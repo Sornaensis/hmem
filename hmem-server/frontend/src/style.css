@@ -4388,3 +4388,7 @@ textarea.observation-edit-content {
 .observation-current-provenance .observation-detail-meta-value { overflow-wrap: anywhere; }
 .observation-provenance-match { overflow-wrap: anywhere; }
 .observation-edit-form #observation-reviewed-sha { width: 100%; box-sizing: border-box; }
+
+.copyable-uuid { font-size: 0.6875rem; line-height: 1.35; font-family: var(--font-mono, monospace); }
+.card-project-in-progress { border-left: 3px solid var(--accent); }
+.filter-checkbox { cursor: pointer; font-size: 0.8rem; gap: 0.35rem; }

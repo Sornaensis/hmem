@@ -185,3 +185,5 @@ MCP token precedence is:
 4. local static bearer `auth.api_key` or `HMEM_API_KEY` when `auth.enabled` is set, considered only when the resolved hmem server URL is loopback
 
 Use `--no-auth` to suppress bearer forwarding entirely.
+
+Workspace deletion uses `DELETE /api/v1/workspaces/:id` and requires workspace admin access (including local superadmin). It soft-deletes the workspace and retains its contents and audit history. Deletion is available from the workspace header after confirmation and is not an MCP tool. Deployed cookie requests require CSRF as for other writes.

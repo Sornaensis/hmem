@@ -25,7 +25,7 @@ than its abbreviated presentation. Native buttons provide Enter/Space support.
 copyableValue : String -> String -> String -> String -> Html Msg
 copyableValue classes label value display =
     button
-        [ class ("copyable-value " ++ classes)
+        [ class ("copyable-value " ++ (if String.contains " ID" label then "copyable-uuid " else "") ++ classes)
         , type_ "button"
         , title ("Copy " ++ label ++ ": " ++ value)
         , attribute "aria-label" ("Copy " ++ label ++ ": " ++ value)
@@ -452,6 +452,7 @@ encodeFilterState model =
                         "tasks"
                 )
           )
+        , ( "filterShowEmptyProjects", Encode.bool model.search.filterShowEmptyProjects )
         , ( "filterPriority", encodeFilterPriority model.search.filterPriority )
         , ( "filterProjectStatuses", Encode.list Encode.string model.search.filterProjectStatuses )
         , ( "filterTaskStatuses", Encode.list Encode.string model.search.filterTaskStatuses )
@@ -473,7 +474,7 @@ encodeFilterState model =
         , ( "collapsedNodes"
           , model.cards.collapsedNodes
                 |> Dict.toList
-                |> List.filter (\( _, v ) -> v)
+                |> List.filter (\( k, v ) -> v && not (String.startsWith "group-" k))
                 |> List.map (\( k, _ ) -> k)
                 |> Encode.list Encode.string
           )
@@ -540,7 +541,7 @@ applyStoredFilters json model =
 
         decodeCollapsed =
             Decode.list Decode.string
-                |> Decode.map (\ids -> Dict.fromList (List.map (\id -> ( id, True )) ids))
+                |> Decode.map (\ids -> Dict.fromList (List.map (\id -> ( id, True )) (List.filter (not << String.startsWith "group-") ids)))
 
         currentSearch =
             model.search
@@ -549,6 +550,7 @@ applyStoredFilters json model =
             { currentSearch
                 | query = Decode.decodeValue (Decode.field "searchQuery" Decode.string) json |> Result.withDefault currentSearch.query
                 , filterShowOnly = Decode.decodeValue (Decode.field "filterShowOnly" decodeShowOnly) json |> Result.withDefault currentSearch.filterShowOnly
+                , filterShowEmptyProjects = Decode.decodeValue (Decode.field "filterShowEmptyProjects" Decode.bool) json |> Result.withDefault currentSearch.filterShowEmptyProjects
                 , filterPriority = Decode.decodeValue (Decode.field "filterPriority" decodeFilterPriority) json |> Result.withDefault currentSearch.filterPriority
                 , filterProjectStatuses = Decode.decodeValue (Decode.field "filterProjectStatuses" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterProjectStatuses
                 , filterTaskStatuses = Decode.decodeValue (Decode.field "filterTaskStatuses" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterTaskStatuses
@@ -574,8 +576,12 @@ applyStoredFilters json model =
 
 
 applyStoredFiltersIfCurrentWorkspace : Encode.Value -> Model -> Model
-applyStoredFiltersIfCurrentWorkspace json model =
+applyStoredFiltersIfCurrentWorkspace json original =
     let
+        groups = original.groups
+        model =
+            { original | groups = { groups | collapsedGroups = Decode.decodeValue (Decode.field "collapsedGroups" (Decode.dict Decode.bool)) json |> Result.withDefault groups.collapsedGroups } }
+
         storedWorkspaceId =
             Decode.decodeValue (Decode.field "workspaceId" (Decode.nullable Decode.string)) json
                 |> Result.withDefault Nothing
@@ -1129,6 +1135,7 @@ computeProjectReadinessRollupFrom allProjects allTasks taskDependencyLinks proje
                 |> uniquePairs
     in
     { openProjectCount = descendantProjects |> List.filter (\project -> isOpenProjectCardStatus project.status) |> List.length
+    , inProgressTaskCount = projectTasks |> List.filter (\task -> task.status == Api.InProgress) |> List.length
     , closedProjectCount = descendantProjects |> List.filter (\project -> project.status == Api.ProjCompleted || project.status == Api.ProjArchived) |> List.length
     , openTaskCount = projectTasks |> List.filter (\task -> isOpenTaskCardStatus task.status) |> List.length
     , doneTaskCount = projectTasks |> List.filter (\task -> task.status == Api.Done) |> List.length

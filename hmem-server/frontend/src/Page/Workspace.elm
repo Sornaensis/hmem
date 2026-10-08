@@ -58,7 +58,12 @@ viewReadableWorkspacePage wsId model ws =
                         [ text (Api.workspaceTypeToString ws.workspaceType) ]
                     , Feature.Editing.viewEditableText model "workspace" ws.id "name" ws.name
                     ]
-                , viewCreateButton model.activeTab
+                , div [ class "workspace-header-actions" ]
+                    [ viewCreateButton model.activeTab
+                    , if Permissions.canAdminCurrentWorkspace model then
+                        button [ class "btn-small btn-danger-subtle", onClick (ConfirmWorkspaceDelete ws.id), disabled (model.groups.workspaceDeletion /= Nothing) ] [ text "Delete workspace" ]
+                      else text ""
+                    ]
                 ]
             , div [ class "workspace-summary" ]
                 [ text (String.join " · " summaryParts)

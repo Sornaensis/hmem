@@ -839,6 +839,53 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
             entry.actorId `shouldSatisfy` isJust
           _ -> expectationFailure "expected exactly one audit row for the workspace rename request"
 
+  describe "Workspace deletion HTTP contract" $ do
+    it "soft-deletes locally without purging contents and denies later active reads" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "workspace-delete-local"
+      project <- Project.createProject env.pool (CreateProject workspace.id Nothing "retained" Nothing Nothing Nothing)
+      task <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "retained task" Nothing Nothing Nothing Nothing)
+      let path = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+      response <- requestWithHeaders app methodDelete path [("X-Request-Id", "workspace-delete-local")] ""
+      responseStatus response `shouldBe` status200
+      request app methodGet path "" >>= (\value -> responseStatus value `shouldBe` status404)
+      request app methodGet ("/api/v1/projects/" <> Text.encodeUtf8 (T.pack (show project.id))) "" >>= (\value -> responseStatus value `shouldBe` status404)
+      request app methodGet ("/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))) "" >>= (\value -> responseStatus value `shouldBe` status404)
+      Project.getProject env.pool project.id `shouldReturn` Just project
+      audits <- Audit.getAuditByEntity env.pool "workspace" (T.pack (show workspace.id)) (Just 10)
+      let matches = filter (\entry -> entry.action == AuditUpdate && entry.requestId == Just "workspace-delete-local") audits
+      length matches `shouldBe` 1
+      map (\entry -> entry.oldValues >>= jsonField "deleted_at") matches `shouldBe` [Just Null]
+      all (\entry -> maybe False (/= Null) (entry.newValues >>= jsonField "deleted_at")) matches `shouldBe` True
+      map (.workspaceId) matches `shouldBe` [Just workspace.id]
+
+    it "requires admin and preserves state for reader editor outsider and anonymous requests" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "workspace-delete-auth"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        editorId <- createDeployedSandboxUser ctx.deployedEnv False False
+        adminId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership editorId Auth.WorkspaceRoleEdit) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership adminId Auth.WorkspaceRoleAdmin) Nothing
+        reader <- issueDeployedSandboxPAT ctx.deployedEnv readerId "delete reader"
+        editor <- issueDeployedSandboxPAT ctx.deployedEnv editorId "delete editor"
+        outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "delete outsider"
+        admin <- issueDeployedSandboxPAT ctx.deployedEnv adminId "delete admin"
+        let path = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        request ctx.deployedApplication methodDelete path "" >>= (\value -> responseStatus value `shouldBe` status401)
+        mapM_ (\token -> requestWithHeaders ctx.deployedApplication methodDelete path (headers token) "" >>= (\value -> responseStatus value `shouldBe` status403)) [reader, editor, outsider]
+        requestWithHeaders ctx.deployedApplication methodGet path (headers admin) "" >>= (\value -> responseStatus value `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodDelete path (headers admin <> [("X-Request-Id", "workspace-delete-admin")]) "" >>= (\value -> responseStatus value `shouldBe` status200)
+        audits <- Audit.getAuditByEntity ctx.deployedEnv.pool "workspace" (T.pack (show workspace.id)) (Just 10)
+        let matches = filter (\entry -> entry.requestId == Just "workspace-delete-admin" && entry.action == AuditUpdate) audits
+        length matches `shouldBe` 1
+        map (.actorType) matches `shouldBe` [Just "bot"]
+        map (\entry -> entry.oldValues >>= jsonField "deleted_at") matches `shouldBe` [Just Null]
+        all (\entry -> maybe False (/= Null) (entry.newValues >>= jsonField "deleted_at")) matches `shouldBe` True
+        map (.workspaceId) matches `shouldBe` [Just workspace.id]
+
   describe "Workspace Groups HTTP contract" $ do
     it "creates, lists, views, deletes, and manages active workspace members" $ \(env, app) -> do
       workspace <- createTestWorkspace env "group-member"

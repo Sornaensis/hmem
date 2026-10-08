@@ -6,6 +6,9 @@ import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
+import Set
+import Ports
+import Json.Encode
 import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -15,6 +18,12 @@ init : GroupsModel
 init =
     { workspaceGroups = Dict.empty
     , groupMembers = Dict.empty
+    , deletedWorkspaces = Set.empty
+    , catalogueOwner = Nothing
+    , catalogueEpoch = 0
+    , collapsedGroups = Dict.empty
+    , workspaceDeletion = Nothing
+    , nextDeletionToken = 0
     , managingGroup = Nothing
     }
 
@@ -22,6 +31,17 @@ init =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        ToggleWorkspaceGroup groupId ->
+            let
+                groups = model.groups
+                collapsed = not (Dict.get groupId groups.collapsedGroups |> Maybe.withDefault False)
+                updated = { groups | collapsedGroups = Dict.insert groupId collapsed groups.collapsedGroups }
+            in
+            ( { model | groups = updated }, Ports.saveToLocalStorage (Json.Encode.object
+                [ ( "key", Json.Encode.string "hmem-workspace-groups" )
+                , ( "value", Json.Encode.object [ ( "collapsedGroups", Json.Encode.dict identity Json.Encode.bool updated.collapsedGroups ) ] )
+                ]) )
+
         GotWorkspaceGroups result ->
             if model.auth.status /= AuthReady || not (Permissions.isSuperadmin model) then
                 ( model, Cmd.none )
@@ -65,7 +85,7 @@ update msg model =
                                 model.groups
 
                             updatedGroups =
-                                { currentGroups | groupMembers = Dict.insert groupId memberIds model.groups.groupMembers }
+                                { currentGroups | groupMembers = Dict.insert groupId (List.filter (\workspaceId -> not (Set.member workspaceId model.groups.deletedWorkspaces)) memberIds) model.groups.groupMembers }
                         in
                         ( { model | groups = updatedGroups }
                         , Cmd.none
@@ -344,12 +364,12 @@ viewSidebarGroup model group =
                 |> List.sortBy .name
 
         collapsed =
-            isCollapsed model ("group-" ++ group.id)
+            Dict.get group.id model.groups.collapsedGroups |> Maybe.withDefault False
     in
     div [ class "sidebar-section" ]
         [ div
             [ class "sidebar-section-title sidebar-group-title"
-            , onClick (ToggleTreeNode ("group-" ++ group.id))
+            , onClick (ToggleWorkspaceGroup group.id)
             , style "cursor" "pointer"
             , style "display" "flex"
             , style "align-items" "center"

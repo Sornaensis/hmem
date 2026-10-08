@@ -430,6 +430,7 @@ instance ToSchema NavigationFilter where
   declareNamedSchema _ = pure $ NamedSchema (Just "NavigationFilter") $ mempty
     & type_ ?~ OpenApiObject
     & description ?~ "Server-owned tree filter; matching descendants retain their ancestors. priority_mode is any, exact, above, or below; priority_value is required except for any."
+    & properties . at "show_empty_projects" ?~ Inline (mempty & type_ ?~ OpenApiBoolean & description ?~ "Defaults true; false requires matching tasks anywhere in the project subtree.")
     & properties . at "show_only" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["projects", "tasks"])
     & properties . at "project_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray)
     & properties . at "task_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray)

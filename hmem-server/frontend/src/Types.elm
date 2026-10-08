@@ -260,6 +260,7 @@ type alias SearchModel =
     , activeRequest : Maybe SearchRequest
     , nextRequestToken : Int
     , filterShowOnly : FilterShowOnly
+    , filterShowEmptyProjects : Bool
     , filterPriority : FilterPriority
     , filterProjectStatuses : List String
     , filterTaskStatuses : List String
@@ -707,6 +708,12 @@ type alias MutationsModel =
 type alias GroupsModel =
     { workspaceGroups : Dict String Api.WorkspaceGroup
     , groupMembers : Dict String (List String)
+    , deletedWorkspaces : Set String
+    , catalogueOwner : Maybe Api.SessionContext
+    , catalogueEpoch : Int
+    , collapsedGroups : Dict String Bool
+    , workspaceDeletion : Maybe WorkspaceDeletion
+    , nextDeletionToken : Int
     , managingGroup : Maybe ManagingGroupState
     }
 
@@ -1013,7 +1020,7 @@ type Msg
     | CanonicalGroupsFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))
     | CanonicalGroupMembersFetched CanonicalRequestGuard String (Result Http.Error (List String))
     | CanonicalMembershipsFetched CanonicalRequestGuard String (Result Http.Error (Api.PaginatedResult Api.WorkspaceMembership))
-    | CanonicalSessionFetched CanonicalRequestGuard (Maybe String) (Result Http.Error Api.SessionContext)
+    | CanonicalSessionFetched CanonicalRequestGuard Int (Maybe String) (Result Http.Error Api.SessionContext)
     | AuthUnauthorized
     | AuthTokenChanged Bool
     | AuthSessionError String
@@ -1071,6 +1078,12 @@ type Msg
     | GotUnifiedSearchResults String Int Int String (Result Http.Error Api.UnifiedSearchResults)
     | NavigateToSearchResult String String
     | SetFilterShowOnly FilterShowOnly
+    | SetFilterShowEmptyProjects Bool
+    | ToggleWorkspaceGroup String
+    | ConfirmWorkspaceDelete String
+    | PerformWorkspaceDelete
+    | CancelWorkspaceDelete
+    | WorkspaceDeleteCompleted WorkspaceDeletion (Result Http.Error ())
     | SetFilterPriority FilterPriority
     | ToggleFilterProjectStatus String
     | ToggleFilterTaskStatus String
@@ -1274,3 +1287,7 @@ type Msg
     | CancelRevert
     | GotRevertResult String String (Result Http.Error Api.RevertResult)
     | NoOp
+
+
+type alias WorkspaceDeletion =
+    { workspaceId : String, token : Int, sessionKey : String, pending : Bool, error : Maybe String }

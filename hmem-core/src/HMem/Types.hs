@@ -1110,7 +1110,7 @@ instance FromJSON ProjectOverview where parseJSON = genericParseJSON jsonOptions
 data ProjectReadinessRollup = ProjectReadinessRollup
   { openProjectCount :: Int, closedProjectCount :: Int, openTaskCount :: Int, doneTaskCount :: Int
   , cancelledTaskCount :: Int, blockedTaskCount :: Int, dependencyBlockedTaskCount :: Int
-  , openDependencyCount :: Int, completionReady :: Bool }
+  , openDependencyCount :: Int, completionReady :: Bool, inProgressTaskCount :: Int }
   deriving (Show, Eq, Generic)
 instance ToJSON ProjectReadinessRollup where toJSON = genericToJSON jsonOptions
 instance FromJSON ProjectReadinessRollup where parseJSON = genericParseJSON jsonOptions
@@ -1364,6 +1364,7 @@ data NavigationFilter = NavigationFilter
   -- below modes, so reducing it to an equality at this boundary silently
   -- changed the existing tree-filter semantics.
   , priorityMode :: Maybe Text, priorityValue :: Maybe Int, query :: Maybe Text
+  , showEmptyProjects :: Maybe Bool
   } deriving (Show, Eq, Generic)
 instance ToJSON NavigationFilter where toJSON = genericToJSON jsonOptions
 instance FromJSON NavigationFilter where parseJSON = genericParseJSON jsonOptions

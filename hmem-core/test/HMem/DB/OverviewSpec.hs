@@ -85,11 +85,35 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
         , priority = Just 10, metadata = Nothing }
 
       roots <- listFilteredProjectChildren env.pool workspace.id Nothing NavigationFilter
-        { showOnly = Nothing, projectStatuses = [ProjActive], taskStatuses = []
+        { showOnly = Nothing, showEmptyProjects = Nothing, projectStatuses = [ProjActive], taskStatuses = []
         , priorityMode = Just "exact", priorityValue = Just 10, query = Just "literal_100%" }
         50 0
 
       map (.id) roots `shouldBe` [retainedRoot.id]
+
+    it "filters empty projects through descendant projects and subtasks with all task predicates" $ \env -> do
+      workspace <- createTestWorkspace env "overview-empty-projects"
+      empty <- createProject env.pool (CreateProject workspace.id Nothing "empty" Nothing Nothing Nothing)
+      root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      child <- createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+      parent <- createTask env.pool (newTask workspace.id (Just child.id) "parent")
+      _ <- updateTask env.pool parent.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just InProgress) Nothing Nothing Unchanged)
+      subtask <- createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "needle_100%" Nothing (Just 7) Nothing Nothing)
+      _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just InProgress) Nothing Nothing Unchanged)
+      let selector = emptyNavigationFilter { showEmptyProjects = Just False, showOnly = Just "projects", projectStatuses = [ProjArchived], taskStatuses = [InProgress], priorityMode = Just "exact", priorityValue = Just 7, query = Just "needle_100%" }
+      filtered <- listFilteredProjectChildren env.pool workspace.id Nothing selector 50 0
+      map (.id) filtered `shouldBe` [root.id]
+      rejected <- listFilteredProjectChildren env.pool workspace.id Nothing (selector { priorityValue = Just 8 }) 50 0
+      rejected `shouldBe` []
+      shown <- listFilteredProjectChildren env.pool workspace.id Nothing emptyNavigationFilter 50 0
+      map (.id) shown `shouldMatchList` [empty.id, root.id]
+      [summary] <- projectCardSummaries env.pool [root]
+      summary.readinessRollup.inProgressTaskCount `shouldBe` 2
+      overview <- getProjectOverview env.pool root.id
+      fmap (\value -> value.readinessRollup.inProgressTaskCount) overview `shouldBe` Just 2
+      _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing Unchanged)
+      [refreshed] <- projectCardSummaries env.pool [root]
+      refreshed.readinessRollup.inProgressTaskCount `shouldBe` 1
 
     it "orders bounded dependency pages by name with deterministic pagination" $ \env -> do
       workspace <- createTestWorkspace env "overview-dependency-page-order"
@@ -155,7 +179,7 @@ newTask workspace project title = CreateTask
 
 emptyNavigationFilter :: NavigationFilter
 emptyNavigationFilter = NavigationFilter
-  { showOnly = Nothing, projectStatuses = [], taskStatuses = []
+  { showOnly = Nothing, showEmptyProjects = Nothing, projectStatuses = [], taskStatuses = []
   , priorityMode = Nothing, priorityValue = Nothing, query = Nothing }
 
 canonicalSha :: Text

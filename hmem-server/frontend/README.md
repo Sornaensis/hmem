@@ -369,3 +369,7 @@ value, including when its display is abbreviated, without activating adjacent
 navigation. Clipboard feedback waits for success/failure from the browser.
 Editable inputs retain their normal behavior; subject drill controls remain
 separate. Observation filters use the shared app filter-bar surface and spacing.
+
+The hierarchy filter bar includes **Show empty projects**, checked by default and saved with each workspace's filters. Unchecking it requires a matching task anywhere in the project subtree, including descendant projects and subtasks; server predicates retain matching ancestors even when branches are unloaded. Projects with any descendant task in progress carry an accent independent of task filters. UUID copy controls use compact text and retain full-value copying and native keyboard access.
+
+Workspace group disclosure is saved globally under `hmem-workspace-groups`. Workspace selection retains the sidebar catalogue and disclosure for the same principal and global grants; catalogue/group change-stream events still reconcile organization changes. Admins (including local superadmin) can delete a workspace from its header after confirmation. Pending deletion disables repeat submission; failures retain the confirmation; successful selected deletion returns home while deletion of a different workspace preserves the route. Soft deletion retains contents and has no MCP tool.

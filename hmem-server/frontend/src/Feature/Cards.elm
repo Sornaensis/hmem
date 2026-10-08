@@ -1650,7 +1650,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
     in
     div [ class "tree-node", style "margin-left" (String.fromInt (depth * 20) ++ "px"), id ("entity-" ++ project.id) ]
         [ div
-            [ class ("card tree-card card-project card-status-" ++ Api.projectStatusToString project.status ++ Feature.DragDrop.dragOverClass model project.id)
+            [ class ("card tree-card card-project card-status-" ++ Api.projectStatusToString project.status ++ (if maybeProjectRollup |> Maybe.map (\rollup -> rollup.inProgressTaskCount > 0) |> Maybe.withDefault False then " card-project-in-progress" else "") ++ Feature.DragDrop.dragOverClass model project.id)
             , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
             , on "dragstart" (Decode.succeed (DragStartCard "project" project.id))
             , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard project.id, True ))
@@ -3064,6 +3064,7 @@ viewProjectsWithZones model renderProject parentId projects =
 treeCriteriaActive : String -> Model -> Bool
 treeCriteriaActive query model =
     not (String.isEmpty query)
+        || not model.search.filterShowEmptyProjects
         || model.search.filterShowOnly /= ShowAll
         || model.search.filterPriority /= AnyPriority
         || not (List.isEmpty model.search.filterProjectStatuses)
@@ -3363,6 +3364,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                 || previous.cards.collapsedNodes /= model.cards.collapsedNodes
                 || previous.focus.focusedEntity /= model.focus.focusedEntity
                 || previous.search.query /= model.search.query
+                || previous.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
                 || previous.search.filterShowOnly /= model.search.filterShowOnly
                 || previous.search.filterPriority /= model.search.filterPriority
                 || previous.search.filterProjectStatuses /= model.search.filterProjectStatuses

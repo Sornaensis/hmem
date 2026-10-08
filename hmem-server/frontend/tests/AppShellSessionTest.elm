@@ -209,7 +209,7 @@ expectRegrantFence scope page allowed denied =
             requestWorkspace scope "before-revoke" { authorized | webSocket = { socket | targetGenerations = Dict.remove target socket.targetGenerations } }
 
         oldGuard =
-            { scopeKey = ChangeStream.scopeKey scope, targetKey = "entity:workspace:a", targetGeneration = 1, sessionEpoch = pending.sessionRequestEpoch, routeWorkspace = pending.selectedWorkspaceId, audienceId = "actor" }
+            { scopeKey = ChangeStream.scopeKey scope, targetKey = "entity:workspace:a", targetGeneration = 1, sessionEpoch = if scope == ChangeStream.Global then pending.groups.catalogueEpoch else pending.sessionRequestEpoch, routeWorkspace = if scope == ChangeStream.Global then Nothing else pending.selectedWorkspaceId, audienceId = "actor" }
 
         requested =
             pending |> refresh denied |> refresh allowed |> requestWorkspace scope "after-regrant"
@@ -221,7 +221,7 @@ expectRegrantFence scope page allowed denied =
             WebSocket.update (CanonicalWorkspaceFetched oldGuard "a" (Ok { workspace | name = "Stale" })) requested |> Tuple.first
 
         currentGuard =
-            { oldGuard | targetGeneration = generation, sessionEpoch = requested.sessionRequestEpoch }
+            { oldGuard | targetGeneration = generation, sessionEpoch = if scope == ChangeStream.Global then requested.groups.catalogueEpoch else requested.sessionRequestEpoch }
 
         current =
             WebSocket.update (CanonicalWorkspaceFetched currentGuard "a" (Ok { workspace | name = "Current" })) stale |> Tuple.first
@@ -325,7 +325,7 @@ populated page =
         | auth = { status = AuthReady, mode = Just "test" }
         , sessionContext = Just superadmin
         , workspaces = Dict.singleton "a" workspace
-        , groups = { groups | workspaceGroups = Dict.singleton "g" { id = "g", name = "Group", description = Nothing, createdAt = "now", updatedAt = "now" } }
+        , groups = { groups | catalogueOwner = Just superadmin, workspaceGroups = Dict.singleton "g" { id = "g", name = "Group", description = Nothing, createdAt = "now", updatedAt = "now" } }
         , dataLoading = { loading | loadingWorkspaces = False, activeWorkspaceListLoadToken = Nothing, loadingWorkspaceData = False, activeWorkspaceLoadToken = Nothing, pendingWorkspaceLoads = 0 }
         , webSocket = { state = Connected, streams = Dict.fromList (( "global", live ChangeStream.Global ) :: workspaceStreams), targetGenerations = Dict.fromList (( "global|entity:workspace:a", 4 ) :: workspaceGuards) }
     }
@@ -333,7 +333,7 @@ populated page =
 
 globalGuard : Page -> Types.CanonicalRequestGuard
 globalGuard page =
-    { scopeKey = "global", targetKey = "entity:workspace:a", targetGeneration = 4, sessionEpoch = 1, routeWorkspace = (initial page).selectedWorkspaceId, audienceId = "actor" }
+    { scopeKey = "global", targetKey = "entity:workspace:a", targetGeneration = 4, sessionEpoch = 0, routeWorkspace = Nothing, audienceId = "actor" }
 
 
 superadmin : Api.SessionContext

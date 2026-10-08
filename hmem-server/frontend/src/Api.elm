@@ -643,6 +643,7 @@ type alias ProjectOverview =
 
 type alias ProjectReadinessRollup =
     { openProjectCount : Int
+    , inProgressTaskCount : Int
     , closedProjectCount : Int
     , openTaskCount : Int
     , doneTaskCount : Int
@@ -3684,6 +3685,7 @@ projectReadinessRollupDecoder : Decoder ProjectReadinessRollup
 projectReadinessRollupDecoder =
     D.succeed ProjectReadinessRollup
         |> optional "open_project_count" D.int 0
+        |> optional "in_progress_task_count" D.int 0
         |> optional "closed_project_count" D.int 0
         |> optional "open_task_count" D.int 0
         |> optional "done_task_count" D.int 0
@@ -3697,6 +3699,7 @@ projectReadinessRollupDecoder =
 defaultProjectReadinessRollup : ProjectReadinessRollup
 defaultProjectReadinessRollup =
     { openProjectCount = 0
+    , inProgressTaskCount = 0
     , closedProjectCount = 0
     , openTaskCount = 0
     , doneTaskCount = 0

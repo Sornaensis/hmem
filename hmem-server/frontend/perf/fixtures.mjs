@@ -161,6 +161,7 @@ export function projectReadinessRollup(fixture, projectId) {
   const projectTasks = [...projectTaskIds].map(id => tasks.get(id))
   const openEdges = openDependencyEdges(fixture, projectTaskIds)
   return {
+    in_progress_task_count: projectTasks.filter(task => task.status === 'in_progress').length,
     open_project_count: descendantProjects.filter(project => OPEN_PROJECT_STATUSES.has(project.status)).length,
     closed_project_count: descendantProjects.filter(project => ['completed', 'archived'].includes(project.status)).length,
     open_task_count: projectTasks.filter(task => OPEN_TASK_STATUSES.has(task.status)).length,
@@ -410,6 +411,7 @@ function descendantProjectTasks(fixture, projectId) {
 }
 
 function projectBranchMatches(fixture, project, filters) {
+  if (filters.showEmptyProjects === false) return descendantProjectTasks(fixture, project.id).some(candidate => taskFilterMatches(candidate, filters))
   // The SQL has an outer project lifecycle/priority gate before descendant
   // retention; preserve that subtlety here.
   if (!statusMatches(project, filters.projectStatuses) || !priorityMatches(project, filters.priorityMode, filters.priorityValue)) return false
@@ -670,6 +672,7 @@ export function navigationBranchResponse(fixture, options = {}) {
   const taskOffset = Math.max(0, Number(options.taskOffset) || 0)
   const filters = {
     showOnly: options.showOnly || 'all',
+    showEmptyProjects: options.showEmptyProjects !== false,
     projectStatuses: options.projectStatuses || [],
     taskStatuses: options.taskStatuses || [],
     priorityMode: options.priorityMode || 'any',

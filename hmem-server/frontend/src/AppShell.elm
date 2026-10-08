@@ -411,6 +411,7 @@ handleOwnedRaw ownedMsg model =
                 navigationFiltersChanged =
                     loaded.search.query /= model.search.query
                         || loaded.search.filterShowOnly /= model.search.filterShowOnly
+                        || loaded.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
                         || loaded.search.filterPriority /= model.search.filterPriority
                         || loaded.search.filterProjectStatuses /= model.search.filterProjectStatuses
                         || loaded.search.filterTaskStatuses /= model.search.filterTaskStatuses
@@ -502,10 +503,10 @@ bootstrapAfterSession previous expectedWorkspace sessionContext model =
             model.dataLoading.activeWorkspaceListLoadToken |> Maybe.withDefault model.dataLoading.nextWorkspaceListLoadToken
 
         forceResync scope =
-            previous.sessionContext /= Nothing && not (sessionScopeRetained scope sessionContext previous)
+            (previous.sessionContext /= Nothing || (scope == Feature.ChangeStream.Global && previous.groups.catalogueOwner /= Nothing)) && not (sessionScopeRetained scope sessionContext previous)
 
         globalCmds =
-            if sessionContext.globalPermissions.superadmin then
+            if sessionContext.globalPermissions.superadmin || sidebarRetained sessionContext previous then
                 []
 
             else
@@ -539,7 +540,7 @@ bootstrapAfterSession previous expectedWorkspace sessionContext model =
                     []
 
         globalStreamCmd =
-            if sessionContext.globalPermissions.superadmin then
+            if sessionContext.globalPermissions.superadmin && not (sidebarRetained sessionContext previous && Dict.member "global" previous.webSocket.streams) then
                 [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) Feature.ChangeStream.Global (forceResync Feature.ChangeStream.Global) ]
 
             else
@@ -635,9 +636,14 @@ sessionScopeAllowed scope sessionContext model =
 
 sessionScopeRetained : Feature.ChangeStream.Scope -> Api.SessionContext -> Model -> Bool
 sessionScopeRetained scope sessionContext previous =
-    sameSessionAuthority sessionContext previous
-        && sessionScopeAllowed scope sessionContext previous
-        && (previous.sessionContext |> Maybe.map (\trusted -> sessionScopeAllowed scope trusted previous) |> Maybe.withDefault False)
+    case scope of
+        Feature.ChangeStream.Global ->
+            sidebarRetained sessionContext previous && sessionContext.globalPermissions.superadmin
+
+        Feature.ChangeStream.Workspace _ ->
+            sameSessionAuthority sessionContext previous
+                && sessionScopeAllowed scope sessionContext previous
+                && (previous.sessionContext |> Maybe.map (\trusted -> sessionScopeAllowed scope trusted previous) |> Maybe.withDefault False)
 
 
 prepareSessionNavigation : Model -> Maybe String -> Api.SessionContext -> Model -> Model
@@ -679,7 +685,7 @@ restoreObservationUrlOnAdmission previous expectedWorkspace sessionContext model
 
 retireSessionScopes : Api.SessionContext -> Model -> Cmd Msg
 retireSessionScopes sessionContext previous =
-    case previous.sessionContext of
+    case (previous.sessionContext |> Maybe.map Just |> Maybe.withDefault previous.groups.catalogueOwner) of
         Just trusted ->
             let
                 oldScopes =
@@ -720,7 +726,7 @@ updateLoadingAfterSession : Model -> Maybe String -> Api.SessionContext -> Model
 updateLoadingAfterSession previous expectedWorkspace sessionContext model =
     let
         keepGlobal =
-            sessionScopeRetained Feature.ChangeStream.Global sessionContext previous
+            sidebarRetained sessionContext previous
 
         keepWorkspace =
             expectedWorkspace |> Maybe.map (\workspaceId -> sessionScopeRetained (Feature.ChangeStream.Workspace workspaceId) sessionContext previous) |> Maybe.withDefault False
@@ -799,10 +805,13 @@ updateLoadingAfterSession previous expectedWorkspace sessionContext model =
 
         nextGroups =
             if keepGlobal then
-                previous.groups
+                let retained = previous.groups in { retained | catalogueOwner = Just sessionContext }
 
             else
-                Feature.Groups.init
+                let
+                    empty = Feature.Groups.init
+                in
+                { empty | collapsedGroups = previous.groups.collapsedGroups, nextDeletionToken = previous.groups.nextDeletionToken, catalogueEpoch = previous.groups.catalogueEpoch + 1, catalogueOwner = Just sessionContext }
 
         updatedLoading =
             { currentLoading
@@ -833,7 +842,7 @@ response. A changed authority instead advances the session epoch.
 -}
 nextSessionTargetGenerations : Api.SessionContext -> Model -> Dict.Dict String Int
 nextSessionTargetGenerations sessionContext previous =
-    if sameSessionAuthority sessionContext previous then
+    if sameSessionAuthority sessionContext previous || sidebarRetained sessionContext previous then
         previous.webSocket.targetGenerations
             |> Dict.map
                 (\target generation ->
@@ -904,7 +913,7 @@ clearSessionScopedState model =
         , cards = Feature.Cards.init
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
-        , groups = Feature.Groups.init
+        , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
         , auditLog = Feature.AuditLog.init
         , timeline = Feature.Timeline.init
         , workspaceAdmin = Feature.WorkspaceAdmin.retireSessionState model.workspaceAdmin
@@ -950,8 +959,8 @@ viewDocument model =
     { title = "hmem"
     , body =
         [ div [ class "app" ]
-            [ if model.auth.status == AuthReady then
-                Feature.Groups.viewSidebar model
+            [ if model.auth.status == AuthReady || (model.auth.status == AuthBooting && model.groups.catalogueOwner /= Nothing) then
+                Feature.Groups.viewSidebar (sidebarModel model)
 
               else
                 text ""
@@ -969,6 +978,7 @@ viewDocument model =
                     , Feature.Cards.viewDeleteConfirmModal model
                     , Feature.AuditLog.viewRevertConfirmModal model
                     , Feature.WorkspaceAdmin.viewPurgeConfirmModal model
+                    , Feature.WorkspaceAdmin.viewDeleteConfirmModal model
                     ]
 
               else
@@ -1115,3 +1125,25 @@ viewAuthFailedPage model message =
           else
             text ""
         ]
+
+
+{-| The catalogue has a principal/global-grant lifetime independent of the route. -}
+sidebarRetained : Api.SessionContext -> Model -> Bool
+sidebarRetained sessionContext previous =
+    previous.groups.catalogueOwner
+        |> Maybe.map (\trusted -> trusted.authMode == sessionContext.authMode && trusted.principal.actorId == sessionContext.principal.actorId && trusted.principal.actorType == sessionContext.principal.actorType && trusted.principal.authority == sessionContext.principal.authority && trusted.principal.grantUserId == sessionContext.principal.grantUserId && trusted.globalPermissions == sessionContext.globalPermissions)
+        |> Maybe.withDefault False
+
+
+sidebarModel : Model -> Model
+sidebarModel model =
+    if model.auth.status == AuthBooting then
+        case model.groups.catalogueOwner of
+            Just owner ->
+                { model | auth = { status = AuthReady, mode = model.auth.mode }, sessionContext = Just owner }
+
+            Nothing ->
+                model
+
+    else
+        model

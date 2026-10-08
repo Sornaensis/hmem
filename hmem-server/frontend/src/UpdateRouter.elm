@@ -103,7 +103,7 @@ route msg model =
         CanonicalMembershipsFetched _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
-        CanonicalSessionFetched _ _ _ ->
+        CanonicalSessionFetched _ _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
         AuthUnauthorized ->
@@ -255,6 +255,21 @@ route msg model =
         WorkspaceCreated _ ->
             Ok (Feature.Mutations.update msg model)
 
+        ToggleWorkspaceGroup _ ->
+            Ok (Feature.Groups.update msg model)
+
+        ConfirmWorkspaceDelete _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        PerformWorkspaceDelete ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        CancelWorkspaceDelete ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        WorkspaceDeleteCompleted _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
         WorkspaceDeleted _ _ ->
             Ok (Feature.WorkspaceAdmin.update msg model)
 
@@ -281,6 +296,9 @@ route msg model =
             Ok (Feature.Search.update msg model)
 
         NavigateToSearchResult _ _ ->
+            Ok (Feature.Search.update msg model)
+
+        SetFilterShowEmptyProjects _ ->
             Ok (Feature.Search.update msg model)
 
         SetFilterShowOnly _ ->

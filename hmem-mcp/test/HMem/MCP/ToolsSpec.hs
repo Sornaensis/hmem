@@ -38,6 +38,15 @@ import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), Observation
 
 spec :: Spec
 spec = do
+  describe "Workspace deletion boundary" $ do
+    it "does not advertise or dispatch workspace_delete" $ do
+      toolNames `shouldNotContain` ["workspace_delete"]
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        result <- handleToolCall manager base Nothing (object ["name" .= ("workspace_delete" :: Text), "arguments" .= object ["workspace_id" .= workspaceId]])
+        result `shouldSatisfy` isMcpError
+      (length <$> readTVarIO requests) `shouldReturn` 0
+
   describe "Revision transport MCP" $ do
     it "rejects content-only, absent/null/malformed preconditions and reviewed SHAs before HTTP dispatch" $ do
       requests <- newTVarIO []

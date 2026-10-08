@@ -110,7 +110,7 @@ taskCardSummaries pool values = do
     ]
 
 emptyProjectReadinessRollup :: ProjectReadinessRollup
-emptyProjectReadinessRollup = ProjectReadinessRollup 0 0 0 0 0 0 0 0 True
+emptyProjectReadinessRollup = ProjectReadinessRollup 0 0 0 0 0 0 0 0 True 0
 
 emptyTaskReadinessRollup :: TaskReadinessRollup
 emptyTaskReadinessRollup = TaskReadinessRollup 0 0 0 0 0 0 True
@@ -252,6 +252,7 @@ projectReadinessRollupStatement = Statement.Statement sql encoder decoder True
       , " (SELECT count(DISTINCT task_id)::bigint FROM open_dependency_edges),"
       , " (SELECT count(*)::bigint FROM open_dependency_edges),"
       , " NOT EXISTS (SELECT 1 FROM desc_projects WHERE status IN ('active'::project_status_enum, 'paused'::project_status_enum)) AND NOT EXISTS (SELECT 1 FROM task_tree WHERE hmem_is_open_task_status(status))"
+      , " , (SELECT count(*)::bigint FROM task_tree WHERE status = 'in_progress'::task_status_enum)"
       ]
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = projectReadinessRollupRowDecoder
@@ -267,6 +268,7 @@ projectReadinessRollupRowDecoder = Dec.singleRow $ ProjectReadinessRollup
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> Dec.column (Dec.nonNullable Dec.bool)
+  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
 
 projectReadinessRollupsBatchStatement :: Statement.Statement [UUID] [(UUID, ProjectReadinessRollup)]
 projectReadinessRollupsBatchStatement = Statement.Statement sql encoder decoder True
@@ -292,6 +294,7 @@ projectReadinessRollupsBatchStatement = Statement.Statement sql encoder decoder 
       , " (SELECT count(DISTINCT task_id)::bigint FROM open_dependency_edges e WHERE e.root_id=roots.root_id),"
       , " (SELECT count(*)::bigint FROM open_dependency_edges e WHERE e.root_id=roots.root_id),"
       , " NOT EXISTS (SELECT 1 FROM desc_projects p WHERE p.root_id=roots.root_id AND p.status IN ('active'::project_status_enum,'paused'::project_status_enum)) AND NOT EXISTS (SELECT 1 FROM task_tree t WHERE t.root_id=roots.root_id AND hmem_is_open_task_status(t.status))"
+      , " , (SELECT count(*)::bigint FROM task_tree t WHERE t.root_id=roots.root_id AND t.status='in_progress'::task_status_enum)"
       , "FROM roots"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
@@ -308,6 +311,7 @@ projectReadinessRollupFields = ProjectReadinessRollup
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> Dec.column (Dec.nonNullable Dec.bool)
+  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
 
 listTaskDependencySummaries :: Pool Hasql.Connection -> UUID -> IO [TaskDependencySummary]
 listTaskDependencySummaries pool taskId = do

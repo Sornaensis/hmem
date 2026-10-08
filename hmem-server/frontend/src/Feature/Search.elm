@@ -40,6 +40,7 @@ init =
     , activeRequest = Nothing
     , nextRequestToken = 1
     , filterShowOnly = ShowAll
+    , filterShowEmptyProjects = True
     , filterPriority = AnyPriority
     , filterProjectStatuses = []
     , filterTaskStatuses = []
@@ -215,6 +216,12 @@ update msg model =
                     { model | search = { searchModel | filterShowOnly = show } }
             in
             reloadNavigation newModel
+
+        SetFilterShowEmptyProjects show ->
+            let
+                searchModel = model.search
+            in
+            reloadNavigation { model | search = { searchModel | filterShowEmptyProjects = show } }
 
         SetFilterPriority pri ->
             let
@@ -513,6 +520,10 @@ viewFilterBar model =
             , viewFilterPill "All" (model.search.filterShowOnly == ShowAll) (SetFilterShowOnly ShowAll)
             , viewFilterPill "Projects" (model.search.filterShowOnly == ShowProjectsOnly) (SetFilterShowOnly ShowProjectsOnly)
             , viewFilterPill "Tasks" (model.search.filterShowOnly == ShowTasksOnly) (SetFilterShowOnly ShowTasksOnly)
+            ]
+        , label [ class "filter-group filter-checkbox" ]
+            [ input [ type_ "checkbox", checked model.search.filterShowEmptyProjects, onCheck SetFilterShowEmptyProjects ] []
+            , text "Show empty projects"
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Project:" ]

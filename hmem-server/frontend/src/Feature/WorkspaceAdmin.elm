@@ -8,6 +8,7 @@ module Feature.WorkspaceAdmin exposing
     , acceptCanonicalMemberships
     , update
     , viewPermissionSummary
+    , viewDeleteConfirmModal
     , viewPurgeConfirmModal
     , viewWorkspaceAdminPanel
     )
@@ -20,6 +21,7 @@ import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Json.Decode as Decode
 import Json.Encode as Encode
+import Set
 import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -144,7 +146,10 @@ finishMembershipMutation model =
 
 handleEscape : Model -> Maybe Model
 handleEscape model =
-    if model.workspaceAdmin.purgeConfirmation /= Nothing then
+    if model.groups.workspaceDeletion |> Maybe.map (\deletion -> not deletion.pending) |> Maybe.withDefault False then
+        Just (setDeletion Nothing model)
+
+    else if model.workspaceAdmin.purgeConfirmation /= Nothing then
         Just (updateWorkspaceAdmin (\admin -> { admin | purgeConfirmation = Nothing }) model)
 
     else
@@ -306,6 +311,58 @@ update msg model =
                     addToast Error "Failed to delete workspace before purge"
                         (updateWorkspaceAdmin (\admin -> { admin | purgeConfirmation = Nothing }) model)
 
+        ConfirmWorkspaceDelete workspaceId ->
+            if canDeleteWorkspace workspaceId model && model.groups.workspaceDeletion == Nothing then
+                let
+                    groups = model.groups
+                    deletion = { workspaceId = workspaceId, token = groups.nextDeletionToken + 1, sessionKey = deletionSessionKey model, pending = False, error = Nothing }
+                in
+                ( { model | groups = { groups | workspaceDeletion = Just deletion, nextDeletionToken = deletion.token } }, Helpers.focusElement "workspace-delete-cancel" )
+            else ( model, Cmd.none )
+
+        CancelWorkspaceDelete ->
+            case model.groups.workspaceDeletion of
+                Just deletion ->
+                    if deletion.pending then ( model, Cmd.none )
+                    else ( setDeletion Nothing model, Cmd.none )
+                Nothing -> ( model, Cmd.none )
+
+        PerformWorkspaceDelete ->
+            case model.groups.workspaceDeletion of
+                Just deletion ->
+                    if deletion.pending || not (canDeleteWorkspace deletion.workspaceId model) || deletion.sessionKey /= deletionSessionKey model then
+                        ( model, Cmd.none )
+                    else
+                        let
+                            pending = { deletion | pending = True, error = Nothing }
+                            ( tracked, requestId, clearCmd ) = beginTrackedMutation [ deletion.workspaceId ] (setDeletion (Just pending) model)
+                        in
+                        ( tracked, Cmd.batch [ clearCmd, Api.deleteWorkspace model.flags.apiUrl deletion.workspaceId requestId (WorkspaceDeleteCompleted pending) ] )
+                Nothing -> ( model, Cmd.none )
+
+        WorkspaceDeleteCompleted deletion result ->
+            case model.groups.workspaceDeletion of
+                Just active ->
+                    if active.token /= deletion.token || active.workspaceId /= deletion.workspaceId || not active.pending || deletion.sessionKey /= deletionSessionKey model then
+                        ( model, Cmd.none )
+                    else
+                        case result of
+                            Ok () ->
+                                let
+                                    groups = model.groups
+                                    cleaned = setDeletion Nothing { model | workspaces = Dict.remove deletion.workspaceId model.workspaces
+                                        , selectedWorkspaceId = if model.selectedWorkspaceId == Just deletion.workspaceId then Nothing else model.selectedWorkspaceId
+                                        , page = if model.selectedWorkspaceId == Just deletion.workspaceId then HomePage else model.page
+                                        , dataLoading = let loading = model.dataLoading in { loading | activeWorkspaceListLoadToken = Nothing, loadingWorkspaces = False }
+                                        , groups = { groups | deletedWorkspaces = Set.insert deletion.workspaceId groups.deletedWorkspaces, groupMembers = Dict.map (\_ members -> List.filter ((/=) deletion.workspaceId) members) groups.groupMembers } }
+                                    ( toasted, toastCmd ) = addToast Success "Workspace deleted" cleaned
+                                    routeCmd = if model.selectedWorkspaceId == Just deletion.workspaceId then pushUrl model.key "/" else Cmd.none
+                                in
+                                ( toasted, Cmd.batch [ toastCmd, routeCmd ] )
+                            Err _ ->
+                                ( setDeletion (Just { active | pending = False, error = Just "Could not delete workspace. Your workspace is unchanged; retry the action." }) model, Cmd.none )
+                Nothing -> ( model, Cmd.none )
+
         WorkspaceDeleted wsId result ->
             case result of
                 Ok () ->
@@ -465,3 +522,42 @@ viewPurgeConfirmModal model =
 updateWorkspaceAdmin : (WorkspaceAdminModel -> WorkspaceAdminModel) -> Model -> Model
 updateWorkspaceAdmin fn model =
     { model | workspaceAdmin = fn model.workspaceAdmin }
+
+
+deleteSessionPrincipal : Api.SessionContext -> String
+deleteSessionPrincipal session =
+    Encode.encode 0 (Encode.list Encode.string [ session.authMode, session.principal.actorType, session.principal.actorId, session.principal.authority, Maybe.withDefault "" session.principal.grantUserId ])
+
+canDeleteWorkspace : String -> Model -> Bool
+canDeleteWorkspace workspaceId model =
+    model.auth.status == AuthReady && model.sessionContext /= Nothing && Dict.member workspaceId model.workspaces
+        && (Permissions.isSuperadmin model || (model.selectedWorkspaceId == Just workspaceId && Permissions.canAdminCurrentWorkspace model))
+
+deletionSessionKey : Model -> String
+deletionSessionKey model =
+    (case model.sessionContext of
+        Just session -> Just session
+        Nothing -> model.groups.catalogueOwner) |> Maybe.map deleteSessionPrincipal |> Maybe.withDefault ""
+
+setDeletion : Maybe WorkspaceDeletion -> Model -> Model
+setDeletion deletion model =
+    let groups = model.groups in { model | groups = { groups | workspaceDeletion = deletion } }
+
+viewDeleteConfirmModal : Model -> Html Msg
+viewDeleteConfirmModal model =
+    case model.groups.workspaceDeletion of
+        Nothing -> text ""
+        Just deletion ->
+            div [ class "modal-overlay", onClick CancelWorkspaceDelete ]
+                [ div [ class "modal", attribute "role" "dialog", attribute "aria-modal" "true", attribute "aria-labelledby" "workspace-delete-title", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
+                    [ h3 [ id "workspace-delete-title", class "modal-title" ] [ text "Delete workspace?" ]
+                    , p [] [ text ("Delete \"" ++ (Dict.get deletion.workspaceId model.workspaces |> Maybe.map .name |> Maybe.withDefault "this workspace") ++ "\" from the active workspace list? Its contents will be retained; this does not purge them.") ]
+                    , case deletion.error of
+                        Just message -> p [ class "form-error", attribute "role" "alert" ] [ text message ]
+                        Nothing -> text ""
+                    , div [ class "modal-actions" ]
+                        [ button [ id "workspace-delete-cancel", class "btn btn-secondary", disabled deletion.pending, onClick CancelWorkspaceDelete ] [ text "Cancel" ]
+                        , button [ class "btn btn-danger", disabled (deletion.pending || not (canDeleteWorkspace deletion.workspaceId model)), onClick PerformWorkspaceDelete ] [ text (if deletion.pending then "Deleting..." else "Delete workspace") ]
+                        ]
+                    ]
+                ]

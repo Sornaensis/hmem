@@ -54,6 +54,7 @@ const socketScript = () => {
     emit(frame) { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(frame) }) }
   }
   window.WebSocket = FixtureSocket
+  window.pushHierarchyGlobalFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1 && new URL(s.url).searchParams.get('ticket') === 'global-ticket')) { for (const frame of frames) socket.emit(frame); socket.emit({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'global-refresh' }) } }
   window.pushHierarchyFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1)) { for (const frame of frames) socket.emit(frame); socket.emit({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'browser-next' }) } }
   const NativeObserver = window.ResizeObserver
   window.hierarchyObserved = new Set()
@@ -125,7 +126,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           assert.equal(path, '/api/v1/workspaces/' + fixture.workspace.id + '/navigation')
           assert.equal(url.searchParams.get('project_limit'), '50'); assert.equal(url.searchParams.get('task_limit'), '50')
           assert.ok(['workspace_root', 'project', 'task'].includes(receipt.kind)); assert.ok(receipt.projectOffset % 50 === 0 && receipt.taskOffset % 50 === 0)
-          value = navigationBranchResponse(fixture, { parentKind: receipt.kind, parentId: receipt.parent, projectLimit: 50, taskLimit: 50, projectOffset: receipt.projectOffset, taskOffset: receipt.taskOffset, query: receipt.query, showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'), priorityMode: url.searchParams.get('priority_mode'), priorityValue: url.searchParams.get('priority_value') })
+          value = navigationBranchResponse(fixture, { parentKind: receipt.kind, parentId: receipt.parent, projectLimit: 50, taskLimit: 50, projectOffset: receipt.projectOffset, taskOffset: receipt.taskOffset, query: receipt.query, showOnly: url.searchParams.get('show_only'), showEmptyProjects: url.searchParams.get('show_empty_projects') !== 'false', projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'), priorityMode: url.searchParams.get('priority_mode'), priorityValue: url.searchParams.get('priority_value') })
           receipt.projectHasMore = value.projects.has_more; receipt.taskHasMore = value.tasks.has_more
         }
         else if (path.endsWith('/navigation/summaries')) { const body = request.postDataJSON(); value = navigationSummariesResponse(fixture, body.project_ids, body.task_ids) }

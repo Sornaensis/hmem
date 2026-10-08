@@ -2,6 +2,7 @@ module HMem.DB.Workspace
   ( listActiveWorkspaces
   , listVisibleWorkspaces
   , renameWorkspace
+  , deleteWorkspace
   ) where
 
 import Control.Exception (throwIO)
@@ -100,3 +101,10 @@ renameWorkspaceStatement = Statement.Statement sql encoder decoder True
       contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.text))
     decoder = Dec.rowMaybe workspaceRowDecoder
+
+-- | Soft deletion preserves workspace contents and existing audit/outbox triggers.
+deleteWorkspace :: Pool Hasql.Connection -> UUID -> IO Bool
+deleteWorkspace pool workspaceId = runSession pool $ Session.statement workspaceId $
+  Statement.Statement "UPDATE workspaces SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING true"
+    (Enc.param (Enc.nonNullable Enc.uuid))
+    (fmap (maybe False id) (Dec.rowMaybe (Dec.column (Dec.nonNullable Dec.bool)))) True

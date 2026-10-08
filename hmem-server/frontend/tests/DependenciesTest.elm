@@ -1004,7 +1004,7 @@ suite =
                         }
 
                     staleProjectRollup =
-                        { openProjectCount = 0
+                        { openProjectCount = 0, inProgressTaskCount = 0
                         , closedProjectCount = 0
                         , openTaskCount = 1
                         , doneTaskCount = 0
@@ -1186,7 +1186,7 @@ suite =
                         }
 
                     staleProjectRollup =
-                        { openProjectCount = 0
+                        { openProjectCount = 0, inProgressTaskCount = 0
                         , closedProjectCount = 0
                         , openTaskCount = 2
                         , doneTaskCount = 0

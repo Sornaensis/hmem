@@ -12,7 +12,8 @@ import Feature.Timeline
 import Feature.WorkspaceAdmin
 import Helpers exposing (localStorageKey, parseFragment, pushUrl, replaceFragment)
 import Permissions
-import Ports exposing (disconnectWebSocket, requestLocalStorage)
+import Ports exposing (disconnectChangeStreamScope, requestLocalStorage)
+import Json.Encode as Encode
 import Set
 import Types exposing (..)
 import Url
@@ -383,6 +384,7 @@ handleUrlChangeWithoutProtectedExit url model =
                             , filterShowOnly = ShowAll
                             , filterPriority = AnyPriority
                             , filterProjectStatuses = []
+                            , filterShowEmptyProjects = True
                             , filterTaskStatuses = []
                             , filterMemoryTypes = []
                             , filterImportance = AnyPriority
@@ -426,7 +428,7 @@ handleUrlChangeWithoutProtectedExit url model =
                     , auth = { status = AuthBooting, mode = model.auth.mode }
                     , sessionContext = Nothing
                     , sessionRequestEpoch = model.sessionRequestEpoch + 1
-                    , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
+                    , webSocket = retireWorkspaceStreams model.webSocket
                     , selectedWorkspaceId = Just wsId
                     , activeTab = frag.tab
                     , projects = Dict.empty
@@ -448,7 +450,7 @@ handleUrlChangeWithoutProtectedExit url model =
                 , Cmd.batch
                     [ Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (model.sessionRequestEpoch + 1) (Just wsId))
                     , requestLocalStorage (localStorageKey wsId)
-                    , disconnectWebSocket ()
+                    , disconnectRouteWorkspaces model
                     ]
                 )
 
@@ -513,7 +515,7 @@ handleUrlChangeWithoutProtectedExit url model =
                 , sessionContext = Nothing
                 , sessionRequestEpoch = model.sessionRequestEpoch + 1
                 , selectedWorkspaceId = Nothing
-                , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
+                , webSocket = retireWorkspaceStreams model.webSocket
                 , auditLog = updatedAuditLog
                 , dependencies = Feature.Dependencies.resetCache model.dependencies
                 , focus = updatedFocus
@@ -521,7 +523,7 @@ handleUrlChangeWithoutProtectedExit url model =
                 |> clearRouteConfirmations False
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)
-                , disconnectWebSocket ()
+                , disconnectRouteWorkspaces model
                 ]
             )
 
@@ -533,11 +535,11 @@ handleUrlChangeWithoutProtectedExit url model =
                 updatedFocus =
                     { currentFocus | returnContext = Nothing }
             in
-            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }, dependencies = Feature.Dependencies.resetCache model.dependencies, focus = updatedFocus }
+            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = retireWorkspaceStreams model.webSocket, dependencies = Feature.Dependencies.resetCache model.dependencies, focus = updatedFocus }
                 |> clearRouteConfirmations False
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)
-                , disconnectWebSocket ()
+                , disconnectRouteWorkspaces model
                 ]
             )
 
@@ -680,3 +682,20 @@ clearRouteConfirmations preserveProtectedWorkspaceRename model =
         , auditLog = { currentAuditLog | revertConfirmation = Nothing, revertInFlight = False }
         , workspaceAdmin = { currentWorkspaceAdmin | purgeConfirmation = Nothing }
     }
+
+
+-- Workspace routing retires only workspace audiences; the catalogue owns a
+-- principal lifetime and remains subscribed while the new route is admitted.
+retireWorkspaceStreams : WebSocketModel -> WebSocketModel
+retireWorkspaceStreams webSocket =
+    { webSocket | streams = Dict.filter (\key _ -> key == "global") webSocket.streams, targetGenerations = Dict.filter (\key _ -> String.startsWith "global|" key) webSocket.targetGenerations }
+
+
+disconnectRouteWorkspaces : Model -> Cmd Msg
+disconnectRouteWorkspaces model =
+    (Dict.keys model.webSocket.streams |> List.filter (String.startsWith "workspace:") |> List.map (String.dropLeft 10))
+        ++ (model.selectedWorkspaceId |> Maybe.map List.singleton |> Maybe.withDefault [])
+        |> Set.fromList
+        |> Set.toList
+        |> List.map (\workspaceId -> disconnectChangeStreamScope (Encode.object [ ( "scope", Encode.string "workspace" ), ( "workspaceId", Encode.string workspaceId ) ]))
+        |> Cmd.batch

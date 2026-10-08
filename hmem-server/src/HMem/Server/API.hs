@@ -88,13 +88,14 @@ type WorkspaceAPI =
   :<|> ReqBody '[JSON] CreateWorkspace :> Post '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> ReqBody '[TolerantJSON] UpdateWorkspaceRequest :> Put '[JSON] Workspace
+  :<|> Capture "workspaceId" UUID :> Description "Requires workspace admin access. Soft-deletes the workspace without purging its contents; unavailable through MCP." :> Delete '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "navigation"
          :> QueryParam "parent_kind" Text :> QueryParam "parent_id" UUID
          :> QueryParam "project_limit" Int :> QueryParam "project_offset" Int
          :> QueryParam "task_limit" Int :> QueryParam "task_offset" Int
          :> QueryParam "show_only" Text :> QueryParams "project_status" ProjectStatus :> QueryParams "task_status" TaskStatus
-          :> QueryParam "priority_mode" Text :> QueryParam "priority_value" Int :> QueryParam "query" Text
-          :> Description "Returns separately paged direct child Project and Task card summaries. parent_kind is workspace_root, project, or task; project/task require parent_id. The full tree filter DTO includes show_only, project_status, task_status, priority_mode (any/exact/above/below), priority_value, and case-insensitive query; matching descendants retain ancestors. Each page defaults to 50, is capped at 100, and uses deterministic lifecycle-rank, priority DESC, title/name, id ordering."
+          :> QueryParam "show_empty_projects" Bool :> QueryParam "priority_mode" Text :> QueryParam "priority_value" Int :> QueryParam "query" Text
+          :> Description "Returns separately paged direct child Project and Task card summaries. parent_kind is workspace_root, project, or task; project/task require parent_id. The full tree filter DTO includes show_only, project_status, task_status, priority_mode (any/exact/above/below), priority_value, case-insensitive query, and show_empty_projects (default true); false requires a matching task in the project subtree even in projects-only mode; matching descendants retain ancestors. Each page defaults to 50, is capped at 100, and uses deterministic lifecycle-rank, priority DESC, title/name, id ordering."
          :> Get '[JSON] NavigationBranchResponse
   :<|> Capture "workspaceId" UUID :> "navigation" :> "focus" :> Capture "entityType" NavigationEntityType :> Capture "entityId" UUID :> QueryParam "ancestor_offset" Int
          :> Description "Fetches a target card plus a root-to-parent ancestor window for direct links outside the loaded branch. Missing or foreign targets return 404. Ancestors are capped at 64; use next_ancestor_offset as ancestor_offset to continue a truncated chain."
@@ -456,7 +457,7 @@ health pool tracker = do
                 , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
 
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
+workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.
@@ -488,12 +489,16 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> navigationH :<|
     input <- decodeRequest requestBody
     reject (validateUpdateWorkspaceInput input)
     handleDBErrors (Workspace.renameWorkspace pool workspaceId input) >>= maybe (throwError workspaceRenameNotFound) pure
-  navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset maybeShowOnly projectStatuses taskStatuses maybePriorityMode maybePriorityValue maybeQuery = do
+  deleteH workspaceId = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleAdmin
+    deleted <- handleDBErrors $ Workspace.deleteWorkspace pool workspaceId
+    if deleted then pure NoContent else throwError err404
+  navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset maybeShowOnly projectStatuses taskStatuses maybeShowEmptyProjects maybePriorityMode maybePriorityValue maybeQuery = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     parent <- navigationParent maybeKind maybeParent
     reject (validateNavigationPage projectLimit projectOffset <> validateNavigationPage taskLimit taskOffset)
     reject (validateNavigationFilter maybeShowOnly maybePriorityMode maybePriorityValue maybeQuery)
-    let filters = NavigationFilter { showOnly = maybeShowOnly, projectStatuses = projectStatuses, taskStatuses = taskStatuses, priorityMode = maybePriorityMode, priorityValue = maybePriorityValue, query = maybeQuery }
+    let filters = NavigationFilter { showOnly = maybeShowOnly, projectStatuses = projectStatuses, taskStatuses = taskStatuses, priorityMode = maybePriorityMode, priorityValue = maybePriorityValue, query = maybeQuery, showEmptyProjects = maybeShowEmptyProjects }
     let projectTake = navigationTake projectLimit
         projectSkip = navigationOffset projectOffset
         taskTake = navigationTake taskLimit

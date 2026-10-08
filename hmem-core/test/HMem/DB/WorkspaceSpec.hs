@@ -19,6 +19,14 @@ import HMem.Types
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Workspace rename persistence" $ do
+    it "soft-deletes once and keeps the existing workspace audit lifecycle" $ \env -> do
+      workspace <- createTestWorkspace env "workspace-delete-target"
+      deleteWorkspace env.pool workspace.id `shouldReturn` True
+      deleteWorkspace env.pool workspace.id `shouldReturn` False
+      listActiveWorkspaces env.pool 100 0 >>= (`shouldNotContain` [workspace])
+      audit <- getAuditLogRows env.pool "workspace" (T.pack (show workspace.id))
+      audit `shouldSatisfy` (not . null)
+
     it "persists the canonical rename after reload while preserving every other workspace field" $ \env -> do
       original <- createTestWorkspace env "workspace-before-rename"
 

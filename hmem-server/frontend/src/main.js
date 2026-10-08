@@ -362,14 +362,12 @@ installAuthHeaderInterceptor()
 // Determine workspace ID from URL for loading stored filters at init
 function getWorkspaceFilters() {
   const match = window.location.pathname.match(/^\/workspace\/([^/]+)/)
-  if (!match) return null
-  const key = 'hmem-ws-' + match[1]
+  let filters = {}
   try {
-    const raw = localStorage.getItem(key)
-    return raw ? JSON.parse(raw) : null
-  } catch (e) {
-    return null
-  }
+    if (match) filters = JSON.parse(safeLocalStorageGet('hmem-ws-' + match[1]) || '{}') || {}
+    const groups = JSON.parse(safeLocalStorageGet('hmem-workspace-groups') || '{}') || {}
+    return { ...filters, collapsedGroups: groups.collapsedGroups || {} }
+  } catch (e) { return {} }
 }
 
 const app = Elm.Main.init({

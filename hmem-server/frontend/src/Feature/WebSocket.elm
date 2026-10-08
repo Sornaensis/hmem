@@ -115,6 +115,23 @@ update msg model =
             if model.auth.status == AuthReady then
                 applyWebSocketChange raw model
 
+            else if model.auth.status == AuthBooting && scopeAuthority ChangeStream.Global model /= Nothing then
+                case Api.decodeCanonicalFrame raw of
+                    Just (Api.CanonicalScoped Api.GlobalScope nested) ->
+                        applyScopedFrame ChangeStream.Global nested model
+
+                    Just (Api.CanonicalSnapshot Api.GlobalScope items token profile) ->
+                        applyCanonicalSnapshot ChangeStream.Global profile items token model
+
+                    Just (Api.CanonicalBatch Api.GlobalScope frames) ->
+                        applyScopedFrames ChangeStream.Global frames model
+
+                    Just (Api.CanonicalStatus Api.GlobalScope status) ->
+                        applyScopedFrame ChangeStream.Global (Api.CanonicalStatus Api.GlobalScope status) model
+
+                    _ ->
+                        ( model, Cmd.none )
+
             else
                 ( model, Cmd.none )
 
@@ -122,7 +139,7 @@ update msg model =
             if canonicalGuardIsCurrent guard model then
                 case result of
                     Ok workspace ->
-                        ( { model | workspaces = Dict.insert workspace.id workspace model.workspaces }, Cmd.none )
+                        ( { model | workspaces = if Set.member workspace.id model.groups.deletedWorkspaces then model.workspaces else Dict.insert workspace.id workspace model.workspaces }, Cmd.none )
 
                     Err (Http.BadStatus 404) ->
                         ( { model | workspaces = Dict.remove workspaceId model.workspaces }, Cmd.none )
@@ -393,7 +410,7 @@ update msg model =
                     Ok paginated ->
                         let
                             workspaces =
-                                List.foldl (\workspace -> Dict.insert workspace.id workspace) Dict.empty paginated.items
+                                List.foldl (\workspace -> if Set.member workspace.id model.groups.deletedWorkspaces then identity else Dict.insert workspace.id workspace) Dict.empty paginated.items
                         in
                         ( { model | workspaces = workspaces }, Cmd.none )
 
@@ -433,7 +450,7 @@ update msg model =
                             groups =
                                 model.groups
                         in
-                        ( { model | groups = { groups | groupMembers = Dict.insert groupId members groups.groupMembers } }, Cmd.none )
+                        ( { model | groups = { groups | groupMembers = Dict.insert groupId (List.filter (\workspaceId -> not (Set.member workspaceId groups.deletedWorkspaces)) members) groups.groupMembers } }, Cmd.none )
 
                     Err error ->
                         canonicalHttpFailure guard error model
@@ -453,9 +470,9 @@ update msg model =
             else
                 ( model, Cmd.none )
 
-        CanonicalSessionFetched guard expectedWorkspace result ->
-            if canonicalGuardIsCurrent guard model then
-                ( model, Task.perform identity (Task.succeed (GotSessionContext guard.sessionEpoch expectedWorkspace result)) )
+        CanonicalSessionFetched guard requestSessionEpoch expectedWorkspace result ->
+            if canonicalGuardIsCurrent guard model && requestSessionEpoch == model.sessionRequestEpoch && expectedWorkspace == model.selectedWorkspaceId then
+                ( model, Task.perform identity (Task.succeed (GotSessionContext requestSessionEpoch expectedWorkspace result)) )
 
             else
                 ( model, Cmd.none )
@@ -466,6 +483,17 @@ update msg model =
 
 canonicalGuardIsCurrent : CanonicalRequestGuard -> Model -> Bool
 canonicalGuardIsCurrent guard model =
+    if guard.scopeKey == "global" then
+        scopeAuthority ChangeStream.Global model
+            |> Maybe.map (\session -> ChangeStream.requestGuardMatches guard model.groups.catalogueEpoch Nothing session.principal.actorId model.webSocket.targetGenerations)
+            |> Maybe.withDefault False
+
+    else
+        workspaceGuardIsCurrent guard model
+
+
+workspaceGuardIsCurrent : CanonicalRequestGuard -> Model -> Bool
+workspaceGuardIsCurrent guard model =
     model.auth.status
         == AuthReady
         && (model.sessionContext
@@ -581,7 +609,7 @@ applyScopedFrames scope frames model =
 
 requiredScopes : Model -> List ChangeStream.Scope
 requiredScopes model =
-    (if Permissions.isSuperadmin model then
+    (if scopeAuthority ChangeStream.Global model /= Nothing then
         [ ChangeStream.Global ]
 
      else
@@ -679,7 +707,7 @@ applyCanonicalSnapshot scope profile items token model =
                     requestGroupMembers ChangeStream.Global
                         (Dict.keys snapshot.groups)
                         { withStream
-                            | workspaces = snapshot.workspaces
+                            | workspaces = (Dict.filter (\catalogueWorkspaceId _ -> not (Set.member catalogueWorkspaceId model.groups.deletedWorkspaces)) snapshot.workspaces)
                             , groups = { groups | workspaceGroups = snapshot.groups, groupMembers = Dict.filter (\groupId _ -> Dict.member groupId snapshot.groups) groups.groupMembers }
                             , dataLoading = { loading | loadingWorkspaces = False, activeWorkspaceListLoadToken = Nothing }
                         }
@@ -694,7 +722,7 @@ applyCanonicalSnapshot scope profile items token model =
                         -- branch data with this intentionally sparse snapshot.
                         let
                             shellModel =
-                                { withStream | workspaces = Dict.union snapshot.workspaces withStream.workspaces }
+                                { withStream | workspaces = Dict.union (Dict.filter (\catalogueWorkspaceId _ -> not (Set.member catalogueWorkspaceId model.groups.deletedWorkspaces)) snapshot.workspaces) withStream.workspaces }
 
                             initialHandoff =
                                 not stream.snapshotApplied
@@ -756,7 +784,7 @@ applyCanonicalSnapshot scope profile items token model =
 
                             snapshotModel =
                                 { withStream
-                                    | workspaces = Dict.union snapshot.workspaces withStream.workspaces
+                                    | workspaces = Dict.union (Dict.filter (\catalogueWorkspaceId _ -> not (Set.member catalogueWorkspaceId model.groups.deletedWorkspaces)) snapshot.workspaces) withStream.workspaces
                                     , projects = snapshot.projects
                                     , tasks = snapshot.tasks
                                     , observations = reconciledObservations
@@ -856,7 +884,7 @@ beginScopedResync scope model =
                 invalidated
     in
     ( setWebSocketState Connecting cacheCleared
-    , connectCmd model.flags model.sessionContext scope True
+    , connectCmd model.flags (scopeAuthority scope model) scope True
     )
 
 
@@ -1089,7 +1117,7 @@ applyAction scope action ( model, accumulated ) =
             requestCanonical scope ("memberships:" ++ workspaceId) (\guard -> Api.fetchWorkspaceMemberships model.flags.apiUrl workspaceId (CanonicalMembershipsFetched guard workspaceId)) accumulated model
 
         ChangeStream.RefreshSessionAuthorization ->
-            requestCanonical scope "session" (\guard -> Api.fetchSessionContext model.flags.apiUrl model.selectedWorkspaceId (CanonicalSessionFetched guard model.selectedWorkspaceId)) accumulated model
+            requestCanonical scope "session" (\guard -> Api.fetchSessionContext model.flags.apiUrl model.selectedWorkspaceId (CanonicalSessionFetched guard model.sessionRequestEpoch model.selectedWorkspaceId)) accumulated model
 
         ChangeStream.AccessGranted workspaceId ->
             append (clearChangeStreamScope (scopePortValue model.sessionContext (ChangeStream.Workspace workspaceId))) model
@@ -1275,7 +1303,7 @@ advanceCanonicalTarget scope targetKey model =
 
 requestCanonical : ChangeStream.Scope -> String -> (CanonicalRequestGuard -> Cmd Msg) -> Cmd Msg -> Model -> ( Model, Cmd Msg )
 requestCanonical scope targetKey makeCommand accumulated model =
-    case model.sessionContext of
+    case scopeAuthority scope model of
         Nothing ->
             let
                 ( next, command ) =
@@ -1295,8 +1323,8 @@ requestCanonical scope targetKey makeCommand accumulated model =
                     { scopeKey = ChangeStream.scopeKey scope
                     , targetKey = targetKey
                     , targetGeneration = generation
-                    , sessionEpoch = model.sessionRequestEpoch
-                    , routeWorkspace = model.selectedWorkspaceId
+                    , sessionEpoch = if scope == ChangeStream.Global then model.groups.catalogueEpoch else model.sessionRequestEpoch
+                    , routeWorkspace = if scope == ChangeStream.Global then Nothing else model.selectedWorkspaceId
                     , audienceId = session.principal.actorId
                     }
 
@@ -2010,3 +2038,17 @@ actorSuffix event =
 
         Nothing ->
             ""
+
+
+scopeAuthority : ChangeStream.Scope -> Model -> Maybe Api.SessionContext
+scopeAuthority scope model =
+    case scope of
+        ChangeStream.Global ->
+            if model.auth.status == AuthReady || model.auth.status == AuthBooting then
+                (if model.groups.catalogueOwner /= Nothing then model.groups.catalogueOwner else if model.auth.status == AuthReady then model.sessionContext else Nothing) |> Maybe.andThen (\session -> if session.globalPermissions.superadmin then Just session else Nothing)
+
+            else
+                Nothing
+
+        ChangeStream.Workspace _ ->
+            if model.auth.status == AuthReady then model.sessionContext else Nothing

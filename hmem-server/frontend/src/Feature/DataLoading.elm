@@ -65,7 +65,7 @@ navigationFilterFingerprint model =
                 AbovePriority value -> "above:" ++ String.fromInt value
                 BelowPriority value -> "below:" ++ String.fromInt value
     in
-    String.join "|" [ showOnly, priority, String.join "," (List.sort model.search.filterProjectStatuses), String.join "," (List.sort model.search.filterTaskStatuses), String.trim model.search.query ]
+    String.join "|" [ showOnly, if model.search.filterShowEmptyProjects then "empty" else "nonempty", priority, String.join "," (List.sort model.search.filterProjectStatuses), String.join "," (List.sort model.search.filterTaskStatuses), String.trim model.search.query ]
 
 
 navigationFilterQuery : Model -> String
@@ -95,7 +95,7 @@ navigationFilterQuery model =
                 "" -> ""
                 value -> "&query=" ++ Url.percentEncode value
     in
-    showOnly ++ priority ++ projectStatuses ++ taskStatuses ++ query
+    showOnly ++ "&show_empty_projects=" ++ (if model.search.filterShowEmptyProjects then "true" else "false") ++ priority ++ projectStatuses ++ taskStatuses ++ query
 
 
 navigationBranchKey : String -> Maybe String -> String
@@ -1144,7 +1144,7 @@ physical admissions and presentations intact; the allocator is not their lifetim
 revalidateNavigationForChangedSummaries : Model -> Api.NavigationSummariesResponse -> Model -> ( Model, Cmd Msg )
 revalidateNavigationForChangedSummaries before summaries model =
     let
-        filtered = before.search.filterShowOnly /= ShowAll || before.search.filterProjectStatuses /= [] || before.search.filterTaskStatuses /= [] || before.search.filterPriority /= AnyPriority || String.trim before.search.query /= ""
+        filtered = not before.search.filterShowEmptyProjects || before.search.filterShowOnly /= ShowAll || before.search.filterProjectStatuses /= [] || before.search.filterTaskStatuses /= [] || before.search.filterPriority /= AnyPriority || String.trim before.search.query /= ""
         queried = String.trim before.search.query /= ""
         projectOwner summary = summary.parentId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
         taskOwner summary = case summary.parentId of
@@ -2507,7 +2507,7 @@ updateResponse msg model =
             beginRootNavigationPreviousPage entityKind model
 
         GotWorkspaces token result ->
-            if model.auth.status /= AuthReady || model.dataLoading.activeWorkspaceListLoadToken /= Just token then
+            if (model.auth.status /= AuthReady && (model.auth.status /= AuthBooting || model.groups.catalogueOwner == Nothing)) || model.dataLoading.activeWorkspaceListLoadToken /= Just token then
                 ( model, Cmd.none )
 
             else
@@ -2521,7 +2521,7 @@ updateResponse msg model =
                                 { currentDataLoading | loadingWorkspaces = False, activeWorkspaceListLoadToken = Nothing }
                         in
                         ( { model
-                            | workspaces = indexBy .id paginated.items
+                            | workspaces = indexBy .id (List.filter (\workspace -> not (Set.member workspace.id model.groups.deletedWorkspaces)) paginated.items)
                             , dataLoading = updatedDataLoading
                           }
                         , Cmd.none

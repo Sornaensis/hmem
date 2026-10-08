@@ -873,13 +873,7 @@ viewWorkspaceTimelinePanel wsId model =
 viewTimelineHistogram : TimelineModel -> Html Msg
 viewTimelineHistogram timeline =
     div [ class "timeline-chart-panel" ]
-        [ div [ class "timeline-graph-header" ]
-            [ div []
-                [ h4 [] [ text "Lifecycle activity" ]
-                , p [] [ text "Lifecycle counts by UTC bucket. Select a graph point to filter the event cards below." ]
-                ]
-            ]
-        , viewTimelineHistogramControls timeline
+        [ viewTimelineHistogramControls timeline
         , viewTimelineChartToggles timeline.chartSeries
         , div [ class "timeline-chart-toggles", attribute "aria-label" "Visible lifecycle events" ]
             (List.map (\( key, labelText ) -> button [ class ("timeline-series-toggle timeline-series-" ++ key), attribute "aria-pressed" (if Dict.get key timeline.chartActions |> Maybe.withDefault False then "true" else "false"), onClick (ToggleTimelineChartAction key) ] [ span [ class "timeline-series-marker" ] [], text labelText ]) lifecycleActions)
@@ -1024,9 +1018,7 @@ viewTimelineLineChart timeline actionLabel action =
             chartCanvasWidth bucketCount
     in
     section [ class "timeline-line-chart-panel" ]
-        [ h5 [] [ text actionLabel ]
-        , p [ class "timeline-line-chart-summary" ] [ text (actionLabel ++ " maximum: " ++ String.fromInt actualMaximum) ]
-        , div [ class "timeline-svg-scroll" ]
+        [ div [ class "timeline-svg-scroll" ]
             [ Svg.svg
                 [ SA.viewBox ("0 0 " ++ String.fromInt canvasWidth ++ " 280")
                 , SA.width (String.fromInt canvasWidth)

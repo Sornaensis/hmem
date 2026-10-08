@@ -163,6 +163,17 @@ test('keyboard mounts the next logical entity before focusing it', () => {
   h.bridge.dispose()
 })
 
+test('filter layouts preserve physical scroll across replacement and measurement echoes', () => {
+  const h = harness(), row = h.row('task:t', 1200)
+  h.setRows([row]); h.flush(); h.scroller.scrollTop = 150
+  h.callbacks.sync({ ...h.stamp, preserveScroll: true, anchor: 'task:t', delta: 40, top: 1200 }); h.flush()
+  assert.equal(h.scroller.scrollTop, 150)
+  const next = { ...h.stamp, revision: h.stamp.revision + 1 }
+  h.setStamp(next); h.callbacks.sync({ ...next, preserveScroll: true, top: 1800 }); h.flush()
+  assert.equal(h.scroller.scrollTop, 150)
+  h.bridge.dispose()
+})
+
 test('layout anchors preserve a measured row and its intrarow offset', () => {
   const h = harness(), anchor = h.row('project:a', 700)
   h.setRows([anchor]); h.flush(); h.scroller.scrollTop = 500

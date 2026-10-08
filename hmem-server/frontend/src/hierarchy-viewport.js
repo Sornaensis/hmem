@@ -161,7 +161,7 @@ export function installHierarchyViewport(app, options = {}) {
       // Sample at admission and compare the actual position before writing:
       // a newer scroll can arrive before its event is delivered. Layouts
       // admitted after our own clamped writes sample their resulting position.
-      if (currentTarget && (layoutScrollTop == null || scroller.scrollTop === layoutScrollTop)) {
+      if (!pendingLayout.preserveScroll && currentTarget && (layoutScrollTop == null || scroller.scrollTop === layoutScrollTop)) {
         if (pendingLayout.target && rowFor(pendingLayout.target)) { /* Reveal below only if its header is outside the viewport. */ }
         else if (anchor) scroller.scrollTop = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + pendingLayout.delta
         else scroller.scrollTop = origin() + Math.max(0, pendingLayout.top)

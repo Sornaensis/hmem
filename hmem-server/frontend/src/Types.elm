@@ -629,6 +629,8 @@ type alias HierarchyViewportState =
     , height : Float
     , nativePins : Set String
     , target : Maybe String
+    , preserveScroll : Bool
+    , filterExtent : Float
     }
 
 

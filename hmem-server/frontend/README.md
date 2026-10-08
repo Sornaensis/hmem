@@ -95,6 +95,10 @@ traverse a full workspace in pages. The
 [navigation decision](../../architecture/adrai/decisions/R01M/R01M48140QPDRRS113KC3AERB1H--keep-interactive-workspace-navigation-bounded-and-stale-response.decision.md)
 defines the transport and rendering limits.
 
+Project filters preserve the current scroll position while replacement rows load;
+the final content can clamp the position at its bottom. Subtasks share their
+parent task's enclosure while each mounted row remains independently measured.
+
 **Show empty projects** is checked by default and saved per workspace. Unchecking
 it requires a matching task anywhere in the subtree; matching ancestors remain
 visible. Workspace group disclosure is saved globally. Workspace admins can

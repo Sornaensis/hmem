@@ -188,6 +188,45 @@ suite =
             in
             Expect.equal ( 0, 0, True )
                 ( firstPaint.cards.viewport.top, beforePaint.cards.viewport.top, List.member "project:root" (Cards.mountedViewportKeys beforePaint) )
+        , test "filter lifetime preserves the offset through pending membership and measured replacement" <| \_ ->
+            let
+                seeded = rootSeed (List.range 1 50 |> List.map (\n -> project ("root-" ++ String.fromInt n))) |> viewportReady
+                scrolled = Cards.updateViewport (viewportEvent seeded 500 [] Nothing []) seeded |> Tuple.first
+                pending = routed (ToggleFilterProjectStatus "active") scrolled
+                loaded = case pending.dataLoading.rootNavigationRequest of
+                    Just request -> routed (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint 0 0
+                        (Ok { workspaceId = workspaceId, projects = { items = [ project "replacement" ], hasMore = False }, tasks = { items = [], hasMore = False } })) pending
+                    Nothing -> pending
+                measured = Cards.updateViewport (viewportEvent loaded 150 [ ( "project:replacement", 400 ) ] Nothing []) loaded |> Tuple.first
+                disclosed = routed CollapseAllNodes measured
+            in
+            Expect.all
+                [ \_ -> Expect.equal ( 500, True, scrolled.cards.viewport.index.keys ) ( pending.cards.viewport.top, pending.cards.viewport.preserveScroll, pending.cards.viewport.index.keys )
+                , \_ -> Expect.equal ( 500, True ) ( loaded.cards.viewport.top, loaded.cards.viewport.preserveScroll )
+                , \_ -> Expect.equal 150 measured.cards.viewport.top
+                , \_ -> Expect.equal False disclosed.cards.viewport.preserveScroll
+                ] ()
+        , test "settled optional pages and failures release filter extent, and changed contexts reset it" <| \_ ->
+            let
+                ready = rootSeed [ project "first" ] |> viewportReady
+                pending = routed (ToggleFilterProjectStatus "active") ready
+                loading = pending.dataLoading
+                optional = { pending | dataLoading = { loading | navigationQueue = [], loadedNavigationBranches = Dict.empty, rootNavigationRequest = Maybe.map (\request -> { request | inFlight = False, succeeded = True, projectHasMore = True }) loading.rootNavigationRequest } }
+                optionalLoading = optional.dataLoading
+                failed = { optional | dataLoading = { optionalLoading | rootNavigationRequest = Maybe.map (\request -> { request | succeeded = False, projectHasMore = False }) optionalLoading.rootNavigationRequest } }
+                otherSearch = optional.search
+                pendingCards = pending.cards
+                pendingViewport = pendingCards.viewport
+                deep = { pending | cards = { pendingCards | viewport = { pendingViewport | top = 10000 } } }
+                other = Cards.refreshViewport optional ( { optional | selectedWorkspaceId = Just "other-workspace", sessionRequestEpoch = optional.sessionRequestEpoch + 1, search = { otherSearch | filterProjectStatuses = [] } }, Cmd.none ) |> Tuple.first
+                released source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "hierarchy-viewport" ] |> Query.has [ Selector.attribute (Html.Attributes.style "min-height" "0px") ]
+            in
+            Expect.all
+                [ \_ -> released optional
+                , \_ -> released failed
+                , \_ -> released deep
+                , \_ -> Expect.equal ( False, 0 ) ( other.cards.viewport.preserveScroll, other.cards.viewport.filterExtent )
+                ] ()
         , test "cached root rows remain scroll reachable with a bounded first paint" <| \_ ->
             let
                 seeded = rootSeed (List.range 1 50 |> List.map (\number -> project ("root-" ++ String.padLeft 3 '0' (String.fromInt number))))

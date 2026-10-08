@@ -3516,7 +3516,7 @@ textarea.observation-edit-content {
 /* Workspace timeline */
 
 .timeline-panel {
-  max-width: 60rem;
+  width: 100%;
 }
 
 .timeline-panel-header {
@@ -3738,6 +3738,8 @@ textarea.observation-edit-content {
   flex-direction: column;
   gap: 0.75rem;
 }
+
+.timeline-event-list { max-width: 60rem; }
 
 .timeline-date-group {
   display: flex;
@@ -4356,6 +4358,16 @@ textarea.observation-edit-content {
 /* Every row owns its spacing, so measured heights equal spacer geometry. */
 .hierarchy-viewport { display: block; overflow-anchor: none; }
 .hierarchy-row { box-sizing: border-box; padding-bottom: 6px; }
+.hierarchy-task-family {
+  background: var(--bg-surface);
+  border-radius: 0.5rem;
+  box-shadow: inset 0 0 0 1px var(--border), inset 3px 0 #14b8a6;
+}
+.hierarchy-task-family > .hierarchy-row > .card-task {
+  border-color: transparent;
+  background: transparent;
+}
+.hierarchy-task-family > .hierarchy-row > .card-subtask { margin-right: 1rem; }
 .hierarchy-row > .card, .hierarchy-row .tree-card { margin-bottom: 0; }
 .hierarchy-spacer { pointer-events: none; }
 .hierarchy-branch-status { min-height: 24px; font-size: 0.8rem; color: var(--text-muted); }

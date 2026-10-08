@@ -60,7 +60,7 @@ init =
     { viewport =
         { workspaceId = Nothing, sessionEpoch = 0, generation = 0, revision = 0
         , rows = Dict.empty, index = Viewport.build 160 Dict.empty [], projection = Nothing
-        , top = 0, height = 800, nativePins = Set.empty, target = Nothing
+        , top = 0, height = 800, nativePins = Set.empty, target = Nothing, preserveScroll = False, filterExtent = 0
         }
     , expandedCards = Dict.empty
     , collapsedNodes = Dict.empty
@@ -3373,6 +3373,22 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                 || (not model.dataLoading.navigationVisibilityActive && (previous.projects /= model.projects || previous.tasks /= model.tasks))
                 || feedbackRowsChanged previous model
         sameContext = old.workspaceId == model.selectedWorkspaceId && old.sessionEpoch == model.sessionRequestEpoch
+        filtersChanged =
+            previous.search.query /= model.search.query
+                || previous.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
+                || previous.search.filterShowOnly /= model.search.filterShowOnly
+                || previous.search.filterPriority /= model.search.filterPriority
+                || previous.search.filterProjectStatuses /= model.search.filterProjectStatuses
+                || previous.search.filterTaskStatuses /= model.search.filterTaskStatuses
+        preserveScroll =
+            sameContext && (filtersChanged || (old.preserveScroll
+                && (previous.dataLoading.rootNavigationRequest |> Maybe.map .generation) == (model.dataLoading.rootNavigationRequest |> Maybe.map .generation)
+                && previous.cards.collapsedNodes == model.cards.collapsedNodes
+                && previous.focus.focusedEntity == model.focus.focusedEntity))
+        awaitingFilteredRoots =
+            preserveScroll && (model.dataLoading.rootNavigationRequest
+                |> Maybe.map (\request -> request.inFlight && not request.succeeded)
+                |> Maybe.withDefault False)
         active = model.auth.status == AuthReady && model.activeTab == ProjectsTab
     in
     if not active then
@@ -3401,8 +3417,8 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
             Nothing -> ( model, command )
             Just ws ->
                 let
-                    projection = cardTreeProjection ws model
-                    rows = logicalRows projection model
+                    projection = if awaitingFilteredRoots then old.projection |> Maybe.withDefault (cardTreeProjection ws model) else cardTreeProjection ws model
+                    rows = if awaitingFilteredRoots then Array.toList old.index.keys |> List.filterMap (\key -> Dict.get key old.rows) else logicalRows projection model
                     keys = List.map .key rows
                     defaults = rows |> List.filter (.kind >> (\kind -> kind /= "project" && kind /= "task")) |> List.map (\row -> ( row.key, if row.kind == "drop" then 8 else 40 )) |> Dict.fromList
                     measurements = if sameContext then Dict.union old.index.heights defaults else defaults
@@ -3415,7 +3431,8 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                     anchor = if awaitingFirstRows then Nothing else Array.get anchorPosition old.index.keys
                     delta = old.top - Viewport.offset anchorPosition old.index
                     anchoredTop =
-                        if sameContext then
+                        if preserveScroll then old.top
+                        else if sameContext then
                             anchor |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Basics.max 0 (Viewport.offset i index + delta)) |> Maybe.withDefault old.top
                         else 0
                     viewport = { old | workspaceId = Just ws, sessionEpoch = model.sessionRequestEpoch, generation = model.dataLoading.navigationGeneration
@@ -3423,6 +3440,12 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                         , index = index, projection = Just projection, top = anchoredTop
                         , nativePins = if sameContext then Set.filter (\key -> Dict.member key index.positions) old.nativePins else Set.empty
                         , target = Nothing
+                        , preserveScroll = preserveScroll
+                        , filterExtent =
+                            if not preserveScroll then 0
+                            else if filtersChanged then
+                                if activeNavigationTransport previous then Basics.max old.filterExtent (Viewport.height old.index) else Viewport.height old.index
+                            else old.filterExtent
                         }
                     cards = model.cards
                     rebuilt = { model | cards = { cards | viewport = viewport } }
@@ -3455,6 +3478,7 @@ viewportConfiguration model anchor delta =
         , ( "epoch", Encode.int viewport.sessionEpoch ), ( "generation", Encode.int viewport.generation ), ( "revision", Encode.int viewport.revision )
         , ( "anchor", anchor |> Maybe.map Encode.string |> Maybe.withDefault Encode.null ), ( "delta", Encode.float delta )
         , ( "top", Encode.float viewport.top ), ( "target", viewport.target |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
+        , ( "preserveScroll", Encode.bool viewport.preserveScroll )
         ]
 
 
@@ -3487,9 +3511,10 @@ updateViewport payload model =
         top = case target of
             Just key -> Dict.get key index.positions |> Maybe.map (\i -> Viewport.offset i index) |> Maybe.withDefault viewport.top
             Nothing ->
-                if List.isEmpty measured then Basics.max 0 (get "top" Decode.float viewport.top)
+                if viewport.preserveScroll || List.isEmpty measured then incomingTop
                 else anchorKey |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Basics.max 0 (Viewport.offset i index + anchorDelta)) |> Maybe.withDefault viewport.top
         next = { viewport | top = top, height = Basics.max 1 (get "height" Decode.float viewport.height), index = index
+            , preserveScroll = viewport.preserveScroll && target == Nothing
             , nativePins = get "pins" (Decode.list Decode.string) [] |> List.take 1 |> Set.fromList |> Set.filter (\key -> Dict.member key viewport.rows)
             , target = case target of
                 Just _ -> target
@@ -3538,7 +3563,29 @@ viewHierarchyViewport ws incoming =
                     case Dict.get key viewport.rows of
                         Just row -> if row.kind == "project" || row.kind == "task" then key else neighborEntity direction (position + direction)
                         Nothing -> ""
-        pieceView piece =
+        taskFamily seen key =
+            case Dict.get key viewport.rows of
+                Just row ->
+                    if Set.member key seen then Nothing
+                    else if row.kind == "task" then
+                        case row.parentId of
+                            Just parent -> taskFamily (Set.insert key seen) ("task:" ++ parent)
+                            Nothing -> Just ( key, row.depth )
+                    else if row.parentKind == "task" || row.parentKind == "task-subtasks" then
+                        row.parentId |> Maybe.andThen (\parent -> taskFamily (Set.insert key seen) ("task:" ++ parent))
+                    else Nothing
+                Nothing -> Nothing
+        familyAt position = Array.get position viewport.index.keys |> Maybe.andThen (taskFamily Set.empty)
+        pieceFamily piece =
+            case piece of
+                Viewport.Row position _ _ -> familyAt position
+                Viewport.Gap start amount ->
+                    let
+                        first = familyAt start
+                        last = familyAt (Viewport.positionAt (Viewport.offset start viewport.index + amount - 0.001) viewport.index)
+                    in
+                    if first == last then first else Nothing
+        pieceView baseDepth piece =
             case piece of
                 Viewport.Gap start amount ->
                     ( "gap-" ++ String.fromInt start, div [ class "hierarchy-spacer", style "height" (String.fromFloat amount ++ "px"), attribute "aria-hidden" "true" ] [] )
@@ -3556,7 +3603,7 @@ viewHierarchyViewport ws incoming =
                     ( key, div [ class "hierarchy-row", attribute "data-hierarchy-key" key, attribute "data-hierarchy-index" (String.fromInt position)
                         , attribute "data-hierarchy-next" (neighborEntity 1 position)
                         , attribute "data-hierarchy-previous" (neighborEntity -1 position)
-                        , style "padding-left" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> depth * 20)) ++ "px")
+                        , style "padding-left" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> Basics.max 0 (depth - baseDepth) * 20)) ++ "px")
                         ] [ row |> Maybe.map content |> Maybe.withDefault (text "") ] )
         pieces = Viewport.window viewport.top viewport.height 300 25 (viewportPins model) viewport.index
         protectedInput =
@@ -3564,8 +3611,34 @@ viewHierarchyViewport ws incoming =
                 Just target -> Just target
                 Nothing -> inlineCreateTarget model
         segments = Viewport.partition (protectedInput |> Maybe.map (\( kind, entityId ) -> kind ++ ":" ++ entityId)) pieces
+        -- Keep the current extent only while a real row can paint in this
+        -- window. A shorter loaded prefix must clamp naturally so its painted
+        -- rows can admit the next bounded discovery wave.
+        pendingFilterMembership = viewport.preserveScroll && activeNavigationTransport model
+            && viewport.top < Viewport.height viewport.index
+        groupedPieces contents =
+            case contents of
+                [] -> []
+                first :: rest ->
+                    case pieceFamily first of
+                        Nothing -> pieceView 0 first :: groupedPieces rest
+                        Just ( family, depth ) ->
+                            let
+                                collect collected remaining =
+                                    case remaining of
+                                        next :: tail ->
+                                            if pieceFamily next == Just ( family, depth ) then collect (next :: collected) tail
+                                            else ( List.reverse collected, remaining )
+                                        [] -> ( List.reverse collected, [] )
+                                ( members, following ) = collect [ first ] rest
+                            in
+                            ( family, Keyed.node "div"
+                                [ class "hierarchy-task-family", attribute "data-task-family" (String.dropLeft 5 family)
+                                , style "margin-left" (String.fromInt (depth * 20) ++ "px")
+                                ] (List.map (pieceView depth) members)
+                            ) :: groupedPieces following
         segment key contents =
-            ( key, Keyed.node "div" [ class "hierarchy-segment", style "display" "contents" ] (List.map pieceView contents) )
+            ( key, Keyed.node "div" [ class "hierarchy-segment", style "display" "contents" ] (groupedPieces contents) )
     in
     div [ class "tree-view" ]
         [ div [ class "tree-toolbar" ]
@@ -3574,9 +3647,23 @@ viewHierarchyViewport ws incoming =
             ]
         , Feature.Editing.viewInlineCreateInput model Nothing "project"
         , Feature.Focus.viewFocusBreadcrumbBar model
-        , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", attribute "data-hierarchy-context" config ]
+        , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", attribute "data-hierarchy-context" config
+            , style "min-height" (String.fromFloat (if pendingFilterMembership then viewport.filterExtent else 0) ++ "px")
+            ]
             [ segment "before" segments.before, segment "editor" segments.pivot, segment "after" segments.after ]
         ]
+
+
+activeNavigationTransport : Model -> Bool
+activeNavigationTransport model =
+    let
+        pending request = request.inFlight && Just request.workspaceId == model.selectedWorkspaceId
+            && request.sessionEpoch == model.sessionRequestEpoch
+            && request.filterFingerprint == Feature.DataLoading.navigationFilterFingerprint model
+    in
+    (model.dataLoading.rootNavigationRequest |> Maybe.map pending |> Maybe.withDefault False)
+        || not (List.isEmpty model.dataLoading.navigationQueue)
+        || List.any pending (Dict.values model.dataLoading.loadedNavigationBranches)
 
 
 feedbackRowsChanged : Model -> Model -> Bool

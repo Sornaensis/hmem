@@ -1,4 +1,4 @@
-module Feature.Timeline exposing (chartCanvasWidth, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, pointMarkerOffset, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel)
+module Feature.Timeline exposing (chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel)
 
 import Api
 import Char
@@ -1020,8 +1020,8 @@ viewTimelineLineChart timeline actionLabel action =
     section [ class "timeline-line-chart-panel" ]
         [ div [ class "timeline-svg-scroll" ]
             [ Svg.svg
-                [ SA.viewBox ("0 0 " ++ String.fromInt canvasWidth ++ " 280")
-                , SA.width (String.fromInt canvasWidth)
+                [ SA.width (String.fromInt canvasWidth)
+                , SA.height "280"
                 , SA.class "timeline-line-chart"
                 , attribute "aria-labelledby" ("timeline-chart-" ++ action ++ "-title timeline-chart-" ++ action ++ "-description")
                 ]
@@ -1115,8 +1115,8 @@ timelineChartGrid canvasWidth actualMaximum renderDomain =
                 let
                     y = chartY renderDomain (toFloat tick)
                 in
-                [ Svg.line [ SA.x1 "44", SA.x2 (floatString (toFloat canvasWidth - 20)), SA.y1 (floatString y), SA.y2 (floatString y), SA.class "timeline-chart-grid" ] []
-                , Svg.text_ [ SA.x "38", SA.y (floatString (y + 4)), SA.class "timeline-chart-axis" ] [ Svg.text (String.fromInt tick) ]
+                [ Svg.line [ SA.x1 (chartPercentX canvasWidth 44), SA.x2 (chartPercentX canvasWidth (toFloat canvasWidth - 20)), SA.y1 (floatString y), SA.y2 (floatString y), SA.class "timeline-chart-grid" ] []
+                , Svg.text_ [ SA.x (chartPercentX canvasWidth 38), SA.y (floatString (y + 4)), SA.class "timeline-chart-axis" ] [ Svg.text (String.fromInt tick) ]
                 ]
             )
 
@@ -1165,7 +1165,7 @@ timelineXLabels canvasWidth buckets =
         |> List.map
             (\( index, bucket ) ->
                 Svg.text_
-                    [ SA.x (floatString (chartXWithWidth canvasWidth bucketCount index))
+                    [ SA.x (chartPercentX canvasWidth (chartXWithWidth canvasWidth bucketCount index))
                     , SA.y "264"
                     , SA.class "timeline-chart-x-axis"
                     ]
@@ -1177,21 +1177,24 @@ viewTimelineSeriesSvg : Dict.Dict String Int -> Maybe TimelineHistogramSelection
 viewTimelineSeriesSvg pointFocus selectedBucket actionLabel action renderDomain canvasWidth bucketCount series =
     let
         points =
-            List.indexedMap (\index point -> { x = chartXWithWidth canvasWidth bucketCount index + pointMarkerOffset series.key, y = chartY renderDomain (toFloat point.count), label = point.label, since = point.since, until = point.until, count = point.count }) series.values
+            List.indexedMap (\index point -> { x = chartXWithWidth canvasWidth bucketCount index, y = chartY renderDomain (toFloat point.count), label = point.label, since = point.since, until = point.until, count = point.count }) series.values
     in
-    Svg.path [ SA.d (timelinePath points), SA.class ("timeline-line timeline-series-" ++ series.key), SA.fill "none" ] []
-        :: List.indexedMap (viewTimelinePoint pointFocus selectedBucket actionLabel action series (List.length points)) points
+    -- Scale only the path geometry. Root text and circles remain in CSS pixels,
+    -- with percentage x coordinates matching this nested viewport exactly.
+    Svg.svg [ SA.viewBox ("0 0 " ++ String.fromInt canvasWidth ++ " 280"), SA.width "100%", SA.height "280", SA.preserveAspectRatio "none", attribute "aria-hidden" "true" ]
+        [ Svg.path [ SA.d (timelinePath points), SA.class ("timeline-line timeline-series-" ++ series.key), SA.fill "none" ] [] ]
+        :: List.indexedMap (viewTimelinePoint pointFocus selectedBucket actionLabel action series canvasWidth (List.length points)) points
 
 
-viewTimelinePoint : Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> TimelineSeriesDefinition -> Int -> Int -> { x : Float, y : Float, label : String, since : String, until : String, count : Int } -> Svg.Svg Msg
-viewTimelinePoint pointFocus selectedBucket actionLabel action series pointCount index point =
+viewTimelinePoint : Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> TimelineSeriesDefinition -> Int -> Int -> Int -> { x : Float, y : Float, label : String, since : String, until : String, count : Int } -> Svg.Svg Msg
+viewTimelinePoint pointFocus selectedBucket actionLabel action series canvasWidth pointCount index point =
     let
         matchingBucket =
             -- Every action line has a roving keyboard point for bucket activation.
             (selectedBucket |> Maybe.map .label) == Just point.label
 
         displayX =
-            point.x
+            chartPercentX canvasWidth point.x
 
         pointId =
             timelinePointId action series.key index
@@ -1212,14 +1215,14 @@ viewTimelinePoint pointFocus selectedBucket actionLabel action series pointCount
         , onTimelinePointKey action series.key index pointCount (SelectTimelineHistogramBucket point.label point.since point.until)
         ]
         [ Svg.circle
-            [ SA.cx (floatString displayX)
+            [ SA.cx displayX
             , SA.cy (floatString point.y)
             , SA.r "11"
             , SA.class "timeline-point-hitarea"
             ]
             []
         , Svg.circle
-            [ SA.cx (floatString displayX)
+            [ SA.cx displayX
             , SA.cy (floatString point.y)
             , SA.r "6"
             , SA.class "timeline-point"
@@ -1229,38 +1232,9 @@ viewTimelinePoint pointFocus selectedBucket actionLabel action series pointCount
         ]
 
 
-pointMarkerOffset : String -> Float
-pointMarkerOffset key =
-    case key of
-        "created" ->
-            -48
-
-        "completed" ->
-            -24
-
-        "deleted" ->
-            0
-
-        "archived" ->
-            24
-
-        "cancelled" ->
-            48
-
-        "projects" ->
-            -36
-
-        "tasks" ->
-            -12
-
-        "subtasks" ->
-            12
-
-        "observations" ->
-            36
-
-        _ ->
-            0
+chartPercentX : Int -> Float -> String
+chartPercentX canvasWidth x =
+    floatString (x / toFloat canvasWidth * 100) ++ "%"
 
 
 timelinePointFocusKey : String -> String -> String

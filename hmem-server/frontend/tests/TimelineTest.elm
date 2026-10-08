@@ -213,14 +213,14 @@ suite =
             \_ ->
                 Feature.Timeline.clampTimelinePointFocus 3 (Dict.fromList [ ( "created-observations", 365 ), ( "deleted-tasks", -4 ) ])
                     |> Expect.equal (Dict.fromList [ ( "created-observations", 2 ), ( "deleted-tasks", 0 ) ])
-        , test "coincident series markers use nonoverlapping pointer-target offsets" <|
+        , test "native coordinates share the path viewport percentage, including a single centered bucket" <|
             \_ ->
-                [ Feature.Timeline.pointMarkerOffset "projects"
-                , Feature.Timeline.pointMarkerOffset "tasks"
-                , Feature.Timeline.pointMarkerOffset "subtasks"
-                , Feature.Timeline.pointMarkerOffset "observations"
+                [ Feature.Timeline.chartPercentX 720 (Feature.Timeline.chartXWithWidth 720 1 0)
+                , Feature.Timeline.chartPercentX 12832 (Feature.Timeline.chartXWithWidth 12832 1 0)
+                , Feature.Timeline.chartPercentX 720 180
+                , Feature.Timeline.chartPercentX 12832 3208
                 ]
-                    |> Expect.equal [ -36, -12, 12, 36 ]
+                    |> Expect.equal [ "50%", "50%", "25%", "25%" ]
         , test "roving point controls make nearby and boundary buckets keyboard-reachable" <|
             \_ ->
                 ( Feature.Timeline.timelinePointFocusKey "created" "projects"

@@ -3672,7 +3672,7 @@ textarea.observation-edit-content {
 .timeline-line-chart-panel h5 { margin: 0; font-size: 0.95rem; }
 .timeline-line-chart-summary { margin: 0.25rem 0 0.5rem; color: var(--text-muted); font-size: 0.75rem; }
 .timeline-svg-scroll { overflow-x: auto; padding: 0.25rem 0 0.5rem; }
-.timeline-line-chart { display: block; min-width: 100%; height: auto; }
+.timeline-line-chart { display: block; min-width: 100%; height: 280px; }
 .timeline-chart-grid { stroke: rgba(148, 163, 184, 0.28); stroke-width: 1; }
 .timeline-chart-axis { fill: var(--text-muted); font-size: 12px; text-anchor: end; }
 .timeline-chart-x-axis { fill: var(--text-muted); font-size: 11px; text-anchor: middle; }

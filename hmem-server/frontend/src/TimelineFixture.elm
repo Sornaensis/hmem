@@ -15,6 +15,7 @@ import Types exposing (TimelineModel)
 type Fixture
     = Empty
     | Zero
+    | One
     | Spike
     | Many
     | Error
@@ -85,6 +86,7 @@ view model =
         , div [ class "timeline-fixture-controls" ]
             [ fixtureButton Empty "Empty"
             , fixtureButton Zero "Zero"
+            , fixtureButton One "One bucket"
             , fixtureButton Spike "Spike"
             , fixtureButton Many "Many buckets"
             , fixtureButton Error "Graph error"
@@ -122,6 +124,13 @@ fixtureTimeline fixture =
 
                 Zero ->
                     List.range 1 3 |> List.map (bucket 0)
+
+                One ->
+                    let
+                        baseBucket = bucket 0 1
+                        zero = { created = 0, completed = 0, deleted = 0, archived = 0, cancelled = 0 }
+                    in
+                    [ { baseBucket | series = { project = zero, task = zero, subtask = zero, observation = zero }, seriesTotals = zero } ]
 
                 Spike ->
                     [ bucket 1 1, bucket 9 2, bucket 2 3 ]

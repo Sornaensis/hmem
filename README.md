@@ -1,45 +1,84 @@
 # hmem
 
-A PostgreSQL-backed observation, project, and task management system for LLMs, written in Haskell.
+hmem stores repository observations, projects, and tasks in PostgreSQL, with a web
+interface, HTTP API, and MCP tools.
 
-## Installation
+## Native installation
 
-### Quick Setup (recommended)
-
-Build and install the executables, then run the setup tool:
+For Windows or Linux, install Haskell Stack, PostgreSQL, and a supported Node.js
+LTS release (20 or later) with npm. Put `stack`, `initdb`, `pg_ctl`, `createdb`,
+`psql`, and `npm` on `PATH`. Run these commands from this repository's root:
 
 ```bash
-stack install                              # installs hmem-server, hmem-mcp, hmem-ctl to ~/.local/bin
-stack run build-frontend -- --install      # builds + installs frontend to ~/.hmem/static/
-hmem-ctl                                   # initial setup and install
-hmem-ctl start                             # start the server
+stack install
+stack run build-frontend -- --install
+hmem-ctl
+hmem-ctl start
+hmem-ctl status
 ```
 
-**Prerequisites**: PostgreSQL must be installed with `initdb`, `pg_ctl`, `createdb`, and `psql` on PATH. To build the web frontend, Node.js/npm must also be installed and `npm` must be on PATH.
+Run `stack path --local-bin` to find the executable directory and add it to `PATH`
+before running `hmem-ctl`. Setup creates a local database and
+`~/.hmem/config.yaml`, and registers services to start automatically. Use
+`hmem-ctl init` instead of the
+bare `hmem-ctl` command if you want to manage startup yourself.
 
-### Optional semantic similarity
+If the frontend build reports that it was skipped, install Node.js/npm and rerun
+the build command. The API can run without the web interface.
 
-hmem works normally without pgvector. To store and search Observation embeddings,
-install the pgvector package that matches the configured PostgreSQL server, then
-inspect and enable the capability in that database:
+## First use
 
-```text
-hmem-ctl pgvector status
-hmem-ctl pgvector enable
-hmem-ctl pgvector status
+Open [http://127.0.0.1:8420](http://127.0.0.1:8420). The native default allows
+local access without a login. Keep it on loopback; configure
+[authentication](auth.md) before enabling shared access.
+
+From the repository you want to track, select or create its workspace:
+
+```bash
+hmem-ctl workspace
 ```
 
-pgvector stores, indexes, and compares vectors; it does not create them. The
-default hmem image leaves automatic vectorization disabled, while manual
-1536-dimensional vectors through REST, MCP, or NDJSON remain available. An
-optional Linux/WSL Docker GPU deployment can validate and run the pinned
-native TEI model for automatic Observation vectorization; there is no CPU
-inference fallback. See
-[Embedding operations](embeddings.md)
-for manual and automatic workflows, and [Docker deployment](docker.md) for
-the opt-in GPU setup. Similarity queries supply an already-produced vector;
-hmem does not expose a raw-text query embedding endpoint.
+This writes `.hmem.workspace` in the current directory with the selected workspace
+UUID. Use that workspace in the browser or pass its UUID to API and MCP calls.
+See the [API guide](api.md) for creating observations, managing tasks, and handling
+update conflicts.
 
-### Docker / Compose
+Use `hmem-ctl status` to check services and `hmem-ctl stop` to stop them.
+For container installation, follow the [Docker guide](docker.md), including its
+required bearer token and browser sign-in step.
 
-For containerized deployments, see [Docker deployment](docker.md). The Compose quick start builds the default `hmem:local` image, starts PostgreSQL, runs migrations, serves the web UI/API on port 8420, and documents auth and secret-handling choices.
+## MCP
+
+Configure your MCP client to launch this command as a stdio server:
+
+```bash
+hmem-mcp --server-url http://127.0.0.1:8420
+```
+
+Keep hmem-server running. In the client, use `workspace_list` to find a workspace,
+then `set_workspace` with its UUID so scoped tools can omit `workspace_id`.
+The context belongs to that MCP session; the bridge does not read
+`.hmem.workspace` automatically.
+
+For a server that requires a token, set `HMEM_MCP_AUTH_TOKEN` in the MCP process's
+environment. Use a service/PAT token for shared installations; see
+[authentication](auth.md#service-and-mcp-tokens). Use HTTPS when connecting to a shared server.
+
+## Optional similarity search
+
+Full-text search works without embeddings. Similarity search requires pgvector
+and a caller-supplied 1536-dimensional query vector in the same space as the stored
+vectors. Automatic vectorization is off by default; its optional GPU setup has
+no CPU fallback. Follow [embeddings and similarity search](embeddings.md) to
+enable pgvector, import vectors, or configure automatic generation.
+
+## Guides
+
+| Topic | Guide |
+| --- | --- |
+| Login, permissions, and tokens | [Authentication](auth.md) |
+| Requests, updates, and errors | [API](api.md) |
+| Containers, backups, and restore | [Docker](docker.md) |
+| Vectors and optional GPU setup | [Embeddings](embeddings.md) |
+| Current tables and relationships | [Database schema](database.md) |
+| Building and testing the web interface | [Frontend development](hmem-server/frontend/README.md) |

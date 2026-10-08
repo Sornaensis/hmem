@@ -1,7 +1,7 @@
-# hmem container runtime configuration and auth contract
+# Container runtime contract
 
-This contract describes the Dockerfile, entrypoint, and Compose runtime surface.
-The ordinary image is the default; the native CUDA image is selected explicitly.
+For image and entrypoint maintainers. Operator setup is in [Docker deployment](../docker.md)
+and [authentication](../auth.md); this file defines the required runtime behavior.
 
 ## Filesystem and identity
 
@@ -96,21 +96,14 @@ images ship `hmem-server`, `hmem-ctl`, `hmem-mcp`, and the actual sibling
 contains no CUDA/model layers. The explicit `gpu-runtime` target is based on
 the pinned native TEI OCI index in `config/managed-embedding-provenance.yaml`.
 
-Prepare a private external BuildKit `managed-bundle` directory with
-`docker/prepare-managed-gpu.py --root <committed-source-projection>
---model-root <prefetched-model> --runtime-root <prefetched-tei-runtime>
---output <new-private-bundle> --report <new-private-report>`. The script accepts
-only a new output path, rejects symlinks and non-regular artifacts, verifies
-source and copied trees with the independent locked Haskell checker, and never
-downloads model or runtime files. Build with
-`docker build --target gpu-runtime --build-context
-managed-bundle=<new-private-bundle> -t hmem:gpu-local .`, or set
-`HMEM_MANAGED_BUNDLE_CONTEXT` to that verified directory and use
-`docker compose -f compose.yaml -f compose.gpu.yaml up --build`. The override
-extends the same `hmem` service, reserves one NVIDIA GPU, and publishes only
-the application HTTP port. It does not publish TEI child ports or mount the
-Docker socket. The installed model/router/manifest are immutable under
-`/opt/hmem/managed-embedding`, with notices and executable/library inventory
+GPU preparation and build commands are in [Docker deployment](../docker.md).
+Preparation must accept only new private output paths, reject symlinks and
+non-regular artifacts, and verify both source and copied trees with the
+[independent checker](../scripts/check-managed-embedding-provenance.hs).
+It must not download model or runtime files. The GPU override extends the same
+`hmem` service, reserves one NVIDIA GPU, publishes only application HTTP, and
+mounts no Docker socket. Model, router, and manifest remain immutable under
+`/opt/hmem/managed-embedding`; notices and executable/library inventories stay
 outside the strict model/runtime trees.
 
 The pinned runtime advertises 32768 model tokens. The application accepts at

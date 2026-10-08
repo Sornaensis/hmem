@@ -1,375 +1,105 @@
-# Frontend validation
+# Frontend development
 
-Workspace **Administration** is a separate tab after Audit for authenticated users with explicit workspace admin access. Implicit local superadmin sessions retain their hidden administration presentation. The tab shows current account/role context and memberships, with labeled User UUID and Role fields to grant, update, or remove access. Member UUID values copy their complete identifier. Failed reads offer Retry; failed writes retain the form and list. Controls stay unavailable through an owned write and its authorization recheck. A failed recheck retires unverified access and offers Retry session.
-
-Use Node.js 20 LTS.
-
-For a clean browser-test installation, run:
+Use a supported Node.js LTS release that meets [package.json](package.json)
+(Node.js >=20). Run these commands from `hmem-server/frontend`:
 
 ```sh
 npm ci
 npm run test:browser:install
 npm test
+npm run dev
 ```
 
-`test:browser:install` provisions the exact Chromium revision required by the locked Playwright version. The timeline browser test starts from a new, empty browser context and runs the compiled production Elm fixture without authentication or backend dependencies.
+The browser install command provisions the Chromium revision required by the
+locked Playwright dependency. Vite serves development on port 3000 and proxies
+API and WebSocket traffic to the server on port 8420.
 
-## Observation drafts
-
-Observation editing retains one dirty or saving draft during same-workspace row,
-tab, and Back navigation. Return to draft, Save draft, and Discard draft remain
-reachable when browsing elsewhere. Editing another observation returns to the
-retained draft. Leaving the workspace requires saving or explicitly discarding
-it; discard cannot interrupt an in-flight save. Permission/session revocation
-and authoritative deletion retire unavailable editing. This bounded in-session
-retention does not persist through a full reload or closing the tab.
-
-Activating an Observation arrow by keyboard or pointer focuses and reveals the
-expanded card's real arrow. Collapsing it restores the exact originating card and
-scroll position, including cards repeated in file-match groups; if a save has moved the
-card, it reveals that same card at its new position. Direct links or removed
-cards return focus to results. This navigation keeps the retained draft available.
-Leaving the Observation tab retires its card origin; a subsequently reopened
-detail returns to results. The compact workspace header scrolls with Observation
-content so keyboard targets remain visible.
-
-Observation results use one scrolling viewport across cards, subject facets,
-and expanded file-match groups. It mounts at most 25 ordinary logical rows and
-three distinct selected/native-focus/return owners; complete loaded membership, ordered evidence,
-group counts, and pagination stay cached. Native Tab mounts the next logical
-control before focusing it. The selected occurrence owns its full read-only detail and any separately labelled
-retained draft, and stays pinned against row eviction. Other occurrences remain compact; links without a displayed occurrence
-use one detached inline card outside loaded counts and match evidence. Collapsing
-a selected card or its match group retains a dirty/saving draft with Return to draft. One original layout can restore unchanged card scroll geometry after
-opening detail; query, content, disclosure, font, or viewport changes retire its
-geometry. A valid originating card still mounts and reveals when that geometry
-cannot be reused.
-`npm run test:observation-viewport` checks production scroll reachability and
-native focus; the other Observation browser families remain separate npm gates.
-
-Displayed identifier values are native copy buttons across the app. Pointer, Enter,
-and Space copy the complete canonical SHA, path, glob, or UUID even when its
-label is abbreviated. Copying preserves selection and editing; subject drilling
-uses its own control. Clipboard feedback follows browser success or failure.
-Editable identifier inputs keep their normal editing behavior.
-
-Live Observation changes automatically refresh the applied discovery query, including
-the previously loaded pages. Requests coalesce into one active pass; old results stay
-visible until a complete guarded pass replaces membership. Equal results preserve the
-viewport and selection. A failed or incomplete refresh keeps the cache and offers
-Retry refresh. Draft filters are not submitted by background refresh. Unified search
-similarly retains its accepted results and refreshes its submitted search text.
-
-Observation list, exact subject, subject-facet and concrete-file requests use
-200-item transport pages. Load more remains explicit; automatic refresh stages
-the previously demanded span before replacing results. Hierarchy pages remain
-50 items, and the viewport still mounts at most 25 ordinary rows plus three owners.
-The workspace information bar shows an authorized full-workspace Observation
-total, including zero, independently of loaded pages or the active tab. Effective
-applied Observation filters show the full distinct match count; draft controls
-do not change it. Counts come from a read-authorized, cookie-CSRF-protected POST
-`/api/v1/observations/count` aggregate over the same list or concrete-path predicates.
-Loading, stale totals and failures are labelled honestly; Retry counts requests
-a fresh guarded aggregate. Count replies cannot change card or subject disclosure,
-focus, scroll, or cached result membership.
-
-Ordered subjects have their own arrow, independent of the full read-only card and
-file-match groups. Card, subject and group preferences survive reloads in a versioned
-workspace/actor/authority storage namespace. Storage contains bounded UI hints only,
-not content, results or drafts. Tagged session and read-request ownership reject late
-hydration; explicit URL context and local preference actions take priority. A saved
-card hydrated on another tab is restored on the first authorized Observation entry,
-unless intervening URL or local preference intent supersedes it. Storage
-failure leaves the page usable. Offset pagination remains a bounded query, not a
-snapshot of concurrent mutations.
-
-Each content save sends the opaque version captured when editing began. A
-competing write produces a conflict and preserves the draft, even before its
-live notification arrives. Keep my draft explicitly adopts the latest version
-as the next save base; Use latest version replaces the draft with that content.
-If a delayed reply disagrees with an already observed version, those choices wait
-for one current-version check. A failed check preserves the draft and explicitly
-offers the retained version; retrying that version remains conditional and can
-conflict again.
-Workspace, ordered subjects, Git SHA, and creation time remain immutable.
-Current scaling fixtures use DTO schema 2 with required deterministic content
-version UUIDs; preserved historical performance evidence describes earlier inputs.
-
-`npm run test:observation-conditional` rebuilds the native test harness and runs
-production Elm against an isolated PostgreSQL-backed API with an independent
-writer and delayed genuine WebSocket deliveries. It requires the configured
-test PostgreSQL tools and locked Playwright Chromium. Its fixture expires within
-ten minutes and removes its browser, server, PostgreSQL process, and sandbox.
-
-Set `HMEM_CONFIG.workspaceSnapshotProfile` before the application starts to
-`full_v1` to load complete canonical workspace snapshots in bounded pages.
-The default is `workspace_shell_v1`; these are the only accepted values.
-The setting is read once at startup and does not alter global snapshots or
-ordinary REST pagination. A reload requests a fresh snapshot rather than proving
-that the previous in-memory projection can resume.
-
-`npm run test:observation-populated` uses the installed native test harness
-relinked after the versioned snapshot migration. It seeds an isolated repository,
-checks real multipage full snapshots and canonical updates through production
-Elm, and separately exercises controlled request failures and permission
-retirement. It uses the same finite fixture lifetime and cleanup as the
-conditional test. The command builds production assets for the controlled cases.
-
-`npm run test:observation-navigation` builds production assets and checks the
-navigation bridge and populated browser flows. It covers keyboard entry/return,
-repeated cards, off-page links, long paths, edit/delete controls, 320 CSS-pixel
-reflow (equivalent to a 1280 CSS-pixel viewport at 400 percent zoom), and enlarged
-text. These automated checks do not qualify native browser zoom or assistive
-technology behavior.
-
-## Observation queries
-
-Observation requests keep a complete applied query separate from filter inputs.
-Apply filters commits the filter drafts; Match files commits concrete path input.
-Save, delete, live resynchronization, and Retry refresh reuse the applied query.
-Unapplied filter changes pause paging until Apply filters or Revert filters;
-unapplied path input leaves the previously matched files active. The displayed
-applied filters describe the query behind the current results.
-
-The compact All control searches saved text; Subject lists stored file and glob
-subjects with exact provenance results. Subject stays active for those exact results.
-Files opens a composer without
-changing those results; its active state reflects applied file matches independently
-of whether the composer is open. Match files applies its trimmed, deduplicated concrete
-paths and filter drafts; wildcard input is rejected. Advanced filters toggles
-the kind, exact subject, and Git SHA controls without resetting their values or
-the applied query. Search also submits with Enter. A selected subject stays
-locked while filtering its exact results.
-
-The browser URL retains the complete applied mode, search, kind, manual subject, revision,
-locked facet, ordered matched paths, and selected Observation. Filter/path drafts,
-content drafts, disclosures, and cached pages stay local. Version 1 fragments use
-`ov=1` and a percent-encoded eight-position JSON `oq` tuple:
-`[mode, search, kind, manualSubject, gitSha, facetKind, facetSubject, paths]`.
-Modes are `flat`, `facets`, `exact`, and `match`; absent kind/facet values are null.
-Legacy tab, focus, and Observation links remain supported. Invalid versioned
-contexts restore default results atomically and show a notice.
-
-Changed Apply, mode, facet, selection, return, and tab actions push history entries;
-canonical cleanup replaces them. Back restores applied context with fresh request
-guards when its query changes, retaining protected drafts in the same workspace.
-Observation hits in unified search use the same intentional history behavior.
-After reauthorization, validated public URL context is restored with fresh requests;
-retired drafts and caches remain cleared. Reload does not persist content drafts.
-Complete encoded URLs are limited to 4096
-UTF-8 bytes. Larger valid queries remain active in the page with an explicit notice.
-They replace the current entry with a bounded, fresh `ox` marker, carrying only
-navigation context. Further oversized transitions replace that entry; a smaller
-complete context pushes a new entry. Back, reload, and shared markers restore
-default filters with an explicit notice rather than partially restoring paths.
-No query history is stored outside the URL and the current page state.
-
-`npm run test:observation-url` builds production assets and checks populated
-restoration, history, clipboard payloads, malformed links, oversized queries,
-selection cleanup, and permission admission in controlled browser fixtures.
-
-Cards show whitespace-collapsed plain-text previews of at most 240 Unicode
-codepoints and three lines. The primary subject uses at most 96 codepoints and
-two lines; selection button names use at most 180 codepoints. Full content stays
-inside the expanded card as read-only content. A native right/down arrow beside
-the primary subject opens or collapses the card; the subject independently copies
-its complete value. Expansion reveals and focuses the real arrow under current
-navigation and layout stamps. There is no body-click or Edit content entry.
-One footer follows the body: folded cards show revision and update time;
-expanded cards show the full revision, ordered subjects, workspace and timestamps,
-with canonical value copying and a permission-checked Delete action.
-The compact revision uses 12 SHA characters. Content update metadata includes
-time and timezone; the immutable provenance revision does not imply automatic
-staleness or change when content is edited.
-Content above 16 KiB uses a labelled native read-only detail reader with its
-exact full value available for scrolling, selection, and copying.
-Any already retained content draft remains separately labelled and reachable with
-its save/discard/conflict/version safeguards until ordinary lifecycle retirement.
-Native text fields normalize line endings for display; Copy full content copies
-the canonical stored text, preserving its line endings.
-
-Failed page or refresh requests keep previously loaded results visible. Retry
-results repeats the failed applied query and offset with a fresh request identity,
-even when filter inputs have changed. A successful page-zero refresh replaces
-membership. Retry detail can recover linked observations outside the loaded page
-while keeping an owned content draft available.
-
-## Expanded hierarchy loading
-
-Navigation transports 50 summaries per kind per request. Expanded nodes whose
-ancestors are also visible and expanded continue automatically, including the
-default expanded state and Expand All. Root lists still load through explicit
-navigation demand. The branch queue is fair and admits at most four physical
-HTTP requests. Collapse, filter, workspace, and session changes retire logical
-generations; a stale response or error still releases its physical admission.
-Session resets preserve those admissions until completion.
-
-Project and task streams finish independently. Same-filter branch refreshes
-stage fresh membership until each kind finishes, preserving its displayed
-cache while fresh pages arrive. Ordering or membership invalidation discards
-the partial pass and coalesces a restart at offset zero. Errors pause until
-retry or reopening; repeated pages without new IDs stop that kind. The client
-automatic offset ceiling is 10,000 (the server allows 100,000); reaching it
-reports an incomplete branch and preserves `hasMore` rather than claiming an
-exhausted stream. The wire `hasMore` contract guarantees full 50-item pages;
-offsets advance by transport size while cached counts deduplicate IDs.
-
-The hierarchy is one continuous logical preorder over all cached root and
-expanded child summaries. Loading another page adds reachable siblings; root
-**Load more** requests the next 50-item transport page directly. Branches
-continue automatically. Branch feedback rows expose loading, continuation or
-an incomplete/error state with Retry; completed branches reserve no status row.
-
-Rendering mounts at most 25 ordinary rows across the entire viewport, plus a
-bounded set of active focus, editor, inline-create, drag and native DOM-focus
-pins. Every omitted run has a spacer, including runs around distant pins.
-Mounted row wrappers own their spacing and are measured with ResizeObserver;
-estimated geometry and mounted-only fallback measurements keep the initial
-render bounded when that API is absent. A cached height-sum index handles scroll
-and measurement updates without rebuilding the hierarchy. Structural changes
-preserve the current row and intrarow scroll anchor when it remains present.
-Offscreen focus and keyboard navigation first mount their logical target,
-then scroll/focus after the stamped DOM update. Drop boundaries use logical
-same-parent siblings, including neighbors outside the viewport.
-
-Detail hydration admits at most six physical requests. Ordinary demand comes
-from the globally bounded mounted/overscan set; active targets are prioritized
-separately. Deep focus requests the target rather than hydrating or mounting
-its entire ancestor chain. Workspace/session/generation/layout stamps reject
-stale measurement and focus work. Canonical snapshot and replay behavior
-remains governed by its separate transport contract. Production browser and
-performance compatibility is validated by the following integration task;
-these local layout and bridge tests do not replace those gates.
-
-## Large-workspace performance qualification
-
-Observation rendering qualification selects the review base with
-`HMEM_EVIDENCE_BASE_COMMIT=ed3aca53afe346f928dc00f2e2a7b0a8e07aaecb`, then runs
-`npm run perf:self-check`, `npm run perf:record-after`, and `npm run perf:check`
-in order. Its `observation-rendering.v1` profile writes five
-`final-working-tree.*.observation-rendering.v1` artifacts in the temporary
-`hmem-observation-rendering-cbb38fd2-fc89-449c-a308-168374f23f82` directory.
-The frontend owner retains them through project closure plus 30 days and removes
-the temporary trace before qualification. Historical Observation scaling
-artifacts remain separate. Physical scroll checks prove complete cached
-membership outside the unchanged timed interaction intervals; mounted DOM and
-card limits still apply to physical rendered elements.
-
-The versioned harness in `perf/` runs production `Main` in locked Chromium
-with intercepted HTTP and canonical WebSocket transport. It requires no backend
-or external network. The unchanged seed produces the small and large fixtures
-recorded in `baseline.v1.json`; fixture cardinalities, route ordering, numeric
-budgets, two warmups, five samples, and nearest-rank p95 remain frozen.
-
-For the expanded hierarchy qualification, select its immutable review base:
-
-```powershell
-$env:HMEM_EVIDENCE_BASE_COMMIT='d9ff753763f086fa4faef078b451f2e48ca1a7a4'
-npm run perf:self-check
-npm run perf:record-after
-npm run perf:check
+```sh
+npm run build
+npm run preview
 ```
 
-Run the record/check pair only after production and harness sources are frozen.
-Both commands build production assets. Record writes distinct
-`final-working-tree.*.expanded-hierarchy.v1` evidence, including its own
-complete diff; it preserves `baseline.v1.json`, `budgets.v1.json`, the shared
-historical complete diff, and previous after records. The explicit record
-authorization preserves actual budget failures in the record; check exits
-nonzero on a budget violation. Check also requires the exact recorded fixture,
-configuration, budget, source, and production asset hashes before opening
-Chromium, and both modes reject input drift during measurement.
+The build replaces `hmem-server/static`. Use the
+[live integration guide](tests-js/README.md) for an isolated API and the
+[performance guide](perf/README.md) for qualification commands and evidence rules.
+Focused browser scripts are listed in [package.json](package.json). Conditional
+and populated Observation tests need the native test harness and configured
+PostgreSQL tools; their isolated fixtures expire within ten minutes and remove
+their browser, server, PostgreSQL process, and sandbox. The conditional script
+rebuilds the harness; the populated script uses the installed harness, which must
+be relinked after snapshot migrations. Navigation checks include 320 CSS-pixel
+reflow and enlarged text; they do not qualify native browser zoom or assistive
+technology behavior. Local bridge/layout tests do not replace production browser
+and performance acceptance.
 
-Cold readiness ends at the accepted authorized `workspace_shell_v1` shell and
-first root-summary anchor visible in the scrolling viewport after two paints.
-Readiness joins current successfully fulfilled and validated workspace/session/
-snapshot receipts to unique same-response Server-Timing identities. The final
-paint evaluation reads matching same-origin Resource Timing responseEnd values
-in the browser clock, with a conservative 2 ms precision guard (1 ms per reading).
-Missing, duplicated, retired, unmatched or boundary-uncertain timing fails closed;
-no host/browser clock synchronization is assumed. A shell completed between the
-two frames may qualify the final paint; one completed after it cannot. Request
-and body-byte accounting still ends after the evaluation returns to the host.
-Cold sampling starts directly after `goto(domcontentloaded)`, without a separate
-tree-selector wait. Its existing two-frame observation rejects missing or loading
-DOM until the current authorized root is visible; the host accounting cut follows
-that observation unchanged.
+## Configuration
 
-Each cold run retains passive request/completion identities and first, decisive,
-and latest readiness evaluations with explicit omission counts. Browser response
-and paint timestamps remain separate from host evaluation/return/cut timestamps.
-The accounting cut is saved before diagnostic formatting; post-cut traffic does
-not enter its history. Failed writer or owned-cleanup receipts retain this bounded
-chronology too. Paint permits and acknowledgments are not observed by these
-diagnostics, and a DOM stamp does not prove an acknowledgment. These diagnostics
-add no evaluation, wait, request, predicate, or performance metric.
-The production shell contains one workspace item. Preserved legacy full-fixture
-resync records contain 155 small or 4,951 large items; their cold timing is not
-phase-comparable with this authorized painted-root cut.
-It counts all HTTP arrivals and fixture bytes before that cut, including
-responses held by an asynchronous gate. Active requests and response completion
-remain separate measurements. This phase differs from the historical full
-snapshot bootstrap; older phase/configuration hashes remain historical evidence,
-not equivalent measurements.
+`window.HMEM_CONFIG` is loaded before Elm starts and overrides the build-time
+`VITE_HMEM_API_URL`, `VITE_HMEM_WS_URL`, and `VITE_HMEM_AUTH_MODE` values. Without
+API or WebSocket overrides, the app uses its origin and `/api/v1/ws`.
+See the [container runtime contract](../../config/container-runtime-contract.md#browser-runtime-config-strategy)
+for the non-secret runtime fields and [authentication](../../auth.md) for login,
+token storage, and CSRF setup. Never bake secrets into assets or runtime config.
 
-Background completion independently verifies exact project/task membership and
-order, terminal pagination for every effectively expanded non-leaf branch,
-bounded physical transport, and finite scroll reachability of every member.
-Collapsed cached branches remain lazy. The run captures DOM, hierarchy-row,
-observer, and physical-request high-water marks through drain, scrolling and
-subsequent interactions. Observation, Timeline, direct focus, local interactions,
-and the 50-frame live batch retain their separate five-sample request/byte
-deltas and p95 budgets. Live settlement excludes a separate 500 ms stability
-window. Timing and retained heap gates require the recorded environment
-fingerprint; a mismatch is explicitly informational under the unchanged policy.
+Set `HMEM_CONFIG.workspaceSnapshotProfile` before startup to `full_v1` for complete
+workspace snapshots. The default is `workspace_shell_v1`; no other value is
+accepted. The setting is read once and does not change global snapshots or REST
+pagination. Reload always requests a fresh snapshot.
 
-The fixture isolates frontend scaling and transport amplification; it does not
-measure database or real network latency. Source route-fidelity self-checks
-retain canonical ordering, list/overview DTOs, Observation token search and
-facets, and UTC Timeline aggregation. The fixed browser clock makes the default
-weekly Timeline request return 13 rows from the unchanged 20/500 backing sources.
+## Editing and navigation gotchas
 
-Versioned after, trace, validation and evidence manifests retain bounded raw
-samples, record/check evaluation, task/base/input provenance and verified trace
-fingerprints as historical qualification evidence. Command receipts label the measured
-Node harness phase explicitly; the preceding npm build is excluded from that
-duration. Success receipts are finalized only after independently bounded browser,
-owned Chromium process, server and trace retirement. A failed retirement attempts
-the remaining cleanup actions and persists a failed qualification receipt. Each
-required action must supply a callable `close` callback; a missing or invalid
-callback is a retirement failure.
-The transient trace is owned
-by this task under `.scratch/expanded-navigation-perf/` and removed after
-verification or failure cleanup; its manifest states that the archive is no
-longer available. These performance receipts complement the production browser
-tests and do not replace frontend or parent acceptance.
+- One dirty or saving Observation draft survives row, tab, and Back navigation
+  within the workspace. Return to draft, Save draft, and Discard draft remain
+  available. Editing another observation returns to that draft. Leaving the
+  workspace requires saving or discarding; discard cannot interrupt a save.
+  Reload, closing the tab, permission/session revocation, and authoritative
+  deletion can retire the draft. Drafts are never persisted in browser storage.
+- Saves use the version captured when editing began. A competing write preserves
+  the draft and shows a conflict. **Keep my draft** adopts the latest version for
+  the next conditional save; **Use latest version** replaces the draft. If a
+  delayed reply disagrees with an observed version, these choices wait for a
+  current-version check. A failed check retains the draft; retrying a retained
+  version can conflict again. Workspace, subjects, Git SHA, and creation time
+  remain immutable.
+- **Apply filters** submits filter inputs; **Match files** submits trimmed,
+  deduplicated concrete paths and filter inputs. Wildcards are rejected. Refresh,
+  save, delete, and retries reuse the applied query. Unapplied filters pause
+  paging until Apply or Revert; unapplied path input leaves prior matches active.
+  A selected Subject remains locked while filtering its exact results.
+- Back and shared links restore applied queries, paths, and selection, with fresh
+  requests. Drafts, cached pages, and disclosures stay local. URLs exceeding
+  4096 UTF-8 bytes keep the query active on the page but replace it with a bounded
+  marker; Back, reload, or sharing that marker restores defaults with a notice.
+  Malformed versioned links also restore defaults with a notice.
+- Failed page, detail, count, or live-refresh requests offer Retry and retain
+  available results. Live refresh uses the submitted query and does not submit
+  filter drafts. Offset pagination is not a snapshot of concurrent writes.
+- Observation arrows open details and return to the originating card when it
+  still exists; otherwise they return to results. Full text remains selectable,
+  and **Copy full content** preserves stored line endings. UUID, path, glob, and
+  SHA copy controls copy the complete value even when abbreviated.
 
-Live-settle timing includes completion of the current root/filter lifetime and
-every effective-expanded descendant pass. New offset-zero admissions retire
-prior terminal coverage immediately; untouched cached passes and explicitly
-collapsed branches retain their scope. Both project and task streams must be
-terminal before two paints and the separate unchanged 500 ms stability check.
+The hierarchy and Observation views use scrolling viewports; cached results
+remain reachable even when their rows are not mounted. Root **Load more** is
+explicit; expanded hierarchy branches continue automatically. Failed or
+incomplete branches retain Retry and do not claim completion. Interactive
+viewport loading is separate from canonical snapshot/replay, which can still
+traverse a full workspace in pages. The
+[navigation decision](../../architecture/adrai/decisions/R01M/R01M48140QPDRRS113KC3AERB1H--keep-interactive-workspace-navigation-bounded-and-stale-response.decision.md)
+defines the transport and rendering limits.
 
-Current navigation completion is indexed at request admission and response completion. Fresh passes retire old coverage before responses arrive; filter and session changes invalidate their lifetime. Changed branches dirty their ancestor proofs, while untouched completed subtrees retain their checked membership. The live-settle timer includes every new proof update and any affected subtree verification, followed by the unchanged 500 ms stability window. Independent replay self-checks cover queued descendants, stale completions, root demand, unequal streams and effective collapse.
+**Show empty projects** is checked by default and saved per workspace. Unchecking
+it requires a matching task anywhere in the subtree; matching ancestors remain
+visible. Workspace group disclosure is saved globally. Workspace admins can
+soft-delete a workspace after confirmation; selected-workspace deletion returns
+home and retains its contents. There is no MCP workspace-delete tool.
 
-The first accepted sparse workspace shell preserves bootstrap navigation ownership. Later authoritative snapshots retire descendant coverage and old callbacks, while selective root refreshes preserve untouched branches. Explicit continuation retries replace current coverage at each kind's requested offset and retain its valid prefix, even when the companion kind has advanced; superseded callbacks cannot complete or poison the current attempt. The self-checks exercise the actual intercepted session, navigation and resync responder callbacks without starting a browser or qualification run.
+The **Administration** tab requires explicit workspace admin access; implicit
+local superadmin sessions retain the hidden-tab presentation. Failed membership
+writes keep the form and list. Controls stay unavailable through the write and
+authorization recheck; a failed recheck offers **Retry session**.
 
-Paused navigation kinds remain incomplete even when a healthy companion response carries valid bytes for them. Unstamped continuations accept only automatic pending kinds. An explicitly selected retry also preserves any healthy automatic-pending sibling; errored and terminal companions remain unchanged. The Retry automation helper binds an explicit selected rendered Retry button to a one-shot owner, session, filter, pass and offset intent; it consumes that intent at matching admission and cancels it after click failure. Lifetime changes and collapse retire unused intents. Ambiguous unstamped retries fail closed.
-
-Retry automation rejects an owner with automatic work queued or physical branch/root/snapshot work still active. It checks quiescence before actionability and again before arming the click; snapshot/root admissions retire stale selections. This avoids an automatic companion consuming retry intent before the selected DOM handler fires, without a timing delay. Direct producer controls still cover selecting a retry while a healthy sibling is queued.
-
-Root completion proof accepts only the project or task kinds admitted by the current root pass. Manual root pages extend that kind’s demand; refresh continuation stops at previously demanded spans. Valid companion payloads cannot clear a paused kind. Initial root loading and its manual pages retain the producer’s whole-request retry mask: a failed bootstrap retries both pending kinds, while a failed single-kind manual page keeps its terminal companion unchanged. Established same-context refreshes and later authoritative snapshots use staged per-kind acceptance. The root Retry helper selects the actual per-kind “Retry loading” control and stamps that request; a selected retry at offset zero preserves independent companion coverage. Session, filter, and accepted authoritative snapshot retirement distinguish genuine fresh root lifetimes from ambiguous unstamped zero-offset retries.
-
-Complete evidence collection accepts binary Git output with explicit limits: 32 MiB per command, 128 MiB across the collection, 30 seconds per command and 60 seconds overall. Required untracked source and failed-record archives remain in the complete diff. A no-index exit code of 1 is accepted only with intact bounded output; overflow, timeout, signals and command errors fail qualification. Evidence files are replaced atomically, and persistence invalidates an earlier success manifest before writing. Partial or failed writes retain an explicit failed receipt, or remove stale success receipts if writing the failure is also unavailable. These writer limits do not change the measured performance budgets or the request-accounting cut.
-
-
-Displayed structured UUIDs, repository subjects/paths and provenance revisions
-are native clickable values. Enter/Space or a click copies the full canonical
-value, including when its display is abbreviated, without activating adjacent
-navigation. Clipboard feedback waits for success/failure from the browser.
-Editable inputs retain their normal behavior; subject drill controls remain
-separate. Observation filters use the shared app filter-bar surface and spacing.
-
-The hierarchy filter bar includes **Show empty projects**, checked by default and saved with each workspace's filters. Unchecking it requires a matching task anywhere in the project subtree, including descendant projects and subtasks; server predicates retain matching ancestors even when branches are unloaded. Projects with any descendant task in progress carry an accent independent of task filters. UUID copy controls use compact text and retain full-value copying and native keyboard access.
-
-Workspace group disclosure is saved globally under `hmem-workspace-groups`. Workspace selection retains the sidebar catalogue and disclosure for the same principal and global grants; catalogue/group change-stream events still reconcile organization changes. Admins (including local superadmin) can delete a workspace from its header after confirmation. Pending deletion disables repeat submission; failures retain the confirmation; successful selected deletion returns home while deletion of a different workspace preserves the route. Soft deletion retains contents and has no MCP tool.
+The performance harness hashes this README as a source input. Historical
+qualification covers its recorded source/assets and measurement phase; it does
+not qualify later documentation revisions. Preserve historical baselines and
+receipts when changing this file.

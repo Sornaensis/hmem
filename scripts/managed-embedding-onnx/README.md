@@ -1,54 +1,47 @@
-# Pinned GTE-Qwen2 fp32 ONNX viability recipe
+# Historical ONNX CPU experiment
 
-> Historical CPU research only. This preserved experiment is superseded by
-> the supported native GPU deployment in [Docker deployment](../../docker.md);
-> it is not the GPU runtime or setup path and does not establish a CPU PASS.
+This experiment is **failed and unqualified**. The
+[recorded report](../../hmem-server/test/fixtures/embedding-onnx-viability/report.json)
+has verdict `not_viable`: pinned TEI reached its 28 GiB cap during 32,768-token
+warmup and was OOM-killed with exit 137 before readiness. Full inference and
+dependent API/scheduler/over-limit checks did not run. Increasing the deadline
+does not repair that failure. It applies to this graph/runtime/host, not every
+possible CPU graph. Supported installation is in [Docker deployment](../../docker.md).
 
-This directory contains the bounded experiment for
-`Alibaba-NLP/gte-Qwen2-1.5B-instruct` revision
-`1cad2ab3ff41c2671f34e135d29831368ee26b68` and the pinned TEI 1.9.3 CPU
-image. It creates evidence outside the repository and does not promote an ONNX
-artifact into the production manifest.
+## Reproduction inputs
 
-The source directory must contain exactly the 20 files in `source-lock.json`.
-Retrieve each `source-lock.json` URL at build time, verify its SHA-256, and place
-it at the listed relative path. Model code is executed only after this complete
-local snapshot passes `verify_source_snapshot`; serving and comparison commands
-run without network access.
+[source-lock.json](source-lock.json) fixes the original 20-file
+`Alibaba-NLP/gte-Qwen2-1.5B-instruct` snapshot at revision
+`1cad2ab3ff41c2671f34e135d29831368ee26b68`. Retrieve its URLs at build time,
+verify every SHA-256 and relative path, and pass `verify_source_snapshot` before
+executing model code. Serving/comparison runs are offline.
 
-Build the toolchain for linux/amd64 from the locked base and hashed Python
-closure:
+Build the linux/amd64 toolchain from the locked base and
+[hashed Python closure](requirements.lock):
 
 ```text
 docker build --platform linux/amd64 --pull=false --tag hmem-managed-embedding-onnx:aa30a81c scripts/managed-embedding-onnx
 ```
 
-The verified experiment image is
-`hmem-managed-embedding-onnx@sha256:8ed20f622337a91b4b0638bce91f78dca5ff5f64bd4a9ee8b95d4f10e91c5bbe`.
-Its base is the linux/amd64 manifest
-`python@sha256:2856e6af199e8128161abd320575eb9b341f3b76f017b5d0c9cd364f60d8a050`.
-`requirements.lock` pins the complete install closure and package hashes.
+The report records the exact verified toolchain/base digests. Run the following
+commands inside that image with `--network none`, a read-only root and
+`/source`, `/scripts`, `/fixtures` mounts, bounded writable output mounts, and
+explicit CPU, memory, swap, process, and thread limits. Mount this directory at
+`/scripts` and the
+[viability fixtures](../../hmem-server/test/fixtures/embedding-onnx-viability/corpus.json)
+at `/fixtures`. Use a writable temporary `HF_HOME` for importing verified local
+model code. The [report](../../hmem-server/test/fixtures/embedding-onnx-viability/report.json)
+records the measured resource limits and evidence paths.
 
-Capture the build-only license evidence from that exact image, then compare it
-to the tracked audit SHA-256
-`995db3fd3fadb5e9acf6fd652253a95d0432db3247be4f3ea9b7e727f186ed87`:
+Capture the build-only audit and compare it to the tracked
+[license audit](../../hmem-server/test/fixtures/embedding-onnx-viability/toolchain-license-audit.json)
+using its report-bound SHA-256:
 
 ```text
 python /scripts/audit_toolchain_licenses.py --requirements /scripts/requirements.lock --output /evidence/toolchain-license-audit.json --toolchain-image hmem-managed-embedding-onnx@sha256:8ed20f622337a91b4b0638bce91f78dca5ff5f64bd4a9ee8b95d4f10e91c5bbe --base-image python@sha256:2856e6af199e8128161abd320575eb9b341f3b76f017b5d0c9cd364f60d8a050
 ```
 
-Create two empty artifact roots and run the same export command against each.
-The executed custom model source is hash-checked. The graph uses fp32, opset 17,
-dynamic batch and sequence axes, `use_cache=false`, and explicit
-`is_causal=true`, matching the model card's published call default. This choice
-is attention-qualified: the pinned native TEI FlashQwen2 backend instead passes
-the configuration's `is_causal=false`. Until that authority issue is resolved,
-the experiment cannot establish a shared embedding space or promote its graph.
-The pinned module guards its `flash_attn` imports with
-`is_flash_attn_2_available()`, but Transformers 4.41.2's remote-code scanner
-treats them as unconditional. `permit_guarded_flash_attention_import` suppresses
-only that scanner dependency for a file with the exact pinned SHA-256; the
-executed CPU model remains unchanged and uses no flash-attn library.
+Run export in two empty artifact roots and compare their inventories:
 
 ```text
 python /scripts/export_model.py --source /source --output /output --threads 8
@@ -58,21 +51,18 @@ python /scripts/reference_oracle.py --source /source --corpus /fixtures/corpus.j
 python /scripts/compare_onnx.py --graph /output/model.onnx --oracle /oracle/oracle.npz --thresholds /fixtures/thresholds.json --report /output/ort-report.json --threads 8
 ```
 
-Run every command in the locked image with `--network none`, a read-only root,
-read-only `/source`, `/scripts`, and `/fixtures` mounts, a writable bounded
-output mount, and explicit CPU, memory, swap, process, and thread limits. Use a
-writable temporary `HF_HOME` so Transformers can import the already verified
-local custom model module.
+The graph uses fp32, opset 17, dynamic batch/sequence axes, `use_cache=false`,
+and explicit `is_causal=true`. Native TEI FlashQwen2 uses the config's
+`is_causal=false`. This unresolved attention difference prevents promotion of
+the graph or a shared embedding-space claim. The exact-hash guard in
+[common.py](common.py) suppresses only Transformers' false unconditional
+`flash_attn` scanner requirement; it does not change executed model code.
 
-The TEI proof uses the exact image
-`ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07`
-on linux/amd64. Start it with no network and the derived serving tree mounted
-read-only at `/model`. A client container using `--network container:<tei-name>`
-shares only that offline loopback namespace and runs `smoke_tei.py` with
-`--url http://127.0.0.1:80 --metrics-url http://127.0.0.1:9000` (also the
-script defaults). The smoke client splits the eleven short corpus items into
-ordered request batches of at most eight, matching the fixed client ceiling.
-The fixed router arguments are:
+## Offline TEI probe
+
+Use the exact CPU image in the report:
+`ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07`,
+linux/amd64, no network, and the serving tree read-only at `/model`. Launch with:
 
 ```text
 --model-id /model
@@ -89,45 +79,32 @@ The fixed router arguments are:
 --pooling last-token
 ```
 
-After readiness, run the client in the TEI container's offline network
-namespace with the launch ports explicitly matched:
+Only after readiness, run the client with `--network container:<tei-name>`:
 
 ```text
 python /scripts/smoke_tei.py --url http://127.0.0.1:80 --metrics-url http://127.0.0.1:9000 --source /source --corpus /fixtures/corpus.json --thresholds /fixtures/thresholds.json --oracle /oracle/oracle.npz --report /evidence/tei-smoke-report.json
 ```
 
-For the 32,769-token negative case, the pinned `/tokenize` route is expected to
-return all 32,769 token records with final EOS 151643; its source path does not
-apply the embedding token-count limit. The `/embed` route must independently
-return the exact length-specific 422 rejection with truncation disabled.
+The eleven short inputs use ordered batches of at most eight. The 32,769-token
+negative requires all token records and final EOS 151643 from `/tokenize`, then
+an independent length-specific 422 from `/embed` with no truncation. No default
+prompt is permitted. The actual preload path is `/usr/local/libfakeintel.so`;
+the historical production lock records `usr/local/lib/libfakeintel.so`.
+Record actual loader mapping without weakening that lock.
 
-Do not pass a default prompt. In the actual image, the preload path is
-`/usr/local/libfakeintel.so`; the production lock currently records the
-extracted-layer path as `usr/local/lib/libfakeintel.so`. The runtime test must
-record the actual loader mapping without changing or silently weakening the
-production manifest.
+The [threshold fixture](../../hmem-server/test/fixtures/embedding-onnx-viability/thresholds.json)
+was frozen before results. Each coordinate requires
+`abs(diff) <= atol + rtol*abs(reference)`; normalized vectors also have a cosine
+distance limit. Relative error is diagnostic. The graph verifier bounds optional
+external-data offsets/lengths, rejects partial overlaps, and hashes every file.
 
-The numerical thresholds in the fixture were frozen at
-`2026-09-06T12:09:37.492Z`, before any oracle or held-out result, with SHA-256
-`3ee04181139c7a72623bd7e42f011555321e61f05b96ba52ce942f2b0a12319e`.
-Each coordinate uses `abs(diff) <= atol + rtol*abs(reference)`. Maximum relative
-error is diagnostic; normalized vectors also have a cosine-distance limit.
+## Redistribution limits
 
-ONNX external-data `offset` and `length` fields are optional. The verifier
-records whether each field was declared, computes the standard effective range
-(offset zero and length to end-of-file when omitted), bounds every effective
-range, rejects partial overlaps, and hashes every referenced file.
-
-The model and TEI source are Apache-2.0. `toolchain-license-audit.json` records
-the license metadata and shipped license/notice-file hashes for every locked
-wheel, the Python runtime license, and the installed Debian package copyright
-inventory in the exact build image. Apache-2.0, BSD, MIT, MPL-2.0, PSF, GPL and
-LGPL family terms occur in that evidence. Redistribution therefore requires
-retaining the applicable copyright/license/NOTICE material and satisfying the
-copyleft source-correspondence terms for redistributed base-image components.
-The audit leaves redistribution review incomplete because some wheel metadata
-omits a machine-readable license expression; those exact packages are listed in
-`unresolved_redistribution_items` for review against their captured license
-fields, classifiers, and files. That metadata absence is not evidence of license
-incompatibility. This experiment does not redistribute or commit the packages,
-base-image filesystem, or weights.
+Model and TEI source are Apache-2.0. The exact-image audit also records wheel,
+Python, and Debian component licenses/notices, including GPL/LGPL terms.
+Redistribution must retain applicable notices and satisfy source-correspondence
+requirements. Review remains incomplete for the audit's
+`unresolved_redistribution_items` lacking machine-readable license expressions;
+missing metadata does not establish incompatibility. This experiment does not
+commit or redistribute weights, packages, or the base filesystem, and does not
+promote an ONNX artifact into the production manifest.

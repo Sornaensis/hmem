@@ -1,7 +1,6 @@
-# Timeline live-refresh integration
+# Timeline live integration
 
-Build the final frontend with explicit loopback API/WebSocket URLs from
-`hmem-server/frontend`:
+Build from `hmem-server/frontend` with explicit loopback endpoints:
 
 ```powershell
 $env:VITE_HMEM_API_URL = 'http://127.0.0.1:5180'
@@ -10,34 +9,35 @@ $env:VITE_HMEM_AUTH_MODE = 'local'
 npm run build
 ```
 
-In a second terminal at the repository root, start the isolated interactive
-harness and note the printed `Static dir` path:
+In a second terminal at the repository root, start the isolated API:
 
 ```powershell
 stack run hmem-test-harness -- local --interactive --port 5180
 ```
 
-Copy `hmem-server/static` into that printed sandbox static directory. The
-harness deletes its sandbox when Enter or Ctrl-C stops it. For Playwright CLI
+Copy the contents of `hmem-server/static` into the printed **Static dir**.
+Stop with Enter or Ctrl-C; the harness deletes its sandbox. For Playwright CLI
 sessions, fulfill `**/hmem-runtime-config.js` with
-`window.HMEM_CONFIG = {};` before navigating; the explicit build-time URLs
-remain authoritative. Then run the lifecycle matrix from
-`hmem-server/frontend`:
+`window.HMEM_CONFIG = {};` before navigating so the explicit build URLs apply.
+
+Run the lifecycle matrix from `hmem-server/frontend`:
 
 ```powershell
 $env:HMEM_TIMELINE_API = 'http://127.0.0.1:5180'
-$env:HMEM_REPO_ROOT = 'D:\Projects\hmem'
+$env:HMEM_REPO_ROOT = (Resolve-Path ../..).Path
 npm run test:timeline-live
 ```
 
-The live test deliberately fails without `HMEM_TIMELINE_API`. It covers
-project/task create, update, complete, soft-delete and audit restore;
-observation create/hard-delete; project/task cascade counts; authoritative
-event and bucket projections; and a real `hmem-mcp` stdio process launched with
-an explicit `--server-url` and session-local `set_workspace` call. This does not
-read or redirect the active Codex MCP workspace context.
+The test deliberately fails when `HMEM_TIMELINE_API` is absent. It checks
+planning/Observation lifecycle, audit restoration, cascade counts, and canonical
+event/bucket projections. Its real `hmem-mcp` stdio process uses an explicit
+`--server-url` and session-local `set_workspace`; it does not change the active
+Codex MCP workspace.
 
-The two-client request-budget, selected-bucket, background catch-up,
-disconnect/replay, and forced-resync checks are run with named Playwright CLI
-sessions against the same isolated harness. Store their screenshots, snapshots,
-network output, and traces under `output/playwright/<label>/`.
+Use named Playwright CLI sessions against this same isolated harness for the
+two-client request-budget, selected-bucket, background catch-up, disconnect/replay,
+and forced-resync checks. Retain the required screenshots, snapshots, network
+output, and traces under `output/playwright/<label>/`, with the executing task
+owning its label and specifying the retention/cleanup disposition. Preserve
+existing required evidence. Performance qualification has separate
+[commands and evidence rules](../perf/README.md).

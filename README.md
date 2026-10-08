@@ -35,7 +35,7 @@ default hmem image leaves automatic vectorization disabled, while manual
 optional Linux/WSL Docker GPU deployment can validate and run the pinned
 native TEI model for automatic Observation vectorization; there is no CPU
 inference fallback. See
-[Database schema and embedding operations](database.md#pgvector-and-embedding-operations)
+[Embedding operations](embeddings.md)
 for manual and automatic workflows, and [Docker deployment](docker.md) for
 the opt-in GPU setup. Similarity queries supply an already-produced vector;
 hmem does not expose a raw-text query embedding endpoint.

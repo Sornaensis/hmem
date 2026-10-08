@@ -23,23 +23,13 @@ and historical findings are not relabeled as GPU evidence.
 
 ## Immutable image and runtime boundary
 
-The runtime image is the OCI index
-`ghcr.io/huggingface/text-embeddings-inference@sha256:aedf3b34836dc57289583142adcf2b93836cda0736ac8e6ce43691b9c2c67170`.
-For `linux/amd64`, the manifest is
-`sha256:144aaa80ddcb520d49df83f915dc188ddd7cc6b1b3b9684a829c21dd39cbe3c5`
-and the configuration is
-`sha256:affa793eda6c6c6583d9c4041372dd710d74a55ab0a89025a1f322dd71b92eb2`.
-The manifest lock contains every compressed layer in order. The discovery tag
-`120-1.9.3` is evidence only and must never be used as the runtime reference.
-
-The source image binds Ubuntu 24.04 and CUDA 12.9.1. The installed bundle
-contains exact copies of the image's `/entrypoint.sh` and
-`/usr/local/bin/text-embeddings-router`. The manifest records their source
-paths, sizes, and hashes. It also records the resolved direct ELF loader
-closure observed for the router. That ELF list is not a claim that CUDA
-dependencies loaded dynamically or linked into the router are separately
-complete; all such image content is instead bound by the exact platform
-manifest, configuration, and ordered layer digests.
+The [provenance manifest](managed-embedding-provenance.yaml) locks the OCI index,
+linux/amd64 manifest/configuration, ordered layers, model snapshot, CUDA
+entrypoint, router, and observed direct ELF loader closure. Use its immutable
+image reference; the discovery tag `120-1.9.3` is evidence only. The source image
+binds Ubuntu 24.04 and CUDA 12.9.1. Installed entrypoint/router bytes must match
+the image. The direct ELF list does not separately qualify dynamically loaded
+CUDA dependencies; the exact platform image digests bind those bytes.
 
 `libcuda.so.1` belongs to the NVIDIA container runtime and host driver. It is
 not an image file and has no image checksum. Deployment must not copy host
@@ -92,9 +82,10 @@ truncation. Requests use `normalize=true`, `truncate=false`, and no default
 prompt.
 
 The immutable numerical authority consists of
-`foundation-contract-v1.json`, `parity-probes-v1.json`, and
-`reference-golden-v1.json`, with their exact sizes and hashes in the
-manifest. The reference method is
+[foundation contract](../hmem-server/test/fixtures/embedding-gpu-viability/foundation-contract-v1.json),
+[parity probes](../hmem-server/test/fixtures/embedding-gpu-viability/parity-probes-v1.json), and
+[reference golden vectors](../hmem-server/test/fixtures/embedding-gpu-viability/reference-golden-v1.json),
+with their exact sizes and hashes in the manifest. The reference method is
 `original-sdpa-math-cuda-f16-v3`. The fixed cases are `doc_short`,
 `mixed_long`, `multilingual`, and `query_search`; their roles, formatted
 UTF-8 hashes, and token counts are locked. Acceptance requires cosine at least
@@ -117,7 +108,7 @@ production defaults.
 
 ## Offline verification and redistribution
 
-`scripts/check-managed-embedding-provenance.hs` embeds the trusted schema,
+The [independent checker](../scripts/check-managed-embedding-provenance.hs) embeds the trusted schema,
 profile, image, model, runtime, numerical, and license locks. The installed
 manifest cannot authorize different bytes by changing its own hashes. Image
 preparation must run the checker against both the complete 20-file original

@@ -1,0 +1,36 @@
++++
+schema = "adrai/decision/v1"
+adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+record = "R01M4G8P7F78E36TPZKE3X5DMPK"
+title = "Model work as hierarchical projects and constrained task dependencies"
+summary = "Keep planning hierarchy and an acyclic prerequisite graph with database-enforced lifecycle gates."
+domains = ["planning-workflow"]
++++
+
+Context: Projects organize planning work, tasks can have subtasks, and tasks can depend on other tasks. This record describes observed behavior; the historical reason for the original choice is not established by these sources.
+
+Observed decision: Store project and task parent links and task_dependencies in PostgreSQL. Reject dependency cycles. Keep active task nesting flat: top-level tasks may have subtasks, but a subtask may not have children. Active parents with unfinished direct subtasks (todo, in_progress, or blocked) automatically become blocked and cannot explicitly start until those children close, are deleted, or detach. Done, cancelled, and deleted children do not block. Normalize eligible existing todo/in_progress parents through the same automatic policy while preserving manually blocked parents, terminal states, and frozen closed ancestor trees. Gate task completion on closing open descendants and project completion on closing descendant projects and tasks. Derive next actionable tasks recursively across eligible project subtrees, distinguishing prerequisite blocking and the open-descendant completion gate; automatically blocked parents appear only when blocked diagnostics are requested. Subtasks remain actionable beneath an otherwise eligible parent.
+
+Explicit project archival recursively archives active descendant projects, including completed projects, and cancels active non-done tasks throughout the project and task hierarchy. Explicit task cancellation cancels active non-done subtasks. Preserve done cascade-descendant tasks, including their completion and update timestamps, and leave soft-deleted rows untouched. An explicitly cancelled root task may transition from done according to the existing API semantics. Preserve prerequisite edges; cancellation does not traverse dependency edges, while normal readiness recomputation includes dependents of all actually changed tasks.
+
+Require reopening a cancelled parent before creating, moving, reparenting, or reopening an unfinished subtask beneath it. Reject the requested unfinished write with TASK_OPEN_UNDER_CANCELLED_TASK rather than silently cancelling it. Completed children may remain under a cancelled parent. Reopening the parent does not reopen its children. Preserve the separate done-parent, closed-project, flat-subtask and parent-eligibility rules, and verify placement ownership before revealing parent lifecycle state.
+
+Enforce cascades and cancelled-parent closure prospectively through database triggers, without backfilling historical rows. Explicit repeated terminal status requests normalize descendants; application metadata-only updates carry transaction-local status intent so they do not sweep historical descendants. Ordered AFTER propagation completes descendants before closure checks and avoids rewriting pending outer UPDATE targets when a statement includes both parent and child. Use deterministic project-before-task and root-to-leaf locking, suppress recursive propagation, and recompute readiness over the actual changed task seeds. Core single and batch updates, direct SQL, REST, MCP and audit reverts share this authority and preserve atomic per-entity audit and canonical outbox attribution.
+
+Use one database canStartSubtasks predicate for child starts, running-child restoration/reparenting, readiness summaries, and next-task discovery: an active open todo/in_progress parent, or an automatically blocked parent, with no open direct prerequisites, manual block, or closed task/project ancestor. Preserve the child's own prerequisite and placement checks. Existing running children are not paused when the parent later becomes ineligible. Recompute both parents on child placement changes. When final subtask and prerequisite blockers clear, an automatically blocked parent returns to todo; progress and completion remain explicit. Publish derived inProgressSubtaskCount and canStartSubtasks in single and batched readiness summaries so unloaded children require no presentation-state persistence or unbounded fetches. Automatic-effect reasons identify subtask, dependency, or combined causes.
+
+Consequences: The hierarchy and prerequisite graph make work order explicit. Completion remains a deliberate gated transition; archive and cancel explicitly close unfinished hierarchy work while retaining completed task history. Invalid placement and lifecycle transitions fail with structured guidance. Cascade updates, readiness effects, audit records and outbox events commit or roll back together.
+
+Evidence:
+- hmem-core/src/HMem/DB/Task.hs: validates placement, preserves explicit status intent, captures changed hierarchy and dependency snapshots, and computes next tasks with separate dependencyBlocked and completionGated annotations.
+- hmem-core/src/HMem/DB/Project.hs: stores and traverses project parent links, coordinates project subtree operations and carries explicit status intent.
+- hmem-server/migrations/V017__flat_subtask_lifecycle_rules.sql: introduced flat active subtasks; V034 replaces its parent-in-progress gate with authoritative parent eligibility.
+- hmem-server/migrations/V027__bounded_task_dependency_cycle_check.sql: rejects dependency cycles with a bounded recursive reachability check.
+- hmem-server/migrations/V012__recursive_lifecycle_invariants.sql: rejects task completion with open descendants, project completion with open descendant projects or tasks, and unfinished work under closed ancestors.
+- hmem-server/migrations/V029__cascade_archive_and_cancel.sql: enforces archive/cancel cascades, cancelled-parent placement rejection and aggregate readiness recomputation without historical normalization.
+- hmem-core/test/HMem/DB/ProjectSpec.hs, TaskSpec.hs and ChangeStreamSpec.hs: exercise cascade preservation, repeated intent, raw and overlapping SQL, batch parity, atomic rollback and concurrent child insertion.
+- hmem-server/test/HMem/Server/APISpec.hs: exercises REST cascade behavior, structured cancelled-parent rejection and audit-revert parity.
+- hmem-server/migrations/V034__subtask_parent_auto_blocking.sql: direct-child blockers, authoritative child eligibility, explicit parent-start rejection, ordered AFTER checks, and eligible parent normalization through preserved V029 recomputation.
+- hmem-core/src/HMem/DB/Overview.hs and HMem/Types.hs: derived single/batch readiness fields.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6ImEzOTU0ZjU3ZmY2Y2U2MTRlODg1MzUwNmUwMDdiZTE2ZTA2Y2E5NzAiLCJpIjoic2hhMjU2Ol9tRTQwclR4MzJVRDJrVEk0M29FNVhJTi1INnhoTVpJVUtoekV0aWozUGsiLCJrIjoiZGVjaXNpb24uYW1lbmQiLCJvIjoiUjAxTTRHOFA3Rjc4RTM2VFBaS0UzWDVETVBLIiwib3AiOiJPMDFNNEc4UDdGNzhFMzZUUFpLRTNYNURNUEsiLCJwIjpbIlIwMU0zWURIQ0tTODU2QllXU0VNQzFaM1lGNyJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpWZkstejh4R1B4WHNKUk5YYUlLN0tXUDJRd3d5QzFQR2Nidl9vN1M0eUlzIiwidCI6MTc5MTU0NzM1MDUwMywidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

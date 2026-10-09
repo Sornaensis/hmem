@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4G8P7F7G5FFZ3Z1VZ88ADWM"
+relation = "amends"
+from_record = "R01M4G8P7F78E36TPZKE3X5DMPK"
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+to_records = ["R01M3YDHCKS856BYWSEMC1Z3YF7"]
++++
+
+Auto-block parents with incomplete direct subtasks while preserving eligible child work and V029 lifecycle safeguards.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6ImEzOTU0ZjU3ZmY2Y2U2MTRlODg1MzUwNmUwMDdiZTE2ZTA2Y2E5NzAiLCJpIjoic2hhMjU2Ol9tRTQwclR4MzJVRDJrVEk0M29FNVhJTi1INnhoTVpJVUtoekV0aWozUGsiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRHOFA3RjdHNUZGWjNaMVZaODhBRFdNIiwib3AiOiJPMDFNNEc4UDdGNzhFMzZUUFpLRTNYNURNUEsiLCJwIjpbIlIwMU0zWURIQ0tTODU2QllXU0VNQzFaM1lGNyJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpRUkM0UTNSeHBub0VJZjdoUjUxSXpUOGYxWnJiUzRRcklESGhjYVlsT2RvIiwidCI6MTc5MTU0NzM1MDUwMywidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

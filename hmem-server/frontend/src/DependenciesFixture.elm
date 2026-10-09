@@ -115,7 +115,7 @@ dependentTaskCardSummary =
         , blockedSubtaskCount = 0
         , dependencyBlockedTaskCount = 0
         , openDependencyCount = 0
-        , completionReady = True
+        , completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False
         }
     }
 

@@ -138,6 +138,16 @@ export function taskReadinessRollup(fixture, taskId) {
   const treeIds = descendantIds(fixture.tasks, taskId)
   const descendants = treeIds.slice(1).map(id => tasks.get(id))
   const openEdges = openDependencyEdges(fixture, treeIds)
+  const parent = tasks.get(taskId)
+  const projects = new Map(fixture.projects.map(project => [project.id, project]))
+  const closedAncestor = (values, initial, closed) => {
+    const seen = new Set()
+    for (let current = initial; current != null; current = values.get(current)?.parent_id) {
+      if (seen.has(current) || !values.has(current) || closed.has(values.get(current).status)) return true
+      seen.add(current)
+    }
+    return false
+  }
   return {
     open_subtask_count: descendants.filter(task => OPEN_TASK_STATUSES.has(task.status)).length,
     done_subtask_count: descendants.filter(task => task.status === 'done').length,
@@ -145,7 +155,12 @@ export function taskReadinessRollup(fixture, taskId) {
     blocked_subtask_count: descendants.filter(task => task.status === 'blocked').length,
     dependency_blocked_task_count: new Set(openEdges.map(edge => edge.task_id)).size,
     open_dependency_count: openEdges.length,
-    completion_ready: !descendants.some(task => OPEN_TASK_STATUSES.has(task.status))
+    completion_ready: !descendants.some(task => OPEN_TASK_STATUSES.has(task.status)),
+    in_progress_subtask_count: fixture.tasks.filter(task => task.parent_id === taskId && task.status === 'in_progress').length,
+    can_start_subtasks: (['todo', 'in_progress'].includes(parent.status) || (parent.status === 'blocked' && parent.auto_blocked === true))
+      && openDependencyEdges(fixture, [taskId]).length === 0
+      && !closedAncestor(tasks, parent.parent_id, new Set(['done', 'cancelled']))
+      && !closedAncestor(projects, parent.project_id, new Set(['completed', 'archived']))
   }
 }
 

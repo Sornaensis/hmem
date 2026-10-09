@@ -241,6 +241,45 @@ function frame(workspace, type, id, action, invalidations, identity) {
   return { schema_version:1, type:'change', event:{ schema_version:1,event_id:identity,scope:'workspace',workspace_id:workspace,occurred_at:'2026-08-30T12:00:00Z',transaction:{id:identity,cause:'rest',request_id:null},actor:{type:'service',id:'controlled-browser'},entity:{type,id,action},invalidations } }
 }
 
+test('blocked parent and offscreen family follow authoritative running-child and manual readiness refreshes', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture()
+  const parent = fixture.tasks.find(item => item.id === 'task-000')
+  const running = fixture.tasks.find(item => item.id === 'subtask-112')
+  parent.status = 'blocked'; parent.auto_blocked = true; running.status = 'in_progress'
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    await h.scrollTo('task:task-000')
+    const parentCard = h.page.locator('#entity-task-000.card-task')
+    assert.equal(await parentCard.evaluate(element => element.classList.contains('card-status-in_progress')), true)
+    assert.equal(await parentCard.locator('.status-select').inputValue(), 'blocked')
+    assert.equal(await parentCard.locator('option[value="in_progress"]').evaluate(element => element.disabled), true)
+    await h.scrollTo('task:subtask-110')
+    assert.equal(await h.page.locator('#entity-task-000').count(), 0, 'Parent should be outside the mounted viewport')
+    const family = h.page.locator('[data-task-family="task-000"]').first()
+    assert.equal(await family.evaluate(element => element.classList.contains('card-status-in_progress')), true)
+    const childOption = h.page.locator('#entity-subtask-110 option[value="in_progress"]')
+    assert.equal(await childOption.evaluate(element => element.disabled), false)
+    const workspace = fixture.workspace.id
+    parent.auto_blocked = false
+    await h.page.evaluate(frames => window.pushHierarchyFrames(frames), [frame(workspace,'task',parent.id,'updated',[{kind:'entity',target:'task:'+parent.id},{kind:'readiness',target:'task:'+parent.id}],'manual-parent-block')])
+    await h.idle(); await h.scrollTo('task:subtask-110')
+    assert.equal(await childOption.evaluate(element => element.disabled), true, 'Manual block changes capability even while status remains blocked')
+    assert.equal(await family.evaluate(element => element.classList.contains('card-status-in_progress')), true, 'Existing running work still styles the family')
+    running.status = 'todo'
+    await h.page.evaluate(frames => window.pushHierarchyFrames(frames), [frame(workspace,'task',running.id,'updated',[{kind:'entity',target:'task:'+running.id},{kind:'readiness',target:'task:'+parent.id}],'last-running-child-stopped')])
+    await h.idle(); await h.scrollTo('task:subtask-110')
+    assert.equal(await family.evaluate(element => element.classList.contains('card-status-in_progress')), false, 'Zero replaces the earlier positive count while incomplete children remain')
+    await h.scrollTo('task:task-000')
+    assert.equal(await parentCard.locator('.status-select').inputValue(), 'blocked')
+    assert.equal(await parentCard.evaluate(element => element.classList.contains('card-status-in_progress')), false)
+    await h.page.locator('#entity-task-000 .tree-toggle').click(); await h.idle()
+    assert.equal(await parentCard.evaluate(element => element.classList.contains('card-status-in_progress')), false)
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    assert.ok(await h.page.evaluate(() => window.hierarchyMaximum) <= 31)
+  } finally { await h.close() }
+})
+
 test('live create delete and reparent restart offset membership, and sparse resync restores complete scroll reachability', { timeout: 90000 }, async () => {
   const h = await openHierarchy()
   try {
@@ -266,7 +305,9 @@ test('live create delete and reparent restart offset membership, and sparse resy
     assert.equal(keys.has('project:project-000'),false)
     const moved=await h.scrollTo('task:task-120')
     assert.equal(await moved.locator('.card-subtask').count(),1)
-    assert.equal(await moved.evaluate(element=>element.style.paddingLeft),'40px')
+    assert.equal(await moved.evaluate(element=>element.style.paddingLeft),'20px')
+    assert.equal(await moved.evaluate(element=>element.closest('[data-task-family="task-000"]').style.marginLeft),'20px')
+    assert.equal(await moved.evaluate(element=>parseFloat(element.style.paddingLeft)+parseFloat(element.closest('[data-task-family="task-000"]').style.marginLeft)),40, 'The relative row and family wrapper preserve total nested indentation')
     assert.ok(h.requests.slice(before).some(r=>r.parent==='task-000'&&r.taskIds?.includes('task-120')))
     const resyncBefore=h.requests.filter(r=>r.path.endsWith('/resync')).length
     await h.page.evaluate(() => window.pushHierarchyFrames([{schema_version:1,type:'resync_required'}]))

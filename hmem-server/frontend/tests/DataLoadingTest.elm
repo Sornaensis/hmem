@@ -35,6 +35,24 @@ suite =
                 in
                 Expect.equal ( 0, 0 ) ( Dict.size seeded.dataLoading.navigationAdmissions, Set.size seeded.dataLoading.cardDetailAdmissions )
 
+        , test "readiness refresh replaces running counts and manual capability for both reparented parents" <|
+            \_ ->
+                let
+                    first = task "old-parent" Nothing
+                    second = task "new-parent" Nothing
+                    ready = first.readinessRollup
+                    summary original running capability = { original | status = Api.Blocked, readinessRollup = { ready | openSubtaskCount = 2, completionReady = False, inProgressSubtaskCount = running, canStartSubtasks = capability } }
+                    seeded = loadRoot workspaceId [] [ summary first 1 True, summary second 0 True ] model
+                    updated = DataLoading.mergeNavigationSummaries [] [ summary first 0 False, summary second 1 True ] seeded
+                    read id current = Dict.get id current.dependencies.taskReadinessRollups |> Maybe.map (\value -> ( value.inProgressSubtaskCount, value.canStartSubtasks ))
+                    stale = case seeded.dataLoading.rootNavigationRequest of
+                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing (request.generation - 1) request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ summary first 1 True ], hasMore = False } })) updated |> Tuple.first
+                        Nothing -> updated
+                in
+                Expect.equal { old = Just (0,False), new = Just (1,True), stale = Just (0,False), summary = Just (0,False), descriptions = [ Nothing, Nothing ] }
+                    { old = read "old-parent" updated, new = read "new-parent" updated, stale = read "old-parent" stale
+                    , summary = Dict.get "old-parent" updated.dataLoading.taskCardSummaries |> Maybe.map (\value -> (value.readinessRollup.inProgressSubtaskCount,value.readinessRollup.canStartSubtasks))
+                    , descriptions = Dict.values updated.tasks |> List.map .description }
         , test "one painted wave bounds combined ordinary work and ignores repeated receipts" <|
             \_ ->
                 let
@@ -3140,7 +3158,7 @@ task id parentId =
     , updatedAt = "2026-01-01T00:00:00Z"
     , directSubtaskCount = 0
     , hasChildren = False
-    , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True }
+    , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False }
     }
 
 
@@ -3352,6 +3370,7 @@ expectPaintReady ready current =
             [ ( "paintReady", Encode.bool ready ), ( "paintNonce", Encode.int (DataLoading.backgroundPaintNonce current) ), ( "paintFilter", Encode.string (DataLoading.navigationFilterFingerprint current) )
             , ( "workspace", Encode.string (Maybe.withDefault "" viewport.workspaceId) ), ( "epoch", Encode.int viewport.sessionEpoch ), ( "generation", Encode.int viewport.generation ), ( "revision", Encode.int viewport.revision )
             , ( "anchor", Encode.null ), ( "delta", Encode.float 0 ), ( "top", Encode.float viewport.top ), ( "target", viewport.target |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
+            , ( "preserveScroll", Encode.bool viewport.preserveScroll )
             ]
     in
     Cards.viewProjectsTree workspaceId current |> Query.fromHtml

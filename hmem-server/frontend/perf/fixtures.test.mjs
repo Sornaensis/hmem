@@ -408,16 +408,38 @@ test('overview fixtures match decoder dependency schema and recursive readiness 
   }
   assert.deepEqual(taskReadinessRollup(fixture, 't0'), {
     open_subtask_count: 1, done_subtask_count: 0, cancelled_subtask_count: 0, blocked_subtask_count: 0,
-    dependency_blocked_task_count: 1, open_dependency_count: 1, completion_ready: false
+    dependency_blocked_task_count: 1, open_dependency_count: 1, completion_ready: false,
+    in_progress_subtask_count: 0, can_start_subtasks: false
   })
   assert.equal(taskReadinessRollup(fixture, 't2').completion_ready, true)
   assert.deepEqual(taskOverviewResponse(fixture, 't1').dependencies, [{ id: 't3', name: 'Blocked dependency' }])
   assert.deepEqual(projectReadinessRollup(fixture, 'p0'), {
-    open_project_count: 1, closed_project_count: 1, open_task_count: 2, done_task_count: 2,
+    open_project_count: 1, closed_project_count: 1, open_task_count: 2, in_progress_task_count: 0, done_task_count: 2,
     cancelled_task_count: 0, blocked_task_count: 1, dependency_blocked_task_count: 1,
     open_dependency_count: 1, completion_ready: false
   })
   assert.equal(projectReadinessRollup(fixture, 'p3').completion_ready, true)
+})
+
+test('subtask eligibility and running-child counts use direct authoritative parent blockers', () => {
+  const fixture = { projects: [{ id: 'p', parent_id: null, status: 'active' }], tasks: [
+    { id: 'parent', parent_id: null, project_id: 'p', status: 'blocked', auto_blocked: true },
+    { id: 'child', parent_id: 'parent', project_id: 'p', status: 'in_progress' },
+    { id: 'todo', parent_id: 'parent', project_id: 'p', status: 'todo' }
+  ], dependencies: [] }
+  assert.equal(taskReadinessRollup(fixture, 'parent').can_start_subtasks, true)
+  assert.equal(taskReadinessRollup(fixture, 'parent').in_progress_subtask_count, 1)
+  fixture.tasks[0].auto_blocked = false
+  assert.equal(taskReadinessRollup(fixture, 'parent').can_start_subtasks, false)
+  fixture.tasks[1].status = 'todo'
+  assert.equal(taskReadinessRollup(fixture, 'parent').in_progress_subtask_count, 0)
+  assert.equal(taskReadinessRollup(fixture, 'parent').open_subtask_count, 2)
+  fixture.tasks[0].auto_blocked = true
+  fixture.dependencies.push({ task_id: 'parent', depends_on_id: 'todo' })
+  assert.equal(taskReadinessRollup(fixture, 'parent').can_start_subtasks, false)
+  fixture.dependencies = []
+  fixture.projects[0].status = 'archived'
+  assert.equal(taskReadinessRollup(fixture, 'parent').can_start_subtasks, false)
 })
 
 test('nearest-rank p95 and live whole-workspace reload classification are frozen', () => {

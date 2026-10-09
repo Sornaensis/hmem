@@ -79,7 +79,7 @@ suite =
                     ()
         , test "cancelled parent prevents reopening children but still permits historical completion and cancellation" <|
             \_ ->
-                List.map (Feature.Cards.taskStatusOptionDisabledReason Nothing True (Just Api.Cancelled)) [ Api.Todo, Api.Blocked, Api.InProgress, Api.Done, Api.Cancelled ]
+                List.map (Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.Cancelled) False) [ Api.Todo, Api.Blocked, Api.InProgress, Api.Done, Api.Cancelled ]
                     |> Expect.equal
                         [ Just "Reopen the cancelled parent task before reopening this subtask."
                         , Just "Reopen the cancelled parent task before reopening this subtask."
@@ -757,7 +757,7 @@ suite =
                 , Helpers.taskCardStatusClass Api.Blocked
                 ]
                     |> Expect.equal
-                        [ "blocked by dependencies"
+                        [ "blocked"
                         , "task-status-text task-status-dependency-blocked"
                         , "popover-card-status task-status-text task-status-dependency-blocked"
                         , ""
@@ -787,15 +787,46 @@ suite =
                         ]
         , test "task status option disabled reasons preserve subtask and completion gates" <|
             \_ ->
-                [ Feature.Cards.taskStatusOptionDisabledReason Nothing True (Just Api.Todo) Api.InProgress
-                , Feature.Cards.taskStatusOptionDisabledReason Nothing True (Just Api.InProgress) Api.InProgress
-                , Feature.Cards.taskStatusOptionDisabledReason (Just "Finish subtasks first.") False Nothing Api.Done
+                [ Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.Todo) False Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.InProgress) True Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason (Just "Finish subtasks first.") 1 False Nothing False Api.Done
                 ]
                     |> Expect.equal
-                        [ Just "Start the parent task before moving this subtask to in progress."
+                        [ Just "Resolve parent prerequisites, manual blocking, or closed ancestors before starting subtasks."
                         , Nothing
                         , Just "Finish subtasks first."
                         ]
+        , test "open subtasks deny parent start while authoritative eligibility permits child start" <|
+            \_ ->
+                [ Feature.Cards.taskStatusOptionDisabledReason Nothing 2 False Nothing False Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.Todo) True Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.Blocked) True Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.Blocked) False Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.Done) True Api.InProgress
+                ]
+                    |> Expect.equal
+                        [ Just "Finish or cancel all incomplete subtasks before starting this task."
+                        , Nothing
+                        , Nothing
+                        , Just "Resolve parent prerequisites, manual blocking, or closed ancestors before starting subtasks."
+                        , Just "Reopen the parent task before reopening this subtask."
+                        ]
+        , test "collapsed blocked cards use running-child rollups without hydrating children and clear at zero" <|
+            \_ ->
+                let
+                    deps = lifecycleModel.dependencies
+                    parent = taskWithStatus "parent" Nothing (Just "project-a") Api.Blocked
+                    rollup = { openSubtaskCount = 2, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = True }
+                    source readiness = { lifecycleModel | tasks = Dict.singleton "parent" parent, dependencies = { deps | taskReadinessRollups = Dict.singleton "parent" readiness } }
+                    card readiness = Feature.Cards.viewProjectsTree "workspace-a" (source readiness) |> Query.fromHtml |> Query.find [ Selector.id "entity-parent" ]
+                in
+                Expect.all
+                    [ \_ -> card rollup |> Query.has [ Selector.class "card-status-in_progress" ]
+                    , \_ -> card rollup |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "blocked") ] |> Query.has [ Selector.attribute (Attributes.selected True) ]
+                    , \_ -> card rollup |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "in_progress") ] |> Query.has [ Selector.attribute (Attributes.disabled True) ]
+                    , \_ -> card { rollup | inProgressSubtaskCount = 0 } |> Query.hasNot [ Selector.class "card-status-in_progress" ]
+                    , \_ -> Helpers.taskCardAppearanceClass Api.Todo (Just rollup) |> Expect.equal (Helpers.taskCardStatusClass Api.Todo)
+                    ] ()
         , test "focus double-click threshold accepts only fast repeated clicks" <|
             \_ ->
                 [ Feature.Cards.focusClickIntervalTriggers 249
@@ -865,12 +896,16 @@ suite =
                         [ taskOverview.readinessRollup.openSubtaskCount == 2
                         , taskOverview.readinessRollup.openDependencyCount == 4
                         , taskOverview.readinessRollup.completionReady == False
+                        , taskOverview.readinessRollup.inProgressSubtaskCount == 0
+                        , taskOverview.readinessRollup.canStartSubtasks == False
+                        , (Decode.decodeString Api.taskOverviewDecoder (String.replace "\"completion_ready\":false" "\"completion_ready\":false,\"in_progress_subtask_count\":1,\"can_start_subtasks\":true" taskOverviewBody) |> Result.map (.readinessRollup >> .canStartSubtasks)) == Ok True
+                        , (Decode.decodeString Api.taskOverviewDecoder (String.replace "\"completion_ready\":false" "\"completion_ready\":false,\"in_progress_subtask_count\":0,\"can_start_subtasks\":false" taskOverviewBody) |> Result.map (.readinessRollup >> .canStartSubtasks)) == Ok False
                         , projectOverview.readinessRollup.openProjectCount == 1
                         , projectOverview.readinessRollup.openTaskCount == 3
                         , projectOverview.readinessRollup.openDependencyCount == 5
                         , projectOverview.readinessRollup.completionReady == False
                         ]
-                            |> Expect.equal (List.repeat 7 True)
+                            |> Expect.equal (List.repeat 11 True)
 
                     ( Err err, _ ) ->
                         Expect.fail (Decode.errorToString err)
@@ -918,8 +953,8 @@ suite =
                 ]
                     |> Expect.equal
                         [ "No ready tasks found. Checking blocked diagnostics…"
-                        , "No ready tasks found. Blocked candidates are listed below with their dependency/manual-blocking rationale."
-                        , "No ready tasks found. Start parent tasks, then resolve any remaining blockers, to make waiting subtasks actionable."
+                        , "No ready tasks found. Blocked candidates are listed below with their blocking rationale."
+                        , "No ready tasks found. Resolve parent blockers, then any remaining subtask blockers."
                         ]
         , test "next task card actions expose only a focusing Jump action" <|
             \_ ->

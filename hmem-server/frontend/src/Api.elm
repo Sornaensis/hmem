@@ -631,6 +631,8 @@ type alias TaskReadinessRollup =
     , dependencyBlockedTaskCount : Int
     , openDependencyCount : Int
     , completionReady : Bool
+    , inProgressSubtaskCount : Int
+    , canStartSubtasks : Bool
     }
 
 
@@ -983,7 +985,10 @@ structuredErrorToUserMessage fallback apiError =
                     "Subtasks can only be added to top-level tasks. Move existing subtasks before nesting this task."
 
                 Just "TASK_SUBTASK_START_BLOCKED" ->
-                    "Start the parent task before moving a subtask to in progress."
+                    "Resolve parent prerequisites, manual blocking, or closed ancestors before starting subtasks."
+
+                Just "TASK_START_BLOCKED_BY_SUBTASKS" ->
+                    "Finish or cancel all incomplete subtasks before starting this task."
 
                 Just "TASK_DEPENDENCY_CROSS_WORKSPACE" ->
                     "Move tasks only after removing or repairing dependencies that cross workspaces."
@@ -3710,6 +3715,9 @@ taskReadinessRollupDecoder =
         |> optional "open_dependency_count" D.int 0
         |> optional "completion_ready" D.bool True
 
+        |> optional "in_progress_subtask_count" D.int 0
+        |> optional "can_start_subtasks" D.bool False
+
 
 defaultTaskReadinessRollup : TaskReadinessRollup
 defaultTaskReadinessRollup =
@@ -3720,6 +3728,8 @@ defaultTaskReadinessRollup =
     , dependencyBlockedTaskCount = 0
     , openDependencyCount = 0
     , completionReady = True
+    , inProgressSubtaskCount = 0
+    , canStartSubtasks = False
     }
 
 

@@ -1095,6 +1095,10 @@ computeTaskReadinessRollupFrom allTasks taskDependencyLinks taskId =
     , dependencyBlockedTaskCount = dependencyBlockedTaskCount
     , openDependencyCount = openDependencyCount
     , completionReady = not (List.any (\task -> isOpenTaskCardStatus task.status) descendantTasks)
+    , inProgressSubtaskCount = allTasks |> List.filter (\task -> task.parentId == Just taskId && task.status == Api.InProgress) |> List.length
+    -- Task rows cannot distinguish automatic blocking from manual intent.
+    -- Eligibility comes from the authoritative readiness summary.
+    , canStartSubtasks = False
     }
 
 
@@ -1246,7 +1250,7 @@ taskStatusDisplayText : Api.TaskStatus -> String
 taskStatusDisplayText status =
     case status of
         Api.Blocked ->
-            "blocked by dependencies"
+            "blocked"
 
         _ ->
             Api.taskStatusToString status |> String.replace "_" " "
@@ -1256,7 +1260,7 @@ taskStatusTitle : Api.TaskStatus -> String
 taskStatusTitle status =
     case status of
         Api.Blocked ->
-            "Blocked by incomplete dependencies"
+            "Blocked by incomplete subtasks, dependencies, or a manual pause"
 
         _ ->
             taskStatusDisplayText status
@@ -1280,6 +1284,15 @@ taskPopoverStatusClass status =
 
         _ ->
             "popover-card-status card-status-" ++ Api.taskStatusToString status
+
+
+taskCardAppearanceClass : Api.TaskStatus -> Maybe Api.TaskReadinessRollup -> String
+taskCardAppearanceClass status maybeRollup =
+    if status == Api.Blocked && (maybeRollup |> Maybe.map .inProgressSubtaskCount |> Maybe.withDefault 0) > 0 then
+        taskCardStatusClass Api.InProgress
+
+    else
+        taskCardStatusClass status
 
 
 taskCardStatusClass : Api.TaskStatus -> String

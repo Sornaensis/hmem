@@ -942,8 +942,8 @@ taskStatusOptionsForTask dependencyBlocked task =
     ensureTaskStatusOption task.status transitionTargets
 
 
-taskStatusOptionDisabledReason : Maybe String -> Bool -> Maybe Api.TaskStatus -> Api.TaskStatus -> Maybe String
-taskStatusOptionDisabledReason completionBlockerReason isSubtask mParentStatus status =
+taskStatusOptionDisabledReason : Maybe String -> Int -> Bool -> Maybe Api.TaskStatus -> Bool -> Api.TaskStatus -> Maybe String
+taskStatusOptionDisabledReason completionBlockerReason openSubtaskCount isSubtask mParentStatus parentCanStartSubtasks status =
     if status == Api.Done then
         completionBlockerReason
 
@@ -953,8 +953,11 @@ taskStatusOptionDisabledReason completionBlockerReason isSubtask mParentStatus s
     else if isOpenTaskStatus status && mParentStatus == Just Api.Done then
         Just "Reopen the parent task before reopening this subtask."
 
-    else if status == Api.InProgress && isSubtask && mParentStatus /= Just Api.InProgress then
-        Just "Start the parent task before moving this subtask to in progress."
+    else if status == Api.InProgress && openSubtaskCount > 0 then
+        Just "Finish or cancel all incomplete subtasks before starting this task."
+
+    else if status == Api.InProgress && isSubtask && not parentCanStartSubtasks then
+        Just "Resolve parent prerequisites, manual blocking, or closed ancestors before starting subtasks."
 
     else
         Nothing
@@ -1845,7 +1848,7 @@ viewProjectNextTasksPanel projection model project =
             Dict.get project.id model.cards.projectNextTaskDiagnosticsErrors
 
         waitingSubtasks =
-            waitingSubtasksForProject projection project
+            waitingSubtasksForProject projection model project
 
         candidateViews =
             candidates
@@ -2007,24 +2010,34 @@ nextTaskRationale candidate =
         "Dependency-blocked by " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ "."
 
     else if candidate.task.status == Api.Blocked then
-        "Blocked; no open dependency is counted by the next-task query."
+        "Blocked by incomplete subtasks or a manual pause; no open dependency is counted by the next-task query."
 
     else if candidate.completionGated then
         "Ready now; completion is gated by " ++ countPhrase candidate.openDescendantCount "open subtask" "open subtasks" ++ "."
 
     else if candidate.task.parentId /= Nothing then
-        "Ready subtask: parent is already in progress."
+        "Ready subtask: parent allows subtask work."
 
     else
         "Ready to start."
 
 
-waitingSubtasksForProject : CardTreeProjection -> Api.Project -> List Api.Task
-waitingSubtasksForProject projection project =
+taskRollupForProjection : CardTreeProjection -> Model -> String -> Maybe Api.TaskReadinessRollup
+taskRollupForProjection projection model taskId =
+    case Dict.get taskId projection.taskRollups of
+        Just rollup ->
+            Just rollup
+
+        Nothing ->
+            Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map .readinessRollup
+
+
+waitingSubtasksForProject : CardTreeProjection -> Model -> Api.Project -> List Api.Task
+waitingSubtasksForProject projection model project =
     let
-        parentNotInProgress parentId =
-            Dict.get parentId projection.tasksById
-                |> Maybe.map (\parent -> parent.status /= Api.InProgress)
+        parentIneligible parentId =
+            taskRollupForProjection projection model parentId
+                |> Maybe.map (\rollup -> not rollup.canStartSubtasks)
                 |> Maybe.withDefault True
     in
     (Dict.get project.id projection.projectTasks |> Maybe.withDefault [])
@@ -2033,7 +2046,7 @@ waitingSubtasksForProject projection project =
                 isOpenTaskStatus task.status
                     && (case task.parentId of
                             Just parentId ->
-                                parentNotInProgress parentId
+                                parentIneligible parentId
 
                             Nothing ->
                                 False
@@ -2084,7 +2097,7 @@ viewWaitingSubtasksNote waitingSubtasks =
         div [ class "project-next-tasks-note" ]
             [ text
                 (countPhrase (List.length waitingSubtasks) "subtask" "subtasks"
-                    ++ " waiting for parent to be in progress before other blockers are evaluated: "
+                    ++ " waiting for parent blockers to clear before other blockers are evaluated: "
                     ++ String.join ", " shown
                     ++ suffix
                     ++ "."
@@ -2098,13 +2111,13 @@ noReadyNextTaskMessage waitingSubtasks blockedDiagnostics diagnosticsLoading =
         "No ready tasks found. Checking blocked diagnostics…"
 
     else if not (List.isEmpty blockedDiagnostics) then
-        "No ready tasks found. Blocked candidates are listed below with their dependency/manual-blocking rationale."
+        "No ready tasks found. Blocked candidates are listed below with their blocking rationale."
 
     else if List.isEmpty waitingSubtasks then
         "No ready or blocked task candidates found for this project. Completed and cancelled work is hidden."
 
     else
-        "No ready tasks found. Start parent tasks, then resolve any remaining blockers, to make waiting subtasks actionable."
+        "No ready tasks found. Resolve parent blockers, then any remaining subtask blockers."
 
 
 viewFocusedTaskNode : CardTreeProjection -> Model -> Api.Task -> Html Msg
@@ -2144,6 +2157,14 @@ viewTaskCardBody descendants projection showProject model task =
             task.parentId
                 |> Maybe.andThen (\parentId -> Dict.get parentId model.tasks)
 
+        parentStatus =
+            case parentTask of
+                Just parent ->
+                    Just parent.status
+
+                Nothing ->
+                    task.parentId |> Maybe.andThen (\parentId -> Dict.get parentId model.dataLoading.taskCardSummaries) |> Maybe.map .status
+
         typeLabel =
             if isSubtask then
                 "SUB"
@@ -2170,9 +2191,7 @@ viewTaskCardBody descendants projection showProject model task =
                 |> Maybe.withDefault []
 
         maybeRollup =
-            case Dict.get task.id projection.taskRollups of
-                Just rollup -> Just rollup
-                Nothing -> Dict.get task.id model.dataLoading.taskCardSummaries |> Maybe.map .readinessRollup
+            taskRollupForProjection projection model task.id
 
         openDependencyCount =
             maybeRollup
@@ -2216,7 +2235,9 @@ viewTaskCardBody descendants projection showProject model task =
             taskCompletionBlockerReason openDescendantTaskCount
 
         taskStatusDisabled status =
-            taskStatusOptionDisabledReason completionBlockerReason isSubtask (Maybe.map .status parentTask) status
+            taskStatusOptionDisabledReason completionBlockerReason openDescendantTaskCount isSubtask parentStatus
+                (task.parentId |> Maybe.andThen (taskRollupForProjection projection model) |> Maybe.map .canStartSubtasks |> Maybe.withDefault False)
+                status
 
         taskProjectAllowsOpenTasks =
             task.projectId
@@ -2244,7 +2265,7 @@ viewTaskCardBody descendants projection showProject model task =
                 "Reopen the project before adding open subtasks."
     in
     div
-        ([ class ("card tree-card " ++ cardClass ++ taskCardStatusClass task.status ++ Feature.DragDrop.dragOverClass model task.id)
+        ([ class ("card tree-card " ++ cardClass ++ taskCardAppearanceClass task.status maybeRollup ++ Feature.DragDrop.dragOverClass model task.id)
         , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
         , id ("entity-" ++ task.id)
         , on "dragstart" (Decode.succeed (DragStartCard "task" task.id))
@@ -3581,8 +3602,8 @@ viewHierarchyViewport ws incoming =
                 taskId = String.dropLeft 5 family
             in
             case Dict.get taskId model.tasks of
-                Just task -> taskCardStatusClass task.status
-                Nothing -> Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map (.status >> taskCardStatusClass) |> Maybe.withDefault ""
+                Just task -> taskCardAppearanceClass task.status (taskRollupForProjection projection model taskId)
+                Nothing -> Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map (\summary -> taskCardAppearanceClass summary.status (taskRollupForProjection projection model taskId)) |> Maybe.withDefault ""
         pieceFamily piece =
             case piece of
                 Viewport.Row position _ _ -> familyAt position

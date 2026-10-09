@@ -15,7 +15,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
-import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, newManager)
+import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, managerIdleConnectionCount, newManager)
 import Network.HTTP.Types (Status, methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status500, statusCode)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
@@ -932,7 +932,7 @@ spec = do
         workspace <- createTestWorkspace env "mcp-change-stream-release-gate"
         withEnvironment "HMEM_MCP_PROVENANCE_TOKEN" trustedMcpProvenance $
           testWithApplication (pure app) $ \port ->
-            bracket (newManager defaultManagerSettings) closeManager $ \manager -> do
+            bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager -> do
               let base = "http://127.0.0.1:" <> show port
               created <- callWithKey manager base (Just localMcpBotToken) "project_create"
                 (object ["workspace_id" .= workspace.id, "name" .= ("MCP canonical project" :: Text)])
@@ -1238,25 +1238,25 @@ data RequestInfo = RequestInfo
 
 withMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
 withMock requests action = testWithApplication (pure (mockApp requests)) $ \port ->
-  bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+  bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
     action manager ("http://127.0.0.1:" <> show port)
 
 withBatchMovePreflightMock :: TVar [RequestInfo] -> Value -> Value -> (Manager -> String -> IO a) -> IO a
 withBatchMovePreflightMock requests taskResponse projectResponse action =
   testWithApplication (pure (batchMovePreflightApp requests taskResponse projectResponse)) $ \port ->
-    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
       action manager ("http://127.0.0.1:" <> show port)
 
 withBatchMoveGetErrorMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
 withBatchMoveGetErrorMock requests action =
   testWithApplication (pure (batchMoveGetErrorApp requests)) $ \port ->
-    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
       action manager ("http://127.0.0.1:" <> show port)
 
 withBatchMoveEveryTaskMismatchMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
 withBatchMoveEveryTaskMismatchMock requests action =
   testWithApplication (pure (batchMoveEveryTaskMismatchApp requests)) $ \port ->
-    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
       action manager ("http://127.0.0.1:" <> show port)
 
 batchMovePreflightApp :: TVar [RequestInfo] -> Value -> Value -> Wai.Application
@@ -1366,7 +1366,7 @@ withRenameProxyApp principal action =
       env.pool tracker wsState Nothing True
     workspace <- createTestWorkspace env "workspace-rename-mcp-proxy-errors"
     testWithApplication (pure app) $ \port ->
-      bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+      bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
         action workspace.id manager ("http://127.0.0.1:" <> show port)
 
 withEnvironment :: String -> String -> IO a -> IO a
@@ -1391,7 +1391,7 @@ mockApp requests request respond = do
 
 withErrorMock :: (Manager -> String -> IO a) -> IO a
 withErrorMock action = testWithApplication (pure errorApp) $ \port ->
-  bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+  bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
     action manager ("http://127.0.0.1:" <> show port)
 
 errorApp :: Wai.Application
@@ -1399,19 +1399,19 @@ errorApp _ respond = respond $ Wai.responseLBS status400 [("Content-Type", "text
 
 withStatusMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
 withStatusMock requests action = testWithApplication (pure (statusApp requests)) $ \port ->
-  bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+  bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
     action manager ("http://127.0.0.1:" <> show port)
 
 withWorkspaceStructuredStatusMock :: Status -> Text -> (Manager -> String -> IO a) -> IO a
 withWorkspaceStructuredStatusMock status message action =
   testWithApplication (pure (workspaceStructuredStatusApp status message)) $ \port ->
-    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
       action manager ("http://127.0.0.1:" <> show port)
 
 withDependencyCycleMock :: (Manager -> String -> IO a) -> IO a
 withDependencyCycleMock action =
   testWithApplication (pure dependencyCycleApp) $ \port ->
-    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
       action manager ("http://127.0.0.1:" <> show port)
 
 dependencyCycleApp :: Wai.Application
@@ -1421,7 +1421,7 @@ dependencyCycleApp _ respond = respond $ Wai.responseLBS status400 [("Content-Ty
 withLifecycleConflictMock :: (Manager -> String -> IO a) -> IO a
 withLifecycleConflictMock action =
   testWithApplication (pure lifecycleConflictApp) $ \port ->
-    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager ->
       action manager ("http://127.0.0.1:" <> show port)
 
 lifecycleConflictApp :: Wai.Application

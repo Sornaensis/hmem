@@ -1184,12 +1184,12 @@ instance ToJSON NextTaskCandidate where
 instance FromJSON NextTaskCandidate where
   parseJSON  = genericParseJSON jsonOptions
 
--- | Current dependency-derived blocking state for a task.  This intentionally
--- separates dependency auto-blocking from completion-gating subtasks.
+-- | Current automatic blocking causes for a task.
 data TaskDependencyAutoBlockSnapshot = TaskDependencyAutoBlockSnapshot
   { task                :: Task
   , autoBlocked         :: Bool
   , openDependencyCount :: Int
+  , openSubtaskCount    :: Int
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TaskDependencyAutoBlockSnapshot where
@@ -1294,7 +1294,8 @@ instance FromJSON TaskDependencySummary where parseJSON = genericParseJSON jsonO
 
 data TaskReadinessRollup = TaskReadinessRollup
   { openSubtaskCount :: Int, doneSubtaskCount :: Int, cancelledSubtaskCount :: Int, blockedSubtaskCount :: Int
-  , dependencyBlockedTaskCount :: Int, openDependencyCount :: Int, completionReady :: Bool }
+  , dependencyBlockedTaskCount :: Int, openDependencyCount :: Int, completionReady :: Bool
+  , inProgressSubtaskCount :: Int, canStartSubtasks :: Bool }
   deriving (Show, Eq, Generic)
 instance ToJSON TaskReadinessRollup where toJSON = genericToJSON jsonOptions
 instance FromJSON TaskReadinessRollup where parseJSON = genericParseJSON jsonOptions

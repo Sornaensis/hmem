@@ -906,7 +906,7 @@ tasks pool = listH :<|> createH :<|> batchMoveH :<|> getH :<|> updateH :<|> dele
     workspaceId <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit; reject (validateUpdateTaskInput input)
     result <- handleDBErrors (Task.updateTaskWithDependencySnapshots pool taskId input) >>= maybe (throwError err404) pure
     let (updated, before, after) = result
-        effects = [] -- snapshots are persisted by core; task updates do not expose Memory effects.
+        effects = dependencyStatusChanges "task_update" before after
     pure TaskMutationResult { task = updated, dependencyEffects = effects }
   deleteH taskId = do
     workspaceId <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit
@@ -948,7 +948,8 @@ dependencyStatusChanges action before after = mapMaybe changed after
     changed snapshot
       | snapshot.task.status == old.task.status
           && snapshot.autoBlocked == old.autoBlocked
-          && snapshot.openDependencyCount == old.openDependencyCount = Nothing
+          && snapshot.openDependencyCount == old.openDependencyCount
+          && snapshot.openSubtaskCount == old.openSubtaskCount = Nothing
       | otherwise = Just TaskDependencyStatusChange
           { task = snapshot.task
           , previousStatus = old.task.status
@@ -963,10 +964,20 @@ dependencyStatusChanges action before after = mapMaybe changed after
 
 dependencyStatusChangeReason :: TaskDependencyAutoBlockSnapshot -> TaskDependencyAutoBlockSnapshot -> Text
 dependencyStatusChangeReason previous current
-  | not previous.autoBlocked && current.autoBlocked = "blocked_by_open_dependencies"
-  | previous.autoBlocked && not current.autoBlocked = "unblocked_dependencies_resolved"
+  | current.task.status == Blocked && not current.autoBlocked
+      && (previous.autoBlocked || previous.task.status /= Blocked) = "manually_blocked"
+  | not previous.autoBlocked && current.autoBlocked =
+      if current.openDependencyCount > 0 && current.openSubtaskCount > 0 then "blocked_by_open_dependencies_and_subtasks"
+      else if current.openSubtaskCount > 0 then "blocked_by_open_subtasks"
+      else "blocked_by_open_dependencies"
+  | previous.autoBlocked && not current.autoBlocked && current.task.status == Todo =
+      if previous.openDependencyCount > 0 && previous.openSubtaskCount > 0 then "unblocked_dependencies_and_subtasks_resolved"
+      else if previous.openSubtaskCount > 0 then "unblocked_subtasks_resolved"
+      else "unblocked_dependencies_resolved"
   | current.openDependencyCount > previous.openDependencyCount = "open_dependency_added"
   | current.openDependencyCount < previous.openDependencyCount = "open_dependency_removed"
+  | current.openSubtaskCount > previous.openSubtaskCount = "open_subtask_added"
+  | current.openSubtaskCount < previous.openSubtaskCount = "open_subtask_removed"
   | otherwise = "dependency_status_changed"
 
 search :: Pool Hasql.Connection -> UnifiedSearchQuery -> Handler UnifiedSearchResults

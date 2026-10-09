@@ -52,12 +52,19 @@ workspace-scoped requests; possession of a resource UUID does not grant access.
 
 For planning clients, create projects/tasks through their OpenAPI routes or use
 `POST /api/v1/projects/spec` to create a project with 1–50 initial tasks.
-Tasks allow one level of subtasks. Start a parent before starting its subtask,
-satisfy dependency prerequisites, and finish open children before marking a task
+Tasks allow one level of subtasks. Parents with incomplete subtasks automatically
+become blocked and cannot start. Subtasks can start beneath a todo or automatically
+blocked parent when its prerequisites and ancestors permit work; manual parent
+blocks prevent child starts. Finish or cancel open children before marking a task
 done or a project completed. A lifecycle conflict returns HTTP 409 with a
 `code`, `message`, and optional `detail`/`hint`; resolve the reported blockers
 before retrying. Archiving a project and cancelling a task can affect descendants,
 so check the returned result rather than assuming only one record changed.
+
+Task overview and navigation readiness summaries derive `in_progress_subtask_count`
+and `can_start_subtasks` from the database, including children outside the loaded
+view. Closing the last child returns an automatically blocked parent to todo once
+its prerequisites are closed; starting or completing the parent remains explicit.
 
 Most list routes return `{"items":[...],"has_more":true}`. Start at `offset=0`,
 advance by the number of returned items, and stop when `has_more` is false.

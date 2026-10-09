@@ -51,6 +51,7 @@ data-files:
     migrations/V031__retire_unversioned_observation_snapshots.sql
     migrations/V032__observation_revision_events.sql
     migrations/V033__retire_pre_revision_observation_sessions.sql
+    migrations/V034__subtask_parent_auto_blocking.sql
 
 library
   exposed-modules:

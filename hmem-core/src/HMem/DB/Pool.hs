@@ -126,6 +126,7 @@ classifyError sessErr = classifyCmd cmdErr
     lifecycleCodeFor "HM104" = Just "TASK_SUBTASK_DEPTH_EXCEEDED"
     lifecycleCodeFor "HM105" = Just "TASK_SUBTASK_START_BLOCKED"
     lifecycleCodeFor "HM106" = Just "TASK_OPEN_UNDER_CANCELLED_TASK"
+    lifecycleCodeFor "HM107" = Just "TASK_START_BLOCKED_BY_SUBTASKS"
     lifecycleCodeFor "HM201" = Just "PROJECT_COMPLETION_BLOCKED"
     lifecycleCodeFor "HM202" = Just "PROJECT_OPEN_UNDER_CLOSED_PROJECT"
     lifecycleCodeFor "HM203" = Just "TASK_OPEN_UNDER_CLOSED_PROJECT"

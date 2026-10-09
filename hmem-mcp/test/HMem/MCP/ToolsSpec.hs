@@ -496,6 +496,18 @@ spec = do
         jsonRpcToolCall manager base initialized workspaceContext "task_move_batch" arguments
           >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "TASK_DEPENDENCY_CROSS_PROJECT" value))
 
+    it "preserves parent-start subtask blockers through MCP and JSON-RPC" $
+      withLifecycleConflictMock $ \manager base -> do
+        let arguments = object ["task_id" .= observationId]
+        response <- handleToolCall manager base Nothing (object ["name" .= ("task_start" :: Text), "arguments" .= arguments])
+        response `shouldSatisfy` isMcpError
+        response `shouldSatisfy` contains "TASK_START_BLOCKED_BY_SUBTASKS"
+        response `shouldSatisfy` contains "blocker_count"
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO Nothing
+        jsonRpcToolCall manager base initialized workspaceContext "task_start" arguments
+          >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "TASK_START_BLOCKED_BY_SUBTASKS" value))
+
     it "keeps the advertised registry parser and dispatch reachability in lockstep" $ do
       sort toolNames `shouldBe` sort (serverOwnedTools <> map fst toolSamples)
       mapM_ (\(name, arguments) -> parseToolCall name arguments `shouldSatisfy` isRight) toolSamples
@@ -1413,6 +1425,14 @@ withLifecycleConflictMock action =
       action manager ("http://127.0.0.1:" <> show port)
 
 lifecycleConflictApp :: Wai.Application
+lifecycleConflictApp request respond | request.requestMethod == methodPut = respond $ Wai.responseLBS status409 [("Content-Type", "application/json")]
+  (encode (object
+    [ "error" .= ("lifecycle_conflict" :: Text)
+    , "code" .= ("TASK_START_BLOCKED_BY_SUBTASKS" :: Text)
+    , "message" .= ("Cannot start a task with incomplete subtasks." :: Text)
+    , "detail" .= object ["blocker_count" .= (1 :: Int), "blocker_ids" .= [workspaceId]]
+    , "hint" .= ("Close incomplete subtasks before starting the parent task." :: Text)
+    ]))
 lifecycleConflictApp _ respond = respond $ Wai.responseLBS status409 [("Content-Type", "application/json")]
   (encode (object
     [ "error" .= ("lifecycle_conflict" :: Text)

@@ -704,6 +704,31 @@ spec = do
                 Left other -> expectationFailure $ "Expected historical V013 rejection, got: " <> show other
                 Right _ -> expectationFailure "Expected new unlinked memory insert to fail after V013"
 
+    it "subtaskParentMigration normalizes eligible existing parents and preserves manual blocks" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              beforeDir <- copyMigrationSubset sandbox migrations "pre-v034" (\name -> name < "V034")
+              upgradeDir <- copyMigrationSubset sandbox migrations "v034-only" (== "V034__subtask_parent_auto_blocking.sql")
+              initial <- Migration.runMigrations pool beforeDir
+              initial.failed `shouldBe` Nothing
+              wsId <- runSession pool $ Session.statement ("subtask-parent-upgrade" :: Text) insertWorkspaceDirectStatement
+              projectId <- runSession pool $ Session.statement (wsId, "project" :: Text) insertProjectDirectStatement
+              todoParent <- runSession pool $ Session.statement (wsId, projectId, Nothing, "todo parent" :: Text, "todo" :: Text) insertTaskDirectStatement
+              runningParent <- runSession pool $ Session.statement (wsId, projectId, Nothing, "running parent" :: Text, "in_progress" :: Text) insertTaskDirectStatement
+              manualParent <- runSession pool $ Session.statement (wsId, projectId, Nothing, "manual parent" :: Text, "blocked" :: Text) insertTaskDirectStatement
+              mapM_ (\parentId -> runSession pool $ Session.statement (wsId, projectId, Just parentId, "child" :: Text, "todo" :: Text) insertTaskDirectStatement) [todoParent, runningParent, manualParent]
+              upgraded <- Migration.runMigrations pool upgradeDir
+              upgraded.failed `shouldBe` Nothing
+              mapM (\taskId -> runSession pool $ Session.statement taskId taskStatusTextStatement) [todoParent, runningParent, manualParent]
+                `shouldReturn` ["blocked", "blocked", "blocked"]
+              mapM (\taskId -> runSession pool $ Session.statement taskId taskAutoBlockedStatement) [todoParent, runningParent, manualParent]
+                `shouldReturn` [True, True, False]
+              mapM (\taskId -> runSession pool $ Session.statement taskId taskCanStartSubtasksStatement) [todoParent, runningParent, manualParent]
+                `shouldReturn` [True, True, False]
+
     it "autoBlockMigration backfills existing task blockers and preserves manual blocked tasks" $
       withTestSandbox $ \sandbox -> do
         migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
@@ -1952,6 +1977,12 @@ taskStatusTextStatement = Statement.Statement sql encoder decoder True
     sql = "SELECT status::text FROM tasks WHERE id = $1"
     encoder = E.param (E.nonNullable E.uuid)
     decoder = D.singleRow (D.column (D.nonNullable D.text))
+
+taskCanStartSubtasksStatement :: Statement.Statement UUID Bool
+taskCanStartSubtasksStatement = Statement.Statement
+  "SELECT hmem_task_can_start_subtasks($1)"
+  (E.param (E.nonNullable E.uuid))
+  (D.singleRow (D.column (D.nonNullable D.bool))) True
 
 taskAutoBlockedStatement :: Statement.Statement UUID Bool
 taskAutoBlockedStatement = Statement.Statement sql encoder decoder True

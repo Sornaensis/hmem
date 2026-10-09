@@ -113,7 +113,7 @@ emptyProjectReadinessRollup :: ProjectReadinessRollup
 emptyProjectReadinessRollup = ProjectReadinessRollup 0 0 0 0 0 0 0 0 True 0
 
 emptyTaskReadinessRollup :: TaskReadinessRollup
-emptyTaskReadinessRollup = TaskReadinessRollup 0 0 0 0 0 0 True
+emptyTaskReadinessRollup = TaskReadinessRollup 0 0 0 0 0 0 True 0 False
 
 listTaskDependencyPage :: Pool Hasql.Connection -> UUID -> Int -> Int -> IO TaskDependencyPage
 listTaskDependencyPage pool taskId requestedLimit requestedOffset = do
@@ -176,19 +176,14 @@ taskReadinessRollupStatement = Statement.Statement sql encoder decoder True
       , " (SELECT count(DISTINCT task_id)::bigint FROM open_dependency_edges),"
       , " (SELECT count(*)::bigint FROM open_dependency_edges),"
       , " NOT EXISTS (SELECT 1 FROM desc_tasks WHERE hmem_is_open_task_status(status))"
+      , " , (SELECT count(*)::bigint FROM desc_tasks WHERE parent_id=$1 AND status='in_progress'::task_status_enum)"
+      , " , hmem_task_can_start_subtasks($1)"
       ]
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = taskReadinessRollupRowDecoder
 
 taskReadinessRollupRowDecoder :: Dec.Result TaskReadinessRollup
-taskReadinessRollupRowDecoder = Dec.singleRow $ TaskReadinessRollup
-  <$> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
-  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
-  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
-  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
-  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
-  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
-  <*> Dec.column (Dec.nonNullable Dec.bool)
+taskReadinessRollupRowDecoder = Dec.singleRow taskReadinessRollupFields
 
 -- The recursive CTE is the single-task lifecycle definition above with a
 -- root_id carried through each row.  That keeps card rollups bit-for-bit
@@ -212,6 +207,8 @@ taskReadinessRollupsBatchStatement = Statement.Statement sql encoder decoder Tru
       , " (SELECT count(DISTINCT task_id)::bigint FROM open_dependency_edges e WHERE e.root_id=roots.root_id),"
       , " (SELECT count(*)::bigint FROM open_dependency_edges e WHERE e.root_id=roots.root_id),"
       , " NOT EXISTS (SELECT 1 FROM desc_tasks t WHERE t.root_id=roots.root_id AND hmem_is_open_task_status(t.status))"
+      , " , (SELECT count(*)::bigint FROM desc_tasks t WHERE t.root_id=roots.root_id AND t.parent_id=roots.root_id AND t.status='in_progress'::task_status_enum)"
+      , " , hmem_task_can_start_subtasks(roots.root_id)"
       , "FROM roots"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
@@ -224,6 +221,8 @@ taskReadinessRollupFields = TaskReadinessRollup
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
+  <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
+  <*> Dec.column (Dec.nonNullable Dec.bool)
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> Dec.column (Dec.nonNullable Dec.bool)
 

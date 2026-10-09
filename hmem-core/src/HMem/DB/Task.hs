@@ -375,8 +375,8 @@ ensureTaskCanBecomeSubtask pool taskId (Just _) = do
         (Just $ blockerDetail childId)
         (Just "Move, delete, or detach existing subtasks before making this task a subtask.")
 
-ensureSubtaskStartAllowed :: Bool -> Maybe Task -> TaskStatus -> IO ()
-ensureSubtaskStartAllowed shouldEnforce mParent targetStatus =
+ensureSubtaskStartAllowed :: Pool Hasql.Connection -> Bool -> Maybe Task -> TaskStatus -> IO ()
+ensureSubtaskStartAllowed pool shouldEnforce mParent targetStatus =
   case (shouldEnforce, mParent, targetStatus) of
     (_, Just parent, status) | parent.status == Cancelled && status `elem` [Todo, InProgress, Blocked] ->
       throwIO $ lifecycleViolation
@@ -384,13 +384,20 @@ ensureSubtaskStartAllowed shouldEnforce mParent targetStatus =
         "Cannot place an unfinished subtask under a cancelled task."
         (Just $ blockerDetail parent.id)
         (Just "Reopen the parent task before adding, moving, or reopening unfinished subtasks.")
-    (True, Just parent, InProgress) | parent.status /= InProgress ->
-      throwIO $ lifecycleViolation
+    (True, Just parent, InProgress) -> do
+      allowed <- runSession pool $ Session.statement parent.id canStartSubtasksStatement
+      when (not allowed) $ throwIO $ lifecycleViolation
         "TASK_SUBTASK_START_BLOCKED"
-        "Cannot start a subtask while its parent task is not in progress."
+        "Cannot start a subtask while its parent task is not eligible for subtask work."
         (Just $ blockerDetail parent.id)
-        (Just "Start the parent task before moving a subtask to in_progress.")
+        (Just "Resolve parent prerequisites, manual blocking, or closed ancestors before starting subtasks.")
     _ -> pure ()
+
+canStartSubtasksStatement :: Statement.Statement UUID Bool
+canStartSubtasksStatement = Statement.Statement
+  "SELECT hmem_task_can_start_subtasks($1)"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
 
 taskFirstActiveChild :: Pool Hasql.Connection -> UUID -> IO (Maybe UUID)
 taskFirstActiveChild pool taskId =
@@ -811,7 +818,7 @@ taskBatchMoveParentProjectMismatchStatement = Statement.Statement sql encoder de
 createTask :: Pool Hasql.Connection -> CreateTask -> IO Task
 createTask pool ct = do
   parent <- ensureTaskPlacement pool ct.workspaceId ct.projectId ct.parentId
-  ensureSubtaskStartAllowed False parent Todo
+  ensureSubtaskStartAllowed pool False parent Todo
   let pri  = maybe 5 fromIntegral (ct.priority) :: Int16
       meta = fromMaybe (toJSON (mempty :: Object)) (ct.metadata)
   rows <- runSession pool $ Session.statement () $ run $
@@ -919,7 +926,7 @@ updateTaskWithDependencySnapshots pool tid ut = do
               )
       mParent <- ensureTaskPlacement pool task.workspaceId targetProjectId targetParentId
       ensureTaskCanBecomeSubtask pool tid targetParentId
-      ensureSubtaskStartAllowed enforcingStartGate mParent targetStatus
+      ensureSubtaskStartAllowed pool enforcingStartGate mParent targetStatus
       let projectChanged = task.projectId /= targetProjectId
           placementChanged = projectChanged || task.parentId /= targetParentId
           parentSeedIds = [parentId | Just parentId <- [task.parentId, targetParentId]]
@@ -1323,10 +1330,10 @@ filteredTaskChildrenStatement = Statement.Statement sql encoder (Dec.rowList raw
 -- A task is actionable when it is still open and either has no open
 -- dependencies or dependency-blocked diagnostics were explicitly requested.
 -- Project subprojects are included recursively, and descendants of in-scope
--- tasks are included for migrated task trees.  Subtasks are only startable
--- when their immediate parent is in_progress.  Parents with open descendants
--- are returned with completionGated/openDescendantCount annotations rather
--- than being filtered out.  Results are ordered by scoped project priority,
+-- tasks are included for migrated task trees. Subtasks are startable when
+-- their parent is eligible for subtask work. Automatically blocked parents
+-- are diagnostics when requested, with completion gating annotations.
+-- Results are ordered by scoped project priority,
 -- then task priority, then stable task creation/id tie-breakers.
 listNextTasks :: Pool Hasql.Connection -> UUID -> Bool -> Int -> IO [NextTaskCandidate]
 listNextTasks pool projectId includeBlocked limitRows = do
@@ -1389,7 +1396,7 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "    LEFT JOIN scoped_tasks parent ON task.parent_id = parent.id"
       , "   WHERE task.status IN ('todo'::task_status_enum, 'in_progress'::task_status_enum, 'blocked'::task_status_enum)"
       , "     AND ($2 OR task.status <> 'blocked'::task_status_enum)"
-      , "     AND (task.parent_id IS NULL OR parent.status = 'in_progress'::task_status_enum)"
+      , "     AND (task.parent_id IS NULL OR hmem_task_can_start_subtasks(task.parent_id))"
       , "),"
       , "open_descendant_ancestors(descendant_id, ancestor_id) AS ("
       , "  SELECT child.id, parent.id"
@@ -1468,6 +1475,7 @@ enrichDependencyAutoBlockSnapshots pool snapshots = do
         { task = Map.findWithDefault snapshot.task snapshot.task.id enrichedById
         , autoBlocked = snapshot.autoBlocked
         , openDependencyCount = snapshot.openDependencyCount
+        , openSubtaskCount = snapshot.openSubtaskCount
         }
   pure $ map enrichSnapshot snapshots
 
@@ -1522,7 +1530,8 @@ dependencyAutoBlockSnapshotsStatement = Statement.Statement sql encoder decoder 
       , "       t.status::text, t.priority, t.metadata, t.due_at, t.completed_at,"
       , "       t.created_at, t.updated_at,"
       , "       t.auto_blocked,"
-      , "       coalesce(open_dep.open_dependency_count, 0)::bigint"
+      , "       coalesce(open_dep.open_dependency_count, 0)::bigint,"
+      , "       (SELECT count(*)::bigint FROM tasks child WHERE child.parent_id=t.id AND child.deleted_at IS NULL AND hmem_is_open_task_status(child.status))"
       , "  FROM tasks t"
       , "  JOIN targets target ON target.id = t.id"
       , "  LEFT JOIN LATERAL ("
@@ -1546,10 +1555,12 @@ dependencyAutoBlockSnapshotRowDecoder = do
   task <- rawTaskRowDecoder
   autoBlocked <- Dec.column (Dec.nonNullable Dec.bool)
   openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
+  openSubtaskCount <- Dec.column (Dec.nonNullable Dec.int8)
   pure TaskDependencyAutoBlockSnapshot
     { task = task
     , autoBlocked = autoBlocked
     , openDependencyCount = fromIntegral openDependencyCount
+    , openSubtaskCount = fromIntegral openSubtaskCount
     }
 
 ------------------------------------------------------------------------

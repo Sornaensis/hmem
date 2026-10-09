@@ -184,6 +184,50 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       map (jsonPath ["transaction", "id"] . (.outboxEnvelope)) (drop 1 mutations)
         `shouldSatisfy` (\case [Just a, Just b, Just c] -> a == b && b == c; _ -> False)
 
+    it "rejects parent starts with structured subtask blockers and publishes running-child readiness" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-subtask-parent"
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
+      let path task = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
+      rejected <- putJson app (path parent) (object ["status" .= ("in_progress" :: T.Text)])
+      responseStatus rejected `shouldBe` status409
+      let Just errorValue = decode (responseBody rejected) :: Maybe Value
+      jsonField "code" errorValue `shouldBe` Just (String "TASK_START_BLOCKED_BY_SUBTASKS")
+      started <- putJson app (path child) (object ["status" .= ("in_progress" :: T.Text)])
+      responseStatus started `shouldBe` status200
+      overviewResponse <- request app methodGet (path parent <> "/overview") ""
+      let Just overview = decode (responseBody overviewResponse) :: Maybe TaskOverview
+      overview.task.status `shouldBe` Blocked
+      overview.readinessRollup.inProgressSubtaskCount `shouldBe` 1
+      overview.readinessRollup.canStartSubtasks `shouldBe` True
+      closed <- putJson app (path child) (object ["status" .= ("done" :: T.Text)])
+      responseStatus closed `shouldBe` status200
+      let Just mutation = decode (responseBody closed) :: Maybe TaskMutationResult
+      map (.reason) mutation.dependencyEffects `shouldContain` ["unblocked_subtasks_resolved"]
+      fmap (fmap (.status)) (Task.getTask env.pool parent.id) `shouldReturn` Just Todo
+
+    it "reports manual blocking without claiming unresolved subtask blockers were resolved" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-subtask-manual"
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
+      let path task = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
+      paused <- putJson app (path parent) (object ["status" .= ("blocked" :: T.Text)])
+      responseStatus paused `shouldBe` status200
+      let Just mutation = decode (responseBody paused) :: Maybe TaskMutationResult
+          [effect] = filter (\effect -> effect.task.id == parent.id) mutation.dependencyEffects
+      effect.previousStatus `shouldBe` Blocked
+      effect.currentStatus `shouldBe` Blocked
+      effect.previousAutoBlocked `shouldBe` True
+      effect.autoBlocked `shouldBe` False
+      effect.reason `shouldBe` "manually_blocked"
+      refused <- putJson app (path child) (object ["status" .= ("in_progress" :: T.Text)])
+      responseStatus refused `shouldBe` status409
+      closed <- putJson app (path child) (object ["status" .= ("done" :: T.Text)])
+      responseStatus closed `shouldBe` status200
+      let Just closedMutation = decode (responseBody closed) :: Maybe TaskMutationResult
+      map (.reason) closedMutation.dependencyEffects `shouldNotContain` ["unblocked_subtasks_resolved"]
+      fmap (fmap (.status)) (Task.getTask env.pool parent.id) `shouldReturn` Just Blocked
+
     it "rejects unfinished create reparent and in-progress reopen under a cancelled parent with HM106 guidance" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-cascade-cancelled-parent"
       parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
@@ -219,8 +263,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       mapM (fmap (fmap (.status)) . Task.getTask env.pool) [parent.id, child.id] `shouldReturn` replicate 2 (Just Cancelled)
       records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
       let reverts = filter (\record -> jsonPath ["transaction", "cause"] record.outboxEnvelope == Just (String "audit_revert")) records
-      length reverts `shouldBe` 2
-      map (jsonPath ["transaction", "id"] . (.outboxEnvelope)) reverts `shouldSatisfy` (\case [Just a, Just b] -> a == b; _ -> False)
+      -- The auto-blocked parent also clears its automatic attribution in V029.
+      length reverts `shouldBe` 3
+      map (jsonPath ["entity", "id"] . (.outboxEnvelope)) reverts `shouldMatchList`
+        map (Just . String . T.pack . show) [parent.id, parent.id, child.id]
+      map (jsonPath ["transaction", "id"] . (.outboxEnvelope)) reverts `shouldSatisfy` (\case [Just a, Just b, Just c] -> a == b && b == c; _ -> False)
 
   describe "unified search continuation HTTP contract" $ do
     it "returns independent page metadata and stable filtered pages" $ \(env, app) -> do

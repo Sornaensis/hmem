@@ -284,6 +284,66 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     fmap (fmap (.parentId)) (Task.getTask env.pool moving.id) `shouldReturn` Just Nothing
     listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50 `shouldReturn` before
 
+  it "serializes a concurrent child insert behind a parent start and auto-blocks the parent" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "subtask-concurrent-insert"
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    acquired <- newEmptyMVar
+    release <- newEmptyMVar
+    let holder = withConn env.pool $ \connection ->
+          (do
+            started <- Session.run (Session.sql "BEGIN" *> Session.statement parent.id cascadeReopenStatement) connection
+            case started of Left err -> fail (show err); Right _ -> pure ()
+            putMVar acquired ()
+            takeMVar release
+            committed <- Session.run (Session.sql "COMMIT") connection
+            case committed of Left err -> fail (show err); Right _ -> pure ())
+          `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+        inserting = try @DBException $ runTransaction env.pool $ do
+          Session.sql "SET LOCAL application_name = 'subtask-child-create'"
+          Session.statement (workspace.id, parent.id) cascadeInsertChildStatement
+    completed <- timeout 10000000 $
+      withAsync holder $ \writer ->
+        (do
+          takeMVar acquired
+          withAsync inserting $ \childWriter -> do
+            waitForLockWait env.pool "subtask-child-create"
+            putMVar release ()
+            wait writer
+            wait childWriter)
+        `finally` void (tryPutMVar release ())
+    completed `shouldSatisfy` (\case Just (Right ()) -> True; _ -> False)
+    fmap (fmap (.status)) (Task.getTask env.pool parent.id) `shouldReturn` Just Blocked
+
+  it "refuses a concurrent parent start after a child insert commits" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "subtask-concurrent-start"
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    acquired <- newEmptyMVar
+    release <- newEmptyMVar
+    let holder = withConn env.pool $ \connection ->
+          (do
+            inserted <- Session.run (Session.sql "BEGIN" *> Session.statement (workspace.id, parent.id) cascadeInsertChildStatement) connection
+            case inserted of Left err -> fail (show err); Right _ -> pure ()
+            putMVar acquired ()
+            takeMVar release
+            committed <- Session.run (Session.sql "COMMIT") connection
+            case committed of Left err -> fail (show err); Right _ -> pure ())
+          `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+        starting = try @DBException $ runTransaction env.pool $ do
+          Session.sql "SET LOCAL application_name = 'subtask-parent-start'"
+          Session.statement parent.id cascadeReopenStatement
+    completed <- timeout 10000000 $
+      withAsync holder $ \writer ->
+        (do
+          takeMVar acquired
+          withAsync starting $ \parentWriter -> do
+            waitForLockWait env.pool "subtask-parent-start"
+            putMVar release ()
+            wait writer
+            wait parentWriter)
+        `finally` void (tryPutMVar release ())
+    completed `shouldSatisfy` (\case Just (Left (DBLifecycleViolation "TASK_START_BLOCKED_BY_SUBTASKS" _ _ _)) -> True; _ -> False)
+    fmap (fmap (.status)) (Task.getTask env.pool parent.id) `shouldReturn` Just Blocked
+
   it "cascade cancellation serializes a concurrent unfinished child insert behind the cancelled parent" $ \_ -> withTestEnv $ \env -> do
     workspace <- createTestWorkspace env "cascade-concurrent-insert"
     parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
@@ -987,9 +1047,16 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
           , object ["kind" .= ("readiness" :: T.Text), "target" .= ("task:" <> idText oldParent.id)]
           , object ["kind" .= ("readiness" :: T.Text), "target" .= ("task:" <> idText newParent.id)]
           ]
-    case records of
+    length records `shouldBe` 3
+    map (envelopeEntityField "id") records `shouldMatchList` map (Just . String . idText) [moved.id, oldParent.id, newParent.id]
+    case filter ((== Just (String (idText moved.id))) . envelopeEntityField "id") records of
       [record] -> envelopeField "invalidations" record `shouldBe` Just expected
       _ -> expectationFailure "expected one outbox record for the direct task move"
+    map (envelopeField "transaction") records `shouldSatisfy` (\case
+      first : rest -> first /= Nothing && all (== first) rest
+      [] -> False)
+    fmap (fmap (.status)) (Task.getTask env.pool oldParent.id) `shouldReturn` Just Todo
+    fmap (fmap (.status)) (Task.getTask env.pool newParent.id) `shouldReturn` Just Blocked
 
 observationInvalidations :: UUID.UUID -> UUID.UUID -> Value
 observationInvalidations workspaceId observationId = toJSON

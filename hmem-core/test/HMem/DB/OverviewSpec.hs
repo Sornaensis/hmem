@@ -108,12 +108,12 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       shown <- listFilteredProjectChildren env.pool workspace.id Nothing emptyNavigationFilter 50 0
       map (.id) shown `shouldMatchList` [empty.id, root.id]
       [summary] <- projectCardSummaries env.pool [root]
-      summary.readinessRollup.inProgressTaskCount `shouldBe` 2
+      summary.readinessRollup.inProgressTaskCount `shouldBe` 1
       overview <- getProjectOverview env.pool root.id
-      fmap (\value -> value.readinessRollup.inProgressTaskCount) overview `shouldBe` Just 2
+      fmap (\value -> value.readinessRollup.inProgressTaskCount) overview `shouldBe` Just 1
       _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing Unchanged)
       [refreshed] <- projectCardSummaries env.pool [root]
-      refreshed.readinessRollup.inProgressTaskCount `shouldBe` 1
+      refreshed.readinessRollup.inProgressTaskCount `shouldBe` 0
 
     it "orders bounded dependency pages by name with deterministic pagination" $ \env -> do
       workspace <- createTestWorkspace env "overview-dependency-page-order"

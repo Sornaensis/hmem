@@ -18,7 +18,7 @@ import Data.UUID (UUID)
 import Test.Hspec
 
 import HMem.DB.Observation
-import HMem.DB.Overview (getTaskOverview)
+import HMem.DB.Overview (getTaskOverview, taskCardSummaries)
 import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
 import HMem.DB.Pool (DBException(..), withConn, runSession)
 import HMem.DB.Project qualified as Project
@@ -27,8 +27,164 @@ import HMem.DB.TestHarness
 import HMem.Types
 
 spec :: Spec
-spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
+spec = do
+  around withTestEnv $ describe "Subtask rejection lifecycle" $ do
+    it "auto-blocks parents while eligible subtasks progress and returns parents to todo" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-auto-block"
+      project <- createProjectFor env workspace.id "project"
+      parent <- createTaskFor env workspace.id (Just project.id) Nothing "parent"
+      child <- createTaskFor env workspace.id (Just project.id) (Just parent.id) "child"
+      fmap (fmap (.status)) (getTask env.pool parent.id) `shouldReturn` Just Blocked
+      expectLifecycleCode "TASK_START_BLOCKED_BY_SUBTASKS" $ updateTask env.pool parent.id (cancelStatusUpdate InProgress)
+      candidates <- listNextTasks env.pool project.id False 20
+      map (\candidate -> candidate.task.id) candidates `shouldBe` [child.id]
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      Just overview <- getTaskOverview env.pool parent.id
+      overview.task.status `shouldBe` Blocked
+      overview.readinessRollup.inProgressSubtaskCount `shouldBe` 1
+      overview.readinessRollup.canStartSubtasks `shouldBe` True
+      [card] <- taskCardSummaries env.pool [overview.task]
+      card.readinessRollup `shouldBe` overview.readinessRollup
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Done)
+      fmap (fmap (.status)) (getTask env.pool parent.id) `shouldReturn` Just Todo
+      Just closed <- getTaskOverview env.pool parent.id
+      closed.readinessRollup.inProgressSubtaskCount `shouldBe` 0
+      closed.readinessRollup.completionReady `shouldBe` True
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate InProgress)
+      fmap (fmap (.status)) (getTask env.pool parent.id) `shouldReturn` Just InProgress
+
+    it "revalidates running-child restoration against manual parent and child prerequisite blockers" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-restoration"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      _ <- deleteTask env.pool child.id
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Blocked)
+      expectLifecycleCode "TASK_SUBTASK_START_BLOCKED" $ restoreTask env.pool child.id
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Todo)
+      restoreTask env.pool child.id `shouldReturn` True
+      prerequisite <- createTaskFor env workspace.id Nothing Nothing "prerequisite"
+      addDependency env.pool child.id prerequisite.id
+      fmap (fmap (.status)) (getTask env.pool child.id) `shouldReturn` Just Blocked
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      fmap (fmap (.status)) (getTask env.pool child.id) `shouldReturn` Just Blocked
+
+    it "preserves explicit manual blocking after a subtask auto-block, including direct SQL" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-manual-conversion"
+      let checkManual block = do
+            parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+            running <- createTaskFor env workspace.id Nothing (Just parent.id) "running"
+            waiting <- createTaskFor env workspace.id Nothing (Just parent.id) "waiting"
+            _ <- updateTask env.pool running.id (cancelStatusUpdate InProgress)
+            block parent.id
+            block parent.id -- Repeating the explicit pause must remain manual.
+            Just overview <- getTaskOverview env.pool parent.id
+            overview.task.status `shouldBe` Blocked
+            overview.readinessRollup.canStartSubtasks `shouldBe` False
+            fmap (fmap (.status)) (getTask env.pool running.id) `shouldReturn` Just InProgress
+            expectLifecycleCode "TASK_SUBTASK_START_BLOCKED" $ updateTask env.pool waiting.id (cancelStatusUpdate InProgress)
+            _ <- updateTask env.pool running.id (cancelStatusUpdate Done)
+            _ <- updateTask env.pool waiting.id (cancelStatusUpdate Cancelled)
+            fmap (fmap (.status)) (getTask env.pool parent.id) `shouldReturn` Just Blocked
+      checkManual (\taskId -> updateTask env.pool taskId (cancelStatusUpdate Blocked) >> pure ())
+      checkManual (\taskId -> runSession env.pool $ Session.statement taskId blockTaskStatement)
+
+    it "preserves automatic attribution during direct recomputation of legacy running parents" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-direct-recompute"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      _ <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      runSession env.pool $ Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER"
+      runSession env.pool $ Session.statement parent.id startTaskStatement
+      runSession env.pool $ Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER"
+      runSession env.pool $ Session.statement parent.id recomputeTaskStatement
+      Just overview <- getTaskOverview env.pool parent.id
+      overview.task.status `shouldBe` Blocked
+      overview.readinessRollup.canStartSubtasks `shouldBe` True
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Blocked)
+      Just manual <- getTaskOverview env.pool parent.id
+      manual.readinessRollup.canStartSubtasks `shouldBe` False
+  taskLifecycleSpec
+
+taskLifecycleSpec :: Spec
+taskLifecycleSpec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Task lifecycle" $ do
+    it "keeps manual and prerequisite blocked parents ineligible without pausing running children" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-parent-blockers"
+      manual <- createTaskFor env workspace.id Nothing Nothing "manual"
+      _ <- updateTask env.pool manual.id (cancelStatusUpdate Blocked)
+      manualChild <- createTaskFor env workspace.id Nothing (Just manual.id) "manual child"
+      expectLifecycleCode "TASK_SUBTASK_START_BLOCKED" $ updateTask env.pool manualChild.id (cancelStatusUpdate InProgress)
+      _ <- updateTask env.pool manualChild.id (cancelStatusUpdate Done)
+      fmap (fmap (.status)) (getTask env.pool manual.id) `shouldReturn` Just Blocked
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      first <- createTaskFor env workspace.id Nothing (Just parent.id) "first"
+      second <- createTaskFor env workspace.id Nothing (Just parent.id) "second"
+      _ <- updateTask env.pool first.id (cancelStatusUpdate InProgress)
+      prerequisite <- createTaskFor env workspace.id Nothing Nothing "prerequisite"
+      addDependency env.pool parent.id prerequisite.id
+      expectLifecycleCode "TASK_SUBTASK_START_BLOCKED" $ updateTask env.pool second.id (cancelStatusUpdate InProgress)
+      fmap (fmap (.status)) (getTask env.pool first.id) `shouldReturn` Just InProgress
+      Just blocked <- getTaskOverview env.pool parent.id
+      blocked.readinessRollup.canStartSubtasks `shouldBe` False
+      _ <- updateTask env.pool first.id (cancelStatusUpdate Done)
+      _ <- updateTask env.pool second.id (cancelStatusUpdate Cancelled)
+      fmap (fmap (.status)) (getTask env.pool parent.id) `shouldReturn` Just Blocked
+      _ <- updateTask env.pool prerequisite.id (cancelStatusUpdate Done)
+      fmap (fmap (.status)) (getTask env.pool parent.id) `shouldReturn` Just Todo
+
+    it "recomputes both parents on running-child placement, reopening and deletion" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-placement"
+      first <- createTaskFor env workspace.id Nothing Nothing "first"
+      second <- createTaskFor env workspace.id Nothing Nothing "second"
+      child <- createTaskFor env workspace.id Nothing (Just first.id) "child"
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      _ <- updateTask env.pool child.id ((cancelStatusUpdate InProgress) { parentId = SetTo second.id })
+      mapM (fmap (fmap (.status)) . getTask env.pool) [first.id, second.id] `shouldReturn` [Just Todo, Just Blocked]
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Done)
+      fmap (fmap (.status)) (getTask env.pool second.id) `shouldReturn` Just Todo
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      fmap (fmap (.status)) (getTask env.pool second.id) `shouldReturn` Just Blocked
+      _ <- deleteTask env.pool child.id
+      fmap (fmap (.status)) (getTask env.pool second.id) `shouldReturn` Just Todo
+      restoreTask env.pool child.id `shouldReturn` True
+      fmap (fmap (.status)) (getTask env.pool second.id) `shouldReturn` Just Blocked
+      _ <- updateTask env.pool child.id ((cancelStatusUpdate InProgress) { parentId = SetNull })
+      fmap (fmap (.status)) (getTask env.pool second.id) `shouldReturn` Just Todo
+      _ <- updateTask env.pool second.id (cancelStatusUpdate Blocked)
+      expectLifecycleCode "TASK_SUBTASK_START_BLOCKED" $
+        updateTask env.pool child.id ((cancelStatusUpdate InProgress) { parentId = SetTo second.id })
+
+    it "sees same-statement inserts and transitions through the authoritative child eligibility predicate" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-same-statement"
+      runSession env.pool $ Session.statement workspace.id insertRunningChildWithParentStatement
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      runSession env.pool $ Session.statement (parent.id, child.id) finishChildAndStartParentStatement
+      mapM (fmap (fmap (.status)) . getTask env.pool) [parent.id, child.id] `shouldReturn` [Just InProgress, Just Done]
+      runSession env.pool $ Session.statement (parent.id, child.id) reopenChildAndResetParentStatement
+      mapM (fmap (fmap (.status)) . getTask env.pool) [parent.id, child.id] `shouldReturn` [Just Blocked, Just InProgress]
+
+    it "rejects direct SQL parent starts atomically and normalizes metadata-only legacy running parents" $ \env -> do
+      workspace <- createTestWorkspace env "subtask-raw-start"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      before <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
+      result <- withConn env.pool $ \connection -> do
+        ensureSession "savepoint" =<< Session.run (Session.sql "SAVEPOINT parent_start") connection
+        attempted <- Session.run (Session.statement parent.id startTaskStatement) connection
+        ensureSession "rollback" =<< Session.run (Session.sql "ROLLBACK TO SAVEPOINT parent_start") connection
+        ensureSession "release" =<< Session.run (Session.sql "RELEASE SAVEPOINT parent_start") connection
+        pure attempted
+      result `shouldSatisfy` isLeft
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50 `shouldReturn` before
+      runSession env.pool $ Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER"
+      runSession env.pool $ Session.statement parent.id startTaskStatement
+      runSession env.pool $ Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER"
+      _ <- updateTask env.pool parent.id ((cancelStatusUpdate Todo) { status = Nothing, title = Just "renamed" })
+      fmap (fmap (.status)) (getTask env.pool parent.id) `shouldReturn` Just Blocked
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      fmap (fmap (.status)) (getTask env.pool child.id) `shouldReturn` Just InProgress
+
     it "cascade cancellation closes unfinished subtasks and preserves done rows and dependency edges" $ \env -> do
       workspace <- createTestWorkspace env "task-cascade-cancel"
       parent <- createTaskFor env workspace.id Nothing Nothing "parent"
@@ -211,6 +367,36 @@ cancelTaskStatement = Statement.Statement
   "UPDATE tasks SET status = 'cancelled' WHERE id = $1"
   (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
 
+startTaskStatement :: Statement.Statement UUID ()
+startTaskStatement = Statement.Statement
+  "UPDATE tasks SET status = 'in_progress' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+blockTaskStatement :: Statement.Statement UUID ()
+blockTaskStatement = Statement.Statement
+  "UPDATE tasks SET status = 'blocked' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+recomputeTaskStatement :: Statement.Statement UUID ()
+recomputeTaskStatement = Statement.Statement
+  "SELECT hmem_recompute_task_auto_blocking(ARRAY[$1]::uuid[])"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+insertRunningChildWithParentStatement :: Statement.Statement UUID ()
+insertRunningChildWithParentStatement = Statement.Statement
+  "WITH ids AS (SELECT gen_random_uuid() AS parent_id, gen_random_uuid() AS child_id) INSERT INTO tasks (id,workspace_id,parent_id,title,status) SELECT parent_id,$1,NULL,'same parent','todo'::task_status_enum FROM ids UNION ALL SELECT child_id,$1,parent_id,'same child','in_progress'::task_status_enum FROM ids"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+finishChildAndStartParentStatement :: Statement.Statement (UUID, UUID) ()
+finishChildAndStartParentStatement = Statement.Statement
+  "UPDATE tasks SET status=CASE WHEN id=$1 THEN 'in_progress'::task_status_enum ELSE 'done'::task_status_enum END WHERE id IN ($1,$2)"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+
+reopenChildAndResetParentStatement :: Statement.Statement (UUID, UUID) ()
+reopenChildAndResetParentStatement = Statement.Statement
+  "UPDATE tasks SET status=CASE WHEN id=$1 THEN 'todo'::task_status_enum ELSE 'in_progress'::task_status_enum END WHERE id IN ($1,$2)"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+
 taskRowForCascadeStatement :: Statement.Statement UUID Value
 taskRowForCascadeStatement = Statement.Statement
   "SELECT to_jsonb(t) FROM tasks t WHERE id = $1"
@@ -236,13 +422,13 @@ taskState env taskId = getTask env.pool taskId >>= maybe (fail "expected task") 
 dependencyIds :: TestEnv -> UUID -> IO [UUID]
 dependencyIds env taskId = getTaskOverview env.pool taskId >>= maybe (fail "expected task overview") (pure . map (.id) . (.dependencies))
 
-expectLifecycleCode :: Text -> IO Int -> Expectation
+expectLifecycleCode :: Show a => Text -> IO a -> Expectation
 expectLifecycleCode expected action = do
   result <- try action
   case result of
     Left (DBLifecycleViolation code _ _ _) -> code `shouldBe` expected
     Left other -> expectationFailure ("expected lifecycle violation, got " <> show other)
-    Right value -> expectationFailure ("expected lifecycle violation, moved " <> show value <> " tasks")
+    Right value -> expectationFailure ("expected lifecycle violation, got " <> show value)
 
 outboxField :: Text -> OutboxRecord -> Maybe Value
 outboxField field record = case record.outboxEnvelope of

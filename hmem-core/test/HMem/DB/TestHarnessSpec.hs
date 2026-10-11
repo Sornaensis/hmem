@@ -32,6 +32,7 @@ import System.Timeout (timeout)
 import Test.Hspec
 
 import HMem.DB.Migration qualified as Migration
+import HMem.DB.Project qualified as Project
 import HMem.DB.Pool (DBException(..), PoolMetrics(..), createPool, getPoolMetrics, runSession, runSessionWithRollbackForTest, runTransaction, withConn)
 import HMem.DB.TestHarness
 import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
@@ -703,6 +704,100 @@ spec = do
                 Left (DBOtherError _) -> pure ()
                 Left other -> expectationFailure $ "Expected historical V013 rejection, got: " <> show other
                 Right _ -> expectationFailure "Expected new unlinked memory insert to fail after V013"
+
+    it "projectPauseMigration upgrades real V034 data atomically and preserves frozen history" $
+      withProjectPauseUpgrade $ \pool upgradeDir -> do
+        before <- runSession pool projectPauseFixtureSnapshot
+        frozen <- runSession pool projectPauseFrozenSnapshot
+        runSession pool $ Session.sql "CREATE FUNCTION fail_pause_migration_ledger() RETURNS trigger AS $$ BEGIN IF NEW.version = 36 THEN RAISE EXCEPTION 'injected V036 ledger failure'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER fail_pause_migration_ledger BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION fail_pause_migration_ledger();"
+        failed <- Migration.runMigrations pool upgradeDir
+        failed.failed `shouldSatisfy` (/= Nothing)
+        show failed.failed `shouldSatisfy` isInfixOf "injected V036 ledger failure"
+        runSession pool projectPauseFixtureSnapshot `shouldReturn` before
+        runSession pool (queryBool "SELECT to_regclass('project_retained_pause_intents') IS NULL AND to_regprocedure('hmem_reconcile_project_pause_v035(uuid[],boolean)') IS NULL AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 36)") `shouldReturn` True
+        assertProjectPauseGuardsEnabled pool
+        runSession pool $ Session.sql "DROP TRIGGER fail_pause_migration_ledger ON schema_migrations; DROP FUNCTION fail_pause_migration_ledger();"
+        upgraded <- Migration.runMigrations pool upgradeDir
+        upgraded.failed `shouldBe` Nothing
+        runSession pool projectPauseFrozenSnapshot `shouldReturn` frozen
+        runSession pool (queryBool "SELECT count(*) = 2 AND bool_and(own_paused) FROM projects WHERE name IN ('legacy root', 'legacy own child')") `shouldReturn` True
+        runSession pool (queryBool "SELECT status = 'paused' AND NOT own_paused FROM projects WHERE name = 'legacy inherited child'") `shouldReturn` True
+        runSession pool (queryBool "SELECT count(*) = 3 AND bool_and(status = 'blocked' AND auto_blocked) FROM tasks WHERE title IN ('legacy ready', 'legacy running', 'legacy running subtask')") `shouldReturn` True
+        runSession pool (queryBool "SELECT status = 'blocked' AND NOT auto_blocked FROM tasks WHERE title = 'legacy manual'") `shouldReturn` True
+        runSession pool (queryBool "SELECT count(*) = 2 AND bool_and(status = 'done') FROM tasks WHERE title IN ('legacy done', 'legacy indirect done')") `shouldReturn` True
+        runSession pool (queryBool "SELECT count(*) = 6 FROM project_retained_pause_intents") `shouldReturn` True
+        runSession pool (queryBool "SELECT count(*) > 0 AND count(DISTINCT transaction_id) = 1 AND bool_and(actor_type = 'system' AND actor_id IS NULL AND request_id IS NULL) AND max(cursor) - min(cursor) + 1 = count(*) FROM change_stream_outbox WHERE transaction_cause = 'migration' AND workspace_id = '00000000-0000-0000-0000-000000001001'") `shouldReturn` True
+        runSession pool (queryBool "SELECT count(*) > 0 AND bool_and(actor_type IS NULL AND actor_id IS NULL AND request_id IS NULL) FROM audit_log WHERE entity_type IN ('project', 'task') AND action = 'update'") `shouldReturn` True
+        assertProjectPauseGuardsEnabled pool
+        stable <- runSession pool projectPauseFixtureSnapshot
+        skipped <- Migration.runMigrations pool upgradeDir
+        skipped.failed `shouldBe` Nothing
+        runSession pool projectPauseFixtureSnapshot `shouldReturn` stable
+        runSession pool (queryBool "SELECT name = 'V036__normalize_project_pause.sql' FROM schema_migrations WHERE version = 36") `shouldReturn` True
+        runSession pool (queryBool "SELECT coalesce(current_setting('hmem.status_intent', true), '') <> 'unchanged' AND coalesce(current_setting('hmem.change_cause', true), '') <> 'migration' AND coalesce(current_setting('hmem.retained_pause_materializing', true), '') <> 'true' AND coalesce(current_setting('hmem.auto_block_origin', true), '') <> 'project_pause'") `shouldReturn` True
+        runSession pool (Session.sql "UPDATE tasks SET status = 'in_progress' WHERE title = 'legacy ready'") `shouldThrow` anyException
+        runSession pool $ Session.sql "UPDATE projects SET status = 'active' WHERE name = 'legacy root';"
+        runSession pool (queryBool "SELECT status = 'todo' AND NOT auto_blocked FROM tasks WHERE title = 'legacy ready'") `shouldReturn` True
+        runSession pool (queryBool "SELECT status = 'blocked' AND NOT auto_blocked FROM tasks WHERE title = 'legacy manual'") `shouldReturn` True
+        runSession pool (queryBool "SELECT status = 'paused' AND own_paused FROM projects WHERE name = 'legacy own child'") `shouldReturn` True
+        runSession pool $ Session.sql "UPDATE tasks SET status = 'in_progress' WHERE title = 'legacy ready';"
+        runSession pool (Session.sql "UPDATE projects SET status = 'paused' WHERE name = 'legacy root'") `shouldThrow` anyException
+
+    it "projectPauseMigration retains excluded intent until guarded restore, move or reopen" $
+      withProjectPauseUpgrade $ \pool upgradeDir -> do
+        upgraded <- Migration.runMigrations pool upgradeDir
+        upgraded.failed `shouldBe` Nothing
+        runTransaction pool $ Session.sql "SELECT set_config('hmem.project_pause_intent', '{\"id\":\"00000000-0000-0000-0000-000000002013\",\"workspace_id\":\"00000000-0000-0000-0000-000000001001\",\"own_paused\":false,\"retained_paused\":false}', true); UPDATE projects SET status = status WHERE name = 'legacy explicit active';"
+        runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = '00000000-0000-0000-0000-000000002013')") `shouldReturn` True
+        runTransaction pool $ Session.sql "SELECT set_config('hmem.project_pause_intent', '{\"id\":\"00000000-0000-0000-0000-000000002013\",\"workspace_id\":\"00000000-0000-0000-0000-000000001002\",\"own_paused\":false,\"retained_paused\":true}', true); UPDATE projects SET status = status WHERE name = 'legacy explicit active';"
+        runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = '00000000-0000-0000-0000-000000002013')") `shouldReturn` True
+        runTransaction pool $ Session.sql "SELECT set_config('hmem.project_pause_intent', '{\"id\":\"00000000-0000-0000-0000-000000002013\",\"workspace_id\":\"00000000-0000-0000-0000-000000001001\",\"own_paused\":false,\"retained_paused\":true}', true); UPDATE projects SET status = status WHERE name = 'legacy explicit active';"
+        runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = '00000000-0000-0000-0000-000000002013')") `shouldReturn` True
+        runSession pool (queryBool "SELECT hmem_project_retained_pause_intent('00000000-0000-0000-0000-000000001001', '00000000-0000-0000-0000-000000002009') AND NOT hmem_project_retained_pause_intent('00000000-0000-0000-0000-000000001002', '00000000-0000-0000-0000-000000002009') AND NOT hmem_project_retained_pause_intent('00000000-0000-0000-0000-000000001002', '00000000-0000-0000-0000-000000009999')") `shouldReturn` True
+        runTransaction pool $ do
+          Session.sql "SELECT set_config('hmem.status_intent', 'unchanged', true); UPDATE projects SET name = 'legacy deleted metadata', status = status WHERE name = 'legacy deleted';"
+        runSession pool (queryBool "SELECT NOT own_paused AND EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = p.id) FROM projects p WHERE name = 'legacy deleted metadata'") `shouldReturn` True
+        Project.restoreProject pool (read "00000000-0000-0000-0000-000000002009") `shouldReturn` True
+        runSession pool (queryBool "SELECT status = 'paused' AND own_paused AND NOT EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = p.id) FROM projects p WHERE name = 'legacy deleted metadata'") `shouldReturn` True
+        stable <- runSession pool projectPauseFixtureSnapshot
+        Project.restoreProject pool (read "00000000-0000-0000-0000-000000002009") `shouldReturn` False
+        runSession pool projectPauseFixtureSnapshot `shouldReturn` stable
+        beforeRejectedRestore <- runSession pool projectPauseFixtureSnapshot
+        Project.restoreProject pool (read "00000000-0000-0000-0000-000000002010") `shouldThrow` anyException
+        runSession pool projectPauseFixtureSnapshot `shouldReturn` beforeRejectedRestore
+        runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = '00000000-0000-0000-0000-000000002010')") `shouldReturn` True
+        runSession pool $ Session.sql "UPDATE tasks SET status = 'blocked' WHERE title = 'legacy deleted running';"
+        Project.restoreProject pool (read "00000000-0000-0000-0000-000000002010") `shouldReturn` True
+        runSession pool $ Session.sql "UPDATE projects SET status = 'active' WHERE name = 'legacy explicit active';"
+        runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = '00000000-0000-0000-0000-000000002013')") `shouldReturn` True
+        Project.restoreProject pool (read "00000000-0000-0000-0000-000000002013") `shouldReturn` True
+        runSession pool (queryBool "SELECT status = 'active' AND NOT own_paused FROM projects WHERE name = 'legacy explicit active'") `shouldReturn` True
+        runTransaction pool $ Session.sql "SELECT set_config('hmem.status_intent', 'unchanged', true); UPDATE projects SET parent_id = '00000000-0000-0000-0000-000000002011' WHERE name = 'legacy move';"
+        runSession pool (queryBool "SELECT status = 'paused' AND own_paused FROM projects WHERE name = 'legacy move'") `shouldReturn` True
+        runSession pool $ Session.sql "UPDATE projects SET status = 'active' WHERE name = 'legacy completed'; UPDATE projects SET status = 'active' WHERE name = 'legacy root';"
+        runSession pool (queryBool "SELECT status = 'paused' AND own_paused FROM projects WHERE name = 'legacy frozen pause'") `shouldReturn` True
+        runSession pool (queryBool "SELECT status = 'active' AND NOT own_paused AND NOT EXISTS (SELECT 1 FROM project_retained_pause_intents WHERE project_id = p.id) FROM projects p WHERE name = 'legacy inherited child'") `shouldReturn` True
+        runSession pool $ Session.sql "DELETE FROM projects WHERE name = 'legacy archived';"
+        runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM project_retained_pause_intents r LEFT JOIN projects p ON p.id = r.project_id WHERE p.id IS NULL)") `shouldReturn` True
+        assertProjectPauseGuardsEnabled pool
+
+    it "projectPauseMigration fresh installation has the same pause and provenance authority" $
+      withTestEnv $ \env -> do
+        runSession env.pool (queryBool "SELECT count(*) = 36 FROM schema_migrations") `shouldReturn` True
+        runSession env.pool (queryBool "SELECT to_regclass('project_retained_pause_intents') IS NOT NULL AND to_regprocedure('hmem_reconcile_project_pause_v035(uuid[],boolean)') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM project_retained_pause_intents)") `shouldReturn` True
+        wsId <- runSession env.pool $ Session.statement ("fresh-pause-parity" :: Text) insertWorkspaceDirectStatement
+        projectId <- runSession env.pool $ Session.statement (wsId, "fresh root" :: Text) insertProjectDirectStatement
+        _childId <- runSession env.pool $ Session.statement (wsId, "fresh child" :: Text) insertProjectDirectStatement
+        runSession env.pool $ Session.sql "UPDATE projects SET parent_id = (SELECT id FROM projects WHERE name = 'fresh root') WHERE name = 'fresh child'; UPDATE projects SET status = 'paused' WHERE name = 'fresh root';"
+        _taskId <- runSession env.pool $ Session.statement (wsId, projectId, Nothing, "fresh ready" :: Text, "todo" :: Text) insertTaskDirectStatement
+        runSession env.pool (queryBool "SELECT status = 'paused' AND own_paused FROM projects WHERE name = 'fresh root'") `shouldReturn` True
+        runSession env.pool (queryBool "SELECT status = 'paused' AND NOT own_paused FROM projects WHERE name = 'fresh child'") `shouldReturn` True
+        runSession env.pool (queryBool "SELECT status = 'blocked' AND auto_blocked FROM tasks WHERE title = 'fresh ready'") `shouldReturn` True
+        runSession env.pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM project_retained_pause_intents)") `shouldReturn` True
+        runSession env.pool $ Session.sql "UPDATE projects SET status = 'active' WHERE name = 'fresh root';"
+        runSession env.pool (queryBool "SELECT count(*) = 2 AND bool_and(status = 'active' AND NOT own_paused) FROM projects WHERE name IN ('fresh root', 'fresh child')") `shouldReturn` True
+        runSession env.pool (queryBool "SELECT status = 'todo' AND NOT auto_blocked FROM tasks WHERE title = 'fresh ready'") `shouldReturn` True
+        assertProjectPauseGuardsEnabled env.pool
 
     it "subtaskParentMigration normalizes eligible existing parents and preserves manual blocks" $
       withTestSandbox $ \sandbox -> do
@@ -1424,6 +1519,56 @@ spec = do
         withCurrentDirectory sandbox.sandboxTmpDir $ do
           repoRoot <- resolveRepoRoot
           repoRoot `shouldBe` sandbox.sandboxRepoRoot
+
+-- Apply genuine V001--V034 files, seed historical states, then install only
+-- V035. Its rule installation must preserve the identities/statuses V036 uses.
+withProjectPauseUpgrade :: (Pool Hasql.Connection -> FilePath -> IO ()) -> IO ()
+withProjectPauseUpgrade action = withTestSandbox $ \sandbox -> do
+  migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+  withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+    bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+      beforeDir <- copyMigrationSubset sandbox migrations "pause-pre-v035" (< "V035")
+      rulesDir <- copyMigrationSubset sandbox migrations "pause-v035-only" (== "V035__project_pause_lifecycle.sql")
+      upgradeDir <- copyMigrationSubset sandbox migrations "pause-v036-only" (== "V036__normalize_project_pause.sql")
+      initial <- Migration.runMigrations pool beforeDir
+      initial.failed `shouldBe` Nothing
+      runSession pool $ Session.sql projectPauseLegacyFixture
+      oldRows <- runSession pool $ queryText "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM projects p), (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM tasks t))::text"
+      installed <- Migration.runMigrations pool rulesDir
+      installed.failed `shouldBe` Nothing
+      runSession pool (queryText "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(p) - 'own_paused' ORDER BY id) FROM projects p), (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM tasks t))::text") `shouldReturn` oldRows
+      action pool upgradeDir
+
+projectPauseLegacyFixture :: BS.ByteString
+projectPauseLegacyFixture = B8.unlines
+  [ "INSERT INTO workspaces(id, name) VALUES ('00000000-0000-0000-0000-000000001001', 'pause upgrade'), ('00000000-0000-0000-0000-000000001002', 'foreign workspace');"
+  , "INSERT INTO projects(id, workspace_id, name) VALUES ('00000000-0000-0000-0000-000000002001', '00000000-0000-0000-0000-000000001001', 'legacy root');"
+  , "INSERT INTO projects(id, workspace_id, parent_id, name) SELECT ('00000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid, '00000000-0000-0000-0000-000000001001', CASE WHEN n IN (2002,2003,2004,2007) THEN '00000000-0000-0000-0000-000000002001'::uuid WHEN n IN (2005,2006,2012) THEN '00000000-0000-0000-0000-000000002004'::uuid WHEN n = 2008 THEN '00000000-0000-0000-0000-000000002007'::uuid ELSE NULL END, name FROM (VALUES (2002,'legacy inherited child'),(2003,'legacy own child'),(2004,'legacy completed'),(2005,'legacy frozen pause'),(2006,'legacy frozen active'),(2007,'legacy archived'),(2008,'legacy archived pause'),(2009,'legacy deleted'),(2010,'legacy deleted running root'),(2011,'legacy unrelated'),(2012,'legacy move'),(2013,'legacy explicit active')) AS x(n,name);"
+  , "INSERT INTO tasks(id,workspace_id,project_id,title) SELECT ('00000000-0000-0000-0000-' || lpad(n::text,12,'0'))::uuid, '00000000-0000-0000-0000-000000001001', ('00000000-0000-0000-0000-' || lpad(p::text,12,'0'))::uuid, title FROM (VALUES (3001,2001,'legacy ready'),(3002,2002,'legacy manual'),(3003,2001,'legacy running'),(3005,2001,'legacy done'),(3006,2001,'legacy cancelled'),(3007,2011,'legacy indirect done'),(3008,2006,'legacy frozen task'),(3010,2009,'legacy deleted task'),(3011,2010,'legacy deleted running')) AS x(n,p,title);"
+  , "INSERT INTO tasks(id,workspace_id,project_id,parent_id,title) VALUES ('00000000-0000-0000-0000-000000003004','00000000-0000-0000-0000-000000001001',NULL,'00000000-0000-0000-0000-000000003003','legacy running subtask'),('00000000-0000-0000-0000-000000003009','00000000-0000-0000-0000-000000001001',NULL,'00000000-0000-0000-0000-000000003005','legacy frozen subtask');"
+  -- Only historical fixture construction bypasses all row triggers. Real
+  -- normalization keeps audit/outbox enabled and suspends two named guards.
+  , "ALTER TABLE projects DISABLE TRIGGER USER; ALTER TABLE tasks DISABLE TRIGGER USER; ALTER TABLE task_dependencies DISABLE TRIGGER USER;"
+  , "UPDATE projects SET status = 'paused' WHERE name IN ('legacy root','legacy own child','legacy frozen pause','legacy archived pause','legacy deleted','legacy deleted running root','legacy move','legacy explicit active');"
+  , "UPDATE projects SET status = 'completed' WHERE name = 'legacy completed'; UPDATE projects SET status = 'archived' WHERE name = 'legacy archived';"
+  , "UPDATE projects SET deleted_at = '2020-01-01' WHERE name IN ('legacy deleted','legacy deleted running root','legacy explicit active');"
+  , "UPDATE tasks SET status = 'in_progress', auto_blocked = false WHERE title IN ('legacy running','legacy running subtask','legacy deleted running');"
+  , "UPDATE tasks SET status = 'blocked', auto_blocked = false WHERE title = 'legacy manual';"
+  , "UPDATE tasks SET status = 'done', auto_blocked = false, completed_at = '2019-01-01' WHERE title IN ('legacy done','legacy indirect done'); UPDATE tasks SET status = 'cancelled', auto_blocked = false WHERE title = 'legacy cancelled';"
+  , "UPDATE tasks SET deleted_at = '2020-01-01' WHERE title IN ('legacy deleted task','legacy deleted running');"
+  , "INSERT INTO task_dependencies(task_id,depends_on_id,workspace_id) VALUES ('00000000-0000-0000-0000-000000003007','00000000-0000-0000-0000-000000003001','00000000-0000-0000-0000-000000001001');"
+  , "ALTER TABLE task_dependencies ENABLE TRIGGER USER; ALTER TABLE tasks ENABLE TRIGGER USER; ALTER TABLE projects ENABLE TRIGGER USER;"
+  ]
+
+projectPauseFixtureSnapshot :: Session.Session Text
+projectPauseFixtureSnapshot = queryText "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM projects p), (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM tasks t), (SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM audit_log a), (SELECT jsonb_agg(to_jsonb(o) ORDER BY scope,workspace_id,cursor) FROM change_stream_outbox o), (SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,workspace_id) FROM change_stream_scope_counters c))::text"
+
+projectPauseFrozenSnapshot :: Session.Session Text
+projectPauseFrozenSnapshot = queryText "WITH protected_ids AS (SELECT id FROM projects WHERE name IN ('legacy completed','legacy frozen pause','legacy frozen active','legacy archived','legacy archived pause','legacy deleted','legacy deleted running root','legacy move','legacy explicit active') UNION SELECT id FROM tasks WHERE title IN ('legacy done','legacy cancelled','legacy indirect done','legacy frozen task','legacy frozen subtask','legacy deleted task','legacy deleted running')) SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM projects p WHERE id IN (SELECT id FROM protected_ids)), (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM tasks t WHERE id IN (SELECT id FROM protected_ids)), (SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM audit_log a WHERE entity_id IN (SELECT id::text FROM protected_ids)), (SELECT jsonb_agg(to_jsonb(o) ORDER BY scope,workspace_id,cursor) FROM change_stream_outbox o WHERE envelope->'entity'->>'id' IN (SELECT id::text FROM protected_ids)))::text"
+
+assertProjectPauseGuardsEnabled :: Pool Hasql.Connection -> IO ()
+assertProjectPauseGuardsEnabled pool =
+  runSession pool (queryBool "SELECT count(*) = 2 AND bool_and(tgenabled = 'O') FROM pg_trigger WHERE (tgrelid = 'projects'::regclass AND tgname = 'trg_project_0_pause_cascade') OR (tgrelid = 'tasks'::regclass AND tgname = 'trg_task_1_paused_placement')") `shouldReturn` True
 
 queryBool :: BS.ByteString -> Session.Session Bool
 queryBool sql = Session.statement () $ Statement.Statement sql E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) True

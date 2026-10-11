@@ -53,6 +53,7 @@ data-files:
     migrations/V033__retire_pre_revision_observation_sessions.sql
     migrations/V034__subtask_parent_auto_blocking.sql
     migrations/V035__project_pause_lifecycle.sql
+    migrations/V036__normalize_project_pause.sql
 
 library
   exposed-modules:

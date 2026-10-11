@@ -220,6 +220,17 @@ the published hmem server. Credential choices and precedence are in
 
 ## Troubleshooting
 
+Before upgrading an existing database, take a restorable backup and stop older
+application writers. Startup applies migrations before serving. V036 makes each
+existing paused project an independent pause, pauses its eligible open descendants,
+and blocks their unfinished tasks, including legacy running work. Done/cancelled
+tasks, manual blocks, deleted rows, and frozen closed branches keep their history.
+Deleted or frozen legacy pauses retain separate provenance until an authorized
+restore, move, or ancestor reopening can materialize it. Ordinary new pause
+requests still refuse running descendants. If migration fails, its data changes,
+compatibility metadata, events, and version registration roll back together;
+resolve the reported failure before retrying startup.
+
 | Problem | Check |
 | --- | --- |
 | Missing local bearer token | Supply `HMEM_API_KEY` in the runtime env file or mount `HMEM_API_KEY_FILE`. |

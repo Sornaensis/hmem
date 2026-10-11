@@ -847,7 +847,7 @@ createTask pool ct = do
       , returning  = Returning id
       }
   case rows of
-    (r:_) -> pure $ rowToTask r
+    (r:_) -> getTask pool r.taskId >>= maybe (throwIO $ DBOtherError "createTask: task disappeared after INSERT") pure
     []    -> throwIO $ DBOtherError "createTask: INSERT returned no rows"
 
 ------------------------------------------------------------------------
@@ -931,6 +931,7 @@ updateTaskWithDependencySnapshots pool tid ut = do
           placementChanged = projectChanged || task.parentId /= targetParentId
           parentSeedIds = [parentId | Just parentId <- [task.parentId, targetParentId]]
       transactionResult <- runTransaction pool $ do
+        Proj.lockPlanningLifecycleS
         projectValidation <- validateTaskProjectLockedS task.workspaceId targetProjectId
         case projectValidation of
           Just err -> pure (Left err)
@@ -991,11 +992,11 @@ updateTaskWithDependencySnapshots pool tid ut = do
                     }
                 case rows of
                   []    -> do
-                    when (ut.status /= Just Cancelled) $ recomputeTaskAutoBlockingS snapshotSeedIds
+                    when (ut.status /= Just Cancelled && not placementChanged) $ recomputeTaskAutoBlockingS snapshotSeedIds
                     after <- dependencyAutoBlockSnapshotsS snapshotSeedIds
                     pure $ Right (Nothing, before, after)
                   (r:_) -> do
-                    when (ut.status /= Just Cancelled) $ recomputeTaskAutoBlockingS snapshotSeedIds
+                    when (ut.status /= Just Cancelled && not placementChanged) $ recomputeTaskAutoBlockingS snapshotSeedIds
                     after <- dependencyAutoBlockSnapshotsS snapshotSeedIds
                     pure $ Right (Just $ rowToTask r, before, after)
       (mTask, beforeRaw, afterRaw) <- case transactionResult of
@@ -1032,6 +1033,7 @@ deleteTask pool tid = isJustCascade <$> deleteTaskCascade pool tid
 deleteTaskCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
 deleteTaskCascade pool tid = do
   runTransaction pool $ do
+    Proj.lockPlanningLifecycleS
     ids <- Session.statement tid taskSubtreeIdsStatement
     deleteTaskIdsCascadeS ids
 
@@ -1041,6 +1043,7 @@ deleteTaskBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
 deleteTaskBatch _pool [] = pure 0
 deleteTaskBatch pool ids = do
   runTransaction pool $ do
+    Proj.lockPlanningLifecycleS
     cascadeIds <- Session.statement ids taskSubtreeIdsForRootsStatement
     mResult <- deleteTaskIdsCascadeS cascadeIds
     pure $ maybe 0 (.taskCount) mResult
@@ -1061,7 +1064,8 @@ deleteTaskIdsCascadeS ids = do
 -- Returns True if the task was restored, False if not found or not deleted.
 restoreTask :: Pool Hasql.Connection -> UUID -> IO Bool
 restoreTask pool tid = do
-  runTransaction pool $ do
+  runTransaction pool $ Proj.withLifecycleStatusIntentS False $ do
+    Proj.lockPlanningLifecycleS
     rows <- Session.statement () $ run $ select $ do
       row <- each taskSchema
       where_ $ row.taskId ==. lit tid
@@ -1085,6 +1089,7 @@ restoreTask pool tid = do
 purgeTaskCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
 purgeTaskCascade pool tid =
   runTransaction pool $ do
+    Proj.lockPlanningLifecycleS
     rows <- Session.statement () $ run $ select $ do
       row <- each taskSchema
       where_ $ row.taskId ==. lit tid
@@ -1129,6 +1134,7 @@ moveTasksBatch pool ids projectId = do
         [] -> pure ()
       ensureTaskProject pool rootWorkspaceId projectId
       transactionResult <- runTransaction pool $ do
+        Proj.lockPlanningLifecycleS
         projectValidation <- validateTaskProjectLockedS rootWorkspaceId projectId
         case projectValidation of
           Just err -> pure (Left err)
@@ -1152,7 +1158,6 @@ moveTasksBatch pool ids projectId = do
                     , updateWhere = \_ row -> in_ row.taskId (map lit movedIds) &&. activeTask row
                     , returning = NoReturning
                     }
-                recomputeTaskAutoBlockingS movedIds
                 _after <- dependencyAutoBlockSnapshotsS movedIds
                 pure (Right movedCount)
       n <- case transactionResult of
@@ -1573,6 +1578,7 @@ addDependency pool tid depId = void $ addDependencyWithSnapshots pool tid depId
 addDependencyWithSnapshots :: Pool Hasql.Connection -> UUID -> UUID -> IO ([TaskDependencyAutoBlockSnapshot], [TaskDependencyAutoBlockSnapshot])
 addDependencyWithSnapshots pool tid depId =
   runTransaction pool $ do
+    Proj.lockPlanningLifecycleS
     before <- dependencyAutoBlockSnapshotsS [tid, depId]
     addDependencyS tid depId
     after <- dependencyAutoBlockSnapshotsS [tid, depId]
@@ -1599,6 +1605,7 @@ removeDependency pool tid depId = void $ removeDependencyWithSnapshots pool tid 
 removeDependencyWithSnapshots :: Pool Hasql.Connection -> UUID -> UUID -> IO ([TaskDependencyAutoBlockSnapshot], [TaskDependencyAutoBlockSnapshot])
 removeDependencyWithSnapshots pool tid depId =
   runTransaction pool $ do
+    Proj.lockPlanningLifecycleS
     before <- dependencyAutoBlockSnapshotsS [tid, depId]
     removeDependencyS tid depId
     after <- dependencyAutoBlockSnapshotsS [tid, depId]

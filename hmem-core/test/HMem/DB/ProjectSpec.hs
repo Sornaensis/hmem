@@ -18,6 +18,7 @@ import Test.Hspec
 
 import HMem.DB.ChangeStream
 import HMem.DB.Observation
+import HMem.DB.Overview (getTaskOverview)
 import HMem.DB.Pool (runSession, DBException(..))
 import HMem.DB.Project
 import HMem.DB.Task qualified as Task
@@ -27,6 +28,268 @@ import HMem.Types
 
 spec :: Spec
 spec = do
+  around withTestEnv $ describe "Project pause lifecycle" $ do
+    it "pauses deep open descendants and hierarchy-only subtasks while preserving closed and terminal rows" $ \env -> do
+      workspace <- createTestWorkspace env "pause-deep"
+      root <- pauseProject env workspace.id Nothing "root"
+      child <- pauseProject env workspace.id (Just root.id) "child"
+      grandchild <- pauseProject env workspace.id (Just child.id) "grandchild"
+      closed <- pauseProject env workspace.id (Just child.id) "closed"
+      _ <- updateProject env.pool closed.id (archiveStatusUpdate ProjCompleted)
+      parent <- pauseTask env workspace.id (Just grandchild.id) Nothing "parent"
+      subtask <- runSession env.pool $ Session.statement (workspace.id, parent.id) unassignedArchiveChildStatement
+      doneTask <- pauseTask env workspace.id (Just child.id) Nothing "done"
+      cancelled <- pauseTask env workspace.id (Just child.id) Nothing "cancelled"
+      _ <- Task.updateTask env.pool doneTask.id (pauseTaskStatus Done)
+      _ <- Task.updateTask env.pool cancelled.id (pauseTaskStatus Cancelled)
+      beforeDone <- Task.getTask env.pool doneTask.id
+      beforeCancelled <- Task.getTask env.pool cancelled.id
+      beforeClosed <- getProject env.pool closed.id
+      updated <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      fmap (.status) updated `shouldBe` Just ProjPaused
+      mapM (fmap (fmap (.status)) . getProject env.pool) [root.id, child.id, grandchild.id]
+        `shouldReturn` replicate 3 (Just ProjPaused)
+      mapM (fmap (fmap (.status)) . Task.getTask env.pool) [parent.id, subtask]
+        `shouldReturn` replicate 2 (Just Blocked)
+      Just overview <- getTaskOverview env.pool parent.id
+      overview.readinessRollup.canStartSubtasks `shouldBe` False
+      Task.getTask env.pool doneTask.id `shouldReturn` beforeDone
+      Task.getTask env.pool cancelled.id `shouldReturn` beforeCancelled
+      getProject env.pool closed.id `shouldReturn` beforeClosed
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (Task.getTask env.pool subtask) `shouldReturn` Just Todo
+      fmap (fmap (.status)) (Task.getTask env.pool parent.id) `shouldReturn` Just Blocked
+      Task.getTask env.pool doneTask.id `shouldReturn` beforeDone
+      Task.getTask env.pool cancelled.id `shouldReturn` beforeCancelled
+
+    it "preserves frozen historical project and task branches while refusing their running descendants" $ \env -> do
+      workspace <- createTestWorkspace env "pause-frozen-history"
+      root <- pauseProject env workspace.id Nothing "root"
+      closed <- pauseProject env workspace.id (Just root.id) "closed branch"
+      historical <- pauseProject env workspace.id (Just closed.id) "historical open grandchild"
+      waiting <- pauseTask env workspace.id (Just historical.id) Nothing "frozen waiting"
+      terminalParent <- pauseTask env workspace.id (Just root.id) Nothing "terminal parent"
+      child <- pauseTask env workspace.id (Just root.id) (Just terminalParent.id) "historical open child"
+      bracket_
+        (runSession env.pool $ Session.sql "ALTER TABLE projects DISABLE TRIGGER USER; ALTER TABLE tasks DISABLE TRIGGER USER")
+        (runSession env.pool $ Session.sql "ALTER TABLE projects ENABLE TRIGGER USER; ALTER TABLE tasks ENABLE TRIGGER USER") $ do
+          _ <- updateProject env.pool closed.id (archiveStatusUpdate ProjCompleted)
+          runSession env.pool $ Session.statement terminalParent.id freezePauseTaskStatement
+      projectsBefore <- mapM (getProject env.pool) [closed.id, historical.id]
+      tasksBefore <- mapM (Task.getTask env.pool) [waiting.id, terminalParent.id, child.id]
+      auditsBefore <- mapM (getAuditLogRows env.pool "project" . T.pack . show) [closed.id, historical.id]
+      taskAuditsBefore <- mapM (getAuditLogRows env.pool "task" . T.pack . show) [waiting.id, terminalParent.id, child.id]
+      let preserve = do
+            mapM (getProject env.pool) [closed.id, historical.id] `shouldReturn` projectsBefore
+            mapM (Task.getTask env.pool) [waiting.id, terminalParent.id, child.id] `shouldReturn` tasksBefore
+            mapM (getAuditLogRows env.pool "project" . T.pack . show) [closed.id, historical.id] `shouldReturn` auditsBefore
+            mapM (getAuditLogRows env.pool "task" . T.pack . show) [waiting.id, terminalParent.id, child.id] `shouldReturn` taskAuditsBefore
+      before <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      preserve
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      preserve
+      after <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      length after `shouldBe` length before + 2 -- only the explicit root pause/resume
+      bracket_
+        (runSession env.pool $ Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER")
+        (runSession env.pool $ Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER") $
+        runSession env.pool $ Session.statement waiting.id startFrozenPauseTaskStatement
+      refused <- try @DBException $ updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      refused `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+      fmap (fmap (.status)) (getProject env.pool root.id) `shouldReturn` Just ProjActive
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` after
+
+    it "retains independent child pauses and manual/dependency/subtask blockers on resume" $ \env -> do
+      workspace <- createTestWorkspace env "pause-causes"
+      root <- pauseProject env workspace.id Nothing "root"
+      own <- pauseProject env workspace.id (Just root.id) "own"
+      inherited <- pauseProject env workspace.id (Just root.id) "inherited"
+      ready <- pauseTask env workspace.id (Just inherited.id) Nothing "ready"
+      manual <- pauseTask env workspace.id (Just inherited.id) Nothing "manual"
+      dependent <- pauseTask env workspace.id (Just inherited.id) Nothing "dependent"
+      prerequisite <- pauseTask env workspace.id (Just inherited.id) Nothing "prerequisite"
+      ownTask <- pauseTask env workspace.id (Just own.id) Nothing "own task"
+      _ <- Task.updateTask env.pool manual.id (pauseTaskStatus Blocked)
+      Task.addDependency env.pool dependent.id prerequisite.id
+      _ <- updateProject env.pool own.id (archiveStatusUpdate ProjPaused)
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      -- Metadata-only updates of an inherited paused project must not own it.
+      _ <- updateProject env.pool inherited.id (UpdateProject (Just "renamed") Unchanged Unchanged Nothing Nothing Nothing)
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      mapM (fmap (fmap (.status)) . getProject env.pool) [root.id, inherited.id, own.id]
+        `shouldReturn` [Just ProjActive, Just ProjActive, Just ProjPaused]
+      mapM (fmap (fmap (.status)) . Task.getTask env.pool) [ready.id, manual.id, dependent.id, ownTask.id]
+        `shouldReturn` [Just Todo, Just Blocked, Just Blocked, Just Blocked]
+      _ <- updateProject env.pool own.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (Task.getTask env.pool ownTask.id) `shouldReturn` Just Todo
+      _ <- Task.updateTask env.pool prerequisite.id (pauseTaskStatus Done)
+      fmap (fmap (.status)) (Task.getTask env.pool dependent.id) `shouldReturn` Just Todo
+      fmap (fmap (.status)) (Task.getTask env.pool manual.id) `shouldReturn` Just Blocked
+
+    it "honors repeated own intent, overlapping SQL targets and remaining paused ancestry" $ \env -> do
+      workspace <- createTestWorkspace env "pause-overlap"
+      root <- pauseProject env workspace.id Nothing "root"
+      child <- pauseProject env workspace.id (Just root.id) "child"
+      runSession env.pool $ Session.statement [root.id, child.id] pauseProjectsStatement
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjPaused
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      updated <- updateProject env.pool child.id (archiveStatusUpdate ProjActive)
+      fmap (.status) updated `shouldBe` Just ProjPaused
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjActive
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      _ <- updateProject env.pool child.id (archiveStatusUpdate ProjPaused)
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjPaused
+
+    it "rejects pause atomically for a running descendant subtask with unchanged audit/outbox" $ \env -> do
+      workspace <- createTestWorkspace env "pause-running"
+      root <- pauseProject env workspace.id Nothing "root"
+      child <- pauseProject env workspace.id (Just root.id) "child"
+      parent <- pauseTask env workspace.id (Just child.id) Nothing "parent"
+      subtask <- pauseTask env workspace.id (Just child.id) (Just parent.id) "running child"
+      _ <- Task.updateTask env.pool subtask.id (pauseTaskStatus InProgress)
+      beforeEvents <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      beforeAudit <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      pause <- try @DBException $ updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      pause `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+      mapM (fmap (fmap (.status)) . getProject env.pool) [root.id, child.id]
+        `shouldReturn` replicate 2 (Just ProjActive)
+      fmap (fmap (.status)) (Task.getTask env.pool subtask.id) `shouldReturn` Just InProgress
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` beforeEvents
+      getAuditLogRows env.pool "project" (T.pack (show root.id)) `shouldReturn` beforeAudit
+
+    it "requires reopening a closed root before pausing" $ \env -> do
+      workspace <- createTestWorkspace env "pause-closed"
+      root <- pauseProject env workspace.id Nothing "root"
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjCompleted)
+      rejected <- try @DBException $ updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_REQUIRES_REOPEN" _ _ _) -> True; _ -> False
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (updateProject env.pool root.id (archiveStatusUpdate ProjPaused)) `shouldReturn` Just ProjPaused
+
+    it "guards own-intent-only SQL writes and restores false intent on an already inherited paused row" $ \env -> do
+      workspace <- createTestWorkspace env "pause-own-authority"
+      root <- pauseProject env workspace.id Nothing "root"
+      child <- pauseProject env workspace.id (Just root.id) "child"
+      task <- pauseTask env workspace.id (Just child.id) Nothing "task"
+      _ <- Task.updateTask env.pool task.id (pauseTaskStatus InProgress)
+      rejected <- try @DBException $ runSession env.pool $ Session.statement (root.id, True) ownPauseProjectStatement
+      rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+      fmap (fmap (.status)) (getProject env.pool root.id) `shouldReturn` Just ProjActive
+      _ <- Task.updateTask env.pool task.id (pauseTaskStatus Todo)
+      runSession env.pool $ Session.statement (root.id, True) ownPauseProjectStatement
+      fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjPaused
+      runSession env.pool $ Session.statement (child.id, False) ownPauseProjectStatement
+      -- Replaying effective paused plus own=false must retain inherited intent,
+      -- including false->false, rather than treating it as a repeated own pause.
+      runSession env.pool $ do
+        Session.statement child.id setRestoredPauseIntentStatement
+        Session.statement [child.id] pauseProjectsStatement
+        Session.sql "SELECT set_config('hmem.project_pause_intent', '', true)"
+      runSession env.pool $ Session.statement (root.id, False) ownPauseProjectStatement
+      mapM (fmap (fmap (.status)) . getProject env.pool) [root.id, child.id]
+        `shouldReturn` replicate 2 (Just ProjActive)
+      fmap (fmap (.status)) (Task.getTask env.pool task.id) `shouldReturn` Just Todo
+      _ <- Task.updateTask env.pool task.id (pauseTaskStatus Done)
+      _ <- updateProject env.pool child.id (archiveStatusUpdate ProjCompleted)
+      closed <- try @DBException $ runSession env.pool $ Session.statement (child.id, True) ownPauseProjectStatement
+      closed `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_REQUIRES_REOPEN" _ _ _) -> True; _ -> False
+
+    it "reconciles canonical creation, project moves, batch task moves and inherited restores" $ \env -> do
+      workspace <- createTestWorkspace env "pause-placement"
+      paused <- pauseProject env workspace.id Nothing "paused"
+      active <- pauseProject env workspace.id Nothing "active"
+      moving <- pauseProject env workspace.id (Just active.id) "moving"
+      task <- pauseTask env workspace.id (Just moving.id) Nothing "moving task"
+      _ <- updateProject env.pool paused.id (archiveStatusUpdate ProjPaused)
+      inherited <- pauseProject env workspace.id (Just paused.id) "inherited"
+      inherited.status `shouldBe` ProjPaused
+      created <- pauseTask env workspace.id (Just inherited.id) Nothing "created blocked"
+      created.status `shouldBe` Blocked
+      _ <- updateProject env.pool moving.id (UpdateProject Nothing Unchanged (SetTo paused.id) Nothing Nothing Nothing)
+      fmap (fmap (.status)) (Task.getTask env.pool task.id) `shouldReturn` Just Blocked
+      _ <- updateProject env.pool moving.id (UpdateProject Nothing Unchanged (SetTo active.id) Nothing Nothing Nothing)
+      fmap (fmap (.status)) (Task.getTask env.pool task.id) `shouldReturn` Just Todo
+      _ <- Task.moveTasksBatch env.pool [task.id] (Just inherited.id)
+      fmap (fmap (.status)) (Task.getTask env.pool task.id) `shouldReturn` Just Blocked
+      _ <- Task.moveTasksBatch env.pool [task.id] (Just active.id)
+      fmap (fmap (.status)) (Task.getTask env.pool task.id) `shouldReturn` Just Todo
+      _ <- deleteProject env.pool inherited.id
+      restoreProject env.pool inherited.id `shouldReturn` True
+      _ <- updateProject env.pool paused.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (getProject env.pool inherited.id) `shouldReturn` Just ProjActive
+      fmap (fmap (.status)) (Task.getTask env.pool created.id) `shouldReturn` Just Todo
+
+    it "refuses task starts, running subtree moves and restores into paused ancestry" $ \env -> do
+      workspace <- createTestWorkspace env "pause-running-placement"
+      paused <- pauseProject env workspace.id Nothing "paused"
+      active <- pauseProject env workspace.id Nothing "active"
+      waiting <- pauseTask env workspace.id (Just paused.id) Nothing "waiting"
+      moving <- pauseTask env workspace.id (Just active.id) Nothing "moving"
+      _ <- Task.updateTask env.pool moving.id (pauseTaskStatus InProgress)
+      _ <- updateProject env.pool paused.id (archiveStatusUpdate ProjPaused)
+      let rejected action = do
+            result <- try @DBException action
+            result `shouldSatisfy` \case Left (DBLifecycleViolation "TASK_RUNNING_UNDER_PAUSED_PROJECT" _ _ _) -> True; _ -> False
+      rejected $ Task.updateTask env.pool waiting.id (pauseTaskStatus InProgress)
+      rejected $ Task.moveTasksBatch env.pool [moving.id] (Just paused.id)
+      _ <- Task.deleteTask env.pool moving.id
+      -- Restore uses the current project's ancestry, including a moved project.
+      _ <- updateProject env.pool active.id (UpdateProject Nothing Unchanged (SetTo paused.id) Nothing Nothing Nothing)
+      rejected $ Task.restoreTask env.pool moving.id
+      fmap (fmap (.status)) (Task.getTask env.pool waiting.id) `shouldReturn` Just Blocked
+
+    it "protects indirect done dependents during pause/resume but resets origin before unrelated dependency edits" $ \env -> do
+      workspace <- createTestWorkspace env "pause-terminal-propagation"
+      root <- pauseProject env workspace.id Nothing "root"
+      prerequisite <- pauseTask env workspace.id (Just root.id) Nothing "prerequisite"
+      doneTask <- pauseTask env workspace.id (Just root.id) Nothing "done dependent"
+      indirect <- pauseTask env workspace.id (Just root.id) Nothing "indirect done"
+      _ <- Task.updateTask env.pool prerequisite.id (pauseTaskStatus Done)
+      Task.addDependency env.pool doneTask.id prerequisite.id
+      _ <- Task.updateTask env.pool doneTask.id (pauseTaskStatus Done)
+      Task.addDependency env.pool indirect.id doneTask.id
+      _ <- Task.updateTask env.pool indirect.id (pauseTaskStatus Done)
+      -- Legacy done dependents of an open prerequisite, impossible to create
+      -- through normal readiness recomputation, expose V029's transitive branch.
+      bracket_
+        (runSession env.pool $ Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER")
+        (runSession env.pool $ Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER") $
+        runSession env.pool $ Session.statement prerequisite.id pauseReopenTaskStatement
+      beforeDone <- Task.getTask env.pool doneTask.id
+      beforeIndirect <- Task.getTask env.pool indirect.id
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      Task.getTask env.pool doneTask.id `shouldReturn` beforeDone
+      Task.getTask env.pool indirect.id `shouldReturn` beforeIndirect
+      runSession env.pool $ do
+        Session.statement root.id resumeProjectStatement
+        -- The very next unrelated dependency trigger in this transaction must
+        -- retain the existing ability to reopen done dependents.
+        Session.statement (doneTask.id, prerequisite.id) pauseTouchDependencyStatement
+      mapM (fmap (fmap (.status)) . Task.getTask env.pool) [doneTask.id, indirect.id]
+        `shouldReturn` replicate 2 (Just Blocked)
+
+    it "retains ordinary done-dependent reopening and dependency insertion inside paused ancestry" $ \env -> do
+      workspace <- createTestWorkspace env "pause-unrelated-dependencies"
+      root <- pauseProject env workspace.id Nothing "root"
+      prerequisite <- pauseTask env workspace.id (Just root.id) Nothing "prerequisite"
+      dependent <- pauseTask env workspace.id (Just root.id) Nothing "dependent"
+      newDependent <- pauseTask env workspace.id (Just root.id) Nothing "new dependent"
+      _ <- Task.updateTask env.pool prerequisite.id (pauseTaskStatus Done)
+      Task.addDependency env.pool dependent.id prerequisite.id
+      _ <- Task.updateTask env.pool dependent.id (pauseTaskStatus Done)
+      _ <- Task.updateTask env.pool newDependent.id (pauseTaskStatus Done)
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      mapM (fmap (fmap (.status)) . Task.getTask env.pool) [dependent.id, newDependent.id]
+        `shouldReturn` replicate 2 (Just Done)
+      _ <- Task.updateTask env.pool prerequisite.id (pauseTaskStatus Todo)
+      fmap (fmap (.status)) (Task.getTask env.pool dependent.id) `shouldReturn` Just Blocked
+      Task.addDependency env.pool newDependent.id prerequisite.id
+      fmap (fmap (.status)) (Task.getTask env.pool newDependent.id) `shouldReturn` Just Blocked
+
   beforeAll setupTestPool $ aroundWith withTestTransaction $ describe "Project lifecycle" $ do
     it "cascade archival archives completed descendant projects and cancels unfinished tasks without changing done rows" $ \env -> do
       workspace <- createTestWorkspace env "project-cascade-archive"
@@ -277,3 +540,47 @@ unassignedArchiveChildStatement = Statement.Statement
   "INSERT INTO tasks (workspace_id, parent_id, title) VALUES ($1, $2, 'unassigned hierarchy child') RETURNING id"
   (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid)))
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))) True
+
+pauseProject :: TestEnv -> UUID -> Maybe UUID -> Text -> IO Project
+pauseProject env workspace parent name = createProject env.pool (CreateProject workspace parent name Nothing Nothing Nothing)
+
+pauseTask :: TestEnv -> UUID -> Maybe UUID -> Maybe UUID -> Text -> IO Task
+pauseTask env workspace project parent title = Task.createTask env.pool (CreateTask workspace project parent title Nothing Nothing Nothing Nothing)
+
+pauseTaskStatus :: TaskStatus -> UpdateTask
+pauseTaskStatus status = UpdateTask Nothing Unchanged Unchanged Unchanged (Just status) Nothing Nothing Unchanged
+
+pauseProjectsStatement :: Statement.Statement [UUID] ()
+pauseProjectsStatement = Statement.Statement
+  "UPDATE projects SET status = 'paused' WHERE id = ANY($1)"
+  (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+
+resumeProjectStatement :: Statement.Statement UUID ()
+resumeProjectStatement = Statement.Statement "UPDATE projects SET status = 'active' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+pauseReopenTaskStatement :: Statement.Statement UUID ()
+pauseReopenTaskStatement = Statement.Statement "UPDATE tasks SET status = 'todo' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+freezePauseTaskStatement :: Statement.Statement UUID ()
+freezePauseTaskStatement = Statement.Statement "UPDATE tasks SET status = 'done' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+startFrozenPauseTaskStatement :: Statement.Statement UUID ()
+startFrozenPauseTaskStatement = Statement.Statement "UPDATE tasks SET status = 'in_progress' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+pauseTouchDependencyStatement :: Statement.Statement (UUID, UUID) ()
+pauseTouchDependencyStatement = Statement.Statement
+  "UPDATE task_dependencies SET task_id = task_id WHERE task_id = $1 AND depends_on_id = $2"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+
+ownPauseProjectStatement :: Statement.Statement (UUID, Bool) ()
+ownPauseProjectStatement = Statement.Statement "UPDATE projects SET own_paused = $2 WHERE id = $1"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.bool))) Dec.noResult True
+
+setRestoredPauseIntentStatement :: Statement.Statement UUID ()
+setRestoredPauseIntentStatement = Statement.Statement
+  "SELECT set_config('hmem.project_pause_intent', jsonb_build_object('id', $1::uuid, 'own_paused', false)::text, true)"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True

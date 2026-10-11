@@ -85,7 +85,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
         , priority = Just 10, metadata = Nothing }
 
       roots <- listFilteredProjectChildren env.pool workspace.id Nothing NavigationFilter
-        { showOnly = Nothing, showEmptyProjects = Nothing, projectStatuses = [ProjActive], taskStatuses = []
+        { showOnly = Nothing, showEmptyProjects = Nothing, projectStatuses = [ProjPaused], taskStatuses = []
         , priorityMode = Just "exact", priorityValue = Just 10, query = Just "literal_100%" }
         50 0
 

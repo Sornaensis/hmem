@@ -5,13 +5,15 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString (ByteString)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
-import Control.Concurrent.Async (async, concurrently, wait, withAsync)
-import Control.Exception (SomeException, bracket_, finally, try)
+import Control.Concurrent.Async (async, concurrently, link, wait, withAsync)
+import Control.Exception (SomeException, bracket, bracket_, finally, try)
 import Control.Monad (void)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Either (isLeft, isRight)
 import Data.Functor.Contravariant (contramap)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.Pool (destroyAllResources)
 import Data.List (find)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -24,12 +26,13 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Test.Hspec
 import System.Timeout (timeout)
+import System.IO (hPutStrLn, stderr)
 import Text.Read (readMaybe)
 
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.ChangeStream
 import HMem.DB.Migration qualified as Migration
-import HMem.DB.Pool (DBException(..), checkPgvector, runSession, runTransaction, withConn)
+import HMem.DB.Pool (DBException(..), checkPgvector, createPool, runSession, runTransaction, withConn)
 import HMem.DB.Observation qualified as Observation
 import HMem.DB.Project (createProject)
 import HMem.DB.Project qualified as Project
@@ -43,6 +46,31 @@ import HMem.Types
 -- ephemeral PostgreSQL sandbox is still discarded by SpecHook after the run.
 spec :: Spec
 spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
+  it "project pause serializes raw starts, inserts and project moves before tuple locks" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "pause-raw-races"
+    root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+    active <- createProject env.pool (CreateProject workspace.id Nothing "active" Nothing Nothing Nothing)
+    waiting <- Task.createTask env.pool (CreateTask workspace.id (Just root.id) Nothing "waiting" Nothing Nothing Nothing Nothing)
+    moving <- Task.createTask env.pool (CreateTask workspace.id (Just active.id) Nothing "moving" Nothing Nothing Nothing Nothing)
+    let pause = Session.statement root.id projectPauseForRaceStatement
+        resume = runSession env.pool $ Session.statement root.id projectResumeForRaceStatement
+    started <- planningPauseRace env "pause-raw-start" pause (Session.statement waiting.id cascadeReopenStatement)
+    started `shouldSatisfy` \case Just (Left (DBLifecycleViolation "TASK_RUNNING_UNDER_PAUSED_PROJECT" _ _ _)) -> True; _ -> False
+    resume
+    inserted <- planningPauseRace env "pause-raw-insert" pause (Session.statement (workspace.id, root.id) projectInsertForRaceStatement)
+    inserted `shouldSatisfy` \case Just (Right ()) -> True; _ -> False
+    tasks <- Task.listTasks env.pool root.id Nothing Nothing Nothing
+    map (.status) tasks `shouldSatisfy` all (== Blocked)
+    resume
+    moved <- planningPauseRace env "pause-raw-move" pause (Session.statement (moving.id, root.id) projectTaskMoveForRaceStatement)
+    moved `shouldSatisfy` \case Just (Right ()) -> True; _ -> False
+    fmap (fmap (.status)) (Task.getTask env.pool moving.id) `shouldReturn` Just Blocked
+    resume
+    refused <- planningPauseRace env "pause-after-running-start" (Session.statement waiting.id cascadeReopenStatement) pause
+    refused `shouldSatisfy` \case Just (Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _)) -> True; _ -> False
+    fmap (fmap (.status)) (Project.getProject env.pool root.id) `shouldReturn` Just ProjActive
+    fmap (fmap (.status)) (Task.getTask env.pool waiting.id) `shouldReturn` Just InProgress
+
   it "retires only tokenless full Observation snapshots and their complete resume lineages in V031" $ \env -> do
     workspace <- createTestWorkspace env "snapshot-version-upgrade"
     original <- Observation.createObservation env.pool CreateObservation
@@ -1176,6 +1204,84 @@ waitForLockWait pool activityName = go (500 :: Int)
       if waiting
         then pure ()
         else threadDelay 10000 >> go (attempts - 1)
+
+planningPauseRace :: TestEnv -> T.Text -> Session.Session () -> Session.Session () -> IO (Maybe (Either DBException ()))
+planningPauseRace env activityName holderAction waiterAction =
+  -- Independent single-connection pools prevent capability-selected stripes
+  -- from starving the holder, waiter or observer before their SQL starts.
+  bracket newRacePool destroyAllResources $ \holderPool ->
+  bracket newRacePool destroyAllResources $ \waiterPool ->
+  bracket newRacePool destroyAllResources $ \observerPool -> do
+  acquired <- newEmptyMVar
+  release <- newEmptyMVar
+  begun <- getCurrentTime
+  phase <- newIORef ("holder acquisition", begun)
+  let mark label = getCurrentTime >>= \at -> writeIORef phase (label, at)
+  let holder = withConn holderPool $ \connection ->
+        (do
+          started <- Session.run (Session.sql "BEGIN" *> holderAction *> Session.statement () raceBackendPidStatement) connection
+          backend <- case started of Left err -> fail (show err); Right value -> pure value
+          putMVar acquired backend
+          takeMVar release
+          committed <- Session.run (Session.sql "COMMIT") connection
+          case committed of Left err -> fail (show err); Right _ -> pure ())
+        `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+      waiting = try @DBException $ runTransaction waiterPool $ do
+        _ <- Session.statement activityName setLocalApplicationNameStatement
+        waiterAction
+  result <- timeout 10000000 $ withAsync holder $ \writer ->
+    (do
+      link writer
+      backend <- takeMVar acquired
+      mark "waiter lock observation"
+      withAsync waiting $ \waiter -> do
+        let observe 0 = expectationFailure ("timed out waiting for planning advisory lock: " <> T.unpack activityName)
+            observe attempts = do
+              blocked <- runSession observerPool $ Session.statement (activityName, backend) racePlanningLockStatement
+              if blocked then pure () else threadDelay 10000 >> observe (attempts - 1)
+        observe (500 :: Int)
+        mark "holder commit"
+        putMVar release ()
+        wait writer
+        mark "waiter completion"
+        wait waiter)
+    `finally` void (tryPutMVar release ())
+  case result of
+    Nothing -> do
+      ended <- getCurrentTime
+      (label, at) <- readIORef phase
+      hPutStrLn stderr ("Pause race timeout " <> T.unpack activityName <> ": " <> label
+        <> "; begun=" <> show begun <> "; phase=" <> show at <> "; ended=" <> show ended)
+    Just _ -> pure ()
+  pure result
+  where newRacePool = createPool env.testDb.testDbConnStr 1 5.0 30000
+
+raceBackendPidStatement :: Statement.Statement () Int32
+raceBackendPidStatement = Statement.Statement "SELECT pg_backend_pid()" Enc.noParams
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int4))) True
+
+racePlanningLockStatement :: Statement.Statement (T.Text, Int32) Bool
+racePlanningLockStatement = Statement.Statement
+  "SELECT EXISTS (SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid WHERE a.application_name = $1 AND l.locktype = 'advisory' AND NOT l.granted AND l.classid = 1751999853 AND l.objid = 35 AND $2 = ANY(pg_blocking_pids(a.pid)))"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.text)) <> contramap snd (Enc.param (Enc.nonNullable Enc.int4)))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
+
+projectPauseForRaceStatement :: Statement.Statement UUID.UUID ()
+projectPauseForRaceStatement = Statement.Statement "UPDATE projects SET status = 'paused' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+projectResumeForRaceStatement :: Statement.Statement UUID.UUID ()
+projectResumeForRaceStatement = Statement.Statement "UPDATE projects SET status = 'active' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+projectInsertForRaceStatement :: Statement.Statement (UUID.UUID, UUID.UUID) ()
+projectInsertForRaceStatement = Statement.Statement
+  "INSERT INTO tasks (workspace_id, project_id, title) VALUES ($1, $2, 'insert behind pause')"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+
+projectTaskMoveForRaceStatement :: Statement.Statement (UUID.UUID, UUID.UUID) ()
+projectTaskMoveForRaceStatement = Statement.Statement "UPDATE tasks SET project_id = $2 WHERE id = $1"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
 
 pruneOutboxWithActivity pool activityName cutoff = runTransaction pool $ do
   Session.statement activityName setLocalApplicationNameStatement

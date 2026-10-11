@@ -103,6 +103,55 @@ spec = do
       _ <- updateTask env.pool parent.id (cancelStatusUpdate Blocked)
       Just manual <- getTaskOverview env.pool parent.id
       manual.readinessRollup.canStartSubtasks `shouldBe` False
+  around withTestEnv $ describe "Paused task placement" $ do
+    it "reconciles subtask reparenting and cancelled/done reopen through the project blocker" $ \env -> do
+      workspace <- createTestWorkspace env "paused-task-reopen"
+      project <- createProjectFor env workspace.id "project"
+      parent <- createTaskFor env workspace.id (Just project.id) Nothing "parent"
+      child <- createTaskFor env workspace.id (Just project.id) Nothing "child"
+      closed <- createTaskFor env workspace.id (Just project.id) Nothing "closed"
+      _ <- updateTask env.pool closed.id (cancelStatusUpdate Cancelled)
+      _ <- Project.updateProject env.pool project.id (projectStatusUpdate ProjPaused)
+      _ <- updateTask env.pool child.id (UpdateTask Nothing Unchanged Unchanged (SetTo parent.id) Nothing Nothing Nothing Unchanged)
+      _ <- updateTask env.pool closed.id (cancelStatusUpdate Todo)
+      mapM (fmap (fmap (.status)) . getTask env.pool) [child.id, closed.id] `shouldReturn` replicate 2 (Just Blocked)
+      Just paused <- getTaskOverview env.pool parent.id
+      paused.readinessRollup.canStartSubtasks `shouldBe` False
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Done)
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Todo)
+      fmap (fmap (.status)) (getTask env.pool child.id) `shouldReturn` Just Blocked
+      _ <- Project.updateProject env.pool project.id (projectStatusUpdate ProjActive)
+      mapM (fmap (fmap (.status)) . getTask env.pool) [parent.id, child.id, closed.id]
+        `shouldReturn` [Just Blocked, Just Todo, Just Todo]
+
+    it "preserves a repeated explicit manual block established during inherited automatic blocking" $ \env -> do
+      workspace <- createTestWorkspace env "paused-task-manual"
+      project <- createProjectFor env workspace.id "project"
+      task <- createTaskFor env workspace.id (Just project.id) Nothing "task"
+      _ <- Project.updateProject env.pool project.id (projectStatusUpdate ProjPaused)
+      _ <- updateTask env.pool task.id (cancelStatusUpdate Blocked)
+      _ <- Project.updateProject env.pool project.id (projectStatusUpdate ProjActive)
+      fmap (fmap (.status)) (getTask env.pool task.id) `shouldReturn` Just Blocked
+      _ <- updateTask env.pool task.id (cancelStatusUpdate Todo)
+      fmap (fmap (.status)) (getTask env.pool task.id) `shouldReturn` Just Todo
+
+    it "rejects project-subtree placement and full project restore with running subtasks atomically" $ \env -> do
+      workspace <- createTestWorkspace env "paused-project-placement"
+      paused <- createProjectFor env workspace.id "paused"
+      moving <- createProjectFor env workspace.id "moving"
+      parent <- createTaskFor env workspace.id (Just moving.id) Nothing "parent"
+      child <- createTaskFor env workspace.id (Just moving.id) (Just parent.id) "running child"
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      _ <- Project.updateProject env.pool paused.id (projectStatusUpdate ProjPaused)
+      let move = UpdateProject Nothing Unchanged (SetTo paused.id) Nothing Nothing Nothing
+      expectLifecycleCode "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" $ Project.updateProject env.pool moving.id move
+      fmap (fmap (.parentId)) (Project.getProject env.pool moving.id) `shouldReturn` Just Nothing
+      _ <- Project.deleteProject env.pool moving.id
+      runSession env.pool $ Session.statement (moving.id, paused.id) pausedDeletedProjectMoveStatement
+      expectLifecycleCode "TASK_RUNNING_UNDER_PAUSED_PROJECT" $ Project.restoreProject env.pool moving.id
+      Project.getProject env.pool moving.id `shouldReturn` Nothing
+      getTask env.pool child.id `shouldReturn` Nothing
+
   taskLifecycleSpec
 
 taskLifecycleSpec :: Spec
@@ -371,6 +420,10 @@ startTaskStatement :: Statement.Statement UUID ()
 startTaskStatement = Statement.Statement
   "UPDATE tasks SET status = 'in_progress' WHERE id = $1"
   (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+pausedDeletedProjectMoveStatement :: Statement.Statement (UUID, UUID) ()
+pausedDeletedProjectMoveStatement = Statement.Statement "UPDATE projects SET parent_id = $2 WHERE id = $1"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
 
 blockTaskStatement :: Statement.Statement UUID ()
 blockTaskStatement = Statement.Statement

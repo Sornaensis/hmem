@@ -6,6 +6,7 @@ module HMem.DB.Project
   , getProjectAncestorIds
   , updateProject
   , withLifecycleStatusIntentS
+  , lockPlanningLifecycleS
   , deleteProject
   , deleteProjectCascade
   , deleteProjectBatch
@@ -347,7 +348,7 @@ createProject pool cp = do
       , returning  = Returning id
       }
   case rows of
-    (r:_) -> pure $ rowToProject r
+    (r:_) -> getProject pool r.projId >>= maybe (throwIO $ DBOtherError "createProject: project disappeared after INSERT") pure
     []    -> throwIO $ DBOtherError "createProject: INSERT returned no rows"
 
 -- | One transaction preserves the normal project and task INSERT triggers,
@@ -355,6 +356,7 @@ createProject pool cp = do
 -- top-level task in the newly created project.
 createProjectSpec :: Pool Hasql.Connection -> CreateProjectSpec -> IO ProjectSpecResult
 createProjectSpec pool spec = runTransaction pool $ do
+  lockPlanningLifecycleS
   projectId <- Session.statement
     (spec.workspaceId, spec.name, spec.description, fromIntegral (fromMaybe 5 spec.priority) :: Int16)
     insertSpecProjectStatement
@@ -430,6 +432,11 @@ withLifecycleStatusIntentS explicit action = do
   _ <- setIntent (fromMaybe "" previous)
   pure result
 
+-- Take the same gate as raw SQL BEFORE STATEMENT triggers before application
+-- snapshot/placement queries acquire any project or task tuple locks.
+lockPlanningLifecycleS :: Session.Session ()
+lockPlanningLifecycleS = Session.sql "SELECT hmem_lock_planning_lifecycle()"
+
 updateProject :: Pool Hasql.Connection -> UUID -> UpdateProject -> IO (Maybe Project)
 updateProject pool pid up = do
   current <- getProject pool pid
@@ -457,7 +464,7 @@ updateProject pool pid up = do
           }
       case rows of
         []    -> pure Nothing
-        (r:_) -> pure . Just $ rowToProject r
+        (_:_) -> getProject pool pid
 
 ------------------------------------------------------------------------
 -- Delete
@@ -469,6 +476,7 @@ deleteProject pool pid = maybe False (const True) <$> deleteProjectCascade pool 
 deleteProjectCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
 deleteProjectCascade pool pid = do
   runTransaction pool $ do
+    lockPlanningLifecycleS
     -- Lock projects before tasks so project deletion and task project-move
     -- operations acquire rows in the same coarse order: projects, then tasks.
     projectIds <- Session.statement pid projectSubtreeIdsForUpdateStatement
@@ -481,6 +489,7 @@ deleteProjectBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
 deleteProjectBatch _pool [] = pure 0
 deleteProjectBatch pool ids = do
   runTransaction pool $ do
+    lockPlanningLifecycleS
     -- Lock projects before tasks for the same order used by task project moves.
     projectIds <- Session.statement ids projectSubtreeIdsForRootsForUpdateStatement
     mResult <- deleteProjectIdsCascadeS projectIds
@@ -512,7 +521,8 @@ updateProjectBatch pool items = do
 -- Returns True if the project was restored, False if not found or not deleted.
 restoreProject :: Pool Hasql.Connection -> UUID -> IO Bool
 restoreProject pool pid = do
-  runTransaction pool $ do
+  runTransaction pool $ withLifecycleStatusIntentS False $ do
+    lockPlanningLifecycleS
     rows <- Session.statement () $ run $ select $ do
       row <- each projectSchema
       where_ $ row.projId ==. lit pid
@@ -545,6 +555,7 @@ restoreProject pool pid = do
 purgeProjectCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
 purgeProjectCascade pool pid =
   runTransaction pool $ do
+    lockPlanningLifecycleS
     rows <- Session.statement () $ run $ select $ do
       row <- each projectSchema
       where_ $ row.projId ==. lit pid

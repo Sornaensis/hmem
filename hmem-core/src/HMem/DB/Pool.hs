@@ -127,9 +127,12 @@ classifyError sessErr = classifyCmd cmdErr
     lifecycleCodeFor "HM105" = Just "TASK_SUBTASK_START_BLOCKED"
     lifecycleCodeFor "HM106" = Just "TASK_OPEN_UNDER_CANCELLED_TASK"
     lifecycleCodeFor "HM107" = Just "TASK_START_BLOCKED_BY_SUBTASKS"
+    lifecycleCodeFor "HM108" = Just "TASK_RUNNING_UNDER_PAUSED_PROJECT"
     lifecycleCodeFor "HM201" = Just "PROJECT_COMPLETION_BLOCKED"
     lifecycleCodeFor "HM202" = Just "PROJECT_OPEN_UNDER_CLOSED_PROJECT"
     lifecycleCodeFor "HM203" = Just "TASK_OPEN_UNDER_CLOSED_PROJECT"
+    lifecycleCodeFor "HM204" = Just "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS"
+    lifecycleCodeFor "HM205" = Just "PROJECT_PAUSE_REQUIRES_REOPEN"
     lifecycleCodeFor _       = Nothing
 
 

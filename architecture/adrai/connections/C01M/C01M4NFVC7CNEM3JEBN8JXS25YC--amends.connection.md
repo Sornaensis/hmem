@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4NFVC7CNEM3JEBN8JXS25YC"
+relation = "amends"
+from_record = "R01M4NFVC7CP2FZFJJ1FSNAZQHS"
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+to_records = ["R01M4G8P7F78E36TPZKE3X5DMPK"]
++++
+
+Record project pause intent, cascading readiness, placement guards and serialized database authority
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6ImE4NzdhYTA1M2M1ZGIwZGZhODZiYWY3Zjg3ZmQyN2NkYWQ3ZTMwZWMiLCJpIjoic2hhMjU2OnpUQ1lveVJrakdHa2lyTU5kVmo3RWdQdGQ4NW1SUmc1V3dGNWhHZUFwMGsiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRORlZDN0NORU0zSkVCTjhKWFMyNVlDIiwib3AiOiJPMDFNNE5GVkM3Q1AyRlpGSkoxRlNOQVpRSFMiLCJwIjpbIlIwMU00RzhQN0Y3OEUzNlRQWktFM1g1RE1QSyJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpqQm1SbTlzQkpOSmhtaTB3Z0t3ZlA1bzlpejdpT0Q5b0c0eFhvZ2JTRHVFIiwidCI6MTc5MTcyMjYzMTQwNCwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

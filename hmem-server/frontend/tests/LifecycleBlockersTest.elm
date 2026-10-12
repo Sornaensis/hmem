@@ -11,10 +11,14 @@ import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
 import Feature.Memory
+import Feature.WebSocket
 import Feature.Timeline
+import UpdateRouter
+import Http
 import Helpers
 import Html.Attributes as Attributes
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Page.Workspace
 import Permissions
 import String
@@ -28,7 +32,144 @@ import Url
 suite : Test
 suite =
     describe "lifecycle blocker frontend handling"
-        [ test "task completion lifecycle errors use task-specific copy and blocker detail" <|
+        [ test "pause availability uses canonical deep running work even with no hydrated tasks" <|
+            \_ ->
+                let
+                    deps = lifecycleModel.dependencies
+                    rollup = Dict.get "project-a" deps.projectReadinessRollups |> Maybe.withDefault emptyProjectRollup
+                    source = { lifecycleModel | tasks = Dict.empty, dependencies = { deps | projectReadinessRollups = Dict.singleton "project-a" { rollup | inProgressTaskCount = 2 } } }
+                    card = Feature.Cards.viewProjectsTree "workspace-a" source |> Query.fromHtml |> Query.find [ Selector.id "entity-project-a" ]
+                in
+                Expect.all
+                    [ \_ -> card |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "paused") ] |> Query.has [ Selector.attribute (Attributes.disabled True) ]
+                    , \_ -> card |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "archived") ] |> Query.hasNot [ Selector.attribute (Attributes.disabled True) ]
+                    ] ()
+        , test "closed projects require reopening before pause" <|
+            \_ ->
+                { lifecycleModel | projects = Dict.singleton "project-a" (projectWithStatus "project-a" Nothing Api.ProjArchived) }
+                    |> Feature.Cards.viewProjectsTree "workspace-a"
+                    |> Query.fromHtml |> Query.find [ Selector.id "entity-project-a" ]
+                    |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "paused") ]
+                    |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.attribute (Attributes.title "Reopen this project before pausing it.") ]
+        , test "structured pause refusal includes bounded server blocker guidance" <|
+            \_ ->
+                Api.decodeApiErrorBody 409 """{"error":"lifecycle_conflict","code":"PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS","detail":{"blocker_count":8,"blocker_ids":["12345678-a"]}}"""
+                    |> Api.apiErrorToUserMessage "Failed"
+                    |> Expect.equal "Finish or stop all running descendant tasks and subtasks before pausing this project. (8 blockers; examples: 12345678)"
+        , test "project envelope keeps full cascade counts and retained ancestor pause, and accepts old project JSON" <|
+            \_ ->
+                let
+                    envelope = String.dropRight 1 pauseProjectJson ++ """, "pause_effects":{"project_count":24,"task_count":42,"projects":[{"id":"child","previous_status":"active","current_status":"paused"}],"tasks":[],"has_more_projects":true,"has_more_tasks":true,"remaining_own_pause":false,"remaining_ancestor_pause":true}}"""
+                in
+                Expect.equal
+                    ( Ok Nothing, Ok (Just ( ( 24, 42 ), ( True, True ), ( False, True ) )) )
+                    ( Decode.decodeString Api.projectMutationResultDecoder pauseProjectJson |> Result.map .pauseEffects
+                    , Decode.decodeString Api.projectMutationResultDecoder envelope |> Result.map (.pauseEffects >> Maybe.map (\e -> ( ( e.projectCount, e.taskCount ), ( e.hasMoreProjects, e.hasMoreTasks ), ( e.remainingOwnPause, e.remainingAncestorPause ) ))) )
+        , test "paused next candidates report combined dependency and subtask blockers" <|
+            \_ ->
+                let
+                    candidate = { task = taskWithStatus "blocked" Nothing (Just "project-a") Api.Blocked, completionGated = True, openDescendantCount = 2, dependencyBlocked = True, openDependencyCount = 1, projectPaused = True }
+                in
+                Feature.Cards.nextTaskRationale candidate
+                    |> Expect.equal "Paused by this project or an ancestor. Resume the project to release this blocker. Still waiting for 1 open dependency. Still waiting for 2 open subtasks."
+        , test "project callback fences reject stale success and error across target, session and workspace lifetimes" <|
+            \_ ->
+                let
+                    target = "project-next:project-a"
+                    ( requested, _ ) = Helpers.beginProjectRequest lifecycleModel.selectedWorkspaceId lifecycleModel.sessionRequestEpoch target (\_ -> Cmd.none) (activeProjectPanels lifecycleModel)
+                    guard = projectGuard requested target
+                    ( newer, _ ) = Helpers.beginProjectRequest requested.selectedWorkspaceId requested.sessionRequestEpoch target (\_ -> Cmd.none) requested
+                    staleModels = [ newer, { requested | sessionRequestEpoch = requested.sessionRequestEpoch + 1 }, { requested | selectedWorkspaceId = Just "workspace-b" } ]
+                    observe source =
+                        UpdateRouter.update (GotProjectNextTasks guard "project-a" (Ok [])) source |> Result.withDefault ( source, Cmd.none ) |> Tuple.first
+                            |> (\next -> UpdateRouter.update (GotProjectNextTasks guard "project-a" (Err Http.Timeout)) next |> Result.withDefault ( next, Cmd.none ) |> Tuple.first)
+                    unchanged source = let next = observe source in ( Dict.size next.cards.projectNextTasks, Dict.size next.cards.projectNextTasksErrors )
+                in
+                List.map unchanged staleModels |> Expect.equal [ ( 0, 0 ), ( 0, 0 ), ( 0, 0 ) ]
+        , test "cascade reconciliation retires pending overview and next callbacks before summaries arrive" <|
+            \_ ->
+                let
+                    targets = [ "project-overview:project-a", "project-next:project-a", "project-next-diagnostics:project-a" ]
+                    requested = List.foldl (\target current -> Helpers.beginProjectRequest current.selectedWorkspaceId current.sessionRequestEpoch target (\_ -> Cmd.none) current |> Tuple.first) (activeProjectPanels lifecycleModel) targets
+                    guards = List.map (projectGuard requested) targets
+                    refreshed = Feature.WebSocket.refreshProjectCascade "project-a" requested |> Tuple.first
+                    overview = { project = project "project-a" Nothing, tasks = [], subprojects = [], readinessRollup = emptyProjectRollup }
+                    messages = [ GotProjectOverview (projectGuard requested "project-overview:project-a") "project-a" (Ok overview), GotProjectNextTasks (projectGuard requested "project-next:project-a") "project-a" (Ok []), GotProjectNextTaskDiagnostics (projectGuard requested "project-next-diagnostics:project-a") "project-a" (Err Http.Timeout), GotProjectOverview (projectGuard requested "project-overview:project-a") "project-a" (Err Http.Timeout), GotProjectNextTasks (projectGuard requested "project-next:project-a") "project-a" (Err Http.Timeout) ]
+                    settled = List.foldl (\message current -> UpdateRouter.update message current |> Result.withDefault ( current, Cmd.none ) |> Tuple.first) refreshed messages
+                in
+                Expect.all
+                    [ \_ -> List.map (\guard -> Helpers.projectRequestIsCurrent guard refreshed) guards |> Expect.equal [ False, False, False ]
+                    , \_ -> ( Dict.size settled.cards.projectNextTasks, Dict.size settled.cards.projectNextTaskDiagnosticsErrors ) |> Expect.equal ( 0, 0 )
+                    , \_ -> Dict.get "project-a" settled.dependencies.projectReadinessRollups |> Expect.equal (Dict.get "project-a" refreshed.dependencies.projectReadinessRollups)
+                    ] ()
+        , test "late project mutation and overview cannot revive retired workspace data or show stale errors" <|
+            \_ ->
+                let
+                    ( requested, _ ) = Helpers.beginProjectRequest lifecycleModel.selectedWorkspaceId lifecycleModel.sessionRequestEpoch "entity:project:project-a" (\_ -> Cmd.none) (activeProjectPanels lifecycleModel)
+                    mutationGuard = projectGuard requested "entity:project:project-a"
+                    retired = { requested | selectedWorkspaceId = Just "workspace-b", projects = Dict.empty }
+                    updated = UpdateRouter.update (ProjectUpdated mutationGuard (Ok { project = projectWithStatus "project-a" Nothing Api.ProjPaused, pauseEffects = Nothing })) retired |> Result.withDefault ( retired, Cmd.none ) |> Tuple.first
+                    afterError = UpdateRouter.update (GotProjectOverview (projectGuard requested "project-overview:project-a") "project-a" (Err Http.Timeout)) updated |> Result.withDefault ( updated, Cmd.none ) |> Tuple.first
+                in
+                ( Dict.size afterError.projects, afterError.toast.nextToastId ) |> Expect.equal ( 0, retired.toast.nextToastId )
+        , test "own canonical event before project acknowledgement retains ancestor-pause guidance, foreign event supersedes it" <|
+            \_ ->
+                let
+                    ( tracked, requestId, _ ) = Helpers.beginTrackedMutation [ "project-a" ] lifecycleModel
+                    requested = UpdateRouter.update (RequestProjectUpdate tracked.selectedWorkspaceId tracked.sessionRequestEpoch "project-a" [ ( "request_id", Encode.string requestId ), ( "status", Encode.string "active" ) ]) tracked |> Result.withDefault ( tracked, Cmd.none ) |> Tuple.first
+                    guard = projectGuard requested "entity:project:project-a"
+                    expired = UpdateRouter.update (ClearPendingRequest requestId) requested |> Result.withDefault ( requested, Cmd.none ) |> Tuple.first
+                    afterOwn = Feature.WebSocket.update (WsMessageReceived (pauseEventWire "own-pause-event" requestId)) expired |> Tuple.first
+                    afterForeign = Feature.WebSocket.update (WsMessageReceived (pauseEventWire "foreign-pause-event" "other-client-request")) afterOwn |> Tuple.first
+                    mutation = { project = projectWithStatus "project-a" Nothing Api.ProjPaused, pauseEffects = Just { projectCount = 0, taskCount = 0, projects = [], tasks = [], hasMoreProjects = False, hasMoreTasks = False, remainingOwnPause = False, remainingAncestorPause = True } }
+                    accept source = UpdateRouter.update (ProjectUpdated guard (Ok mutation)) source |> Result.withDefault ( source, Cmd.none ) |> Tuple.first
+                    ownAccepted = accept afterOwn
+                    foreignRejected = accept afterForeign
+                in
+                Expect.all
+                    [ \_ -> Dict.get requestId expired.mutations.pendingRequestIds |> Expect.equal Nothing
+                    , \_ -> Helpers.projectOperationMatches "project-a" (Just requestId) expired |> Expect.equal True
+                    , \_ -> Dict.size ownAccepted.mutations.projectOperations |> Expect.equal 0
+                    , \_ -> Dict.size afterForeign.mutations.projectOperations |> Expect.equal 0
+                    , \_ -> Helpers.projectRequestIsCurrent guard afterOwn |> Expect.equal True
+                    , \_ -> Helpers.projectRequestIsCurrent guard afterForeign |> Expect.equal False
+                    , \_ -> ownAccepted.toast.nextToastId |> Expect.equal (afterOwn.toast.nextToastId + 1)
+                    , \_ -> List.map .message ownAccepted.toast.toasts |> Expect.equal [ "Project remains paused by an ancestor." ]
+                    , \_ -> Dict.get "project-a" ownAccepted.projects |> Maybe.map .status |> Expect.equal (Just Api.ProjPaused)
+                    , \_ -> Dict.get "project-a" foreignRejected.projects |> Maybe.map .status |> Expect.equal (Dict.get "project-a" afterForeign.projects |> Maybe.map .status)
+                    , \_ -> foreignRejected.toast.nextToastId |> Expect.equal afterForeign.toast.nextToastId
+                    ] ()
+        , test "older callbacks cannot remove newer operations, and authority reset retires current correlation" <|
+            \_ ->
+                let
+                    ( firstTracked, firstId, _ ) = Helpers.beginTrackedMutation [ "project-a" ] lifecycleModel
+                    ( first, _ ) = Helpers.beginProjectMutation firstTracked.selectedWorkspaceId firstTracked.sessionRequestEpoch "project-a" [ ( "request_id", Encode.string firstId ) ] firstTracked
+                    oldGuard = projectGuard first "entity:project:project-a"
+                    ( secondTracked, secondId, _ ) = Helpers.beginTrackedMutation [ "project-a" ] first
+                    ( current, _ ) = Helpers.beginProjectMutation secondTracked.selectedWorkspaceId secondTracked.sessionRequestEpoch "project-a" [ ( "request_id", Encode.string secondId ) ] secondTracked
+                    afterOld = UpdateRouter.update (ProjectUpdated oldGuard (Err (Api.decodeApiErrorBody 409 "{}"))) current |> Result.withDefault ( current, Cmd.none ) |> Tuple.first
+                    afterError = UpdateRouter.update (ProjectUpdated (projectGuard current "entity:project:project-a") (Err (Api.decodeApiErrorBody 409 "{}"))) current |> Result.withDefault ( current, Cmd.none ) |> Tuple.first
+                    afterRoute = AppShell.finalizeInit (Types.WorkspacePage "workspace-b") current
+                    afterSession = AppShell.handleOwned (AppShell.AuthTokenChangedMsg True) current |> Tuple.first
+                    changedAudience = { current | sessionContext = current.sessionContext |> Maybe.map (\session -> let principal = session.principal in { session | principal = { principal | actorId = "new-principal" } }) }
+                in
+                Expect.all
+                    [ \_ -> Dict.get "project-a" afterOld.mutations.projectOperations |> Maybe.andThen .requestId |> Expect.equal (Just secondId)
+                    , \_ -> Helpers.projectOperationMatches "project-a" (Just secondId) afterOld |> Expect.equal True
+                    , \_ -> Dict.size afterError.mutations.projectOperations |> Expect.equal 0
+                    , \_ -> Dict.size afterRoute.mutations.projectOperations |> Expect.equal 0
+                    , \_ -> Dict.size afterSession.mutations.projectOperations |> Expect.equal 0
+                    , \_ -> Helpers.retireProjectOperations changedAudience |> .mutations |> .projectOperations |> Dict.size |> Expect.equal 0
+                    ] ()
+        , test "inactive next demand clears loading state so a later expansion can retry" <|
+            \_ ->
+                let
+                    cards = lifecycleModel.cards
+                    source = { lifecycleModel | cards = { cards | projectNextTasksLoading = Dict.singleton "project-a" True, projectNextTaskDiagnosticsLoading = Dict.singleton "project-a" True } }
+                    settled = UpdateRouter.update (RequestProjectNextTasks source.selectedWorkspaceId source.sessionRequestEpoch "project-a" False) source |> Result.withDefault ( source, Cmd.none ) |> Tuple.first
+                in
+                ( Dict.get "project-a" settled.cards.projectNextTasksLoading, Dict.get "project-a" settled.cards.projectNextTaskDiagnosticsLoading ) |> Expect.equal ( Nothing, Nothing )
+        , test "task completion lifecycle errors use task-specific copy and blocker detail" <|
             \_ ->
                 let
                     body =
@@ -940,6 +1081,7 @@ suite =
                         { task = { blockedTask | status = Api.Blocked }
                         , completionGated = False
                         , openDescendantCount = 0
+                        , projectPaused = False
                         , dependencyBlocked = True
                         , openDependencyCount = 1
                         }
@@ -963,6 +1105,7 @@ suite =
                         { task = task "jump-task" Nothing (Just "project-a")
                         , completionGated = False
                         , openDescendantCount = 0
+                        , projectPaused = False
                         , dependencyBlocked = False
                         , openDependencyCount = 0
                         }
@@ -1569,3 +1712,37 @@ taskTitleUpdateAuditJson =
 accessTokenAuditJson : String
 accessTokenAuditJson =
     """{"id":"audit-access-token","workspace_id":null,"entity_type":"access_token","entity_id":"token-1","action":"create","old_values":null,"new_values":{"id":"token-1","actor_type":"bot","actor_label":"CI Bot","token_hash":"secret-digest","last_used_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"},"request_id":"req-token","actor_type":"bot","actor_id":"bot-1","actor_label":"CI Bot","changed_at":"2026-01-01T00:00:06Z"}"""
+
+
+emptyProjectRollup : Api.ProjectReadinessRollup
+emptyProjectRollup =
+    { openProjectCount = 0, inProgressTaskCount = 0, closedProjectCount = 0, openTaskCount = 0, doneTaskCount = 0, cancelledTaskCount = 0, blockedTaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True }
+
+
+projectGuard : Types.Model -> String -> Types.CanonicalRequestGuard
+projectGuard source target =
+    { scopeKey = "workspace:" ++ (source.selectedWorkspaceId |> Maybe.withDefault "")
+    , targetKey = target
+    , targetGeneration = Dict.get ("workspace:" ++ (source.selectedWorkspaceId |> Maybe.withDefault "") ++ "|" ++ target) source.webSocket.targetGenerations |> Maybe.withDefault 0
+    , sessionEpoch = source.sessionRequestEpoch
+    , routeWorkspace = source.selectedWorkspaceId
+    , audienceId = source.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault ""
+    }
+
+
+pauseProjectJson : String
+pauseProjectJson =
+    """{"id":"project-a","workspace_id":"workspace-a","parent_id":null,"name":"Project A","description":null,"status":"paused","priority":5,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"""
+
+
+activeProjectPanels : Types.Model -> Types.Model
+activeProjectPanels source =
+    let cards = source.cards
+    in { source | cards = { cards | expandedCards = Dict.singleton "project-a" True } }
+
+
+pauseEventWire : String -> String -> String
+pauseEventWire eventId requestId =
+    """{"schema_version":1,"transport":"frame","scope":{"scope":"workspace","workspace_id":"workspace-a"},"frame":{"schema_version":1,"type":"change","event":{"schema_version":1,"event_id":"EVENT_ID","scope":"workspace","workspace_id":"workspace-a","occurred_at":"2026-10-12T12:00:00Z","transaction":{"id":"pause-tx","cause":"rest","request_id":"REQUEST_ID"},"actor":{"type":"system","id":null},"entity":{"type":"project","id":"project-a","action":"updated"},"invalidations":[{"kind":"entity","target":"project:project-a"},{"kind":"tree","target":"workspace:workspace-a"},{"kind":"next_task","target":"workspace:workspace-a"}]}}}"""
+        |> String.replace "EVENT_ID" eventId
+        |> String.replace "REQUEST_ID" requestId

@@ -297,7 +297,7 @@ update msg model =
                                     ( trackedModel, requestId, clearCmd ) =
                                         beginTrackedMutation [ state.entityId ] model
                                 in
-                                ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
+                                ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model (Just requestId) state ] )
 
                             else
                                 ( model, Cmd.none )
@@ -375,7 +375,7 @@ update msg model =
                                     else
                                         updateEditingModel (\ed -> { ed | editState = Nothing }) trackedModel
                             in
-                            ( savingModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
+                            ( savingModel, Cmd.batch [ clearCmd, saveEditCmd model (Just requestId) state ] )
 
                     else
                         -- Editing state has moved to a different field; don't clear it
@@ -396,10 +396,9 @@ update msg model =
             ( trackedModel
             , Cmd.batch
                 [ clearCmd
-                , Api.updateProject model.flags.apiUrl
+                , Helpers.projectUpdateCmd model
                     projId
                     [ ( "status", Encode.string (Api.projectStatusToString newStatus) ), ( "request_id", Encode.string requestId ) ]
-                    ProjectUpdated
                 ]
             )
 
@@ -426,10 +425,9 @@ update msg model =
             ( trackedModel
             , Cmd.batch
                 [ clearCmd
-                , Api.updateProject model.flags.apiUrl
+                , Helpers.projectUpdateCmd model
                     projId
                     [ ( "priority", Encode.int newPri ), ( "request_id", Encode.string requestId ) ]
-                    ProjectUpdated
                 ]
             )
 
@@ -623,7 +621,7 @@ update msg model =
 
                 fetchProjectOverviewCmd =
                     if Dict.member cardId model.projects && not (Dict.member cardId model.dependencies.projectReadinessRollups) then
-                        Api.fetchProjectOverview model.flags.apiUrl cardId (GotProjectOverview cardId)
+                        Helpers.projectOverviewCmd model cardId
 
                     else
                         Cmd.none
@@ -647,7 +645,7 @@ update msg model =
                                         ( trackedModel, requestId, clearCmd ) =
                                             beginTrackedMutation [ state.entityId ] model
                                     in
-                                    ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
+                                    ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model (Just requestId) state ] )
 
                                 else
                                     ( model, Cmd.none )
@@ -739,9 +737,11 @@ workspaceTypeFromString raw =
             Api.Repository
 
 
-saveEditCmd : String -> Maybe String -> { entityType : String, entityId : String, field : String, value : String, original : String, requestId : Maybe String, workspaceGeneration : Maybe Int, error : Maybe String } -> Cmd Msg
-saveEditCmd apiUrl maybeRequestId state =
+saveEditCmd : Model -> Maybe String -> { entityType : String, entityId : String, field : String, value : String, original : String, requestId : Maybe String, workspaceGeneration : Maybe Int, error : Maybe String } -> Cmd Msg
+saveEditCmd model maybeRequestId state =
     let
+        apiUrl = model.flags.apiUrl
+
         fields =
             [ ( state.field, Encode.string state.value ) ]
                 ++ (case maybeRequestId of
@@ -762,10 +762,7 @@ saveEditCmd apiUrl maybeRequestId state =
                     Cmd.none
 
         "project" ->
-            Api.updateProject apiUrl
-                state.entityId
-                fields
-                ProjectUpdated
+            Helpers.projectUpdateCmd model state.entityId fields
 
         "task" ->
             Api.updateTask apiUrl

@@ -1,5 +1,7 @@
 module UpdateRouter exposing (MainOwnedMsg(..), update)
 
+import Dict
+import Api
 import AppShell
 import Browser
 import Feature.AuditLog
@@ -246,8 +248,32 @@ route msg model =
         MemoryCreated _ ->
             Ok (Feature.Mutations.update msg model)
 
-        ProjectUpdated _ ->
-            Ok (Feature.Mutations.update msg model)
+        RequestProjectUpdate workspace epoch projectId fields ->
+            Ok (Helpers.beginProjectMutation workspace epoch projectId fields model)
+
+        RequestProjectOverview workspace epoch projectId ->
+            Ok (Helpers.beginProjectRequest workspace epoch ("project-overview:" ++ projectId) (\guard -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview guard projectId)) model)
+
+        RequestProjectNextTasks workspace epoch projectId diagnostics ->
+            let
+                target = (if diagnostics then "project-next-diagnostics:" else "project-next:") ++ projectId
+                toMsg guard = if diagnostics then GotProjectNextTaskDiagnostics guard projectId else GotProjectNextTasks guard projectId
+            in
+            if Helpers.projectNextDemandIsActive projectId model then
+                Ok (Helpers.beginProjectRequest workspace epoch target (\guard -> Api.fetchProjectNextTasks model.flags.apiUrl projectId (if diagnostics then 200 else 5) diagnostics (toMsg guard)) model)
+            else
+                let cards = model.cards
+                in
+                Ok ( { model | cards = { cards | projectNextTasksLoading = Dict.remove projectId cards.projectNextTasksLoading, projectNextTaskDiagnosticsLoading = Dict.remove projectId cards.projectNextTaskDiagnosticsLoading } }, Cmd.none )
+
+        ProjectUpdated guard _ ->
+            let
+                completed = Helpers.finishProjectOperation guard model
+            in
+            if Helpers.projectRequestIsCurrent guard model then
+                Ok (Feature.Mutations.update msg completed)
+            else
+                Ok ( completed, Cmd.none )
 
         TaskUpdated _ ->
             Ok (Feature.Mutations.update msg model)
@@ -675,14 +701,23 @@ route msg model =
         LoadTaskDependencyPage _ ->
             Ok (Feature.Dependencies.update msg model)
 
-        GotProjectOverview _ _ ->
-            Ok (Feature.Dependencies.update msg model)
+        GotProjectOverview guard _ _ ->
+            if Helpers.projectRequestIsCurrent guard model then
+                Ok (Feature.Dependencies.update msg model)
+            else
+                Ok ( model, Cmd.none )
 
-        GotProjectNextTasks _ _ ->
-            Ok (Feature.Cards.update msg model)
+        GotProjectNextTasks guard projectId _ ->
+            if Helpers.projectRequestIsCurrent guard model && Helpers.projectNextDemandIsActive projectId model then
+                Ok (Feature.Cards.update msg model)
+            else
+                Ok ( model, Cmd.none )
 
-        GotProjectNextTaskDiagnostics _ _ ->
-            Ok (Feature.Cards.update msg model)
+        GotProjectNextTaskDiagnostics guard projectId _ ->
+            if Helpers.projectRequestIsCurrent guard model && Helpers.projectNextDemandIsActive projectId model then
+                Ok (Feature.Cards.update msg model)
+            else
+                Ok ( model, Cmd.none )
 
         RefreshProjectNextTasks _ ->
             Ok (Feature.Cards.update msg model)

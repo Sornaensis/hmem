@@ -123,11 +123,15 @@ finalizeInit page model =
         , sessionRequestEpoch = model.sessionRequestEpoch + 1
         , dataLoading = Feature.DataLoading.prepareForPageLoad page model.dataLoading
     }
+        |> Helpers.retireProjectOperations
 
 
 handleOwned : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
 handleOwned ownedMsg model =
-    Feature.Cards.refreshViewport model (handleOwnedRaw ownedMsg model)
+    let
+        ( next, command ) = handleOwnedRaw ownedMsg model
+    in
+    Feature.Cards.refreshViewport model ( Helpers.retireProjectOperations next, command )
 
 
 handleOwnedRaw : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )

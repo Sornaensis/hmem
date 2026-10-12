@@ -1,5 +1,7 @@
 module Feature.Mutations exposing (init, update)
 
+import Feature.WebSocket
+import Helpers
 import Dict
 import Api
 import Helpers exposing (applyTaskMutationResult, beginWorkspaceDataReload, pushUrl, taskMutationResultIds, trackLocalMutation, trackLocalMutations)
@@ -12,6 +14,7 @@ init : MutationsModel
 init =
     { pendingMutationIds = Dict.empty
     , pendingRequestIds = Dict.empty
+    , projectOperations = Dict.empty
     , nextRequestId = 1
     }
 
@@ -146,20 +149,34 @@ update msg model =
                 Err _ ->
                     addToast Error "Failed to create workspace" model
 
-        ProjectUpdated result ->
-            case result of
-                Ok proj ->
-                    let
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation proj.id
-                                (markProjectDetailCurrent proj
-                                    { model | projects = Dict.insert proj.id proj model.projects }
-                                )
-                    in
-                    ( trackedModel, Cmd.batch [ trackCmd, refreshReadinessCaches trackedModel ] )
+        ProjectUpdated guard result ->
+            if not (Helpers.projectRequestIsCurrent guard model) then
+                ( model, Cmd.none )
 
-                Err err ->
-                    handleApiMutationError "Failed to update project" err model
+            else
+                case result of
+                    Ok mutation ->
+                        if Just mutation.project.workspaceId /= model.selectedWorkspaceId || guard.targetKey /= "entity:project:" ++ mutation.project.id then
+                            ( model, Cmd.none )
+                        else
+                            let
+                                proj = mutation.project
+                                tasks = mutation.pauseEffects |> Maybe.map (.tasks >> List.map .task) |> Maybe.withDefault []
+                                canonical = List.foldl (\task current -> { current | tasks = Dict.insert task.id task current.tasks })
+                                    (markProjectDetailCurrent proj { model | projects = Dict.insert proj.id proj model.projects }) tasks |> markTaskDetailsCurrent tasks
+                                ( tracked, trackCmd ) = trackLocalMutations (proj.id :: List.map .id tasks) canonical
+                                ( refreshing, refreshCmd ) = Feature.WebSocket.refreshProjectCascade proj.id tracked
+                                refreshed = markProjectDetailCurrent proj refreshing |> markTaskDetailsCurrent tasks
+                                notice = mutation.pauseEffects |> Maybe.andThen (\effects ->
+                                    if effects.remainingOwnPause || effects.remainingAncestorPause then
+                                        Just (if effects.remainingAncestorPause then "Project remains paused by an ancestor." else "Project remains independently paused.")
+                                    else Nothing)
+                                ( toasted, toastCmd ) = notice |> Maybe.map (\message -> addToast Info message refreshed) |> Maybe.withDefault ( refreshed, Cmd.none )
+                            in
+                            ( toasted, Cmd.batch [ trackCmd, refreshCmd, toastCmd, refreshReadinessCaches toasted ] )
+
+                    Err err ->
+                        handleApiMutationError "Failed to update project" err model
 
         TaskUpdated result ->
             case result of
@@ -336,15 +353,15 @@ refreshReadinessCaches model =
             |> Cmd.batch
         , model.dependencies.projectReadinessRollups
             |> Dict.keys
-            |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
+            |> List.map (\projectId -> Helpers.projectOverviewCmd model projectId)
             |> Cmd.batch
         , model.cards.projectNextTasks
             |> Dict.keys
             |> List.map
                 (\projectId ->
                     Cmd.batch
-                        [ Api.fetchProjectNextTasks model.flags.apiUrl projectId 5 False (GotProjectNextTasks projectId)
-                        , Api.fetchProjectNextTasks model.flags.apiUrl projectId 200 True (GotProjectNextTaskDiagnostics projectId)
+                        [ Helpers.projectNextTasksCmd model projectId False
+                        , Helpers.projectNextTasksCmd model projectId True
                         ]
                 )
             |> Cmd.batch

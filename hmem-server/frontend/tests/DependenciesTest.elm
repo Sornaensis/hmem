@@ -1047,7 +1047,7 @@ suite =
                     afterAddReadiness =
                         WebSocket.update
                             (CanonicalProjectOverviewFetched
-                                (canonicalGuardFor ("dependency-readiness:project:" ++ projectId) afterPrerequisite)
+                                (canonicalGuardFor ("project-overview:" ++ projectId) afterPrerequisite)
                                 projectId
                                 (Ok { project = project projectId, tasks = [ dependentTask ], subprojects = [], readinessRollup = addProjectRollup })
                             )
@@ -1061,7 +1061,7 @@ suite =
                     afterRemoveReadiness =
                         WebSocket.update
                             (CanonicalProjectOverviewFetched
-                                (canonicalGuardFor ("dependency-readiness:project:" ++ projectId) afterRemoveEvent)
+                                (canonicalGuardFor ("project-overview:" ++ projectId) afterRemoveEvent)
                                 projectId
                                 (Ok { project = project projectId, tasks = [ dependentTask ], subprojects = [], readinessRollup = staleProjectRollup })
                             )
@@ -1222,7 +1222,7 @@ suite =
                         canonicalGuardFor ("dependency-readiness:task:" ++ ancestorTaskId) afterEventA
 
                     oldProjectGuard =
-                        canonicalGuardFor ("dependency-readiness:project:" ++ projectId) afterEventA
+                        canonicalGuardFor ("project-overview:" ++ projectId) afterEventA
 
                     afterAncestorCrawlStarted =
                         Dependencies.beginDependencyRefresh ancestorTaskId afterEventA
@@ -1239,7 +1239,7 @@ suite =
                         canonicalGuardFor ("dependency-readiness:task:" ++ ancestorTaskId) afterEventB
 
                     newProjectGuard =
-                        canonicalGuardFor ("dependency-readiness:project:" ++ projectId) afterEventB
+                        canonicalGuardFor ("project-overview:" ++ projectId) afterEventB
 
                     staleOverview =
                         { task = ancestorTask
@@ -1307,7 +1307,7 @@ suite =
                         "workspace:" ++ workspaceId ++ "|dependency-readiness:task:" ++ ancestorTaskId
 
                     projectTarget =
-                        "workspace:" ++ workspaceId ++ "|dependency-readiness:project:" ++ projectId
+                        "workspace:" ++ workspaceId ++ "|project-overview:" ++ projectId
                 in
                 Expect.equal
                     { taskGeneration = Just 2

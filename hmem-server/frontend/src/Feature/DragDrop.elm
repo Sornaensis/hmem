@@ -283,7 +283,7 @@ trackedProjectMutation trackedIds projectId fields model =
     ( trackedModel
     , Cmd.batch
         [ clearCmd
-        , Api.updateProject model.flags.apiUrl projectId (fields ++ [ ( "request_id", Encode.string requestId ) ]) ProjectUpdated
+        , projectUpdateCmd model projectId (fields ++ [ ( "request_id", Encode.string requestId ) ])
         ]
     )
 
@@ -332,8 +332,8 @@ swapPriorities apiUrl requestId drag targetType targetId model =
                     Dict.get targetId model.projects |> Maybe.map .priority |> Maybe.withDefault 5
             in
             Cmd.batch
-                [ Api.updateProject apiUrl drag.entityId [ ( "priority", Encode.int targetPri ), ( "request_id", Encode.string requestId ) ] ProjectUpdated
-                , Api.updateProject apiUrl targetId [ ( "priority", Encode.int dragPri ), ( "request_id", Encode.string requestId ) ] ProjectUpdated
+                [ projectUpdateCmd model drag.entityId [ ( "priority", Encode.int targetPri ), ( "request_id", Encode.string requestId ) ]
+                , projectUpdateCmd model targetId [ ( "priority", Encode.int dragPri ), ( "request_id", Encode.string requestId ) ]
                 ]
 
         "task" ->

@@ -68,7 +68,7 @@ const socketScript = () => {
   new MutationObserver(() => { window.hierarchyMaximum = Math.max(window.hierarchyMaximum, document.querySelectorAll('[data-hierarchy-key]').length) }).observe(document, { childList: true, subtree: true })
 }
 
-export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = []) {
+export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = [], authority = null) {
   const fixtures = [fixture, ...additionalFixtures]
   const staticRoot = resolve(process.cwd(), '../static')
   const server = createServer(async (request, response) => {
@@ -106,7 +106,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       const request = route.request(), url = new URL(request.url()), path = url.pathname
       const navigation = path.endsWith('/navigation')
       const detail = /^\/api\/v1\/(projects|tasks)\/[^/]+$/.test(path)
-      const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', arrived: performance.now(), done: false }
+      const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', includeBlocked: url.searchParams.get('include_blocked') === 'true', arrived: performance.now(), done: false }
       requests.push(receipt)
       if (navigation) { activeBranches++; maxBranches = Math.max(maxBranches, activeBranches) }
       if (detail) { activeDetails++; maxDetails = Math.max(maxDetails, activeDetails) }
@@ -132,11 +132,22 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         else if (path.endsWith('/navigation/summaries')) { const body = request.postDataJSON(); value = navigationSummariesResponse(fixture, body.project_ids, body.task_ids) }
         else if (path.includes('/navigation/focus/')) { const parts = path.split('/'); value = navigationFocusResponse(fixture, parts.at(-2), parts.at(-1), Number(url.searchParams.get('ancestor_offset') || 0)) }
         else if (/^\/api\/v1\/projects\/[^/]+\/overview$/.test(path)) value = projectOverviewResponse(fixture, path.split('/')[4])
-        else if (/^\/api\/v1\/projects\/[^/]+\/next-tasks$/.test(path)) value=fixture.tasks.filter(task=>task.project_id===entityId&&!task.parent_id&&task.status!=='done'&&task.status!=='cancelled').slice(0,Number(url.searchParams.get('limit'))).map(task=>{const descendants=fixture.tasks.filter(child=>child.parent_id===task.id&&child.status!=='done'&&child.status!=='cancelled');return {task,completion_gated:descendants.length>0,open_descendant_count:descendants.length,dependency_blocked:false,open_dependency_count:0}})
+        else if (/^\/api\/v1\/projects\/[^/]+\/next-tasks$/.test(path)) {
+          const projects = new Map(fixture.projects.map(project => [project.id, project]))
+          const paused = projectId => { const seen = new Set(); for (let id = projectId; id != null && !seen.has(id); id = projects.get(id)?.parent_id) { seen.add(id); if (projects.get(id)?.status === 'paused') return true }; return false }
+          value = fixture.tasks.filter(task => task.project_id === entityId && !task.parent_id && !['done','cancelled'].includes(task.status))
+            .map(task => { const descendants = fixture.tasks.filter(child => child.parent_id === task.id && !['done','cancelled'].includes(child.status)); const dependencies = fixture.dependencies.filter(edge => edge.task_id === task.id && !['done','cancelled'].includes(fixture.tasks.find(other => other.id === edge.depends_on_id)?.status)); return {task,completion_gated:descendants.length > 0,open_descendant_count:descendants.length,dependency_blocked:dependencies.length > 0,open_dependency_count:dependencies.length,project_paused:paused(task.project_id)} })
+            .filter(candidate => receipt.includeBlocked || (!candidate.project_paused && !candidate.dependency_blocked && candidate.task.status !== 'blocked'))
+            .slice(0, Number(url.searchParams.get('limit')))
+        }
         else if (/^\/api\/v1\/tasks\/[^/]+\/overview$/.test(path)) value = taskOverviewResponse(fixture, path.split('/')[4])
         else if (detail) {
           value = (path.includes('/projects/') ? fixture.projects : fixture.tasks).find(item => item.id === path.split('/')[4])
-          if (request.method() === 'PUT') { const update = request.postDataJSON(); assert.deepEqual(Object.keys(update).sort(), ['request_id','title']); assert.equal(typeof update.request_id,'string'); value.title=update.title; receipt.update = update }
+          if (request.method() === 'PUT') {
+            const update = request.postDataJSON(); assert.equal(typeof update.request_id, 'string'); receipt.update = update
+            if (path.includes('/projects/') && authority) value = authority.updateProject(fixture, entityId, update)
+            else { assert.deepEqual(Object.keys(update).sort(), ['request_id','title']); value.title = update.title }
+          }
         }
         else if (path === '/api/v1/observations/count') value = fixtureObservationCounts(fixture, request.postDataJSON())
         else if (path === '/api/v1/observations' || path.endsWith('/subject-facets')) value = { items: [], has_more: false }
@@ -145,9 +156,11 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         if (control) { control.used = true; control.receipt = receipt; if (control.error) { status = control.error; value = { error: 'Controlled failure' } }; if (control.transform) value = control.transform(value) }
         if (navigation && status < 400) { receipt.projectIds = value.projects.items.map(item => item.id); receipt.taskIds = value.tasks.items.map(item => item.id); receipt.projectHasMore = value.projects.has_more; receipt.taskHasMore = value.tasks.has_more }
         receipt.status = status
-        receipt.bytes = Buffer.byteLength(JSON.stringify(value))
+        const responseBody = JSON.stringify(value)
+        receipt.bytes = Buffer.byteLength(responseBody)
         if (control) { control.arrivedResolve(receipt); if (control.hold) { held.add(control.release); await control.wait; held.delete(control.release) } }
-        await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) })
+        await route.fulfill({ status, contentType: 'application/json', body: responseBody })
+        if (authority && request.method() === 'PUT' && path.includes('/projects/')) await authority.broadcast()
       } catch (error) { errors.push(error.message); await route.abort().catch(() => {}) }
       finally { receipt.done = true; if (navigation) activeBranches--; if (detail) activeDetails-- }
     })

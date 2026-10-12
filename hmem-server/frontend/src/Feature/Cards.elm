@@ -173,8 +173,8 @@ update msg model =
                 fetchProjectNextTasksCmd =
                     if shouldFetchProjectNextTasks then
                         Cmd.batch
-                            [ Api.fetchProjectNextTasks model.flags.apiUrl cardId 5 False (GotProjectNextTasks cardId)
-                            , Api.fetchProjectNextTasks model.flags.apiUrl cardId 200 True (GotProjectNextTaskDiagnostics cardId)
+                            [ Helpers.projectNextTasksCmd model cardId False
+                            , Helpers.projectNextTasksCmd model cardId True
                             ]
 
                     else
@@ -287,12 +287,12 @@ update msg model =
             in
             ( { model | cards = updatedCards }
             , Cmd.batch
-                [ Api.fetchProjectNextTasks model.flags.apiUrl projectId 5 False (GotProjectNextTasks projectId)
-                , Api.fetchProjectNextTasks model.flags.apiUrl projectId 200 True (GotProjectNextTaskDiagnostics projectId)
+                [ Helpers.projectNextTasksCmd model projectId False
+                , Helpers.projectNextTasksCmd model projectId True
                 ]
             )
 
-        GotProjectNextTasks projectId result ->
+        GotProjectNextTasks _ projectId result ->
             let
                 currentCards =
                     model.cards
@@ -321,7 +321,7 @@ update msg model =
                     , Cmd.none
                     )
 
-        GotProjectNextTaskDiagnostics projectId result ->
+        GotProjectNextTaskDiagnostics _ projectId result ->
             case result of
                 Ok candidates ->
                     let
@@ -1641,6 +1641,14 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
             if status == Api.ProjCompleted then
                 completionBlockerReason
 
+            else if status == Api.ProjPaused then
+                if List.member project.status [ Api.ProjCompleted, Api.ProjArchived ] then
+                    Just "Reopen this project before pausing it."
+                else if maybeProjectRollup |> Maybe.map (\rollup -> rollup.inProgressTaskCount > 0) |> Maybe.withDefault False then
+                    Just "Finish or stop all running descendant tasks and subtasks before pausing."
+                else
+                    Nothing
+
             else
                 Nothing
 
@@ -2000,13 +2008,18 @@ nextTaskCandidateClass candidate =
 
 isBlockedNextTaskCandidate : Api.NextTaskCandidate -> Bool
 isBlockedNextTaskCandidate candidate =
-    candidate.dependencyBlocked || candidate.task.status == Api.Blocked
+    candidate.projectPaused || candidate.dependencyBlocked || candidate.task.status == Api.Blocked
 
 
 
 nextTaskRationale : Api.NextTaskCandidate -> String
 nextTaskRationale candidate =
-    if candidate.dependencyBlocked then
+    if candidate.projectPaused then
+        "Paused by this project or an ancestor. Resume the project to release this blocker."
+            ++ (if candidate.dependencyBlocked then " Still waiting for " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ "." else "")
+            ++ (if candidate.completionGated then " Still waiting for " ++ countPhrase candidate.openDescendantCount "open subtask" "open subtasks" ++ "." else "")
+
+    else if candidate.dependencyBlocked then
         "Dependency-blocked by " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ "."
 
     else if candidate.task.status == Api.Blocked then

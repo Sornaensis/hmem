@@ -3,6 +3,7 @@ module DataLoadingTest exposing (suite)
 import Api
 import AppShell
 import Dict
+import Helpers
 import Expect
 import Feature.Cards as Cards
 import Feature.ChangeStream as ChangeStream
@@ -771,9 +772,12 @@ suite =
                     mutatedTask =
                         { oldTask | title = "new task", status = Api.InProgress, priority = 8, description = Just "new task description", updatedAt = "2026-01-03T00:00:00Z" }
 
+                    ready = { requested | sessionContext = Just editorSession }
+                    ( guarded, _ ) = Helpers.beginProjectRequest ready.selectedWorkspaceId ready.sessionRequestEpoch ("entity:project:" ++ mutatedProject.id) (\_ -> Cmd.none) ready
+                    guard = { scopeKey = "workspace:" ++ (ready.selectedWorkspaceId |> Maybe.withDefault ""), targetKey = "entity:project:" ++ mutatedProject.id, targetGeneration = 1, sessionEpoch = ready.sessionRequestEpoch, routeWorkspace = ready.selectedWorkspaceId, audienceId = editorSession.principal.actorId }
                     afterMutations =
-                        requested
-                            |> Mutations.update (ProjectUpdated (Ok mutatedProject))
+                        guarded
+                            |> Mutations.update (ProjectUpdated guard (Ok { project = mutatedProject, pauseEffects = Nothing }))
                             |> Tuple.first
                             |> Mutations.update (TaskUpdated (Ok { task = mutatedTask, dependencyEffects = [] }))
                             |> Tuple.first

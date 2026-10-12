@@ -1,5 +1,6 @@
 module Feature.WebSocket exposing
-    ( connectCmd
+    ( refreshProjectCascade
+    , connectCmd
     , init
     , subscriptions
     , update
@@ -71,6 +72,14 @@ subscriptions =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
+    let
+        ( next, command ) = updateRaw msg model
+    in
+    ( Helpers.retireProjectOperations next, command )
+
+
+updateRaw : Msg -> Model -> ( Model, Cmd Msg )
+updateRaw msg model =
     case msg of
         WsConnectingMsg ->
             if model.auth.status == AuthReady then
@@ -592,8 +601,26 @@ applyScopedFrames scope frames model =
         prior =
             Dict.get key model.webSocket.streams |> Maybe.withDefault (ChangeStream.init scope [])
 
-        ( next, actions ) =
-            ChangeStream.reduceFrames frames prior
+        step frame ( current, accumulated, pendingForeignRoots ) =
+            let
+                ( nextState, additions ) = ChangeStream.reduceFrame frame current
+                roots =
+                    case frame of
+                        Api.CanonicalChange envelope ->
+                            if envelope.entityType == "project"
+                                && not (List.member envelope.eventId current.eventIds)
+                                && List.member envelope.eventId nextState.eventIds
+                                && not (Helpers.projectOperationMatches envelope.entityId envelope.requestId model) then
+                                Set.insert envelope.entityId pendingForeignRoots
+                            else pendingForeignRoots
+                        _ -> pendingForeignRoots
+            in
+            ( nextState, accumulated ++ additions, roots )
+
+        ( next, rawActions, foreignRoots ) =
+            List.foldl step ( prior, [], Set.empty ) frames
+
+        actions = ChangeStream.coalesce rawActions
 
         streams =
             Dict.insert key next model.webSocket.streams
@@ -604,7 +631,12 @@ applyScopedFrames scope frames model =
         updated =
             updateWebSocket (\webSocket -> { webSocket | streams = streams, state = connectionState }) model
     in
-    applyActions scope actions updated
+    applyActions scope actions
+        (if scopeMatchesSelectedWorkspace scope updated then
+            Set.toList foreignRoots |> List.concatMap (\id -> loadedProjectCascadeTargets id updated)
+                |> List.filter (Tuple.first >> (==) "project") |> List.map Tuple.second |> Set.fromList |> Set.toList
+                |> List.foldl (\id current -> advanceCanonicalTarget scope ("entity:project:" ++ id) current) updated
+         else updated)
 
 
 requiredScopes : Model -> List ChangeStream.Scope
@@ -966,9 +998,15 @@ applyActions scope actions model =
             else
                 ( model, Cmd.none )
 
+        cascadeRoots =
+            navigationTargets |> List.filterMap (\( kind, id ) -> if kind == "project" then Just id else Nothing)
+
+        cascadeTargets =
+            List.concatMap (\id -> loadedProjectCascadeTargets id navigationModel) cascadeRoots
+
         ( revalidationModel, revalidationCmd ) =
             if scopeMatchesSelectedWorkspace scope model then
-                requestNavigationSummaryBatches scope navigationTargets navigationModel
+                requestNavigationSummaryBatches scope (navigationTargets ++ cascadeTargets) (invalidateCascadeRequests scope cascadeTargets navigationModel)
 
             else
                 ( model, Cmd.none )
@@ -1064,26 +1102,11 @@ applyAction scope action ( model, accumulated ) =
         ChangeStream.RefreshNextTasks workspaceId ->
             if model.selectedWorkspaceId == Just workspaceId then
                 let
-                    cards =
-                        model.cards
-
-                    invalidated =
-                        advanceCanonicalTarget scope
-                            ("next:" ++ workspaceId)
-                            { model
-                                | cards =
-                                    { cards
-                                        | projectNextTasks = Dict.empty
-                                        , projectNextTaskDiagnostics = Dict.empty
-                                        , projectNextTasksLoading = Dict.empty
-                                        , projectNextTaskDiagnosticsLoading = Dict.empty
-                                        , projectNextTasksErrors = Dict.empty
-                                        , projectNextTaskDiagnosticsErrors = Dict.empty
-                                    }
-                            }
+                    ids = Dict.keys model.cards.projectNextTasks ++ Dict.keys model.cards.projectNextTaskDiagnostics ++ Dict.keys model.cards.projectNextTasksLoading ++ Dict.keys model.cards.projectNextTaskDiagnosticsLoading |> Set.fromList |> Set.toList
+                    invalidated = List.foldl
+                        (\id current -> advanceCanonicalTarget scope ("project-next:" ++ id) current |> advanceCanonicalTarget scope ("project-next-diagnostics:" ++ id)) model ids
                 in
-                ( invalidated, accumulated )
-
+                ( invalidated, Cmd.batch (accumulated :: List.map (refreshProjectNextTaskCache invalidated) ids) )
             else
                 append Cmd.none model
 
@@ -1547,7 +1570,7 @@ revalidateDependencyReadiness scope taskId dependsOnId present model =
 
 requestProjectOverview : ChangeStream.Scope -> String -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
 requestProjectOverview scope target projectId accumulated model =
-    requestCanonical scope target (\guard -> Api.fetchProjectOverview model.flags.apiUrl projectId (CanonicalProjectOverviewFetched guard projectId)) accumulated model
+    requestCanonical scope ("project-overview:" ++ projectId) (\guard -> Api.fetchProjectOverview model.flags.apiUrl projectId (CanonicalProjectOverviewFetched guard projectId)) accumulated model
 
 
 requestGroupMembers : ChangeStream.Scope -> List String -> Model -> ( Model, Cmd Msg )
@@ -1921,7 +1944,7 @@ refreshCachedEntityData model =
         projectReadinessCmds =
             model.dependencies.projectReadinessRollups
                 |> Dict.keys
-                |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
+                |> List.map (\projectId -> Helpers.projectOverviewCmd model projectId)
 
         projectNextTaskCmds =
             model.cards.projectNextTasks
@@ -1952,7 +1975,7 @@ refreshProjectReadinessCaches : Model -> Cmd Msg
 refreshProjectReadinessCaches model =
     model.dependencies.projectReadinessRollups
         |> Dict.keys
-        |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
+        |> List.map (\projectId -> Helpers.projectOverviewCmd model projectId)
         |> Cmd.batch
 
 
@@ -1967,8 +1990,8 @@ refreshProjectNextTaskCaches model =
 refreshProjectNextTaskCache : Model -> String -> Cmd Msg
 refreshProjectNextTaskCache model projectId =
     Cmd.batch
-        [ Api.fetchProjectNextTasks model.flags.apiUrl projectId 5 False (GotProjectNextTasks projectId)
-        , Api.fetchProjectNextTasks model.flags.apiUrl projectId 200 True (GotProjectNextTaskDiagnostics projectId)
+        [ Helpers.projectNextTasksCmd model projectId False
+        , Helpers.projectNextTasksCmd model projectId True
         ]
 
 
@@ -2052,3 +2075,49 @@ scopeAuthority scope model =
 
         ChangeStream.Workspace _ ->
             if model.auth.status == AuthReady then model.sessionContext else Nothing
+
+
+loadedProjectCascadeTargets : String -> Model -> List ( String, String )
+loadedProjectCascadeTargets root model =
+    let
+        parent id =
+            Dict.get id model.dataLoading.projectCardSummaries |> Maybe.map .parentId
+                |> Maybe.withDefault (Dict.get id model.projects |> Maybe.andThen .parentId)
+        within visited id =
+            if id == root then True
+            else if Set.member id visited then False
+            else parent id |> Maybe.map (within (Set.insert id visited)) |> Maybe.withDefault False
+        projectIds = Dict.keys model.dataLoading.projectCardSummaries ++ Dict.keys model.projects |> Set.fromList |> Set.toList |> List.filter (within Set.empty)
+        taskProjects = Dict.values model.dataLoading.taskCardSummaries |> List.map (\task -> ( task.id, task.projectId ))
+            |> (++) (Dict.values model.tasks |> List.map (\task -> ( task.id, task.projectId )))
+        taskIds = taskProjects |> List.filter (Tuple.second >> Maybe.map (within Set.empty) >> Maybe.withDefault False) |> List.map Tuple.first |> Set.fromList |> Set.toList
+    in
+    List.map (Tuple.pair "project") projectIds ++ List.map (Tuple.pair "task") taskIds
+
+
+refreshProjectCascade : String -> Model -> ( Model, Cmd Msg )
+refreshProjectCascade root model =
+    case model.selectedWorkspaceId of
+        Nothing ->
+            ( model, Cmd.none )
+
+        Just workspaceId ->
+            let
+                ( navigationModel, navigationCmd ) = Feature.DataLoading.revalidateNavigationForFilters model
+                targets = loadedProjectCascadeTargets root model
+                ( summaryModel, summaryCmd ) = requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) targets (invalidateCascadeRequests (ChangeStream.Workspace workspaceId) targets navigationModel)
+            in
+            ( summaryModel, Cmd.batch [ navigationCmd, summaryCmd, refreshProjectNextTaskCaches summaryModel ] )
+
+
+invalidateCascadeRequests : ChangeStream.Scope -> List ( String, String ) -> Model -> Model
+invalidateCascadeRequests scope targets model =
+    List.foldl
+        (\( kind, id ) current ->
+            if kind == "project" then
+                current |> advanceCanonicalTarget scope ("project-overview:" ++ id)
+                    |> advanceCanonicalTarget scope ("project-next:" ++ id)
+                    |> advanceCanonicalTarget scope ("project-next-diagnostics:" ++ id)
+            else
+                current)
+        model targets

@@ -5,6 +5,7 @@ import Browser.Dom
 import Browser.Navigation as Nav
 import Char
 import Dict exposing (Dict)
+import Feature.ChangeStream
 import Html exposing (Html, button, text)
 import Html.Attributes exposing (attribute, class, title, type_)
 import Html.Events exposing (stopPropagationOn)
@@ -1562,3 +1563,112 @@ observationUrlBytes value =
     String.toList value
         |> List.map (\character -> let code = Char.toCode character in if code <= 0x7F then 1 else if code <= 0x07FF then 2 else if code <= 0xFFFF then 3 else 4)
         |> List.sum
+
+
+-- Each dispatch shares the canonical target lifetime with live revalidation.
+projectRequestIsCurrent : CanonicalRequestGuard -> Model -> Bool
+projectRequestIsCurrent guard model =
+    model.auth.status == AuthReady
+        && (model.sessionContext
+            |> Maybe.map (\session -> Feature.ChangeStream.requestGuardMatches guard model.sessionRequestEpoch model.selectedWorkspaceId session.principal.actorId model.webSocket.targetGenerations)
+            |> Maybe.withDefault False)
+
+
+prepareProjectRequest : Maybe String -> Int -> String -> Model -> Maybe ( CanonicalRequestGuard, Model )
+prepareProjectRequest workspace epoch target model =
+    if workspace /= model.selectedWorkspaceId || epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady then
+        Nothing
+    else
+        case ( workspace, model.sessionContext ) of
+            ( Just workspaceId, Just session ) ->
+                let
+                    scope = "workspace:" ++ workspaceId
+                    key = scope ++ "|" ++ target
+                    generation = Dict.get key model.webSocket.targetGenerations |> Maybe.withDefault 0 |> (+) 1
+                    guard = { scopeKey = scope, targetKey = target, targetGeneration = generation, sessionEpoch = epoch, routeWorkspace = workspace, audienceId = session.principal.actorId }
+                    webSocket = model.webSocket
+                in
+                Just ( guard, { model | webSocket = { webSocket | targetGenerations = Dict.insert key generation webSocket.targetGenerations } } )
+            _ -> Nothing
+
+
+beginProjectRequest : Maybe String -> Int -> String -> (CanonicalRequestGuard -> Cmd Msg) -> Model -> ( Model, Cmd Msg )
+beginProjectRequest workspace epoch target makeCommand model =
+    case prepareProjectRequest workspace epoch target model of
+        Just ( guard, requested ) -> ( requested, makeCommand guard )
+        Nothing -> ( model, Cmd.none )
+
+
+beginProjectMutation : Maybe String -> Int -> String -> List ( String, Encode.Value ) -> Model -> ( Model, Cmd Msg )
+beginProjectMutation workspace epoch projectId fields model =
+    case prepareProjectRequest workspace epoch ("entity:project:" ++ projectId) model of
+        Nothing -> ( model, Cmd.none )
+        Just ( guard, requested ) ->
+            let
+                mutations = requested.mutations
+                requestId = fields |> List.filter (Tuple.first >> (==) "request_id") |> List.head |> Maybe.andThen (Tuple.second >> Decode.decodeValue Decode.string >> Result.toMaybe)
+                operation = { requestId = requestId, guard = guard }
+                registered = { requested | mutations = { mutations | projectOperations = Dict.insert projectId operation mutations.projectOperations } }
+            in
+            ( registered, Api.updateProject model.flags.apiUrl projectId fields (ProjectUpdated guard) )
+
+
+projectOperationMatches : String -> Maybe String -> Model -> Bool
+projectOperationMatches projectId requestId model =
+    Dict.get projectId model.mutations.projectOperations
+        |> Maybe.map (\operation -> requestId /= Nothing && operation.requestId == requestId
+            && operation.guard.targetKey == "entity:project:" ++ projectId
+            && projectRequestIsCurrent operation.guard model)
+        |> Maybe.withDefault False
+
+
+finishProjectOperation : CanonicalRequestGuard -> Model -> Model
+finishProjectOperation guard model =
+    let
+        mutations = model.mutations
+        remaining = Dict.filter (\_ operation -> operation.guard /= guard) mutations.projectOperations
+    in
+    { model | mutations = { mutations | projectOperations = remaining } }
+
+
+retireProjectOperations : Model -> Model
+retireProjectOperations model =
+    let
+        mutations = model.mutations
+        current = Dict.filter (\_ operation -> projectRequestIsCurrent operation.guard model) mutations.projectOperations
+    in
+    { model | mutations = { mutations | projectOperations = current } }
+
+
+projectUpdateCmd : Model -> String -> List ( String, Encode.Value ) -> Cmd Msg
+projectUpdateCmd model projectId fields =
+    ElmTask.perform identity (ElmTask.succeed (RequestProjectUpdate model.selectedWorkspaceId model.sessionRequestEpoch projectId fields))
+
+
+projectOverviewCmd : Model -> String -> Cmd Msg
+projectOverviewCmd model projectId =
+    ElmTask.perform identity (ElmTask.succeed (RequestProjectOverview model.selectedWorkspaceId model.sessionRequestEpoch projectId))
+
+
+projectNextTasksCmd : Model -> String -> Bool -> Cmd Msg
+projectNextTasksCmd model projectId diagnostics =
+    ElmTask.perform identity (ElmTask.succeed (RequestProjectNextTasks model.selectedWorkspaceId model.sessionRequestEpoch projectId diagnostics))
+
+
+projectNextDemandIsActive : String -> Model -> Bool
+projectNextDemandIsActive projectId model =
+    let
+        project id = Dict.get id model.projects
+        visible visited id =
+            if Set.member id visited then False
+            else case project id of
+                Nothing -> False
+                Just value ->
+                    Just value.workspaceId == model.selectedWorkspaceId
+                        && (case value.parentId of
+                            Nothing -> True
+                            Just parent ->
+                                Dict.get ("proj-" ++ parent) model.cards.collapsedNodes /= Just True
+                                    && visible (Set.insert id visited) parent)
+    in
+    Dict.get projectId model.cards.expandedCards == Just True && visible Set.empty projectId

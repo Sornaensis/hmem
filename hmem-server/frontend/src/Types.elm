@@ -701,9 +701,16 @@ type FocusReturnSource
     | ReturnFromGlobalAudit
 
 
+type alias ProjectMutationOperation =
+    { requestId : Maybe String
+    , guard : CanonicalRequestGuard
+    }
+
+
 type alias MutationsModel =
     { pendingMutationIds : Dict String Bool
     , pendingRequestIds : Dict String Bool
+    , projectOperations : Dict String ProjectMutationOperation
     , nextRequestId : Int
     }
 
@@ -1065,7 +1072,10 @@ type Msg
     | ProjectCreated (Result Api.ApiError Api.Project)
     | TaskCreated (Result Api.ApiError Api.Task)
     | MemoryCreated (Result Api.ApiError Api.Memory)
-    | ProjectUpdated (Result Api.ApiError Api.Project)
+    | RequestProjectUpdate (Maybe String) Int String (List ( String, Encode.Value ))
+    | RequestProjectOverview (Maybe String) Int String
+    | RequestProjectNextTasks (Maybe String) Int String Bool
+    | ProjectUpdated CanonicalRequestGuard (Result Api.ApiError Api.ProjectMutationResult)
     | TaskUpdated (Result Api.ApiError Api.TaskMutationResult)
     | MemoryUpdated (Result Http.Error Api.Memory)
     | WorkspaceUpdated String (Result Api.ApiError Api.Workspace)
@@ -1192,9 +1202,9 @@ type Msg
     | GotTaskDependencies String (Maybe String) Int Int (Result Http.Error Api.TaskOverview)
     | GotTaskDependencyPage String String Int Int Int (Result Http.Error Api.TaskDependencyPage)
     | LoadTaskDependencyPage String
-    | GotProjectOverview String (Result Http.Error Api.ProjectOverview)
-    | GotProjectNextTasks String (Result Http.Error (List Api.NextTaskCandidate))
-    | GotProjectNextTaskDiagnostics String (Result Http.Error (List Api.NextTaskCandidate))
+    | GotProjectOverview CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
+    | GotProjectNextTasks CanonicalRequestGuard String (Result Http.Error (List Api.NextTaskCandidate))
+    | GotProjectNextTaskDiagnostics CanonicalRequestGuard String (Result Http.Error (List Api.NextTaskCandidate))
     | RefreshProjectNextTasks String
     | StartAddDependency String
     | DependencySearch String

@@ -414,7 +414,7 @@ update msg model =
                     Err _ ->
                         addToast Error "Failed to load task dependencies" model
 
-        GotProjectOverview projectId result ->
+        GotProjectOverview _ projectId result ->
             case result of
                 Ok overview ->
                     let

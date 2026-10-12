@@ -37,6 +37,9 @@ module Api exposing
     , ObservationSubjectFacetQuery
     , PaginatedResult
     , Project
+    , ProjectMutationResult
+    , ProjectPauseEffects
+    , projectMutationResultDecoder
     , ProjectOverview
     , ProjectReadinessRollup
     , ProjectSearchResult
@@ -378,6 +381,7 @@ type alias NextTaskCandidate =
     , openDescendantCount : Int
     , dependencyBlocked : Bool
     , openDependencyCount : Int
+    , projectPaused : Bool
     }
 
 
@@ -389,6 +393,10 @@ type alias TaskDependencyStatusChange =
     , autoBlocked : Bool
     , previousOpenDependencyCount : Int
     , openDependencyCount : Int
+    , previousOpenSubtaskCount : Int
+    , openSubtaskCount : Int
+    , previousProjectPaused : Bool
+    , projectPaused : Bool
     , reason : String
     }
 
@@ -404,6 +412,24 @@ type alias DependencyMutationResult =
 type alias TaskMutationResult =
     { task : Task
     , dependencyEffects : List TaskDependencyStatusChange
+    }
+
+
+type alias ProjectMutationResult =
+    { project : Project
+    , pauseEffects : Maybe ProjectPauseEffects
+    }
+
+
+type alias ProjectPauseEffects =
+    { projectCount : Int
+    , taskCount : Int
+    , projects : List { id : String, previousStatus : ProjectStatus, currentStatus : ProjectStatus }
+    , tasks : List TaskDependencyStatusChange
+    , hasMoreProjects : Bool
+    , hasMoreTasks : Bool
+    , remainingOwnPause : Bool
+    , remainingAncestorPause : Bool
     }
 
 
@@ -971,6 +997,12 @@ structuredErrorToUserMessage fallback apiError =
 
                 Just "TASK_OPEN_UNDER_CANCELLED_TASK" ->
                     "Reopen the cancelled parent task before adding, moving, or reopening unfinished subtasks."
+
+                Just "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" ->
+                    "Finish or stop all running descendant tasks and subtasks before pausing this project."
+
+                Just "PROJECT_PAUSE_REQUIRES_REOPEN" ->
+                    "Reopen this project before pausing it."
 
                 Just "PROJECT_COMPLETION_BLOCKED" ->
                     "Complete/archive child projects and finish or cancel all tasks before closing this project."
@@ -1541,6 +1573,7 @@ nextTaskCandidateDecoder =
         |> required "open_descendant_count" D.int
         |> required "dependency_blocked" D.bool
         |> required "open_dependency_count" D.int
+        |> optional "project_paused" D.bool False
 
 
 taskDependencyStatusChangeDecoder : Decoder TaskDependencyStatusChange
@@ -1553,6 +1586,10 @@ taskDependencyStatusChangeDecoder =
         |> required "auto_blocked" D.bool
         |> required "previous_open_dependency_count" D.int
         |> required "open_dependency_count" D.int
+        |> optional "previous_open_subtask_count" D.int 0
+        |> optional "open_subtask_count" D.int 0
+        |> optional "previous_project_paused" D.bool False
+        |> optional "project_paused" D.bool False
         |> required "reason" D.string
 
 
@@ -1574,6 +1611,30 @@ taskMutationResultDecoder =
             , D.succeed []
             ]
         )
+
+
+projectMutationResultDecoder : Decoder ProjectMutationResult
+projectMutationResultDecoder =
+    D.succeed ProjectMutationResult
+        |> custom projectDecoder
+        |> optional "pause_effects" (D.map Just projectPauseEffectsDecoder) Nothing
+
+
+projectPauseEffectsDecoder : Decoder ProjectPauseEffects
+projectPauseEffectsDecoder =
+    D.succeed ProjectPauseEffects
+        |> required "project_count" D.int
+        |> required "task_count" D.int
+        |> required "projects"
+            (D.list (D.map3 (\id previous current -> { id = id, previousStatus = previous, currentStatus = current })
+                (D.field "id" D.string)
+                (D.field "previous_status" projectStatusDecoder)
+                (D.field "current_status" projectStatusDecoder)))
+        |> required "tasks" (D.list taskDependencyStatusChangeDecoder)
+        |> required "has_more_projects" D.bool
+        |> required "has_more_tasks" D.bool
+        |> required "remaining_own_pause" D.bool
+        |> required "remaining_ancestor_pause" D.bool
 
 
 cascadeResultDecoder : Decoder CascadeResult
@@ -3291,7 +3352,7 @@ createProject apiUrl wsId name requestId toMsg =
         }
 
 
-updateProject : String -> String -> List ( String, E.Value ) -> (Result ApiError Project -> msg) -> Cmd msg
+updateProject : String -> String -> List ( String, E.Value ) -> (Result ApiError ProjectMutationResult -> msg) -> Cmd msg
 updateProject apiUrl projectId fields toMsg =
     let
         headers =
@@ -3302,7 +3363,7 @@ updateProject apiUrl projectId fields toMsg =
         , headers = headers
         , url = apiUrl ++ "/api/v1/projects/" ++ projectId
         , body = Http.jsonBody (E.object fields)
-        , expect = expectJsonWithApiError projectDecoder toMsg
+        , expect = expectJsonWithApiError projectMutationResultDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

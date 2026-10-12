@@ -125,3 +125,19 @@ The performance harness hashes this README as a source input. Historical
 qualification covers its recorded source/assets and measurement phase; it does
 not qualify later documentation revisions. Preserve historical baselines and
 receipts when changing this file.
+
+Project pause controls use the canonical descendant running count, including
+unloaded tasks and subtasks. Stop or finish running work before pausing; reopen a
+completed or archived project first. Server lifecycle refusals still provide
+bounded blocker examples when cached readiness is unavailable or out of date.
+Resume releases the project pause cause while independent child pauses, manual
+blocks, dependencies and incomplete subtasks continue to apply. Next-task
+rationales show the combined blockers.
+
+Pause acknowledgements and live project events refresh loaded descendants through
+canonical summary batches and the existing guarded membership loader. They do not
+infer descendant states from a truncated response sample. Project mutations,
+readiness and next-task callbacks use workspace, session and target generations,
+so delayed responses cannot revive a retired workspace or overwrite newer state.
+The project-pause browser regression uses two independent production Elm pages
+with one intercepted canonical authority; it does not qualify a deployed backend.

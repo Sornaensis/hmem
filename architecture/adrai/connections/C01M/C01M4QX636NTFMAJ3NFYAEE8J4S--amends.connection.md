@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4QX636NTFMAJ3NFYAEE8J4S"
+relation = "amends"
+from_record = "R01M4QX636NQVCPVK0HEC02CXPR"
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+to_records = ["R01M4QKHENRFDZCRWWHAEE2QKFX"]
++++
+
+Bind project acknowledgement correlation to the actual guarded operation lifetime
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6ImQ1NWVkNjNmYmMwYzFhZTQ5NjgyOGQzNGNjZGI5ZWI3Yzc3NTk3MWIiLCJpIjoic2hhMjU2OkExellfQ3FEMzlBU1VYZTIta3pWYWJKV0tuRlM5NEVIZDl0dUh2N1didFEiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRRWDYzNk5URk1BSjNORllBRUU4SjRTIiwib3AiOiJPMDFNNFFYNjM2TlFWQ1BWSzBIRUMwMkNYUFIiLCJwIjpbIlIwMU00UUtIRU5SRkRaQ1JXV0hBRUUyUUtGWCJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpqclBNc2JPSVFNcXU4UVNzbEJWb1psS19CQ1dQd3hGOGM5T1FCZ0QxSnk4IiwidCI6MTc5MTgwMzcyMjk2NSwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

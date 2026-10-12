@@ -53,11 +53,16 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline/buckets" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
+  & paths . at "/api/v1/projects/{projectId}" . _Just . put %~ fmap documentProjectPause
+  & paths . at "/api/v1/audit/{auditId}/revert" . _Just . post . _Just . description ?~ "Authorized project replay restores canonical independent and retained pause intent. Ambiguous legacy transitions return audit_pause_provenance_missing (409); malformed canonical provenance returns audit_pause_provenance_invalid (409). Metadata replays preserve current pause intent. Lifecycle guards remain authoritative."
   & paths . at "/api/v1/tasks/batch-move" . _Just . post %~ fmap documentTaskBatchMove
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . post %~ fmap documentDependencyAdd
   & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
   where
+    documentProjectPause operation = operation
+      & description ?~ "Pausing cascades inherited pause to eligible descendant projects and automatic blocking to unfinished tasks/subtasks. Running descendants refuse the entire pause. Closed projects must reopen first. Resume returns eligible automatic blocks to todo while preserving manual, dependency, subtask and independent/ancestor pause causes. The flattened canonical Project response includes bounded pause_effects."
+      & responses %~ (<> Responses Nothing (InsOrdMap.fromList [(409, Inline (mempty & description .~ "Authenticated lifecycle refusal with bounded running-task guidance; no mutation occurred."))]))
     tagObservation operation = operation & tags .~ InsOrdSet.singleton "Observations"
     documentObservationUpdate operation = operation
       & parameters . traversed %~ documentIfMatch
@@ -497,11 +502,34 @@ instance ToSchema NavigationSummariesRequest where
     & required .~ ["project_ids", "task_ids"]
 instance ToSchema NavigationSummariesResponse where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectReadinessRollup where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ProjectPauseStatusChange where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ProjectPauseEffects where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ProjectPauseEffects)
+    project <- declareSchemaRef (Proxy @ProjectPauseStatusChange)
+    task <- declareSchemaRef (Proxy @TaskDependencyStatusChange)
+    pure $ NamedSchema name $ schema
+      & description ?~ "Cascade counts and deterministic samples of at most twenty projects and twenty tasks; flags indicate remaining independent or ancestor pause."
+      & properties . at "projects" ?~ Inline (uuidArrayLike project 20)
+      & properties . at "tasks" ?~ Inline (uuidArrayLike task 20)
+instance ToSchema ProjectMutationResult where
+  declareNamedSchema _ = do
+    NamedSchema _ schema <- genericDeclareNamedSchema opts (Proxy @Project)
+    effects <- declareSchemaRef (Proxy @ProjectPauseEffects)
+    pure $ NamedSchema (Just "ProjectMutationResult") $ schema
+      & properties . at "pause_effects" ?~ effects
+      & required %~ (<> ["pause_effects"])
 instance ToSchema NextTaskCandidate where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Task where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateTask where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateTask where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema TaskMutationResult where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskMutationResult where
+  declareNamedSchema _ = do
+    NamedSchema _ schema <- genericDeclareNamedSchema opts (Proxy @Task)
+    effects <- declareSchemaRef (Proxy @[TaskDependencyStatusChange])
+    pure $ NamedSchema (Just "TaskMutationResult") $ schema
+      & properties . at "dependency_effects" ?~ effects
+      & required %~ (<> ["dependency_effects"])
 instance ToSchema BatchMoveTasksRequest where
   declareNamedSchema _ = pure $ NamedSchema (Just "BatchMoveTasksRequest") $ mempty
     & type_ ?~ OpenApiObject

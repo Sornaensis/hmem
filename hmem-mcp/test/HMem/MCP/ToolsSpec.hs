@@ -287,7 +287,7 @@ spec = do
 
     it "guides durable project and task descriptions, status, and atomic subtasks" $ do
       toolDescriptionIs "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state."
-      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates. Completing requires closed descendants. Archiving also archives all descendant projects, including completed projects, and cancels non-done tasks while preserving done tasks."
+      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates. Pausing requires no running descendant tasks or subtasks and cascades inherited pause/blocking. Resuming returns eligible automatically blocked tasks to todo and retains independent or ancestor pauses; acknowledgements include bounded pause effects. Completing requires closed descendants. Archiving also archives all descendant projects, including completed projects, and cancels non-done tasks while preserving done tasks."
       toolDescriptionIs "project_spec" "Atomically create a project and 1 to 50 initial atomic tasks in one request. Validation, authorization, or database rejection creates nothing. If the connection or response fails, the outcome is uncertain; check the workspace's projects before retrying. Returns the project ID and task IDs in input order. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks."
       toolDescriptionIs "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks. Reopen a cancelled or done parent before adding unfinished subtasks."
       toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks. Cancelling also cancels non-done subtasks while preserving done subtasks. Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it. Reopening does not reopen descendants."
@@ -601,6 +601,23 @@ spec = do
         jsonField key payload `shouldBe` jsonField key (object ["workspace_id" .= workspaceId, "query" .= ("needle" :: Text), "entity_types" .= (["project", "task"] :: [Text]), "project_status" .= ("archived" :: Text), "task_status" .= ("done" :: Text), "project_id" .= workspaceId, "limit" .= (2 :: Int), "offset" .= (4 :: Int)])
 
   describe "Project and Task response shaping" $ do
+    it "preserves project pause counts, retained guidance and compact task causes" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        result <- call manager base "project_update" (object ["project_id" .= observationId, "status" .= ("active" :: Text)])
+        jsonPath ["pause_effects", "task_count"] result `shouldBe` Just (Number 23)
+        jsonPath ["pause_effects", "remaining_ancestor_pause"] result `shouldBe` Just (Bool True)
+        jsonPath ["pause_effects", "tasks"] result `shouldSatisfy` maybe False (arrayFirst (\effect ->
+          jsonPath ["task", "description"] effect == Nothing && jsonField "project_paused" effect == Just (Bool True)))
+        jsonPath ["summary", "description"] result `shouldBe` Nothing
+      [sent] <- readTVarIO requests
+      sent.requestMethod `shouldBe` methodPut
+      jsonField "own_paused" (maybe Null id (decode sent.requestBody)) `shouldBe` Nothing
+      withWorkspaceStructuredStatusMock status403 "Denied" $ \manager base -> do
+        denied <- handleToolCall manager base Nothing (object ["name" .= ("project_update" :: Text), "arguments" .= object ["project_id" .= observationId, "status" .= ("paused" :: Text)]])
+        denied `shouldSatisfy` isMcpError
+        jsonField "pause_effects" denied `shouldBe` Nothing
+
     it "matches compact summary fixtures while leaving full descriptions to detail calls" $ do
       golden <- compactFixtures
       compactProjectSummary projectWithLongDescription `shouldBe` fixturePayload golden "project_summary"
@@ -650,6 +667,12 @@ spec = do
             then do
               jsonPath ["dependency_effects"] response `shouldSatisfy` maybe False (arrayFirst (\effect -> jsonPath ["task", "description"] effect == Nothing && jsonField "previous_status" effect == Just (String "todo") && jsonField "current_status" effect == Just (String "blocked") && jsonField "previous_auto_blocked" effect == Just (Bool False) && jsonField "previous_open_dependency_count" effect == Just (Number 0)))
               BL.length (encode response) `shouldSatisfy` (< 1000)
+            else if name `elem` ["project_update", "project_archive"] then do
+              jsonPath ["pause_effects", "task_count"] response `shouldBe` Just (Number 23)
+              jsonPath ["pause_effects", "remaining_ancestor_pause"] response `shouldBe` Just (Bool True)
+              jsonPath ["pause_effects", "tasks"] response `shouldSatisfy` maybe False (arrayFirst (\effect ->
+                jsonPath ["task", "description"] effect == Nothing && jsonField "project_paused" effect == Just (Bool True)
+                  && jsonField "previous_project_paused" effect == Just (Bool False)))
             else pure ()
         specResult <- call manager base "project_spec" (case lookup "project_spec" toolSamples of Just sample -> sample; Nothing -> object [])
         jsonField "project_id" specResult `shouldBe` Just (toJSON observationId)
@@ -1518,6 +1541,6 @@ responseFor method path rawQuery body
     dependencyMutation action = object ["action" .= action, "task_id" .= observationId, "depends_on_id" .= workspaceId, "affected_tasks" .= [dependencyChange]]
 
 projectWithLongDescription, taskWithLongDescription, dependencyChange :: Value
-projectWithLongDescription = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "description" .= T.replicate 10000 "p", "status" .= ("archived" :: Text), "priority" .= (5 :: Int), "parent_id" .= Null]
+projectWithLongDescription = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "description" .= T.replicate 10000 "p", "status" .= ("archived" :: Text), "priority" .= (5 :: Int), "parent_id" .= Null, "pause_effects" .= object ["project_count" .= (23 :: Int), "task_count" .= (23 :: Int), "projects" .= ([] :: [Value]), "tasks" .= [dependencyChange], "has_more_projects" .= True, "has_more_tasks" .= True, "remaining_own_pause" .= False, "remaining_ancestor_pause" .= True]]
 taskWithLongDescription = object ["id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("done" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "due_at" .= Null, "dependency_effects" .= [dependencyChange]]
-dependencyChange = object ["task" .= object ["id" .= observationId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("blocked" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "due_at" .= Null], "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int), "open_dependency_count" .= (1 :: Int), "reason" .= ("blocked_by_open_dependencies" :: Text)]
+dependencyChange = object ["task" .= object ["id" .= observationId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("blocked" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "due_at" .= Null], "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int), "open_dependency_count" .= (1 :: Int), "previous_open_subtask_count" .= (0 :: Int), "open_subtask_count" .= (0 :: Int), "previous_project_paused" .= False, "project_paused" .= True, "reason" .= ("blocked_by_paused_project_and_open_dependencies" :: Text)]

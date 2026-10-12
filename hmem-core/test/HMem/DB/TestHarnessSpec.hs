@@ -705,6 +705,22 @@ spec = do
                 Left other -> expectationFailure $ "Expected historical V013 rejection, got: " <> show other
                 Right _ -> expectationFailure "Expected new unlinked memory insert to fail after V013"
 
+    it "projectPauseAuditMigration rolls back its own DDL and ledger without rewriting existing history" $
+      withProjectPauseUpgrade $ \pool upgradeDir -> do
+        runSession pool $ Session.sql "CREATE FUNCTION fail_pause_audit_ledger() RETURNS trigger AS $$ BEGIN IF NEW.version = 37 THEN RAISE EXCEPTION 'injected V037 ledger failure'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER fail_pause_audit_ledger BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION fail_pause_audit_ledger();"
+        failed <- Migration.runMigrations pool upgradeDir
+        show failed.failed `shouldSatisfy` isInfixOf "injected V037 ledger failure"
+        runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version=36) AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=37) AND to_regprocedure('hmem_project_pause_audit_capture()') IS NULL AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_projects_audit')") `shouldReturn` True
+        history <- runSession pool projectPauseFixtureSnapshot
+        runSession pool $ Session.sql "DROP TRIGGER fail_pause_audit_ledger ON schema_migrations; DROP FUNCTION fail_pause_audit_ledger();"
+        upgraded <- Migration.runMigrations pool upgradeDir
+        upgraded.failed `shouldBe` Nothing
+        runSession pool projectPauseFixtureSnapshot `shouldReturn` history
+        runSession pool (queryBool "SELECT name='V037__project_pause_audit_provenance.sql' FROM schema_migrations WHERE version=37") `shouldReturn` True
+        skipped <- Migration.runMigrations pool upgradeDir
+        skipped.failed `shouldBe` Nothing
+        runSession pool projectPauseFixtureSnapshot `shouldReturn` history
+
     it "projectPauseMigration upgrades real V034 data atomically and preserves frozen history" $
       withProjectPauseUpgrade $ \pool upgradeDir -> do
         before <- runSession pool projectPauseFixtureSnapshot
@@ -783,7 +799,7 @@ spec = do
 
     it "projectPauseMigration fresh installation has the same pause and provenance authority" $
       withTestEnv $ \env -> do
-        runSession env.pool (queryBool "SELECT count(*) = 36 FROM schema_migrations") `shouldReturn` True
+        runSession env.pool (queryBool "SELECT count(*) = 37 FROM schema_migrations") `shouldReturn` True
         runSession env.pool (queryBool "SELECT to_regclass('project_retained_pause_intents') IS NOT NULL AND to_regprocedure('hmem_reconcile_project_pause_v035(uuid[],boolean)') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM project_retained_pause_intents)") `shouldReturn` True
         wsId <- runSession env.pool $ Session.statement ("fresh-pause-parity" :: Text) insertWorkspaceDirectStatement
         projectId <- runSession env.pool $ Session.statement (wsId, "fresh root" :: Text) insertProjectDirectStatement
@@ -1529,7 +1545,7 @@ withProjectPauseUpgrade action = withTestSandbox $ \sandbox -> do
     bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
       beforeDir <- copyMigrationSubset sandbox migrations "pause-pre-v035" (< "V035")
       rulesDir <- copyMigrationSubset sandbox migrations "pause-v035-only" (== "V035__project_pause_lifecycle.sql")
-      upgradeDir <- copyMigrationSubset sandbox migrations "pause-v036-only" (== "V036__normalize_project_pause.sql")
+      upgradeDir <- copyMigrationSubset sandbox migrations "pause-v036-v037" (\file -> file >= "V036" && file < "V038")
       initial <- Migration.runMigrations pool beforeDir
       initial.failed `shouldBe` Nothing
       runSession pool $ Session.sql projectPauseLegacyFixture

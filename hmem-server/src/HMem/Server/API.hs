@@ -29,7 +29,7 @@ import Data.Aeson.KeyMap qualified as AesonKeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (isNothing, fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -169,7 +169,7 @@ type ProjectAPI =
   :<|> ReqBody '[JSON] CreateProject :> Post '[JSON] Project
   :<|> "spec" :> Description "Atomically creates one project and 1..50 initial top-level tasks in input order. Requires edit access to the supplied active workspace. Validation and authorization failures create nothing; database failures roll back the complete batch." :> ReqBody '[JSON] CreateProjectSpec :> Post '[JSON] ProjectSpecResult
   :<|> Capture "projectId" UUID :> Get '[JSON] Project
-  :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] Project
+  :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] ProjectMutationResult
   :<|> Capture "projectId" UUID :> Delete '[JSON] CascadeResult
   :<|> Capture "projectId" UUID :> "overview" :> Get '[JSON] ProjectOverview
   :<|> Capture "projectId" UUID :> "next-tasks" :> QueryParam "limit" Int :> QueryParam "include_blocked" Bool :> Get '[JSON] [NextTaskCandidate]
@@ -853,8 +853,14 @@ projects pool = listH :<|> createH :<|> createSpecH :<|> getH :<|> updateH :<|> 
     handleDBErrors (Project.getProject pool projectId) >>= maybe (throwError err404) pure
   updateH projectId input = do
     workspaceId <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleEdit; reject (validateUpdateProjectInput input)
-    updated <- handleDBErrors (Project.updateProject pool projectId input) >>= maybe (throwError err404) pure
-    pure updated
+    (updated, projectChanges, before, after, own, ancestor) <- handleDBErrors
+      (Project.updateProjectWithSnapshots pool projectId input (Task.projectPauseSnapshotsS projectId))
+      >>= maybe (throwError err404) pure
+    let taskChanges = dependencyStatusChanges "project_updated" before after
+        result = ProjectMutationResult updated $ ProjectPauseEffects
+          (length projectChanges) (length taskChanges) (take 20 projectChanges) (take 20 taskChanges)
+          (length projectChanges > 20) (length taskChanges > 20) own ancestor
+    pure result
   deleteH projectId = do
     workspaceId <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleEdit
     handleDBErrors (Project.deleteProjectCascade pool projectId) >>= maybe (throwError err404) pure
@@ -949,7 +955,8 @@ dependencyStatusChanges action before after = mapMaybe changed after
       | snapshot.task.status == old.task.status
           && snapshot.autoBlocked == old.autoBlocked
           && snapshot.openDependencyCount == old.openDependencyCount
-          && snapshot.openSubtaskCount == old.openSubtaskCount = Nothing
+          && snapshot.openSubtaskCount == old.openSubtaskCount
+          && snapshot.projectPaused == old.projectPaused = Nothing
       | otherwise = Just TaskDependencyStatusChange
           { task = snapshot.task
           , previousStatus = old.task.status
@@ -958,7 +965,11 @@ dependencyStatusChanges action before after = mapMaybe changed after
           , autoBlocked = snapshot.autoBlocked
           , previousOpenDependencyCount = old.openDependencyCount
           , openDependencyCount = snapshot.openDependencyCount
-           , reason = dependencyStatusChangeReason old snapshot
+          , previousOpenSubtaskCount = old.openSubtaskCount
+          , openSubtaskCount = snapshot.openSubtaskCount
+          , previousProjectPaused = old.projectPaused
+          , projectPaused = snapshot.projectPaused
+          , reason = dependencyStatusChangeReason old snapshot
            }
       where old = previous snapshot
 
@@ -966,19 +977,27 @@ dependencyStatusChangeReason :: TaskDependencyAutoBlockSnapshot -> TaskDependenc
 dependencyStatusChangeReason previous current
   | current.task.status == Blocked && not current.autoBlocked
       && (previous.autoBlocked || previous.task.status /= Blocked) = "manually_blocked"
-  | not previous.autoBlocked && current.autoBlocked =
-      if current.openDependencyCount > 0 && current.openSubtaskCount > 0 then "blocked_by_open_dependencies_and_subtasks"
-      else if current.openSubtaskCount > 0 then "blocked_by_open_subtasks"
-      else "blocked_by_open_dependencies"
+  | not previous.autoBlocked && current.autoBlocked = "blocked_by_" <> causes current
   | previous.autoBlocked && not current.autoBlocked && current.task.status == Todo =
-      if previous.openDependencyCount > 0 && previous.openSubtaskCount > 0 then "unblocked_dependencies_and_subtasks_resolved"
-      else if previous.openSubtaskCount > 0 then "unblocked_subtasks_resolved"
-      else "unblocked_dependencies_resolved"
+      "unblocked_" <> resolvedCauses previous <> "_resolved"
+  | current.projectPaused && not previous.projectPaused = "project_pause_added"
+  | previous.projectPaused && not current.projectPaused = "project_pause_removed"
   | current.openDependencyCount > previous.openDependencyCount = "open_dependency_added"
   | current.openDependencyCount < previous.openDependencyCount = "open_dependency_removed"
   | current.openSubtaskCount > previous.openSubtaskCount = "open_subtask_added"
   | current.openSubtaskCount < previous.openSubtaskCount = "open_subtask_removed"
   | otherwise = "dependency_status_changed"
+  where
+    causes snapshot
+      | not snapshot.projectPaused && snapshot.openDependencyCount == 0 = "open_subtasks"
+      | otherwise = Text.intercalate "_and_" $
+          ["paused_project" | snapshot.projectPaused] <>
+          ["open_dependencies" | snapshot.openDependencyCount > 0] <>
+          ["subtasks" | snapshot.openSubtaskCount > 0]
+    resolvedCauses snapshot = Text.intercalate "_and_" $
+      ["project_pause" | snapshot.projectPaused] <>
+      ["dependencies" | snapshot.openDependencyCount > 0] <>
+      ["subtasks" | snapshot.openSubtaskCount > 0]
 
 search :: Pool Hasql.Connection -> UnifiedSearchQuery -> Handler UnifiedSearchResults
 search pool query = do
@@ -1018,8 +1037,9 @@ audit pool = listH :<|> revertH :<|> getH where
     entity <- case (entry.entityType, entry.action) of
       ("project", AuditUpdate) | isSoftDelete entry -> restoreProject workspaceId entityId
       ("project", AuditUpdate) -> do
-        old <- decodeOld entry
-        handleDBErrors (Project.updateProject pool entityId old) >>= maybe (throwError err409) (pure . Just . toJSON)
+        (old, intent) <- projectAuditUpdate entry
+        handleDBErrors (Project.updateProjectForAudit pool workspaceId entityId old intent)
+          >>= maybe (throwError err409) (pure . Just . toJSON)
       ("project", AuditDelete) -> do
         restored <- handleDBErrors $ Project.restoreProject pool entityId
         if restored then do project <- handleDBErrors (Project.getProject pool entityId); pure (toJSON <$> project) else throwError err409
@@ -1041,6 +1061,37 @@ audit pool = listH :<|> revertH :<|> getH where
       ("observation", _) -> throwError unsupportedObservation
       _ -> throwError err409
     pure RevertResult { auditEntry = entry, entity = entity }
+  projectAuditUpdate :: AuditLogEntry -> Handler (UpdateProject, Maybe Project.ProjectAuditPauseIntent)
+  projectAuditUpdate entry = do
+    decoded <- (decodeOld entry :: Handler UpdateProject)
+    let old :: UpdateProject
+        old = if auditField "parent_id" entry.oldValues == auditField "parent_id" entry.newValues
+          then decoded { parentId = Unchanged } else decoded
+    oldOwn <- privateBoolean "own_paused" entry.oldValues
+    newOwn <- privateBoolean "own_paused" entry.newValues
+    oldRetained <- privateBoolean "retained_paused" entry.oldValues
+    newRetained <- privateBoolean "retained_paused" entry.newValues
+    let metadataOnly = auditField "status" entry.oldValues == auditField "status" entry.newValues
+          && oldOwn == newOwn && oldRetained == newRetained
+    if metadataOnly
+      then pure (old { status = Nothing }, Nothing)
+      else do
+        let wasPaused = old.status == Just ProjPaused
+            own = fromMaybe wasPaused oldOwn
+        -- Missing legacy own provenance means the old status was an explicit
+        -- intent. A known false own flag plus a missing retained flag is
+        -- ambiguous: it may be modern inherited or deferred historical pause.
+        when (wasPaused && oldOwn == Just False && isNothing oldRetained) $
+          throwError err409 { errBody = Aeson.encode $ object
+            ["error" .= ("audit_pause_provenance_missing" :: Text)
+            ,"message" .= ("This historical transition lacks retained pause provenance; choose the intended project status explicitly." :: Text)] }
+        pure (old, Just (Project.ProjectAuditPauseIntent own (fromMaybe False oldRetained)))
+  privateBoolean key values = case auditField key values of
+    Nothing -> pure Nothing
+    Just (Aeson.Bool value) -> pure (Just value)
+    Just _ -> throwError err409 { errBody = Aeson.encode $ object
+      ["error" .= ("audit_pause_provenance_invalid" :: Text)
+      ,"message" .= ("The canonical project audit contains malformed pause provenance." :: Text)] }
   decodeOld :: Aeson.FromJSON a => AuditLogEntry -> Handler a
   decodeOld entry = case entry.oldValues >>= Aeson.decode . Aeson.encode of
     Just value -> pure value
@@ -1174,3 +1225,4 @@ renderSnapshotToken (ChangeStream.SnapshotToken value) = value
 
 renderResumeToken :: ChangeStream.ResumeToken -> Text
 renderResumeToken (ChangeStream.ResumeToken value) = value
+

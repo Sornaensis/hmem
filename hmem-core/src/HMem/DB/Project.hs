@@ -5,6 +5,9 @@ module HMem.DB.Project
   , getProjectsByIds
   , getProjectAncestorIds
   , updateProject
+  , updateProjectWithSnapshots
+  , updateProjectForAudit
+  , ProjectAuditPauseIntent(..)
   , withLifecycleStatusIntentS
   , lockPlanningLifecycleS
   , deleteProject
@@ -22,11 +25,11 @@ module HMem.DB.Project
 
 import Control.Exception (throwIO)
 import Control.Monad (forM, when)
-import Data.Aeson (Object, toJSON)
+import Data.Aeson (Object, object, (.=), toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16, Int32)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -437,34 +440,112 @@ withLifecycleStatusIntentS explicit action = do
 lockPlanningLifecycleS :: Session.Session ()
 lockPlanningLifecycleS = Session.sql "SELECT hmem_lock_planning_lifecycle()"
 
+-- Private replay authority is separate from public project input.
+data ProjectAuditPauseIntent = ProjectAuditPauseIntent
+  { ownPaused :: Bool, retainedPaused :: Bool } deriving (Show, Eq)
+
 updateProject :: Pool Hasql.Connection -> UUID -> UpdateProject -> IO (Maybe Project)
-updateProject pool pid up = do
-  current <- getProject pool pid
+updateProject pool pid up = fmap (\(project, _, _, _, _, _) -> project) <$>
+  updateProjectWithSnapshots pool pid up (pure ())
+
+-- Snapshot, mutation, canonical reread and remaining pause authority share the
+-- same serialized transaction. The caller can supply task cause snapshots.
+updateProjectWithSnapshots :: Pool Hasql.Connection -> UUID -> UpdateProject -> Session.Session a
+  -> IO (Maybe (Project, [ProjectPauseStatusChange], a, a, Bool, Bool))
+updateProjectWithSnapshots pool pid up snapshots = runTransaction pool $ do
+  lockPlanningLifecycleS
+  current <- getProjectS pid
   case current of
     Nothing -> pure Nothing
-    Just currentProject -> do
-      case up.parentId of
-        Unchanged   -> pure ()
-        SetNull     -> pure ()
-        SetTo newId -> ensureParentProject pool currentProject.workspaceId (Just newId)
-      rows <- runSession pool $ withLifecycleStatusIntentS (isJust up.status) $ Session.statement () $ run $
-        update Update
-          { target = projectSchema
-          , from = pure ()
-          , set = \_ row -> row
-              { projName        = maybe row.projName        lit up.name
-              , projDescription = applyNullableUpdate row.projDescription up.description
-              , projParentId    = applyNullableUpdate row.projParentId up.parentId
-              , projStatus      = maybe row.projStatus      lit up.status
-              , projPriority    = maybe row.projPriority    (lit . fromIntegral) up.priority
-              , projMetadata    = maybe row.projMetadata    lit up.metadata
-              }
-          , updateWhere = \_ row -> row.projId ==. lit pid &&. activeProject row
-          , returning = Returning id
-          }
-      case rows of
-        []    -> pure Nothing
-        (_:_) -> getProject pool pid
+    Just _ -> do
+      projectBefore <- Session.statement pid projectPauseStatusSnapshotStatement
+      before <- snapshots
+      changed <- updateProjectS pid up
+      case changed of
+        Nothing -> pure Nothing
+        Just canonical -> do
+          after <- snapshots
+          projectAfter <- Session.statement pid projectPauseStatusSnapshotStatement
+          (own, ancestor) <- Session.statement pid projectPauseStateStatement
+          let changes = [ ProjectPauseStatusChange id oldStatus status
+                        | (id, status) <- projectAfter, id /= pid
+                        , Just oldStatus <- [lookup id projectBefore], oldStatus /= status ]
+          pure $ Just (canonical, changes, before, after, own, ancestor)
+
+-- The server authorizes workspace admin before calling this helper. Bind the
+-- stored private intent to the current entity's workspace again under the gate.
+updateProjectForAudit :: Pool Hasql.Connection -> UUID -> UUID -> UpdateProject
+  -> Maybe ProjectAuditPauseIntent -> IO (Maybe Project)
+updateProjectForAudit pool workspace pid up intent = runTransaction pool $ do
+  lockPlanningLifecycleS
+  current <- getProjectS pid
+  case current of
+    Just project | project.workspaceId == workspace -> case intent of
+      Nothing -> updateProjectS pid up
+      Just stored -> do
+        previous <- Session.statement () $ Statement.Statement
+          "SELECT current_setting('hmem.project_pause_intent', true)" Enc.noParams
+          (Dec.singleRow (Dec.column (Dec.nullable Dec.text))) True
+        let setIntent = flip Session.statement $ Statement.Statement
+              "SELECT set_config('hmem.project_pause_intent', $1::jsonb::text, true)"
+              (Enc.param (Enc.nonNullable Enc.jsonb))
+              (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+        _ <- setIntent $ object ["id" .= pid, "workspace_id" .= workspace,
+              "own_paused" .= stored.ownPaused, "retained_paused" .= stored.retainedPaused]
+        result <- updateProjectS pid up
+        _ <- Session.statement (fromMaybe "" previous) $ Statement.Statement
+          "SELECT set_config('hmem.project_pause_intent', $1, true)"
+          (Enc.param (Enc.nonNullable Enc.text))
+          (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+        pure result
+    _ -> pure Nothing
+
+getProjectS :: UUID -> Session.Session (Maybe Project)
+getProjectS pid = fmap (rowToProject <$>) $ fmap listToMaybe $ Session.statement () $ run $ select $ do
+  row <- each projectSchema
+  where_ $ row.projId ==. lit pid &&. activeProject row
+  pure row
+
+updateProjectS :: UUID -> UpdateProject -> Session.Session (Maybe Project)
+updateProjectS pid up = do
+  current <- getProjectS pid
+  case (current, up.parentId) of
+    (Just project, SetTo newParentId) | project.parentId /= Just newParentId -> do
+      parent <- getProjectS newParentId
+      case parent of
+        Nothing -> Session.sql "DO $$ BEGIN RAISE EXCEPTION USING ERRCODE='23503', MESSAGE='Referenced parent project does not exist'; END $$;"
+        Just value -> when (value.workspaceId /= project.workspaceId) $
+          Session.sql "DO $$ BEGIN RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='Parent project must belong to the same workspace'; END $$;"
+    _ -> pure ()
+  rows <- withLifecycleStatusIntentS (isJust up.status) $ Session.statement () $ run $
+    update Update
+      { target = projectSchema
+      , from = pure ()
+      , set = \_ row -> row
+          { projName = maybe row.projName lit up.name
+          , projDescription = applyNullableUpdate row.projDescription up.description
+          , projParentId = applyNullableUpdate row.projParentId up.parentId
+          , projStatus = maybe row.projStatus lit up.status
+          , projPriority = maybe row.projPriority (lit . fromIntegral) up.priority
+          , projMetadata = maybe row.projMetadata lit up.metadata }
+      , updateWhere = \_ row -> row.projId ==. lit pid &&. activeProject row
+      , returning = Returning id }
+  if Prelude.null rows then pure Nothing else getProjectS pid
+
+projectPauseStatusSnapshotStatement :: Statement.Statement UUID [(UUID, ProjectStatus)]
+projectPauseStatusSnapshotStatement = Statement.Statement sql (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.rowList $ (,) <$> Dec.column (Dec.nonNullable Dec.uuid) <*> statusDecoder) True
+  where
+    statusDecoder = do
+      text <- Dec.column (Dec.nonNullable Dec.text)
+      maybe (fail "Unexpected project status") pure (projectStatusFromText text)
+    sql = "WITH RECURSIVE tree(id) AS (SELECT id FROM projects WHERE id=$1 AND deleted_at IS NULL UNION SELECT p.id FROM projects p JOIN tree t ON p.parent_id=t.id WHERE p.deleted_at IS NULL) SELECT p.id,p.status::text FROM projects p JOIN tree t ON t.id=p.id ORDER BY p.id"
+
+projectPauseStateStatement :: Statement.Statement UUID (Bool, Bool)
+projectPauseStateStatement = Statement.Statement
+  "WITH RECURSIVE ancestors(id,parent_id,own_paused) AS (SELECT id,parent_id,own_paused FROM projects WHERE id=$1 UNION ALL SELECT p.id,p.parent_id,p.own_paused FROM projects p JOIN ancestors a ON p.id=a.parent_id WHERE p.deleted_at IS NULL) SELECT (SELECT own_paused OR hmem_project_retained_pause_intent(workspace_id,id) FROM projects WHERE id=$1), EXISTS (SELECT 1 FROM ancestors WHERE id<>$1 AND own_paused)"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.singleRow $ (,) <$> Dec.column (Dec.nonNullable Dec.bool) <*> Dec.column (Dec.nonNullable Dec.bool)) True
 
 ------------------------------------------------------------------------
 -- Delete

@@ -188,3 +188,43 @@ missing. A 503 `capability_unavailable` on vector operations means pgvector is
 not ready. Check [authentication](auth.md) or [embedding readiness](embeddings.md)
 for recovery. For validation and lifecycle errors, use the response message and
 hint; avoid blindly retrying the same rejected request.
+
+## Pause and resume project work
+
+Set a project's `status` to `paused` with `PUT /api/v1/projects/{id}`.
+Open descendant projects inherit pause, and unfinished tasks and subtasks become
+automatically blocked. Any live running descendant prevents pause atomically,
+including running historical work in a frozen branch. A completed or archived
+root must first be reopened as `active`.
+
+Setting `active` clears that project's independent pause. Descendants with their
+own pause, or with another paused ancestor, remain paused. Eligible automatically
+blocked tasks return to `todo` when all project, dependency and subtask blockers
+clear. Manual blocks and done/cancelled tasks are preserved.
+
+Project update responses retain the plain Project fields and add `pause_effects`.
+It contains `project_count`, `task_count`, deterministic `projects` and `tasks`
+samples (at most twenty of each), `has_more_projects`, `has_more_tasks`,
+`remaining_own_pause`, and `remaining_ancestor_pause`. Refresh affected tree,
+readiness and next-task views when a sample is truncated. Task effects include
+prior/current status, automatic blocking, dependency/subtask counts and
+`previous_project_paused`/`project_paused`, so a pause cause can be added or
+removed while another cause still blocks the task. MCP keeps these counts,
+causes and retained-pause guidance in its compact acknowledgement.
+
+Next-task discovery excludes effectively paused work by default.
+`include_blocked=true` includes paused diagnostic candidates, including subtasks,
+with `project_paused=true`. Use the authoritative readiness rollup to decide
+whether subtasks can start. Lifecycle conflicts return a code, message, bounded
+blocker IDs/count and a recovery hint; rejected cascades leave no partial events.
+
+Audit reverts require workspace admin access. Metadata reverts preserve current
+pause intent; pause transitions restore their recorded independent and retained
+intent through the same lifecycle guards. `own_paused` and `retained_paused` are
+read-only canonical audit provenance and cannot be set through public project
+input. Some historical transitions predate retained provenance: an old paused
+snapshot with known false own intent but missing retained intent is ambiguous.
+Such a transition returns `409 audit_pause_provenance_missing` after authorization;
+choose the desired project status explicitly. Metadata and unambiguous historical
+transitions remain usable. Malformed stored provenance returns
+`409 audit_pause_provenance_invalid`.

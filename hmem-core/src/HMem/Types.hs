@@ -10,7 +10,7 @@ module HMem.Types
   , validateCreateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
-  , ProjectStatus(..), Project(..), CreateProject(..), ProjectSpecTask(..), CreateProjectSpec(..), ProjectSpecResult(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..), ProjectCardSummary(..)
+  , ProjectStatus(..), Project(..), ProjectPauseStatusChange(..), ProjectPauseEffects(..), ProjectMutationResult(..), CreateProject(..), ProjectSpecTask(..), CreateProjectSpec(..), ProjectSpecResult(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..), ProjectCardSummary(..)
   , TaskDependencySummary(..), TaskDependencyPage(..), TaskOverview(..), TaskReadinessRollup(..), TaskCardSummary(..)
   , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), LinkDependency(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
   , NavigationParent(..), NavigationFilter(..), NavigationBranchRequest(..), NavigationPage(..), NavigationBranchResponse(..), NavigationEntityType(..), NavigationSummary(..), NavigationFocusResponse(..), NavigationSummariesRequest(..), NavigationSummariesResponse(..)
@@ -1177,12 +1177,44 @@ data NextTaskCandidate = NextTaskCandidate
   , openDescendantCount :: Int
   , dependencyBlocked   :: Bool
   , openDependencyCount :: Int
+  , projectPaused       :: Bool
   } deriving (Show, Eq, Generic)
 
 instance ToJSON NextTaskCandidate where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON NextTaskCandidate where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON = withObject "NextTaskCandidate" $ \o -> NextTaskCandidate
+    <$> o .: "task" <*> o .: "completion_gated" <*> o .: "open_descendant_count"
+    <*> o .: "dependency_blocked" <*> o .: "open_dependency_count"
+    <*> o .:? "project_paused" .!= False
+
+-- | Bounded project cascade acknowledgement. Counts cover all affected rows;
+-- samples contain at most twenty rows of each kind.
+data ProjectPauseStatusChange = ProjectPauseStatusChange
+  { id :: UUID, previousStatus :: ProjectStatus, currentStatus :: ProjectStatus }
+  deriving (Show, Eq, Generic)
+instance ToJSON ProjectPauseStatusChange where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectPauseStatusChange where parseJSON = genericParseJSON jsonOptions
+
+data ProjectPauseEffects = ProjectPauseEffects
+  { projectCount :: Int, taskCount :: Int
+  , projects :: [ProjectPauseStatusChange], tasks :: [TaskDependencyStatusChange]
+  , hasMoreProjects :: Bool, hasMoreTasks :: Bool
+  , remainingOwnPause :: Bool, remainingAncestorPause :: Bool
+  } deriving (Show, Eq, Generic)
+instance ToJSON ProjectPauseEffects where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectPauseEffects where parseJSON = genericParseJSON jsonOptions
+
+data ProjectMutationResult = ProjectMutationResult
+  { project :: Project, pauseEffects :: ProjectPauseEffects }
+  deriving (Show, Eq, Generic)
+instance ToJSON ProjectMutationResult where
+  toJSON result = case toJSON result.project of
+    Object obj -> Object (KM.insert "pause_effects" (toJSON result.pauseEffects) obj)
+    other -> object ["project" .= other, "pause_effects" .= result.pauseEffects]
+instance FromJSON ProjectMutationResult where
+  parseJSON value = withObject "ProjectMutationResult" (\o -> ProjectMutationResult
+    <$> parseJSON value <*> (o .:? "pause_effects" .!= ProjectPauseEffects 0 0 [] [] False False False False)) value
 
 -- | Current automatic blocking causes for a task.
 data TaskDependencyAutoBlockSnapshot = TaskDependencyAutoBlockSnapshot
@@ -1190,12 +1222,15 @@ data TaskDependencyAutoBlockSnapshot = TaskDependencyAutoBlockSnapshot
   , autoBlocked         :: Bool
   , openDependencyCount :: Int
   , openSubtaskCount    :: Int
+  , projectPaused       :: Bool
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TaskDependencyAutoBlockSnapshot where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON TaskDependencyAutoBlockSnapshot where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON = withObject "TaskDependencyAutoBlockSnapshot" $ \o -> TaskDependencyAutoBlockSnapshot
+    <$> o .: "task" <*> o .: "auto_blocked" <*> o .: "open_dependency_count"
+    <*> o .: "open_subtask_count" <*> o .:? "project_paused" .!= False
 
 data TaskDependencyStatusChange = TaskDependencyStatusChange
   { task                    :: Task
@@ -1205,13 +1240,23 @@ data TaskDependencyStatusChange = TaskDependencyStatusChange
   , autoBlocked             :: Bool
   , previousOpenDependencyCount :: Int
   , openDependencyCount     :: Int
+  , previousOpenSubtaskCount :: Int
+  , openSubtaskCount         :: Int
+  , previousProjectPaused   :: Bool
+  , projectPaused           :: Bool
   , reason                  :: Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TaskDependencyStatusChange where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON TaskDependencyStatusChange where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON = withObject "TaskDependencyStatusChange" $ \o -> TaskDependencyStatusChange
+    <$> o .: "task" <*> o .: "previous_status" <*> o .: "current_status"
+    <*> o .: "previous_auto_blocked" <*> o .: "auto_blocked"
+    <*> o .: "previous_open_dependency_count" <*> o .: "open_dependency_count"
+    <*> o .:? "previous_open_subtask_count" .!= 0 <*> o .:? "open_subtask_count" .!= 0
+    <*> o .:? "previous_project_paused" .!= False <*> o .:? "project_paused" .!= False
+    <*> o .: "reason"
 
 data LinkDependency = LinkDependency
   { dependsOnId :: UUID } deriving (Show, Eq, Generic)

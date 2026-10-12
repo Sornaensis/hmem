@@ -13,6 +13,23 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 
 spec :: Spec
 spec = do
+  describe "Project pause JSON compatibility" $ do
+    it "defaults new diagnostic fields when decoding older task responses" $ do
+      let task = Task workspace workspace Nothing Nothing "task" Nothing Todo 5 (object []) Nothing Nothing 0 observedAt observedAt
+          legacyNext = object ["task" .= task, "completion_gated" .= False, "open_descendant_count" .= (0 :: Int), "dependency_blocked" .= False, "open_dependency_count" .= (0 :: Int)]
+          legacyChange = object ["task" .= task, "previous_status" .= Todo, "current_status" .= Blocked,
+            "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int),
+            "open_dependency_count" .= (1 :: Int), "reason" .= ("blocked_by_open_dependencies" :: T.Text)]
+      eitherDecode (encode legacyNext) `shouldBe` Right (NextTaskCandidate task False 0 False 0 False)
+      eitherDecode (encode legacyChange) `shouldBe` Right (TaskDependencyStatusChange task Todo Blocked False True 0 1 0 0 False False "blocked_by_open_dependencies")
+    it "keeps plain Project decoders and older mutation responses compatible" $ do
+      let project = Project workspace workspace Nothing "project" Nothing ProjPaused 5 (object []) observedAt observedAt
+          empty = ProjectPauseEffects 0 0 [] [] False False False False
+          mutation = ProjectMutationResult project empty
+      eitherDecode (encode mutation) `shouldBe` Right project
+      eitherDecode (encode project) `shouldBe` Right (ProjectMutationResult project empty)
+      eitherDecode (encode mutation) `shouldBe` Right mutation
+
   describe "Timeline lifecycle JSON compatibility" $ do
     it "defaults additive action fields for older payloads and preserves distinct counts" $ do
       (eitherDecode "{\"created\":1,\"completed\":2,\"deleted\":3}" :: Either String TimelineBucketSeriesCounts)

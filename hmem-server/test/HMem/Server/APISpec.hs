@@ -164,6 +164,227 @@ createVersionObservation env app name = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "project pause HTTP contract" $ do
+    it "returns bounded truthful cascade samples and paused subtask diagnostics" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-bounded"
+      root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      children <- forM [1..23 :: Int] $ \n -> do
+        project <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) (T.pack (show n)) Nothing Nothing Nothing)
+        _ <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "ready" Nothing Nothing Nothing Nothing)
+        pure project
+      response <- putJson app (pauseProjectPath root.id) (object ["status" .= ("paused" :: T.Text)])
+      responseStatus response `shouldBe` status200
+      let Just result = decode (responseBody response) :: Maybe ProjectMutationResult
+          Just plainProject = decode (responseBody response) :: Maybe Project
+      plainProject.status `shouldBe` ProjPaused
+      result.pauseEffects.projectCount `shouldBe` 23
+      result.pauseEffects.taskCount `shouldBe` 23
+      map (.id) result.pauseEffects.projects `shouldBe` take 20 (sort (map (.id) children))
+      length result.pauseEffects.tasks `shouldBe` 20
+      result.pauseEffects.hasMoreProjects `shouldBe` True
+      result.pauseEffects.hasMoreTasks `shouldBe` True
+      result.pauseEffects.remainingOwnPause `shouldBe` True
+      map (.projectPaused) result.pauseEffects.tasks `shouldBe` replicate 20 True
+      map (.reason) result.pauseEffects.tasks `shouldBe` replicate 20 "blocked_by_paused_project"
+      ready <- request app methodGet (pauseProjectPath root.id <> "/next-tasks?limit=100") ""
+      decode (responseBody ready) `shouldBe` Just ([] :: [NextTaskCandidate])
+      diagnostics <- request app methodGet (pauseProjectPath root.id <> "/next-tasks?include_blocked=true&limit=100") ""
+      let Just candidates = decode (responseBody diagnostics) :: Maybe [NextTaskCandidate]
+      length candidates `shouldBe` 23
+      map (.projectPaused) candidates `shouldBe` replicate 23 True
+      resumed <- putJson app (pauseProjectPath root.id) (object ["status" .= ("active" :: T.Text)])
+      let Just unpaused = decode (responseBody resumed) :: Maybe ProjectMutationResult
+      unpaused.pauseEffects.taskCount `shouldBe` 23
+      unpaused.pauseEffects.remainingOwnPause `shouldBe` False
+
+    it "reports cause additions/removals while dependency and subtask blocking remains" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-combined"
+      forM_ [(False,False),(True,False),(False,True),(True,True)] $ \(dependencies, subtasks) -> do
+        project <- Project.createProject env.pool (CreateProject workspace.id Nothing "combination" Nothing Nothing Nothing)
+        parent <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "parent" Nothing Nothing Nothing Nothing)
+        if dependencies then do
+          prerequisite <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "prerequisite" Nothing Nothing Nothing Nothing)
+          Task.addDependency env.pool parent.id prerequisite.id
+        else pure ()
+        child <- if subtasks then Just <$> Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "subtask" Nothing Nothing Nothing Nothing) else pure Nothing
+        paused <- putJson app (pauseProjectPath project.id) (object ["status" .= ("paused" :: T.Text)])
+        let Just mutation = decode (responseBody paused) :: Maybe ProjectMutationResult
+            Just effect = find (\item -> item.task.id == parent.id) mutation.pauseEffects.tasks
+        effect.projectPaused `shouldBe` True
+        effect.previousProjectPaused `shouldBe` False
+        effect.openDependencyCount `shouldBe` if dependencies then 1 else 0
+        effect.task.dependencyCount `shouldBe` if dependencies then 1 else 0
+        effect.openSubtaskCount `shouldBe` if subtasks then 1 else 0
+        effect.reason `shouldBe` if dependencies || subtasks then "project_pause_added" else "blocked_by_paused_project"
+        diagnostics <- request app methodGet (pauseProjectPath project.id <> "/next-tasks?include_blocked=true") ""
+        let Just candidates = decode (responseBody diagnostics) :: Maybe [NextTaskCandidate]
+        map (\item -> item.task.id) candidates `shouldContain` (parent.id : maybe [] (pure . (.id)) child)
+        resumed <- putJson app (pauseProjectPath project.id) (object ["status" .= ("active" :: T.Text)])
+        let Just resumedMutation = decode (responseBody resumed) :: Maybe ProjectMutationResult
+            Just resumedEffect = find (\item -> item.task.id == parent.id) resumedMutation.pauseEffects.tasks
+        resumedEffect.projectPaused `shouldBe` False
+        resumedEffect.currentStatus `shouldBe` if dependencies || subtasks then Blocked else Todo
+        resumedEffect.reason `shouldBe` if dependencies || subtasks then "project_pause_removed" else "unblocked_project_pause_resolved"
+
+    it "counts frozen tasks that become eligible during reopen or reparent beneath pause" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-frozen-effects"
+      forM_ [False, True] $ \move -> do
+        destination <- Project.createProject env.pool (CreateProject workspace.id Nothing "paused destination" Nothing Nothing Nothing)
+        _ <- putJson app (pauseProjectPath destination.id) (object ["status" .= ("paused" :: T.Text)])
+        closed <- Project.createProject env.pool (CreateProject workspace.id (if move then Nothing else Just destination.id) "closed" Nothing Nothing Nothing)
+        branch <- if move then Project.createProject env.pool (CreateProject workspace.id (Just closed.id) "historical branch" Nothing Nothing Nothing) else pure closed
+        historicalTasks <- forM [1..21 :: Int] $ \n -> Task.createTask env.pool (CreateTask workspace.id (Just branch.id) Nothing (T.pack (show n)) Nothing Nothing Nothing Nothing)
+        DBPool.runTransaction env.pool $ do
+          Session.sql "ALTER TABLE projects DISABLE TRIGGER USER; ALTER TABLE tasks DISABLE TRIGGER USER"
+          Session.statement (map (.id) historicalTasks) $ Statement.Statement "UPDATE tasks SET status='todo',auto_blocked=false WHERE id=ANY($1)"
+            (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+          Session.statement (map (.id) historicalTasks) $ Statement.Statement "UPDATE tasks SET status='todo',auto_blocked=false WHERE id=ANY($1)"
+            (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+          Session.statement closed.id $ Statement.Statement "UPDATE projects SET status='archived' WHERE id=$1"
+            (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+          Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER; ALTER TABLE projects ENABLE TRIGGER USER"
+        beforeTasks <- traverse (Task.getTask env.pool . (.id)) historicalTasks
+        map (fmap (.status)) beforeTasks `shouldBe` replicate 21 (Just Todo)
+        response <- putJson app (pauseProjectPath branch.id) $
+          if move then object ["parent_id" .= destination.id] else object ["status" .= ("active" :: T.Text)]
+        responseStatus response `shouldBe` status200
+        let Just mutation = decode (responseBody response) :: Maybe ProjectMutationResult
+        mutation.project.status `shouldBe` ProjPaused
+        mutation.pauseEffects.taskCount `shouldBe` 21
+        length mutation.pauseEffects.tasks `shouldBe` 20
+        mutation.pauseEffects.hasMoreTasks `shouldBe` True
+        map (.previousStatus) mutation.pauseEffects.tasks `shouldBe` replicate 20 Todo
+        map (.currentStatus) mutation.pauseEffects.tasks `shouldBe` replicate 20 Blocked
+        map (.reason) mutation.pauseEffects.tasks `shouldBe` replicate 20 "blocked_by_paused_project"
+
+    it "restores deferred legacy intent through metadata and explicit transition replay" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-deferred-replay"
+      ancestor <- Project.createProject env.pool (CreateProject workspace.id Nothing "deleted ancestor" Nothing Nothing Nothing)
+      child <- Project.createProject env.pool (CreateProject workspace.id (Just ancestor.id) "historical paused" Nothing Nothing Nothing)
+      frozenTask <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "frozen todo" Nothing Nothing Nothing Nothing)
+      frozenDone <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "frozen done" Nothing Nothing Nothing Nothing)
+      _ <- Task.updateTask env.pool frozenDone.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing Unchanged)
+      frozenBefore <- traverse (Task.getTask env.pool) [frozenTask.id,frozenDone.id]
+      frozenEvents <- filter (\row -> jsonPath ["entity","type"] row.outboxEnvelope == Just (String "task")) <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      frozenAudit <- traverse (\id -> Audit.getAuditLog env.pool (AuditLogQuery Nothing (Just "task") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)) [frozenTask.id,frozenDone.id]
+      DBPool.runTransaction env.pool $ do
+        Session.sql "ALTER TABLE projects DISABLE TRIGGER USER"
+        Session.statement ancestor.id $ Statement.Statement "UPDATE projects SET deleted_at=now() WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.statement child.id $ Statement.Statement "UPDATE projects SET status='paused',own_paused=false WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.sql "ALTER TABLE projects ENABLE TRIGGER USER"
+        Session.statement child.id $ Statement.Statement "INSERT INTO project_retained_pause_intents(project_id) VALUES ($1)"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      _ <- putJson app (pauseProjectPath child.id) (object ["name" .= ("renamed legacy" :: T.Text)])
+      metadataRows <- pauseProjectAudits env child.id
+      let Just metadata = find (\entry -> (entry.newValues >>= jsonField "name") == Just (String "renamed legacy")) metadataRows
+      request app methodPost (pauseAuditPath metadata.id) "" >>= (\response -> responseStatus response `shouldBe` status200)
+      _ <- putJson app (pauseProjectPath child.id) (object ["status" .= ("active" :: T.Text)])
+      rows <- pauseProjectAudits env child.id
+      let Just transition = find (\entry -> (entry.oldValues >>= jsonField "retained_paused") == Just (Bool True)
+            && (entry.newValues >>= jsonField "retained_paused") == Just (Bool False)) rows
+      response <- request app methodPost (pauseAuditPath transition.id) ""
+      responseStatus response `shouldBe` status200
+      fmap (fmap (.status)) (Project.getProject env.pool child.id) `shouldReturn` Just ProjPaused
+      DBPool.runSession env.pool (Session.statement (workspace.id, child.id) $ Statement.Statement
+        "SELECT hmem_project_retained_pause_intent($1,$2)"
+        (((\(workspace,_) -> workspace) >$< Enc.param (Enc.nonNullable Enc.uuid)) <> ((\(_,project) -> project) >$< Enc.param (Enc.nonNullable Enc.uuid)))
+        (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True) `shouldReturn` True
+      traverse (Task.getTask env.pool) [frozenTask.id,frozenDone.id] `shouldReturn` frozenBefore
+      traverse (\id -> Audit.getAuditLog env.pool (AuditLogQuery Nothing (Just "task") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)) [frozenTask.id,frozenDone.id] `shouldReturn` frozenAudit
+      (filter (\row -> jsonPath ["entity","type"] row.outboxEnvelope == Just (String "task")) <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100) `shouldReturn` frozenEvents
+      Project.restoreProject env.pool ancestor.id `shouldReturn` True
+      fmap (fmap (.status)) (Task.getTask env.pool frozenTask.id) `shouldReturn` Just Blocked
+      Task.getTask env.pool frozenDone.id `shouldReturn` (frozenBefore !! 1)
+      DBPool.runSession env.pool (Session.statement child.id $ Statement.Statement
+        "SELECT own_paused AND NOT EXISTS(SELECT 1 FROM project_retained_pause_intents WHERE project_id=p.id) FROM projects p WHERE id=$1"
+        (Enc.param (Enc.nonNullable Enc.uuid)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True) `shouldReturn` True
+
+    it "preserves inherited intent on metadata and repeated-pause audit reverts" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-revert"
+      root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      _ <- putJson app (pauseProjectPath root.id) (object ["status" .= ("paused" :: T.Text)])
+      child <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+      _ <- putJson app (pauseProjectPath child.id) (object ["name" .= ("renamed" :: T.Text)])
+      entries <- pauseProjectAudits env child.id
+      let Just metadata = find (\entry -> (entry.newValues >>= jsonField "name") == Just (String "renamed")) entries
+      reverted <- request app methodPost (pauseAuditPath metadata.id) ""
+      responseStatus reverted `shouldBe` status200
+      _ <- putJson app (pauseProjectPath child.id) (object ["status" .= ("paused" :: T.Text)])
+      transitions <- pauseProjectAudits env child.id
+      let Just explicit = find (\entry -> (entry.oldValues >>= jsonField "own_paused") == Just (Bool False)
+            && (entry.newValues >>= jsonField "own_paused") == Just (Bool True)) transitions
+      repeatedRevert <- request app methodPost (pauseAuditPath explicit.id) ""
+      responseStatus repeatedRevert `shouldBe` status200
+      fmap (fmap (.status)) (Project.getProject env.pool child.id) `shouldReturn` Just ProjPaused
+      _ <- putJson app (pauseProjectPath root.id) (object ["status" .= ("active" :: T.Text)])
+      fmap (fmap (.status)) (Project.getProject env.pool child.id) `shouldReturn` Just ProjActive
+      rows <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      filter (\row -> jsonPath ["transaction", "cause"] row.outboxEnvelope == Just (String "audit_revert")) rows `shouldSatisfy` (not . null)
+
+    it "ignores public private-intent fields and acknowledges retained ancestor pause" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-private-input"
+      root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      child <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+      _ <- putJson app (pauseProjectPath root.id) (object ["status" .= ("paused" :: T.Text)])
+      response <- putJson app (pauseProjectPath child.id) (object ["status" .= ("active" :: T.Text), "own_paused" .= True, "retained_paused" .= True])
+      let Just result = decode (responseBody response) :: Maybe ProjectMutationResult
+      result.project.status `shouldBe` ProjPaused
+      result.pauseEffects.remainingOwnPause `shouldBe` False
+      result.pauseEffects.remainingAncestorPause `shouldBe` True
+      _ <- putJson app (pauseProjectPath root.id) (object ["status" .= ("active" :: T.Text)])
+      fmap (fmap (.status)) (Project.getProject env.pool child.id) `shouldReturn` Just ProjActive
+
+    it "rejects foreign and deleted parents through ordinary and private replay without events" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-parent"
+      foreignWorkspace <- createTestWorkspace env "http-pause-parent-foreign"
+      root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      foreignParent <- Project.createProject env.pool (CreateProject foreignWorkspace.id Nothing "foreign" Nothing Nothing Nothing)
+      deletedParent <- Project.createProject env.pool (CreateProject workspace.id Nothing "deleted" Nothing Nothing Nothing)
+      _ <- Project.deleteProject env.pool deletedParent.id
+      _ <- putJson app (pauseProjectPath root.id) (object ["name" .= ("renamed" :: T.Text)])
+      [entry] <- filter (\entry -> entry.action == AuditUpdate) <$> pauseProjectAudits env root.id
+      before <- Project.getProject env.pool root.id
+      events <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      forM_ [foreignParent.id, deletedParent.id] $ \parent -> do
+        failed <- putJson app (pauseProjectPath root.id) (object ["parent_id" .= parent])
+        responseStatus failed `shouldSatisfy` (`elem` [status400,status409])
+        DBPool.runSession env.pool $ Session.statement (toJSON parent,entry.id) $ Statement.Statement
+          "UPDATE audit_log SET old_values=jsonb_set(old_values,'{parent_id}',$1::jsonb) WHERE id=$2"
+          (((\(value,_) -> value) >$< Enc.param (Enc.nonNullable Enc.jsonb)) <> ((\(_,id) -> id) >$< Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+        replay <- request app methodPost (pauseAuditPath entry.id) ""
+        responseStatus replay `shouldSatisfy` (`elem` [status400,status409])
+        Project.getProject env.pool root.id `shouldReturn` before
+        listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` events
+
+    it "rejects ambiguous historical and malformed canonical replay evidence after authorization" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-pause-old-evidence"
+      root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      _ <- putJson app (pauseProjectPath root.id) (object ["status" .= ("paused" :: T.Text)])
+      child <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+      _ <- putJson app (pauseProjectPath child.id) (object ["status" .= ("paused" :: T.Text)])
+      entries <- pauseProjectAudits env child.id
+      let Just entry = find (\value -> value.action == AuditUpdate) entries
+      DBPool.runSession env.pool $ Session.statement entry.id $ Statement.Statement
+        "UPDATE audit_log SET old_values=old_values-'retained_paused',new_values=new_values-'retained_paused' WHERE id=$1"
+        (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      ambiguous <- request app methodPost (pauseAuditPath entry.id) ""
+      responseStatus ambiguous `shouldBe` status409
+      let Just ambiguousBody = decode (responseBody ambiguous) :: Maybe Value
+      jsonField "error" ambiguousBody `shouldBe` Just (String "audit_pause_provenance_missing")
+      DBPool.runSession env.pool $ Session.statement entry.id $ Statement.Statement
+        "UPDATE audit_log SET old_values=jsonb_set(old_values,'{own_paused}','123'::jsonb) WHERE id=$1"
+        (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      malformed <- request app methodPost (pauseAuditPath entry.id) ""
+      responseStatus malformed `shouldBe` status409
+      let Just malformedBody = decode (responseBody malformed) :: Maybe Value
+      jsonField "error" malformedBody `shouldBe` Just (String "audit_pause_provenance_invalid")
+      deniedApp <- pauseDeniedApp env
+      denied <- request deniedApp methodPost (pauseAuditPath entry.id) ""
+      responseStatus denied `shouldBe` status403
+      LBS.toStrict (responseBody denied) `shouldNotSatisfy` BS.isInfixOf "provenance"
+
   describe "cascade lifecycle HTTP contract" $ do
     it "archives open project descendants and preserves completed task fields" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-cascade-archive"
@@ -2250,6 +2471,22 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       entityTypeToText ETObservation `shouldBe` "observation"
 
   describe "OpenAPI" $ do
+    it "documents bounded project pause results, automatic causes and private replay boundaries" $ \(_env, app) -> do
+      response <- request app methodGet "/api/v1/openapi.json" ""
+      responseStatus response `shouldBe` status200
+      let Just document = decode (responseBody response) :: Maybe Value
+          property schemaName field = jsonPath ["components","schemas",schemaName,"properties",field] document
+      property "ProjectMutationResult" "id" `shouldSatisfy` isJust
+      property "ProjectMutationResult" "pause_effects" `shouldSatisfy` isJust
+      property "ProjectMutationResult" "project" `shouldBe` Nothing
+      forM_ ["projects","tasks"] $ \field ->
+        (property "ProjectPauseEffects" field >>= jsonField "maxItems") `shouldBe` Just (Number 20)
+      forM_ ["project_paused","previous_project_paused","open_subtask_count","previous_open_subtask_count"] $ \field ->
+        property "TaskDependencyStatusChange" field `shouldSatisfy` isJust
+      property "NextTaskCandidate" "project_paused" `shouldSatisfy` isJust
+      forM_ ["own_paused","retained_paused"] $ \field -> property "UpdateProject" field `shouldBe` Nothing
+      jsonPath ["paths","/api/v1/projects/{projectId}","put","responses","409"] document `shouldSatisfy` isJust
+
     it "documents Observation and Timeline contracts while excluding legacy paths" $ \(_env, app) -> do
       -- Check the served document too, not merely the value used by middleware.
       served <- request app methodGet "/api/v1/openapi.json" ""
@@ -2551,3 +2788,21 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       mapM_ (\legacyPath -> (paths >>= jsonField legacyPath) `shouldBe` Nothing)
         [ "/api/v1/memories", "/api/v1/categories", "/api/v1/cleanup/policies"
         , "/api/v1/projects/{projectId}/memories", "/api/v1/tasks/{taskId}/context" ]
+
+pauseProjectPath :: UUID -> BS.ByteString
+pauseProjectPath id = "/api/v1/projects/" <> Text.encodeUtf8 (T.pack (show id))
+
+pauseAuditPath :: UUID -> BS.ByteString
+pauseAuditPath id = "/api/v1/audit/" <> Text.encodeUtf8 (T.pack (show id)) <> "/revert"
+
+pauseProjectAudits :: TestEnv -> UUID -> IO [AuditLogEntry]
+pauseProjectAudits env id = Audit.getAuditLog env.pool
+  (AuditLogQuery Nothing (Just "project") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)
+
+pauseDeniedApp :: TestEnv -> IO Application
+pauseDeniedApp env = do
+  tracker <- newAccessTracker env.pool 3600
+  wsState <- newWSState
+  let app = serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker wsState True)
+      principal = Principal ActorUser "unprivileged" "Unprivileged" PrincipalNoAuthority
+  pure $ \req respond -> withPrincipalContext (Just principal) (app req respond)

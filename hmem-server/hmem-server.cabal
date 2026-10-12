@@ -54,6 +54,7 @@ data-files:
     migrations/V034__subtask_parent_auto_blocking.sql
     migrations/V035__project_pause_lifecycle.sql
     migrations/V036__normalize_project_pause.sql
+    migrations/V037__project_pause_audit_provenance.sql
 
 library
   exposed-modules:

@@ -112,7 +112,7 @@ toolDefinitions =
       , "offset" .= prop "integer" "Result offset"
       ] ["embedding"])
   , tool "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state." (schema ["name" .= prop "string" "Project name", "description" .= prop "string" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates", "parent_id" .= prop "string" "Optional parent project UUID for hierarchy", "priority" .= prop "integer" "Priority 1 through 10"] ["name"])
-  , tool "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates. Completing requires closed descendants. Archiving also archives all descendant projects, including completed projects, and cancels non-done tasks while preserving done tasks." (schema ["project_id" .= prop "string" "Project UUID; the only required field", "name" .= prop "string" "Project name", "description" .= nullableProp "Durable project specification: aims, scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates", "parent_id" .= nullableProp "Parent project UUID for hierarchy; omit to keep the existing parent or use null to clear it", "status" .= enumProp "Execution state; record progress here, not in the description" ["active", "paused", "completed", "archived"], "priority" .= prop "integer" "Priority"] ["project_id"])
+  , tool "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates. Pausing requires no running descendant tasks or subtasks and cascades inherited pause/blocking. Resuming returns eligible automatically blocked tasks to todo and retains independent or ancestor pauses; acknowledgements include bounded pause effects. Completing requires closed descendants. Archiving also archives all descendant projects, including completed projects, and cancels non-done tasks while preserving done tasks." (schema ["project_id" .= prop "string" "Project UUID; the only required field", "name" .= prop "string" "Project name", "description" .= nullableProp "Durable project specification: aims, scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates", "parent_id" .= nullableProp "Parent project UUID for hierarchy; omit to keep the existing parent or use null to clear it", "status" .= enumProp "Execution state; record progress here, not in the description" ["active", "paused", "completed", "archived"], "priority" .= prop "integer" "Priority"] ["project_id"])
   , tool "project_detail" "Get project details, including its complete description." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_overview" "Get a compact project overview with tasks and subprojects." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_next_tasks" "Get actionable tasks for a project subtree." (schema ["project_id" .= prop "string" "Project UUID", "limit" .= prop "integer" "Maximum candidates", "include_blocked" .= prop "boolean" "Include blocked candidates"] ["project_id"])
@@ -341,12 +341,12 @@ execute manager base apiKey = \case
   WorkspaceUpdate workspaceId input -> request manager base apiKey "PUT" ("/api/v1/workspaces/" <> uuidPath workspaceId) (Just (encode input)) (mutationAck "updated" "workspace" . compactWorkspaceSummary)
   UnifiedSearch input -> request manager base apiKey "POST" "/api/v1/search" (Just (encode input)) compactSearchResults
   ProjectCreate input -> request manager base apiKey "POST" "/api/v1/projects" (Just (encode input)) (mutationAck "created" "project" . compactProjectSummary)
-  ProjectUpdate pid input -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode input)) (mutationAck "updated" "project" . compactProjectSummary)
+  ProjectUpdate pid input -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode input)) (projectMutationAck "updated")
   ProjectDetail pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid) Nothing fullProjectDetail
   ProjectOverviewCall pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid <> "/overview") Nothing compactProjectOverview
   ProjectNextTasks pid limit includeBlocked -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid <> "/next-tasks" <> query [("limit", show <$> limit), ("include_blocked", if includeBlocked then Just "true" else Nothing)]) Nothing compactNextTasks
   ProjectSpec input -> executeProjectSpec manager base apiKey input
-  ProjectArchive pid -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode (object ["status" .= ("archived" :: Text)]))) (mutationAck "archived" "project" . compactProjectSummary)
+  ProjectArchive pid -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode (object ["status" .= ("archived" :: Text)]))) (projectMutationAck "archived")
   TaskCreate input -> request manager base apiKey "POST" "/api/v1/tasks" (Just (encode input)) (taskMutationAck "created")
   TaskUpdate tid input -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode input)) (taskMutationAck "updated")
   TaskMoveBatch workspace input -> case workspace of
@@ -615,6 +615,10 @@ compactDependencyChange change = object (catMaybes
   , copy "auto_blocked"
   , copy "previous_open_dependency_count"
   , copy "open_dependency_count"
+  , copy "previous_open_subtask_count"
+  , copy "open_subtask_count"
+  , copy "previous_project_paused"
+  , copy "project_paused"
   , copy "reason"
   ])
   where copy key = (Key.fromText key .=) <$> field key change
@@ -622,7 +626,7 @@ compactDependencyChange change = object (catMaybes
 compactNextTasks :: Value -> Value
 compactNextTasks (Array rows) = toJSON (map compactRow (toList rows)) where
   compactRow row = case field "task" row of
-    Just task -> object ["task" .= compactTaskSummary task, "completion_gated" .= fromMaybe (Bool False) (field "completion_gated" row), "open_descendant_count" .= fromMaybe (Number 0) (field "open_descendant_count" row), "dependency_blocked" .= fromMaybe (Bool False) (field "dependency_blocked" row), "open_dependency_count" .= fromMaybe (Number 0) (field "open_dependency_count" row)]
+    Just task -> object ["task" .= compactTaskSummary task, "completion_gated" .= fromMaybe (Bool False) (field "completion_gated" row), "open_descendant_count" .= fromMaybe (Number 0) (field "open_descendant_count" row), "project_paused" .= fromMaybe (Bool False) (field "project_paused" row), "dependency_blocked" .= fromMaybe (Bool False) (field "dependency_blocked" row), "open_dependency_count" .= fromMaybe (Number 0) (field "open_dependency_count" row)]
     Nothing -> compactTaskSummary row
 compactNextTasks _ = toJSON ([] :: [Value])
 
@@ -635,6 +639,15 @@ compactWorkspaceList value = object ["items" .= mapField "items" compactWorkspac
 
 mutationAck :: Text -> Text -> Value -> Value
 mutationAck action entity summary = object ( ["ok" .= True, "action" .= action, "entity_type" .= entity, "summary" .= summary] <> maybe [] (\identifier -> ["id" .= identifier]) (field "id" summary) <> maybe [] (\status -> ["status" .= status]) (field "status" summary) )
+
+projectMutationAck :: Text -> Value -> Value
+projectMutationAck action value = case mutationAck action "project" (compactProjectSummary value) of
+  Object fields -> case field "pause_effects" value of
+    Just effects -> Object (KM.insert "pause_effects" (case effects of
+      Object values -> Object (KM.insert "tasks" (toJSON (mapField "tasks" compactDependencyChange effects)) values)
+      other -> other) fields)
+    Nothing -> Object fields
+  other -> other
 
 taskMutationAck :: Text -> Value -> Value
 taskMutationAck action value = case mutationAck action "task" (compactTaskSummary value) of

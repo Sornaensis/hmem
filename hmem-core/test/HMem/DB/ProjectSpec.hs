@@ -18,8 +18,8 @@ import Test.Hspec
 
 import HMem.DB.ChangeStream
 import HMem.DB.Observation
-import HMem.DB.Overview (getTaskOverview)
-import HMem.DB.Pool (runSession, DBException(..))
+import HMem.DB.Overview (getTaskOverview, getProjectOverview, projectCardSummary, projectCardSummaries)
+import HMem.DB.Pool (runSession, runTransaction, DBException(..))
 import HMem.DB.Project
 import HMem.DB.Task qualified as Task
 import HMem.DB.TestHarness
@@ -28,6 +28,387 @@ import HMem.Types
 
 spec :: Spec
 spec = do
+  around withTestEnv $ describe "Project pause audit provenance" $ do
+    it "captures per-row marker removal, no-ops and later writes in the same transaction" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-multirow"
+      root <- pauseProject env workspace.id Nothing "root"
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      first <- pauseProject env workspace.id (Just root.id) "first"
+      second <- pauseProject env workspace.id (Just root.id) "second"
+      runSession env.pool $ Session.statement [first.id, second.id] $ Statement.Statement
+        "INSERT INTO project_retained_pause_intents SELECT unnest($1::uuid[])"
+        (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+      beforeFirst <- getAuditLogRows env.pool "project" (T.pack (show first.id))
+      beforeSecond <- getAuditLogRows env.pool "project" (T.pack (show second.id))
+      runTransaction env.pool $ do
+        Session.statement [first.id, second.id] $ Statement.Statement
+          "UPDATE projects SET status='active' WHERE id=ANY($1)"
+          (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+        Session.statement first.id touchProjectStatement
+        Session.statement second.id $ Statement.Statement
+          "UPDATE projects SET name='later write' WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.sql "DO $$ BEGIN IF coalesce(current_setting('hmem.project_pause_audit_capture',true),'{}')::jsonb <> '{}'::jsonb THEN RAISE EXCEPTION 'capture leaked'; END IF; END $$;"
+      firstRows <- runSession env.pool $ Session.statement first.id pauseAuditSnapshotsStatement
+      secondRows <- runSession env.pool $ Session.statement second.id pauseAuditSnapshotsStatement
+      let transitions rows = [ row | row <- rows
+            , (field "old" row >>= field "retained_paused") == Just (Bool True)
+            , (field "new" row >>= field "retained_paused") == Just (Bool False) ]
+      length (transitions firstRows) `shouldBe` 1
+      length (transitions secondRows) `shouldBe` 1
+      length firstRows `shouldBe` length beforeFirst + 2 -- explicit requested row + effective inherited reconciliation; no-op suppressed
+      length secondRows `shouldBe` length beforeSecond + 3 -- additionally the independent later metadata write
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "clears conflict-only INSERT captures before later writes in the same transaction" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-conflict"
+      root <- pauseProject env workspace.id Nothing "root"
+      before <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      runTransaction env.pool $ do
+        Session.statement root.id $ Statement.Statement
+          "INSERT INTO projects(id,workspace_id,name) SELECT id,workspace_id,name FROM projects WHERE id=$1 ON CONFLICT(id) DO NOTHING"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.sql "DO $$ BEGIN IF coalesce(current_setting('hmem.project_pause_audit_capture',true),'{}')::jsonb <> '{}'::jsonb THEN RAISE EXCEPTION 'capture leaked'; END IF; END $$;"
+        Session.statement root.id touchProjectStatement
+      getAuditLogRows env.pool "project" (T.pack (show root.id)) `shouldReturn` before
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "clears upsert and zero-row statement captures before subsequent writes" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-upsert"
+      root <- pauseProject env workspace.id Nothing "root"
+      before <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      runTransaction env.pool $ do
+        Session.statement root.id $ Statement.Statement
+          "INSERT INTO projects(id,workspace_id,name) SELECT id,workspace_id,'upserted' FROM projects WHERE id=$1 ON CONFLICT(id) DO UPDATE SET name=excluded.name"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "upsert capture leaked"
+        Session.sql "UPDATE projects SET name=name WHERE false; INSERT INTO projects(workspace_id,name) SELECT workspace_id,name FROM projects WHERE false; DELETE FROM projects WHERE false"
+        Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "zero-row capture leaked"
+        Session.statement root.id touchProjectStatement
+      after <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      length after `shouldBe` length before + 1
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "clears a suppressed row capture without producing an audit or affecting later writes" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-suppressed"
+      root <- pauseProject env workspace.id Nothing "root"
+      before <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      runTransaction env.pool $ do
+        Session.sql "CREATE FUNCTION suppress_pause_audit_fixture() RETURNS trigger AS $$ BEGIN RETURN NULL; END $$ LANGUAGE plpgsql; CREATE TRIGGER zzzzz_suppress_pause_audit_fixture BEFORE UPDATE ON projects FOR EACH ROW EXECUTE FUNCTION suppress_pause_audit_fixture()"
+        Session.statement root.id touchProjectStatement
+        Session.sql "DROP TRIGGER zzzzz_suppress_pause_audit_fixture ON projects; DROP FUNCTION suppress_pause_audit_fixture()"
+        Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "suppressed capture leaked"
+        Session.statement root.id touchProjectStatement
+      getAuditLogRows env.pool "project" (T.pack (show root.id)) `shouldReturn` before
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "restores capture scope after a rejected pause and allows a later same-transaction write" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-rejected"
+      root <- pauseProject env workspace.id Nothing "root"
+      task <- pauseTask env workspace.id (Just root.id) Nothing "running"
+      _ <- Task.updateTask env.pool task.id (pauseTaskStatus InProgress)
+      before <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      runTransaction env.pool $ do
+        _ <- Session.statement (T.pack (show root.id)) $ Statement.Statement
+          "SELECT set_config('hmem.test_pause_target',$1,true)" (Enc.param (Enc.nonNullable Enc.text))
+          (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+        Session.sql "DO $$ BEGIN BEGIN UPDATE projects SET status='paused' WHERE id=current_setting('hmem.test_pause_target')::uuid; RAISE EXCEPTION 'expected running refusal'; EXCEPTION WHEN SQLSTATE 'HM204' THEN NULL; END; END $$"
+        Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "rejected capture leaked"
+        Session.statement root.id $ Statement.Statement "UPDATE projects SET name='after rejection' WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      after <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      length after `shouldBe` length before + 1
+      fmap (fmap (.status)) (getProject env.pool root.id) `shouldReturn` Just ProjActive
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "preserves pending outer marker snapshots during parent-before-child materialization" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-pending"
+      closed <- pauseProject env workspace.id Nothing "closed"
+      parent <- pauseProject env workspace.id (Just closed.id) "moving parent"
+      child <- pauseProject env workspace.id (Just parent.id) "pending child"
+      runTransaction env.pool $ do
+        Session.sql "ALTER TABLE projects DISABLE TRIGGER USER"
+        Session.statement closed.id archiveProjectStatement
+        Session.statement [child.id] $ Statement.Statement
+          "UPDATE projects SET status='paused',own_paused=false WHERE id=ANY($1)"
+          (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+        Session.sql "ALTER TABLE projects ENABLE TRIGGER USER"
+        Session.statement [child.id] $ Statement.Statement
+          "INSERT INTO project_retained_pause_intents SELECT unnest($1::uuid[])"
+          (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+      beforeRows <- runSession env.pool $ Session.statement child.id pauseAuditSnapshotsStatement
+      runTransaction env.pool $ do
+        Session.sql "CREATE FUNCTION assert_pending_pause_capture() RETURNS trigger AS $$ BEGIN IF current_setting('hmem.retained_pause_materializing',true)='true' AND NOT EXISTS (SELECT 1 FROM jsonb_each(coalesce(nullif(current_setting('hmem.project_pause_audit_capture',true),''),'{}')::jsonb) entry WHERE entry.value->>'project_id'=NEW.id::text AND entry.key <> ('UPDATE:' || TG_RELID::text || ':' || OLD.ctid::text)) THEN RAISE EXCEPTION 'parent-before-child fixture did not preserve pending outer row'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER zz_assert_pending_pause_capture BEFORE UPDATE OF own_paused ON projects FOR EACH ROW EXECUTE FUNCTION assert_pending_pause_capture(); SET LOCAL enable_indexscan=off; SET LOCAL enable_bitmapscan=off;"
+        Session.statement [parent.id,child.id] $ Statement.Statement
+          "UPDATE projects SET parent_id=CASE WHEN id=($1::uuid[])[1] THEN NULL ELSE parent_id END,name=name WHERE id=ANY($1)"
+          (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+        Session.sql "DROP TRIGGER zz_assert_pending_pause_capture ON projects; DROP FUNCTION assert_pending_pause_capture();"
+      rows <- runSession env.pool $ Session.statement child.id pauseAuditSnapshotsStatement
+      length rows `shouldBe` length beforeRows + 1
+      let materialized row = (field "old" row >>= field "own_paused") == Just (Bool False)
+            && (field "old" row >>= field "retained_paused") == Just (Bool True)
+            && (field "new" row >>= field "own_paused") == Just (Bool True)
+            && (field "new" row >>= field "retained_paused") == Just (Bool False)
+      length (filter materialized rows) `shouldBe` 1
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "correlates deferred FK hard-delete audits with their captured tuple versions" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-fk-purge"
+      parent <- pauseProject env workspace.id Nothing "parent"
+      child <- pauseProject env workspace.id (Just parent.id) "child"
+      runSession env.pool $ Session.statement child.id $ Statement.Statement
+        "INSERT INTO project_retained_pause_intents(project_id) VALUES ($1)"
+        (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      runTransaction env.pool $ Session.statement parent.id $ Statement.Statement
+        "DELETE FROM projects WHERE id=$1" (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      rows <- runSession env.pool $ Session.statement child.id pauseAuditSnapshotsStatement
+      let deleted row = field "new" row == Just Null
+            && (field "old" row >>= field "retained_paused") == Just (Bool True)
+      length (filter deleted rows) `shouldBe` 1
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "records settled marker consumption during nested materialization" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-materialization"
+      root <- pauseProject env workspace.id Nothing "root"
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      child <- pauseProject env workspace.id (Just root.id) "child"
+      runSession env.pool $ Session.statement [child.id] $ Statement.Statement
+        "INSERT INTO project_retained_pause_intents SELECT unnest($1::uuid[])"
+        (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      rows <- runSession env.pool $ Session.statement child.id pauseAuditSnapshotsStatement
+      let settled row = (field "old" row >>= field "own_paused") == Just (Bool False)
+            && (field "old" row >>= field "retained_paused") == Just (Bool True)
+            && (field "new" row >>= field "own_paused") == Just (Bool True)
+            && (field "new" row >>= field "retained_paused") == Just (Bool False)
+      length (filter settled rows) `shouldBe` 1
+      getProject env.pool child.id >>= \value -> fmap (.status) value `shouldBe` Just ProjPaused
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "rejects foreign or deleted parents in ordinary and private mutations atomically" $ \env -> do
+      workspace <- createTestWorkspace env "pause-parent-scope"
+      foreignWorkspace <- createTestWorkspace env "pause-parent-foreign"
+      root <- pauseProject env workspace.id Nothing "root"
+      foreignParent <- pauseProject env foreignWorkspace.id Nothing "foreign"
+      deletedParent <- pauseProject env workspace.id Nothing "deleted"
+      _ <- deleteProject env.pool deletedParent.id
+      before <- getProject env.pool root.id
+      audits <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      events <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      let move :: UUID -> UpdateProject
+          move parentId = (archiveStatusUpdate ProjActive) { parentId = SetTo parentId }
+      mapM_ (\parent -> do
+        updateProject env.pool root.id (move parent) `shouldThrow` anyException
+        updateProjectForAudit env.pool workspace.id root.id (move parent)
+          (Just (ProjectAuditPauseIntent False False)) `shouldThrow` anyException
+        getProject env.pool root.id `shouldReturn` before
+        getAuditLogRows env.pool "project" (T.pack (show root.id)) `shouldReturn` audits
+        listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` events)
+        [foreignParent.id, deletedParent.id]
+
+    it "allows pure resume of legacy running work while genuine pause still refuses frozen descendants" $ \env -> do
+      workspace <- createTestWorkspace env "pause-legacy-running-resume"
+      mapM_ (\frozenBranch -> do
+        root <- pauseProject env workspace.id Nothing "root"
+        branch <- pauseProject env workspace.id (Just root.id) "branch"
+        leaf <- pauseProject env workspace.id (Just branch.id) "leaf"
+        running <- pauseTask env workspace.id (Just leaf.id) Nothing "historical running"
+        runTransaction env.pool $ do
+          Session.sql "ALTER TABLE projects DISABLE TRIGGER USER; ALTER TABLE tasks DISABLE TRIGGER USER"
+          Session.statement root.id $ Statement.Statement "UPDATE projects SET status='paused',own_paused=true WHERE id=$1"
+            (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+          Session.statement leaf.id $ Statement.Statement "UPDATE projects SET status='paused',own_paused=false WHERE id=$1"
+            (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+          if frozenBranch then Session.statement branch.id archiveProjectStatement else
+            Session.statement branch.id $ Statement.Statement "UPDATE projects SET status='paused',own_paused=false WHERE id=$1"
+              (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+          Session.statement running.id $ Statement.Statement "UPDATE tasks SET status='in_progress',auto_blocked=false WHERE id=$1"
+            (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+          Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER; ALTER TABLE projects ENABLE TRIGGER USER"
+          if frozenBranch then Session.statement leaf.id $ Statement.Statement
+            "INSERT INTO project_retained_pause_intents(project_id) VALUES ($1)"
+            (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True else pure ()
+        taskBefore <- Task.getTask env.pool running.id
+        leafBefore <- getProject env.pool leaf.id
+        resumed <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+        fmap (.status) resumed `shouldBe` Just ProjActive
+        Task.getTask env.pool running.id `shouldReturn` taskBefore
+        if frozenBranch then getProject env.pool leaf.id `shouldReturn` leafBefore else
+          fmap (fmap (.status)) (getProject env.pool leaf.id) `shouldReturn` Just ProjActive
+        rejected <- try @DBException $ updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+        rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+        fmap (fmap (.status)) (getProject env.pool root.id) `shouldReturn` Just ProjActive
+        Task.getTask env.pool running.id `shouldReturn` taskBefore) [False,True]
+
+    it "isolates mixed resume/pause rows and prevents same-transaction resume capability reuse" $ \env -> do
+      workspace <- createTestWorkspace env "pause-resume-capability"
+      resumed <- pauseProject env workspace.id Nothing "resume"
+      paused <- pauseProject env workspace.id Nothing "pause"
+      firstTask <- pauseTask env workspace.id (Just resumed.id) Nothing "legacy running"
+      secondTask <- pauseTask env workspace.id (Just paused.id) Nothing "running"
+      runTransaction env.pool $ do
+        Session.sql "ALTER TABLE projects DISABLE TRIGGER USER; ALTER TABLE tasks DISABLE TRIGGER USER"
+        Session.statement resumed.id $ Statement.Statement "UPDATE projects SET status='paused',own_paused=true WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.statement [firstTask.id,secondTask.id] $ Statement.Statement "UPDATE tasks SET status='in_progress',auto_blocked=false WHERE id=ANY($1)"
+          (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+        Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER; ALTER TABLE projects ENABLE TRIGGER USER"
+      before <- traverse (getProject env.pool) [resumed.id,paused.id]
+      events <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      rejected <- try @DBException $ runTransaction env.pool $ Session.statement [resumed.id,paused.id] $ Statement.Statement
+        "UPDATE projects SET status=CASE WHEN id=($1::uuid[])[1] THEN 'active'::project_status_enum ELSE 'paused'::project_status_enum END WHERE id=ANY($1)"
+        (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+      rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+      traverse (getProject env.pool) [resumed.id,paused.id] `shouldReturn` before
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` events
+      runTransaction env.pool $ do
+        Session.statement resumed.id $ Statement.Statement "UPDATE projects SET status='active' WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "resume candidate leaked"
+        _ <- Session.statement (T.pack (show resumed.id)) $ Statement.Statement
+          "SELECT set_config('hmem.test_pause_target',$1,true)" (Enc.param (Enc.nonNullable Enc.text))
+          (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+        Session.sql "DO $$ BEGIN BEGIN UPDATE projects SET own_paused=true WHERE id=current_setting('hmem.test_pause_target')::uuid; RAISE EXCEPTION 'resume authority leaked into later pause'; EXCEPTION WHEN SQLSTATE 'HM204' THEN NULL; END; END $$"
+        Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "later rejected candidate leaked"
+        Session.statement resumed.id $ Statement.Statement "UPDATE projects SET status='active' WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.statement resumed.id $ Statement.Statement "UPDATE projects SET own_paused=own_paused,name=name WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "repeated/no-op candidate leaked"
+      fmap (fmap (.status)) (getProject env.pool resumed.id) `shouldReturn` Just ProjActive
+      fmap (fmap (.status)) (Task.getTask env.pool firstTask.id) `shouldReturn` Just InProgress
+
+    it "refuses a descendant pause before its parent's same-statement resume can mask original running work" $ \env -> do
+      workspace <- createTestWorkspace env "pause-hierarchical-mixed"
+      parent <- pauseProject env workspace.id Nothing "parent"
+      _ <- updateProject env.pool parent.id (archiveStatusUpdate ProjPaused)
+      child <- pauseProject env workspace.id (Just parent.id) "child"
+      running <- pauseTask env workspace.id (Just child.id) Nothing "original running"
+      runTransaction env.pool $ do
+        Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER"
+        Session.statement running.id $ Statement.Statement "UPDATE tasks SET status='in_progress',auto_blocked=false WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER"
+      before <- traverse (getProject env.pool) [parent.id,child.id]
+      taskBefore <- Task.getTask env.pool running.id
+      audits <- traverse (\id -> getAuditLogRows env.pool "project" (T.pack (show id))) [parent.id,child.id]
+      taskAudit <- getAuditLogRows env.pool "task" (T.pack (show running.id))
+      events <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      rejected <- try @DBException $ runTransaction env.pool $ do
+        _ <- Session.statement (T.pack (show child.id)) $ Statement.Statement
+          "SELECT set_config('hmem.test_pending_pause_child',$1,true)" (Enc.param (Enc.nonNullable Enc.text))
+          (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+        Session.sql "CREATE FUNCTION witness_parent_resume_mask() RETURNS trigger AS $$ BEGIN IF OLD.status='in_progress' AND NEW.status='blocked' THEN IF NOT EXISTS (SELECT 1 FROM jsonb_each(coalesce(nullif(current_setting('hmem.project_pause_audit_capture',true),''),'{}')::jsonb) entry WHERE entry.value->'resume'->>'id'=current_setting('hmem.test_pending_pause_child') AND entry.value->'resume'->'requested'='true'::jsonb AND entry.value->'resume'->'active'='false'::jsonb) THEN RAISE EXCEPTION 'parent-before-descendant fixture not established'; END IF; PERFORM set_config('hmem.test_parent_mask_witness','true',true); END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER zz_witness_parent_resume_mask BEFORE UPDATE OF status ON tasks FOR EACH ROW EXECUTE FUNCTION witness_parent_resume_mask(); SET LOCAL enable_indexscan=off; SET LOCAL enable_bitmapscan=off;"
+        Session.statement [parent.id,child.id] $ Statement.Statement
+          "UPDATE projects SET status=CASE WHEN id=($1::uuid[])[1] THEN 'active'::project_status_enum ELSE 'paused'::project_status_enum END WHERE id=ANY($1)"
+          (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) Dec.noResult True
+        witnessed <- Session.statement () $ Statement.Statement
+          "SELECT current_setting('hmem.test_parent_mask_witness',true)='true'" Enc.noParams
+          (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
+        if witnessed then pure () else error "controlled parent-first path did not execute"
+        Session.sql "DROP TRIGGER zz_witness_parent_resume_mask ON tasks; DROP FUNCTION witness_parent_resume_mask()"
+      rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+      traverse (getProject env.pool) [parent.id,child.id] `shouldReturn` before
+      Task.getTask env.pool running.id `shouldReturn` taskBefore
+      traverse (\id -> getAuditLogRows env.pool "project" (T.pack (show id))) [parent.id,child.id] `shouldReturn` audits
+      getAuditLogRows env.pool "task" (T.pack (show running.id)) `shouldReturn` taskAudit
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` events
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "refuses repeated true own pause intent with original running rows and no events" $ \env -> do
+      workspace <- createTestWorkspace env "pause-repeated-own-true"
+      root <- pauseProject env workspace.id Nothing "root"
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      running <- pauseTask env workspace.id (Just root.id) Nothing "original running"
+      runTransaction env.pool $ do
+        Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER"
+        Session.statement running.id $ Statement.Statement "UPDATE tasks SET status='in_progress',auto_blocked=false WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER"
+      before <- getProject env.pool root.id
+      taskBefore <- Task.getTask env.pool running.id
+      audits <- getAuditLogRows env.pool "project" (T.pack (show root.id))
+      events <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      rejected <- try @DBException $ runSession env.pool $ Session.statement (root.id,True) ownPauseProjectStatement
+      rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+      getProject env.pool root.id `shouldReturn` before
+      Task.getTask env.pool running.id `shouldReturn` taskBefore
+      getAuditLogRows env.pool "project" (T.pack (show root.id)) `shouldReturn` audits
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` events
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "keeps harmless and suppressed descendant captures from refusing a same-statement parent resume" $ \env -> do
+      workspace <- createTestWorkspace env "pause-harmless-mixed"
+      mapM_ (\suppressChild -> do
+        parent <- pauseProject env workspace.id Nothing "parent"
+        _ <- updateProject env.pool parent.id (archiveStatusUpdate ProjPaused)
+        child <- pauseProject env workspace.id (Just parent.id) "child"
+        running <- pauseTask env workspace.id (Just child.id) Nothing "legacy running"
+        runTransaction env.pool $ do
+          Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER"
+          Session.statement running.id $ Statement.Statement "UPDATE tasks SET status='in_progress',auto_blocked=false WHERE id=$1"
+            (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+          Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER"
+        taskBefore <- Task.getTask env.pool running.id
+        taskAudits <- getAuditLogRows env.pool "task" (T.pack (show running.id))
+        runTransaction env.pool $ do
+          if suppressChild then Session.sql "CREATE FUNCTION suppress_descendant_pause_fixture() RETURNS trigger AS $$ BEGIN IF NEW.name='child' AND NEW.own_paused THEN RETURN NULL; END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER zzzzz_suppress_descendant_pause_fixture BEFORE UPDATE ON projects FOR EACH ROW EXECUTE FUNCTION suppress_descendant_pause_fixture()" else pure ()
+          Session.sql "SET LOCAL enable_indexscan=off; SET LOCAL enable_bitmapscan=off"
+          Session.statement ([parent.id,child.id],suppressChild) $ Statement.Statement
+            "UPDATE projects SET own_paused=CASE WHEN id=($1::uuid[])[1] THEN false WHEN $2 THEN true ELSE own_paused END,name=name WHERE id=ANY($1)"
+            (contramap fst (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) <> contramap snd (Enc.param (Enc.nonNullable Enc.bool))) Dec.noResult True
+          if suppressChild then Session.sql "DROP TRIGGER zzzzz_suppress_descendant_pause_fixture ON projects; DROP FUNCTION suppress_descendant_pause_fixture()" else pure ()
+          Session.statement () pauseCaptureEmptyStatement >>= \empty -> if empty then pure () else error "mixed metadata/suppressed capture leaked"
+        fmap (fmap (.status)) (getProject env.pool parent.id) `shouldReturn` Just ProjActive
+        fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjActive
+        Task.getTask env.pool running.id `shouldReturn` taskBefore
+        getAuditLogRows env.pool "task" (T.pack (show running.id)) `shouldReturn` taskAudits
+        childAudits <- runSession env.pool $ Session.statement child.id pauseAuditSnapshotsStatement
+        filter (\row -> (field "new" row >>= field "own_paused") == Just (Bool True)) childAudits `shouldBe` []) [False,True]
+
+    it "rolls back deferred replay intent and events when a frozen descendant is running" $ \env -> do
+      workspace <- createTestWorkspace env "pause-deferred-replay-running"
+      ancestor <- pauseProject env workspace.id Nothing "deleted ancestor"
+      child <- pauseProject env workspace.id (Just ancestor.id) "legacy child"
+      running <- pauseTask env workspace.id (Just child.id) Nothing "running"
+      _ <- Task.updateTask env.pool running.id (pauseTaskStatus InProgress)
+      runTransaction env.pool $ do
+        Session.sql "ALTER TABLE projects DISABLE TRIGGER USER"
+        Session.statement ancestor.id $ Statement.Statement "UPDATE projects SET deleted_at=now() WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        Session.sql "ALTER TABLE projects ENABLE TRIGGER USER"
+      before <- getProject env.pool child.id
+      taskBefore <- Task.getTask env.pool running.id
+      audits <- getAuditLogRows env.pool "project" (T.pack (show child.id))
+      events <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      rejected <- try @DBException $ updateProjectForAudit env.pool workspace.id child.id
+        (archiveStatusUpdate ProjPaused) (Just (ProjectAuditPauseIntent False True))
+      rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
+      getProject env.pool child.id `shouldReturn` before
+      Task.getTask env.pool running.id `shouldReturn` taskBefore
+      getAuditLogRows env.pool "project" (T.pack (show child.id)) `shouldReturn` audits
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` events
+      runSession env.pool (Session.statement child.id $ Statement.Statement
+        "SELECT NOT EXISTS(SELECT 1 FROM project_retained_pause_intents WHERE project_id=$1)"
+        (Enc.param (Enc.nonNullable Enc.uuid)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True) `shouldReturn` True
+      runSession env.pool (Session.statement () pauseCaptureEmptyStatement) `shouldReturn` True
+
+    it "binds private replay to the workspace and restores inherited false intent" $ \env -> do
+      workspace <- createTestWorkspace env "pause-audit-private"
+      foreignWorkspace <- createTestWorkspace env "pause-audit-foreign"
+      root <- pauseProject env workspace.id Nothing "root"
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      child <- pauseProject env workspace.id (Just root.id) "child"
+      before <- getProject env.pool child.id
+      updateProjectForAudit env.pool foreignWorkspace.id child.id (archiveStatusUpdate ProjPaused)
+        (Just (ProjectAuditPauseIntent True False)) `shouldReturn` Nothing
+      getProject env.pool child.id `shouldReturn` before
+      _ <- updateProject env.pool child.id (archiveStatusUpdate ProjPaused)
+      _ <- updateProjectForAudit env.pool workspace.id child.id (archiveStatusUpdate ProjPaused)
+        (Just (ProjectAuditPauseIntent False False))
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
+      fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjActive
+
   around withTestEnv $ describe "Project pause lifecycle" $ do
     it "pauses deep open descendants and hierarchy-only subtasks while preserving closed and terminal rows" $ \env -> do
       workspace <- createTestWorkspace env "pause-deep"
@@ -143,6 +524,26 @@ spec = do
       _ <- updateProject env.pool child.id (archiveStatusUpdate ProjPaused)
       _ <- updateProject env.pool root.id (archiveStatusUpdate ProjActive)
       fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjPaused
+
+    it "counts running frozen descendants equally in single and batch pause readiness" $ \env -> do
+      workspace <- createTestWorkspace env "pause-frozen-running-rollup"
+      root <- pauseProject env workspace.id Nothing "root"
+      frozen <- pauseProject env workspace.id (Just root.id) "frozen"
+      parent <- pauseTask env workspace.id (Just frozen.id) Nothing "parent"
+      child <- pauseTask env workspace.id (Just frozen.id) (Just parent.id) "running subtask"
+      _ <- Task.updateTask env.pool child.id (pauseTaskStatus InProgress)
+      runTransaction env.pool $ do
+        Session.sql "ALTER TABLE projects DISABLE TRIGGER USER"
+        Session.statement frozen.id archiveProjectStatement
+        Session.sql "ALTER TABLE projects ENABLE TRIGGER USER"
+      single <- projectCardSummary env.pool root
+      batch <- projectCardSummaries env.pool [root]
+      batch `shouldBe` [single]
+      single.readinessRollup.inProgressTaskCount `shouldBe` 1
+      overview <- getProjectOverview env.pool root.id
+      fmap (\value -> value.readinessRollup.inProgressTaskCount) overview `shouldBe` Just 1
+      rejected <- try @DBException $ updateProject env.pool root.id (archiveStatusUpdate ProjPaused)
+      rejected `shouldSatisfy` \case Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _) -> True; _ -> False
 
     it "rejects pause atomically for a running descendant subtask with unchanged audit/outbox" $ \env -> do
       workspace <- createTestWorkspace env "pause-running"
@@ -584,3 +985,14 @@ setRestoredPauseIntentStatement :: Statement.Statement UUID ()
 setRestoredPauseIntentStatement = Statement.Statement
   "SELECT set_config('hmem.project_pause_intent', jsonb_build_object('id', $1::uuid, 'own_paused', false)::text, true)"
   (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+pauseAuditSnapshotsStatement :: Statement.Statement UUID [Value]
+pauseAuditSnapshotsStatement = Statement.Statement
+  "SELECT jsonb_build_object('old',old_values,'new',new_values) FROM audit_log WHERE entity_type='project' AND entity_id=$1::uuid::text ORDER BY changed_at,id"
+  (Enc.param (Enc.nonNullable Enc.uuid)) (Dec.rowList (Dec.column (Dec.nonNullable Dec.jsonb))) True
+
+pauseCaptureEmptyStatement :: Statement.Statement () Bool
+pauseCaptureEmptyStatement = Statement.Statement
+  "SELECT coalesce(nullif(current_setting('hmem.project_pause_audit_capture',true),''),'{}')::jsonb='{}'::jsonb AND coalesce(nullif(current_setting('hmem.project_pause_audit_scopes',true),''),'[]')::jsonb='[]'::jsonb"
+  Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
+

@@ -21,6 +21,7 @@ module HMem.DB.Task
   , listNextTasks
   , enrichTaskCounts
   , dependencyAutoBlockSnapshots
+  , projectPauseSnapshotsS
   , enrichDependencyAutoBlockSnapshots
   , addDependencyWithSnapshots
   , removeDependencyWithSnapshots
@@ -1351,6 +1352,7 @@ listNextTasks pool projectId includeBlocked limitRows = do
         , openDescendantCount = candidate.openDescendantCount
         , dependencyBlocked = candidate.dependencyBlocked
         , openDependencyCount = candidate.openDependencyCount
+        , projectPaused = candidate.projectPaused
         }
   pure (map enrichCandidate rows)
   where
@@ -1401,7 +1403,10 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "    LEFT JOIN scoped_tasks parent ON task.parent_id = parent.id"
       , "   WHERE task.status IN ('todo'::task_status_enum, 'in_progress'::task_status_enum, 'blocked'::task_status_enum)"
       , "     AND ($2 OR task.status <> 'blocked'::task_status_enum)"
-      , "     AND (task.parent_id IS NULL OR hmem_task_can_start_subtasks(task.parent_id))"
+      , "     AND ($2 OR NOT hmem_task_is_inside_paused_project(task.id))"
+      , "     AND NOT hmem_task_is_inside_closed_project(task.id)"
+      , "     AND NOT hmem_task_has_closed_ancestor(task.id)"
+      , "     AND (task.parent_id IS NULL OR hmem_task_can_start_subtasks(task.parent_id) OR ($2 AND hmem_task_is_inside_paused_project(task.id)))"
       , "),"
       , "open_descendant_ancestors(descendant_id, ancestor_id) AS ("
       , "  SELECT child.id, parent.id"
@@ -1435,7 +1440,8 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "       coalesce(open_desc.open_descendant_count, 0) > 0 AS completion_gated,"
       , "       coalesce(open_desc.open_descendant_count, 0)::bigint AS open_descendant_count,"
       , "       coalesce(open_dep.open_dependency_count, 0) > 0 AS dependency_blocked,"
-      , "       coalesce(open_dep.open_dependency_count, 0)::bigint AS open_dependency_count"
+      , "       coalesce(open_dep.open_dependency_count, 0)::bigint AS open_dependency_count,"
+      , "       hmem_task_is_inside_paused_project(candidate.id) AS project_paused"
       , "  FROM candidate_tasks candidate"
       , "  LEFT JOIN open_descendant_counts open_desc ON open_desc.id = candidate.id"
       , "  LEFT JOIN open_dependency_counts open_dep ON open_dep.id = candidate.id"
@@ -1456,12 +1462,14 @@ nextTaskCandidateRowDecoder = do
   openDescendantCount <- Dec.column (Dec.nonNullable Dec.int8)
   dependencyBlocked <- Dec.column (Dec.nonNullable Dec.bool)
   openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
+  projectPaused <- Dec.column (Dec.nonNullable Dec.bool)
   pure NextTaskCandidate
     { task = task
     , completionGated = completionGated
     , openDescendantCount = fromIntegral openDescendantCount
     , dependencyBlocked = dependencyBlocked
     , openDependencyCount = fromIntegral openDependencyCount
+    , projectPaused = projectPaused
     }
 
 dependencyAutoBlockSnapshots :: Pool Hasql.Connection -> [UUID] -> IO [TaskDependencyAutoBlockSnapshot]
@@ -1481,13 +1489,23 @@ enrichDependencyAutoBlockSnapshots pool snapshots = do
         , autoBlocked = snapshot.autoBlocked
         , openDependencyCount = snapshot.openDependencyCount
         , openSubtaskCount = snapshot.openSubtaskCount
+        , projectPaused = snapshot.projectPaused
         }
   pure $ map enrichSnapshot snapshots
 
-dependencyAutoBlockSnapshotsS :: [UUID] -> Session.Session [TaskDependencyAutoBlockSnapshot]
-dependencyAutoBlockSnapshotsS seedIds = Session.statement seedIds dependencyAutoBlockSnapshotsStatement
+-- Include all potential transition targets, including currently frozen branches
+-- that become eligible on reopen/reparent, plus transitive dependents/parents.
+projectPauseSnapshotsS :: UUID -> Session.Session [TaskDependencyAutoBlockSnapshot]
+projectPauseSnapshotsS pid = do
+  seeds <- Session.statement pid $ Statement.Statement
+    "WITH RECURSIVE projects_tree(id) AS (SELECT id FROM projects WHERE id=$1 AND deleted_at IS NULL UNION SELECT p.id FROM projects p JOIN projects_tree t ON p.parent_id=t.id WHERE p.deleted_at IS NULL), task_tree(id) AS (SELECT t.id FROM tasks t JOIN projects_tree p ON t.project_id=p.id WHERE t.deleted_at IS NULL UNION SELECT child.id FROM tasks child JOIN task_tree parent ON child.parent_id=parent.id WHERE child.deleted_at IS NULL) SELECT id FROM task_tree ORDER BY id"
+    (Enc.param (Enc.nonNullable Enc.uuid)) (Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))) True
+  Session.statement (seeds, True) dependencyAutoBlockSnapshotsStatement
 
-dependencyAutoBlockSnapshotsStatement :: Statement.Statement [UUID] [TaskDependencyAutoBlockSnapshot]
+dependencyAutoBlockSnapshotsS :: [UUID] -> Session.Session [TaskDependencyAutoBlockSnapshot]
+dependencyAutoBlockSnapshotsS seedIds = Session.statement (seedIds, False) dependencyAutoBlockSnapshotsStatement
+
+dependencyAutoBlockSnapshotsStatement :: Statement.Statement ([UUID], Bool) [TaskDependencyAutoBlockSnapshot]
 dependencyAutoBlockSnapshotsStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
@@ -1536,7 +1554,9 @@ dependencyAutoBlockSnapshotsStatement = Statement.Statement sql encoder decoder 
       , "       t.created_at, t.updated_at,"
       , "       t.auto_blocked,"
       , "       coalesce(open_dep.open_dependency_count, 0)::bigint,"
-      , "       (SELECT count(*)::bigint FROM tasks child WHERE child.parent_id=t.id AND child.deleted_at IS NULL AND hmem_is_open_task_status(child.status))"
+      , "       (SELECT count(*)::bigint FROM tasks child WHERE child.parent_id=t.id AND child.deleted_at IS NULL AND hmem_is_open_task_status(child.status)),"
+      , "       hmem_task_is_inside_paused_project(t.id),"
+      , "       (SELECT count(*)::bigint FROM task_dependencies links WHERE links.task_id=t.id)"
       , "  FROM tasks t"
       , "  JOIN targets target ON target.id = t.id"
       , "  LEFT JOIN LATERAL ("
@@ -1548,11 +1568,12 @@ dependencyAutoBlockSnapshotsStatement = Statement.Statement sql encoder decoder 
       , "       AND hmem_is_open_task_status(dep.status)"
       , "  ) open_dep ON true"
       , " WHERE t.deleted_at IS NULL"
-      , "   AND NOT hmem_task_is_inside_closed_project(t.id)"
-      , "   AND NOT hmem_task_has_closed_ancestor(t.id)"
+      , "   AND ($2 OR NOT hmem_task_is_inside_closed_project(t.id))"
+      , "   AND ($2 OR NOT hmem_task_has_closed_ancestor(t.id))"
       , " ORDER BY t.created_at ASC, t.id ASC"
       ]
-    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    encoder = contramap fst (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.bool))
     decoder = Dec.rowList dependencyAutoBlockSnapshotRowDecoder
 
 dependencyAutoBlockSnapshotRowDecoder :: Dec.Row TaskDependencyAutoBlockSnapshot
@@ -1561,11 +1582,14 @@ dependencyAutoBlockSnapshotRowDecoder = do
   autoBlocked <- Dec.column (Dec.nonNullable Dec.bool)
   openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
   openSubtaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  projectPaused <- Dec.column (Dec.nonNullable Dec.bool)
+  dependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
   pure TaskDependencyAutoBlockSnapshot
-    { task = task
+    { task = task { dependencyCount = fromIntegral dependencyCount }
     , autoBlocked = autoBlocked
     , openDependencyCount = fromIntegral openDependencyCount
     , openSubtaskCount = fromIntegral openSubtaskCount
+    , projectPaused = projectPaused
     }
 
 ------------------------------------------------------------------------

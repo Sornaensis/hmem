@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4QGTTB8FW3Z00BW34EP6XEH"
+relation = "amends"
+from_record = "R01M4QGTTB8YTD3XVAXRF5CCYW8"
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+to_records = ["R01M4QENAEN9ZZQHH0GQZ5F5GFC"]
++++
+
+Preserve original running refusal across mixed resume pause callbacks and explicit repeated own intent
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjQ1MDExMTAzMjcxM2MwZmQyNDBhM2U1YzMyN2ZkNmNkZWEyMWFhZmUiLCJpIjoic2hhMjU2Om1xWWM4OVZaRkhVX0pRMjd4Smt3bl9VWjNhdmNvaXhfeTE5cDJ2ek5DTFkiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRRR1RUQjhGVzNaMDBCVzM0RVA2WEVIIiwib3AiOiJPMDFNNFFHVFRCOFlURDNYVkFYUkY1Q0NZVzgiLCJwIjpbIlIwMU00UUVOQUVOOVpaUUhIMEdRWjVGNUdGQyJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpWcDFmbUJraXRUV2pXV2lhRkFmN1kxQW9xS2Z6OU93SXdLZ011TkxFd2Q4IiwidCI6MTc5MTc5MDc3MDUzNiwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

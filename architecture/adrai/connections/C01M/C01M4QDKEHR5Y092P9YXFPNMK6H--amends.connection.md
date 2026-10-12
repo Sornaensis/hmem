@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4QDKEHR5Y092P9YXFPNMK6H"
+relation = "amends"
+from_record = "R01M4QDKEHRVVHJN2KK8GBE1J6M"
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+to_records = ["R01M4NJGRP0GAWAM38BC8A9GMQG"]
++++
+
+Expose bounded pause effects and guarded private audit provenance with frozen replay preservation
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6ImEwOTEwZTZjNDdkZjdiMmJiZDAxMjgyMWQxM2EwMzAwNjBlZjQxYjAiLCJpIjoic2hhMjU2OlF5c08tR1hRWm9WMGFhLXpxVW13dXQxcU1vd3RWX0tlVDEyLTBSWVM2XzAiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRRREtFSFI1WTA5MlA5WVhGUE5NSzZIIiwib3AiOiJPMDFNNFFES0VIUlZWSEpOMktLOEdCRTFKNk0iLCJwIjpbIlIwMU00TkpHUlAwR0FXQU0zOEJDOEE5R01RRyJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpOS3VwSjdTQVFaWEtocjJlUk03WjhVNUlpdlQ1NXk5MEJTR2hnSTFRek9nIiwidCI6MTc5MTc4NzM4MzM1MiwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

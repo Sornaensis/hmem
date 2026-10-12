@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4QENAENSKQ9X61ZCNKAKMNH"
+relation = "amends"
+from_record = "R01M4QENAEN9ZZQHH0GQZ5F5GFC"
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+to_records = ["R01M4QDKEHRVVHJN2KK8GBE1J6M"]
++++
+
+Distinguish scoped pure resume from genuine pause while retaining all-live refusal and frozen history
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjIzNzEzOTgxNWU0MDk0ODcwNzhjYzQwNmUyMWQwMGQ1ZDM3NzFmYWEiLCJpIjoic2hhMjU2OjZSWTRzeTBMb20zUVJRUmd3RHRFdDJMSHFGOF8yZUkzV0ZIcC1Tb1JKUjgiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRRRU5BRU5TS1E5WDYxWkNOS0FLTU5IIiwib3AiOiJPMDFNNFFFTkFFTjlaWlFISDBHUVo1RjVHRkMiLCJwIjpbIlIwMU00UURLRUhSVlZISk4yS0s4R0JFMUo2TSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpOcm45d3NZWmhaVzQyT2RIYVl5OVJqUXpPM3FMUU5VMGw5WUpoV2NTNFJnIiwidCI6MTc5MTc4ODQ5MzI2OSwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

@@ -34,9 +34,11 @@ for (const size of ['small', 'large']) {
     assert.deepEqual(validateFixture(first), [])
     assert.equal(stableFixtureJson(first), stableFixtureJson(second))
     assert.equal(fixtureHash(first), fixtureHash(second))
+    // Current schema-2 generator at c9df488b3e25a789fc14a8fcb012d8efea7d6ada,
+    // including latest_sequence/current_provenance; historical contracts stay frozen below.
     assert.equal(fixtureHash(first), {
-      small: '7b9002d3d7666610ee4c93becab2c139f8414387501d96d2c79c1c802a90dff9',
-      large: '5517d465140405f6eecf2de94b45b6383557df0e1cb01539e6b23b9197119b3c'
+      small: '2f269eb2256dc4dde701cf769e2d83c73a99c29de26b1da8ae24a343cd39e3cb',
+      large: '0c966ae9c5476317ba8f7f05ad0200a9c8526e16c430e6068a8a4daf9e35a077'
     }[size])
   })
 }

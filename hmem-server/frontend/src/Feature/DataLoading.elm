@@ -1,9 +1,10 @@
-module Feature.DataLoading exposing (acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
 import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity)
+import Json.Encode as Encode
 import Permissions
 import Set
 import String
@@ -23,6 +24,7 @@ init =
     , initialObservationLoad = Nothing
     , nextWorkspaceLoadToken = 1
     , cardHydrationLoaded = False
+    , planningCounts = emptyPlanningCounts
     , navigationGeneration = 0
     , rootNavigationRequest = Nothing
     , loadedNavigationBranches = Dict.empty
@@ -47,6 +49,96 @@ init =
     , activeNavigationFocus = Nothing
     , navigationFocuses = Dict.empty
     }
+
+
+emptyPlanningCounts : PlanningCountState
+emptyPlanningCounts =
+    { owner = Nothing, active = Nothing, nextToken = 1, generation = 0, pending = False, current = False, value = Nothing, error = Nothing }
+
+
+{-| Retire logical ownership without freeing a physical HTTP request. Its exact
+callback releases the slot before a new owner can request counts.
+-}
+retirePlanningCounts : PlanningCountState -> PlanningCountState
+retirePlanningCounts previous =
+    { emptyPlanningCounts | active = previous.active, nextToken = previous.nextToken, generation = previous.generation + 1 }
+
+
+invalidatePlanningCounts : Model -> Model
+invalidatePlanningCounts model =
+    let
+        loading = model.dataLoading
+        counts = loading.planningCounts
+    in
+    { model | dataLoading = { loading | planningCounts = { counts | generation = counts.generation + 1, pending = True, current = False, error = Nothing } } }
+
+
+planningCountOwner : Model -> Maybe PlanningCountGuard
+planningCountOwner model =
+    case ( model.page, model.selectedWorkspaceId, model.sessionContext ) of
+        ( WorkspacePage pageWorkspace, Just workspaceId, Just session ) ->
+            if pageWorkspace == workspaceId && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                Just
+                    { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, token = 0, generation = 0
+                    , audience = Encode.encode 0 (Encode.list Encode.string [ session.authMode, session.principal.actorType, session.principal.actorId, session.principal.authority, Maybe.withDefault "" session.principal.grantUserId, Permissions.currentWorkspaceRoleLabel model ])
+                    }
+            else Nothing
+        _ -> Nothing
+
+
+syncPlanningCounts : Model -> ( Model, Cmd Msg )
+syncPlanningCounts model =
+    let
+        loading = model.dataLoading
+        counts = loading.planningCounts
+    in
+    case planningCountOwner model of
+        Nothing ->
+            ( { model | dataLoading = { loading | planningCounts = if counts.owner == Nothing && counts.value == Nothing && not counts.pending then counts else retirePlanningCounts counts } }, Cmd.none )
+
+        Just owner ->
+            let
+                owned = if counts.owner /= Just owner then
+                    let retired = retirePlanningCounts counts in { retired | owner = Just owner, pending = True }
+                    else counts
+            in
+            if owned.active == Nothing && owned.pending && owned.error == Nothing then
+                let
+                    guard = { owner | token = owned.nextToken, generation = owned.generation }
+                    started = { owned | active = Just guard, nextToken = owned.nextToken + 1, pending = False }
+                in
+                ( { model | dataLoading = { loading | planningCounts = started } }
+                , Api.fetchWorkspacePlanningCounts model.flags.apiUrl owner.workspaceId (GotWorkspacePlanningCounts guard)
+                )
+            else
+                ( { model | dataLoading = { loading | planningCounts = owned } }, Cmd.none )
+
+
+syncPlanningCountsResult : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+syncPlanningCountsResult ( model, command ) =
+    let ( counted, countCommand ) = syncPlanningCounts model in
+    ( counted, Cmd.batch [ command, countCommand ] )
+
+
+acceptPlanningCounts : PlanningCountGuard -> Result error Api.WorkspacePlanningCounts -> Model -> ( Model, Cmd Msg )
+acceptPlanningCounts guard result model =
+    let
+        loading = model.dataLoading
+        counts = loading.planningCounts
+    in
+    if counts.active /= Just guard then ( model, Cmd.none )
+    else
+        let
+            owner = { guard | token = 0, generation = 0 }
+            owned = planningCountOwner model == Just owner && counts.owner == Just owner
+            current = owned && guard.generation == counts.generation && not counts.pending
+            completed = { counts | active = Nothing }
+            settled = if not current then { completed | pending = counts.pending || owned, error = Nothing }
+                else case result of
+                    Ok value -> { completed | value = Just value, current = True, error = Nothing }
+                    Err _ -> { completed | current = False, error = Just "Planning totals unavailable" }
+        in
+        syncPlanningCounts { model | dataLoading = { loading | planningCounts = settled } }
 
 
 navigationFilterFingerprint : Model -> String
@@ -1518,7 +1610,8 @@ requestNavigationFocus force workspaceId entityType entityId model =
 prepareForPageLoad : Page -> DataLoadingModel -> DataLoadingModel
 prepareForPageLoad page dataLoading =
     { dataLoading
-        | loadingWorkspaceData =
+        | planningCounts = retirePlanningCounts dataLoading.planningCounts
+        , loadingWorkspaceData =
             case page of
                 WorkspacePage _ ->
                     True
@@ -2500,6 +2593,12 @@ update msg model =
 updateResponse : Msg -> Model -> ( Model, Cmd Msg )
 updateResponse msg model =
     case msg of
+        GotWorkspacePlanningCounts guard result ->
+            acceptPlanningCounts guard result model
+
+        RetryWorkspacePlanningCounts ->
+            syncPlanningCounts (invalidatePlanningCounts model)
+
         LoadRootNavigationPage entityKind ->
             beginRootNavigationPage entityKind model
 

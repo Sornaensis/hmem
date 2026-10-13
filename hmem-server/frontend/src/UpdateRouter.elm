@@ -130,6 +130,12 @@ route msg model =
         GotWorkspace _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotWorkspacePlanningCounts _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
+        RetryWorkspacePlanningCounts ->
+            Ok (Feature.DataLoading.update msg model)
+
         GotRootNavigation _ _ _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 

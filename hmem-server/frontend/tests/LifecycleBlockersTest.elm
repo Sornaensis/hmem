@@ -406,37 +406,15 @@ suite =
                 , Feature.DataLoading.nextPageOffset 10000 { items = [ "x" ], hasMore = True }
                 ]
                     |> Expect.equal [ Just 2, Nothing, Nothing, Just 10000, Nothing ]
-        , test "workspace summary hides partial counts while workspace data is still paging" <|
+        , test "workspace summary uses authoritative totals independently of paging" <|
             \_ ->
                 let
-                    activeProject =
-                        project "active-project" Nothing
-
-                    closedProject =
-                        projectWithStatus "closed-project" Nothing Api.ProjCompleted
-
-                    openTask =
-                        task "open-task" Nothing (Just "active-project")
-
-                    blockedTask =
-                        taskWithStatus "blocked-task" Nothing (Just "active-project") Api.Blocked
-
-                    doneTask =
-                        taskWithStatus "done-task" Nothing (Just "active-project") Api.Done
-
-                    otherWorkspaceTask =
-                        taskWithWorkspace "other-workspace-task" Nothing Nothing "workspace-b"
-
-                    workspaceObservation =
-                        observation "observation-a"
-
-                    otherWorkspaceObservation =
-                        observationWithWorkspace "observation-b" "workspace-b"
+                    empty = Feature.DataLoading.emptyPlanningCounts
                 in
-                [ Page.Workspace.workspaceSummaryParts True "workspace-a" [ activeProject ] [ openTask ] [ workspaceObservation ] False
-                , Page.Workspace.workspaceSummaryParts False "workspace-a" [ activeProject, closedProject ] [ openTask, blockedTask, doneTask, otherWorkspaceTask ] [ workspaceObservation, otherWorkspaceObservation ] False
+                [ Page.Workspace.workspaceSummaryParts empty
+                , Page.Workspace.workspaceSummaryParts { empty | current = True, value = Just { openProjects = 1, openTasks = 60 } }
                 ]
-                    |> Expect.equal [ [], [ "1 open project", "2 open tasks" ] ]
+                    |> Expect.equal [ [ "Loading planning totals…" ], [ "1 open project", "60 open tasks" ] ]
         , test "timeline tab fragment round-trips and exposes a workspace tab label" <|
             \_ ->
                 [ (Helpers.parseFragment (Just "tab=timeline")).tab == TimelineTab

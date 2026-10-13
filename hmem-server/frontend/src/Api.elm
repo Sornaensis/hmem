@@ -143,6 +143,9 @@ module Api exposing
     , fetchTasks
     , fetchTasksPage
     , fetchWorkspace
+    , WorkspacePlanningCounts
+    , workspacePlanningCountsDecoder
+    , fetchWorkspacePlanningCounts
     , fetchWorkspaceGroups
     , fetchWorkspaceLinks
     , fetchWorkspaceMemberships
@@ -2742,6 +2745,25 @@ fetchWorkspace apiUrl wsId toMsg =
     Http.get
         { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId
         , expect = Http.expectJson toMsg workspaceDecoder
+        }
+
+
+type alias WorkspacePlanningCounts =
+    { openProjects : Int, openTasks : Int }
+
+
+workspacePlanningCountsDecoder : Decoder WorkspacePlanningCounts
+workspacePlanningCountsDecoder =
+    D.map2 WorkspacePlanningCounts
+        (D.field "open_projects" D.int)
+        (D.field "open_tasks" D.int)
+
+
+fetchWorkspacePlanningCounts : String -> String -> (Result Http.Error WorkspacePlanningCounts -> msg) -> Cmd msg
+fetchWorkspacePlanningCounts apiUrl wsId toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/planning-counts"
+        , expect = Http.expectJson toMsg workspacePlanningCountsDecoder
         }
 
 

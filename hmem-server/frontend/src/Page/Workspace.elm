@@ -42,12 +42,7 @@ viewReadableWorkspacePage wsId model ws =
     let
         summaryParts =
             workspaceSummaryParts
-                (model.dataLoading.loadingWorkspaceData || model.dataLoading.pendingWorkspaceLoads > 0)
-                wsId
-                (Dict.values model.projects)
-                (Dict.values model.tasks)
-                (Dict.values model.observations.items)
-                model.observations.hasMore
+                model.dataLoading.planningCounts
     in
     div [ class "page" ]
         [ viewStickyWorkspaceBar model ws summaryParts
@@ -66,7 +61,7 @@ viewReadableWorkspacePage wsId model ws =
                     ]
                 ]
             , div [ class "workspace-summary" ]
-                [ text (String.join " · " summaryParts)
+                [ viewPlanningSummary model summaryParts
                 , if ws.workspaceType == Api.Repository then
                     let counts = model.observations.counts in
                     span [ class "workspace-observation-total", attribute "aria-live" "polite" ]
@@ -150,43 +145,31 @@ viewReadableWorkspacePage wsId model ws =
         ]
 
 
-workspaceSummaryParts : Bool -> String -> List Api.Project -> List Api.Task -> List Api.Observation -> Bool -> List String
-workspaceSummaryParts workspaceDataLoadActive wsId projects tasks observations observationsHaveMore =
-    if workspaceDataLoadActive then
-        []
-
+workspaceSummaryParts : PlanningCountState -> List String
+workspaceSummaryParts counts =
+    if counts.current then
+        case counts.value of
+            Just value ->
+                [ String.fromInt value.openProjects ++ " open " ++ (if value.openProjects == 1 then "project" else "projects")
+                , String.fromInt value.openTasks ++ " open " ++ (if value.openTasks == 1 then "task" else "tasks")
+                ]
+            Nothing -> [ "Planning totals unavailable" ]
+    else if counts.error /= Nothing then
+        [ "Planning totals unavailable" ]
+    else if counts.value /= Nothing then
+        [ "Updating planning totals…" ]
     else
-        let
-            wsProjects =
-                projects |> List.filter (\p -> p.workspaceId == wsId)
+        [ "Loading planning totals…" ]
 
-            wsTasks =
-                tasks |> List.filter (\t -> t.workspaceId == wsId)
 
-            wsObservations =
-                observations |> List.filter (\observation -> observation.workspaceId == wsId)
-
-            activeProjects =
-                wsProjects |> List.filter (\p -> p.status == Api.ProjActive || p.status == Api.ProjPaused) |> List.length
-
-            activeTasks =
-                wsTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
-
-            observationCount =
-                List.length wsObservations
-        in
-        List.filterMap identity
-            [ if activeProjects > 0 then
-                Just (String.fromInt activeProjects ++ " open " ++ (if activeProjects > 1 then "projects" else "project"))
-
-              else
-                Nothing
-            , if activeTasks > 0 then
-                Just (String.fromInt activeTasks ++ " open " ++ (if activeTasks > 1 then "tasks" else "task"))
-
-              else
-                Nothing
-            ]
+viewPlanningSummary : Model -> List String -> Html Msg
+viewPlanningSummary model parts =
+    span [ class "workspace-planning-total", attribute "aria-live" "polite" ]
+        [ text (String.join " · " parts)
+        , if model.dataLoading.planningCounts.error /= Nothing then
+            button [ class "btn btn-sm", type_ "button", onClick RetryWorkspacePlanningCounts ] [ text "Retry planning totals" ]
+          else text ""
+        ]
 
 
 viewUnauthorizedWorkspace : Model -> Html Msg
@@ -226,7 +209,7 @@ viewStickyWorkspaceBar model ws summaryParts =
                 [ text (Api.workspaceTypeToString ws.workspaceType) ]
             , span [ class "sticky-workspace-name" ] [ text ws.name ]
             , span [ class "sticky-workspace-summary" ]
-                [ text (String.join " · " summaryParts)
+                [ viewPlanningSummary model summaryParts
                 , if ws.workspaceType == Api.Repository then
                     let counts = model.observations.counts in
                     span [ class "workspace-observation-total" ]

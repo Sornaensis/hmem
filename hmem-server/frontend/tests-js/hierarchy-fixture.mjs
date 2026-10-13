@@ -121,6 +121,10 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         else if (path === '/api/v1/change-stream/ticket') value = { ticket: 'browser-ticket', expires_at: '2099-01-01T00:00:00Z' }
         else if (path === '/api/v1/workspaces') value = { items: fixtures.map(value => value.workspace), has_more: false }
         else if (path === '/api/v1/workspaces/' + fixture.workspace.id) value = fixture.workspace
+        else if (path === '/api/v1/workspaces/' + fixture.workspace.id + '/planning-counts') value = {
+          open_projects: fixture.projects.filter(row => row.workspace_id === fixture.workspace.id && !row.deleted_at && ['active','paused'].includes(row.status)).length,
+          open_tasks: fixture.tasks.filter(row => row.workspace_id === fixture.workspace.id && !row.deleted_at && ['todo','in_progress','blocked'].includes(row.status)).length,
+        }
         else if (path === '/api/v1/workspaces/' + fixture.workspace.id + '/memberships') value = { items: [], has_more: false }
         else if (navigation) {
           assert.equal(path, '/api/v1/workspaces/' + fixture.workspace.id + '/navigation')

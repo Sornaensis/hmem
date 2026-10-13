@@ -124,6 +124,7 @@ type alias DataLoadingModel =
     , initialObservationLoad : Maybe ObservationBootstrapLoad
     , nextWorkspaceLoadToken : Int
     , cardHydrationLoaded : Bool
+    , planningCounts : PlanningCountState
     , navigationGeneration : Int
     , rootNavigationRequest : Maybe NavigationBranchState
     , loadedNavigationBranches : Dict String NavigationBranchState
@@ -151,6 +152,22 @@ type alias DataLoadingModel =
     , navigationVisibilityActive : Bool
     , activeNavigationFocus : Maybe NavigationFocusRequest
     , navigationFocuses : Dict String NavigationFocusRequest
+    }
+
+
+type alias PlanningCountGuard =
+    { workspaceId : String, sessionEpoch : Int, audience : String, token : Int, generation : Int }
+
+
+type alias PlanningCountState =
+    { owner : Maybe PlanningCountGuard
+    , active : Maybe PlanningCountGuard
+    , nextToken : Int
+    , generation : Int
+    , pending : Bool
+    , current : Bool
+    , value : Maybe Api.WorkspacePlanningCounts
+    , error : Maybe String
     }
 
 
@@ -1041,6 +1058,8 @@ type Msg
       -- HTTP responses
     | GotWorkspaces Int (Result Http.Error (Api.PaginatedResult Api.Workspace))
     | GotWorkspace String Int (Result Http.Error Api.Workspace)
+    | GotWorkspacePlanningCounts PlanningCountGuard (Result Http.Error Api.WorkspacePlanningCounts)
+    | RetryWorkspacePlanningCounts
     | GotRootNavigation String Int (Maybe Int) Int String Int Int (Result Http.Error Api.NavigationBranchResponse)
     | GotNavigationBranch String Int Int String String Int Int (Result Http.Error Api.NavigationBranchResponse)
     | LoadNavigationBranchPage String String String

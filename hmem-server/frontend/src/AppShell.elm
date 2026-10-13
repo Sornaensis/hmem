@@ -904,6 +904,7 @@ stopAllLoading dataLoading =
         , navigationGeneration = dataLoading.navigationGeneration + 1
         , navigationAdmissions = dataLoading.navigationAdmissions
         , cardDetailAdmissions = dataLoading.cardDetailAdmissions
+        , planningCounts = Feature.DataLoading.retirePlanningCounts dataLoading.planningCounts
     }
 
 

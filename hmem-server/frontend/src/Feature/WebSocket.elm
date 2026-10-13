@@ -83,7 +83,7 @@ updateRaw msg model =
     case msg of
         WsConnectingMsg ->
             if model.auth.status == AuthReady then
-                ( setWebSocketState Connecting model, Cmd.none )
+                ( Feature.DataLoading.invalidatePlanningCounts (setWebSocketState Connecting model), Cmd.none )
 
             else
                 ( setWebSocketState Disconnected model, Cmd.none )
@@ -92,7 +92,7 @@ updateRaw msg model =
             if model.auth.status == AuthReady then
                 -- A transport open is only replaying.  The canonical terminal
                 -- checkpoint below is the sole transition to live/Connected.
-                ( setWebSocketState Connecting model, Cmd.none )
+                ( Feature.DataLoading.invalidatePlanningCounts (setWebSocketState Connecting model), Cmd.none )
 
             else
                 ( setWebSocketState Disconnected model, Cmd.none )
@@ -106,7 +106,7 @@ updateRaw msg model =
                     _ ->
                         addToast Warning
                             "Connection lost. Reconnecting..."
-                            (setWebSocketState Connecting model)
+                            (Feature.DataLoading.invalidatePlanningCounts (setWebSocketState Connecting model))
 
             else
                 ( setWebSocketState Disconnected model, Cmd.none )
@@ -115,7 +115,7 @@ updateRaw msg model =
             if model.auth.status == AuthReady then
                 addToast Warning
                     "Canonical change stream is reconnecting or requires scoped resync"
-                    (setWebSocketState (ConnectionFailed reason) model)
+                    (Feature.DataLoading.invalidatePlanningCounts (setWebSocketState (ConnectionFailed reason) model))
 
             else
                 ( setWebSocketState Disconnected model, Cmd.none )
@@ -622,6 +622,15 @@ applyScopedFrames scope frames model =
 
         actions = ChangeStream.coalesce rawActions
 
+        planningChanged =
+            scopeMatchesSelectedWorkspace scope model
+                && List.any (\frame -> case frame of
+                    Api.CanonicalChange envelope ->
+                        List.member envelope.entityType [ "project", "task" ]
+                            && not (List.member envelope.eventId prior.eventIds)
+                            && List.member envelope.eventId next.eventIds
+                    _ -> False) frames
+
         streams =
             Dict.insert key next model.webSocket.streams
 
@@ -630,6 +639,7 @@ applyScopedFrames scope frames model =
 
         updated =
             updateWebSocket (\webSocket -> { webSocket | streams = streams, state = connectionState }) model
+                |> (\current -> if planningChanged || (scopeMatchesSelectedWorkspace scope model && next.live && not prior.live) then Feature.DataLoading.invalidatePlanningCounts current else current)
     in
     applyActions scope actions
         (if scopeMatchesSelectedWorkspace scope updated then
@@ -713,6 +723,7 @@ applyCanonicalSnapshot scope profile items token model =
             let
                 withoutStale =
                     invalidateScopeRequests scope model
+                        |> (\current -> if scopeMatchesSelectedWorkspace scope model then Feature.DataLoading.invalidatePlanningCounts current else current)
 
                 key =
                     ChangeStream.scopeKey scope
@@ -911,6 +922,7 @@ beginScopedResync scope model =
         cacheCleared =
             if scopeMatchesSelectedWorkspace scope invalidated then
                 Feature.DataLoading.invalidateNavigationRequests { invalidated | dependencies = Dependencies.resetCache invalidated.dependencies }
+                    |> Feature.DataLoading.invalidatePlanningCounts
 
             else
                 invalidated

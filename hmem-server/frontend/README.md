@@ -66,6 +66,14 @@ pagination. Reload always requests a fresh snapshot.
 
 ## Editing and navigation gotchas
 
+The regular and sticky workspace headers share authoritative open-project and
+open-task totals from the authorized planning-counts read. They include collapsed,
+unloaded, nested and unassigned work and remain independent of navigation pages,
+focus and view filters. Both headers show explicit zero totals, loading or updating
+feedback, and an unavailable state with Retry when a read fails. Canonical planning
+changes and resynchronization refresh the totals through one coalesced physical
+request; workspace, session and audience changes retire old responses.
+
 - One dirty or saving Observation draft survives row, tab, and Back navigation
   within the workspace. Return to draft, Save draft, and Discard draft remain
   available. Editing another observation returns to that draft. Leaving the

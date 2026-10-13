@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test'
 import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
 import { evidenceProfile, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
-import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -232,6 +232,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     receipt.bytes = Buffer.byteLength(body)
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
     if (key === 'navigation:branch') receipt.navigation = value
+    if (key === 'observations:list') receipt.observationPage = observationPageReceipt(request.url(), request.method(), value, status)
     const gate = receipt.gate
     let fulfilled = false
     if (gate && !gate.used) { gate.used = true; gate.signalPaused(); await (gate.waitForRelease) }
@@ -240,6 +241,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         ...(receipt.paintReceiptId ? { headers: { 'Server-Timing': 'hmem_receipt;desc="' + receipt.paintReceiptId + '"' } } : {}) })
       fulfilled = true
     } finally {
+      if (receipt.observationPage) receipt.observationPage.response.fulfilled = fulfilled
       if (status < 400 && key === 'change-stream:resync') {
         const requestBody = request.postDataJSON()
         if (!requestBody.page_token) {
@@ -382,10 +384,12 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     }))
     if (pathname === '/api/v1/observations') return reply(route, request, queryObservations(fixture, {
       query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'),
+      currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'),
       offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit')
     }))
     if (pathname === '/api/v1/observations/subject-facets') return reply(route, request, queryObservationFacets(fixture, {
       query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), gitSha: url.searchParams.get('git_sha'),
+      currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'),
       offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit')
     }))
     if (pathname === '/api/v1/observations/match') return reply(route, request, fixture.observationScaling
@@ -758,6 +762,22 @@ function requestDelta(tracker, before) {
     routes: requests.reduce((acc, request) => ({ ...acc, [request.key]: (acc[request.key] || 0) + 1 }), {}),
     routeBytes: requests.reduce((acc, request) => ({ ...acc, [request.key]: (acc[request.key] || 0) + request.bytes }), {})
   }
+}
+
+export function observationPaginationSource() {
+  const file = path.join(frontendRoot, 'src/Feature/Observation.elm')
+  const source = fs.readFileSync(file, 'utf8')
+  const pageSize = Number(source.match(/pageSize\s*:\s*Int\s+pageSize\s*=\s*(\d+)/)?.[1])
+  if (pageSize !== OBSERVATION_PAGINATION_CONTRACT.pageSize) throw new Error('Observation pagination source contract changed')
+  return { path: normalizedRepositoryPath(file), symbol: 'pageSize', pageSize, sha256: sha256File(file) }
+}
+
+export function assertObservationPagination(tracker, before, fixture, offset, query, label) {
+  const pages = tracker.requests.slice(before.index).filter(request => request.key === 'observations:list')
+  if (pages.length !== 1) throw new Error(label + ' requires exactly one actual Observation list page, observed ' + pages.length)
+  const expected = queryObservations(fixture, { query, offset, limit: OBSERVATION_PAGINATION_CONTRACT.pageSize })
+  return assertObservationPageReceipt(pages[0].observationPage, { workspaceId: fixture.workspace.id, offset, query,
+    expectedIds: expected.items.map(item => item.id), hasMore: expected.has_more })
 }
 
 function assertSingleCappedBranchRequest(tracker, before, workspaceId, parentId, label) {
@@ -1273,21 +1293,31 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const observationsTabBefore = requestSnapshot(tracker)
   const obsTabMs = await requiredDoubleFrame(page, '.tabs button:nth-child(2)')
   await page.waitForSelector('#observation-results')
-  await waitObservationMembers(page, Math.min(50, fixture.observations.length), 'Observations initial page')
+  const observationPageSize = OBSERVATION_PAGINATION_CONTRACT.pageSize
+  await waitObservationMembers(page, Math.min(observationPageSize, fixture.observations.length), 'Observations initial page')
   await waitForTransportQuiescence(page, tracker, 'Observations initial page')
+  const initialObservationPage = assertObservationPagination(tracker, observationsTabBefore, fixture, 0, null, 'Observations initial page')
   interactions.observationsTabMs = { ms: obsTabMs, ...requestDelta(tracker, observationsTabBefore) }
   tabSwitches.observations = interactions.observationsTabMs
   dom.push({ tab: 'observations', ...(await domMetrics(page)) })
-  if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== Math.min(50, fixture.observations.length)) throw new Error('Initial flat Observation membership was not scroll-reachable')
-  const loadBefore = requestSnapshot(tracker)
-  const loadStart = performance.now()
+  if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== Math.min(observationPageSize, fixture.observations.length)) throw new Error('Initial flat Observation membership was not scroll-reachable')
   const loadButton = page.locator('.observation-load-more')
-  if (await loadButton.count() !== 1) throw new Error(`required Observation load-more target count was ${await loadButton.count()}`)
-  await loadButton.click()
-  await waitObservationMembers(page, Math.min(100, fixture.observations.length), 'Observation load more')
-  await waitForTransportQuiescence(page, tracker, 'Observation load more')
-  const observationLoadMore = { ms: performance.now() - loadStart, ...requestDelta(tracker, loadBefore) }
-  if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== Math.min(100, fixture.observations.length)) throw new Error('Paged flat Observation membership was not scroll-reachable')
+  let observationLoadMore
+  if (!initialObservationPage.response.hasMore) {
+    if (fixture.size !== 'small' || fixture.observations.length !== 60 || await loadButton.count() !== 0) throw new Error('Small Observation first page must be complete and have no load-more action')
+    observationLoadMore = { applicable: false, reason: 'terminal-first-page', loaded: 60, hasMore: false, buttonAbsent: true, receipt: initialObservationPage }
+  } else {
+    const loadBefore = requestSnapshot(tracker)
+    const loadStart = performance.now()
+    if (fixture.size !== 'large' || await loadButton.count() !== 1 || !await loadButton.isEnabled()) throw new Error('Large Observation load-more must be an enabled actual action')
+    await loadButton.click()
+    await waitObservationMembers(page, 2 * observationPageSize, 'Observation load more')
+    await waitForTransportQuiescence(page, tracker, 'Observation load more')
+    const ms = performance.now() - loadStart
+    const receipt = assertObservationPagination(tracker, loadBefore, fixture, observationPageSize, null, 'Observation load more')
+    observationLoadMore = { applicable: true, exercised: true, loaded: 2 * observationPageSize, ms, ...requestDelta(tracker, loadBefore), receipt }
+    if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== 2 * observationPageSize) throw new Error('Paged flat Observation membership was not scroll-reachable')
+  }
   const filterInput = page.locator('#observation-query')
   if (await filterInput.count() !== 1) throw new Error(`required Observation query target count was ${await filterInput.count()}`)
   const filterBefore = requestSnapshot(tracker)
@@ -1295,13 +1325,15 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const observationFilterMs = await requiredDoubleFrame(page, '.observation-filter-apply')
   await waitObservationMembers(page, 1, 'Observation filter', true)
   await waitForTransportQuiescence(page, tracker, 'Observation filter')
+  const filteredObservationPage = assertObservationPagination(tracker, filterBefore, fixture, 0, OBSERVATION_MEASURED_QUERY, 'Observation filter')
   interactions.observationFilterMs = { ms: observationFilterMs, ...requestDelta(tracker, filterBefore) }
   filters.observations = interactions.observationFilterMs
   const observationFilterResetBefore = requestSnapshot(tracker)
   await filterInput.fill('')
   const observationFilterResetMs = await requiredDoubleFrame(page, '.observation-filter-apply')
-  await waitObservationMembers(page, Math.min(50, fixture.observations.length), 'Observation filter reset')
+  await waitObservationMembers(page, Math.min(observationPageSize, fixture.observations.length), 'Observation filter reset')
   await waitForTransportQuiescence(page, tracker, 'Observation filter reset')
+  const resetObservationPage = assertObservationPagination(tracker, observationFilterResetBefore, fixture, 0, null, 'Observation filter reset')
   interactions.observationFilterResetMs = { ms: observationFilterResetMs, ...requestDelta(tracker, observationFilterResetBefore) }
   filters.observationReset = interactions.observationFilterResetMs
 
@@ -1373,6 +1405,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const renderMaximums = renderMaximum(dom)
   const result = {
     fixture: fixture.size, measured, cold, background, lifetimeRender, tabSwitches, filters, interactions, observationLoadMore, observationScaling, directFocus, liveBatch, dom,
+    observationPagination: { revision: OBSERVATION_PAGINATION_CONTRACT.revision, initial: initialObservationPage, filtered: filteredObservationPage, reset: resetObservationPage },
     maxDomNodes: renderMaximums.nodes, maxCollectionRows: renderMaximums.rows,
     attributableHeapBytes: Math.max(0, heap.usedSize - blankHeap),
     heapPoint: HARNESS_CONFIGURATION.heapPoint,
@@ -1394,7 +1427,8 @@ function aggregates(runs) {
   const values = (key, label) => assertFiveSamples(runs.map(key), label)
   const cold = values(run => run.cold.ms, 'cold')
   const focus = values(run => run.directFocus.ms, 'direct focus')
-  const load = values(run => run.observationLoadMore.ms, 'Observation load more')
+  if (runs.some(run => run.fixture !== runs[0].fixture)) throw new Error('Observation pagination samples changed scale')
+  const observationLoadMore = aggregateObservationLoadMore(runs.map(run => run.observationLoadMore), runs[0].fixture)
   const live = values(run => run.liveBatch.ms, 'live batch')
   const interactionNames = Object.keys(runs[0].interactions).sort()
   if (interactionNames.length === 0) throw new Error('at least one named local interaction is required')
@@ -1434,7 +1468,7 @@ function aggregates(runs) {
       requested: runs.map(run => run.directFocus.directFocusRequested), rendered: runs.map(run => run.directFocus.directFocusRendered),
       failureReasons: runs.map(run => run.directFocus.productFailureReason)
     },
-    observationLoadMore: { rawMs: load, medianMs: median(load), p95Ms: nearestRankP95(load), requestCounts: runs.map(run => run.observationLoadMore.count) },
+    observationLoadMore,
     liveBatch: {
       rawMs: live, medianMs: median(live), p95Ms: nearestRankP95(live), requestDeltas: liveRequestDeltas,
       requestCounts: liveRequestDeltas.map(delta => delta.count), fixtureBytes: liveRequestDeltas.map(delta => delta.bytes),
@@ -1465,7 +1499,7 @@ function evaluate(result, comparableEnvironment = true) {
   add('direct focus requests', Math.max(...large.directFocus.requestCounts), target.directFocus.maxRequests, Math.max(...large.directFocus.requestCounts) <= target.directFocus.maxRequests)
   add('direct focus requested', large.directFocus.requested.every(Boolean), target.directFocus.requireRequested, large.directFocus.requested.every(Boolean) === target.directFocus.requireRequested)
   add('direct focus rendered', large.directFocus.rendered.every(Boolean), target.directFocus.requireRendered, large.directFocus.rendered.every(Boolean) === target.directFocus.requireRendered)
-  add('Observation load-more requests', Math.max(...large.observationLoadMore.requestCounts), target.observationLoadMore.maxRequests, Math.max(...large.observationLoadMore.requestCounts) <= target.observationLoadMore.maxRequests)
+  metrics.push(...observationPaginationMetrics(small.observationLoadMore, large.observationLoadMore, target.observationLoadMore, comparableEnvironment))
   metrics.push(...observationScalingMetrics(large.observationScaling, target.observationLoadMore, comparableEnvironment))
   add('live follow-up requests', Math.max(...large.liveBatch.requestCounts), target.liveBatch.maxFollowUpRequests, Math.max(...large.liveBatch.requestCounts) <= target.liveBatch.maxFollowUpRequests)
   add('live whole-workspace reload', large.liveBatch.wholeWorkspaceReload, false, !large.liveBatch.wholeWorkspaceReload)
@@ -1477,7 +1511,7 @@ function evaluate(result, comparableEnvironment = true) {
   for (const [name, actual, expected] of [
     ['cold median ms', large.cold.medianMs, target.cold.maxMedianMs], ['cold p95 ms', large.cold.p95Ms, target.cold.maxP95Ms],
     ['local interaction worst p95 ms', large.localInteractions.worstP95Ms, target.localInteraction.maxP95Ms], ['direct focus p95 ms', large.directFocus.p95Ms, target.directFocus.maxP95Ms],
-    ['Observation load-more p95 ms', large.observationLoadMore.p95Ms, target.observationLoadMore.maxP95Ms], ['live batch p95 ms', large.liveBatch.p95Ms, target.liveBatch.maxP95Ms],
+    ['live batch p95 ms', large.liveBatch.p95Ms, target.liveBatch.maxP95Ms],
     ['attributable heap bytes', large.heap.maxAttributableBytes, target.heap.maxAttributableBytes]
   ]) add(name, actual, expected, !comparableEnvironment || actual <= expected, comparableEnvironment ? 'pinned-environment' : 'informational')
   return { comparableEnvironment, passed: metrics.every(metric => metric.pass), metrics }
@@ -1559,6 +1593,8 @@ async function main() {
     budgetsHash: hashJson(budgets),
     configurationHash: hashJson(HARNESS_CONFIGURATION),
     directFocusContractHash: hashJson(DIRECT_FOCUS_CONTRACT),
+    observationPaginationContractHash: hashJson(OBSERVATION_PAGINATION_CONTRACT),
+    observationPaginationSource: observationPaginationSource(),
     ...(evidencePlan.scaling ? { observationScalingContractHash: hashJson(OBSERVATION_SCALING_CONTRACT) } : {}),
     ...(evidencePlan.planningCounts ? { planningCountsContractHash: hashJson({ ...PLANNING_COUNTS_CONTRACT, traceCaptureOptions }) } : {}),
     ...(evidencePlan.rendering ? { observationReachabilityContractHash: hashJson({ revision: 'logical-scroll.v1', flat: [50, 100], match: [50, 100, 150], completeOrderedContextualCards: true, physicalBudgetSelectorsUnchanged: true, scansOutsideMeasuredActionIntervals: true }) } : {}),
@@ -1664,6 +1700,7 @@ async function main() {
         ? (recordOutputPath === baselinePath ? 'explicit --authorize-baseline' : 'explicit --authorize-after-artifact')
         : recordedBaseline.recordAuthorization,
       environment, configuration: HARNESS_CONFIGURATION, contracts,
+      observationPaginationContract: OBSERVATION_PAGINATION_CONTRACT,
       taskId: evidenceTask?.taskId || null, parentTaskId: evidenceTask?.parentTaskId || null, evidenceBaseCommit,
       inputQualification: qualifiedInputs, sourceProvenance: qualifiedProvenance, measurementRevision: evidenceRevision,
       fixtures: {

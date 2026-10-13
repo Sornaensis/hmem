@@ -25,6 +25,68 @@ export function hashJson(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
+export const OBSERVATION_PAGINATION_CONTRACT = Object.freeze({
+  revision: 'observation-pagination.200.v1', method: 'GET', path: '/api/v1/observations', pageSize: 200,
+  source: 'hmem-server/frontend/src/Feature/Observation.elm:pageSize',
+  reviewBase: 'f546cafd26adae37772d2383262e87596ea7151b',
+  small: Object.freeze({ total: 60, initial: 60, loadMoreApplicable: false }),
+  large: Object.freeze({ total: 2000, initial: 200, afterLoadMore: 400, loadMoreApplicable: true }),
+  legacyTimingComparability: Object.freeze({ pageSize: 50, comparable: false, reason: 'Current 200-item pagination has a different measured workload from retained 50-item pagination.' })
+})
+
+export function observationPageReceipt(input, method, value, status = 200) {
+  const url = new URL(input)
+  const integer = name => { const raw = url.searchParams.get(name); return raw != null && /^\d+$/.test(raw) ? Number(raw) : null }
+  return { request: { method, path: url.pathname, workspace_id: url.searchParams.get('workspace_id'),
+    query: url.searchParams.get('query'), subject_kind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'),
+    git_sha: url.searchParams.get('git_sha'), current_git_sha: url.searchParams.get('current_git_sha'), history_git_sha: url.searchParams.get('history_git_sha'),
+    offset: integer('offset'), limit: integer('limit') },
+    response: { ids: value.items?.map(item => item.id) || null, hasMore: value.has_more, status, fulfilled: false } }
+}
+
+export function assertObservationPageReceipt(receipt, { workspaceId, offset, query = null, expectedIds, hasMore }) {
+  const request = receipt?.request, response = receipt?.response
+  if (!request || request.method !== 'GET' || request.path !== OBSERVATION_PAGINATION_CONTRACT.path
+    || request.workspace_id !== workspaceId || request.offset !== offset || request.limit !== 200
+    || (request.query || null) !== (query || null)
+    || ['subject_kind', 'subject', 'git_sha', 'current_git_sha', 'history_git_sha'].some(key => request[key] != null)
+    || !response || response.status !== 200 || response.fulfilled !== true || response.hasMore !== hasMore
+    || JSON.stringify(response.ids) !== JSON.stringify(expectedIds)) throw new Error('Observation pagination wire/prefix receipt mismatch')
+  return receipt
+}
+
+export function aggregateObservationLoadMore(samples, scale) {
+  if (!['small', 'large'].includes(scale) || samples.length !== 5) throw new Error('Observation pagination requires five samples from one known scale')
+  const applicable = scale === 'large'
+  if (samples.some(sample => sample?.applicable !== applicable)) throw new Error('Observation load-more applicability changed or contradicts its scale')
+  for (const sample of samples) {
+    const receipt = sample.receipt, ids = receipt?.response?.ids
+    if (!Array.isArray(ids) || new Set(ids).size !== ids.length || !receipt?.request?.workspace_id) throw new Error('Observation pagination lacks an actual unique page receipt')
+    assertObservationPageReceipt(receipt, { workspaceId: receipt.request.workspace_id, offset: applicable ? 200 : 0, expectedIds: ids, hasMore: applicable })
+    if (ids.length !== (applicable ? 200 : 60) || sample.loaded !== (applicable ? 400 : 60)) throw new Error('Observation pagination membership/exhaustion mismatch')
+    if (applicable) {
+      if (sample.exercised !== true || !Number.isFinite(sample.ms) || sample.ms <= 0 || !Number.isInteger(sample.count) || sample.count < 1) throw new Error('Eligible Observation load-more requires actual finite timing and requests')
+    } else if (sample.reason !== 'terminal-first-page' || sample.buttonAbsent !== true || sample.hasMore !== false || 'ms' in sample || 'count' in sample) throw new Error('Terminal small pagination must not invent an exercised timing or request count')
+  }
+  if (!applicable) return { applicable: false, reason: 'terminal-first-page', terminalSamples: 5, receipts: samples.map(sample => sample.receipt) }
+  const rawMs = assertFiveSamples(samples.map(sample => sample.ms), 'Observation load more')
+  return { applicable: true, exercisedSamples: 5, rawMs, medianMs: median(rawMs), p95Ms: nearestRankP95(rawMs), requestCounts: samples.map(sample => sample.count), receipts: samples.map(sample => sample.receipt) }
+}
+
+export function observationPaginationMetrics(small, large, budget, comparableEnvironment) {
+  const exercised = large?.applicable === true && large.exercisedSamples === 5 && large.rawMs?.length === 5
+    && large.rawMs.every(ms => Number.isFinite(ms) && ms > 0) && large.requestCounts?.length === 5
+    && large.requestCounts.every(count => Number.isInteger(count) && count > 0)
+  const requests = exercised ? Math.max(...large.requestCounts) : null
+  const timing = exercised ? nearestRankP95(large.rawMs) : null
+  return [
+    { name: 'small Observation terminal pagination', actual: small?.terminalSamples ?? null, expected: 5, pass: small?.applicable === false && small.terminalSamples === 5, category: 'exact' },
+    { name: 'large Observation load-more exercised samples', actual: large?.exercisedSamples ?? null, expected: 5, pass: !!exercised, category: 'exact' },
+    { name: 'Observation load-more requests', actual: requests, expected: budget.maxRequests, pass: !!exercised && requests <= budget.maxRequests, category: 'exact' },
+    { name: 'Observation load-more p95 ms', actual: timing, expected: budget.maxP95Ms, pass: !!exercised && (!comparableEnvironment || timing <= budget.maxP95Ms), category: comparableEnvironment ? 'pinned-environment' : 'informational' }
+  ]
+}
+
 export function nearestRankP95(values) {
   if (!Array.isArray(values) || values.length === 0 || values.some(value => !Number.isFinite(value))) throw new Error('p95 requires non-empty finite samples')
   const sorted = [...values].sort((a, b) => a - b)

@@ -105,10 +105,10 @@ test('timeout diagnostic capture failures report unknown values and other failur
 
 test('ordinary initial, load-more, filter and reset use one logical helper while physical budget selectors remain intact', () => {
   const source = fs.readFileSync('perf/harness.mjs', 'utf8')
-  assert.match(source, /waitObservationMembers\(page, Math\.min\(50, fixture\.observations\.length\), 'Observations initial page'\)/)
-  assert.match(source, /waitObservationMembers\(page, Math\.min\(100, fixture\.observations\.length\), 'Observation load more'\)/)
+  assert.match(source, /waitObservationMembers\(page, Math\.min\(observationPageSize, fixture\.observations\.length\), 'Observations initial page'\)/)
+  assert.match(source, /waitObservationMembers\(page, 2 \* observationPageSize, 'Observation load more'\)/)
   assert.match(source, /waitObservationMembers\(page, 1, 'Observation filter', true\)/)
-  assert.match(source, /waitObservationMembers\(page, Math\.min\(50, fixture\.observations\.length\), 'Observation filter reset'\)/)
+  assert.match(source, /waitObservationMembers\(page, Math\.min\(observationPageSize, fixture\.observations\.length\), 'Observation filter reset'\)/)
   const metrics = source.split('async function domMetrics(page)')[1].split('async function')[0]
   assert.match(metrics, /observations: document\.querySelectorAll\('\.observation-card'\)\.length/)
   assert.match(source, /m\.rows=Math\.max\(m\.rows,document\.querySelectorAll\('\.card-project,\.card-task,\.card-subtask,\.observation-card,\.timeline-event-card,\.timeline-value-table tbody tr'\)\.length\)/)

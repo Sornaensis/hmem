@@ -78,6 +78,23 @@ project/task identities once, including unassigned tasks and subtasks. Counts
 follow fixture status, placement and deletion changes at request time. Request
 and body-byte accounting includes these reads under the unchanged budgets.
 
+Current ordinary Observation pagination is source-anchored at 200 items, including
+at the original planning-count review base. Its pagination contract and exact
+production source hash are recorded separately from the historical harness
+configuration. Each initial, filter, reset and eligible load-more proof retains
+the actual method, path, workspace, filters, offset, limit, ordered response IDs
+and `has_more`; logical membership remains separate from physical DOM budgets.
+The small 60-observation fixture proves a complete first page, no load-more
+button, filter membership of one and reset membership of 60. Its load-more
+receipt is explicitly inapplicable and contains no invented timing or no-op
+request count. Large loads 200 then exercises offset 200/limit 200 to reach 400,
+filters to one and resets to 200. All five large samples require real exercised
+timings and requests, retaining the two-request and comparable 500 ms p95 limits.
+Mixed eligibility, missing numeric evidence or incomplete terminal proof fails.
+Current record/check timing compares the same 200-item phase; retained 50-item
+pagination timings are explicitly not phase-comparable. Historical records,
+budgets and fixture generators remain unchanged.
+
 The five output kinds are `after`, `trace-manifest`, `validation-record`,
 `evidence-manifest`, and `complete.diff`, named
 `final-working-tree.*.<profile>.v1` (the diff ends in `.diff`).

@@ -10,7 +10,7 @@ import { scanObservationRows, revealObservationRow } from '../tests-js/observati
 import { evidenceProfile, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
 import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
-import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
+import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.dirname(here)
@@ -390,6 +390,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     }))
     if (pathname === '/api/v1/observations/match') return reply(route, request, fixture.observationScaling
       ? queryObservationScalingMatches(fixture, request.postDataJSON()) : { items: [], has_more: false })
+    if (pathname === '/api/v1/observations/count' && request.method() === 'POST') return reply(route, request, queryObservationCounts(fixture, request.postDataJSON()))
     const projectOverview = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/overview$/)
     if (projectOverview) {
       return reply(route, request, projectOverviewResponse(fixture, decodeURIComponent(projectOverview[1])))
@@ -1578,6 +1579,7 @@ async function main() {
       ...toolVersions, chromium: browser.version(), viewport: `${HARNESS_CONFIGURATION.viewport.width}x${HARNESS_CONFIGURATION.viewport.height}`, headless: true
     }
     environment.fingerprint = hashJson(environment)
+    attemptState.phase = 'deep-focus prerequisite'
     process.stdout.write('deep-focus continuation... ')
     const staleFocusContinuation = await verifyStaleDeepFocusContinuation(browser, server.origin)
     const deepFocusContinuation = { ...await verifyDeepFocusContinuation(browser, server.origin), ...staleFocusContinuation }

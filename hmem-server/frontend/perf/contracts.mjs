@@ -65,6 +65,7 @@ export function perfApiRouteKey(input, method = 'GET') {
   if (is(['GET'], /^\/api\/v1\/tasks\/[^/]+$/)) return `tasks:entity:${pathname.split('/')[4]}`
   if (is(['GET'], /^\/api\/v1\/observations\/subject-facets$/)) return 'observations:facets'
   if (is(['POST'], /^\/api\/v1\/observations\/match$/)) return 'observations:match'
+  if (is(['POST'], /^\/api\/v1\/observations\/count$/)) return 'observations:count'
   if (is(['GET'], /^\/api\/v1\/observations$/)) return 'observations:list'
   if (is(['GET'], /^\/api\/v1\/observations\/[^/]+$/)) return `observations:entity:${pathname.split('/')[4]}`
   return null

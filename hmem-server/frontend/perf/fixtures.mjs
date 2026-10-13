@@ -496,6 +496,36 @@ export function queryObservations(fixture, options = {}) {
   return paginate(ranked.map(value => value.observation), options.offset, options.limit)
 }
 
+export function queryObservationCounts(fixture, query) {
+  const scoped = fixture.observations.filter(observation => observation.workspace_id === query.workspace_id)
+  // Revision events are separate from creation provenance. Missing fixture
+  // history cannot establish a match against a reviewed history SHA.
+  const eligible = query.history_git_sha ? scoped.filter(observation =>
+    (observation.revision_history || []).some(event => event.reviewed_git_sha === query.history_git_sha)
+  ) : scoped
+  const candidates = []
+  for (let offset = 0; ; offset += 200) {
+    const page = queryObservations({ ...fixture, observations: eligible }, {
+      query: query.query, subjectKind: query.subject_kind, subject: query.subject,
+      gitSha: query.git_sha, currentGitSha: query.current_git_sha, historyGitSha: query.history_git_sha,
+      offset, limit: 200
+    })
+    candidates.push(...page.items)
+    if (!page.has_more) break
+  }
+  const values = query.paths == null ? candidates : candidates.filter(observation =>
+    observation.subjects.some(subject => (!query.subject_kind || subject.subject_kind === query.subject_kind)
+      && query.paths.some(path => {
+        if (subject.subject_kind === 'file') return subject.subject === path
+        const pattern = subject.subject.split('/').map((part, index, all) => part === '**'
+          ? (index === all.length - 1 ? '.*' : '(?:[^/]+/)*')
+          : part.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + (index === all.length - 1 ? '' : '/')).join('')
+        return new RegExp('^' + pattern + '$', 'u').test(path)
+      }))
+  )
+  return { workspace_id: query.workspace_id, total_count: scoped.length, match_count: values.length }
+}
+
 export function queryObservationFacets(fixture, options = {}) {
   let ranked = observationSearch(fixture, options.query)
   if (options.gitSha) ranked = ranked.filter(({ observation }) => observation.git_sha === options.gitSha)

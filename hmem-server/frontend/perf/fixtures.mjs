@@ -653,6 +653,23 @@ export function snapshotItems(fixture) {
 // The production bounded bootstrap explicitly requests this profile.  Keep the
 // full snapshot helper above untouched: baseline.v1.json records the historical
 // full_v1 behaviour and must remain comparable evidence.
+export const PLANNING_COUNTS_CONTRACT = Object.freeze({
+  route: 'GET /api/v1/workspaces/:id/planning-counts',
+  projectStatuses: Object.freeze(['active', 'paused']),
+  taskStatuses: Object.freeze(['todo', 'in_progress', 'blocked']),
+  scope: 'current nondeleted rows in one workspace, counted once by identity, including unassigned tasks and subtasks'
+})
+
+export function workspacePlanningCounts(fixture) {
+  if (fixture.workspace.deleted_at != null) return null
+  const count = (rows, statuses) => [...new Map(rows.map(row => [row.id, row])).values()]
+    .filter(row => row.workspace_id === fixture.workspace.id && row.deleted_at == null && statuses.includes(row.status)).length
+  return {
+    open_projects: count(fixture.projects, PLANNING_COUNTS_CONTRACT.projectStatuses),
+    open_tasks: count(fixture.tasks, PLANNING_COUNTS_CONTRACT.taskStatuses)
+  }
+}
+
 export function workspaceShellSnapshotItems(fixture) {
   return [{ schema_version: 1, kind: 'workspace', data: fixture.workspace }]
 }

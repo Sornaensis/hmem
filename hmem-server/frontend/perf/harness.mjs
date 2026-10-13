@@ -7,10 +7,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
 import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
-import { evidenceProfile, scalingRecordOutputs, assertEvidenceIdentity, prepareScalingScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
+import { evidenceProfile, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
 import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
-import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
+import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.dirname(here)
@@ -29,6 +29,7 @@ const evidenceBaseCommit = process.env.HMEM_EVIDENCE_BASE_COMMIT || '818cc3cc634
 const evidencePlan = evidenceProfile(evidenceBaseCommit, frontendRoot, os.tmpdir())
 const evidenceTask = evidencePlan.task
 const evidenceRevision = evidencePlan.revision
+const traceCaptureOptions = observationTraceCaptureOptions(evidencePlan.isolatedEvidence)
 const evidenceOperations = createEvidenceOperations(evidencePlan, os.tmpdir())
 let attemptState = null
 const legacyAfterArtifactPath = path.join(here, 'final-working-tree.after.v1.json')
@@ -40,9 +41,9 @@ const afterArtifactPath = evidencePlan.files.after
 const afterTraceArtifactPath = evidencePlan.files.traceManifest
 const requestedRecordOutputPath = outputArgument === -1 ? baselinePath : path.resolve(frontendRoot, process.argv[outputArgument + 1] || '')
 const requestedRecordTraceManifestPath = traceOutputArgument === -1 ? traceManifestPath : path.resolve(frontendRoot, process.argv[traceOutputArgument + 1] || '')
-const scalingOutputs = mode === 'record' ? scalingRecordOutputs(evidencePlan, requestedRecordOutputPath, requestedRecordTraceManifestPath, legacyAfterArtifactPath, legacyAfterTraceArtifactPath) : null
-const recordOutputPath = scalingOutputs?.output || (evidenceTask && requestedRecordOutputPath === legacyAfterArtifactPath ? afterArtifactPath : requestedRecordOutputPath)
-const recordTraceManifestPath = scalingOutputs?.traceManifest || (evidenceTask && requestedRecordTraceManifestPath === legacyAfterTraceArtifactPath ? afterTraceArtifactPath : requestedRecordTraceManifestPath)
+const isolatedOutputs = mode === 'record' ? isolatedRecordOutputs(evidencePlan, requestedRecordOutputPath, requestedRecordTraceManifestPath, legacyAfterArtifactPath, legacyAfterTraceArtifactPath) : null
+const recordOutputPath = isolatedOutputs?.output || (evidenceTask && requestedRecordOutputPath === legacyAfterArtifactPath ? afterArtifactPath : requestedRecordOutputPath)
+const recordTraceManifestPath = isolatedOutputs?.traceManifest || (evidenceTask && requestedRecordTraceManifestPath === legacyAfterTraceArtifactPath ? afterTraceArtifactPath : requestedRecordTraceManifestPath)
 const WARMUPS = HARNESS_CONFIGURATION.warmups
 const PRODUCTION_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const SAMPLES = HARNESS_CONFIGURATION.samples
@@ -89,7 +90,7 @@ function normalizedRepositoryPath(file) {
 }
 
 function evidenceArtifactPath(file) {
-  return evidencePlan.scaling ? path.resolve(file) : normalizedRepositoryPath(file)
+  return evidencePlan.isolatedEvidence ? path.resolve(file) : normalizedRepositoryPath(file)
 }
 
 function writeEvidence(file, bytes) {
@@ -131,7 +132,7 @@ export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write =
   const evidenceBaseCommit = plan.baseCommit, evidenceTask = plan.task
   const evidenceDiffPath = plan.files.diff, evidenceManifestPath = plan.files.manifest, validationRecordPath = plan.files.validation
   const sha256File = file => createHash('sha256').update(io.readFileSync(file)).digest('hex')
-  const evidenceArtifactPath = file => plan.scaling ? path.resolve(file) : normalizedRepositoryPath(file)
+  const evidenceArtifactPath = file => plan.isolatedEvidence ? path.resolve(file) : normalizedRepositoryPath(file)
   const repositoryRoot = path.resolve(frontendRoot, '..', '..')
   // Review subjects deliberately exclude generated evidence from their source
   // patch. Retain v1 alongside v2 here so a historical artifact cannot leak
@@ -340,6 +341,10 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     if (pathname === '/api/v1/change-stream/ticket') return reply(route, request, { ticket: `fixture-${fixture.size}-ticket`, expires_at: '2099-01-01T00:00:00Z' })
     if (pathname === '/api/v1/workspaces') return reply(route, request, paginate([fixture.workspace], url.searchParams.get('offset'), url.searchParams.get('limit')))
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}`) return reply(route, request, fixture.workspace)
+    if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/planning-counts`) {
+      const value = workspacePlanningCounts(fixture)
+      return reply(route, request, value || { error: 'workspace not found' }, value ? 200 : 404)
+    }
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation`) {
       const value = navigationBranchResponse(fixture, {
       parentKind: url.searchParams.get('parent_kind'), parentId: url.searchParams.get('parent_id'),
@@ -1173,7 +1178,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   diagnosticRuns.push({ fixture: fixture.size, measured, trace, diagnostics: tracker.coldDiagnostics })
   const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
   await context.addInitScript(fakeWebSocketScript)
-  if (trace) await context.tracing.start(observationTraceCaptureOptions(!!fixture.observationScaling))
+  if (trace) await context.tracing.start(traceCaptureOptions)
   const page = await context.newPage()
   const consoleErrors = []
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
@@ -1493,8 +1498,8 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
 async function main() {
   attemptState = { startedAtUtc: new Date().toISOString(), started: performance.now(), phase: 'startup', pendingFailure: false, traceVerified: false, retirement: null }
   if (!process.env.HMEM_EVIDENCE_BASE_COMMIT) throw new Error('Set HMEM_EVIDENCE_BASE_COMMIT explicitly before record or check; no implicit historical evidence writes')
-  prepareScalingScratch(evidencePlan, os.tmpdir())
-  if (evidencePlan.scaling) {
+  prepareEvidenceScratch(evidencePlan, os.tmpdir())
+  if (evidencePlan.isolatedEvidence) {
     evidenceOperations.verify()
     const manifest = fs.existsSync(evidenceManifestPath) ? JSON.parse(fs.readFileSync(evidenceManifestPath, 'utf8')) : null
     if (manifest) assertEvidenceIdentity(evidencePlan, manifest)
@@ -1517,6 +1522,7 @@ async function main() {
     configurationHash: hashJson(HARNESS_CONFIGURATION),
     directFocusContractHash: hashJson(DIRECT_FOCUS_CONTRACT),
     ...(evidencePlan.scaling ? { observationScalingContractHash: hashJson(OBSERVATION_SCALING_CONTRACT) } : {}),
+    ...(evidencePlan.planningCounts ? { planningCountsContractHash: hashJson({ ...PLANNING_COUNTS_CONTRACT, traceCaptureOptions }) } : {}),
     ...(evidencePlan.rendering ? { observationReachabilityContractHash: hashJson({ revision: 'logical-scroll.v1', flat: [50, 100], match: [50, 100, 150], completeOrderedContextualCards: true, physicalBudgetSelectorsUnchanged: true, scansOutsideMeasuredActionIntervals: true }) } : {}),
     fixtures: { small: fixtureHash(fixtures.small), large: fixtureHash(fixtures.large) },
     snapshots: { small: snapshotHash(fixtures.small), large: snapshotHash(fixtures.large) }
@@ -1594,10 +1600,10 @@ async function main() {
       evidenceOperations.verify()
       if (!fs.existsSync(tracePath)) throw new Error(`record trace was not created: ${tracePath}`)
       const traceSizeBytes = fs.statSync(tracePath).size
-      if (evidencePlan.scaling) {
-        const admission = traceAdmissionReceipt(traceSizeBytes, 64 * 1024 * 1024, observationTraceCaptureOptions(true))
+      if (evidencePlan.isolatedEvidence) {
+        const admission = traceAdmissionReceipt(traceSizeBytes, 64 * 1024 * 1024, traceCaptureOptions)
         console.log('TRACE_ARCHIVE_ADMISSION=' + JSON.stringify(admission))
-        if (!admission.withinLimit) throw Object.assign(new Error('Observation temporary trace exceeds its 64 MiB bound: ' + traceSizeBytes + ' bytes'), { traceAdmission: admission })
+        if (!admission.withinLimit) throw Object.assign(new Error('Task temporary trace exceeds its 64 MiB bound: ' + traceSizeBytes + ' bytes'), { traceAdmission: admission })
       }
       const firstHash = sha256File(tracePath)
       const secondHash = sha256File(tracePath)
@@ -1607,10 +1613,10 @@ async function main() {
         logicalName: 'large measured sample 5/5 Playwright trace',
         sha256: firstHash,
         sizeBytes: traceSizeBytes,
-        ...(evidencePlan.scaling ? { captureOptions: observationTraceCaptureOptions(true), temporaryLimitBytes: 64 * 1024 * 1024 } : {}),
+        ...(evidencePlan.isolatedEvidence ? { captureOptions: traceCaptureOptions, temporaryLimitBytes: 64 * 1024 * 1024 } : {}),
         capturedRun: 'large sample 5/5 after two warmups',
         verifiedDuringRecord: true,
-        retention: evidencePlan.scaling ? 'temporary trace under the verified outside-repository task directory; removed before successful qualification; verified provenance remains in the retained trace manifest' : evidenceRevision === 'expanded-hierarchy.v1' ? 'generated under task-owned .scratch/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available' : 'generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
+        retention: evidencePlan.isolatedEvidence ? 'temporary trace under the verified outside-repository task directory; removed before successful qualification; verified provenance remains in the retained trace manifest' : evidenceRevision === 'expanded-hierarchy.v1' ? 'generated under task-owned .scratch/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available' : 'generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
       }
     }
     const result = {
@@ -1659,9 +1665,9 @@ async function main() {
       } },
       { resource: 'task trace', close: async () => {
         if (!evidencePlan.qualifiedRetirement) return
-        if (evidencePlan.scaling) evidenceOperations.verify()
+        if (evidencePlan.isolatedEvidence) evidenceOperations.verify()
         try { evidenceOperations.remove(tracePath) } catch (error) { if (error.code !== 'ENOENT') throw error }
-        if (evidencePlan.scaling) {
+        if (evidencePlan.isolatedEvidence) {
           const temporary = path.dirname(tracePath)
           const contents = await fs.promises.readdir(temporary).catch(error => { if (error.code === 'ENOENT') return null; throw error })
           if (contents?.length === 0) { evidenceOperations.verify(); await fs.promises.rmdir(temporary) }
@@ -1702,11 +1708,11 @@ async function main() {
 
 if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main().catch(error => {
   console.error(error.stack || error)
-  if (evidencePlan.scaling) console.error('BOUNDED_FAILURE_RECEIPT=' + JSON.stringify({
+  if (evidencePlan.isolatedEvidence) console.error('BOUNDED_FAILURE_RECEIPT=' + JSON.stringify({
     taskId: evidenceTask.taskId, evidenceBaseCommit, phase: attemptState?.phase,
     startedAtUtc: attemptState?.startedAtUtc, elapsedMs: attemptState ? Math.round(performance.now() - attemptState.started) : null,
     failure: error.message.slice(0, 1000), traceAdmission: error.traceAdmission || null,
-    captureOptions: observationTraceCaptureOptions(true), retirement: attemptState?.retirement,
+    captureOptions: traceCaptureOptions, retirement: attemptState?.retirement,
     priorFailureDiagnosticsPreserved: !!attemptState?.pendingFailure && !(attemptState.traceVerified && attemptState.retirement?.passed),
     retainedPaths: [validationRecordPath, evidenceManifestPath]
   }))

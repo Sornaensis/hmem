@@ -49,6 +49,7 @@ export function perfApiRouteKey(input, method = 'GET') {
   if (is(['POST'], /^\/api\/v1\/change-stream\/resync$/)) return 'change-stream:resync'
   if (is(['POST'], /^\/api\/v1\/change-stream\/ticket$/)) return 'change-stream:ticket'
   if (is(['GET'], /^\/api\/v1\/workspaces$/)) return 'workspaces:list'
+  if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/planning-counts$/)) return 'workspaces:planning-counts'
   if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/timeline\/buckets$/)) return 'timeline:buckets'
   if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/timeline$/)) return 'timeline:events'
   if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/memberships$/)) return 'workspaces:memberships'

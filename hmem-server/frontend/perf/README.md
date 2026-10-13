@@ -49,6 +49,7 @@ measurement. These recipes select distinct task-owned outputs:
 | Observation scaling | `c5230077a643d06e7ca5a4ff6b5616cfb90862ec` | `b9f1de65-f016-4178-89a0-ac13a5d7fff8` |
 | Observation rendering | `ed3aca53afe346f928dc00f2e2a7b0a8e07aaecb` | `cbb38fd2-fc89-449c-a308-168374f23f82` |
 | Expanded hierarchy | `d9ff753763f086fa4faef078b451f2e48ca1a7a4` | `555ebf6e-8442-43f4-a75d-c33fcffc76f4` |
+| Planning counts | `f546cafd26adae37772d2383262e87596ea7151b` | `b401c358-1a68-404e-bd18-86f40bb3b771` |
 
 For example:
 
@@ -67,6 +68,16 @@ arbitrary output redirection and baseline recording under Observation task
 profiles are rejected. The measured Node harness duration excludes the npm build.
 Production browser tests and parent acceptance remain separate gates.
 
+Planning counts uses the original project review base above and the ordinary
+navigation fixtures and interactions. Its isolated evidence ownership does not
+enable Observation scaling. Use the same self-check, record-after and check
+recipe with `HMEM_EVIDENCE_BASE_COMMIT` set to the planning-count base. Arbitrary
+redirects and baseline recording are rejected for this profile too. Its exact GET
+`/api/v1/workspaces/:id/planning-counts` response counts current nondeleted open
+project/task identities once, including unassigned tasks and subtasks. Counts
+follow fixture status, placement and deletion changes at request time. Request
+and body-byte accounting includes these reads under the unchanged budgets.
+
 The five output kinds are `after`, `trace-manifest`, `validation-record`,
 `evidence-manifest`, and `complete.diff`, named
 `final-working-tree.*.<profile>.v1` (the diff ends in `.diff`).
@@ -77,6 +88,14 @@ closure plus 30 days, then disposes of them; each file is bounded to 64 MiB.
 Expanded hierarchy writes its separate artifacts in this directory and keeps
 the baseline, budgets, historical complete diff, previous after records, and
 failed-record archives unchanged. Preserve existing versioned evidence.
+
+Planning-count outputs use the single OS temporary directory
+`hmem-planning-counts-b401c358-1a68-404e-bd18-86f40bb3b771`, owned by that adapter
+task. Only its five declared reproducibility artifacts and temporary trace are
+admitted, with a 64 MiB limit per file. The task owner retains the five artifacts
+through project closure plus 30 days, then disposes of them. Targeted unresolved
+failure diagnostics expire on resolution or task closure. No planning-count
+qualification writes historical evidence in this directory.
 
 ## Measurement boundaries and evidence
 
@@ -148,6 +167,13 @@ Observation capture spans the full final large sample with DOM/network snapshots
 source capture disabled, and optional screenshot previews disabled. Exact options
 are fingerprinted. Double hashing and the 64 MiB trace limit remain required;
 omitting previews does not guarantee fit.
+
+Planning counts uses `temporary/large-planning-counts-trace.zip` in its verified
+task directory, with the same full final large-sample interval, DOM/network
+snapshots and disabled source/screenshots. Capture options and the planning-count
+response contract join its input fingerprints. The owned trace must pass size
+and double-hash verification and be removed before qualified success; only its
+manifest remains available.
 
 Preserve existing failed trace diagnostics until a fresh full-interval archive
 passes size/double-hash verification and owned retirement. Failures report bounded

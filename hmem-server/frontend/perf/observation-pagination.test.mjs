@@ -64,6 +64,29 @@ test('receipt proves exact small terminal 60, large 200-to-400, filter one and r
   }
 })
 
+test('initial page proof includes eager startup hydration while tab timing retains its action boundary', () => {
+  const fixture = generateFixture('small'), { receipt } = receiptFor(fixture)
+  const startupBefore = { index: 0 }
+  const tracker = { requests: [
+    { key: 'navigation:branch' },
+    { key: 'observations:list', observationPage: receipt },
+    { key: 'tasks:list' }
+  ] }
+  const tabBefore = { index: tracker.requests.length }
+  assert.deepEqual(assertObservationPagination(tracker, startupBefore, fixture, 0, null, 'initial'), receipt)
+  assert.throws(() => assertObservationPagination(tracker, tabBefore, fixture, 0, null, 'initial'), /observed 0/)
+  for (const pages of [[], [receipt, receipt], [{ ...receipt, response: { ...receipt.response, fulfilled: false } }], [{ ...receipt, request: { ...receipt.request, offset: 200 } }]]) {
+    const bad = { requests: pages.map(observationPage => ({ key: 'observations:list', observationPage })) }
+    assert.throws(() => assertObservationPagination(bad, startupBefore, fixture, 0, null, 'initial'))
+  }
+  const source = fs.readFileSync('perf/harness.mjs', 'utf8')
+  const run = source.slice(source.indexOf('async function measureRun('))
+  const startupCut = run.indexOf('const observationStartupBefore = requestSnapshot(tracker)')
+  assert.ok(startupCut >= 0 && startupCut < run.indexOf('await navigateToFirstUsefulViewport('))
+  assert.match(run, /initialObservationPage = assertObservationPagination\(tracker, observationStartupBefore,/)
+  assert.match(run, /observationsTabMs = \{ ms: obsTabMs, \.\.\.requestDelta\(tracker, observationsTabBefore\)/)
+})
+
 test('small aggregation is an exact terminal eligibility receipt with no invented timing or no-op count', () => {
   const summary = aggregateObservationLoadMore(samples('small'), 'small')
   assert.equal(summary.applicable, false); assert.equal(summary.terminalSamples, 5)

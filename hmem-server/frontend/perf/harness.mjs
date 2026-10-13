@@ -1234,6 +1234,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   if (fixture.observationScaling) fixture = { ...fixture, observations: fixture.observations.map(value => ({ ...value })) }
   const anchors = representativeProjectAnchors(fixture)
   const tracker = createTracker(fixture)
+  const observationStartupBefore = requestSnapshot(tracker)
   diagnosticRuns.push({ fixture: fixture.size, measured, trace, diagnostics: tracker.coldDiagnostics })
   const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
   await context.addInitScript(fakeWebSocketScript)
@@ -1296,7 +1297,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const observationPageSize = OBSERVATION_PAGINATION_CONTRACT.pageSize
   await waitObservationMembers(page, Math.min(observationPageSize, fixture.observations.length), 'Observations initial page')
   await waitForTransportQuiescence(page, tracker, 'Observations initial page')
-  const initialObservationPage = assertObservationPagination(tracker, observationsTabBefore, fixture, 0, null, 'Observations initial page')
+  const initialObservationPage = assertObservationPagination(tracker, observationStartupBefore, fixture, 0, null, 'Observations initial page')
   interactions.observationsTabMs = { ms: obsTabMs, ...requestDelta(tracker, observationsTabBefore) }
   tabSwitches.observations = interactions.observationsTabMs
   dom.push({ tab: 'observations', ...(await domMetrics(page)) })

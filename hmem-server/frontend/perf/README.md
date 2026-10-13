@@ -139,6 +139,14 @@ must finish before live settlement's two paints. The separate 500 ms stability
 window is excluded from the settle timer and rejects in-flight or late traffic.
 Collapsed branches stay lazy; partial or paused streams cannot prove completion.
 
+Settled expanded-navigation qualification rejects branch feedback rows. Root lists
+remain driven by explicit demand: an enabled project/task root Load-more control is
+valid when its current admitted, fulfilled 50-item wire pages prove the exact ordered
+prefix and independent remaining membership. Loading, errors, Retry, disabled or
+uncorroborated controls fail. Scrolling verifies admitted members without clicking
+root pagers; physical row/observer and transport limits remain unchanged. This
+semantic feedback contract is fingerprinted separately for current qualification.
+
 Historical full snapshots contain 155 small or 4,951 large items, transported in
 two or 50 pages. Terminal-page readiness and canonical byte/order equality are
 required for that phase. Their cold timing is not phase-comparable with the

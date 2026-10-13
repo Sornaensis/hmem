@@ -231,7 +231,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     receipt.key = key
     receipt.bytes = Buffer.byteLength(body)
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
-    if (key === 'navigation:branch') receipt.navigation = value
+    if (key === 'navigation:branch') { receipt.navigation = value; receipt.navigationStatus = status }
     if (key === 'observations:list') receipt.observationPage = observationPageReceipt(request.url(), request.method(), value, status)
     if (key === 'timeline:events' || key === 'timeline:buckets') receipt.timeline = timelineReceipt(request.url(), request.method(), value, status)
     const gate = receipt.gate
@@ -244,6 +244,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     } finally {
       if (receipt.observationPage) receipt.observationPage.response.fulfilled = fulfilled
       if (receipt.timeline) receipt.timeline.response.fulfilled = fulfilled
+      if (key === 'navigation:branch') receipt.navigationFulfilled = fulfilled
       if (status < 400 && key === 'change-stream:resync') {
         const requestBody = request.postDataJSON()
         if (!requestBody.page_token) {
@@ -663,23 +664,103 @@ function completedExpandedMembership(tracker, fixture) {
   return { expandedBranches, projectIds: projectIds.size, taskIds: taskIds.size, terminalStreams, membershipOrdered: true, entityKeys: [...projectIds].map(id => 'project:' + id).concat([...taskIds].map(id => 'task:' + id)) }
 }
 
-async function scrollExpandedHierarchy(page, expectedKeys) {
+export const SETTLED_NAVIGATION_FEEDBACK_CONTRACT = Object.freeze({
+  revision: 'settled-root-continuation.v1', rootKinds: ['project', 'task'], rootPageSize: 50,
+  rootFilters: { show_empty_projects: 'true', priority_mode: 'any' },
+  rootDemand: 'Enabled Load more controls corroborated by current admitted fulfilled ordered root prefixes with remaining members.',
+  expandedBranches: 'All admitted descendant streams are independently terminal; every branch feedback row fails.'
+})
+
+export function settledNavigationSource() {
+  const files = ['src/Api.elm', 'src/Feature/DataLoading.elm', 'src/Feature/Cards.elm']
+  const api = fs.readFileSync(path.join(frontendRoot, files[0]), 'utf8')
+  const loading = fs.readFileSync(path.join(frontendRoot, files[1]), 'utf8')
+  const cards = fs.readFileSync(path.join(frontendRoot, files[2]), 'utf8')
+  if (!api.includes('/navigation?parent_kind=') || !api.includes('&project_limit=50&project_offset=') || !api.includes('&task_limit=50&task_offset=')
+    || !loading.includes('&show_empty_projects=') || !loading.includes('&priority_mode=any')
+    || !cards.includes('viewViewportRootStatus') || !cards.includes('LoadRootNavigationPage kind')) throw new Error('Settled root navigation source contract changed')
+  return files.map(relative => { const file = path.join(frontendRoot, relative); return { path: normalizedRepositoryPath(file), sha256: sha256File(file) } })
+}
+
+export function hierarchyFeedbackRows() {
+  return [...document.querySelectorAll('[data-hierarchy-key^="status:"], [data-hierarchy-key^="root-status:"]')].map(row => ({
+    key: row.dataset.hierarchyKey.slice(0, 256), text: row.textContent.trim().slice(0, 256),
+    status: !!row.querySelector('[role="status"],.loading-indicator,.card-description-error,.hierarchy-branch-status'),
+    buttons: [...row.querySelectorAll('button')].slice(0, 3).map(button => ({ text: button.textContent.trim().slice(0, 128), disabled: button.disabled,
+      continuation: button.classList.contains('navigation-load-more') }))
+  }))
+}
+
+export function assertSettledHierarchyFeedback(rows, tracker, fixture) {
+  const failure = reason => { throw Object.assign(new Error('Settled expanded hierarchy feedback: ' + reason), { navigationFeedback: { reason, rows: Array.isArray(rows) ? rows.slice(0, 4) : null, activeRootBranches: tracker.activeRootBranches } }) }
+  if (!Array.isArray(rows)) failure('Missing actual row snapshot')
+  if (!rows.length) return { rootContinuationKinds: [] }
+  if (!tracker.navigationProof?.ready() || tracker.activeRootBranches !== 0) failure('Navigation lifetime is not settled')
+  const roots = tracker.requests.filter(request => request.key === 'navigation:branch' && new URL(request.url).searchParams.get('parent_kind') === 'workspace_root')
+  const latest = roots.at(-1)?.proofNavigation
+  if (!latest || latest.owner !== 'workspace_root' || latest.retired || !latest.done || latest.error || latest.state?.latest !== latest || latest.state.unknown) failure('Missing current admitted root lifetime')
+  const expected = expectedNavigationChildren(fixture).workspace_root
+  const current = roots.filter(request => request.proofNavigation?.epoch === latest.epoch && request.proofNavigation?.rootEpoch === latest.rootEpoch && request.proofNavigation?.state === latest.state)
+  const kinds = []
+  for (const row of rows) {
+    const kind = row.key === 'root-status:project' ? 'project' : row.key === 'root-status:task' ? 'task' : null
+    if (!kind || kinds.includes(kind) || row.status !== false || row.text !== 'Load more ' + kind + 's' || row.buttons?.length !== 1
+      || row.buttons[0].text !== row.text || row.buttons[0].disabled !== false || row.buttons[0].continuation !== true) failure('Unexpected loading, error, branch, malformed or disabled row')
+    const state = latest.state.kinds[kind]
+    if (!state || state.pending || state.paused || state.more !== true) failure('Root kind has no settled continuation')
+    const pages = current.filter(request => request.proofNavigation.slots[kind]).sort((a, b) => a.proofNavigation.slots[kind].offset - b.proofNavigation.slots[kind].offset)
+    const prefix = []
+    for (const request of pages) {
+      const url = new URL(request.url), stamp = request.proofNavigation, slot = stamp.slots[kind], page = request.navigation?.[kind + 's']
+      const ids = page?.items?.map(item => item.id)
+      const parameters = [...url.searchParams.keys()]
+      const allowed = ['parent_kind', 'project_limit', 'project_offset', 'task_limit', 'task_offset', 'show_empty_projects', 'priority_mode']
+      if (request.method !== 'GET' || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation`
+        || parameters.length !== allowed.length || new Set(parameters).size !== allowed.length || parameters.some(name => !allowed.includes(name))
+        || url.searchParams.get('parent_kind') !== 'workspace_root' || url.searchParams.get('show_empty_projects') !== 'true'
+        || ['project', 'task'].some(kind => url.searchParams.get(kind + '_limit') !== '50' || url.searchParams.get(kind + '_offset') !== String(stamp[kind + 'Offset']))
+        || navigationFilterContext(url) !== navigationFilterContext(new URL('http://fixture?priority_mode=any'))
+        || stamp.retired || stamp.context !== navigationFilterContext(url) || !stamp.done || stamp.error
+        || request.done !== true || request.navigationFulfilled !== true || request.navigationStatus !== 200
+        || !slot.done || slot.error || slot.limit !== 50 || slot.offset !== prefix.length
+        || url.searchParams.get(kind + '_offset') !== String(slot.offset) || url.searchParams.get(kind + '_limit') !== '50'
+        || JSON.stringify(ids) !== JSON.stringify(expected[kind + 's'].slice(slot.offset, slot.offset + 50))
+        || page.has_more !== (slot.offset + 50 < expected[kind + 's'].length)
+        || JSON.stringify(slot.stream?.ids) !== JSON.stringify(ids) || slot.stream.hasMore !== page.has_more) failure('Root wire/admission/order/prefix mismatch')
+      prefix.push(...ids)
+    }
+    if (!prefix.length || prefix.length >= expected[kind + 's'].length || pages.at(-1).navigation[kind + 's'].has_more !== true) failure('No independently expected remaining root members')
+    kinds.push(kind)
+  }
+  return { rootContinuationKinds: kinds }
+}
+
+export function collectSettledHierarchyFeedback(feedback, rows, tracker, fixture) {
+  if (feedback.failure) throw feedback.failure
+  try { assertSettledHierarchyFeedback(rows, tracker, fixture) }
+  catch (error) { feedback.failure = error; throw error }
+  for (const row of rows) feedback.set(row.key, row)
+}
+
+export async function scrollExpandedHierarchy(page, expectedKeys, tracker, fixture) {
   const keys = new Set(), deadline = performance.now() + 30000
+  const feedback = new Map()
   await page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 0 })
   let end = false
   while (performance.now() < deadline) {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     for (const key of await page.locator('[data-hierarchy-key]').evaluateAll(rows => rows.map(row => row.dataset.hierarchyKey))) keys.add(key)
+    collectSettledHierarchyFeedback(feedback, await page.evaluate(hierarchyFeedbackRows), tracker, fixture)
     if (end) break
     end = await page.locator('#main-content-scroll').evaluate(element => { const before = element.scrollTop; element.scrollTop += element.clientHeight / 2; return element.scrollTop === before })
   }
   if (!end) throw new Error('Finite expanded hierarchy scroll did not reach its end')
   const missing = expectedKeys.filter(key => !keys.has(key))
   if (missing.length) throw new Error('Expanded members were not scroll-reachable: ' + missing.slice(0, 5).join(', '))
-  if (await page.locator('[data-hierarchy-key^="status:"], [data-hierarchy-key^="root-status:"]').count()) throw new Error('Settled expanded hierarchy still reserves a feedback row')
+  const settledFeedback = assertSettledHierarchyFeedback([...feedback.values()], tracker, fixture)
   await page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 0 })
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-  return { reachedEnd: true, distinctMountedKeys: keys.size }
+  return { reachedEnd: true, distinctMountedKeys: keys.size, ...settledFeedback }
 }
 
 async function restoreWorkspace(page, tracker, fixture, anchorId, label) {
@@ -1358,7 +1439,9 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const backgroundStarted = performance.now()
   await waitForWorkspaceReady(page, tracker, fixture, anchors.first, 'complete expanded hierarchy')
   const completion = completedExpandedMembership(tracker, fixture)
-  const scrollCompletion = await scrollExpandedHierarchy(page, completion.entityKeys)
+  stage('expanded navigation scroll')
+  const scrollCompletion = await scrollExpandedHierarchy(page, completion.entityKeys, tracker, fixture)
+  stage('expanded navigation detail settle')
   await waitForTransportQuiescence(page, tracker, 'expanded hierarchy scroll detail demand')
   delete completion.entityKeys
   const background = { ms: performance.now() - backgroundStarted, completeRequests: tracker.requests.length, completeBytes: tracker.requests.reduce((sum, request) => sum + request.bytes, 0), afterViewportRequests: tracker.requests.length - coldEnd, maxPhysicalBranches: tracker.maxBranches, maxPhysicalExpandedBranches: tracker.maxExpandedBranches, maxPhysicalRootBranches: tracker.maxRootBranches, maxPhysicalDetails: tracker.maxDetails, ...completion, ...scrollCompletion }
@@ -1368,6 +1451,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const interactions = {}
   const tabSwitches = {}
   const filters = {}
+  stage('Projects interactions')
   if (fixture.size === 'large') {
     const branchInteractions = await measureLargeBranchExpandCollapse(page, tracker, fixture, anchors.expanded)
     interactions.branchExpandMs = branchInteractions.expand
@@ -1650,11 +1734,13 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
       commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
+      ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
     failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
       qualificationPassed: false, failure: error.message, retirement,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
+      ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}),
       validationRecord: { path: evidenceArtifactPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
   }, action)
@@ -1692,6 +1778,8 @@ async function main() {
     observationPaginationSource: observationPaginationSource(),
     timelineCurrentContractHash: hashJson(TIMELINE_CURRENT_CONTRACT),
     timelineCurrentSource: timelineSource(),
+    settledNavigationFeedbackContractHash: hashJson(SETTLED_NAVIGATION_FEEDBACK_CONTRACT),
+    settledNavigationFeedbackSource: settledNavigationSource(),
     ...(evidencePlan.scaling ? { observationScalingContractHash: hashJson(OBSERVATION_SCALING_CONTRACT) } : {}),
     ...(evidencePlan.planningCounts ? { planningCountsContractHash: hashJson({ ...PLANNING_COUNTS_CONTRACT, traceCaptureOptions }) } : {}),
     ...(evidencePlan.rendering ? { observationReachabilityContractHash: hashJson({ revision: 'logical-scroll.v1', flat: [50, 100], match: [50, 100, 150], completeOrderedContextualCards: true, physicalBudgetSelectorsUnchanged: true, scansOutsideMeasuredActionIntervals: true }) } : {}),
@@ -1799,6 +1887,7 @@ async function main() {
       environment, configuration: HARNESS_CONFIGURATION, contracts,
       observationPaginationContract: OBSERVATION_PAGINATION_CONTRACT,
       timelineCurrentContract: TIMELINE_CURRENT_CONTRACT,
+      settledNavigationFeedbackContract: SETTLED_NAVIGATION_FEEDBACK_CONTRACT,
       taskId: evidenceTask?.taskId || null, parentTaskId: evidenceTask?.parentTaskId || null, evidenceBaseCommit,
       inputQualification: qualifiedInputs, sourceProvenance: qualifiedProvenance, measurementRevision: evidenceRevision,
       fixtures: {
@@ -1868,7 +1957,7 @@ async function main() {
     command.exitCode = checkQualification({ recordEvaluation: previous.recordEvaluation, checkEvaluation: measuredResult.evaluation,
       commands: [...previous.commands, command], retirement }).exitCode
   }
-  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), { ...(failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {}), ...(failure?.observationMembership ? { observationMembership: failure.observationMembership } : {}), ...(failure?.timelineQualification ? { timelineQualification: failure.timelineQualification } : {}) })
+  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), { ...(failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {}), ...(failure?.observationMembership ? { observationMembership: failure.observationMembership } : {}), ...(failure?.timelineQualification ? { timelineQualification: failure.timelineQualification } : {}), ...(failure?.navigationFeedback ? { navigationFeedback: failure.navigationFeedback } : {}) })
   if (failure) {
     persistOrRetainFailureDiagnostics(attemptState, () => qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure }, diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() }))))
     throw failure
@@ -1888,6 +1977,7 @@ if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main
     failure: error.message.slice(0, 1000), traceAdmission: error.traceAdmission || null,
     observationMembership: error.observationMembership || null,
     timelineQualification: error.timelineQualification || null,
+    navigationFeedback: error.navigationFeedback || null,
     captureOptions: traceCaptureOptions, retirement: attemptState?.retirement,
     priorFailureDiagnosticsPreserved: !!attemptState?.pendingFailure && !(attemptState.traceVerified && attemptState.retirement?.passed),
     retainedPaths: [validationRecordPath, evidenceManifestPath]

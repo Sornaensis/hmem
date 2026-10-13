@@ -79,6 +79,7 @@ import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
+import StartupAdmission
 import ObservationViewport
 import ObservationPreferences as Preferences
 import Ports exposing (copyToClipboard)
@@ -216,7 +217,7 @@ invalidateCounts state =
 syncCounts : Model -> ( Model, Cmd Msg )
 syncCounts model =
     let counts = model.observations.counts in
-    if model.auth.status /= AuthReady || model.sessionContext == Nothing || not (Permissions.canReadCurrentWorkspace model) then
+    if model.auth.status /= AuthReady || model.sessionContext == Nothing || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing then
         ( updateObservation (\state -> { state | counts = { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 } }) model, Cmd.none )
     else
         case repositoryWorkspaceId model of
@@ -237,18 +238,35 @@ syncCounts model =
                         guard = { owner | token = queued.nextToken, generation = queued.generation, fingerprint = fingerprint }
                         started = { queued | active = Just guard, nextToken = queued.nextToken + 1, pending = False }
                     in
-                    ( updateObservation (\state -> { state | counts = started }) model, Api.fetchObservationCounts model.flags.apiUrl (countQuery workspaceId model.observations) (GotObservationCounts guard) )
+                    let
+                        loading = model.dataLoading
+                        admission = StartupAdmission.reconcile
+                            (if model.workspaceAdmin.authorizationPending == Nothing then Just { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, audience = countActor model } else Nothing)
+                            loading.startupAdmission
+                        occupied = Set.toList admission.physical |> List.any (String.startsWith "observation|")
+                    in
+                    case if occupied then Nothing else StartupAdmission.admit (countPhysicalKey guard) admission of
+                        Just admitted ->
+                            let next = updateObservation (\state -> { state | counts = started }) model in
+                            ( { next | dataLoading = { loading | startupAdmission = admitted } }, Api.fetchObservationCounts model.flags.apiUrl (countQuery workspaceId model.observations) (GotObservationCounts guard) )
+                        Nothing ->
+                            let next = updateObservation (\state -> { state | counts = queued }) model in
+                            ( { next | dataLoading = { loading | startupAdmission = admission } }, Cmd.none )
                 else
                     ( updateObservation (\state -> { state | counts = queued }) model, Cmd.none )
 
 
 acceptCounts : ObservationCountGuard -> Result Http.Error Api.ObservationCounts -> Model -> ( Model, Cmd Msg )
-acceptCounts guard result model =
-    let counts = model.observations.counts in
+acceptCounts guard result source =
+    let
+        loading = source.dataLoading
+        model = { source | dataLoading = { loading | startupAdmission = StartupAdmission.complete (countPhysicalKey guard) loading.startupAdmission } }
+        counts = model.observations.counts
+    in
     if counts.active /= Just guard then ( model, Cmd.none )
     else
         let
-            owned = guard.workspaceId == Maybe.withDefault "" (repositoryWorkspaceId model) && guard.sessionEpoch == model.sessionRequestEpoch && guard.actor == countActor model && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model
+            owned = guard.workspaceId == Maybe.withDefault "" (repositoryWorkspaceId model) && guard.sessionEpoch == model.sessionRequestEpoch && guard.actor == countActor model && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model && model.workspaceAdmin.authorizationPending == Nothing
             current = owned && guard.generation == counts.generation && guard.fingerprint == countFingerprint guard.workspaceId model.observations && not counts.pending
             completed = { counts | active = Nothing, settledFingerprint = guard.fingerprint }
             settled = if not current then { completed | pending = owned, error = Nothing }
@@ -258,6 +276,11 @@ acceptCounts guard result model =
                     Err _ -> { completed | current = False, error = Just "Unable to load Observation counts." }
         in
         syncCounts (updateObservation (\state -> { state | counts = settled }) model)
+
+
+countPhysicalKey : ObservationCountGuard -> String
+countPhysicalKey guard =
+    "observation|" ++ Encode.encode 0 (Encode.list Encode.string [ guard.workspaceId, String.fromInt guard.sessionEpoch, guard.actor, String.fromInt guard.token, String.fromInt guard.generation, guard.fingerprint ])
 
 
 {-| Read permission may be revoked and regranted within the same session epoch.

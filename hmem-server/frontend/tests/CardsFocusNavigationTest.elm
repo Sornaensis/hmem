@@ -16,6 +16,7 @@ import Feature.Focus as Focus
 import Helpers
 import Http
 import Set
+import StartupAdmission
 import Test exposing (Test, describe, test)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
@@ -845,9 +846,24 @@ task id parentId =
 viewportReady : Model -> Model
 viewportReady source =
     let
-        ready = { source | auth = { status = AuthReady, mode = Just "test" } }
+        ready = normalOperation source
     in
     Cards.refreshViewport source ( ready, Cmd.none ) |> Tuple.first
+
+
+{-| These card/navigation cases exercise the normal producer after startup.
+StartupAdmissionTest separately checks the canonical/header paint handoff.
+-}
+normalOperation : Model -> Model
+normalOperation source =
+    let
+        readOnlySession = { editorSession | workspace = Just { workspaceId = workspaceId, role = Just "read", canRead = True, canEdit = False, canAdmin = False } }
+        ready = { source | auth = { status = AuthReady, mode = Just "test" }, sessionContext = source.sessionContext |> Maybe.withDefault readOnlySession |> Just }
+        counted = DataLoading.syncPlanningCounts ready |> Tuple.first
+        loading = counted.dataLoading
+        startup = loading.startupAdmission
+    in
+    { counted | dataLoading = { loading | startupAdmission = { startup | phase = StartupAdmission.Normal } } }
 
 
 rootSeed : List Api.ProjectCardSummary -> Model
@@ -893,7 +909,7 @@ editorSession =
 rootPaint : Model -> Model
 rootPaint source =
     let
-        prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) { source | auth = { status = AuthReady, mode = Just "test" } }
+        prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) (normalOperation source)
         response = { workspaceId = workspaceId, projects = { items = Dict.values source.dataLoading.projectCardSummaries |> List.filter (\summary -> summary.parentId == Nothing), hasMore = False }, tasks = { items = Dict.values source.dataLoading.taskCardSummaries |> List.filter (\summary -> summary.parentId == Nothing && summary.projectId == Nothing), hasMore = False } }
         loaded = case prepared.dataLoading.rootNavigationRequest of
             Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch prepared.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0 (Ok response)) prepared |> Cards.refreshViewport prepared |> Tuple.first

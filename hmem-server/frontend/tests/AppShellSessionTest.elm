@@ -11,6 +11,7 @@ import Feature.WebSocket as WebSocket
 import Http
 import Json.Encode as Encode
 import Set
+import StartupAdmission
 import Test exposing (Test, describe, test)
 import Types exposing (AuthStatus(..), Model, Msg(..), Page(..), WSState(..), WorkspaceTab(..))
 import Url
@@ -354,7 +355,11 @@ workspace =
 paintEmptyRoot : Model -> Model
 paintEmptyRoot source =
     let
-        prepared = DataLoading.prepareRootNavigationRequest (Just "a") source
+        owned = DataLoading.syncPlanningCounts source |> Tuple.first
+        loading = owned.dataLoading
+        startup = loading.startupAdmission
+        postBootstrap = { owned | dataLoading = { loading | startupAdmission = { startup | phase = StartupAdmission.Normal } } }
+        prepared = DataLoading.prepareRootNavigationRequest (Just "a") postBootstrap
         loaded = case prepared.dataLoading.rootNavigationRequest of
             Just request -> DataLoading.update (GotRootNavigation "a" request.sessionEpoch prepared.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0 (Ok { workspaceId = "a", projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) prepared |> Cards.refreshViewport prepared |> Tuple.first
             Nothing -> prepared

@@ -8,6 +8,7 @@ import Feature.ChangeStream
 import HierarchyViewport
 import Array exposing (Array)
 import ObservationViewport
+import StartupAdmission
 import ObservationPreferences
 import Http
 import Json.Encode as Encode
@@ -125,6 +126,7 @@ type alias DataLoadingModel =
     , nextWorkspaceLoadToken : Int
     , cardHydrationLoaded : Bool
     , planningCounts : PlanningCountState
+    , startupAdmission : StartupAdmission.State
     , navigationGeneration : Int
     , rootNavigationRequest : Maybe NavigationBranchState
     , loadedNavigationBranches : Dict String NavigationBranchState

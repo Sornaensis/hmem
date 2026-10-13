@@ -120,7 +120,7 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case UpdateRouter.update msg model of
         Ok result ->
-            Feature.DataLoading.syncPlanningCountsResult result
+            Feature.DataLoading.syncPlanningCountsResult result |> Cards.refreshViewport model
 
         Err mainOwnedMsg ->
             (case mainOwnedMsg of
@@ -132,7 +132,7 @@ update msg model =
 
                 UpdateRouter.HandleInAppShell ownedMsg ->
                     AppShell.handleOwned ownedMsg model
-            ) |> Feature.Observation.refreshViewport model |> Feature.DataLoading.syncPlanningCountsResult
+            ) |> Feature.Observation.refreshViewport model |> Feature.DataLoading.syncPlanningCountsResult |> Cards.refreshViewport model
 
 
 

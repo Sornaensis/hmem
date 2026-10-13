@@ -3424,7 +3424,9 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
         ( retired, Cmd.batch [ command, Ports.syncHierarchyViewport (viewportConfiguration retired Nothing 0) ] )
     else if not changed then
         let
-            metadataCommand = Cmd.batch [ command, if previous.dataLoading.backgroundAdmission /= model.dataLoading.backgroundAdmission then Ports.syncHierarchyViewport (viewportConfiguration model Nothing 0) else Cmd.none ]
+            -- Outgoing port effects are delivered in reverse batch order.
+            -- The authoritative final layout must arrive after nested layouts.
+            metadataCommand = Cmd.batch [ if previous.dataLoading.backgroundAdmission /= model.dataLoading.backgroundAdmission || viewportBackgroundReady previous /= viewportBackgroundReady model then Ports.syncHierarchyViewport (viewportConfiguration model Nothing 0) else Cmd.none, command ]
         in
         if previous.dependencies.taskDependencyLinks /= model.dependencies.taskDependencyLinks || taskStatusesChanged then
             let
@@ -3474,7 +3476,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                     rebuilt = { model | cards = { cards | viewport = viewport } }
                     ( demanded, details ) = viewportDetailDemand rebuilt
                 in
-                ( demanded, Cmd.batch [ command, details, Ports.syncHierarchyViewport (viewportConfiguration demanded (if sameContext then anchor else Nothing) delta) ] )
+                ( demanded, Cmd.batch [ Ports.syncHierarchyViewport (viewportConfiguration demanded (if sameContext then anchor else Nothing) delta), details, command ] )
 
 
 viewportBackgroundReady : Model -> Bool
@@ -3485,7 +3487,7 @@ viewportBackgroundReady model =
         rootReady = model.dataLoading.rootNavigationRequest |> Maybe.map (\request -> current request && (request.succeeded || request.projectCardCount > 0 || request.taskCardCount > 0)) |> Maybe.withDefault False
         focusReady = model.focus.focusedEntity |> Maybe.andThen (\( kind, id ) -> Dict.get (kind ++ ":" ++ id) model.dataLoading.navigationFocuses) |> Maybe.map (\request -> current request && request.succeeded) |> Maybe.withDefault False
     in
-    model.auth.status == AuthReady && model.activeTab == ProjectsTab && (rootReady || focusReady)
+    model.auth.status == AuthReady && model.activeTab == ProjectsTab && (rootReady || focusReady) && Feature.DataLoading.startupBackgroundReady model
 
 
 viewportConfiguration : Model -> Maybe String -> Float -> Encode.Value

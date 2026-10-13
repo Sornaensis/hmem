@@ -28,6 +28,7 @@ import Html.Keyed as Keyed
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
+import StartupAdmission
 import Page.Home
 import Page.Workspace
 import Permissions
@@ -905,6 +906,7 @@ stopAllLoading dataLoading =
         , navigationAdmissions = dataLoading.navigationAdmissions
         , cardDetailAdmissions = dataLoading.cardDetailAdmissions
         , planningCounts = Feature.DataLoading.retirePlanningCounts dataLoading.planningCounts
+        , startupAdmission = StartupAdmission.retire dataLoading.startupAdmission
     }
 
 

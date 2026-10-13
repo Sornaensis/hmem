@@ -19,6 +19,7 @@ import Json.Encode as Encode
 import Route
 import Set
 import String
+import StartupAdmission
 import Test exposing (Test, describe, test)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
@@ -67,6 +68,21 @@ suite =
                     , ( Dict.size duplicate.dataLoading.navigationAdmissions, Set.size duplicate.dataLoading.cardDetailAdmissions )
                     , duplicate.dataLoading.backgroundAdmission.remaining
                     )
+        , test "count debt exhausts a stale ordinary permit without dispatching branches or details" <|
+            \_ ->
+                let
+                    summary = let parent = project "exhausted-parent" Nothing in { parent | hasChildren = True }
+                    waiting = loadRootUnpainted workspaceId [ summary ] [] model
+                    loading = waiting.dataLoading
+                    startup = loading.startupAdmission
+                    permit = loading.backgroundAdmission
+                    exhausted = { waiting | dataLoading = { loading | startupAdmission = { startup | phase = StartupAdmission.Initial, spent = 6, initialWaveOpened = True }, backgroundAdmission = { permit | remaining = 5, acknowledged = True } } }
+                    queued = DataLoading.beginNavigationBranch "project" workspaceId (Just summary.id) exhausted |> Tuple.first
+                    detailed = DataLoading.ensureVisibleCardDetails workspaceId queued.sessionRequestEpoch queued.dataLoading.navigationGeneration (Set.singleton summary.id) Set.empty queued |> Tuple.first
+                in
+                Expect.equal ( ( 0, 0 ), ( Just False, True ) )
+                    ( ( Dict.size detailed.dataLoading.navigationAdmissions, Set.size detailed.dataLoading.cardDetailAdmissions )
+                    , ( Dict.get "project:exhausted-parent" detailed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight, List.member "project:exhausted-parent" detailed.dataLoading.navigationQueue ) )
         , test "rapid branch and detail completion yields before replenishing ordinary credits" <|
             \_ ->
                 let
@@ -2940,6 +2956,26 @@ filterFingerprint =
 
 model : Model
 model =
+    initialModel
+        |> (\initial -> { initial | sessionContext = Just editorSession })
+        |> normalNavigation
+
+
+{-| Navigation regressions start after the separately tested bootstrap handoff.
+The dedicated StartupAdmission tests exercise the initial ledger and ACKs.
+-}
+normalNavigation : Model -> Model
+normalNavigation source =
+    let
+        ready = DataLoading.syncPlanningCounts source |> Tuple.first
+        loading = ready.dataLoading
+        startup = loading.startupAdmission
+    in
+    { ready | dataLoading = { loading | startupAdmission = { startup | phase = StartupAdmission.Normal, initialWaveOpened = True } } }
+
+
+initialModel : Model
+initialModel =
     AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
         |> AppShell.finalizeInit (WorkspacePage workspaceId)
         |> (\initial -> { initial | auth = { status = AuthReady, mode = Just "test" } })
@@ -2965,8 +3001,8 @@ focusHydrationModel =
 actualFocusBootstrap : Model
 actualFocusBootstrap =
     let
-        focus = model.focus
-        initial = { model | focus = { focus | focusedEntity = Just ( "project", "target" ) } }
+        focus = initialModel.focus
+        initial = { initialModel | focus = { focus | focusedEntity = Just ( "project", "target" ) } }
     in
     AppShell.handleOwned (AppShell.SessionContextLoadedMsg initial.sessionRequestEpoch (Just workspaceId) (Ok editorSession)) initial |> Tuple.first
 
@@ -3043,7 +3079,7 @@ loadRoot workspace projects tasks source =
         session = { editorSession | workspace = Just { workspaceId = workspace, role = Just "edit", canRead = True, canEdit = True, canAdmin = False } }
         authorized = if source.auth.status == AuthReady && (source.sessionContext |> Maybe.andThen .workspace |> Maybe.map .workspaceId) == Just workspace then source else AppShell.handleOwned (AppShell.SessionContextLoadedMsg source.sessionRequestEpoch (Just workspace) (Ok session)) source |> Tuple.first
     in
-    loadRootUnpainted workspace projects tasks (if authorized.activeTab == ProjectsTab then authorized else AppShell.handleOwned (AppShell.SwitchTabMsg ProjectsTab) authorized |> Tuple.first) |> painted
+    loadRootUnpainted workspace projects tasks (if authorized.activeTab == ProjectsTab then authorized else AppShell.handleOwned (AppShell.SwitchTabMsg ProjectsTab) authorized |> Tuple.first) |> normalNavigation |> painted
 
 
 loadRootUnpainted : String -> List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> Model

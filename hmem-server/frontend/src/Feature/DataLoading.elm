@@ -1,13 +1,15 @@
-module Feature.DataLoading exposing (emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
+import Feature.ChangeStream
 import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity)
 import Json.Encode as Encode
 import Permissions
 import Set
 import String
+import StartupAdmission
 import Toast exposing (addToast)
 import Types exposing (..)
 import Url
@@ -25,6 +27,7 @@ init =
     , nextWorkspaceLoadToken = 1
     , cardHydrationLoaded = False
     , planningCounts = emptyPlanningCounts
+    , startupAdmission = StartupAdmission.init
     , navigationGeneration = 0
     , rootNavigationRequest = Nothing
     , loadedNavigationBranches = Dict.empty
@@ -77,7 +80,7 @@ planningCountOwner : Model -> Maybe PlanningCountGuard
 planningCountOwner model =
     case ( model.page, model.selectedWorkspaceId, model.sessionContext ) of
         ( WorkspacePage pageWorkspace, Just workspaceId, Just session ) ->
-            if pageWorkspace == workspaceId && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+            if pageWorkspace == workspaceId && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model && model.workspaceAdmin.authorizationPending == Nothing then
                 Just
                     { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, token = 0, generation = 0
                     , audience = Encode.encode 0 (Encode.list Encode.string [ session.authMode, session.principal.actorType, session.principal.actorId, session.principal.authority, Maybe.withDefault "" session.principal.grantUserId, Permissions.currentWorkspaceRoleLabel model ])
@@ -87,10 +90,12 @@ planningCountOwner model =
 
 
 syncPlanningCounts : Model -> ( Model, Cmd Msg )
-syncPlanningCounts model =
+syncPlanningCounts source =
     let
+        model = reconcileStartup source
         loading = model.dataLoading
         counts = loading.planningCounts
+        ownedStartup = loading.startupAdmission
     in
     case planningCountOwner model of
         Nothing ->
@@ -107,22 +112,31 @@ syncPlanningCounts model =
                     guard = { owner | token = owned.nextToken, generation = owned.generation }
                     started = { owned | active = Just guard, nextToken = owned.nextToken + 1, pending = False }
                 in
-                ( { model | dataLoading = { loading | planningCounts = started } }
-                , Api.fetchWorkspacePlanningCounts model.flags.apiUrl owner.workspaceId (GotWorkspacePlanningCounts guard)
-                )
+                case StartupAdmission.admit (planningPhysicalKey guard) ownedStartup of
+                    Just admission ->
+                        ( { model | dataLoading = { loading | planningCounts = started, startupAdmission = admission } }
+                        , Api.fetchWorkspacePlanningCounts model.flags.apiUrl owner.workspaceId (GotWorkspacePlanningCounts guard)
+                        )
+                    Nothing ->
+                        ( { model | dataLoading = { loading | planningCounts = owned } }, Cmd.none )
             else
                 ( { model | dataLoading = { loading | planningCounts = owned } }, Cmd.none )
 
 
 syncPlanningCountsResult : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
 syncPlanningCountsResult ( model, command ) =
-    let ( counted, countCommand ) = syncPlanningCounts model in
-    ( counted, Cmd.batch [ command, countCommand ] )
+    let
+        ( counted, countCommand ) = syncPlanningCounts model
+        ( observed, observationCommand ) = Feature.Observation.syncCounts counted
+    in
+    ( reconcileStartup observed, Cmd.batch [ command, countCommand, observationCommand ] )
 
 
 acceptPlanningCounts : PlanningCountGuard -> Result error Api.WorkspacePlanningCounts -> Model -> ( Model, Cmd Msg )
-acceptPlanningCounts guard result model =
+acceptPlanningCounts guard result source =
     let
+        sourceLoading = source.dataLoading
+        model = { source | dataLoading = { sourceLoading | startupAdmission = StartupAdmission.complete (planningPhysicalKey guard) sourceLoading.startupAdmission } }
         loading = model.dataLoading
         counts = loading.planningCounts
     in
@@ -139,6 +153,96 @@ acceptPlanningCounts guard result model =
                     Err _ -> { completed | current = False, error = Just "Planning totals unavailable" }
         in
         syncPlanningCounts { model | dataLoading = { loading | planningCounts = settled } }
+
+
+planningPhysicalKey : PlanningCountGuard -> String
+planningPhysicalKey guard =
+    "planning|" ++ Encode.encode 0 (Encode.list Encode.string [ guard.workspaceId, String.fromInt guard.sessionEpoch, guard.audience, String.fromInt guard.token, String.fromInt guard.generation ])
+
+
+rootPhysicalKey : String -> Int -> Int -> String -> Int -> Int -> String
+rootPhysicalKey workspace epoch generation fingerprint projectOffset taskOffset =
+    "root|" ++ Encode.encode 0 (Encode.list Encode.string [ workspace, String.fromInt epoch, String.fromInt generation, fingerprint, String.fromInt projectOffset, String.fromInt taskOffset ])
+
+
+recordRootRecovery : NavigationBranchState -> Model -> Model
+recordRootRecovery request source =
+    let
+        model = reconcileStartup source
+        loading = model.dataLoading
+        key = rootPhysicalKey request.workspaceId request.sessionEpoch request.generation request.filterFingerprint request.projectOffset request.taskOffset
+    in
+    { model | dataLoading = { loading | startupAdmission = StartupAdmission.recordRecovery key loading.startupAdmission } }
+
+
+startupFingerprint : Model -> String
+startupFingerprint model =
+    let
+        root = model.dataLoading.rootNavigationRequest
+        counts = model.dataLoading.planningCounts
+        observation = model.observations.counts
+        stream = model.selectedWorkspaceId |> Maybe.andThen (\id -> Dict.get ("workspace:" ++ id) model.webSocket.streams)
+    in
+    Encode.encode 0 (Encode.list Encode.string
+        [ navigationFilterFingerprint model
+        , root |> Maybe.map (\request -> String.fromInt request.generation ++ ":" ++ String.fromInt request.projectOffset ++ ":" ++ String.fromInt request.taskOffset ++ ":" ++ (if request.inFlight then "busy" else "settled")) |> Maybe.withDefault "none"
+        , String.fromInt counts.generation ++ ":" ++ (if counts.pending then "pending" else "settled")
+        , if model.selectedWorkspaceId |> Maybe.andThen (\id -> Dict.get id model.workspaces) |> Maybe.map (\workspace -> workspace.workspaceType == Api.Repository) |> Maybe.withDefault True then
+            String.fromInt observation.generation ++ ":" ++ observation.settledFingerprint ++ ":" ++ (if observation.pending then "pending" else "settled")
+          else "no-observations"
+        , stream |> Maybe.map (\state -> Maybe.withDefault "" state.resumeToken ++ ":" ++ (if state.live then "live" else Maybe.withDefault "replay" state.failure)) |> Maybe.withDefault "none"
+        ])
+
+
+startupSettled : Model -> Bool
+startupSettled model =
+    let
+        loading = model.dataLoading
+        state = loading.startupAdmission
+        counts = loading.planningCounts
+        observation = model.observations.counts
+        parked = StartupAdmission.remaining state == 0
+        needsObservations = model.selectedWorkspaceId |> Maybe.andThen (\id -> Dict.get id model.workspaces) |> Maybe.map (\workspace -> workspace.workspaceType == Api.Repository) |> Maybe.withDefault True
+        headers = counts.active == Nothing && observation.active == Nothing
+            && (counts.current || counts.error /= Nothing || (parked && counts.pending))
+            && (not needsObservations || observation.current || observation.error /= Nothing || (parked && observation.pending))
+        root = loading.rootNavigationRequest |> Maybe.map (\request -> Just request.workspaceId == model.selectedWorkspaceId && request.sessionEpoch == model.sessionRequestEpoch && not request.inFlight) |> Maybe.withDefault (model.focus.focusedEntity /= Nothing)
+        canonical = model.selectedWorkspaceId |> Maybe.andThen (\id -> Dict.get ("workspace:" ++ id) model.webSocket.streams)
+            |> Maybe.map (\stream -> Just stream.scope == Maybe.map Feature.ChangeStream.Workspace model.selectedWorkspaceId && (stream.live || stream.failure /= Nothing)) |> Maybe.withDefault False
+    in
+    state.authorized && canonical && root && headers && Set.isEmpty state.physical
+
+
+reconcileStartup : Model -> Model
+reconcileStartup model =
+    let
+        loading = model.dataLoading
+        owner = planningCountOwner model |> Maybe.map (\guard -> { workspaceId = guard.workspaceId, sessionEpoch = guard.sessionEpoch, audience = guard.audience })
+        owned = StartupAdmission.reconcile owner loading.startupAdmission
+        prepared = { model | dataLoading = { loading | startupAdmission = owned } }
+        settled = startupSettled prepared
+        fingerprint = startupFingerprint prepared
+        hasHierarchy = loading.rootNavigationRequest |> Maybe.map (\request -> request.projectCardCount > 0 || request.taskCardCount > 0) |> Maybe.withDefault (model.focus.focusedEntity /= Nothing)
+        next =
+            if settled && (model.activeTab /= ProjectsTab || not hasHierarchy) then
+                StartupAdmission.headerOnly owned
+            else if model.activeTab == ProjectsTab && owned.phase == StartupAdmission.HeaderOnly && settled then
+                { owned | phase = StartupAdmission.AwaitNormalPaint fingerprint }
+            else
+                StartupAdmission.arm fingerprint settled owned
+        changed = next.phase /= owned.phase
+        permit = loading.backgroundAdmission
+    in
+    { prepared | dataLoading = { loading | startupAdmission = next
+        , backgroundAdmission = if changed then { permit | nonce = permit.nonce + 1, acknowledged = False, remaining = 0 } else permit } }
+
+
+startupBackgroundReady : Model -> Bool
+startupBackgroundReady model =
+    case model.dataLoading.startupAdmission.phase of
+        StartupAdmission.Normal -> True
+        StartupAdmission.HeaderOnly -> False
+        _ -> startupSettled model
 
 
 navigationFilterFingerprint : Model -> String
@@ -313,8 +417,9 @@ navigationBranchExpanded key model =
 
 
 prepareBackgroundAdmission : Model -> Model
-prepareBackgroundAdmission model =
+prepareBackgroundAdmission source =
     let
+        model = reconcileStartup source
         loading = model.dataLoading
         permit = loading.backgroundAdmission
         fingerprint = navigationFilterFingerprint model
@@ -350,22 +455,52 @@ acceptBackgroundPaint nonce source =
     in
     if nonce /= permit.nonce || permit.acknowledged || model.activeTab /= ProjectsTab || model.auth.status /= AuthReady then ( model, Cmd.none )
     else
-        let
-            opened = { model | dataLoading = { loading | backgroundAdmission = { permit | acknowledged = True, remaining = 5 } } }
-            ( branched, branchCommand ) = pumpNavigation opened
-            ( detailed, detailCommand ) = ensurePresentedCardDetails branched
-        in
-        ( detailed, Cmd.batch [ branchCommand, detailCommand ] )
+        case loading.startupAdmission.phase of
+            StartupAdmission.ClosureArmed fingerprint ->
+                let
+                    next = StartupAdmission.acknowledgeClosure fingerprint loading.startupAdmission
+                in
+                ( { model | dataLoading = { loading | startupAdmission = next, backgroundAdmission = { permit | nonce = permit.nonce + 1, acknowledged = False, remaining = 0 } } }, Cmd.none )
+
+            StartupAdmission.AwaitNormalPaint fingerprint ->
+                openBackgroundWave (StartupAdmission.acknowledgeNormal fingerprint loading.startupAdmission) 5 model
+
+            StartupAdmission.Initial ->
+                if loading.startupAdmission.initialWaveOpened || not (startupSettled model) then
+                    ( model, Cmd.none )
+                else
+                    openBackgroundWave (StartupAdmission.openInitialWave loading.startupAdmission) (min 5 (StartupAdmission.remaining loading.startupAdmission)) model
+
+            StartupAdmission.Normal ->
+                openBackgroundWave loading.startupAdmission 5 model
+
+            StartupAdmission.HeaderOnly ->
+                ( model, Cmd.none )
 
 
-consumeBackground : Maybe String -> Model -> Model
+openBackgroundWave : StartupAdmission.State -> Int -> Model -> ( Model, Cmd Msg )
+openBackgroundWave state credits model =
+    let
+        loading = model.dataLoading
+        permit = loading.backgroundAdmission
+        opened = { model | dataLoading = { loading | startupAdmission = state, backgroundAdmission = { permit | acknowledged = True, remaining = credits } } }
+        ( counted, countCommand ) = if state.phase == StartupAdmission.Normal then syncPlanningCountsResult ( opened, Cmd.none ) else ( opened, Cmd.none )
+        ( branched, branchCommand ) = pumpNavigation counted
+        ( detailed, detailCommand ) = ensurePresentedCardDetails branched
+    in
+    ( detailed, Cmd.batch [ countCommand, branchCommand, detailCommand ] )
+
+
+consumeBackground : Maybe String -> Model -> Maybe Model
 consumeBackground branchKey model =
     let
         loading = model.dataLoading
         permit = loading.backgroundAdmission
         branch = branchKey /= Nothing
+        key = branchKey |> Maybe.map ((++) "branch|") |> Maybe.withDefault ("detail|" ++ String.fromInt (loading.nextCardDetailRequestId - 1))
     in
-    { model | dataLoading = { loading | backgroundAdmission = { permit | branchRequests = Maybe.map (\key -> Set.insert key permit.branchRequests) branchKey |> Maybe.withDefault permit.branchRequests, detailRequests = if branch then permit.detailRequests else Set.insert (loading.nextCardDetailRequestId - 1) permit.detailRequests, remaining = permit.remaining - 1, branches = permit.branches + (if branch then 1 else 0), details = permit.details + (if branch then 0 else 1) } } }
+    StartupAdmission.admitOrdinary key loading.startupAdmission
+        |> Maybe.map (\startup -> { model | dataLoading = { loading | startupAdmission = startup, backgroundAdmission = { permit | branchRequests = Maybe.map (\requestKey -> Set.insert requestKey permit.branchRequests) branchKey |> Maybe.withDefault permit.branchRequests, detailRequests = if branch then permit.detailRequests else Set.insert (loading.nextCardDetailRequestId - 1) permit.detailRequests, remaining = permit.remaining - 1, branches = permit.branches + (if branch then 1 else 0), details = permit.details + (if branch then 0 else 1) } } })
 
 
 ordinaryDetailsPending : Model -> Bool
@@ -394,7 +529,7 @@ pumpNavigationQueue budget model =
     let
         loading = model.dataLoading
     in
-    if budget <= 0 || Dict.size loading.navigationAdmissions >= navigationConcurrency || model.activeTab /= ProjectsTab || loading.backgroundAdmission.remaining <= 0 || (loading.backgroundAdmission.branches >= 2 && ordinaryDetailsPending model) then
+    if budget <= 0 || Dict.size loading.navigationAdmissions >= navigationConcurrency || model.activeTab /= ProjectsTab || loading.backgroundAdmission.remaining <= 0 || not (StartupAdmission.canOrdinary loading.startupAdmission) || (loading.backgroundAdmission.branches >= 2 && ordinaryDetailsPending model) then
         ( model, Cmd.none )
     else
         case loading.navigationQueue of
@@ -416,9 +551,12 @@ pumpNavigationQueue budget model =
                                 request = { previous | inFlight = True }
                                 poppedLoading = popped.dataLoading
                                 admitted = consumeBackground (Just (navigationAdmissionKey key request)) { popped | dataLoading = { poppedLoading | loadedNavigationBranches = Dict.insert key request poppedLoading.loadedNavigationBranches, navigationAdmissions = Dict.insert (navigationAdmissionKey key request) request poppedLoading.navigationAdmissions } }
-                                ( next, commands ) = pumpNavigationQueue (budget - 1) admitted
                             in
-                            ( next, Cmd.batch [ commands, Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId kind (Just id) request.projectOffset request.taskOffset (navigationFilterQuery model) (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset) ] )
+                            case admitted of
+                                Nothing -> ( model, Cmd.none )
+                                Just accepted ->
+                                    let ( next, commands ) = pumpNavigationQueue (budget - 1) accepted in
+                                    ( next, Cmd.batch [ commands, Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId kind (Just id) request.projectOffset request.taskOffset (navigationFilterQuery model) (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset) ] )
                     _ -> pumpNavigationQueue (budget - 1) popped
 
 
@@ -428,12 +566,15 @@ releaseNavigationAdmission msg model =
         loading = model.dataLoading
     in
     case msg of
+        GotRootNavigation ws epoch _ generation fingerprint projectOffset taskOffset _ ->
+            { model | dataLoading = { loading | startupAdmission = StartupAdmission.complete (rootPhysicalKey ws epoch generation fingerprint projectOffset taskOffset) loading.startupAdmission } }
         GotNavigationBranch ws epoch generation key fingerprint projectOffset taskOffset _ ->
-            { model | dataLoading = { loading | navigationAdmissions = Dict.remove (String.join "|" [ key, ws, String.fromInt epoch, String.fromInt generation, String.fromInt projectOffset, String.fromInt taskOffset, fingerprint ]) loading.navigationAdmissions } }
+            let identity = String.join "|" [ key, ws, String.fromInt epoch, String.fromInt generation, String.fromInt projectOffset, String.fromInt taskOffset, fingerprint ] in
+            { model | dataLoading = { loading | startupAdmission = StartupAdmission.complete ("branch|" ++ identity) loading.startupAdmission, navigationAdmissions = Dict.remove identity loading.navigationAdmissions } }
         GotProjectCardDetail request id _ ->
-            { model | dataLoading = { loading | cardDetailAdmissions = Set.remove request.requestId loading.cardDetailAdmissions, cardDetailRetries = if Dict.get id loading.projectCardDetailRequests == Just request then Set.remove ( "project", id ) loading.cardDetailRetries else loading.cardDetailRetries } }
+            { model | dataLoading = { loading | startupAdmission = StartupAdmission.complete ("detail|" ++ String.fromInt request.requestId) loading.startupAdmission, cardDetailAdmissions = Set.remove request.requestId loading.cardDetailAdmissions, cardDetailRetries = if Dict.get id loading.projectCardDetailRequests == Just request then Set.remove ( "project", id ) loading.cardDetailRetries else loading.cardDetailRetries } }
         GotTaskCardDetail request id _ ->
-            { model | dataLoading = { loading | cardDetailAdmissions = Set.remove request.requestId loading.cardDetailAdmissions, cardDetailRetries = if Dict.get id loading.taskCardDetailRequests == Just request then Set.remove ( "task", id ) loading.cardDetailRetries else loading.cardDetailRetries } }
+            { model | dataLoading = { loading | startupAdmission = StartupAdmission.complete ("detail|" ++ String.fromInt request.requestId) loading.startupAdmission, cardDetailAdmissions = Set.remove request.requestId loading.cardDetailAdmissions, cardDetailRetries = if Dict.get id loading.taskCardDetailRequests == Just request then Set.remove ( "task", id ) loading.cardDetailRetries else loading.cardDetailRetries } }
         _ -> model
 
 
@@ -935,7 +1076,7 @@ beginRootNavigationPage entityKind model =
 
                 refreshRetry = retrying && refreshing
 
-                generation = if canLoad && refreshRetry then model.dataLoading.navigationGeneration + 1 else previous.generation
+                generation = if canLoad && retrying then model.dataLoading.navigationGeneration + 1 else previous.generation
 
                 request =
                     { previous
@@ -959,7 +1100,7 @@ beginRootNavigationPage entityKind model =
                 ( model, Cmd.none )
 
             else if canLoad then
-                ( { model | dataLoading = { loading | navigationGeneration = if refreshRetry then generation else loading.navigationGeneration, rootNavigationRequest = Just request, rootNavigationPresentation = Just { nextPresentation | generation = generation }, navigationPasses = if refreshing && not retrying then Dict.update (navigationBranchKey "workspace_root" Nothing) (Maybe.map extendDemand) loading.navigationPasses else loading.navigationPasses } }
+                ( recordRootRecovery request { model | dataLoading = { loading | navigationGeneration = if retrying then generation else loading.navigationGeneration, rootNavigationRequest = Just request, rootNavigationPresentation = Just { nextPresentation | generation = generation }, navigationPasses = if refreshing && not retrying then Dict.update (navigationBranchKey "workspace_root" Nothing) (Maybe.map extendDemand) loading.navigationPasses else loading.navigationPasses } }
                 , Api.fetchNavigationBranch model.flags.apiUrl workspaceId "workspace_root" Nothing projectOffset taskOffset (navigationFilterQuery model)
                     (GotRootNavigation workspaceId model.sessionRequestEpoch Nothing request.generation request.filterFingerprint projectOffset taskOffset)
                 )
@@ -1004,7 +1145,7 @@ prepareRootNavigationRequest expectedWorkspace model =
                     loading =
                         model.dataLoading
                 in
-                { model
+                ({ model
                     | dataLoading =
                         let
                             request =
@@ -1030,7 +1171,7 @@ prepareRootNavigationRequest expectedWorkspace model =
                             , rootNavigationPresentation = Just (initialPresentation request)
                             , navigationVisibilityActive = True
                         }
-                }
+                } |> (\prepared -> prepared.dataLoading.rootNavigationRequest |> Maybe.map (\request -> recordRootRecovery request prepared) |> Maybe.withDefault prepared))
 
             else
                 model
@@ -1111,7 +1252,7 @@ reloadNavigationForFilters model =
                 resetModel =
                     { model | dataLoading = resetLoading, webSocket = retiredSocket }
             in
-            ( resetModel
+            ( resetModel |> (\prepared -> prepared.dataLoading.rootNavigationRequest |> Maybe.map (\request -> recordRootRecovery request prepared) |> Maybe.withDefault prepared)
             , Api.fetchRootNavigation model.flags.apiUrl workspaceId (navigationFilterQuery resetModel)
                 (GotRootNavigation workspaceId model.sessionRequestEpoch Nothing generation (navigationFilterFingerprint resetModel) 0 0)
             )
@@ -1299,7 +1440,7 @@ revalidateNavigationForChangedSummaries before summaries model =
                                 presentation = loading.rootNavigationPresentation |> Maybe.map (\value -> { value | generation = generation })
                                 next = { allocated | dataLoading = { nextLoading | rootNavigationRequest = Just request, rootNavigationPresentation = presentation, navigationPasses = Dict.insert (navigationBranchKey "workspace_root" Nothing) rootPass nextLoading.navigationPasses } }
                             in
-                            ( next, Api.fetchRootNavigation current.flags.apiUrl workspaceId (navigationFilterQuery current) (GotRootNavigation workspaceId current.sessionRequestEpoch current.dataLoading.activeWorkspaceLoadToken generation fingerprint 0 0) :: commands )
+                            ( recordRootRecovery request next, Api.fetchRootNavigation current.flags.apiUrl workspaceId (navigationFilterQuery current) (GotRootNavigation workspaceId current.sessionRequestEpoch current.dataLoading.activeWorkspaceLoadToken generation fingerprint 0 0) :: commands )
                         Nothing -> ( current, commands )
                 ( Just workspaceId, ( kind, id ) ) ->
                     let key = navigationBranchKey kind (Just id) in
@@ -2242,10 +2383,12 @@ ensurePresentedCardDetails source =
         ( pinned, pinCommands ) = List.foldl beginTaskCardDetail ( pinnedProjects, pinnedProjectCommands ) (List.filter (\summary -> Set.member summary.id taskPins) tasks)
         ordinary begin summary ( current, accumulated ) =
             let permit = current.dataLoading.backgroundAdmission in
-            if current.activeTab /= ProjectsTab || permit.remaining <= 0 || (permit.details >= 3 && not (List.isEmpty current.dataLoading.navigationQueue)) then ( current, accumulated )
+            if current.activeTab /= ProjectsTab || permit.remaining <= 0 || not (StartupAdmission.canOrdinary current.dataLoading.startupAdmission) || (permit.details >= 3 && not (List.isEmpty current.dataLoading.navigationQueue)) then ( current, accumulated )
             else
                 let ( next, nextCommands ) = begin summary ( current, accumulated ) in
-                if Set.size next.dataLoading.cardDetailAdmissions > Set.size current.dataLoading.cardDetailAdmissions then ( consumeBackground Nothing next, nextCommands ) else ( next, nextCommands )
+                if Set.size next.dataLoading.cardDetailAdmissions > Set.size current.dataLoading.cardDetailAdmissions then
+                    consumeBackground Nothing next |> Maybe.map (\admitted -> ( admitted, nextCommands )) |> Maybe.withDefault ( current, accumulated )
+                else ( next, nextCommands )
         ( hydratedProjects, projectCommands ) = List.foldl (ordinary beginProjectCardDetail) ( pinned, pinCommands ) projects
         ( hydrated, commands ) = List.foldl (ordinary beginTaskCardDetail) ( hydratedProjects, projectCommands ) tasks
     in
@@ -2322,7 +2465,7 @@ restoreNavigationPresentation parentKind maybeParentId model =
                         }
                 in
                 if request.inFlight then
-                    ( updated
+                    ( if rootBranch then recordRootRecovery request updated else updated
                     , Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId parentKind maybeParentId request.projectOffset request.taskOffset (navigationFilterQuery model)
                         (if rootBranch then
                             GotRootNavigation request.workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset
@@ -2550,7 +2693,7 @@ acceptRootRefresh maybeToken navigation model =
                         , loadedNavigationBranches = Dict.insert key nextRequest nextLoading.loadedNavigationBranches
                         , navigationPasses = if pendingProject || pendingTask || projectError /= Nothing || taskError /= Nothing then Dict.insert key nextPass nextLoading.navigationPasses else Dict.remove key nextLoading.navigationPasses
                         } }
-                settled = if dispatch then accepted else { accepted | dataLoading = finishWorkspaceLoad maybeToken accepted.dataLoading }
+                settled = if dispatch then recordRootRecovery nextRequest accepted else { accepted | dataLoading = finishWorkspaceLoad maybeToken accepted.dataLoading }
                 ( presented, presentationCommand ) = ensureNavigationPresentation "workspace_root" Nothing settled
                 command =
                     if dispatch then

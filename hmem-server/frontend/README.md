@@ -74,6 +74,17 @@ feedback, and an unavailable state with Retry when a read fails. Canonical plann
 changes and resynchronization refresh the totals through one coalesced physical
 request; workspace, session and audience changes retire old responses.
 
+Startup count reads and the first ordinary navigation wave share six admission
+credits under the current workspace, session and audience. Completed or retired
+requests do not refund those credits. A settled canonical stream, root and header
+presentation lead through a closure paint and a separate continuation paint before
+normal background waves resume. Observations and Timeline allow count continuation
+without granting ordinary navigation work. Failed or deferred totals remain visibly
+unavailable or updating. Mandatory root recovery requests reduce the initial
+allowance even when it is exhausted; transport resync and ticket retries remain
+independently accounted by the browser request receipts. The healthy startup
+qualification budget is not a universal ceiling on offline recovery traffic.
+
 - One dirty or saving Observation draft survives row, tab, and Back navigation
   within the workspace. Return to draft, Save draft, and Discard draft remain
   available. Editing another observation returns to that draft. Leaving the

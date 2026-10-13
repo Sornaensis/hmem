@@ -141,6 +141,156 @@ export function liveWholeWorkspaceReload(routes) {
   return ['change-stream:resync', 'projects:list', 'tasks:list', 'observations:list'].some(key => (routes[key] || 0) > 0)
 }
 
+export const LIVE_OBSERVATION_REFRESH_CONTRACT = Object.freeze({
+  revision: 'live-observation-retained-prefix.v1', pageSize: 200, maximumRefreshPages: 1,
+  retainedContextProof: 'Inferred from the same-run fulfilled unfiltered reset, executed logical membership guard, source and unchanged intervening recipe; offscreen cache state is not directly observed.',
+  legacyRouteFlag: 'Retained separately; any Observation list remains true in the historical route-only classifier.',
+  individualRefreshes: 'Distinct successful detail GETs must match independently updated IDs inside the validated reset cache and exact fixture DTOs; a whole-cache or whole-entity walk fails.'
+})
+
+export function classifyLiveObservationHydration(input) {
+  const { runId, workspaceId, total, expectedPrefix, reset, intervening, requests, delta, active, unknownRoutes, snapshotGeneration, liveStartIndex, updatedObservationIds, expectedObservationEntities } = input
+  const legacy = liveWholeWorkspaceReload(delta?.routes || {})
+  const result = (classification, reason, proof = null) => ({ revision: LIVE_OBSERVATION_REFRESH_CONTRACT.revision, classification,
+    passed: classification === 'bounded-cache-refresh' || classification === 'no-enumeration', wholeWorkspaceReload: classification === 'whole-hydration' || classification === 'unproven',
+    legacyWholeWorkspaceReload: legacy, proofBasis: LIVE_OBSERVATION_REFRESH_CONTRACT.retainedContextProof, reason, proof })
+  const sameMap = (left, right) => JSON.stringify(Object.entries(left || {}).sort()) === JSON.stringify(Object.entries(right || {}).sort())
+  const routeKey = request => { try { return perfApiRouteKey(request.url, request.method) } catch { return null } }
+  if (!runId || !workspaceId || !Array.isArray(requests) || !Array.isArray(unknownRoutes) || unknownRoutes.length || active !== 0 || !delta || !Number.isInteger(liveStartIndex) || liveStartIndex < 0) return result('unproven', 'Missing or incomplete live capture')
+  const accounted = { count: requests.length, bytes: 0, routes: {}, routeBytes: {} }
+  for (const [index, request] of requests.entries()) {
+    if (request.runId !== runId || !request.done || request.fulfilled !== true || !Number.isInteger(request.status) || request.status < 200 || request.status >= 300
+      || request.requestIndex !== liveStartIndex + index || request.requestId !== request.requestIndex + 1
+      || !Number.isSafeInteger(request.bytes) || request.bytes < 0 || typeof request.key !== 'string' || routeKey(request) !== request.key) return result('unproven', 'Unsuccessful, unknown, foreign or malformed live receipt')
+    accounted.bytes += request.bytes
+    accounted.routes[request.key] = (accounted.routes[request.key] || 0) + 1
+    accounted.routeBytes[request.key] = (accounted.routeBytes[request.key] || 0) + request.bytes
+  }
+  if (!Number.isSafeInteger(accounted.bytes) || delta.count !== accounted.count || delta.bytes !== accounted.bytes || !sameMap(delta.routes, accounted.routes) || !sameMap(delta.routeBytes, accounted.routeBytes)) return result('unproven', 'Live request/byte accounting mismatch')
+  if (['change-stream:resync', 'projects:list', 'tasks:list', 'workspaces:list'].some(key => (accounted.routes[key] || 0) > 0)) return result('whole-hydration', 'Workspace or entity-list enumeration')
+  if (requests.some(request => ['session', 'change-stream:ticket', 'workspaces:entity'].includes(request.key))) return result('unproven', 'Live workspace/session context admission or retirement')
+  if (requests.some(request => request.workspaceId !== workspaceId || (!['workspaces:planning-counts', 'observations:count', 'observations:list', 'navigation:summaries', 'navigation:branch'].includes(request.key)
+    && !/^(projects|tasks|observations):entity:/.test(request.key)))) return result('unproven', 'Foreign workspace or uncorroborated live context traffic')
+  const lists = requests.filter(request => request.key === 'observations:list')
+  const entities = requests.filter(request => request.key.startsWith('observations:entity:'))
+  const requestAllowedBetween = request => request.runId === runId && request.workspaceId === workspaceId && request.done === true && request.fulfilled === true && request.status === 200 && request.method === 'GET'
+    && routeKey(request) === request.key
+    && (['timeline:events', 'timeline:buckets', 'navigation:branch', 'navigation:focus'].includes(request.key) || /^(projects|tasks):entity:/.test(request.key))
+  const resetContext = expectedCount => reset && reset.runId === runId && reset.workspaceId === workspaceId && Number.isInteger(reset.requestIndex) && Number.isInteger(reset.requestId)
+    && Number.isInteger(snapshotGeneration) && snapshotGeneration >= 1 && reset.snapshotGeneration === snapshotGeneration && reset.membership?.executed === true && reset.membership.expected === expectedCount
+    && reset.recipe === 'reset-timeline-projects-separate-focus-projects-live.v1' && Array.isArray(intervening) && reset.recipeCompleted === true
+    && reset.requestIndex < liveStartIndex && intervening.length === liveStartIndex - reset.requestIndex - 1
+    && reset.receipt?.requestId === reset.requestId && reset.receipt.requestIndex === reset.requestIndex
+    && !intervening.some((request, index) => !requestAllowedBetween(request) || request.requestIndex !== reset.requestIndex + index + 1 || request.requestId !== request.requestIndex + 1
+      || (['timeline:events', 'timeline:buckets', 'navigation:branch', 'navigation:focus'].includes(request.key) && !new URL(request.url).pathname.startsWith(`/api/v1/workspaces/${workspaceId}/`)))
+  const exactPage = (request, hasMore = true) => {
+    const url = new URL(request.url)
+    const keys = [...url.searchParams.keys()]
+    if (request.runId !== runId || request.workspaceId !== workspaceId || request.method !== 'GET' || url.pathname !== '/api/v1/observations' || request.done !== true || request.fulfilled !== true || request.status !== 200
+      || keys.length !== 3 || new Set(keys).size !== 3 || keys.some(key => !['workspace_id', 'limit', 'offset'].includes(key))
+      || url.searchParams.get('workspace_id') !== workspaceId || url.searchParams.get('limit') !== '200' || url.searchParams.get('offset') !== '0') throw new Error('Not an exact current unfiltered first page')
+    assertObservationPageReceipt(request.observationPage, { workspaceId, offset: 0, expectedIds: expectedPrefix, hasMore })
+  }
+  const compact = request => ({ runId: request.runId, workspaceId: request.workspaceId, requestId: request.requestId, requestIndex: request.requestIndex, method: request.method, url: request.url,
+    bytes: request.bytes, status: request.status, fulfilled: request.fulfilled, count: request.observationPage.response.ids.length,
+    prefixHash: hashJson(request.observationPage.response.ids), firstId: request.observationPage.response.ids[0], lastId: request.observationPage.response.ids.at(-1), hasMore: request.observationPage.response.hasMore })
+  if (!lists.length) {
+    const proof = { runId, workspaceId, accountedRequests: accounted.count, accountedBytes: accounted.bytes,
+      liveStartIndex, liveEndIndex: liveStartIndex + accounted.count, requestsSucceeded: true, enumerationRequests: 0, observationEntityRequests: entities.length }
+    if (entities.length) {
+      const cached = Math.min(200, total), ids = entities.map(request => request.key.slice('observations:entity:'.length))
+      if (!Number.isSafeInteger(total) || total <= 0 || !Array.isArray(expectedPrefix) || expectedPrefix.length !== cached || new Set(expectedPrefix).size !== cached
+        || entities.length >= cached || entities.length >= total || new Set(ids).size !== ids.length) return result('whole-hydration', 'Duplicate or whole-cache Observation detail walk')
+      if (!resetContext(cached) || !Array.isArray(updatedObservationIds) || new Set(updatedObservationIds).size !== updatedObservationIds.length || !expectedObservationEntities) return result('unproven', 'Missing current reset or independently updated Observation IDs')
+      try { exactPage(reset.receipt, total > cached) } catch { return result('unproven', 'Detail refresh reset cache is not corroborated') }
+      for (const request of entities) {
+        const id = request.key.slice('observations:entity:'.length), url = new URL(request.url), dto = request.observationEntity, expected = expectedObservationEntities[id]
+        if (request.method !== 'GET' || url.pathname !== '/api/v1/observations/' + id || url.search || request.status !== 200
+          || !updatedObservationIds.includes(id) || !expectedPrefix.includes(id) || !dto || dto.id !== id || dto.workspaceId !== workspaceId
+          || !expected || dto.dtoHash !== expected.hash || dto.bytes !== expected.bytes || request.bytes !== expected.bytes) return result('unproven', 'Observation detail ID/path/workspace/updated-cache/DTO mismatch')
+      }
+      Object.assign(proof, { backingTotal: total, inferredRetainedCount: cached, offscreenModelObserved: false, executedResetMembership: reset.membership,
+        reset: compact(reset.receipt), interveningReceipts: intervening.length, cacheIds: expectedPrefix, updatedIds: updatedObservationIds,
+        entities: entities.map(request => ({ runId: request.runId, workspaceId: request.workspaceId, requestId: request.requestId, requestIndex: request.requestIndex,
+          id: request.observationEntity.id, method: request.method, url: request.url, status: request.status, fulfilled: request.fulfilled,
+          bytes: request.bytes, dtoHash: request.observationEntity.dtoHash, expectedDtoHash: expectedObservationEntities[request.observationEntity.id].hash })) })
+    }
+    return result('no-enumeration', 'Complete live capture has only corroborated individual refreshes and no workspace/entity list enumeration', proof)
+  }
+  if (lists.length !== 1) return result('whole-hydration', 'Observation page growth, restart or multiple refresh pages')
+  if (entities.length) return result('unproven', 'Mixed list/detail cache refresh is not corroborated by this contract')
+  if (!Number.isSafeInteger(total) || total <= 200 || !Array.isArray(expectedPrefix) || expectedPrefix.length !== 200 || new Set(expectedPrefix).size !== 200) return result('whole-hydration', 'Observation first page is not independently bounded below full membership')
+  if (!resetContext(200)) return result('unproven', 'Missing, foreign or stale accepted reset context')
+  try { exactPage(reset.receipt); exactPage(lists[0]) }
+  catch { return result('unproven', 'Reset/live wire, fulfillment or unique ordered fixture prefix mismatch') }
+  if (lists[0].requestIndex <= reset.requestIndex) return result('unproven', 'Reset/live request provenance is missing or out of order')
+  return result('bounded-cache-refresh', 'One fulfilled refresh of the independently corroborated retained first-page prefix', {
+    runId, workspaceId, backingTotal: total, inferredRetainedCount: 200, offscreenModelObserved: false,
+    executedResetMembership: reset.membership, reset: compact(reset.receipt), live: compact(lists[0]),
+    interveningReceipts: intervening.length, accountedRequests: accounted.count, accountedBytes: accounted.bytes,
+    liveStartIndex, liveEndIndex: liveStartIndex + accounted.count, requestsSucceeded: true })
+}
+
+export function liveHydrationAccepted(value) {
+  if (value?.revision !== LIVE_OBSERVATION_REFRESH_CONTRACT.revision || value.passed !== true || value.wholeWorkspaceReload !== false
+    || value.proofBasis !== LIVE_OBSERVATION_REFRESH_CONTRACT.retainedContextProof || typeof value.reason !== 'string' || !value.reason.length || value.reason.length > 256) return false
+  const proof = value.proof
+  const uuid = input => typeof input === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input)
+  const integer = input => Number.isSafeInteger(input) && input >= 0
+  const digest = input => typeof input === 'string' && /^[0-9a-f]{64}$/i.test(input)
+  if (!proof || !uuid(proof.runId) || !uuid(proof.workspaceId) || !integer(proof.accountedRequests)
+    || !integer(proof.accountedBytes) || !integer(proof.liveStartIndex) || !integer(proof.liveEndIndex)
+    || proof.liveEndIndex !== proof.liveStartIndex + proof.accountedRequests || proof.requestsSucceeded !== true
+    || (proof.accountedRequests > 0 && proof.accountedBytes <= 0) || (proof.accountedRequests === 0 && proof.accountedBytes !== 0)) return false
+  const page = (receipt, count = 200, hasMore = true) => {
+    if (!receipt || receipt.runId !== proof.runId || receipt.workspaceId !== proof.workspaceId || !integer(receipt.requestIndex)
+      || receipt.requestId !== receipt.requestIndex + 1 || receipt.method !== 'GET' || receipt.status !== 200 || receipt.fulfilled !== true
+      || receipt.count !== count || receipt.hasMore !== hasMore || !integer(receipt.bytes) || receipt.bytes <= 0 || !digest(receipt.prefixHash)
+      || !uuid(receipt.firstId) || !uuid(receipt.lastId) || receipt.firstId === receipt.lastId) return false
+    try {
+      const url = new URL(receipt.url), keys = [...url.searchParams.keys()]
+      return url.pathname === '/api/v1/observations' && keys.length === 3 && new Set(keys).size === 3
+        && keys.every(key => ['workspace_id', 'limit', 'offset'].includes(key)) && url.searchParams.get('workspace_id') === proof.workspaceId
+        && url.searchParams.get('limit') === '200' && url.searchParams.get('offset') === '0'
+    } catch { return false }
+  }
+  if (value.classification === 'no-enumeration') {
+    if (value.legacyWholeWorkspaceReload !== false || proof.enumerationRequests !== 0 || !integer(proof.observationEntityRequests) || proof.observationEntityRequests > proof.accountedRequests) return false
+    if (!proof.observationEntityRequests) return proof.entities == null || (Array.isArray(proof.entities) && !proof.entities.length)
+    if (!integer(proof.backingTotal) || proof.backingTotal < 1 || proof.inferredRetainedCount !== Math.min(200, proof.backingTotal)
+      || proof.offscreenModelObserved !== false || proof.executedResetMembership?.executed !== true || proof.executedResetMembership.expected !== proof.inferredRetainedCount
+      || !integer(proof.interveningReceipts) || !page(proof.reset, proof.inferredRetainedCount, proof.backingTotal > proof.inferredRetainedCount)
+      || proof.reset.requestIndex + proof.interveningReceipts + 1 !== proof.liveStartIndex
+      || !Array.isArray(proof.cacheIds) || proof.cacheIds.length !== proof.inferredRetainedCount || new Set(proof.cacheIds).size !== proof.cacheIds.length || !proof.cacheIds.every(uuid)
+      || hashJson(proof.cacheIds) !== proof.reset.prefixHash || proof.cacheIds[0] !== proof.reset.firstId || proof.cacheIds.at(-1) !== proof.reset.lastId
+      || !Array.isArray(proof.updatedIds) || !proof.updatedIds.every(uuid) || new Set(proof.updatedIds).size !== proof.updatedIds.length
+      || !Array.isArray(proof.entities) || proof.entities.length !== proof.observationEntityRequests || proof.entities.length >= proof.cacheIds.length
+      || new Set(proof.entities.map(entity => entity.id)).size !== proof.entities.length || new Set(proof.entities.map(entity => entity.requestIndex)).size !== proof.entities.length) return false
+    let entityBytes = 0
+    for (const entity of proof.entities) {
+      if (!uuid(entity.id) || !proof.cacheIds.includes(entity.id) || !proof.updatedIds.includes(entity.id) || entity.runId !== proof.runId || entity.workspaceId !== proof.workspaceId
+        || !integer(entity.requestIndex) || entity.requestId !== entity.requestIndex + 1 || entity.requestIndex < proof.liveStartIndex || entity.requestIndex >= proof.liveEndIndex
+        || entity.method !== 'GET' || entity.status !== 200 || entity.fulfilled !== true || !integer(entity.bytes) || entity.bytes <= 0
+        || !digest(entity.dtoHash) || !digest(entity.expectedDtoHash) || entity.dtoHash !== entity.expectedDtoHash) return false
+      try { const url = new URL(entity.url); if (url.pathname !== '/api/v1/observations/' + entity.id || url.search) return false } catch { return false }
+      entityBytes += entity.bytes
+    }
+    return integer(entityBytes) && entityBytes <= proof.accountedBytes
+  }
+  return value.classification === 'bounded-cache-refresh' && value.legacyWholeWorkspaceReload === true
+    && proof.offscreenModelObserved === false && proof.inferredRetainedCount === 200 && integer(proof.backingTotal) && proof.backingTotal > 200
+    && proof.executedResetMembership?.executed === true && proof.executedResetMembership.expected === 200
+    && integer(proof.interveningReceipts) && proof.accountedRequests > 0 && proof.accountedRequests <= 12 && page(proof.reset) && page(proof.live)
+    && proof.reset.requestIndex + proof.interveningReceipts + 1 === proof.liveStartIndex
+    && proof.live.requestIndex >= proof.liveStartIndex && proof.live.requestIndex < proof.liveEndIndex
+    && proof.live.bytes <= proof.accountedBytes && proof.reset.prefixHash === proof.live.prefixHash
+    && proof.reset.firstId === proof.live.firstId && proof.reset.lastId === proof.live.lastId
+}
+
+export function aggregateLiveHydration(values) {
+  return { passed: Array.isArray(values) && values.length === 5 && values.every(liveHydrationAccepted) }
+}
+
 export function perfApiRouteKey(input, method = 'GET') {
   const pathname = input instanceof URL ? input.pathname : new URL(input, 'http://perf.local').pathname
   const verb = method.toUpperCase()

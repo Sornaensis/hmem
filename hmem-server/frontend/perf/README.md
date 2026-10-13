@@ -147,6 +147,27 @@ uncorroborated controls fail. Scrolling verifies admitted members without clicki
 root pagers; physical row/observer and transport limits remain unchanged. This
 semantic feedback contract is fingerprinted separately for current qualification.
 
+Current live hydration qualification retains the historical route-only reload
+Boolean and reports a separate receipt classification. A single Observation
+first-page refresh qualifies only with the same-run fulfilled unfiltered reset,
+its executed exact 200-member guard, unchanged intervening context, and one
+fulfilled offset-0/limit-200 response whose unique ordered IDs match both the
+validated reset and independent fixture prefix, with more members remaining.
+Complete successful request/byte accounting is mandatory; every request remains
+in the unchanged live budgets. Session retirement, enumeration, extra pages,
+restarts, filtered or unproven traffic fails. Retained inactive membership is
+inferred from reset proof, source and the executed recipe; offscreen model state
+is not directly observed. This current contract/source proof is separately hashed;
+historical records and their route-only results are preserved.
+
+Individual Observation detail refreshes qualify separately from list enumeration:
+each distinct successful GET must target an ID updated by the dispatched fixture
+frames and present in the same-run validated reset cache. Response ID/workspace,
+complete DTO hash and byte size must match the independent fixture response.
+Duplicate, unreferenced, foreign, missing, failed, or whole-cache detail walks fail.
+The current small case records 16 individual receipts within all 18 live requests;
+the existing 12-request large-only budget gains no small-scale cap.
+
 Historical full snapshots contain 155 small or 4,951 large items, transported in
 two or 50 pages. Terminal-page readiness and canonical byte/order equality are
 required for that phase. Their cold timing is not phase-comparable with the

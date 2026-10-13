@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test'
 import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
 import { evidenceProfile, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
-import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, LIVE_OBSERVATION_REFRESH_CONTRACT, classifyLiveObservationHydration, aggregateLiveHydration, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -229,10 +229,14 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     const receipt = tracker.arrivals.get(request)
     if (!receipt) throw new Error('response without registered arrival')
     receipt.key = key
+    receipt.status = status
+    receipt.workspaceId ||= value?.workspace_id || null
     receipt.bytes = Buffer.byteLength(body)
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
     if (key === 'navigation:branch') { receipt.navigation = value; receipt.navigationStatus = status }
     if (key === 'observations:list') receipt.observationPage = observationPageReceipt(request.url(), request.method(), value, status)
+    if (key.startsWith('observations:entity:')) receipt.observationEntity = { id: value?.id || null, workspaceId: value?.workspace_id || null,
+      dtoHash: hashJson(value), bytes: receipt.bytes }
     if (key === 'timeline:events' || key === 'timeline:buckets') receipt.timeline = timelineReceipt(request.url(), request.method(), value, status)
     const gate = receipt.gate
     let fulfilled = false
@@ -242,6 +246,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         ...(receipt.paintReceiptId ? { headers: { 'Server-Timing': 'hmem_receipt;desc="' + receipt.paintReceiptId + '"' } } : {}) })
       fulfilled = true
     } finally {
+      receipt.fulfilled = fulfilled
       if (receipt.observationPage) receipt.observationPage.response.fulfilled = fulfilled
       if (receipt.timeline) receipt.timeline.response.fulfilled = fulfilled
       if (key === 'navigation:branch') receipt.navigationFulfilled = fulfilled
@@ -292,7 +297,10 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     const pathname = url.pathname
     const contractedKey = perfApiRouteKey(url, request.method())
     const key = contractedKey || 'unimplemented:' + request.method() + ':' + pathname
-    const receipt = { requestId: tracker.requests.length + 1, key, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
+    const receipt = { requestId: tracker.requests.length + 1, requestIndex: tracker.requests.length, runId: tracker.paintRunId,
+      workspaceId: pathname.match(/^\/api\/v1\/workspaces\/([^/]+)(?:\/|$)/)?.[1] || url.searchParams.get('workspace_id')
+        || (key === 'observations:count' ? request.postDataJSON()?.workspace_id : null),
+      key, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
     if (tracker.navigationProof) {
       if (key === 'session' || key === 'change-stream:resync') receipt.paintReceiptId = tracker.paintRunId + '-' + tracker.requests.length
       if (key === 'session') { receipt.proofSession = tracker.navigationProof.beginSession(); receipt.paintSession = tracker.paintReadiness.beginSession(receipt.at, receipt.paintReceiptId, request.url()) }
@@ -853,6 +861,24 @@ export function observationPaginationSource() {
   const pageSize = Number(source.match(/pageSize\s*:\s*Int\s+pageSize\s*=\s*(\d+)/)?.[1])
   if (pageSize !== OBSERVATION_PAGINATION_CONTRACT.pageSize) throw new Error('Observation pagination source contract changed')
   return { path: normalizedRepositoryPath(file), symbol: 'pageSize', pageSize, sha256: sha256File(file) }
+}
+
+export function liveObservationRefreshSource() {
+  const files = ['src/Feature/Observation.elm', 'src/Feature/WebSocket.elm', 'src/Feature/DataLoading.elm']
+  const observation = fs.readFileSync(path.join(frontendRoot, files[0]), 'utf8')
+  const socket = fs.readFileSync(path.join(frontendRoot, files[1]), 'utf8')
+  if (!observation.includes('targetOffset = Basics.max pageSize') || !observation.includes('next < old.targetOffset')
+    || !observation.includes('fetchRefreshPage 0 prepared') || !observation.includes('requestSessionEpoch = sessionEpoch')
+    || !socket.includes('Observation.refreshActiveResults')) throw new Error('Live retained Observation refresh source changed')
+  return files.map(relative => { const file = path.join(frontendRoot, relative); return { path: normalizedRepositoryPath(file), sha256: sha256File(file) } })
+}
+
+export function observationResetProof(tracker, fixture, page, expected) {
+  const request = tracker.requests.findLast(request => request.observationPage === page)
+  if (!request) throw new Error('Executed reset has no actual request receipt')
+  return { runId: tracker.paintRunId, workspaceId: fixture.workspace.id, requestId: request.requestId, requestIndex: request.requestIndex,
+    snapshotGeneration: tracker.model.snapshotGeneration, receipt: request, membership: { executed: true, expected },
+    recipe: 'reset-timeline-projects-separate-focus-projects-live.v1', recipeCompleted: false }
 }
 
 export function assertObservationPagination(tracker, before, fixture, offset, query, label) {
@@ -1513,6 +1539,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   await waitObservationMembers(page, Math.min(observationPageSize, fixture.observations.length), 'Observation filter reset')
   await waitForTransportQuiescence(page, tracker, 'Observation filter reset')
   const resetObservationPage = assertObservationPagination(tracker, observationFilterResetBefore, fixture, 0, null, 'Observation filter reset')
+  const resetProof = observationResetProof(tracker, fixture, resetObservationPage, Math.min(observationPageSize, fixture.observations.length))
   interactions.observationFilterResetMs = { ms: observationFilterResetMs, ...requestDelta(tracker, observationFilterResetBefore) }
   filters.observationReset = interactions.observationFilterResetMs
 
@@ -1537,6 +1564,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
 
   stage('pre-live Projects restore')
   await restoreWorkspace(page, tracker, fixture, anchors.first, 'pre-live representative Projects restore')
+  resetProof.recipeCompleted = true
 
   const collapsedBranches = fixture.size === 'large' ? ['project:' + anchors.expanded] : []
   tracker.navigationProof.setCollapsed(collapsedBranches)
@@ -1564,10 +1592,17 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const liveDelta = requestDelta(tracker, liveBefore)
   const entityRoutes = Object.entries(liveDelta.routes).filter(([key]) => key.includes(':entity:'))
   const duplicateRequests = entityRoutes.reduce((sum, [, count]) => sum + Math.max(0, count - 1), 0)
+  const updatedObservationIds = [...new Set(fixture.liveFrames.filter(frame => frame.event.workspace_id === fixture.workspace.id && frame.event.entity.type === 'observation' && frame.event.entity.action === 'updated').map(frame => frame.event.entity.id))]
+  const hydration = classifyLiveObservationHydration({ runId: tracker.paintRunId, workspaceId: fixture.workspace.id,
+    total: fixture.observations.length, expectedPrefix: queryObservations(fixture, { offset: 0, limit: 200 }).items.map(item => item.id),
+    updatedObservationIds,
+    expectedObservationEntities: Object.fromEntries(fixture.observations.filter(value => updatedObservationIds.includes(value.id)).map(value => [value.id, { hash: hashJson(value), bytes: Buffer.byteLength(JSON.stringify(value)) }])),
+    reset: resetProof, intervening: tracker.requests.slice(resetProof.requestIndex + 1, liveBefore.index), requests: tracker.requests.slice(liveBefore.index),
+    liveStartIndex: liveBefore.index, delta: liveDelta, active: tracker.active, unknownRoutes: tracker.unhandledApiRoutes, snapshotGeneration: tracker.model.snapshotGeneration })
   const liveBatch = {
     frames: fixture.liveFrames.length, sockets: pushedSockets, ms: liveTiming.settleMs, stabilityMs: liveTiming.stabilityMs, stabilityRequests: stability.requests,
     ...liveDelta, requests: liveDelta.count, duplicateRequests,
-    wholeWorkspaceReload: liveWholeWorkspaceReload(liveDelta.routes)
+    wholeWorkspaceReload: liveWholeWorkspaceReload(liveDelta.routes), hydration
   }
   dom.push({ tab: 'post-live-projects', ...(await domMetrics(page)) })
 
@@ -1650,7 +1685,8 @@ function aggregates(runs) {
       rawMs: live, medianMs: median(live), p95Ms: nearestRankP95(live), requestDeltas: liveRequestDeltas,
       requestCounts: liveRequestDeltas.map(delta => delta.count), fixtureBytes: liveRequestDeltas.map(delta => delta.bytes),
       routeCounts: liveRequestDeltas.map(delta => delta.routes), routeBytes: liveRequestDeltas.map(delta => delta.routeBytes),
-      duplicateRequests: runs.map(run => run.liveBatch.duplicateRequests), wholeWorkspaceReload: runs.some(run => run.liveBatch.wholeWorkspaceReload)
+      duplicateRequests: runs.map(run => run.liveBatch.duplicateRequests), wholeWorkspaceReload: runs.some(run => run.liveBatch.wholeWorkspaceReload),
+      hydration: runs.map(run => run.liveBatch.hydration), hydrationPassed: aggregateLiveHydration(runs.map(run => run.liveBatch.hydration)).passed
     },
     heap: { values: runs.map(run => run.attributableHeapBytes), maxAttributableBytes: Math.max(...runs.map(run => run.attributableHeapBytes)) },
     consoleErrors: runs.flatMap(run => run.consoleErrors)
@@ -1679,7 +1715,8 @@ function evaluate(result, comparableEnvironment = true) {
   metrics.push(...observationPaginationMetrics(small.observationLoadMore, large.observationLoadMore, target.observationLoadMore, comparableEnvironment))
   metrics.push(...observationScalingMetrics(large.observationScaling, target.observationLoadMore, comparableEnvironment))
   add('live follow-up requests', Math.max(...large.liveBatch.requestCounts), target.liveBatch.maxFollowUpRequests, Math.max(...large.liveBatch.requestCounts) <= target.liveBatch.maxFollowUpRequests)
-  add('live whole-workspace reload', large.liveBatch.wholeWorkspaceReload, false, !large.liveBatch.wholeWorkspaceReload)
+  add('small live whole-workspace hydration', small.liveBatch.hydrationPassed, true, small.liveBatch.hydrationPassed === true)
+  add('live whole-workspace hydration', large.liveBatch.hydrationPassed, true, large.liveBatch.hydrationPassed === true)
   add('live repeated-target duplicate requests', Math.max(...large.liveBatch.duplicateRequests), target.liveBatch.maxDuplicateRequestsPerRepeatedTarget, Math.max(...large.liveBatch.duplicateRequests) <= target.liveBatch.maxDuplicateRequestsPerRepeatedTarget)
   add('browser console errors', large.consoleErrors.length, 0, large.consoleErrors.length === 0)
   for (const [scenario, values] of Object.entries(large.localInteractions.scenarios)) {
@@ -1780,6 +1817,8 @@ async function main() {
     timelineCurrentSource: timelineSource(),
     settledNavigationFeedbackContractHash: hashJson(SETTLED_NAVIGATION_FEEDBACK_CONTRACT),
     settledNavigationFeedbackSource: settledNavigationSource(),
+    liveObservationRefreshContractHash: hashJson(LIVE_OBSERVATION_REFRESH_CONTRACT),
+    liveObservationRefreshSource: liveObservationRefreshSource(),
     ...(evidencePlan.scaling ? { observationScalingContractHash: hashJson(OBSERVATION_SCALING_CONTRACT) } : {}),
     ...(evidencePlan.planningCounts ? { planningCountsContractHash: hashJson({ ...PLANNING_COUNTS_CONTRACT, traceCaptureOptions }) } : {}),
     ...(evidencePlan.rendering ? { observationReachabilityContractHash: hashJson({ revision: 'logical-scroll.v1', flat: [50, 100], match: [50, 100, 150], completeOrderedContextualCards: true, physicalBudgetSelectorsUnchanged: true, scansOutsideMeasuredActionIntervals: true }) } : {}),
@@ -1888,6 +1927,7 @@ async function main() {
       observationPaginationContract: OBSERVATION_PAGINATION_CONTRACT,
       timelineCurrentContract: TIMELINE_CURRENT_CONTRACT,
       settledNavigationFeedbackContract: SETTLED_NAVIGATION_FEEDBACK_CONTRACT,
+      liveObservationRefreshContract: LIVE_OBSERVATION_REFRESH_CONTRACT,
       taskId: evidenceTask?.taskId || null, parentTaskId: evidenceTask?.parentTaskId || null, evidenceBaseCommit,
       inputQualification: qualifiedInputs, sourceProvenance: qualifiedProvenance, measurementRevision: evidenceRevision,
       fixtures: {

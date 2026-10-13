@@ -9,8 +9,8 @@ import { chromium } from '@playwright/test'
 import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
 import { evidenceProfile, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
-import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
-import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
+import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.dirname(here)
@@ -233,6 +233,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
     if (key === 'navigation:branch') receipt.navigation = value
     if (key === 'observations:list') receipt.observationPage = observationPageReceipt(request.url(), request.method(), value, status)
+    if (key === 'timeline:events' || key === 'timeline:buckets') receipt.timeline = timelineReceipt(request.url(), request.method(), value, status)
     const gate = receipt.gate
     let fulfilled = false
     if (gate && !gate.used) { gate.used = true; gate.signalPaused(); await (gate.waitForRelease) }
@@ -242,6 +243,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       fulfilled = true
     } finally {
       if (receipt.observationPage) receipt.observationPage.response.fulfilled = fulfilled
+      if (receipt.timeline) receipt.timeline.response.fulfilled = fulfilled
       if (status < 400 && key === 'change-stream:resync') {
         const requestBody = request.postDataJSON()
         if (!requestBody.page_token) {
@@ -256,8 +258,8 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         tracker.model.snapshotComplete = value.has_more === false
         if (tracker.model.snapshotComplete) tracker.navigationProof?.completeSnapshot(receipt.proofSnapshot, value.snapshot_profile)
       }
-      if (status < 400 && key === 'timeline:events') tracker.model.timelineEvents = value.items.length
-      if (status < 400 && key === 'timeline:buckets') {
+      if (fulfilled && status < 400 && key === 'timeline:events') tracker.model.timelineEvents = value.items.length
+      if (fulfilled && status < 400 && key === 'timeline:buckets') {
         tracker.model.timelineBuckets = value.buckets.length
         tracker.model.timelineBucketRequest = { since: value.since, until: value.until, bucket: value.bucket }
       }
@@ -439,7 +441,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
   }
 }
 
-async function staticServer() {
+export async function staticServer() {
   const server = http.createServer((request, response) => {
     const pathname = new URL(request.url, 'http://local').pathname
     if (pathname === '/hmem-runtime-config.js') {
@@ -484,7 +486,7 @@ const fakeWebSocketScript = `
     unobserve(row){super.unobserve(row);ledger.unobserve(this,row)}
     disconnect(){super.disconnect();ledger.disconnect(this)}
   };
-  new MutationObserver(()=>{const m=window.__perfRenderMaximum;m.nodes=Math.max(m.nodes,document.querySelectorAll('*').length);m.rows=Math.max(m.rows,document.querySelectorAll('.card-project,.card-task,.card-subtask,.observation-card,.timeline-event-card,.timeline-value-table tbody tr').length);m.hierarchyRows=Math.max(m.hierarchyRows,document.querySelectorAll('[data-hierarchy-key]').length)}).observe(document,{childList:true,subtree:true});
+  new MutationObserver(()=>{const m=window.__perfRenderMaximum;m.nodes=Math.max(m.nodes,document.querySelectorAll('*').length);m.rows=Math.max(m.rows,document.querySelectorAll('.card-project,.card-task,.card-subtask,.observation-card,.timeline-event-card,.timeline-value-table tbody tr,.timeline-point-control').length);m.hierarchyRows=Math.max(m.hierarchyRows,document.querySelectorAll('[data-hierarchy-key]').length)}).observe(document,{childList:true,subtree:true});
   window.WebSocket=PerfWebSocket;
   window.__perfPushFrames=(frames) => { const open=sockets.filter(socket => socket.readyState===1); const marker={frames:frames.length,sockets:open.length,resumeToken:'fixture-live-after',dispatchTurnComplete:false}; window.__perfLastPush=marker; for (const frame of frames) for (const socket of open) socket.__emit(frame); for (const socket of open) socket.__emit({schema_version:1,type:'checkpoint',catch_up:'complete',resume_token:'fixture-live-after'}); setTimeout(() => { marker.dispatchTurnComplete=true; }, 0); return open.length; };
 })();`
@@ -741,12 +743,12 @@ async function assertLiveStability(page, tracker, durationMs = 500) {
 async function domMetrics(page) {
   return page.evaluate(() => ({
     nodes: document.querySelectorAll('*').length,
-    rows: document.querySelectorAll('.card-project,.card-task,.card-subtask,.observation-card,.timeline-event-card,.timeline-value-table tbody tr').length,
+    rows: document.querySelectorAll('.card-project,.card-task,.card-subtask,.observation-card,.timeline-event-card,.timeline-value-table tbody tr,.timeline-point-control').length,
     projects: document.querySelectorAll('.card-project').length,
     tasks: document.querySelectorAll('.card-task,.card-subtask').length,
     observations: document.querySelectorAll('.observation-card').length,
     timelineEvents: document.querySelectorAll('.timeline-event-card').length,
-    timelineRows: document.querySelectorAll('.timeline-value-table tbody tr').length
+    timelineRows: document.querySelectorAll('.timeline-value-table tbody tr,.timeline-point-control').length
   }))
 }
 
@@ -778,6 +780,96 @@ export function assertObservationPagination(tracker, before, fixture, offset, qu
   const expected = queryObservations(fixture, { query, offset, limit: OBSERVATION_PAGINATION_CONTRACT.pageSize })
   return assertObservationPageReceipt(pages[0].observationPage, { workspaceId: fixture.workspace.id, offset, query,
     expectedIds: expected.items.map(item => item.id), hasMore: expected.has_more })
+}
+
+export function timelineSource() {
+  const sources = ['src/Feature/Timeline.elm', 'src/Api.elm', 'src/Helpers.elm'].map(relative => {
+    const file = path.join(frontendRoot, relative)
+    return { path: normalizedRepositoryPath(file), sha256: sha256File(file) }
+  })
+  const source = fs.readFileSync(path.join(frontendRoot, 'src/Feature/Timeline.elm'), 'utf8')
+  if (!/histogramWindow = "30"/.test(source) || !/histogramBucket = "week"/.test(source)
+    || !source.includes('Maybe.withDefault 30 (String.toInt window) - 1') || !source.includes('nowMillis + millisPerDay')
+    || !source.includes('timeline-point-control') || !source.includes('Lifecycle activity')) throw new Error('Timeline current source contract changed')
+  return { window: '30', bucket: 'week', sources }
+}
+
+export function assertTimelineTransport(tracker, before, fixture) {
+  const requests = tracker.requests.slice(before.index)
+  const expectedEvents = queryTimelineEvents(fixture, { limit: 50 })
+  const expectedBuckets = queryTimelineBuckets(fixture, TIMELINE_CURRENT_CONTRACT.query)
+  const receipts = {}
+  for (const [kind, value] of [['events', expectedEvents], ['buckets', expectedBuckets]]) {
+    const actual = requests.filter(request => request.key === 'timeline:' + kind)
+    if (actual.length !== 1) throw new Error('Timeline requires exactly one actual ' + kind + ' response, observed ' + actual.length)
+    receipts[kind] = assertTimelineReceipt(actual[0].timeline, fixture.workspace.id, kind, value)
+  }
+  if (tracker.model.timelineEvents !== expectedEvents.items.length || tracker.model.timelineBuckets !== expectedBuckets.buckets.length
+    || JSON.stringify(tracker.model.timelineBucketRequest) !== JSON.stringify(TIMELINE_CURRENT_CONTRACT.query)) throw new Error('Timeline intercepted model does not match the current fulfilled DTOs')
+  return { receipts, chart: timelineChartExpectation(expectedEvents, expectedBuckets) }
+}
+
+export function timelineDomReady(expected) {
+  const panel = document.querySelector('.timeline-panel')
+  if (!panel || document.querySelector('.timeline-panel .loading-indicator,.timeline-graph-error,.timeline-stale-notice,.timeline-state .btn-secondary,.timeline-selection-note')
+    || [...document.querySelectorAll('.timeline-graph-state')].some(node => node.textContent.includes('Loading'))
+    || JSON.stringify([...document.querySelectorAll('.timeline-event-card')].map(node => node.id)) !== JSON.stringify(expected.eventIds)) return false
+  const charts = [...document.querySelectorAll('svg.timeline-line-chart')]
+  if (charts.length !== 1 || charts[0].namespaceURI !== 'http://www.w3.org/2000/svg'
+    || charts[0].getAttribute('aria-labelledby') !== 'timeline-chart-lifecycle-title timeline-chart-lifecycle-description'
+    || document.getElementById('timeline-chart-lifecycle-title')?.textContent !== 'Lifecycle activity lifecycle counts by UTC bucket'
+    || document.getElementById('timeline-chart-lifecycle-description')?.textContent !== 'Each interactive point selects its half-open UTC bucket for the event cards.') return false
+  const controls = [...document.querySelectorAll('.timeline-graph-controls select')]
+  if (controls.length !== 2 || controls[0].value !== expected.window || controls[1].value !== expected.bucket) return false
+  const paths = [...document.querySelectorAll('svg.timeline-line-chart path.timeline-line')]
+  if (paths.length !== expected.actions.length || !expected.actions.every((action, index) => paths[index].classList.contains('timeline-series-' + action)
+    && paths[index].namespaceURI === 'http://www.w3.org/2000/svg' && paths[index].getAttribute('d')?.trim())) return false
+  const toggles = [...document.querySelectorAll('[aria-label="Visible lifecycle events"] .timeline-series-toggle')]
+  if (toggles.length !== expected.actions.length || !expected.actions.every((action, index) => toggles[index].classList.contains('timeline-series-' + action) && toggles[index].getAttribute('aria-pressed') === 'true')) return false
+  const entities = ['projects', 'tasks', 'subtasks', 'observations']
+  const entityToggles = [...document.querySelectorAll('[aria-label="Visible entity series"] .timeline-series-toggle')]
+  if (entityToggles.length !== entities.length || !entities.every((entity, index) => entityToggles[index].classList.contains('timeline-series-' + entity) && entityToggles[index].getAttribute('aria-pressed') === 'true')) return false
+  const points = [...document.querySelectorAll('.timeline-point-control')]
+  return points.length === expected.points.length && expected.points.every((point, index) => {
+    const node = points[index]
+    return node.id === point.id && node.namespaceURI === 'http://www.w3.org/2000/svg'
+      && node.getAttribute('role') === point.role && node.getAttribute('tabindex') === point.tabindex
+      && node.getAttribute('aria-pressed') === point.pressed && node.getAttribute('aria-label') === point.label
+      && node.querySelector('title')?.textContent === point.title
+      && node.querySelectorAll('circle.timeline-point-hitarea').length === 1 && node.querySelectorAll('circle.timeline-point').length === 1
+  })
+}
+
+export function timelineDomSnapshot() {
+  const text = selector => document.querySelector(selector)?.textContent?.slice(0, 256) || null
+  const toggles = (label, limit) => [...document.querySelectorAll('[aria-label="' + label + '"] .timeline-series-toggle')].slice(0, limit).map(node => ({ classes: node.getAttribute('class')?.slice(0, 128) || null, pressed: node.getAttribute('aria-pressed')?.slice(0, 16) || null }))
+  return { panel: !!document.querySelector('.timeline-panel'), eventCards: document.querySelectorAll('.timeline-event-card').length,
+    charts: document.querySelectorAll('svg.timeline-line-chart').length, paths: document.querySelectorAll('path.timeline-line').length,
+    points: document.querySelectorAll('.timeline-point-control').length, legacyRows: document.querySelectorAll('.timeline-value-table tbody tr').length,
+    selectedPoints: document.querySelectorAll('.timeline-point-selected').length, selection: !!document.querySelector('.timeline-selection-note'),
+    controls: [...document.querySelectorAll('.timeline-graph-controls select')].slice(0, 2).map(node => node.value.slice(0, 32)),
+    loading: !!document.querySelector('.timeline-panel .loading-indicator') || [...document.querySelectorAll('.timeline-graph-state')].some(node => node.textContent.includes('Loading')),
+    error: text('.timeline-graph-error,.timeline-stale-notice,.timeline-state .btn-secondary'),
+    lifecycleToggles: toggles('Visible lifecycle events', 5), entityToggles: toggles('Visible entity series', 4),
+    pointLabels: [...document.querySelectorAll('.timeline-point-control')].slice(0, 25).map(node => node.getAttribute('aria-label')?.slice(0, 256) || null) }
+}
+
+export async function waitTimeline(page, tracker, before, fixture) {
+  let timer
+  try {
+    const chart = timelineChartExpectation(queryTimelineEvents(fixture, { limit: 50 }), queryTimelineBuckets(fixture, TIMELINE_CURRENT_CONTRACT.query))
+    await page.waitForFunction(timelineDomReady, chart, { timeout: 30000 })
+    await waitForTransportQuiescence(page, tracker, 'Timeline')
+    return assertTimelineTransport(tracker, before, fixture)
+  } catch (error) {
+    let dom
+    try { dom = await Promise.race([page.evaluate(timelineDomSnapshot), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Timeline diagnostic capture exceeded 1000ms')), 1000) })]) }
+    catch (captureError) { dom = { captureError: captureError.message.slice(0, 256) } }
+    finally { clearTimeout(timer) }
+    const diagnostic = { phase: attemptState?.phase || 'Timeline', dom, active: tracker.active, model: { events: tracker.model.timelineEvents, buckets: tracker.model.timelineBuckets, request: tracker.model.timelineBucketRequest },
+      requests: tracker.requests.slice(before.index).filter(request => request.key.startsWith('timeline:')).slice(0, 4).map(request => ({ method: request.method, url: request.url.slice(0, 512), fulfilled: request.timeline?.response.fulfilled ?? null, status: request.timeline?.response.status ?? null })) }
+    throw Object.assign(new Error(error.message + '; Timeline ' + JSON.stringify(diagnostic), { cause: error }), { timelineQualification: diagnostic })
+  }
 }
 
 function assertSingleCappedBranchRequest(tracker, before, workspaceId, parentId, label) {
@@ -1230,7 +1322,9 @@ export async function waitObservationMembers(page, count, label = 'Observation m
   if (attemptState) attemptState.phase = previousPhase
 }
 
-async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns) {
+export async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns) {
+  const runPhase = attemptState?.phase || fixture.size + ' warmup'
+  const stage = label => { if (attemptState) attemptState.phase = runPhase + ': ' + label }
   if (fixture.observationScaling) fixture = { ...fixture, observations: fixture.observations.map(value => ({ ...value })) }
   const anchors = representativeProjectAnchors(fixture)
   const tracker = createTracker(fixture)
@@ -1341,35 +1435,30 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const observationScaling = fixture.observationScaling ? await measureObservationScaling(page, tracker, fixture, cdp, blankHeap, dom, interactions) : null
 
   const timelineTabBefore = requestSnapshot(tracker)
+  stage('Timeline')
   const timelineTabMs = await requiredDoubleFrame(page, '.tabs button:nth-child(3)')
-  await page.waitForSelector('.timeline-panel')
-  await page.waitForFunction(() =>
-    !document.querySelector('.timeline-panel .loading-indicator')
-    && document.querySelectorAll('.timeline-event-card').length > 0
-    && document.querySelectorAll('.timeline-value-table tbody tr').length > 0,
-  null, { timeout: 30000 })
-  await waitForTransportQuiescence(page, tracker, 'Timeline')
-  const expectedTimelineBuckets = queryTimelineBuckets(fixture, TIMELINE_DEFAULT_UI_QUERY).buckets.length
-  if (tracker.model.timelineEvents !== Math.min(50, fixture.timeline.events.length) || tracker.model.timelineBuckets !== expectedTimelineBuckets || JSON.stringify(tracker.model.timelineBucketRequest) !== JSON.stringify(TIMELINE_DEFAULT_UI_QUERY)) {
-    throw new Error(`Timeline model readiness mismatch: events ${tracker.model.timelineEvents}/${Math.min(50, fixture.timeline.events.length)}, buckets ${tracker.model.timelineBuckets}/${expectedTimelineBuckets}, request=${JSON.stringify(tracker.model.timelineBucketRequest)}`)
-  }
+  const timelineQualification = await waitTimeline(page, tracker, timelineTabBefore, fixture)
   interactions.timelineTabMs = { ms: timelineTabMs, ...requestDelta(tracker, timelineTabBefore) }
   tabSwitches.timeline = interactions.timelineTabMs
   dom.push({ tab: 'timeline', ...(await domMetrics(page)) })
 
   const projectsTabBefore = requestSnapshot(tracker)
+  stage('Projects tab restore')
   const returnProjectsMs = await requiredDoubleFrame(page, '.tabs button:nth-child(1)')
   await waitForWorkspaceReady(page, tracker, fixture, anchors.first, 'Projects tab representative restore')
   interactions.projectsTabMs = { ms: returnProjectsMs, ...requestDelta(tracker, projectsTabBefore) }
   tabSwitches.projects = interactions.projectsTabMs
+  stage('direct focus')
   const directFocus = await measureDirectFocus(browser, origin, fixture)
 
+  stage('pre-live Projects restore')
   await restoreWorkspace(page, tracker, fixture, anchors.first, 'pre-live representative Projects restore')
 
   const collapsedBranches = fixture.size === 'large' ? ['project:' + anchors.expanded] : []
   tracker.navigationProof.setCollapsed(collapsedBranches)
   const logicalReady = () => tracker.navigationProof.ready()
   const liveBefore = requestSnapshot(tracker)
+  stage('live batch')
   const liveStart = performance.now()
   const pushedSockets = await page.evaluate(frames => window.__perfPushFrames(frames), fixture.liveFrames)
   if (pushedSockets !== 1) throw new Error(`live fixture expected one open socket, observed ${pushedSockets}`)
@@ -1377,6 +1466,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const settledAt = await waitForLiveSettle(page, tracker, liveBefore, anchors.first, logicalReady)
   const stability = await assertLiveStability(page, tracker, 500)
   const liveTiming = liveTimingSummary({ startedAt: liveStart, settledAt, stabilityStartedAt: stability.startedAt, stabilityEndedAt: stability.endedAt })
+  stage('post-live readiness')
   const postLiveUi = await projectUiSignals(page, anchors.first)
   const expectedSnapshotItems = workspaceShellSnapshotItems(fixture).length
   const expectedSnapshotPages = Math.ceil(expectedSnapshotItems / DIRECT_FOCUS_CONTRACT.pageSize)
@@ -1397,6 +1487,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   }
   dom.push({ tab: 'post-live-projects', ...(await domMetrics(page)) })
 
+  stage('Projects heap after garbage collection')
   await cdp.send('HeapProfiler.collectGarbage')
   const heap = await cdp.send('Runtime.getHeapUsage')
   assertNoUnhandledApiRoutes(tracker)
@@ -1407,6 +1498,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const result = {
     fixture: fixture.size, measured, cold, background, lifetimeRender, tabSwitches, filters, interactions, observationLoadMore, observationScaling, directFocus, liveBatch, dom,
     observationPagination: { revision: OBSERVATION_PAGINATION_CONTRACT.revision, initial: initialObservationPage, filtered: filteredObservationPage, reset: resetObservationPage },
+    timelineQualification: { revision: TIMELINE_CURRENT_CONTRACT.revision, ...timelineQualification },
     maxDomNodes: renderMaximums.nodes, maxCollectionRows: renderMaximums.rows,
     attributableHeapBytes: Math.max(0, heap.usedSize - blankHeap),
     heapPoint: HARNESS_CONFIGURATION.heapPoint,
@@ -1557,10 +1649,12 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
       evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
       commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
+      ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
     failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
       qualificationPassed: false, failure: error.message, retirement,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
+      ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}),
       validationRecord: { path: evidenceArtifactPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
   }, action)
@@ -1596,6 +1690,8 @@ async function main() {
     directFocusContractHash: hashJson(DIRECT_FOCUS_CONTRACT),
     observationPaginationContractHash: hashJson(OBSERVATION_PAGINATION_CONTRACT),
     observationPaginationSource: observationPaginationSource(),
+    timelineCurrentContractHash: hashJson(TIMELINE_CURRENT_CONTRACT),
+    timelineCurrentSource: timelineSource(),
     ...(evidencePlan.scaling ? { observationScalingContractHash: hashJson(OBSERVATION_SCALING_CONTRACT) } : {}),
     ...(evidencePlan.planningCounts ? { planningCountsContractHash: hashJson({ ...PLANNING_COUNTS_CONTRACT, traceCaptureOptions }) } : {}),
     ...(evidencePlan.rendering ? { observationReachabilityContractHash: hashJson({ revision: 'logical-scroll.v1', flat: [50, 100], match: [50, 100, 150], completeOrderedContextualCards: true, physicalBudgetSelectorsUnchanged: true, scansOutsideMeasuredActionIntervals: true }) } : {}),
@@ -1702,6 +1798,7 @@ async function main() {
         : recordedBaseline.recordAuthorization,
       environment, configuration: HARNESS_CONFIGURATION, contracts,
       observationPaginationContract: OBSERVATION_PAGINATION_CONTRACT,
+      timelineCurrentContract: TIMELINE_CURRENT_CONTRACT,
       taskId: evidenceTask?.taskId || null, parentTaskId: evidenceTask?.parentTaskId || null, evidenceBaseCommit,
       inputQualification: qualifiedInputs, sourceProvenance: qualifiedProvenance, measurementRevision: evidenceRevision,
       fixtures: {
@@ -1771,7 +1868,7 @@ async function main() {
     command.exitCode = checkQualification({ recordEvaluation: previous.recordEvaluation, checkEvaluation: measuredResult.evaluation,
       commands: [...previous.commands, command], retirement }).exitCode
   }
-  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), { ...(failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {}), ...(failure?.observationMembership ? { observationMembership: failure.observationMembership } : {}) })
+  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), { ...(failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {}), ...(failure?.observationMembership ? { observationMembership: failure.observationMembership } : {}), ...(failure?.timelineQualification ? { timelineQualification: failure.timelineQualification } : {}) })
   if (failure) {
     persistOrRetainFailureDiagnostics(attemptState, () => qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure }, diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() }))))
     throw failure
@@ -1790,6 +1887,7 @@ if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main
     startedAtUtc: attemptState?.startedAtUtc, elapsedMs: attemptState ? Math.round(performance.now() - attemptState.started) : null,
     failure: error.message.slice(0, 1000), traceAdmission: error.traceAdmission || null,
     observationMembership: error.observationMembership || null,
+    timelineQualification: error.timelineQualification || null,
     captureOptions: traceCaptureOptions, retirement: attemptState?.retirement,
     priorFailureDiagnosticsPreserved: !!attemptState?.pendingFailure && !(attemptState.traceVerified && attemptState.retirement?.passed),
     retainedPaths: [validationRecordPath, evidenceManifestPath]

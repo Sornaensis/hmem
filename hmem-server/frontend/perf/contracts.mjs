@@ -87,6 +87,44 @@ export function observationPaginationMetrics(small, large, budget, comparableEnv
   ]
 }
 
+export const TIMELINE_CURRENT_CONTRACT = Object.freeze({
+  revision: 'timeline-window-svg.v1', clockUtc: '2026-08-30T12:00:00Z', window: '30',
+  query: Object.freeze({ since: '2026-08-01T00:00:00Z', until: '2026-08-31T00:00:00Z', bucket: 'week' }),
+  eventLimit: 50, actions: Object.freeze(['created', 'completed', 'deleted', 'archived', 'cancelled']),
+  source: 'hmem-server/frontend/src/Feature/Timeline.elm',
+  legacyTimingComparability: Object.freeze({ comparable: false, reason: 'Current 30-day SVG qualification differs from the retained three-month table workload.' })
+})
+
+export function timelineReceipt(input, method, value, status = 200) {
+  const url = new URL(input)
+  return { request: { method, path: url.pathname, query: Object.fromEntries([...url.searchParams].sort()) },
+    response: { status, fulfilled: false, value } }
+}
+
+export function assertTimelineReceipt(receipt, workspaceId, kind, expected) {
+  const request = receipt?.request, response = receipt?.response
+  const query = kind === 'events' ? { limit: '50' } : { bucket: 'week', paged: 'true', since: TIMELINE_CURRENT_CONTRACT.query.since, until: TIMELINE_CURRENT_CONTRACT.query.until }
+  const suffix = kind === 'events' ? '' : '/buckets'
+  if (!['events', 'buckets'].includes(kind) || request?.method !== 'GET'
+    || request.path !== `/api/v1/workspaces/${workspaceId}/timeline${suffix}`
+    || JSON.stringify(request.query) !== JSON.stringify(query) || response?.status !== 200 || response.fulfilled !== true
+    || JSON.stringify(response.value) !== JSON.stringify(expected)) throw new Error('Timeline exact request/DTO receipt mismatch: ' + kind)
+  return receipt
+}
+
+export function timelineChartExpectation(events, histogram) {
+  const labels = { created: 'Create', completed: 'Complete', deleted: 'Delete', archived: 'Archive', cancelled: 'Cancel' }
+  const format = value => value.replace('T', ' ').slice(0, 16)
+  const points = TIMELINE_CURRENT_CONTRACT.actions.flatMap(action => histogram.buckets.map((bucket, index) => {
+    const count = ['project', 'task', 'subtask', 'observation'].reduce((sum, kind) => sum + (bucket.series[kind][action] ?? 0), 0)
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('Timeline canonical count is invalid')
+    return { id: `timeline-point-lifecycle-${action}-${index}`, role: 'button', tabindex: index === 0 ? '0' : '-1', pressed: 'false',
+      label: `Lifecycle activity, ${labels[action]}, ${bucket.label}, ${format(bucket.bucket_start)} to ${format(bucket.bucket_end)} exclusive, ${count}, not selected`,
+      title: `Lifecycle activity — ${labels[action]} — ${bucket.label} [${format(bucket.bucket_start)}, ${format(bucket.bucket_end)}): ${count}` }
+  }))
+  return { eventIds: events.items.map(event => 'timeline-event-' + event.id), points, actions: TIMELINE_CURRENT_CONTRACT.actions, window: '30', bucket: 'week' }
+}
+
 export function nearestRankP95(values) {
   if (!Array.isArray(values) || values.length === 0 || values.some(value => !Number.isFinite(value))) throw new Error('p95 requires non-empty finite samples')
   const sorted = [...values].sort((a, b) => a - b)

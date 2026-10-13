@@ -146,9 +146,19 @@ current one-item workspace shell and painted-root cut. Direct focus starts
 with an empty model and paused canonical resync, observes the last root project
 (small 9, large 249) for 750 ms, then verifies the untouched complete resync.
 
-The clock is fixed at `2026-08-30T12:00:00Z`. Timeline's default range is
-June 1 through August 31 exclusive and returns 13 weekly rows from the unchanged
-20/500 backing source rows. Search ranking and UTC bucket aggregation are
+The clock is fixed at `2026-08-30T12:00:00Z`. Current Timeline qualification uses
+the source-anchored 30-day default, August 1 through August 31 exclusive, with five
+weekly buckets. Exact fulfilled event-list (limit 50) and histogram request/DTO
+receipts prove the ordered event cards and all five enabled lifecycle SVG series.
+Each point's accessible count, half-open range, title and roving keyboard position
+must match the canonical buckets; zero activity remains valid. Physical collection
+and lifetime high-water metrics count these point controls and retain the legacy
+table selector under unchanged budgets. The current contract and its production
+source hashes are fingerprinted separately from historical configuration.
+
+Historical Timeline fixtures retain the June 1 through August 31 range and its
+13 weekly rows from unchanged 20/500 backing rows. Their table workload is not
+timing-comparable to the current 30-day SVG workload. Search ranking and UTC bucket aggregation are
 deterministic approximations, with production route ordering and caps checked
 by self-tests. Historical path-match profiles use empty valid results;
 Observation profiles use the declared nonempty matcher.

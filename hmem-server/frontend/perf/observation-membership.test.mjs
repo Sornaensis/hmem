@@ -111,7 +111,7 @@ test('ordinary initial, load-more, filter and reset use one logical helper while
   assert.match(source, /waitObservationMembers\(page, Math\.min\(observationPageSize, fixture\.observations\.length\), 'Observation filter reset'\)/)
   const metrics = source.split('async function domMetrics(page)')[1].split('async function')[0]
   assert.match(metrics, /observations: document\.querySelectorAll\('\.observation-card'\)\.length/)
-  assert.match(source, /m\.rows=Math\.max\(m\.rows,document\.querySelectorAll\('\.card-project,\.card-task,\.card-subtask,\.observation-card,\.timeline-event-card,\.timeline-value-table tbody tr'\)\.length\)/)
+  assert.match(source, /m\.rows=Math\.max\(m\.rows,document\.querySelectorAll\('\.card-project,\.card-task,\.card-subtask,\.observation-card,\.timeline-event-card,\.timeline-value-table tbody tr,\.timeline-point-control'\)\.length\)/)
   assert.match(source, /observationMembership: error\.observationMembership \|\| null/)
 })
 

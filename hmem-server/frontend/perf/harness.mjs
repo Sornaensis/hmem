@@ -1165,11 +1165,49 @@ async function measureObservationScaling(page, tracker, fixture, cdp, blankHeap,
     researchTriggers: { activeEditorHeap: activeEditorHeapBytes > contract.researchTriggers.activeEditorHeapBytes, observationLiveFollowUps: live.count > contract.researchTriggers.observationLiveFollowUps } }
 }
 
-async function waitObservationMembers(page, count) {
-  await page.waitForFunction(({ expected, logical }) => logical
-    ? document.getElementById('observation-viewport')?.dataset.observationLoadedCount === String(expected)
-    : document.querySelectorAll('.observation-card').length === expected,
-  { expected: count, logical: evidencePlan.rendering }, { timeout: 30000 })
+export function observationMembershipReady({ expected, requireIdle = false }) {
+  const viewport = document.getElementById('observation-viewport')
+  const raw = viewport?.dataset.observationLoadedCount
+  const valid = typeof raw === 'string' && /^(0|[1-9][0-9]*)$/.test(raw) && Number.isSafeInteger(Number(raw))
+  const count = viewport ? (valid ? Number(raw) : null) : document.querySelectorAll('.observation-card').length
+  return count === expected && (!requireIdle || !document.querySelector('.observation-state-loading'))
+}
+
+export function observationMembershipSnapshot({ expected, label, phase, requireIdle }) {
+  const viewport = document.getElementById('observation-viewport')
+  const raw = viewport?.dataset.observationLoadedCount
+  const valid = typeof raw === 'string' && /^(0|[1-9][0-9]*)$/.test(raw) && Number.isSafeInteger(Number(raw))
+  const error = document.querySelector('.observation-state-error')
+  return { expected, label, phase, requireIdle, viewportPresent: !!viewport,
+    rawLogicalCount: raw == null ? null : String(raw).slice(0, 64), logicalCount: valid ? Number(raw) : null,
+    mountedCards: document.querySelectorAll('.observation-card').length,
+    loading: !!document.querySelector('.observation-state-loading'), error: !!error,
+    errorText: error?.textContent?.slice(0, 256) || null,
+    layoutReady: viewport?.dataset.observationLayoutReady?.slice(0, 32) || null,
+    context: viewport?.dataset.observationViewportContext?.slice(0, 512) || null }
+}
+
+export async function waitObservationMembers(page, count, label = 'Observation membership', requireIdle = false) {
+  const previousPhase = attemptState?.phase
+  const phase = previousPhase ? previousPhase + ': ' + label : label
+  if (attemptState) attemptState.phase = phase
+  try {
+    await page.waitForFunction(observationMembershipReady, { expected: count, requireIdle }, { timeout: 30000 })
+  } catch (error) {
+    if (error.name !== 'TimeoutError') throw error
+    let diagnostic
+    let diagnosticTimer
+    try {
+      diagnostic = await Promise.race([
+        page.evaluate(observationMembershipSnapshot, { expected: count, label, phase, requireIdle }),
+        new Promise((_, reject) => { diagnosticTimer = setTimeout(() => reject(new Error('Observation membership diagnostic capture exceeded 1000ms')), 1000) })
+      ])
+    }
+    catch (captureError) { diagnostic = { expected: count, label, phase, captureError: captureError.message.slice(0, 256) } }
+    finally { clearTimeout(diagnosticTimer) }
+    throw Object.assign(new Error(error.message + '; Observation membership ' + JSON.stringify(diagnostic), { cause: error }), { observationMembership: diagnostic })
+  }
+  if (attemptState) attemptState.phase = previousPhase
 }
 
 async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns) {
@@ -1235,7 +1273,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const observationsTabBefore = requestSnapshot(tracker)
   const obsTabMs = await requiredDoubleFrame(page, '.tabs button:nth-child(2)')
   await page.waitForSelector('#observation-results')
-  await waitObservationMembers(page, Math.min(50, fixture.observations.length))
+  await waitObservationMembers(page, Math.min(50, fixture.observations.length), 'Observations initial page')
   await waitForTransportQuiescence(page, tracker, 'Observations initial page')
   interactions.observationsTabMs = { ms: obsTabMs, ...requestDelta(tracker, observationsTabBefore) }
   tabSwitches.observations = interactions.observationsTabMs
@@ -1246,7 +1284,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const loadButton = page.locator('.observation-load-more')
   if (await loadButton.count() !== 1) throw new Error(`required Observation load-more target count was ${await loadButton.count()}`)
   await loadButton.click()
-  await waitObservationMembers(page, Math.min(100, fixture.observations.length))
+  await waitObservationMembers(page, Math.min(100, fixture.observations.length), 'Observation load more')
   await waitForTransportQuiescence(page, tracker, 'Observation load more')
   const observationLoadMore = { ms: performance.now() - loadStart, ...requestDelta(tracker, loadBefore) }
   if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== Math.min(100, fixture.observations.length)) throw new Error('Paged flat Observation membership was not scroll-reachable')
@@ -1255,17 +1293,14 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const filterBefore = requestSnapshot(tracker)
   await filterInput.fill(OBSERVATION_MEASURED_QUERY)
   const observationFilterMs = await requiredDoubleFrame(page, '.observation-filter-apply')
-  await page.waitForFunction(() => {
-    const count = document.querySelectorAll('.observation-card').length
-    return !document.querySelector('.observation-state-loading') && count === 1
-  }, null, { timeout: 30000 })
+  await waitObservationMembers(page, 1, 'Observation filter', true)
   await waitForTransportQuiescence(page, tracker, 'Observation filter')
   interactions.observationFilterMs = { ms: observationFilterMs, ...requestDelta(tracker, filterBefore) }
   filters.observations = interactions.observationFilterMs
   const observationFilterResetBefore = requestSnapshot(tracker)
   await filterInput.fill('')
   const observationFilterResetMs = await requiredDoubleFrame(page, '.observation-filter-apply')
-  await waitObservationMembers(page, Math.min(50, fixture.observations.length))
+  await waitObservationMembers(page, Math.min(50, fixture.observations.length), 'Observation filter reset')
   await waitForTransportQuiescence(page, tracker, 'Observation filter reset')
   interactions.observationFilterResetMs = { ms: observationFilterResetMs, ...requestDelta(tracker, observationFilterResetBefore) }
   filters.observationReset = interactions.observationFilterResetMs
@@ -1486,9 +1521,11 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
     failureValidation: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId,
       evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
       commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message,
+      ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
     failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
       qualificationPassed: false, failure: error.message, retirement,
+      ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}),
       validationRecord: { path: evidenceArtifactPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
   }, action)
@@ -1696,7 +1733,7 @@ async function main() {
     command.exitCode = checkQualification({ recordEvaluation: previous.recordEvaluation, checkEvaluation: measuredResult.evaluation,
       commands: [...previous.commands, command], retirement }).exitCode
   }
-  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {})
+  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), { ...(failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {}), ...(failure?.observationMembership ? { observationMembership: failure.observationMembership } : {}) })
   if (failure) {
     persistOrRetainFailureDiagnostics(attemptState, () => qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure }, diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() }))))
     throw failure
@@ -1714,6 +1751,7 @@ if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main
     taskId: evidenceTask.taskId, evidenceBaseCommit, phase: attemptState?.phase,
     startedAtUtc: attemptState?.startedAtUtc, elapsedMs: attemptState ? Math.round(performance.now() - attemptState.started) : null,
     failure: error.message.slice(0, 1000), traceAdmission: error.traceAdmission || null,
+    observationMembership: error.observationMembership || null,
     captureOptions: traceCaptureOptions, retirement: attemptState?.retirement,
     priorFailureDiagnosticsPreserved: !!attemptState?.pendingFailure && !(attemptState.traceVerified && attemptState.retirement?.passed),
     retainedPaths: [validationRecordPath, evidenceManifestPath]

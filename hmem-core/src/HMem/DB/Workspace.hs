@@ -1,6 +1,7 @@
 module HMem.DB.Workspace
   ( listActiveWorkspaces
   , listVisibleWorkspaces
+  , getWorkspacePlanningCounts
   , renameWorkspace
   , deleteWorkspace
   ) where
@@ -19,7 +20,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
 import HMem.DB.Pool (DBException(..), runSession)
-import HMem.Types (UpdateWorkspace(..), Workspace(..), validateUpdateWorkspaceInput, workspaceTypeFromText)
+import HMem.Types (UpdateWorkspace(..), Workspace(..), WorkspacePlanningCounts(..), validateUpdateWorkspaceInput, workspaceTypeFromText)
 
 listActiveWorkspaces :: Pool Hasql.Connection -> Int -> Int -> IO [Workspace]
 listActiveWorkspaces pool limitRows offsetRows =
@@ -28,6 +29,24 @@ listActiveWorkspaces pool limitRows offsetRows =
 listVisibleWorkspaces :: Pool Hasql.Connection -> UUID -> Int -> Int -> IO [Workspace]
 listVisibleWorkspaces pool userId limitRows offsetRows =
   runSession pool $ Session.statement (userId, toInt32 limitRows, toInt32 offsetRows) listVisibleWorkspacesStatement
+
+-- | Both aggregates use one statement snapshot and return only two counts.
+-- Count base rows rather than overlapping hierarchy rollups or loaded pages.
+getWorkspacePlanningCounts :: Pool Hasql.Connection -> UUID -> IO (Maybe WorkspacePlanningCounts)
+getWorkspacePlanningCounts pool workspaceId =
+  runSession pool $ Session.statement workspaceId workspacePlanningCountsStatement
+
+workspacePlanningCountsStatement :: Statement.Statement UUID (Maybe WorkspacePlanningCounts)
+workspacePlanningCountsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT \
+          \(SELECT count(*) FROM projects WHERE workspace_id = w.id AND deleted_at IS NULL AND status IN ('active', 'paused')), \
+          \(SELECT count(*) FROM tasks WHERE workspace_id = w.id AND deleted_at IS NULL AND status IN ('todo', 'in_progress', 'blocked')) \
+          \FROM workspaces w WHERE w.id = $1 AND w.deleted_at IS NULL"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowMaybe $ WorkspacePlanningCounts
+      <$> Dec.column (Dec.nonNullable Dec.int8)
+      <*> Dec.column (Dec.nonNullable Dec.int8)
 
 -- | Rename an active workspace and return its canonical row.  Validation lives
 -- here as well as at the HTTP boundary so alternate callers cannot bypass the

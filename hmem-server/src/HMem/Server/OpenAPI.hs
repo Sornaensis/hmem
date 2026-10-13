@@ -49,6 +49,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations/{observationId}/embedding" . _Just . put %~ fmap tagObservation
   & paths . at "/api/v1/search" . _Just . post %~ fmap documentUnifiedSearch
   & paths . at "/api/v1/workspaces/{workspaceId}" . _Just . put %~ fmap tagWorkspaceRename
+  & paths . at "/api/v1/workspaces/{workspaceId}/planning-counts" . _Just . get %~ fmap tagPlanningCounts
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline/buckets" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
@@ -91,6 +92,14 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
       & tags .~ InsOrdSet.singleton "Workspaces"
       & description ?~ "Renames an active workspace. The request body accepts only name; malformed, unauthenticated, forbidden, and missing requests return the standard 400, 401, 403, and 404 responses."
       & responses %~ (<> workspaceRenameErrors)
+
+    tagPlanningCounts operation = operation
+      & tags .~ InsOrdSet.singleton "Workspaces"
+      & description ?~ "Requires workspace read access. Returns constant-size authoritative totals from one database statement snapshot: live active/paused projects and todo/in_progress/blocked tasks, including unassigned tasks and subtasks. Each row counts once, independently of navigation filters, pagination and overlapping subtree rollups. Deleted and terminal rows are excluded."
+      & responses %~ (<> Responses Nothing (InsOrdMap.fromList
+          [ (401, Inline (mempty & description .~ "Unauthenticated."))
+          , (403, Inline (mempty & description .~ "Forbidden for the requested workspace."))
+          , (404, Inline (mempty & description .~ "The active workspace was not found.")) ]))
 
     workspaceRenameErrors = Responses Nothing $ InsOrdMap.fromList
       [ (400, Inline (mempty & description .~ "Validation error. The JSON body must be an object with exactly one string name field whose value is non-blank and no more than 1024 bytes."))
@@ -372,6 +381,7 @@ deprecatedSubjectSchema = mempty
   & deprecated ?~ True
   & description ?~ "Deprecated compatibility projection of subjects[0]."
 instance ToSchema Workspace where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WorkspacePlanningCounts where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateWorkspace where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceGroup where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateWorkspaceGroup where declareNamedSchema = genericDeclareNamedSchema opts

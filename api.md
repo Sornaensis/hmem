@@ -46,6 +46,14 @@ Workspaces scope your data and permissions. Create one with
 `personal`, `organization`, or `planning`). Creation needs the global `create_workspace` grant
 or superadmin access. List accessible workspaces with `GET /api/v1/workspaces`.
 
+Read `GET /api/v1/workspaces/{workspaceId}/planning-counts` with workspace read
+access for `{ "open_projects": 3, "open_tasks": 12 }`. These authoritative totals
+count each live active/paused project and todo/in_progress/blocked task once,
+including unassigned tasks and subtasks. Deleted and terminal rows are excluded.
+Both counts share one database statement snapshot and are independent of loaded
+navigation pages, filters and overlapping project subtree rollups. Unauthenticated,
+forbidden and missing/deleted workspace requests retain the usual 401/403/404 behavior.
+
 Projects and tasks can belong to any workspace. Observations require an active
 `repository` workspace, including when requested by ID. Use `workspace_id` in
 workspace-scoped requests; possession of a resource UUID does not grant access.

@@ -89,6 +89,7 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> ReqBody '[TolerantJSON] UpdateWorkspaceRequest :> Put '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Description "Requires workspace admin access. Soft-deletes the workspace without purging its contents; unavailable through MCP." :> Delete '[JSON] NoContent
+  :<|> Capture "workspaceId" UUID :> "planning-counts" :> Get '[JSON] WorkspacePlanningCounts
   :<|> Capture "workspaceId" UUID :> "navigation"
          :> QueryParam "parent_kind" Text :> QueryParam "parent_id" UUID
          :> QueryParam "project_limit" Int :> QueryParam "project_offset" Int
@@ -457,7 +458,7 @@ health pool tracker = do
                 , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
 
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
+workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.
@@ -493,6 +494,9 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> na
     requireWorkspace pool workspaceId Auth.WorkspaceRoleAdmin
     deleted <- handleDBErrors $ Workspace.deleteWorkspace pool workspaceId
     if deleted then pure NoContent else throwError err404
+  planningCountsH workspaceId = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    handleDBErrors (Workspace.getWorkspacePlanningCounts pool workspaceId) >>= maybe (throwError err404) pure
   navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset maybeShowOnly projectStatuses taskStatuses maybeShowEmptyProjects maybePriorityMode maybePriorityValue maybeQuery = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     parent <- navigationParent maybeKind maybeParent

@@ -8,7 +8,7 @@ module HMem.Types
   , ObservationEmbedding(..), EmbeddingSpaceFingerprint, embeddingSpaceFingerprintText, legacyManualEmbeddingSpace, parseEmbeddingSpaceFingerprint
   , ObservationCountQuery(..), ObservationCounts(..), validateObservationCountQuery
   , validateCreateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
-  , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
+  , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspacePlanningCounts(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
   , ProjectStatus(..), Project(..), ProjectPauseStatusChange(..), ProjectPauseEffects(..), ProjectMutationResult(..), CreateProject(..), ProjectSpecTask(..), CreateProjectSpec(..), ProjectSpecResult(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..), ProjectCardSummary(..)
   , TaskDependencySummary(..), TaskDependencyPage(..), TaskOverview(..), TaskReadinessRollup(..), TaskCardSummary(..)
@@ -991,6 +991,17 @@ instance ToJSON Workspace where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON Workspace where
   parseJSON  = genericParseJSON jsonOptions
+
+-- | Authoritative live open rows across a workspace, independent of navigation.
+data WorkspacePlanningCounts = WorkspacePlanningCounts
+  { openProjects :: Int64
+  , openTasks :: Int64
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspacePlanningCounts where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON WorkspacePlanningCounts where
+  parseJSON = genericParseJSON jsonOptions
 
 data CreateWorkspace = CreateWorkspace
   { name          :: Text

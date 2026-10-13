@@ -1020,6 +1020,49 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         responseStatus authorized `shouldBe` status200
         decode (responseBody authorized) `shouldBe` Just BatchResult { affected = 1 }
 
+  describe "Workspace planning counts HTTP contract" $ do
+    it "returns exactly two authoritative counts independently of navigation and rejects inactive targets" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "workspace-planning-counts-api"
+      let path workspaceId = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspaceId)) <> "/planning-counts"
+          readCounts expected = do
+            response <- request app methodGet (path workspace.id) ""
+            responseStatus response `shouldBe` status200
+            decode (responseBody response) `shouldBe` Just expected
+      readCounts (object ["open_projects" .= (0 :: Int), "open_tasks" .= (0 :: Int)])
+      root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      child <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "parent" Nothing Nothing Nothing Nothing)
+      _ <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "subtask" Nothing Nothing Nothing Nothing)
+      _ <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "unassigned" Nothing Nothing Nothing Nothing)
+      readCounts (object ["open_projects" .= (2 :: Int), "open_tasks" .= (3 :: Int)])
+      request app methodGet (path (read "00000000-0000-0000-0000-000000000001" :: UUID)) ""
+        >>= (\response -> responseStatus response `shouldBe` status404)
+      markWorkspaceDeleted env workspace.id
+      request app methodGet (path workspace.id) "" >>= (\response -> responseStatus response `shouldBe` status404)
+
+    it "authorizes deployed readers before disclosing counts or workspace existence" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "workspace-planning-counts-auth"
+        foreignWorkspace <- createTestWorkspace ctx.deployedEnv "workspace-planning-counts-foreign"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        reader <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Planning counts reader"
+        outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Planning counts outsider"
+        let path workspaceId = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspaceId)) <> "/planning-counts"
+            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            getCounts workspaceId requestHeaders = requestWithHeaders ctx.deployedApplication methodGet (path workspaceId) requestHeaders ""
+        getCounts workspace.id [] >>= (\response -> responseStatus response `shouldBe` status401)
+        getCounts workspace.id (headers outsider) >>= (\response -> responseStatus response `shouldBe` status403)
+        getCounts foreignWorkspace.id (headers reader) >>= (\response -> responseStatus response `shouldBe` status403)
+        getCounts (read "00000000-0000-0000-0000-000000000001" :: UUID) (headers reader) >>= (\response -> responseStatus response `shouldBe` status403)
+        authorized <- getCounts workspace.id (headers reader)
+        responseStatus authorized `shouldBe` status200
+        decode (responseBody authorized) `shouldBe` Just (WorkspacePlanningCounts 0 0)
+        markWorkspaceDeleted ctx.deployedEnv workspace.id
+        getCounts workspace.id (headers reader) >>= (\response -> responseStatus response `shouldBe` status404)
+
   describe "Workspace rename HTTP contract" $ do
     it "persists an authorized name-only rename, permits duplicates, and rejects invalid or inactive targets" $ \(env, app) -> do
       workspace <- createTestWorkspace env "workspace-rename-api"
@@ -2471,6 +2514,19 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       entityTypeToText ETObservation `shouldBe` "observation"
 
   describe "OpenAPI" $ do
+    it "documents the constant-size workspace planning counts read and authorization errors" $ \(_env, app) -> do
+      response <- request app methodGet "/api/v1/openapi.json" ""
+      responseStatus response `shouldBe` status200
+      let Just document = decode (responseBody response) :: Maybe Value
+          schema = jsonPath ["components", "schemas", "WorkspacePlanningCounts"] document
+          operation = jsonPath ["paths", "/api/v1/workspaces/{workspaceId}/planning-counts", "get"] document
+      sort <$> (schema >>= jsonField "required" >>= (jsonStrings . Just)) `shouldBe` Just ["open_projects", "open_tasks"]
+      forM_ ["open_projects", "open_tasks"] $ \field -> do
+        (schema >>= jsonField "properties" >>= jsonField field >>= jsonField "type") `shouldBe` Just (String "integer")
+        (schema >>= jsonField "properties" >>= jsonField field >>= jsonField "format") `shouldBe` Just (String "int64")
+      forM_ ["401", "403", "404"] $ \code ->
+        (operation >>= jsonField "responses" >>= jsonField code) `shouldSatisfy` isJust
+
     it "documents bounded project pause results, automatic causes and private replay boundaries" $ \(_env, app) -> do
       response <- request app methodGet "/api/v1/openapi.json" ""
       responseStatus response `shouldBe` status200

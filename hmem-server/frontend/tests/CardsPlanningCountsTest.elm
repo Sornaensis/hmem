@@ -1,0 +1,193 @@
+module CardsPlanningCountsTest exposing (suite)
+
+import Api
+import AppShell
+import Dict
+import Expect
+import Feature.Cards as Cards
+import Feature.DataLoading as DataLoading
+import Test exposing (Test, describe, test)
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
+import Types exposing (Flags, Model, Page(..), WorkspaceTab(..))
+import Url
+
+
+suite : Test
+suite =
+    describe "planning count presentation"
+        [ test "two tasks sharing a prerequisite show two blocked tasks and two relationships" <| \_ ->
+            let
+                base = project "shared"
+                rollup = base.readinessRollup
+                counted = { base | readinessRollup = { rollup | openTaskCount = 3, dependencyBlockedTaskCount = 2, openDependencyCount = 2 } }
+                seeded = DataLoading.mergeNavigationSummaries [ counted ] (List.map (taskIn counted.id) [ "a", "b", "prerequisite" ]) model
+                dependencies = seeded.dependencies
+                linked = { seeded | dependencies = { dependencies | taskDependencyLinks = [ { taskId = "a", dependsOnId = "prerequisite" }, { taskId = "b", dependsOnId = "prerequisite" } ] } }
+            in
+            Expect.all
+                [ \_ -> cardSummary counted.id linked |> Query.has [ Selector.text "3 tasks", Selector.text "2 dependency-blocked tasks among open tasks", Selector.text "2 open prerequisite relationships" ]
+                , \_ -> Cards.cardTreeProjection workspaceId linked |> .taskDirectOpenDependencyCounts |> Expect.equal (Dict.fromList [ ( "a", 1 ), ( "b", 1 ) ])
+                ] ()
+        , test "one task with several prerequisites counts relationships separately from blocked tasks" <| \_ ->
+            let
+                base = project "multiple"
+                rollup = base.readinessRollup
+                counted = { base | readinessRollup = { rollup | openTaskCount = 4, dependencyBlockedTaskCount = 1, openDependencyCount = 3 } }
+                seeded = DataLoading.mergeNavigationSummaries [ counted ] (List.map (taskIn counted.id) [ "a", "p1", "p2", "p3" ]) model
+                dependencies = seeded.dependencies
+                linked = { seeded | dependencies = { dependencies | taskDependencyLinks = List.map (\id -> { taskId = "a", dependsOnId = id }) [ "p1", "p2", "p3" ] } }
+            in
+            Expect.all
+                [ \_ -> cardSummary counted.id linked |> Query.has [ Selector.text "4 tasks", Selector.text "1 dependency-blocked task among open tasks", Selector.text "3 open prerequisite relationships" ]
+                , \_ -> Cards.cardTreeProjection workspaceId linked |> .taskDirectOpenDependencyCounts |> Expect.equal (Dict.singleton "a" 3)
+                ] ()
+        , test "ancestor and child cards retain overlapping canonical subtree counts" <| \_ ->
+            let
+                parentBase = project "ancestor"
+                childBase = project "child"
+                parentRollup = parentBase.readinessRollup
+                childRollup = childBase.readinessRollup
+                parent = { parentBase | readinessRollup = { parentRollup | openProjectCount = 1, openTaskCount = 3 } }
+                child = { childBase | parentId = Just parent.id, readinessRollup = { childRollup | openTaskCount = 2 } }
+                seeded = DataLoading.mergeNavigationSummaries [ parent, child ] [] model
+            in
+            Expect.all
+                [ \_ -> cardSummary parent.id seeded |> Query.has [ Selector.text "3 tasks", Selector.text "Subtree includes descendant projects and subtasks; overlaps ancestor totals." ]
+                , \_ -> cardSummary child.id seeded |> Query.has [ Selector.text "2 tasks", Selector.text "Subtree includes descendant projects and subtasks; overlaps ancestor totals." ]
+                ] ()
+        , describe "closed project and task counts"
+            (List.map projectClosedTest [ ( "done only", 2, 0 ), ( "cancelled only", 0, 2 ), ( "mixed terminal", 1, 1 ) ])
+        , describe "closed subtask counts"
+            (List.map subtaskClosedTest [ ( "done only", 2, 0 ), ( "cancelled only", 0, 2 ), ( "mixed terminal", 1, 1 ) ])
+        , test "mixed open and terminal subtasks show remaining work" <| \_ ->
+            let
+                base = task "parent"
+                rollup = base.readinessRollup
+                parent = { base | readinessRollup = { rollup | openSubtaskCount = 1, doneSubtaskCount = 1, cancelledSubtaskCount = 1 } }
+            in
+            DataLoading.mergeNavigationSummaries [] [ parent ] model
+                |> cardSummary parent.id
+                |> Query.has [ Selector.text "1/3 subtasks remaining" ]
+        , test "canonical fallback survives readiness reset, collapsed branches and missing task details" <| \_ ->
+            let
+                base = project "fallback"
+                rollup = base.readinessRollup
+                counted = { base | readinessRollup = { rollup | openTaskCount = 60, doneTaskCount = 10, cancelledTaskCount = 5, dependencyBlockedTaskCount = 2, openDependencyCount = 3 } }
+                seeded = DataLoading.mergeNavigationSummaries [ counted ] [] model
+                dependencies = seeded.dependencies
+                cards = seeded.cards
+                recovering = { seeded | dependencies = { dependencies | projectReadinessRollups = Dict.empty }, cards = { cards | collapsedNodes = Dict.singleton "proj-fallback" True }, tasks = Dict.empty }
+            in
+            cardSummary counted.id recovering |> Query.has [ Selector.text "60/75 tasks remaining", Selector.text "2 dependency-blocked tasks among open tasks", Selector.text "3 open prerequisite relationships" ]
+        , test "known zero remains visible without inventing dependency blockers" <| \_ ->
+            let
+                seeded = DataLoading.mergeNavigationSummaries [ project "empty" ] [] model
+            in
+            Expect.all
+                [ \_ -> cardSummary "empty" seeded |> Query.has [ Selector.text "0 tasks" ]
+                , \_ -> cardSummary "empty" seeded |> Query.hasNot [ Selector.text "dependency-blocked" ]
+                ] ()
+        , test "missing authoritative totals stay unavailable" <| \_ ->
+            let
+                base = project "unknown"
+                source = { model | projects = Dict.singleton base.id (Api.projectFromCardSummary base) }
+            in
+            Expect.all
+                [ \_ -> cardSummary base.id source |> Query.has [ Selector.text "Task counts unavailable" ]
+                , \_ -> cardSummary base.id source |> Query.hasNot [ Selector.text "0 tasks" ]
+                ] ()
+        , test "loading membership preserves canonical counts" <| \_ ->
+            let
+                base = project "loading"
+                rollup = base.readinessRollup
+                counted = { base | readinessRollup = { rollup | openTaskCount = 12 } }
+                seeded = DataLoading.mergeNavigationSummaries [ counted ] [] model
+                requested = DataLoading.beginNavigationBranch "project" workspaceId (Just counted.id) seeded |> Tuple.first
+            in
+            Expect.all
+                [ \_ -> cardSummary counted.id requested |> Query.has [ Selector.text "12 tasks" ]
+                , \_ -> Cards.viewProjectsTree workspaceId requested |> Query.fromHtml |> Query.has [ Selector.text "Loading more…" ]
+                ] ()
+        ]
+
+
+projectClosedTest : ( String, Int, Int ) -> Test
+projectClosedTest ( label, done, cancelled ) =
+    test label <| \_ ->
+        let
+            base = project "closed-project"
+            rollup = base.readinessRollup
+            counted = { base | readinessRollup = { rollup | closedProjectCount = 2, doneTaskCount = done, cancelledTaskCount = cancelled } }
+            seeded = DataLoading.mergeNavigationSummaries [ counted ] [] model
+        in
+        Expect.all
+            [ \_ -> cardSummary base.id seeded |> Query.has [ Selector.text "2 subprojects (all closed)", Selector.text "2 tasks (all closed)" ]
+            , \_ -> cardSummary base.id seeded |> Query.hasNot [ Selector.text "all done" ]
+            ] ()
+
+
+subtaskClosedTest : ( String, Int, Int ) -> Test
+subtaskClosedTest ( label, done, cancelled ) =
+    test label <| \_ ->
+        let
+            base = task "closed-parent"
+            rollup = base.readinessRollup
+            counted = { base | readinessRollup = { rollup | doneSubtaskCount = done, cancelledSubtaskCount = cancelled } }
+            seeded = DataLoading.mergeNavigationSummaries [] [ counted ] model
+        in
+        Expect.all
+            [ \_ -> cardSummary base.id seeded |> Query.has [ Selector.text "2 subtasks (all closed)" ]
+            , \_ -> cardSummary base.id seeded |> Query.hasNot [ Selector.text "all done" ]
+            ] ()
+
+
+cardSummary : String -> Model -> Query.Single Types.Msg
+cardSummary id source =
+    Cards.viewProjectsTree workspaceId source
+        |> Query.fromHtml
+        |> Query.find [ Selector.id ("entity-" ++ id) ]
+        |> Query.find [ Selector.class "card-summary" ]
+
+
+workspaceId : String
+workspaceId =
+    "workspace-1"
+
+
+model : Model
+model =
+    AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
+        |> AppShell.finalizeInit (WorkspacePage workspaceId)
+
+
+flags : Flags
+flags =
+    { apiUrl = "https://api.example", wsUrl = "wss://api.example", sessionId = "session-1", runtimeMode = "test", authTokenStorageKey = "hmem-auth-token", authTokenPresent = False, loginUrl = Nothing, logoutUrl = Nothing }
+
+
+url : Url.Url
+url =
+    { protocol = Url.Https, host = "app.example", port_ = Nothing, path = "/workspace/workspace-1", query = Nothing, fragment = Nothing }
+
+
+project : String -> Api.ProjectCardSummary
+project id =
+    { id = id, workspaceId = workspaceId, parentId = Nothing, name = id, status = Api.ProjActive, priority = 1, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z", directProjectCount = 0, directTaskCount = 0, hasChildren = True
+    , readinessRollup = { openProjectCount = 0, inProgressTaskCount = 0, closedProjectCount = 0, openTaskCount = 0, doneTaskCount = 0, cancelledTaskCount = 0, blockedTaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True }
+    }
+
+
+task : String -> Api.TaskCardSummary
+task id =
+    { id = id, workspaceId = workspaceId, projectId = Nothing, parentId = Nothing, title = id, status = Api.Todo, priority = 1, dueAt = Nothing, completedAt = Nothing, dependencyCount = 0, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z", directSubtaskCount = 0, hasChildren = False
+    , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False }
+    }
+
+
+taskIn : String -> String -> Api.TaskCardSummary
+taskIn projectId id =
+    let
+        base = task id
+    in
+    { base | projectId = Just projectId }

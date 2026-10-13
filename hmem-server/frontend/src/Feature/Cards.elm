@@ -1703,7 +1703,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                         |> Maybe.map .openProjectCount
                         |> Maybe.withDefault 0
 
-                completedSubprojects =
+                closedSubprojects =
                     maybeProjectRollup
                         |> Maybe.map .closedProjectCount
                         |> Maybe.withDefault 0
@@ -1713,7 +1713,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                         |> Maybe.map .openTaskCount
                         |> Maybe.withDefault 0
 
-                completedTasks =
+                closedTasks =
                     maybeProjectRollup
                         |> Maybe.map (\rollup -> rollup.doneTaskCount + rollup.cancelledTaskCount)
                         |> Maybe.withDefault 0
@@ -1730,20 +1730,20 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
 
                 summaryParts =
                     List.filterMap identity
-                        [ countLabel remainingSubprojects completedSubprojects "subproject" "subprojects"
+                        [ countLabel remainingSubprojects closedSubprojects "subproject" "subprojects"
                         , case maybeProjectRollup of
                             Nothing ->
                                 Just "Task counts unavailable"
 
                             Just _ ->
-                                countLabel remainingTasks completedTasks "task" "tasks" |> Maybe.withDefault "0 tasks" |> Just
+                                countLabel remainingTasks closedTasks "task" "tasks" |> Maybe.withDefault "0 tasks" |> Just
                         , if dependencyBlockedTasks > 0 then
-                            Just (countPhrase dependencyBlockedTasks "dependency-blocked task" "dependency-blocked tasks")
+                            Just (countPhrase dependencyBlockedTasks "dependency-blocked task" "dependency-blocked tasks" ++ " among open tasks")
 
                           else
                             Nothing
                         , if openDependencyCount > 0 then
-                            Just (countPhrase openDependencyCount "open dependency" "open dependencies")
+                            Just (countPhrase openDependencyCount "open prerequisite relationship" "open prerequisite relationships")
 
                           else
                             Nothing
@@ -1753,7 +1753,10 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                 text ""
 
               else
-                div [ class "card-summary" ] [ text (String.join " · " summaryParts) ]
+                div [ class "card-summary" ]
+                    [ text (String.join " · " summaryParts)
+                    , span [ class "card-count-scope" ] [ text " · Subtree includes descendant projects and subtasks; overlaps ancestor totals." ]
+                    ]
             , div [ class "card-body card-expanded" ]
                 [ div [ class "card-desc-row" ]
                     [ button [ class "btn-extras-toggle", onClick (ToggleCardExpand project.id) ]
@@ -2329,7 +2332,7 @@ viewTaskCardBody descendants projection showProject model task =
                     Just rollup -> rollup.openSubtaskCount
                     Nothing -> if descendants then childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length else 0
 
-            completedSubtasks =
+            closedSubtasks =
                 case maybeRollup of
                     Just rollup -> rollup.doneSubtaskCount + rollup.cancelledSubtaskCount
                     Nothing -> if descendants then List.length childTasks - remainingSubtasks else 0
@@ -2338,30 +2341,16 @@ viewTaskCardBody descendants projection showProject model task =
                 task.dependencyCount
 
             subtaskLabel =
-                let
-                    total =
-                        remainingSubtasks + completedSubtasks
-                in
-                if total == 0 then
-                    Nothing
-
-                else if completedSubtasks == 0 then
-                    Just (String.fromInt total ++ " subtask" ++ (if total > 1 then "s" else ""))
-
-                else if remainingSubtasks == 0 then
-                    Just (String.fromInt total ++ " subtask" ++ (if total > 1 then "s" else "") ++ " (all done)")
-
-                else
-                    Just (String.fromInt remainingSubtasks ++ "/" ++ String.fromInt total ++ " subtasks remaining")
+                countLabel remainingSubtasks closedSubtasks "subtask" "subtasks"
 
             summaryParts =
                 List.filterMap identity
                     [ subtaskLabel
                     , if openDependencyCount > 0 then
-                        Just (String.fromInt openDependencyCount ++ " open dep" ++ (if openDependencyCount > 1 then "s" else ""))
+                        Just (countPhrase openDependencyCount "open prerequisite relationship" "open prerequisite relationships")
 
                       else if depCount > 0 then
-                        Just (String.fromInt depCount ++ " dep" ++ (if depCount > 1 then "s" else ""))
+                        Just (countPhrase depCount "prerequisite relationship" "prerequisite relationships")
 
                       else
                         Nothing
@@ -3218,19 +3207,19 @@ taskTreePassesFilters task allTasks taskFilter =
 
 
 countLabel : Int -> Int -> String -> String -> Maybe String
-countLabel remaining completed noun pluralNoun =
+countLabel remaining closed noun pluralNoun =
     let
         total =
-            remaining + completed
+            remaining + closed
     in
     if total == 0 then
         Nothing
 
-    else if completed == 0 then
+    else if closed == 0 then
         Just (String.fromInt total ++ " " ++ (if total > 1 then pluralNoun else noun))
 
     else if remaining == 0 then
-        Just (String.fromInt total ++ " " ++ (if total > 1 then pluralNoun else noun) ++ " (all done)")
+        Just (String.fromInt total ++ " " ++ (if total > 1 then pluralNoun else noun) ++ " (all closed)")
 
     else
         Just (String.fromInt remaining ++ "/" ++ String.fromInt total ++ " " ++ pluralNoun ++ " remaining")

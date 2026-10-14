@@ -836,7 +836,7 @@ spec = do
 
     it "projectPauseMigration fresh installation has the same pause and provenance authority" $
       withTestEnv $ \env -> do
-        runSession env.pool (queryBool "SELECT count(*) = 37 FROM schema_migrations") `shouldReturn` True
+        runSession env.pool (queryBool "SELECT count(*) = 37 FROM schema_migrations WHERE version BETWEEN 1 AND 37") `shouldReturn` True
         runSession env.pool (queryBool "SELECT to_regclass('project_retained_pause_intents') IS NOT NULL AND to_regprocedure('hmem_reconcile_project_pause_v035(uuid[],boolean)') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM project_retained_pause_intents)") `shouldReturn` True
         wsId <- runSession env.pool $ Session.statement ("fresh-pause-parity" :: Text) insertWorkspaceDirectStatement
         projectId <- runSession env.pool $ Session.statement (wsId, "fresh root" :: Text) insertProjectDirectStatement

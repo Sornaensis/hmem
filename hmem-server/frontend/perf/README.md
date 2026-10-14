@@ -282,6 +282,20 @@ the admitted contained parent/root lifetime.
 
 ## Historical authority and limitations
 
+For the scoped due-removal causal diagnostic, after its reviewed commit and with
+the matched production build, run once from this directory with
+`HMEM_EVIDENCE_BASE_COMMIT=33abd80dd13dbc6c850397eeb13f79047d0f7c91 node perf/diagnose-live.mjs`
+(PowerShell: set `$env:HMEM_EVIDENCE_BASE_COMMIT` before the command). It executes
+one unchanged large scenario without tracing or qualification and refuses to
+overwrite `live-causal-diagnostic.json` in the separately verified final-task
+failure archive. Passive host boundaries retain at most 32 request summaries and
+first/decisive/latest readiness observations; no DTO bodies or additional browser
+polls are collected. Host and browser clocks are distinct. Readiness observations
+bracket existing evaluations and cannot by themselves separate decoding, Elm
+updates/rendering and polling. The receipt is limited to 256 KiB, owned by final
+task `1e420484-81b9-4251-b485-82abca34c800`, and expires at issue resolution or
+task/project closure. It does not replace the enforced record/check budgets.
+
 [baseline.v1.json](baseline.v1.json) records commit
 `ca04f51c3494c83c433d12bd7791f89be876daea`, environment, scales, raw samples,
 route evidence, evaluations, and trace metadata. Its final trace was generated

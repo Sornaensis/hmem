@@ -250,12 +250,14 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     if (key === 'timeline:events' || key === 'timeline:buckets') receipt.timeline = timelineReceipt(request.url(), request.method(), value, status)
     const gate = receipt.gate
     let fulfilled = false
+    tracker.liveDiagnostics?.prepared(receipt.requestId, performance.now(), status, receipt.bytes)
     if (gate && !gate.used) { gate.used = true; gate.signalPaused(); await (gate.waitForRelease) }
     try {
       await route.fulfill({ status, contentType: 'application/json', body,
         ...(receipt.paintReceiptId ? { headers: { 'Server-Timing': 'hmem_receipt;desc="' + receipt.paintReceiptId + '"' } } : {}) })
       fulfilled = true
     } finally {
+      tracker.liveDiagnostics?.fulfilled(receipt.requestId, performance.now(), fulfilled)
       receipt.fulfilled = fulfilled
       if (receipt.observationPage) receipt.observationPage.response.fulfilled = fulfilled
       if (receipt.timeline) receipt.timeline.response.fulfilled = fulfilled
@@ -325,6 +327,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     }
     tracker.coldDiagnostics.arrival({ at: receipt.at, requestId: tracker.requests.length + 1, key, url: request.url(), paintReceiptId: receipt.paintReceiptId ?? null, lifetime: tracker.paintReadiness?.lifetime() });
     tracker.requests.push(receipt); tracker.arrivals.set(request, receipt)
+    tracker.liveDiagnostics?.arrival(receipt.requestId, key, receipt.at)
     tracker.active += 1; tracker.lastActivityAt = receipt.at
     tracker.counts[key] = (tracker.counts[key] || 0) + 1
     if (key === 'change-stream:resync') tracker.activeSnapshots += 1
@@ -809,16 +812,28 @@ function expectedNavigationChildren(fixture) {
   return Object.fromEntries(Object.entries(children).map(([key, value]) => [key, { projects: order('project', value.projects), tasks: order('task', value.tasks) }]))
 }
 
-async function waitForLiveSettle(page, tracker, before, anchorId, logicalReady, timeoutMs = 30000) {
+export async function waitForLiveSettle(page, tracker, before, anchorId, logicalReady, timeoutMs = 30000) {
   const deadline = performance.now() + timeoutMs
   while (performance.now() < deadline) {
     assertNoUnhandledApiRoutes(tracker)
     const ui = await projectUiSignals(page, anchorId)
     const dispatchTurnComplete = await page.evaluate(() => window.__perfLastPush?.dispatchTurnComplete === true)
     const followUpRequests = tracker.requests.length - before.index
-    if (liveSettleReady({ dispatchTurnComplete, activeRequests: tracker.active, loading: ui.loading, focused: ui.focused, anchorVisible: ui.anchorVisible, followUpRequests, logicalNavigationComplete: logicalReady() })) {
+    const proofStartedAt = tracker.liveDiagnostics ? performance.now() : null
+    const logicalNavigationComplete = logicalReady()
+    const proofEndedAt = tracker.liveDiagnostics ? performance.now() : null
+    const state = { dispatchTurnComplete, activeRequests: tracker.active, loading: ui.loading, focused: ui.focused, anchorVisible: ui.anchorVisible, followUpRequests, logicalNavigationComplete }
+    const ready = liveSettleReady(state)
+    tracker.liveDiagnostics?.readiness(performance.now(), state, ready, { startedAt: proofStartedAt, endedAt: proofEndedAt })
+    if (ready) {
+      tracker.liveDiagnostics?.paintStarted(performance.now())
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-      if (tracker.active === 0 && logicalReady()) return performance.now()
+      const paintEndedAt = tracker.liveDiagnostics ? performance.now() : null
+      const recheckStartedAt = tracker.liveDiagnostics && tracker.active === 0 ? performance.now() : null
+      const paintReady = tracker.active === 0 && logicalReady()
+      const recheckEndedAt = recheckStartedAt === null ? null : performance.now()
+      tracker.liveDiagnostics?.paintEnded(paintEndedAt, tracker.active, paintReady, recheckStartedAt === null ? null : { startedAt: recheckStartedAt, endedAt: recheckEndedAt })
+      if (paintReady) return performance.now()
     }
     await page.waitForTimeout(10)
   }
@@ -1439,7 +1454,7 @@ export async function waitObservationMembers(page, count, label = 'Observation m
   if (attemptState) attemptState.phase = previousPhase
 }
 
-export async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns) {
+export async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns, liveDiagnostics = null) {
   const runPhase = attemptState?.phase || fixture.size + ' warmup'
   const stage = label => { if (attemptState) attemptState.phase = runPhase + ': ' + label }
   if (fixture.observationScaling) fixture = { ...fixture, observations: fixture.observations.map(value => ({ ...value })) }
@@ -1582,11 +1597,16 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const liveBefore = requestSnapshot(tracker)
   stage('live batch')
   const liveStart = performance.now()
+  if (liveDiagnostics) { tracker.liveDiagnostics = liveDiagnostics; liveDiagnostics.start(liveStart) }
   const pushedSockets = await page.evaluate(frames => window.__perfPushFrames(frames), fixture.liveFrames)
+  liveDiagnostics?.dispatched(performance.now())
   if (pushedSockets !== 1) throw new Error(`live fixture expected one open socket, observed ${pushedSockets}`)
   await page.waitForFunction(expected => window.__perfLastPush?.frames === expected && window.__perfLastPush?.resumeToken === 'fixture-live-after', fixture.liveFrames.length)
   const settledAt = await waitForLiveSettle(page, tracker, liveBefore, anchors.first, logicalReady)
+  liveDiagnostics?.settled(settledAt)
   const stability = await assertLiveStability(page, tracker, 500)
+  liveDiagnostics?.stable(stability.startedAt, stability.endedAt)
+  delete tracker.liveDiagnostics
   const liveTiming = liveTimingSummary({ startedAt: liveStart, settledAt, stabilityStartedAt: stability.startedAt, stabilityEndedAt: stability.endedAt })
   stage('post-live readiness')
   const postLiveUi = await projectUiSignals(page, anchors.first)

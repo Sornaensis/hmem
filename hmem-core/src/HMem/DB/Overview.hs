@@ -148,11 +148,16 @@ directSubtaskCountsBatchStatement = Statement.Statement
 
 taskDependencyPageStatement :: Statement.Statement (UUID, Int32, Int32) [TaskDependencySummary]
 taskDependencyPageStatement = Statement.Statement
-  "SELECT t.id,t.title FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_id WHERE d.task_id=$1 AND t.deleted_at IS NULL ORDER BY lower(t.title),t.id LIMIT $2 OFFSET $3"
+  "SELECT t.id,t.title,t.status::text FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_id WHERE d.task_id=$1 AND t.deleted_at IS NULL ORDER BY lower(t.title),t.id LIMIT $2 OFFSET $3"
   ( contramap (\(a, _, _) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
  <> contramap (\(_, b, _) -> b) (Enc.param (Enc.nonNullable Enc.int4))
  <> contramap (\(_, _, c) -> c) (Enc.param (Enc.nonNullable Enc.int4)) )
-  (Dec.rowList (TaskDependencySummary <$> Dec.column (Dec.nonNullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.text))) True
+  (Dec.rowList $ do
+    dependencyId <- Dec.column (Dec.nonNullable Dec.uuid)
+    dependencyName <- Dec.column (Dec.nonNullable Dec.text)
+    statusText <- Dec.column (Dec.nonNullable Dec.text)
+    dependencyStatus <- maybe (fail "Unexpected dependency status") pure (taskStatusFromText statusText)
+    pure TaskDependencySummary { id = dependencyId, name = dependencyName, status = dependencyStatus }) True
 
 getTaskReadinessRollup :: Pool Hasql.Connection -> UUID -> IO TaskReadinessRollup
 getTaskReadinessRollup pool taskId = runSession pool $ Session.statement taskId taskReadinessRollupStatement
@@ -314,11 +319,11 @@ projectReadinessRollupFields = ProjectReadinessRollup
 
 listTaskDependencySummaries :: Pool Hasql.Connection -> UUID -> IO [TaskDependencySummary]
 listTaskDependencySummaries pool taskId = do
-  rows <- runSession pool $ Session.statement () $ run $ select $ orderBy ((\(_, name) -> name) >$< asc) $ do
+  rows <- runSession pool $ Session.statement () $ run $ select $ orderBy ((\(_, name, _) -> name) >$< asc) $ do
     dependency <- each taskDependencySchema
     where_ $ dependency.tdTaskId ==. lit taskId
     task <- each taskSchema
     where_ $ task.taskId ==. dependency.tdDependsOnId
     where_ $ activeTask task
-    pure (task.taskId, task.taskTitle)
-  pure [TaskDependencySummary { id = dependencyId, name = dependencyName } | (dependencyId, dependencyName) <- rows]
+    pure (task.taskId, task.taskTitle, task.taskStatus)
+  pure [TaskDependencySummary { id = dependencyId, name = dependencyName, status = dependencyStatus } | (dependencyId, dependencyName, dependencyStatus) <- rows]

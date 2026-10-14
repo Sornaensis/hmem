@@ -28,6 +28,20 @@ import HMem.Types
 
 spec :: Spec
 spec = do
+  around withTestEnv $ describe "Next-task card pagination" $ do
+    it "exhausts more than 200 distinct ready candidates while legacy callers stay capped" $ \env -> do
+      workspace <- createTestWorkspace env "next-card-pages"
+      project <- createProjectFor env workspace.id "project"
+      created <- mapM (\n -> createTaskFor env workspace.id (Just project.id) Nothing (T.pack ("task-" <> show n))) [1..207 :: Int]
+      let load off = do
+            result <- listNextTaskPage env.pool project.id False 100 off
+            remainder <- if result.hasMore then load (off + length result.items) else pure []
+            pure (result.items <> remainder)
+      candidates <- load 0
+      sort (map (\row -> row.task.id) candidates) `shouldBe` sort (map (.id) created)
+      length candidates `shouldBe` 207
+      legacy <- listNextTasks env.pool project.id False 999
+      length legacy `shouldBe` 200
   around withTestEnv $ describe "Subtask rejection lifecycle" $ do
     it "auto-blocks parents while eligible subtasks progress and returns parents to todo" $ \env -> do
       workspace <- createTestWorkspace env "subtask-auto-block"

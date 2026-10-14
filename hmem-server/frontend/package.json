@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "elm-test && elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && elm make src/DependenciesFixture.elm --output .dependencies-fixture-test.js && node --test tests-js/change-stream.test.js && node --test tests-js/timeline-fixture.browser.test.js && node --test tests-js/dependencies.browser.test.js && node --test tests-js/hierarchy-viewport.test.js && npm run build && node --test tests-js/hierarchy-loading.browser.test.js && node --test tests-js/project-pause.browser.test.js tests-js/project-next-subtasks.browser.test.js && node --test tests-js/planning-counts.browser.test.js",
+    "test": "elm-test && elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && elm make src/DependenciesFixture.elm --output .dependencies-fixture-test.js && node --test tests-js/change-stream.test.js && node --test tests-js/timeline-fixture.browser.test.js && node --test tests-js/dependencies.browser.test.js && node --test tests-js/hierarchy-viewport.test.js && npm run build && node --test tests-js/hierarchy-loading.browser.test.js && node --test tests-js/project-pause.browser.test.js tests-js/project-next-subtasks.browser.test.js tests-js/card-disclosures.browser.test.js && node --test tests-js/planning-counts.browser.test.js",
     "test:timeline-fixture": "elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && node --test tests-js/timeline-fixture.browser.test.js",
     "test:timeline-live": "node --test tests-js/timeline-live-refresh.integration.test.js",
     "test:observation-navigation": "npm run build && node --test tests-js/observation-navigation.test.js tests-js/observation-navigation.browser.test.js",

@@ -173,6 +173,7 @@ type ProjectAPI =
   :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] ProjectMutationResult
   :<|> Capture "projectId" UUID :> Delete '[JSON] CascadeResult
   :<|> Capture "projectId" UUID :> "overview" :> Get '[JSON] ProjectOverview
+  :<|> Capture "projectId" UUID :> "next-task-page" :> QueryParam "limit" Int :> QueryParam "offset" Int :> QueryParam "include_blocked" Bool :> Get '[JSON] (PaginatedResult NextTaskCandidate)
   :<|> Capture "projectId" UUID :> "next-tasks" :> QueryParam "limit" Int :> QueryParam "include_blocked" Bool :> Get '[JSON] [NextTaskCandidate]
 
 type TaskAPI =
@@ -835,7 +836,7 @@ invalidIfMatch :: ServerError
 invalidIfMatch = badRequest "validation_error" "If-Match must contain one strong quoted canonical content_version UUID"
 
 projects :: Pool Hasql.Connection -> Server ProjectAPI
-projects pool = listH :<|> createH :<|> createSpecH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where
+projects pool = listH :<|> createH :<|> createSpecH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextPageH :<|> nextH where
   listH workspaceId status queryValue limit offset = do
     workspace <- maybe (throwError err403) pure workspaceId
     requireWorkspace pool workspace Auth.WorkspaceRoleRead
@@ -871,6 +872,9 @@ projects pool = listH :<|> createH :<|> createSpecH :<|> getH :<|> updateH :<|> 
   overviewH projectId = do
     _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
     handleDBErrors (Overview.getProjectOverview pool projectId) >>= maybe (throwError err404) pure
+  nextPageH projectId limit offset includeBlocked = do
+    _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
+    handleDBErrors $ Task.listNextTaskPage pool projectId (fromMaybe False includeBlocked) (fromMaybe 50 limit) (fromMaybe 0 offset)
   nextH projectId limit includeBlocked = do
     _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
     handleDBErrors $ Task.listNextTasks pool projectId (fromMaybe False includeBlocked) (fromMaybe 5 limit)

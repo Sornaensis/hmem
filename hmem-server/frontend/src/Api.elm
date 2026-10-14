@@ -22,6 +22,8 @@ module Api exposing
     , TaskCardSummary
     , MemoryType(..)
     , NextTaskCandidate
+    , NextTaskPage
+    , fetchProjectNextTaskPage
     , Observation
     , ObservationCounts
     , ObservationCountQuery
@@ -385,6 +387,7 @@ type alias NextTaskCandidate =
     , dependencyBlocked : Bool
     , openDependencyCount : Int
     , projectPaused : Bool
+    , parentBlocked : Bool
     }
 
 
@@ -636,6 +639,7 @@ type alias MemoryLink =
 type alias TaskDependencySummary =
     { id : String
     , name : String
+    , status : TaskStatus
     }
 
 
@@ -1577,6 +1581,7 @@ nextTaskCandidateDecoder =
         |> required "dependency_blocked" D.bool
         |> required "open_dependency_count" D.int
         |> optional "project_paused" D.bool False
+        |> optional "parent_blocked" D.bool False
 
 
 taskDependencyStatusChangeDecoder : Decoder TaskDependencyStatusChange
@@ -3690,6 +3695,18 @@ fetchProjectOverview apiUrl projectId toMsg =
         }
 
 
+type alias NextTaskPage =
+    { items : List NextTaskCandidate, hasMore : Bool }
+
+
+fetchProjectNextTaskPage : String -> String -> Int -> Bool -> (Result Http.Error NextTaskPage -> msg) -> Cmd msg
+fetchProjectNextTaskPage apiUrl projectId offset includeBlocked toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/projects/" ++ projectId ++ "/next-task-page?limit=50&offset=" ++ String.fromInt offset ++ "&include_blocked=" ++ (if includeBlocked then "true" else "false")
+        , expect = Http.expectJson toMsg (D.map2 NextTaskPage (D.field "items" (boundedListDecoder 100 nextTaskCandidateDecoder)) (D.field "has_more" D.bool))
+        }
+
+
 fetchProjectNextTasks : String -> String -> Int -> Bool -> (Result Http.Error (List NextTaskCandidate) -> msg) -> Cmd msg
 fetchProjectNextTasks apiUrl projectId limit includeBlocked toMsg =
     let
@@ -3737,6 +3754,7 @@ taskDependencySummaryDecoder =
     D.succeed TaskDependencySummary
         |> required "id" D.string
         |> required "name" D.string
+        |> required "status" taskStatusDecoder
 
 
 taskDependencyPageDecoder : Decoder TaskDependencyPage

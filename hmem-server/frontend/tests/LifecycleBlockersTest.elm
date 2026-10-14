@@ -68,7 +68,7 @@ suite =
         , test "paused next candidates report combined dependency and subtask blockers" <|
             \_ ->
                 let
-                    candidate = { task = taskWithStatus "blocked" Nothing (Just "project-a") Api.Blocked, completionGated = True, openDescendantCount = 2, dependencyBlocked = True, openDependencyCount = 1, projectPaused = True }
+                    candidate = { task = taskWithStatus "blocked" Nothing (Just "project-a") Api.Blocked, completionGated = True, openDescendantCount = 2, dependencyBlocked = True, openDependencyCount = 1, projectPaused = True, parentBlocked = False }
                 in
                 Feature.Cards.nextTaskRationale candidate
                     |> Expect.equal "Paused by this project or an ancestor. Resume the project to release this blocker. Still waiting for 1 open dependency. Still waiting for 2 open subtasks."
@@ -1060,6 +1060,7 @@ suite =
                         , completionGated = False
                         , openDescendantCount = 0
                         , projectPaused = False
+                        , parentBlocked = False
                         , dependencyBlocked = True
                         , openDependencyCount = 1
                         }
@@ -1084,6 +1085,7 @@ suite =
                         , completionGated = False
                         , openDescendantCount = 0
                         , projectPaused = False
+                        , parentBlocked = False
                         , dependencyBlocked = False
                         , openDependencyCount = 0
                         }

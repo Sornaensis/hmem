@@ -412,7 +412,7 @@ instance ToSchema TaskDependencyPage where
     item <- declareSchemaRef (Proxy @TaskDependencySummary)
     pure $ NamedSchema (Just "TaskDependencyPage") $ mempty
       & type_ ?~ OpenApiObject
-      & description ?~ "A bounded dependency-summary page. items are ordered by lower(name), id and contain at most 100 entries."
+      & description ?~ "A bounded dependency-summary page with authoritative task status. items are ordered by lower(name), id and contain at most 100 entries."
       & properties . at "items" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject item & maxItems ?~ fromIntegral maxNavigationPageSize)
       & properties . at "has_more" ?~ Inline (mempty & type_ ?~ OpenApiBoolean)
       & required .~ ["items", "has_more"]

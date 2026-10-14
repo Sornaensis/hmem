@@ -100,7 +100,7 @@ suite =
                                 pendingRefresh.sessionRequestEpoch
                                 1
                                 0
-                                (Ok { items = [ { id = prerequisiteId, name = "Authoritative prerequisite" } ], hasMore = False })
+                                (Ok { items = [ { id = prerequisiteId, name = "Authoritative prerequisite", status = Api.Todo } ], hasMore = False })
                             )
                             pendingRefresh
                 in
@@ -190,7 +190,7 @@ suite =
                                 afterAddEvent.sessionRequestEpoch
                                 1
                                 0
-                                (Ok { items = [ { id = prerequisiteId, name = "Remote prerequisite" } ], hasMore = False })
+                                (Ok { items = [ { id = prerequisiteId, name = "Remote prerequisite", status = Api.Todo } ], hasMore = False })
                             )
                             afterAddEvent
                             |> Tuple.first
@@ -231,7 +231,7 @@ suite =
                         List.range 1 60 |> List.map dependencySummary
 
                     newItem =
-                        { id = prerequisiteId, name = "Dependency 999" }
+                        { id = prerequisiteId, name = "Dependency 999", status = Api.Todo }
 
                     base =
                         remoteModel True
@@ -299,7 +299,7 @@ suite =
                     { sourceMetadata = Nothing
                     , overviewMetadata = Just False
                     , initialRequest = Just ( 1, 0 )
-                    , cacheWhileRefreshing = oldItems ++ [ { id = prerequisiteId, name = "Prerequisite" } ]
+                    , cacheWhileRefreshing = oldItems ++ [ { id = prerequisiteId, name = "Prerequisite", status = Api.Todo } ]
                     , continuationRequest = Just ( 2, 50 )
                     , accumulatorSize = Just 50
                     , staleResponseIgnored = Just ( 2, 50 )
@@ -348,7 +348,7 @@ suite =
                                 newer.sessionRequestEpoch
                                 1
                                 0
-                                (Ok { items = [ { id = "stale", name = "Stale" } ], hasMore = False })
+                                (Ok { items = [ { id = "stale", name = "Stale", status = Api.Todo } ], hasMore = False })
                             )
                             newer
                             |> Tuple.first
@@ -360,7 +360,7 @@ suite =
                                 newer.sessionRequestEpoch
                                 2
                                 0
-                                (Ok { items = [ { id = prerequisiteId, name = "Current" }, { id = prerequisiteId, name = "Duplicate" } ], hasMore = False })
+                                (Ok { items = [ { id = prerequisiteId, name = "Current", status = Api.Todo }, { id = prerequisiteId, name = "Duplicate", status = Api.Todo } ], hasMore = False })
                             )
                             afterStale
                             |> Tuple.first
@@ -431,7 +431,7 @@ suite =
                         { base
                             | dependencies =
                                 { dependencies
-                                    | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Prerequisite" } ]
+                                    | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Prerequisite", status = Api.Todo } ]
                                     , taskDependencyLinks = [ { taskId = dependentId, dependsOnId = prerequisiteId } ]
                                     , taskDependencyLoading = Dict.singleton dependentId True
                                     , taskDependencyRequests = Dict.singleton dependentId existingRequest
@@ -496,7 +496,7 @@ suite =
                         { base
                             | dependencies =
                                 { dependencies
-                                    | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Stale prerequisite" } ]
+                                    | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Stale prerequisite", status = Api.Todo } ]
                                     , taskDependencyHasMore = Dict.singleton dependentId False
                                     , taskDependencyNextOffset = Dict.singleton dependentId 1
                                 }
@@ -548,7 +548,7 @@ suite =
                         { base
                             | dependencies =
                                 { dependencies
-                                    | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Deleted prerequisite" } ]
+                                    | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Deleted prerequisite", status = Api.Todo } ]
                                     , taskDependencyLinks = [ { taskId = dependentId, dependsOnId = prerequisiteId } ]
                                     , taskDependencyLoading = Dict.singleton dependentId True
                                     , taskDependencyRequests = Dict.singleton dependentId inFlightRequest
@@ -567,7 +567,7 @@ suite =
                                 inFlight.sessionRequestEpoch
                                 7
                                 0
-                                (Ok { items = [ { id = prerequisiteId, name = "Late stale prerequisite" } ], hasMore = False })
+                                (Ok { items = [ { id = prerequisiteId, name = "Late stale prerequisite", status = Api.Todo } ], hasMore = False })
                             )
                             invalidated
                             |> Tuple.first
@@ -613,7 +613,7 @@ suite =
                                 before.sessionRequestEpoch
                                 7
                                 0
-                                (Ok { items = [ { id = "stale-route", name = "Stale route dependency" } ], hasMore = False })
+                                (Ok { items = [ { id = "stale-route", name = "Stale route dependency", status = Api.Todo } ], hasMore = False })
                             )
                             returned
                             |> Tuple.first
@@ -668,7 +668,7 @@ suite =
                                 before.sessionRequestEpoch
                                 7
                                 0
-                                (Ok { items = [ { id = "stale-snapshot", name = "Stale snapshot dependency" } ], hasMore = False })
+                                (Ok { items = [ { id = "stale-snapshot", name = "Stale snapshot dependency", status = Api.Todo } ], hasMore = False })
                             )
                             afterSnapshot
                             |> Tuple.first
@@ -839,7 +839,7 @@ suite =
                     oldOverviewResult =
                         Ok
                             { task = task dependentId "Stale overview task" Api.Todo
-                            , dependencies = [ { id = "stale-overview", name = "Stale overview" } ]
+                            , dependencies = [ { id = "stale-overview", name = "Stale overview", status = Api.Todo } ]
                             , readinessRollup = dependentTaskCardSummary.readinessRollup
                             }
 
@@ -879,7 +879,7 @@ suite =
 
                     afterFinalPage =
                         Dependencies.update
-                            (GotTaskDependencyPage dependentId workspaceId afterEvent.sessionRequestEpoch 2 50 (Ok { items = List.drop 50 oldItems ++ [ { id = prerequisiteId, name = "Dependency 999" } ], hasMore = False }))
+                            (GotTaskDependencyPage dependentId workspaceId afterEvent.sessionRequestEpoch 2 50 (Ok { items = List.drop 50 oldItems ++ [ { id = prerequisiteId, name = "Dependency 999", status = Api.Todo } ], hasMore = False }))
                             afterOldDuringAccumulator
                             |> Tuple.first
 
@@ -1127,7 +1127,7 @@ suite =
                                 overviewGeneration
                                 (Ok
                                     { task = task dependentId "Late task" Api.Todo
-                                    , dependencies = [ { id = "late-dependency", name = "Late dependency" } ]
+                                    , dependencies = [ { id = "late-dependency", name = "Late dependency", status = Api.Todo } ]
                                     , readinessRollup = dependentTaskCardSummary.readinessRollup
                                     }
                                 )
@@ -1206,7 +1206,7 @@ suite =
                             , tasks = Dict.insert ancestorTaskId ancestorTask (Dict.insert dependentId dependentTask base.tasks)
                             , dependencies =
                                 { dependencies
-                                    | taskDependencies = Dict.insert ancestorTaskId [ { id = "old-ancestor-row", name = "Old ancestor row" } ] dependencies.taskDependencies
+                                    | taskDependencies = Dict.insert ancestorTaskId [ { id = "old-ancestor-row", name = "Old ancestor row", status = Api.Todo } ] dependencies.taskDependencies
                                     , taskDependencyHasMore = Dict.insert ancestorTaskId False dependencies.taskDependencyHasMore
                                     , taskDependencyNextOffset = Dict.insert ancestorTaskId 1 dependencies.taskDependencyNextOffset
                                     , taskReadinessRollups = Dict.insert ancestorTaskId staleTaskRollup dependencies.taskReadinessRollups
@@ -1243,7 +1243,7 @@ suite =
 
                     staleOverview =
                         { task = ancestorTask
-                        , dependencies = [ { id = "stale-overview-row", name = "Stale overview row" } ]
+                        , dependencies = [ { id = "stale-overview-row", name = "Stale overview row", status = Api.Todo } ]
                         , readinessRollup = { staleTaskRollup | openDependencyCount = 99 }
                         }
 
@@ -1270,7 +1270,7 @@ suite =
                                         request.sessionEpoch
                                         request.generation
                                         request.offset
-                                        (Ok { items = [ { id = "canonical-ancestor-row", name = "Canonical ancestor row" } ], hasMore = False })
+                                        (Ok { items = [ { id = "canonical-ancestor-row", name = "Canonical ancestor row", status = Api.Todo } ], hasMore = False })
                                     )
                                     afterOldProjectReadiness
                                     |> Tuple.first
@@ -1352,7 +1352,7 @@ suite =
                                 afterAddEcho.sessionRequestEpoch
                                 1
                                 0
-                                (Ok { items = [ { id = prerequisiteId, name = "Prerequisite" } ], hasMore = False })
+                                (Ok { items = [ { id = prerequisiteId, name = "Prerequisite", status = Api.Todo } ], hasMore = False })
                             )
                             afterAddEcho
                             |> Tuple.first
@@ -1506,6 +1506,7 @@ dependencySummary : Int -> Api.TaskDependencySummary
 dependencySummary index =
     { id = "dependency-" ++ String.fromInt index
     , name = "Dependency " ++ String.padLeft 3 '0' (String.fromInt index)
+    , status = Api.Todo
     }
 
 
@@ -1576,7 +1577,7 @@ staleDependencyRefreshModel =
     { base
         | dependencies =
             { dependencies
-                | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Stale prerequisite" } ]
+                | taskDependencies = Dict.singleton dependentId [ { id = prerequisiteId, name = "Stale prerequisite", status = Api.Todo } ]
                 , taskDependencyLinks = [ { taskId = dependentId, dependsOnId = prerequisiteId } ]
                 , taskDependencyHasMore = Dict.singleton dependentId False
                 , taskDependencyNextOffset = Dict.singleton dependentId 1
@@ -1588,7 +1589,7 @@ staleDependencyRefreshModel =
                         , offset = 0
                         , generation = 7
                         }
-                , taskDependencyRefreshItems = Dict.singleton dependentId [ { id = "partial", name = "Partial" } ]
+                , taskDependencyRefreshItems = Dict.singleton dependentId [ { id = "partial", name = "Partial", status = Api.Todo } ]
                 , taskDependencyMutations =
                     [ { requestId = "stale-local-request"
                       , taskId = dependentId

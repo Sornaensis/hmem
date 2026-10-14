@@ -890,7 +890,7 @@ taskDependencySummariesForTask model taskId =
                 |> List.filterMap
                     (\link ->
                         Dict.get link.dependsOnId model.tasks
-                            |> Maybe.map (\task -> { id = task.id, name = task.title })
+                            |> Maybe.map (\task -> { id = task.id, name = task.title, status = task.status })
                     )
 
 
@@ -931,13 +931,13 @@ applyTaskDependencySummaryMutation result tasks dependencies =
                         |> List.filterMap
                             (\link ->
                                 Dict.get link.dependsOnId tasks
-                                    |> Maybe.map (\task -> { id = task.id, name = task.title })
+                                    |> Maybe.map (\task -> { id = task.id, name = task.title, status = task.status })
                             )
             in
             case ( result.action, Dict.get result.dependsOnId tasks ) of
                 ( "add", Just task ) ->
                     Dict.insert result.taskId
-                        ((existing ++ [ { id = task.id, name = task.title } ])
+                        ((existing ++ [ { id = task.id, name = task.title, status = task.status } ])
                             |> List.foldl (\summary values -> if List.any (\value -> value.id == summary.id) values then values else summary :: values) []
                             |> List.sortBy (\summary -> ( String.toLower summary.name, summary.id ))
                         )
@@ -960,7 +960,7 @@ applyTaskDependencySummaryMutation result tasks dependencies =
                                         existing
 
                                     else
-                                        (existing ++ [ { id = task.id, name = task.title } ])
+                                        (existing ++ [ { id = task.id, name = task.title, status = task.status } ])
                                             |> List.sortBy (\summary -> ( String.toLower summary.name, summary.id ))
 
                                 Nothing ->

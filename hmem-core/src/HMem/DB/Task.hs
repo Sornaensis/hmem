@@ -19,6 +19,7 @@ module HMem.DB.Task
   , listTaskChildren
   , listFilteredTaskChildren
   , listNextTasks
+  , listNextTaskPage
   , enrichTaskCounts
   , dependencyAutoBlockSnapshots
   , projectPauseSnapshotsS
@@ -1342,8 +1343,20 @@ filteredTaskChildrenStatement = Statement.Statement sql encoder (Dec.rowList raw
 -- Results are ordered by scoped project priority,
 -- then task priority, then stable task creation/id tie-breakers.
 listNextTasks :: Pool Hasql.Connection -> UUID -> Bool -> Int -> IO [NextTaskCandidate]
-listNextTasks pool projectId includeBlocked limitRows = do
-  rows <- runSession pool $ Session.statement (projectId, includeBlocked, toInt32 sanitizedLimit) listNextTasksStatement
+listNextTasks pool projectId includeBlocked limitRows =
+  listNextTasksAt pool projectId includeBlocked False (Prelude.min 200 (Prelude.max 1 limitRows)) 0
+
+-- Card pagination includes parent-gated diagnostics without changing legacy candidates.
+listNextTaskPage :: Pool Hasql.Connection -> UUID -> Bool -> Int -> Int -> IO (PaginatedResult NextTaskCandidate)
+listNextTaskPage pool projectId includeBlocked limitRows offsetRows = do
+  let lim = Prelude.min 100 (Prelude.max 1 limitRows)
+      off = Prelude.min 2147483646 (Prelude.max 0 offsetRows)
+  rows <- listNextTasksAt pool projectId includeBlocked True (lim + 1) off
+  pure PaginatedResult { items = Prelude.take lim rows, hasMore = length rows > lim }
+
+listNextTasksAt :: Pool Hasql.Connection -> UUID -> Bool -> Bool -> Int -> Int -> IO [NextTaskCandidate]
+listNextTasksAt pool projectId includeBlocked includeParentBlocked limitRows offsetRows = do
+  rows <- runSession pool $ Session.statement (projectId, includeBlocked, fromIntegral limitRows, fromIntegral offsetRows, includeParentBlocked) listNextTasksStatement
   enrichedTasks <- enrichTaskCounts pool (map (.task) rows)
   let enrichedById = Map.fromList [(task.id, task) | task <- enrichedTasks]
       enrichCandidate candidate = NextTaskCandidate
@@ -1353,15 +1366,11 @@ listNextTasks pool projectId includeBlocked limitRows = do
         , dependencyBlocked = candidate.dependencyBlocked
         , openDependencyCount = candidate.openDependencyCount
         , projectPaused = candidate.projectPaused
+        , parentBlocked = candidate.parentBlocked
         }
   pure (map enrichCandidate rows)
-  where
-    sanitizedLimit = Prelude.min 200 . Prelude.max 1 $ limitRows
 
-    toInt32 :: Int -> Int32
-    toInt32 = fromIntegral
-
-listNextTasksStatement :: Statement.Statement (UUID, Bool, Int32) [NextTaskCandidate]
+listNextTasksStatement :: Statement.Statement (UUID, Bool, Int32, Int32, Bool) [NextTaskCandidate]
 listNextTasksStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
@@ -1406,7 +1415,7 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "     AND ($2 OR NOT hmem_task_is_inside_paused_project(task.id))"
       , "     AND NOT hmem_task_is_inside_closed_project(task.id)"
       , "     AND NOT hmem_task_has_closed_ancestor(task.id)"
-      , "     AND (task.parent_id IS NULL OR hmem_task_can_start_subtasks(task.parent_id) OR ($2 AND hmem_task_is_inside_paused_project(task.id)))"
+      , "     AND (task.parent_id IS NULL OR hmem_task_can_start_subtasks(task.parent_id) OR ($2 AND (hmem_task_is_inside_paused_project(task.id) OR $5)))"
       , "),"
       , "open_descendant_ancestors(descendant_id, ancestor_id) AS ("
       , "  SELECT child.id, parent.id"
@@ -1441,18 +1450,21 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "       coalesce(open_desc.open_descendant_count, 0)::bigint AS open_descendant_count,"
       , "       coalesce(open_dep.open_dependency_count, 0) > 0 AS dependency_blocked,"
       , "       coalesce(open_dep.open_dependency_count, 0)::bigint AS open_dependency_count,"
-      , "       hmem_task_is_inside_paused_project(candidate.id) AS project_paused"
+      , "       hmem_task_is_inside_paused_project(candidate.id) AS project_paused,"
+      , "       (candidate.parent_id IS NOT NULL AND NOT hmem_task_can_start_subtasks(candidate.parent_id)) AS parent_blocked"
       , "  FROM candidate_tasks candidate"
       , "  LEFT JOIN open_descendant_counts open_desc ON open_desc.id = candidate.id"
       , "  LEFT JOIN open_dependency_counts open_dep ON open_dep.id = candidate.id"
       , " WHERE ($2 OR coalesce(open_dep.open_dependency_count, 0) = 0)"
       , " ORDER BY candidate.scope_project_priority DESC, candidate.priority DESC, candidate.created_at ASC, candidate.id ASC"
-      , " LIMIT $3"
+      , " LIMIT $3 OFFSET $4"
       ]
     encoder =
-      contramap (\(projectId, _, _) -> projectId) (Enc.param (Enc.nonNullable Enc.uuid)) <>
-      contramap (\(_, includeBlocked, _) -> includeBlocked) (Enc.param (Enc.nonNullable Enc.bool)) <>
-      contramap (\(_, _, limitRows) -> limitRows) (Enc.param (Enc.nonNullable Enc.int4))
+      contramap (\(projectId, _, _, _, _) -> projectId) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_, includeBlocked, _, _, _) -> includeBlocked) (Enc.param (Enc.nonNullable Enc.bool)) <>
+      contramap (\(_, _, limitRows, _, _) -> limitRows) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_, _, _, offsetRows, _) -> offsetRows) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_, _, _, _, includeParentBlocked) -> includeParentBlocked) (Enc.param (Enc.nonNullable Enc.bool))
     decoder = Dec.rowList nextTaskCandidateRowDecoder
 
 nextTaskCandidateRowDecoder :: Dec.Row NextTaskCandidate
@@ -1463,6 +1475,7 @@ nextTaskCandidateRowDecoder = do
   dependencyBlocked <- Dec.column (Dec.nonNullable Dec.bool)
   openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
   projectPaused <- Dec.column (Dec.nonNullable Dec.bool)
+  parentBlocked <- Dec.column (Dec.nonNullable Dec.bool)
   pure NextTaskCandidate
     { task = task
     , completionGated = completionGated
@@ -1470,6 +1483,7 @@ nextTaskCandidateRowDecoder = do
     , dependencyBlocked = dependencyBlocked
     , openDependencyCount = fromIntegral openDependencyCount
     , projectPaused = projectPaused
+    , parentBlocked = parentBlocked
     }
 
 dependencyAutoBlockSnapshots :: Pool Hasql.Connection -> [UUID] -> IO [TaskDependencyAutoBlockSnapshot]

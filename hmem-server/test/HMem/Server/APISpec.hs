@@ -188,6 +188,13 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       Task.addDependency env.pool parent.id prerequisite.id
       parentBlocked <- request app methodGet (pauseProjectPath project.id <> "/next-tasks?limit=100") ""
       decode (responseBody parentBlocked) `shouldBe` Just ([] :: [NextTaskCandidate])
+      pageResponse <- request app methodGet (pauseProjectPath project.id <> "/next-task-page?include_blocked=true&limit=100") ""
+      responseStatus pageResponse `shouldBe` status200
+      let Just page = decode (responseBody pageResponse) :: Maybe (PaginatedResult NextTaskCandidate)
+      page.hasMore `shouldBe` False
+      sort (map (\row -> row.task.id) page.items) `shouldBe` sort [parent.id, child.id, blocked.id]
+      map (\row -> row.parentBlocked) (filter (\row -> row.task.id == child.id) page.items) `shouldBe` [True]
+
 
   describe "project pause HTTP contract" $ do
     it "returns bounded truthful cascade samples and paused subtask diagnostics" $ \(env, app) -> do

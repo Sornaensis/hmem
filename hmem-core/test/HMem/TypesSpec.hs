@@ -20,7 +20,7 @@ spec = do
           legacyChange = object ["task" .= task, "previous_status" .= Todo, "current_status" .= Blocked,
             "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int),
             "open_dependency_count" .= (1 :: Int), "reason" .= ("blocked_by_open_dependencies" :: T.Text)]
-      eitherDecode (encode legacyNext) `shouldBe` Right (NextTaskCandidate task False 0 False 0 False)
+      eitherDecode (encode legacyNext) `shouldBe` Right (NextTaskCandidate task False 0 False 0 False False)
       eitherDecode (encode legacyChange) `shouldBe` Right (TaskDependencyStatusChange task Todo Blocked False True 0 1 0 0 False False "blocked_by_open_dependencies")
     it "keeps plain Project decoders and older mutation responses compatible" $ do
       let project = Project workspace workspace Nothing "project" Nothing ProjPaused 5 (object []) observedAt observedAt

@@ -44,6 +44,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
         Nothing -> expectationFailure "Expected task overview"
         Just overview -> do
           map (.id) overview.dependencies `shouldBe` [dependency.id]
+          map (.status) overview.dependencies `shouldBe` [Todo]
           overview.readinessRollup.completionReady `shouldBe` True
 
     it "keeps batched card rollups equal to the legacy single-overview semantics" $ \env -> do

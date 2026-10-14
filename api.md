@@ -236,3 +236,5 @@ Such a transition returns `409 audit_pause_provenance_missing` after authorizati
 choose the desired project status explicitly. Metadata and unambiguous historical
 transitions remain usable. Malformed stored provenance returns
 `409 audit_pause_provenance_invalid`.
+
+Expanded project cards consume `GET /api/v1/projects/:id/next-task-page` to exhaustion. It returns `{items, has_more}`, defaults to 50 items, caps pages at 100, and accepts `offset` and `include_blocked`. Diagnostic pages include parent-gated subtasks with `parent_blocked`; closed/deleted placements stay excluded. The legacy `next-tasks` list keeps its existing limits and candidate eligibility. Dependency summaries in task overviews and dependency pages include authoritative `status` for closed-work grouping.

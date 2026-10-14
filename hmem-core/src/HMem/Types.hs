@@ -1189,6 +1189,7 @@ data NextTaskCandidate = NextTaskCandidate
   , dependencyBlocked   :: Bool
   , openDependencyCount :: Int
   , projectPaused       :: Bool
+  , parentBlocked       :: Bool
   } deriving (Show, Eq, Generic)
 
 instance ToJSON NextTaskCandidate where
@@ -1198,6 +1199,7 @@ instance FromJSON NextTaskCandidate where
     <$> o .: "task" <*> o .: "completion_gated" <*> o .: "open_descendant_count"
     <*> o .: "dependency_blocked" <*> o .: "open_dependency_count"
     <*> o .:? "project_paused" .!= False
+    <*> o .:? "parent_blocked" .!= False
 
 -- | Bounded project cascade acknowledgement. Counts cover all affected rows;
 -- samples contain at most twenty rows of each kind.
@@ -1344,7 +1346,7 @@ data TaskListQuery = TaskListQuery
 instance ToJSON TaskListQuery where toJSON = genericToJSON jsonOptions
 instance FromJSON TaskListQuery where parseJSON = genericParseJSON jsonOptions
 
-data TaskDependencySummary = TaskDependencySummary { id :: UUID, name :: Text } deriving (Show, Eq, Generic)
+data TaskDependencySummary = TaskDependencySummary { id :: UUID, name :: Text, status :: TaskStatus } deriving (Show, Eq, Generic)
 instance ToJSON TaskDependencySummary where toJSON = genericToJSON jsonOptions
 instance FromJSON TaskDependencySummary where parseJSON = genericParseJSON jsonOptions
 

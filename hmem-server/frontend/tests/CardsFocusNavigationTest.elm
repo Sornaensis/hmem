@@ -474,7 +474,7 @@ suite =
                 ready = viewportReady { seeded | sessionContext = Just editorSession, webSocket = { websocket | targetGenerations = Dict.singleton "workspace:workspace-1|task-overview:dependent" 1 } }
                 guard = { scopeKey = "workspace:workspace-1", targetKey = "task-overview:dependent", targetGeneration = 1, sessionEpoch = ready.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
                 overview dependencies = { task = Dict.get "dependent" ready.tasks |> Maybe.withDefault (Api.taskFromCardSummary (task "dependent" Nothing)), dependencies = dependencies, readinessRollup = (task "dependent" Nothing).readinessRollup }
-                linked = routed (CanonicalTaskOverviewFetched guard "dependent" (Ok (overview [ { id = "prerequisite", name = "prerequisite" } ]))) ready
+                linked = routed (CanonicalTaskOverviewFetched guard "dependent" (Ok (overview [ { id = "prerequisite", name = "prerequisite", status = Api.Todo } ]))) ready
                 unlinked = routed (CanonicalTaskOverviewFetched guard "dependent" (Ok (overview []))) linked
                 done source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "entity-dependent" ] |> Query.findAll [ Selector.tag "option", Selector.attribute (Html.Attributes.value "done") ]
             in

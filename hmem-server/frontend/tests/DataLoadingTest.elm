@@ -1978,11 +1978,11 @@ suite =
                         Dependencies.beginDependencyRefresh "task" first
 
                     stale =
-                        Dependencies.update (GotTaskDependencyPage "task" workspaceId model.sessionRequestEpoch 1 0 (Ok { items = [ { id = "stale", name = "Stale" } ], hasMore = False })) second
+                        Dependencies.update (GotTaskDependencyPage "task" workspaceId model.sessionRequestEpoch 1 0 (Ok { items = [ { id = "stale", name = "Stale", status = Api.Todo } ], hasMore = False })) second
                             |> Tuple.first
 
                     current =
-                        Dependencies.update (GotTaskDependencyPage "task" workspaceId model.sessionRequestEpoch 2 0 (Ok { items = [ { id = "current", name = "Current" } ], hasMore = False })) stale
+                        Dependencies.update (GotTaskDependencyPage "task" workspaceId model.sessionRequestEpoch 2 0 (Ok { items = [ { id = "current", name = "Current", status = Api.Todo } ], hasMore = False })) stale
                             |> Tuple.first
                 in
                 Expect.equal

@@ -566,6 +566,7 @@ type alias DependenciesModel =
     , taskDependencyHasMore : Dict String Bool
     , taskDependencyNextOffset : Dict String Int
     , taskDependencyLoading : Dict String Bool
+    , taskDependencyErrors : Dict String String
     , taskDependencyRequests : Dict String DependencyPageRequest
     , taskDependencyRefreshItems : Dict String (List Api.TaskDependencySummary)
     , taskDependencyMutations : List DependencyMutationCorrelation
@@ -1222,8 +1223,10 @@ type Msg
       -- Task dependencies
     | GotTaskDependencies String (Maybe String) Int Int (Result Http.Error Api.TaskOverview)
     | GotTaskDependencyPage String String Int Int Int (Result Http.Error Api.TaskDependencyPage)
+    | RefreshTaskDependencies String
     | LoadTaskDependencyPage String
     | GotProjectOverview CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
+    | GotProjectNextTaskPage CanonicalRequestGuard String Bool Int (List Api.NextTaskCandidate) (Result Http.Error Api.NextTaskPage)
     | GotProjectNextTasks CanonicalRequestGuard String (Result Http.Error (List Api.NextTaskCandidate))
     | GotProjectNextTaskDiagnostics CanonicalRequestGuard String (Result Http.Error (List Api.NextTaskCandidate))
     | RefreshProjectNextTasks String

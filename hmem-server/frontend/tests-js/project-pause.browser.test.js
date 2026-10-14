@@ -61,8 +61,8 @@ test('two independent clients converge after canonical pause/resume, including c
     await a.idle(); await b.idle()
     assert.equal(await b.page.locator('#entity-hidden-work').count(), 0)
     await b.scrollTo('task:work-044'); await b.scrollTo('project:root-project')
-    oldNext = b.gate(r => r.path.endsWith('/root-project/next-tasks') && r.includeBlocked, { hold:true })
-    oldReady = b.gate(r => r.path.endsWith('/root-project/next-tasks') && !r.includeBlocked, { hold:true })
+    oldNext = b.gate(r => r.path.endsWith('/root-project/next-task-page') && r.includeBlocked, { hold:true })
+    oldReady = b.gate(r => r.path.endsWith('/root-project/next-task-page') && !r.includeBlocked, { hold:true })
     await b.page.locator('#entity-root-project .btn-extras-toggle').first().click()
     await b.bounded(oldNext.arrived, 10000, 'Old diagnostic response')
     await b.bounded(oldReady.arrived, 10000, 'Old first ready response')
@@ -71,6 +71,7 @@ test('two independent clients converge after canonical pause/resume, including c
     const before = b.requests.length
     await a.page.locator('#entity-root-project .card-project select').first().selectOption('paused')
     await a.idle()
+    await b.page.locator('#entity-root-project .project-next-tasks-diagnostics > summary').click()
     await b.page.locator('#entity-root-project .project-next-tasks-diagnostics').getByText('Paused by this project or an ancestor.', { exact:false }).first().waitFor()
     oldReady.release(); oldNext.release(); await b.idle(); await paint(b.page)
     assert.equal(await b.page.locator('#entity-root-project .card-project select').first().inputValue(), 'paused')
@@ -103,7 +104,7 @@ test('held project diagnostics cannot contaminate a replacement workspace', { ti
   let held
   try {
     await h.start(); await h.idle()
-    held = h.gate(r => r.path.endsWith('/root-project/next-tasks') && r.includeBlocked, { hold:true,transform(values) { return values.map(value => ({ ...value,task:{ ...value.task,title:'Retired diagnostic sentinel' } })) } })
+    held = h.gate(r => r.path.endsWith('/root-project/next-task-page') && r.includeBlocked, { hold:true,transform(page) { return { ...page, items: page.items.map(value => ({ ...value,task:{ ...value.task,title:'Retired diagnostic sentinel' } })) } } })
     await h.page.locator('#entity-root-project .btn-extras-toggle').first().click(); await h.bounded(held.arrived, 10000, 'Held old workspace diagnostics')
     await h.page.locator('.sidebar-nav').getByRole('link', { name:'Replacement workspace' }).click(); await h.page.locator('#entity-replacement-root-project').waitFor()
     held.release(); await h.idle()

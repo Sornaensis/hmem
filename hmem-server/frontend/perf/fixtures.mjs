@@ -197,7 +197,7 @@ export function taskOverviewResponse(fixture, taskId) {
     .filter(edge => edge.task_id === task.id)
     .map(edge => tasks.get(edge.depends_on_id))
     .filter(Boolean)
-    .map(dependency => ({ id: dependency.id, name: dependency.title }))
+    .map(dependency => ({ id: dependency.id, name: dependency.title, status: dependency.status }))
     .sort((left, right) => compareText(left.name, right.name))
   return { task, dependencies, readiness_rollup: taskReadinessRollup(fixture, taskId) }
 }

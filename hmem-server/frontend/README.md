@@ -160,3 +160,5 @@ readiness and next-task callbacks use workspace, session and target generations,
 so delayed responses cannot revive a retired workspace or overwrite newer state.
 The project-pause browser regression uses two independent production Elm pages
 with one intercepted canonical authority; it does not qualify a deployed backend.
+
+Expanded project cards load every next task through guarded bounded pages. Blocked tasks/subtasks share a count disclosure, initially collapsed, including parent-gated work with its rationale. Task cards show open dependencies directly and closed (done/cancelled) dependencies in a separate initially collapsed disclosure. Counts use authoritative summaries, with loading/incomplete feedback during refresh and retries after failures. Each disclosure is independent and keyboard accessible.

@@ -19,6 +19,7 @@ import Feature.Timeline
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
 import Helpers
+import Http
 import Ports
 import Toast
 import Types exposing (..)
@@ -263,10 +264,10 @@ route msg model =
         RequestProjectNextTasks workspace epoch projectId diagnostics ->
             let
                 target = (if diagnostics then "project-next-diagnostics:" else "project-next:") ++ projectId
-                toMsg guard = if diagnostics then GotProjectNextTaskDiagnostics guard projectId else GotProjectNextTasks guard projectId
+                toMsg guard = GotProjectNextTaskPage guard projectId diagnostics 0 []
             in
             if Helpers.projectNextDemandIsActive projectId model then
-                Ok (Helpers.beginProjectRequest workspace epoch target (\guard -> Api.fetchProjectNextTasks model.flags.apiUrl projectId (if diagnostics then 200 else 5) diagnostics (toMsg guard)) model)
+                Ok (Helpers.beginProjectRequest workspace epoch target (\guard -> Api.fetchProjectNextTaskPage model.flags.apiUrl projectId 0 diagnostics (toMsg guard)) model)
             else
                 let cards = model.cards
                 in
@@ -704,12 +705,35 @@ route msg model =
         GotTaskDependencyPage _ _ _ _ _ _ ->
             Ok (Feature.Dependencies.update msg model)
 
+        RefreshTaskDependencies _ ->
+            Ok (Feature.Dependencies.update msg model)
+
         LoadTaskDependencyPage _ ->
             Ok (Feature.Dependencies.update msg model)
 
         GotProjectOverview guard _ _ ->
             if Helpers.projectRequestIsCurrent guard model then
                 Ok (Feature.Dependencies.update msg model)
+            else
+                Ok ( model, Cmd.none )
+
+        GotProjectNextTaskPage guard projectId diagnostics offset accumulated result ->
+            if Helpers.projectRequestIsCurrent guard model && Helpers.projectNextDemandIsActive projectId model then
+                let
+                    deliver value = if diagnostics then GotProjectNextTaskDiagnostics guard projectId value else GotProjectNextTasks guard projectId value
+                in
+                case result of
+                    Ok page ->
+                        if page.hasMore && (List.isEmpty page.items || offset > 2147483647 - List.length page.items) then
+                            Ok (Feature.Cards.update (deliver (Err (Http.BadBody "Next-task continuation did not advance"))) model)
+                        else if page.hasMore then
+                            let nextOffset = offset + List.length page.items
+                            in
+                            Ok ( model, Api.fetchProjectNextTaskPage model.flags.apiUrl projectId nextOffset diagnostics (GotProjectNextTaskPage guard projectId diagnostics nextOffset (accumulated ++ page.items)) )
+                        else
+                            Ok (Feature.Cards.update (deliver (Ok (List.foldl (\item values -> if List.any (\value -> value.task.id == item.task.id) values then values else values ++ [ item ]) [] (accumulated ++ page.items)))) model)
+                    Err error ->
+                        Ok (Feature.Cards.update (deliver (Err error)) model)
             else
                 Ok ( model, Cmd.none )
 

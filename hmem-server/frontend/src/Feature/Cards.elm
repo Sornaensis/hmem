@@ -231,6 +231,8 @@ update msg model =
                                 { dependencies
                                     | taskDependencyLoading = Dict.insert cardId True dependencies.taskDependencyLoading
                                     , taskDependencyRequests = Dict.insert cardId request dependencies.taskDependencyRequests
+                                    , taskDependencyRefreshItems = Dict.insert cardId [] dependencies.taskDependencyRefreshItems
+                                    , taskDependencyErrors = Dict.remove cardId dependencies.taskDependencyErrors
                                     , nextTaskDependencyRequestGeneration = request.generation + 1
                                 }
 
@@ -1859,7 +1861,7 @@ viewProjectNextTasksPanel projection model project =
             Dict.get project.id model.cards.projectNextTaskDiagnosticsErrors
 
         waitingSubtasks =
-            waitingSubtasksForProject projection model project
+            []
 
         candidateViews =
             candidates
@@ -1914,15 +1916,18 @@ viewProjectNextTasksPanel projection model project =
 
             Just _ ->
                 div [ class "project-next-tasks-list" ] candidateViews
+        , if diagnosticsLoading then
+            div [ class "project-next-tasks-empty", attribute "role" "status" ] [ text "Loading blocked tasks/subtasks…" ]
+          else
+            text ""
         , if not (List.isEmpty blockedDiagnostics) then
-            div [ class "project-next-tasks-diagnostics" ]
-                [ div [ class "project-next-tasks-diagnostics-title" ] [ text "Blocked diagnostics" ]
+            details [ class "project-next-tasks-diagnostics card-disclosure" ]
+                [ summary [ class "project-next-tasks-diagnostics-title" ] [ text (countPhrase (List.length blockedDiagnostics) "blocked task/subtask" "blocked tasks/subtasks" ++ (if diagnosticsLoading then " (refreshing…)" else if diagnosticsErrorMessage /= Nothing then " (refresh incomplete)" else "")) ]
                 , div [ class "project-next-tasks-list" ] blockedDiagnosticViews
                 ]
 
           else
             text ""
-        , viewWaitingSubtasksNote waitingSubtasks
         ]
 
 
@@ -2011,7 +2016,7 @@ nextTaskCandidateClass candidate =
 
 isBlockedNextTaskCandidate : Api.NextTaskCandidate -> Bool
 isBlockedNextTaskCandidate candidate =
-    candidate.projectPaused || candidate.dependencyBlocked || candidate.task.status == Api.Blocked
+    candidate.projectPaused || candidate.parentBlocked || candidate.dependencyBlocked || candidate.task.status == Api.Blocked
 
 
 
@@ -2021,6 +2026,10 @@ nextTaskRationale candidate =
         "Paused by this project or an ancestor. Resume the project to release this blocker."
             ++ (if candidate.dependencyBlocked then " Still waiting for " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ "." else "")
             ++ (if candidate.completionGated then " Still waiting for " ++ countPhrase candidate.openDescendantCount "open subtask" "open subtasks" ++ "." else "")
+
+    else if candidate.parentBlocked then
+        "Waiting for parent blockers to clear before subtask work can start."
+            ++ (if candidate.dependencyBlocked then " Still waiting for " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ "." else "")
 
     else if candidate.dependencyBlocked then
         "Dependency-blocked by " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ "."

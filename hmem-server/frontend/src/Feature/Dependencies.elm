@@ -35,6 +35,7 @@ init =
     , taskDependencyHasMore = Dict.empty
     , taskDependencyNextOffset = Dict.empty
     , taskDependencyLoading = Dict.empty
+    , taskDependencyErrors = Dict.empty
     , taskDependencyRequests = Dict.empty
     , taskDependencyRefreshItems = Dict.empty
     , taskDependencyMutations = []
@@ -90,6 +91,7 @@ resetCache dependencies =
         , taskDependencyHasMore = Dict.empty
         , taskDependencyNextOffset = Dict.empty
         , taskDependencyLoading = Dict.empty
+        , taskDependencyErrors = Dict.empty
         , taskDependencyRequests = Dict.empty
         , taskDependencyRefreshItems = Dict.empty
         , taskDependencyMutations = []
@@ -104,6 +106,7 @@ cacheCompleteTaskDependencies taskId items dependencies =
         , taskDependencyHasMore = Dict.insert taskId False dependencies.taskDependencyHasMore
         , taskDependencyNextOffset = Dict.insert taskId (List.length items) dependencies.taskDependencyNextOffset
         , taskDependencyLoading = Dict.insert taskId False dependencies.taskDependencyLoading
+        , taskDependencyErrors = Dict.remove taskId dependencies.taskDependencyErrors
         , taskDependencyRequests = Dict.remove taskId dependencies.taskDependencyRequests
         , taskDependencyRefreshItems = Dict.remove taskId dependencies.taskDependencyRefreshItems
     }
@@ -184,7 +187,7 @@ applyDependencyPage taskId request result model =
                         authoritativeItems =
                             deduplicateAndSortDependencies (accumulatedItems ++ page.items)
                     in
-                    if page.hasMore && not (List.isEmpty page.items) then
+                    if page.hasMore && not (List.isEmpty page.items) && request.offset <= 2147483647 - List.length page.items then
                         let
                             nextRequest =
                                 { request
@@ -211,6 +214,7 @@ applyDependencyPage taskId request result model =
                                 | dependencies =
                                     { dependenciesModel
                                         | taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
+                                        , taskDependencyErrors = Dict.insert taskId "Dependency refresh incomplete" dependenciesModel.taskDependencyErrors
                                         , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
                                         , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
                                     }
@@ -224,6 +228,7 @@ applyDependencyPage taskId request result model =
                                     , taskDependencyHasMore = Dict.insert taskId False dependenciesModel.taskDependencyHasMore
                                     , taskDependencyNextOffset = Dict.insert taskId nextOffset dependenciesModel.taskDependencyNextOffset
                                     , taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
+                                    , taskDependencyErrors = Dict.remove taskId dependenciesModel.taskDependencyErrors
                                     , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
                                     , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
                                 }
@@ -250,7 +255,8 @@ applyDependencyPage taskId request result model =
                                 , taskDependencyHasMore = Dict.insert taskId page.hasMore dependenciesModel.taskDependencyHasMore
                                 , taskDependencyNextOffset = Dict.insert taskId nextOffset dependenciesModel.taskDependencyNextOffset
                                 , taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
-                                , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
+                                , taskDependencyErrors = Dict.remove taskId dependenciesModel.taskDependencyErrors
+                                    , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
                                 , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
                             }
                       }
@@ -268,7 +274,8 @@ applyDependencyPage taskId request result model =
                     | dependencies =
                         { dependenciesModel
                             | taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
-                            , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
+                            , taskDependencyErrors = Dict.insert taskId "Dependency refresh incomplete" dependenciesModel.taskDependencyErrors
+                                    , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
                             , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
                         }
                 }
@@ -285,25 +292,12 @@ beginDependencyRefresh taskId model =
                 request =
                     { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, offset = 0, generation = dependencies.nextTaskDependencyRequestGeneration }
 
-                cachedItems =
-                    Dict.get taskId dependencies.taskDependencies |> Maybe.withDefault []
-
-                refreshAll =
-                    Dict.get taskId dependencies.taskDependencyHasMore
-                        /= Just True
-                        && List.length cachedItems
-                        >= dependencyPageSize
-
                 updated =
                     { dependencies
                         | taskDependencyLoading = Dict.insert taskId True dependencies.taskDependencyLoading
+                        , taskDependencyErrors = Dict.remove taskId dependencies.taskDependencyErrors
                         , taskDependencyRequests = Dict.insert taskId request dependencies.taskDependencyRequests
-                        , taskDependencyRefreshItems =
-                            if refreshAll then
-                                Dict.insert taskId [] dependencies.taskDependencyRefreshItems
-
-                            else
-                                Dict.remove taskId dependencies.taskDependencyRefreshItems
+                        , taskDependencyRefreshItems = Dict.insert taskId [] dependencies.taskDependencyRefreshItems
                         , nextTaskDependencyRequestGeneration = request.generation + 1
                     }
             in
@@ -326,6 +320,7 @@ invalidateDependencyPage taskId model =
                 , taskDependencyHasMore = Dict.remove taskId dependencies.taskDependencyHasMore
                 , taskDependencyNextOffset = Dict.remove taskId dependencies.taskDependencyNextOffset
                 , taskDependencyLoading = Dict.remove taskId dependencies.taskDependencyLoading
+                , taskDependencyErrors = Dict.remove taskId dependencies.taskDependencyErrors
                 , taskDependencyRequests = Dict.remove taskId dependencies.taskDependencyRequests
                 , taskDependencyRefreshItems = Dict.remove taskId dependencies.taskDependencyRefreshItems
                 , nextTaskDependencyRequestGeneration = dependencies.nextTaskDependencyRequestGeneration + 1
@@ -336,6 +331,9 @@ invalidateDependencyPage taskId model =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        RefreshTaskDependencies taskId ->
+            beginDependencyRefresh taskId model
+
         GotTaskDependencyPage taskId workspaceId sessionEpoch generation offset result ->
             case Dict.get taskId model.dependencies.taskDependencyRequests of
                 Just request ->
@@ -577,6 +575,12 @@ update msg model =
 viewTaskDependencies : Model -> String -> List Api.TaskDependencySummary -> Html Msg
 viewTaskDependencies model taskId deps =
     let
+        openDeps =
+            List.filter (\dep -> isOpenTaskCardStatus dep.status) deps
+
+        closedDeps =
+            List.filter (\dep -> not (isOpenTaskCardStatus dep.status)) deps
+
         selectorOpen =
             case model.dependencies.addingDependencyFor of
                 Just st ->
@@ -589,12 +593,23 @@ viewTaskDependencies model taskId deps =
         [ div [ class "task-dependencies-header" ]
             [ span [ class "task-dependencies-title" ] [ text ("Dependencies (" ++ String.fromInt (List.length deps) ++ ")") ]
             ]
-        , if List.isEmpty deps then
-            div [ class "task-dependencies-empty" ] [ text "No dependencies" ]
+        , if List.isEmpty openDeps then
+            div [ class "task-dependencies-empty" ] [ text "No open dependencies" ]
 
           else
             div [ class "task-dependencies-list" ]
-                (List.map (viewDependencyItem model taskId) deps)
+                (List.map (viewDependencyItem model taskId) openDeps)
+        , if List.isEmpty closedDeps then
+            text ""
+          else
+            details [ class "task-closed-dependencies card-disclosure" ]
+                [ summary [] [ text (String.fromInt (List.length closedDeps) ++ (if List.length closedDeps == 1 then " closed dependency" else " closed dependencies") ++ (if Dict.get taskId model.dependencies.taskDependencyHasMore == Just True || Dict.get taskId model.dependencies.taskDependencyLoading == Just True then " (loaded so far)" else if Dict.member taskId model.dependencies.taskDependencyErrors then " (refresh incomplete)" else "")) ]
+                , div [ class "task-dependencies-list" ] (List.map (viewDependencyItem model taskId) closedDeps)
+                ]
+        , if Dict.get taskId model.dependencies.taskDependencyLoading |> Maybe.withDefault False then
+            div [ attribute "role" "status" ] [ text "Loading dependencies…" ]
+          else
+            text ""
         , if Dict.get taskId model.dependencies.taskDependencyHasMore |> Maybe.withDefault False then
             button
                 [ class "btn-small btn-ghost"
@@ -612,6 +627,12 @@ viewTaskDependencies model taskId deps =
 
           else
             text ""
+        , case Dict.get taskId model.dependencies.taskDependencyErrors of
+            Just message ->
+                div [ attribute "role" "status" ]
+                    [ text message, button [ onClick (RefreshTaskDependencies taskId) ] [ text "Retry" ] ]
+            Nothing ->
+                text ""
         , if Permissions.canEditCurrentWorkspace model then
             div [ class "card-inline-actions" ]
                 [ div [ class "popover-anchor" ]

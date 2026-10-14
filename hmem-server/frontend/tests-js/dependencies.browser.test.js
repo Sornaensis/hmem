@@ -110,7 +110,7 @@ async function startFixtureServer(requests) {
     if (request.method === 'GET' && request.url === `/api/v1/tasks/${dependentId}/dependencies?limit=50&offset=0`) {
       dependencyPageRequests += 1
       response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ items: dependencyPresent ? [ { id: prerequisiteId, name: 'Prerequisite' } ] : [], has_more: false }))
+      response.end(JSON.stringify({ items: dependencyPresent ? [ { id: prerequisiteId, name: 'Prerequisite', status: 'todo' } ] : [], has_more: false }))
       return
     }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })

@@ -38,7 +38,7 @@ export function hierarchyFixture() {
 
 // Match the production candidate contract, including unloaded subtasks. The
 // database remains the authority; this supplies controlled browser responses.
-export function projectNextTasksResponse(fixture, projectId, includeBlocked, limit) {
+export function projectNextTasksResponse(fixture, projectId, includeBlocked, limit, offset = 0, page = false) {
   const projects = new Map(fixture.projects.map(project => [project.id, project]))
   const tasks = new Map(fixture.tasks.map(task => [task.id, task]))
   const open = task => task && !task.deleted_at && ['todo', 'in_progress', 'blocked'].includes(task.status)
@@ -73,11 +73,11 @@ export function projectNextTasksResponse(fixture, projectId, includeBlocked, lim
   return [...scope.keys()].map(id => tasks.get(id))
     .filter(task => open(task) && !closedPlacement(task)
       && (includeBlocked || (task.status !== 'blocked' && !projectPaused(task)))
-      && (!task.parent_id || (tasks.has(task.parent_id) && !projectPaused(tasks.get(task.parent_id)) && taskReadinessRollup(fixture, task.parent_id).can_start_subtasks) || (includeBlocked && projectPaused(task))))
-    .map(task => { const openDescendants = descendants(task), openDependencies = dependencies(task); return { task, completion_gated: openDescendants > 0, open_descendant_count: openDescendants, dependency_blocked: openDependencies > 0, open_dependency_count: openDependencies, project_paused: projectPaused(task) } })
+      && (!task.parent_id || (tasks.has(task.parent_id) && !projectPaused(tasks.get(task.parent_id)) && taskReadinessRollup(fixture, task.parent_id).can_start_subtasks) || (includeBlocked && (page || projectPaused(task)))))
+    .map(task => { const openDescendants = descendants(task), openDependencies = dependencies(task); return { task, completion_gated: openDescendants > 0, open_descendant_count: openDescendants, dependency_blocked: openDependencies > 0, open_dependency_count: openDependencies, project_paused: projectPaused(task), parent_blocked: !!task.parent_id && !taskReadinessRollup(fixture, task.parent_id).can_start_subtasks } })
     .filter(candidate => includeBlocked || !candidate.dependency_blocked)
     .sort((a, b) => projects.get(scope.get(b.task.id)).priority - projects.get(scope.get(a.task.id)).priority || b.task.priority - a.task.priority || a.task.created_at.localeCompare(b.task.created_at) || a.task.id.localeCompare(b.task.id))
-    .slice(0, Math.min(200, Math.max(1, limit)))
+    .slice(offset, offset + (page ? limit : Math.min(200, Math.max(1, limit))))
 }
 
 async function bounded(action, milliseconds, label) {
@@ -180,6 +180,17 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         else if (path.endsWith('/navigation/summaries')) { const body = request.postDataJSON(); value = navigationSummariesResponse(fixture, body.project_ids, body.task_ids) }
         else if (path.includes('/navigation/focus/')) { const parts = path.split('/'); value = navigationFocusResponse(fixture, parts.at(-2), parts.at(-1), Number(url.searchParams.get('ancestor_offset') || 0)) }
         else if (/^\/api\/v1\/projects\/[^/]+\/overview$/.test(path)) value = projectOverviewResponse(fixture, path.split('/')[4])
+        else if (/^\/api\/v1\/projects\/[^/]+\/next-task-page$/.test(path)) {
+          receipt.offset = Number(url.searchParams.get('offset') || 0)
+          const limit = Number(url.searchParams.get('limit') || 50)
+          const values = projectNextTasksResponse(fixture, entityId, receipt.includeBlocked, limit + 1, receipt.offset, true)
+          value = { items: values.slice(0, limit), has_more: values.length > limit }
+        }
+        else if (/^\/api\/v1\/tasks\/[^/]+\/dependencies$/.test(path) && request.method() === 'GET') {
+          const dependencies = taskOverviewResponse(fixture, entityId).dependencies
+          const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 50)
+          value = { items: dependencies.slice(offset, offset + limit), has_more: dependencies.length > offset + limit }
+        }
         else if (/^\/api\/v1\/projects\/[^/]+\/next-tasks$/.test(path)) {
           value = projectNextTasksResponse(fixture, entityId, receipt.includeBlocked, Number(url.searchParams.get('limit')))
         }

@@ -74,8 +74,10 @@ test('collapsed continuation replies stay retired and reopening resumes incomple
 test('failed independent continuation pauses with truthful error and explicit Retry completes it', { timeout: 60000 }, async () => {
   const h = await openHierarchy()
   try {
-    h.gate(r => r.parent === 'root-project' && r.taskOffset === 50, { error: 500 })
-    await h.start(); await h.idle()
+    const firstError = h.gate(r => r.parent === 'root-project' && r.taskOffset === 50, { error: 500 })
+    await h.start()
+    await h.bounded(firstError.arrived, 10000, 'First failed automatic continuation')
+    await h.idle()
     const failed = h.requests.filter(r => r.parent === 'root-project' && r.status === 500)
     assert.equal(failed.length, 1)
     const afterError = h.requests.length

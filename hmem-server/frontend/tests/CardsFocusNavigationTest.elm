@@ -387,7 +387,44 @@ suite =
                 , Dict.get "project:p050" moved.cards.viewport.rows |> Maybe.map .parentId
                 , Dict.member "project:p040" deleted.cards.viewport.rows
                 )
-        , test "content-only task detail response preserves cached viewport projection and geometry" <| \_ ->
+        , test "Main routed collapse rebuilds ordered rows once and preserves the current row anchor" <| \_ ->
+            let
+                roots = List.range 1 80 |> List.map (\n -> project ("p" ++ String.padLeft 3 '0' (String.fromInt n)))
+                child = let base = project "child" in { base | parentId = Just "p040", hasChildren = False }
+                ready = DataLoading.mergeNavigationSummaries [ child ] [] (rootSeed roots) |> viewportReady
+                position = Dict.get "project:p040" ready.cards.viewport.index.positions |> Maybe.withDefault 0
+                top = Viewport.offset position ready.cards.viewport.index + 15
+                scrolled = Cards.updateViewport (viewportEvent ready top [] Nothing []) ready |> Tuple.first
+                collapsed = Main.update (ToggleTreeNode "proj-p040") scrolled |> Tuple.first
+                newPosition = Dict.get "project:p040" collapsed.cards.viewport.index.positions |> Maybe.withDefault 0
+                projectKeys source = source.cards.viewport.index.keys |> Array.toList |> List.filter (String.startsWith "project:")
+            in
+            Expect.all
+                [ \_ -> Expect.equal (scrolled.cards.viewport.revision + 1) collapsed.cards.viewport.revision
+                , \_ -> Expect.equal (List.map (\summary -> "project:" ++ summary.id) roots) (projectKeys collapsed)
+                , \_ -> Expect.equal True (List.member "project:child" (projectKeys scrolled))
+                , \_ -> Expect.equal 15 (collapsed.cards.viewport.top - Viewport.offset newPosition collapsed.cards.viewport.index)
+                , \_ -> Expect.equal True (Dict.member "child" collapsed.dataLoading.projectCardSummaries)
+                ] ()
+        , test "Main count completion updates authoritative totals without rebuilding viewport geometry" <| \_ ->
+            let
+                summary = let base = project "counted" in { base | hasChildren = False }
+                ready = rootSeed [ summary ] |> viewportReady
+            in
+            case ready.dataLoading.planningCounts.active of
+                Nothing -> Expect.fail "Expected an admitted authoritative planning count request"
+                Just guard ->
+                    let
+                        updated = Main.update (GotWorkspacePlanningCounts guard (Ok { openProjects = 1, openTasks = 60 })) ready |> Tuple.first
+                    in
+                    Expect.all
+                        [ \_ -> Expect.equal (Just { openProjects = 1, openTasks = 60 }) updated.dataLoading.planningCounts.value
+                        , \_ -> Expect.equal True updated.dataLoading.planningCounts.current
+                        , \_ -> Expect.equal ready.cards.viewport.projection updated.cards.viewport.projection
+                        , \_ -> Expect.equal ready.cards.viewport.index updated.cards.viewport.index
+                        , \_ -> Expect.equal ready.cards.viewport.revision updated.cards.viewport.revision
+                        ] ()
+        , test "content-only task detail response preserves cached viewport projection and geometry through Main" <| \_ ->
             let
                 seeded = DataLoading.mergeNavigationSummaries [] [ task "detail" Nothing ] model
                 loading = seeded.dataLoading
@@ -398,7 +435,7 @@ suite =
                 Nothing -> Expect.fail "Expected a real admitted task detail request"
                 Just request ->
                     let
-                        updated = routed (GotTaskCardDetail request "detail" (Ok { taskDetail | description = Just "New full description" })) ready
+                        updated = Main.update (GotTaskCardDetail request "detail" (Ok { taskDetail | description = Just "New full description" })) ready |> Tuple.first
                     in
                     Expect.all
                         [ \_ -> Expect.equal (Just (Just "New full description")) (Dict.get "detail" updated.tasks |> Maybe.map .description)

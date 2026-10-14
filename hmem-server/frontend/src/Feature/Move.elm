@@ -20,7 +20,7 @@ import Url
 
 init : MoveModel
 init =
-    { dialog = Nothing, resumeOrdinary = False, nextToken = 1, nextReadId = 1, admissions = Dict.empty }
+    { dialog = Nothing, resumeOrdinary = False, refreshOrdinary = False, nextToken = 1, nextReadId = 1, admissions = Dict.empty }
 
 
 {-| Retirement never releases physical HTTP occupancy. Exact callbacks do that.
@@ -33,29 +33,53 @@ retire state =
 
 emptyBranch : MoveBranch
 emptyBranch =
-    { ids = [], offset = 0, complete = False, pending = Nothing, error = Nothing, lastIssued = 0 }
+    { ids = [], offset = 0, complete = False, pending = Nothing, error = Nothing, lastIssued = 0, staged = Nothing }
+
+
+{-| No status parameters would mean all statuses to the server. An intentionally
+empty filter instead has locally complete, empty destination membership; focus
+still supplies canonical location context and readiness.
+-}
+emptyFilteredBranches : MoveDialog -> MoveDialog
+emptyFilteredBranches dialog =
+    if Set.isEmpty dialog.statuses then
+        { dialog | branches = Dict.map (\_ branch -> { branch | ids = [], offset = 0, complete = True, pending = Nothing, error = Nothing, staged = Nothing }) dialog.branches
+            , stagedProjects = Dict.empty
+        }
+    else dialog
 
 
 setDialog : MoveDialog -> Model -> Model
 setDialog dialog model =
     let state = model.move in
-    { model | move = { state | dialog = Just dialog } }
+    { model | move = { state | dialog = Just (align model.move.dialog dialog) } }
 
 
 reconcile : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
 reconcile ( model, command ) =
     case model.move.dialog of
         Nothing ->
-            if model.move.resumeOrdinary then
+            if model.move.resumeOrdinary || (model.move.refreshOrdinary && Dict.isEmpty model.move.admissions) then
                 let
                     state = model.move
-                    ( next, navigation ) = Feature.DataLoading.pumpNavigation { model | move = { state | resumeOrdinary = False } }
+                    ready = { model | move = { state | resumeOrdinary = False, refreshOrdinary = state.refreshOrdinary && not (Dict.isEmpty state.admissions) } }
+                    ( refreshed, refresh ) = if state.refreshOrdinary && Dict.isEmpty state.admissions then Feature.DataLoading.revalidateNavigationForFilters ready else ( ready, Cmd.none )
+                    ( next, navigation ) = Feature.DataLoading.pumpNavigation refreshed
                     ( detailed, details ) = Feature.DataLoading.ensurePresentedCardDetails next
                 in
-                ( detailed, Cmd.batch [ command, navigation, details ] )
+                ( detailed, Cmd.batch [ command, refresh, navigation, details ] )
             else ( model, command )
         Just dialog ->
-            if not (Permissions.canEditCurrentWorkspace model)
+            if dialog.refreshRequested && dialog.saving == Nothing
+                && dialog.guard.sessionEpoch == model.sessionRequestEpoch
+                && dialog.guard.routeWorkspace == model.selectedWorkspaceId
+                && (model.sessionContext |> Maybe.map (.principal >> .actorId >> (==) dialog.guard.audienceId) |> Maybe.withDefault False)
+                && Permissions.canEditCurrentWorkspace model && targetExists dialog model then
+                case Helpers.prepareProjectRequest model.selectedWorkspaceId model.sessionRequestEpoch dialog.guard.targetKey model of
+                    Just ( guard, guarded ) ->
+                        reconcile (setDialog (beginRefresh { dialog | guard = guard }) guarded, command)
+                    Nothing -> ( close model, command )
+            else if not (Permissions.canEditCurrentWorkspace model)
                 || not (Helpers.projectRequestIsCurrent dialog.guard model)
                 || not (targetExists dialog model) then
                 let state = model.move in
@@ -92,7 +116,7 @@ update msg model =
             finishRead readId (acceptBranch readId result) model
 
         MoveFocusFetched readId result ->
-            finishRead readId (acceptFocus readId result) model
+            finishRead readId (\request -> if request.branch == "@selection" then acceptSelection readId result request else acceptFocus readId result request) model
 
         MoveMatchFetched readId result ->
             finishRead readId (acceptMatch readId result) model
@@ -150,17 +174,37 @@ update msg model =
                                         , matchPending = Dict.filter (\key _ -> key == id || not (isWithin dialog.projects id key)) dialog.matchPending
                                         } model)
                                 else if Dict.member id dialog.projects then
-                                    pump (setDialog { dialog | expanded = Set.insert id dialog.expanded, branches = Dict.insert id emptyBranch dialog.branches } model)
+                                    pump (setDialog { dialog | expanded = Set.insert id dialog.expanded, branches = Dict.update id (Maybe.withDefault emptyBranch >> Just) dialog.branches } model)
                                 else ( model, Cmd.none )
                             MoveSelect destination ->
                                 if destinationReason model dialog destination == Nothing then
-                                    ( setDialog { dialog | selected = Just destination, error = Nothing } model, Cmd.none )
+                                    pump (setDialog (settle model { dialog | selected = Just destination, selectedPath = Set.empty, selectionValidation = if dialog.revalidating then Maybe.map emptySelection destination else Nothing, error = Nothing }) model)
                                 else ( model, Cmd.none )
                             MoveRows offset ->
-                                ( setDialog { dialog | rowOffset = clamp 0 (Basics.max 0 (List.length (visibleRows dialog) - 1)) offset } model, Cmd.none )
+                                pump (setDialog { dialog | rowOffset = clamp 0 (Basics.max 0 (List.length (visibleRows dialog) - 25)) offset } model)
+                            MoveScroll top ->
+                                let
+                                    index = Basics.max 0 (floor ((top - 56) / 56))
+                                    anchor = visibleRows dialog |> List.drop index |> List.head |> Maybe.map Tuple.first
+                                    offset = clamp 0 (Basics.max 0 (List.length (visibleRows dialog) - 25)) (index - 3)
+                                in
+                                pump (setDialog { dialog | rowOffset = offset, anchor = anchor, anchorDelta = top - toFloat ((index + 1) * 56), scrollTop = top } model)
+                            MoveRowFocused id ->
+                                ( setDialog { dialog | activeRow = Just id } model, Cmd.none )
+                            MoveFocusRow index ->
+                                let
+                                    rows = visibleRows dialog
+                                    bounded = clamp 0 (Basics.max 0 (List.length rows - 1)) index
+                                    target = rows |> List.drop bounded |> List.head |> Maybe.map Tuple.first
+                                    offset = clamp 0 (Basics.max 0 (List.length rows - 25)) (bounded - 3)
+                                    next = { dialog | rowOffset = offset, activeRow = target, focusTarget = target, revealTarget = target, reveal = dialog.reveal + 1 }
+                                in
+                                pump (setDialog next model)
                             MoveRetry branch ->
                                 if branch == "@focus" then
                                     resetFilters { dialog | focusError = Nothing, focusOffset = 0, focusComplete = False, taskParentName = Nothing, projects = Dict.empty } model
+                                else if branch == "@selection" then
+                                    pump (setDialog { dialog | selectionValidation = Maybe.map (.id >> emptySelection) dialog.selectionValidation } model)
                                 else if String.startsWith "@match:" branch then
                                     pump (setDialog { dialog | matchErrors = Dict.remove (String.dropLeft 7 branch) dialog.matchErrors } model)
                                 else
@@ -205,7 +249,7 @@ open kind id model =
                 Dict.get id model.tasks |> Maybe.map (\t -> ( t.title, t.projectId, t.parentId ))
             else Nothing
     in
-    case ( target, Helpers.prepareProjectRequest model.selectedWorkspaceId model.sessionRequestEpoch ((if kind == "project" then "entity:" else "move:") ++ kind ++ ":" ++ id) model ) of
+    case ( target, Helpers.prepareProjectRequest model.selectedWorkspaceId model.sessionRequestEpoch ("move:" ++ kind ++ ":" ++ id) model ) of
         ( Just ( name, current, parent ), Just ( guard, guarded ) ) ->
             let
                 state = guarded.move
@@ -216,7 +260,7 @@ open kind id model =
                     , sourceRunning = False
                     , query = "", statuses = Set.fromList [ "active", "paused" ], generation = 0
                     , expanded = Set.empty, projects = Dict.empty, matches = Dict.empty, matchPending = Dict.empty, matchErrors = Dict.empty, branches = Dict.singleton "" emptyBranch
-                    , selected = Nothing, rowOffset = 0, focusOffset = 0, focusPending = Nothing, focusComplete = False, focusError = Nothing
+                    , selected = Nothing, selectedPath = Set.empty, selectionValidation = Nothing, revealTarget = Nothing, focusTarget = Nothing, rowOffset = 0, activeRow = Nothing, anchor = Nothing, anchorDelta = 0, scrollTop = 0, layout = 0, reveal = 0, revealPending = True, refreshRequested = False, revalidating = False, contextIds = Set.empty, stagedProjects = Dict.empty, focusOffset = 0, focusPending = Nothing, focusComplete = False, focusError = Nothing
                     , saving = Nothing, error = Nothing
                     }
             in
@@ -226,7 +270,18 @@ open kind id model =
 
 resetFilters : MoveDialog -> Model -> ( Model, Cmd Msg )
 resetFilters dialog model =
-    pump (setDialog { dialog | generation = dialog.generation + 1, expanded = Set.empty, branches = Dict.singleton "" emptyBranch, selected = Nothing, rowOffset = 0, error = Nothing, focusPending = Nothing, matches = Dict.empty, matchPending = Dict.empty, matchErrors = Dict.empty } model)
+    pump (setDialog (unfoldContext { dialog | generation = dialog.generation + 1, branches = Dict.singleton "" emptyBranch, selected = Nothing, selectedPath = Set.empty, selectionValidation = Nothing, revealTarget = Nothing, focusTarget = Nothing, rowOffset = 0, activeRow = Nothing, anchor = Nothing, scrollTop = 0, layout = dialog.layout + 1, revealPending = True, stagedProjects = Dict.empty, revalidating = False, error = Nothing, focusPending = Nothing, matches = Dict.empty, matchPending = Dict.empty, matchErrors = Dict.empty }) model)
+
+
+beginRefresh : MoveDialog -> MoveDialog
+beginRefresh dialog =
+    { dialog | generation = dialog.generation + 1, refreshRequested = False, revalidating = True
+        , branches = Dict.map (\_ branch -> { branch | offset = 0, complete = False, pending = Nothing, error = Nothing, staged = Just [] }) dialog.branches
+        , stagedProjects = Dict.empty, focusComplete = False, focusPending = Nothing, focusOffset = 0, focusError = Nothing
+        , matches = Dict.empty, matchPending = Dict.empty, matchErrors = Dict.empty
+        , selectionValidation = dialog.selected |> Maybe.andThen identity |> Maybe.map emptySelection
+    }
+        |> emptyFilteredBranches
 
 
 filterQuery : MoveDialog -> String
@@ -256,12 +311,15 @@ pump model =
             let
                 state = model.move
                 pendingFocus = not dialog.focusComplete && dialog.focusPending == Nothing && dialog.focusError == Nothing
+                pendingSelection = dialog.selectionValidation |> Maybe.map (\validation -> not validation.complete && validation.pending == Nothing && validation.error == Nothing) |> Maybe.withDefault False
                 ready =
                     Dict.toList dialog.branches
                         |> List.filter (\( key, branch ) -> effectiveBranch dialog key && not branch.complete && branch.pending == Nothing && branch.error == Nothing && not (Set.isEmpty dialog.statuses))
                         |> List.sortBy (Tuple.second >> .lastIssued)
                 matchDemand =
-                    visibleRows dialog |> List.drop dialog.rowOffset |> List.take 25 |> List.map Tuple.first
+                    (mountedRows dialog |> List.map (Tuple.second >> Tuple.first))
+                        ++ (dialog.selected |> Maybe.andThen identity |> Maybe.map List.singleton |> Maybe.withDefault [])
+                        |> Set.fromList |> Set.toList
                         |> List.filter (\id -> Dict.get id dialog.projects |> Maybe.map (\p ->
                             String.trim dialog.query /= ""
                                 && Set.member (Api.projectStatusToString p.status) dialog.statuses
@@ -269,13 +327,14 @@ pump model =
                                 && not (Dict.member id dialog.matches || Dict.member id dialog.matchPending || Dict.member id dialog.matchErrors)) |> Maybe.withDefault False)
                 candidate =
                     if pendingFocus then Just ( "@focus", dialog.focusOffset )
+                    else if pendingSelection then dialog.selectionValidation |> Maybe.map (\validation -> ( "@selection", validation.offset ))
                     else case List.head ready of
                         Just ( key, branch ) -> Just ( key, branch.offset )
                         Nothing ->
                             if Set.size model.dataLoading.cardDetailAdmissions + (Dict.values state.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then Nothing
                             else List.head matchDemand |> Maybe.map (\id -> ( "@match:" ++ id, 0 ))
             in
-            if Dict.size state.admissions + Dict.size model.dataLoading.navigationAdmissions >= 4 then ( model, Cmd.none )
+            if Dict.size state.admissions + Dict.size model.dataLoading.navigationAdmissions + (if model.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False then 1 else 0) >= 4 then ( model, Cmd.none )
             else
                 case ( candidate, model.selectedWorkspaceId ) of
                     ( Just ( branch, offset ), Just workspace ) ->
@@ -284,13 +343,15 @@ pump model =
                             request = { token = dialog.token, generation = dialog.generation, branch = branch, offset = offset }
                             nextDialog =
                                 if branch == "@focus" then { dialog | focusPending = Just readId }
+                                else if branch == "@selection" then { dialog | selectionValidation = Maybe.map (\validation -> { validation | pending = Just readId }) dialog.selectionValidation }
                                 else if String.startsWith "@match:" branch then { dialog | matchPending = Dict.insert (String.dropLeft 7 branch) readId dialog.matchPending }
                                 else { dialog | branches = Dict.update branch (Maybe.map (\b -> { b | pending = Just readId, lastIssued = readId })) dialog.branches }
                             admitted = { model | move = { state | nextReadId = readId + 1, admissions = Dict.insert readId request state.admissions, dialog = Just nextDialog } }
                             readCmd =
                                 if branch == "@focus" then Api.fetchNavigationFocus model.flags.apiUrl workspace dialog.entityType dialog.entityId offset (MoveFocusFetched readId)
+                                else if branch == "@selection" then Api.fetchNavigationFocus model.flags.apiUrl workspace "project" (dialog.selectionValidation |> Maybe.map .id |> Maybe.withDefault "") offset (MoveFocusFetched readId)
                                 else if String.startsWith "@match:" branch then Api.fetchProject model.flags.apiUrl (String.dropLeft 7 branch) (MoveMatchFetched readId)
-                                else Api.fetchNavigationBranch model.flags.apiUrl workspace (if branch == "" then "workspace_root" else "project") (if branch == "" then Nothing else Just branch) offset 0 (filterQuery dialog) (MoveBranchFetched readId)
+                                else Api.fetchNavigationBranch model.flags.apiUrl workspace (if branch == "" then "workspace_root" else "project") (if branch == "" then Nothing else Just branch) offset 0 (if dialog.entityType == "project" && branch /= "" && isWithin dialog.projects dialog.entityId branch then "&show_only=projects&show_empty_projects=true" else filterQuery dialog) (MoveBranchFetched readId)
                             ( next, more ) = pump admitted
                         in
                         ( next, Cmd.batch [ readCmd, more ] )
@@ -310,7 +371,7 @@ finishRead readId accept model =
                     else Just current
                 _ -> state.dialog
     in
-    pump { model | move = { state | admissions = Dict.remove readId state.admissions, dialog = dialog, resumeOrdinary = state.resumeOrdinary || dialog == Nothing } }
+    pump { model | move = { state | admissions = Dict.remove readId state.admissions, dialog = Maybe.map (settle model >> align state.dialog) dialog, resumeOrdinary = state.resumeOrdinary || dialog == Nothing } }
 
 
 acceptBranch : Int -> Result Http.Error Api.NavigationBranchResponse -> MoveRead -> MoveDialog -> MoveDialog
@@ -331,15 +392,29 @@ acceptBranch readId result request dialog =
                         else
                             let
                                 ids = List.map .id response.projects.items
-                                fresh = List.filter (\id -> not (List.member id branch.ids)) ids
+                                previous = Maybe.withDefault branch.ids branch.staged
+                                fresh = List.filter (\id -> not (List.member id previous)) ids
                                 nextOffset = request.offset + 50
                                 error =
                                     if response.projects.hasMore && (List.length ids /= 50 || List.isEmpty fresh) then Just "The project page made no progress. This list is incomplete."
                                     else if response.projects.hasMore && nextOffset >= 10000 then Just "The project navigation limit was reached. Narrow the search to see more projects."
                                     else Nothing
-                                nextBranch = { branch | ids = branch.ids ++ fresh, offset = nextOffset, complete = not response.projects.hasMore, pending = Nothing, error = error }
+                                membership = previous ++ fresh
+                                stagedProjects = List.foldl (\p -> Dict.insert p.id p) dialog.stagedProjects response.projects.items
+                                nextBranch = { branch | ids = if branch.staged == Nothing || not response.projects.hasMore then membership else branch.ids
+                                    , staged = if branch.staged /= Nothing && response.projects.hasMore then Just membership else Nothing
+                                    , offset = nextOffset, complete = not response.projects.hasMore, pending = Nothing, error = error }
+                                removed id =
+                                    not (List.member id membership || Set.member id dialog.contextIds || Set.member id dialog.selectedPath)
+                                        && not (dialog.revalidating && dialog.selected == Just (Just id))
+                                        && (Dict.get id dialog.projects |> Maybe.map (\p -> p.parentId == (if request.branch == "" then Nothing else Just request.branch)) |> Maybe.withDefault False)
+                                        && not (Dict.toList dialog.branches |> List.any (\( key, other ) -> key /= request.branch && List.member id (Maybe.withDefault [] other.staged)))
+                                projects = if branch.staged == Nothing then List.foldl (\p -> Dict.insert p.id p) dialog.projects response.projects.items
+                                    else if response.projects.hasMore then dialog.projects
+                                    else List.foldl (\id all -> Dict.get id stagedProjects |> Maybe.map (\p -> Dict.insert id p all) |> Maybe.withDefault all)
+                                        (List.foldl Dict.remove dialog.projects (List.filter removed branch.ids)) membership
                             in
-                            { dialog | projects = List.foldl (\p -> Dict.insert p.id p) dialog.projects response.projects.items, branches = Dict.insert request.branch nextBranch dialog.branches }
+                            { dialog | projects = projects, stagedProjects = stagedProjects, branches = Dict.insert request.branch nextBranch dialog.branches }
         Nothing -> dialog
 
 
@@ -373,10 +448,79 @@ acceptFocus readId result request dialog =
                 else if request.offset > 0 && (authoritative.currentProject /= dialog.currentProject || authoritative.taskParent /= dialog.taskParent || authoritative.name /= dialog.name || authoritative.sourceOpen /= dialog.sourceOpen || authoritative.sourceRunning /= dialog.sourceRunning) then
                     { dialog | focusPending = Nothing, focusComplete = False, focusError = Just "The current location changed while loading its ancestors. Retry before moving." }
                 else
-                    { authoritative | projects = projects, taskParentName = case taskParentName of
+                    unfoldContext { authoritative | projects = projects
+                    , contextIds = Set.union (if request.offset == 0 then Set.empty else dialog.contextIds) (response.target :: response.ancestors |> List.filterMap (\summary -> case summary of
+                        Api.NavigationProjectSummary p -> Just p.id
+                        _ -> Nothing) |> Set.fromList)
+                    , taskParentName = case taskParentName of
                         Just name -> Just name
                         Nothing -> if authoritative.taskParent == dialog.taskParent then dialog.taskParentName else Nothing
                     , focusPending = Nothing, focusComplete = not response.ancestorsTruncated, focusOffset = next, focusError = error }
+
+
+emptySelection : String -> MoveSelectionValidation
+emptySelection id =
+    { id = id, offset = 0, pending = Nothing, complete = False, error = Nothing, projects = Dict.empty }
+
+
+selectionReady : MoveDialog -> Bool
+selectionReady dialog =
+    dialog.selectionValidation |> Maybe.map .complete |> Maybe.withDefault True
+
+
+{-| Membership of an expanded branch cannot establish whether a destination
+moved beneath a collapsed parent. Validate its target and bounded ancestry
+directly, under the same dialog generation and physical admission fences.
+-}
+acceptSelection : Int -> Result Http.Error Api.NavigationFocusResponse -> MoveRead -> MoveDialog -> MoveDialog
+acceptSelection readId result request dialog =
+    case dialog.selectionValidation of
+        Nothing -> dialog
+        Just validation ->
+            if validation.pending /= Just readId || dialog.selected /= Just (Just validation.id) then dialog
+            else
+                let
+                    rejected message = { dialog | selectionValidation = Just { validation | pending = Nothing, error = Just message } }
+                    absent = { dialog | selected = Nothing, selectedPath = Set.empty, selectionValidation = Nothing, error = Just "Selected destination is unavailable. Choose another destination." }
+                in
+                case result of
+                    Err (Http.BadStatus status) ->
+                        if status == 404 || status == 403 then absent
+                        else rejected "Selected destination could not be verified. Retry before moving."
+                    Err _ -> rejected "Selected destination could not be verified. Retry before moving."
+                    Ok response ->
+                        case response.target of
+                            Api.NavigationTaskSummary _ -> rejected "The destination response did not match this project."
+                            Api.NavigationProjectSummary project ->
+                                let
+                                    next = response.nextAncestorOffset |> Maybe.withDefault request.offset
+                                    summaries = response.target :: response.ancestors |> List.filterMap (\summary -> case summary of
+                                        Api.NavigationProjectSummary p -> Just p
+                                        _ -> Nothing)
+                                    projects = List.foldl (\p -> Dict.insert p.id p) validation.projects summaries
+                                    changed = request.offset > 0 && Dict.get validation.id validation.projects /= Just project
+                                in
+                                if project.id /= validation.id || Just response.workspaceId /= dialog.guard.routeWorkspace
+                                    || List.any (\p -> p.workspaceId /= response.workspaceId) summaries then
+                                    rejected "The destination response did not match this project."
+                                else if changed then rejected "Selected destination changed while loading. Retry before moving."
+                                else if response.ancestorsTruncated && (next <= request.offset || next >= 10000) then
+                                    rejected "Selected destination ancestry is incomplete. Retry before moving."
+                                else if response.ancestorsTruncated then
+                                    { dialog | selectionValidation = Just { validation | pending = Nothing, offset = next, projects = projects } }
+                                else
+                                    let
+                                        path = Dict.keys projects |> Set.fromList
+                                        parents = Set.remove validation.id path
+                                        previousPath = projectChain dialog.projects validation.id |> List.map .id |> Set.fromList
+                                        revealSelected = previousPath /= path || not (Set.isEmpty (Set.diff parents dialog.expanded))
+                                        expanded = Set.union parents dialog.expanded
+                                        branches = Set.foldl (\id all -> Dict.update id (Maybe.withDefault emptyBranch >> Just) all) dialog.branches parents
+                                    in
+                                    emptyFilteredBranches { dialog | projects = Dict.union projects dialog.projects, selectedPath = path, expanded = expanded, branches = branches
+                                        , selectionValidation = Just { validation | pending = Nothing, complete = True, offset = next, projects = projects }
+                                        , revealPending = dialog.revealPending || revealSelected
+                                    }
 
 
 acceptMatch : Int -> Result Http.Error Api.Project -> MoveRead -> MoveDialog -> MoveDialog
@@ -411,15 +555,101 @@ isWithin projects ancestor id =
     walk Set.empty id
 
 
+{-| Canonical focus context stays visible independently of destination filters. -}
+unfoldContext : MoveDialog -> MoveDialog
+unfoldContext dialog =
+    let
+        expanded = Set.union dialog.expanded dialog.contextIds
+        branches = Set.foldl (\id all -> Dict.update id (Maybe.withDefault emptyBranch >> Just) all) dialog.branches expanded
+    in
+    emptyFilteredBranches { dialog | expanded = expanded, branches = branches }
+
+
 visibleRows : MoveDialog -> List ( String, Int )
 visibleRows dialog =
     let
+        children branch =
+            let
+                expected = if branch == "" then Nothing else Just branch
+                memberIds = Dict.get branch dialog.branches |> Maybe.map .ids |> Maybe.withDefault []
+                context = Set.union dialog.contextIds dialog.selectedPath |> Set.toList |> List.filter (\id -> Dict.get id dialog.projects |> Maybe.map (\p -> p.parentId == expected) |> Maybe.withDefault False)
+                order p = ( Api.projectStatusOrder p.status, negate p.priority, ( String.toLower p.name, p.id ) )
+            in
+            Set.fromList (memberIds ++ context) |> Set.toList |> List.filterMap (\id -> Dict.get id dialog.projects)
+                |> List.filter (\p -> p.parentId == expected) |> List.sortBy order |> List.map .id
         walk visited depth branch =
-            Dict.get branch dialog.branches |> Maybe.map (\b -> b.ids |> List.concatMap (\id ->
+            children branch |> List.concatMap (\id ->
                 if Set.member id visited then []
-                else ( id, depth ) :: (if Set.member id dialog.expanded then walk (Set.insert id visited) (depth + 1) id else []))) |> Maybe.withDefault []
+                else ( id, depth ) :: (if Set.member id dialog.expanded then walk (Set.insert id visited) (depth + 1) id else []))
     in
-    if Set.isEmpty dialog.statuses then [] else walk Set.empty 0 ""
+    walk Set.empty 0 ""
+
+
+mountedRows : MoveDialog -> List ( Int, ( String, Int ) )
+mountedRows dialog =
+    visibleRows dialog |> List.indexedMap Tuple.pair |> List.filter (\( index, ( id, _ ) ) ->
+        (index >= dialog.rowOffset && index < dialog.rowOffset + 25) || Just id == dialog.activeRow)
+
+
+{-| Fixed two-line rows give the picker exact geometry. Preserve a logical row
+and its intrarow offset when membership or expansion changes its position.
+-}
+align : Maybe MoveDialog -> MoveDialog -> MoveDialog
+align previous dialog =
+    let
+        rows = visibleRows dialog
+        changed = previous |> Maybe.map (visibleRows >> (/=) rows) |> Maybe.withDefault False
+        index = rows |> List.indexedMap Tuple.pair |> List.filter (\( _, ( id, _ ) ) -> Just id == dialog.anchor) |> List.head |> Maybe.map Tuple.first
+    in
+    if changed then
+        case index of
+            Just i -> { dialog | rowOffset = clamp 0 (Basics.max 0 (List.length rows - 25)) (i - 3), scrollTop = toFloat ((i + 1) * 56) + dialog.anchorDelta, layout = dialog.layout + 1 }
+            Nothing -> { dialog | anchor = Nothing, rowOffset = clamp 0 (Basics.max 0 (List.length rows - 25)) dialog.rowOffset, layout = dialog.layout + 1 }
+    else dialog
+
+
+settle : Model -> MoveDialog -> MoveDialog
+settle model pending =
+    let
+        refreshing = pending.revalidating && not (pending.focusComplete && (pending.selectionValidation |> Maybe.map .complete |> Maybe.withDefault True) && (Dict.toList pending.branches |> List.all (\( key, b ) -> not (effectiveBranch pending key) || b.complete)))
+        -- A selected destination may move between parents whose passes complete
+        -- in either order. Keep its summary until all effective membership is
+        -- authoritative, then remove summaries without a current owner.
+        dialog =
+            if pending.revalidating && not refreshing then
+                { pending | projects = Dict.filter (\id project -> Set.member id pending.contextIds || Set.member id pending.selectedPath
+                    || (Dict.toList pending.branches |> List.any (\( key, branch ) -> effectiveBranch pending key && List.member id branch.ids
+                        && project.parentId == (if key == "" then Nothing else Just key)))) pending.projects }
+            else pending
+        rows = visibleRows dialog
+        rootComplete = Dict.get "" dialog.branches |> Maybe.map .complete |> Maybe.withDefault False
+        selected = case dialog.selected of
+            Just destination ->
+                let
+                    reason = destinationReason model dialog destination
+                    checking = reason == Just "Checking search match…"
+                        || (destination |> Maybe.andThen (\id -> Dict.get id dialog.matchErrors) |> Maybe.map (\error -> reason == Just error) |> Maybe.withDefault False)
+                in
+                if reason /= Nothing && not checking && dialog.focusComplete
+                    && (dialog.selectionValidation |> Maybe.map .complete |> Maybe.withDefault True) then Nothing
+                else if not refreshing && destination /= Nothing && not (destination |> Maybe.map (\id -> Set.member id dialog.selectedPath) |> Maybe.withDefault False) && not (List.any (\( id, _ ) -> Just id == destination) rows) then Nothing
+                else dialog.selected
+            Nothing -> Nothing
+        target = if dialog.selectionValidation |> Maybe.map .complete |> Maybe.withDefault False then dialog.selected |> Maybe.andThen identity
+            else if dialog.entityType == "project" then Just dialog.entityId else dialog.currentProject
+        index = rows |> List.indexedMap Tuple.pair |> List.filter (\( _, ( id, _ ) ) -> Just id == target) |> List.head |> Maybe.map Tuple.first
+        reveal = dialog.revealPending && dialog.focusComplete && rootComplete
+        offset = if reveal then index |> Maybe.map (\i -> clamp 0 (Basics.max 0 (List.length rows - 25)) (i - 3)) |> Maybe.withDefault 0
+            else clamp 0 (Basics.max 0 (List.length rows - 25)) dialog.rowOffset
+    in
+    { dialog | selected = selected, selectedPath = if selected == dialog.selected then dialog.selectedPath else Set.empty
+        , selectionValidation = if selected == dialog.selected then dialog.selectionValidation else Nothing
+        , revalidating = refreshing, rowOffset = offset
+        , revealPending = if reveal then False else dialog.revealPending
+        , reveal = if reveal then dialog.reveal + 1 else dialog.reveal
+        , revealTarget = if reveal then target else dialog.revealTarget
+        , focusTarget = if reveal then Nothing else dialog.focusTarget
+    }
 
 
 destinationReason : Model -> MoveDialog -> Maybe String -> Maybe String
@@ -470,16 +700,6 @@ projectChain projects id =
     walk Set.empty id
 
 
-projectPath : MoveDialog -> Maybe String -> String
-projectPath dialog destination =
-    case destination of
-        Nothing -> if dialog.entityType == "project" then "Workspace root" else "No project"
-        Just id ->
-            let chain = projectChain dialog.projects id in
-            if List.isEmpty chain then "Loading location…"
-            else "Workspace root / " ++ String.join " / " (List.map .name chain)
-
-
 moveFields : MoveDialog -> Maybe String -> List ( String, Encode.Value )
 moveFields dialog destination =
     let value = destination |> Maybe.map Encode.string |> Maybe.withDefault Encode.null in
@@ -492,7 +712,7 @@ confirm dialog model =
     case dialog.selected of
         Nothing -> ( model, Cmd.none )
         Just destination ->
-            if destinationReason model dialog destination /= Nothing || not dialog.focusComplete || not (Permissions.canEditCurrentWorkspace model) then ( model, Cmd.none )
+            if destinationReason model dialog destination /= Nothing || not dialog.focusComplete || not (selectionReady dialog) || dialog.revalidating || not (Permissions.canEditCurrentWorkspace model) then ( model, Cmd.none )
             else
                 let
                     trackedIds = dialog.entityId :: (destination |> Maybe.map List.singleton |> Maybe.withDefault [])
@@ -529,20 +749,54 @@ view model =
                 rows = visibleRows dialog
                 destination = dialog.selected
                 valid = destination |> Maybe.map (\d -> destinationReason model dialog d == Nothing) |> Maybe.withDefault False
-                row ( id, depth ) =
-                    case Dict.get id dialog.projects of
+                badge label = span [ class "move-role" ] [ text label ]
+                role id =
+                    if dialog.entityType == "project" && id == dialog.entityId then Just "Moving"
+                    else if Just id == dialog.currentProject then Just "Current parent"
+                    else if dialog.entityType == "project" && isWithin dialog.projects dialog.entityId id then Just "Moves with"
+                    else if destination == Just (Just id) then Just "Selected"
+                    else Nothing
+                keys index =
+                    Decode.field "key" Decode.string |> Decode.andThen (\key ->
+                        case key of
+                            "ArrowDown" -> Decode.succeed ( MoveFocusRow (index + 1), True )
+                            "ArrowUp" -> Decode.succeed ( MoveFocusRow (index - 1), True )
+                            "Home" -> Decode.succeed ( MoveFocusRow 0, True )
+                            "End" -> Decode.succeed ( MoveFocusRow (List.length rows - 1), True )
+                            _ -> Decode.fail "Native key")
+                row ( index, ( projectId, depth ) ) =
+                    case Dict.get projectId dialog.projects of
                         Nothing -> text ""
                         Just project ->
-                            let reason = destinationReason model dialog (Just id) in
-                            div [ class "move-project-row", style "padding-left" (String.fromInt (depth * 16) ++ "px") ]
-                                [ if project.directProjectCount > 0 then
-                                    button [ class "tree-toggle", disabled saving, attribute "aria-label" ((if Set.member id dialog.expanded then "Collapse " else "Expand ") ++ project.name), attribute "aria-expanded" (if Set.member id dialog.expanded then "true" else "false"), onClick (MoveToggleBranch id) ] [ text (if Set.member id dialog.expanded then "▼" else "▶") ]
+                            let
+                                reason = destinationReason model dialog (Just projectId)
+                                moving = dialog.entityType == "project" && isWithin dialog.projects dialog.entityId projectId
+                                current = Just projectId == dialog.currentProject
+                                rowClass = "move-project-row" ++ (if moving then " move-source" else "") ++ (if current then " move-current" else "") ++ (if destination == Just (Just projectId) then " move-selected" else "")
+                            in
+                            div [ class rowClass, attribute "data-project-id" projectId, attribute "data-row-index" (String.fromInt index), style "padding-left" (String.fromInt (Basics.min depth 8 * 18) ++ "px") ]
+                                [ span [ class "move-tree-guides", attribute "aria-hidden" "true" ] (List.repeat (Basics.min depth 8) (span [] []))
+                                , if project.directProjectCount > 0 then
+                                    button [ class "tree-toggle", disabled saving, attribute "aria-label" ((if Set.member projectId dialog.expanded then "Collapse " else "Expand ") ++ project.name), attribute "aria-expanded" (if Set.member projectId dialog.expanded then "true" else "false"), onClick (MoveToggleBranch projectId), onFocus (MoveRowFocused projectId), custom "keydown" (keys index |> Decode.map (\( message, _ ) -> { message = message, stopPropagation = True, preventDefault = True })) ] [ text (if Set.member projectId dialog.expanded then "▾" else "▸") ]
                                   else span [ class "tree-toggle-spacer" ] []
-                                , button [ class ("move-project-choice" ++ (if destination == Just (Just id) then " selected" else "")), disabled (saving || reason /= Nothing), title (Maybe.withDefault ("Select " ++ project.name) reason), attribute "aria-pressed" (if destination == Just (Just id) then "true" else "false"), onClick (MoveSelect (Just id)) ]
-                                    [ text project.name, span [ class "move-project-status" ] [ text (Api.projectStatusToString project.status) ] ]
-                                , if Dict.member id dialog.matchErrors then button [ disabled saving, onClick (MoveRetry ("@match:" ++ id)) ] [ text "Retry search match" ] else text ""
-                                , reason |> Maybe.map (\message -> span [ class "move-choice-reason" ] [ text message ]) |> Maybe.withDefault (text "")
+                                , button [ Html.Attributes.id ("move-choice-" ++ projectId), class ("move-project-choice" ++ (if destination == Just (Just projectId) then " selected" else "")), disabled saving
+                                    , attribute "aria-disabled" (if reason /= Nothing then "true" else "false")
+                                    , title (Maybe.withDefault ("Select " ++ project.name) reason)
+                                    , attribute "aria-label" (project.name ++ (role projectId |> Maybe.map ((++) ", ") |> Maybe.withDefault "") ++ (reason |> Maybe.map ((++) ". ") |> Maybe.withDefault ""))
+                                    , attribute "aria-pressed" (if destination == Just (Just projectId) then "true" else "false"), onClick (MoveSelect (Just projectId)), onFocus (MoveRowFocused projectId), custom "keydown" (keys index |> Decode.map (\( message, _ ) -> { message = message, stopPropagation = True, preventDefault = True })) ]
+                                    [ span [ class "move-project-name" ] [ text project.name ]
+                                    , span [ class "move-project-meta" ] [ span [ class "move-project-status" ] [ text (Api.projectStatusToString project.status) ], role projectId |> Maybe.map badge |> Maybe.withDefault (text "") ] ]
+                                , if Dict.member projectId dialog.matchErrors then button [ class "btn", disabled saving, onClick (MoveRetry ("@match:" ++ projectId)), title "Retry search match", attribute "aria-label" ("Retry search match for " ++ project.name) ] [ text "Retry" ] else text ""
                                 ]
+                pieces =
+                    let
+                        spacer count = div [ class "move-tree-spacer", style "height" (String.fromInt (count * 56) ++ "px"), attribute "aria-hidden" "true" ] []
+                        walk from mounted =
+                            case mounted of
+                                [] -> [ spacer (List.length rows - from) ]
+                                (( index, _ ) as item) :: rest -> spacer (index - from) :: row item :: walk (index + 1) rest
+                    in
+                    walk 0 (mountedRows dialog)
                 branchNotice ( key, branch ) =
                     let name = if key == "" then "Projects" else Dict.get key dialog.projects |> Maybe.map .name |> Maybe.withDefault key in
                     if not (effectiveBranch dialog key) then text ""
@@ -562,40 +816,45 @@ view model =
             in
             Html.node "dialog"
                 [ id "move-dialog", class "move-dialog", attribute "aria-labelledby" "move-dialog-title", attribute "data-move-token" (String.fromInt dialog.token)
+                , attribute "aria-description" ((if dialog.entityType == "project" then "Moving project " else "Moving task ") ++ dialog.name ++ (if dialog.entityType == "task" && dialog.taskParent /= Nothing then ". Moving to another project detaches this subtask and makes it a top-level task. Live subtasks follow this move." else ". The subtree follows this move."))
                 , attribute "data-move-origin" ("move-origin-" ++ dialog.entityType ++ "-" ++ dialog.entityId)
                 , preventDefaultOn "cancel" (Decode.succeed ( CloseMove, True ))
                 , preventDefaultOn "keydown" keyDecoder
                 ]
-                [ h2 [ id "move-dialog-title" ] [ text ("Move " ++ dialog.name) ]
-                , div [ class "move-location" ] [ strong [] [ text "Current: " ], text (projectPath dialog dialog.currentProject ++ (dialog.taskParentName |> Maybe.map ((++) " / ") |> Maybe.withDefault "")) ]
-                , input [ id "move-search", type_ "search", placeholder "Search projects", attribute "aria-label" "Search destination projects", value dialog.query, disabled saving, onInput MoveQueryChanged, preventDefaultOn "keydown" (Decode.field "key" Decode.string |> Decode.map (\key -> ( if key == "Enter" then MoveConfirm else NoOp, key == "Enter" ))) ] []
+                [ h2 [ id "move-dialog-title" ] [ text "Select Destination" ]
+                , input [ id "move-search", type_ "search", placeholder "Search projects", attribute "aria-label" "Search destination projects", value dialog.query, disabled saving, onInput MoveQueryChanged ] []
                 , div [ class "move-status-filters" ] (List.map (\status ->
-                    label [] [ input [ type_ "checkbox", checked (Set.member status dialog.statuses), disabled saving, onCheck (\_ -> MoveStatusChanged status) ] [], text status ]) [ "active", "paused", "completed", "archived" ])
-                , div [ class "move-tree", attribute "aria-label" "Destination projects" ]
-                    ([ button [ class ("move-project-choice" ++ (if destination == Just Nothing then " selected" else "")), disabled (saving || destinationReason model dialog Nothing /= Nothing), title (destinationReason model dialog Nothing |> Maybe.withDefault "Select root placement"), onClick (MoveSelect Nothing) ] [ text (if dialog.entityType == "project" then "Workspace root" else "No project") ] ]
-                        ++ List.map row (rows |> List.drop dialog.rowOffset |> List.take 25)
-                        ++ (if List.isEmpty rows && (Dict.get "" dialog.branches |> Maybe.map .complete |> Maybe.withDefault False) then [ p [] [ text "No matching projects." ] ] else [])
-                        ++ (if Set.isEmpty dialog.statuses then [ p [] [ text "Select a project status to browse." ] ] else [])
-                    )
-                , div [ class "move-row-pages" ]
-                    [ button [ disabled (saving || dialog.rowOffset == 0), onClick (MoveRows (Basics.max 0 (dialog.rowOffset - 25))) ] [ text "Previous projects" ]
-                    , text (String.fromInt (Basics.min (List.length rows) (dialog.rowOffset + 1)) ++ "–" ++ String.fromInt (Basics.min (List.length rows) (dialog.rowOffset + 25)) ++ " of " ++ String.fromInt (List.length rows) ++ " loaded")
-                    , button [ disabled (saving || dialog.rowOffset + 25 >= List.length rows), onClick (MoveRows (dialog.rowOffset + 25)) ] [ text "Next projects" ]
+                    button [ class ("filter-pill" ++ (if Set.member status dialog.statuses then " filter-pill-active" else "")), attribute "aria-pressed" (if Set.member status dialog.statuses then "true" else "false"), disabled saving, onClick (MoveStatusChanged status) ] [ text status ]) [ "active", "paused", "completed", "archived" ])
+                , div [ id "move-tree", class "move-tree", attribute "aria-label" "Destination projects", tabindex 0
+                    , attribute "data-move-reveal" (String.fromInt dialog.reveal), attribute "data-move-offset" (String.fromInt dialog.rowOffset)
+                    , attribute "data-move-layout" (String.fromInt dialog.layout), attribute "data-move-scroll-top" (String.fromFloat dialog.scrollTop)
+                    , attribute "data-move-focus" (Maybe.withDefault "" dialog.focusTarget)
+                    , attribute "data-move-location" (dialog.revealTarget |> Maybe.withDefault (if dialog.entityType == "project" then dialog.entityId else Maybe.withDefault "" dialog.currentProject))
+                    , on "scroll" (Decode.at [ "target", "scrollTop" ] Decode.float |> Decode.map MoveScroll)
+                    , preventDefaultOn "keydown" (keys (dialog.rowOffset - 1))
                     ]
+                    ([ div [ class ("move-project-row move-root" ++ (if dialog.currentProject == Nothing then " move-current" else "") ++ (if destination == Just Nothing then " move-selected" else "")) ]
+                        [ button [ class ("move-project-choice" ++ (if destination == Just Nothing then " selected" else "")), disabled saving
+                            , attribute "aria-label" (if dialog.entityType == "project" then "Workspace root" else "No project")
+                            , attribute "aria-disabled" (if destinationReason model dialog Nothing /= Nothing then "true" else "false")
+                            , title (destinationReason model dialog Nothing |> Maybe.withDefault "Select root placement"), onClick (MoveSelect Nothing), attribute "aria-pressed" (if destination == Just Nothing then "true" else "false") ]
+                            [ span [ class "move-project-name" ] [ text (if dialog.entityType == "project" then "Workspace root" else "No project") ]
+                            , if dialog.currentProject == Nothing then badge "Current parent" else if destination == Just Nothing then badge "Selected" else text "" ] ] ]
+                        ++ pieces
+                        ++ (if List.isEmpty rows && (Dict.get "" dialog.branches |> Maybe.map .complete |> Maybe.withDefault False) then [ p [] [ text "No matching projects." ] ] else [])
+                        ++ (if Set.isEmpty dialog.statuses then [ p [] [ text "Select a status to browse." ] ] else [])
+                    )
                 , div [] (List.map branchNotice (Dict.toList dialog.branches))
                 , if dialog.focusComplete then text "" else
-                    div [ attribute "role" "status" ]
+                    div [ class "move-loading", attribute "role" "status" ]
                         [ text (Maybe.withDefault "Loading current location…" dialog.focusError)
                         , if dialog.focusError /= Nothing then button [ disabled saving, onClick (MoveRetry "@focus") ] [ text "Retry current location" ] else text ""
                         ]
-                , div [ class "move-location" ] [ strong [] [ text "Destination: " ], text (destination |> Maybe.map (projectPath dialog) |> Maybe.withDefault "Choose a project or root placement") ]
-                , p [ class "move-effects" ] [ text (if dialog.entityType == "project" then "The entire project subtree follows this move."
-                    else if dialog.taskParent /= Nothing then "Moving to another project detaches this subtask from its parent and makes it a top-level task."
-                    else "Live subtasks follow this task to its destination.") ]
-                , p [ class "move-effects" ] [ text "Paused destinations can block readiness. Running work cannot enter paused ancestry. Dependencies, including closed dependencies, must stay in the same project." ]
+                , dialog.selectionValidation |> Maybe.andThen .error |> Maybe.map (\message -> div [ class "move-load-error", attribute "role" "status" ] [ text message, button [ disabled saving, onClick (MoveRetry "@selection") ] [ text "Retry destination" ] ]) |> Maybe.withDefault (text "")
                 , dialog.error |> Maybe.map (\message -> div [ class "move-load-error", attribute "role" "alert" ] [ text message ]) |> Maybe.withDefault (text "")
                 , div [ class "modal-actions" ]
                     [ button [ class "btn", onClick CloseMove ] [ text "Cancel" ]
-                    , button [ class "btn btn-primary", disabled (saving || not valid || not dialog.focusComplete), onClick MoveConfirm ] [ text (if saving then "Moving…" else "Move") ]
+                    , button [ class "btn btn-primary", disabled (saving || not valid || not dialog.focusComplete || not (selectionReady dialog) || dialog.revalidating), onClick MoveConfirm ] [ text (if saving then "Moving…" else "Confirm") ]
                     ]
                 ]
+

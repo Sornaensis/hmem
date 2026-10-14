@@ -11,6 +11,19 @@ let moveOrigin = null
 let moveDialogToken = null
 const moveDialogObserver = new MutationObserver(() => {
   const next = document.getElementById('move-dialog')
+  const tree = next?.querySelector('#move-tree')
+  if (tree && tree.dataset.moveReveal !== tree.dataset.appliedReveal) {
+    tree.dataset.appliedReveal = tree.dataset.moveReveal
+    tree.dataset.appliedLayout = tree.dataset.moveLayout
+    const targetId = tree.dataset.moveFocus || tree.dataset.moveLocation
+    const target = targetId ? document.getElementById('move-choice-' + targetId) : null
+    const index = Number(target?.closest('[data-row-index]')?.dataset.rowIndex ?? tree.dataset.moveOffset)
+    tree.scrollTop = Math.max(0, index - 2) * 56
+    if (tree.dataset.moveFocus && target) target.focus({preventScroll:true})
+  } else if (tree && tree.dataset.moveLayout !== tree.dataset.appliedLayout) {
+    tree.dataset.appliedLayout = tree.dataset.moveLayout
+    tree.scrollTop = Number(tree.dataset.moveScrollTop)
+  }
   if (next === activeMoveDialog && next?.dataset.moveToken === moveDialogToken) return
   if (activeMoveDialog) {
     const origin = document.getElementById(moveOrigin)
@@ -43,7 +56,7 @@ const moveDialogObserver = new MutationObserver(() => {
     }
   }
 })
-moveDialogObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-move-token', 'data-move-origin'] })
+moveDialogObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-move-token', 'data-move-origin', 'data-move-reveal', 'data-move-layout'] })
 
 import { createCanonicalFrameBatcher, createCanonicalStateHandler, createChangeStreamManager } from './change-stream.js'
 

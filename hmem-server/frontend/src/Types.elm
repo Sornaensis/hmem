@@ -75,6 +75,7 @@ type alias Model =
 type alias MoveModel =
     { dialog : Maybe MoveDialog
     , resumeOrdinary : Bool
+    , refreshOrdinary : Bool
     , nextToken : Int
     , nextReadId : Int
     , admissions : Dict Int MoveRead
@@ -101,7 +102,22 @@ type alias MoveDialog =
     , matchErrors : Dict String String
     , branches : Dict String MoveBranch
     , selected : Maybe (Maybe String)
+    , selectedPath : Set String
+    , selectionValidation : Maybe MoveSelectionValidation
     , rowOffset : Int
+    , activeRow : Maybe String
+    , anchor : Maybe String
+    , anchorDelta : Float
+    , scrollTop : Float
+    , layout : Int
+    , reveal : Int
+    , revealPending : Bool
+    , revealTarget : Maybe String
+    , focusTarget : Maybe String
+    , refreshRequested : Bool
+    , revalidating : Bool
+    , contextIds : Set String
+    , stagedProjects : Dict String Api.ProjectCardSummary
     , focusOffset : Int
     , focusPending : Maybe Int
     , focusComplete : Bool
@@ -119,6 +135,17 @@ type alias MoveBranch =
     , pending : Maybe Int
     , error : Maybe String
     , lastIssued : Int
+    , staged : Maybe (List String)
+    }
+
+
+type alias MoveSelectionValidation =
+    { id : String
+    , offset : Int
+    , pending : Maybe Int
+    , complete : Bool
+    , error : Maybe String
+    , projects : Dict String Api.ProjectCardSummary
     }
 
 
@@ -1165,6 +1192,9 @@ type Msg
     | MoveToggleBranch String
     | MoveSelect (Maybe String)
     | MoveRows Int
+    | MoveScroll Float
+    | MoveFocusRow Int
+    | MoveRowFocused String
     | MoveRetry String
     | MoveConfirm
     | MoveBranchFetched Int (Result Http.Error Api.NavigationBranchResponse)

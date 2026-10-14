@@ -196,12 +196,172 @@ suite =
                 ( pageTwo.move.dialog |> Maybe.andThen .focusError |> (/=) Nothing
                 , Dict.get freshRead retry.move.admissions |> Maybe.map .offset
                 , fresh.move.dialog |> Maybe.map (\d -> ( d.currentProject, d.focusComplete )) )
-        , test "view mounts at most 25 project choices with keyboard-accessible separate expand actions" <| \_ ->
+        , test "canonical focus unfolds deep current ancestry even outside destination statuses" <| \_ ->
+            let
+                opened = step (OpenMove "task" "child") base
+                parent = project "source" (Just "ancestor")
+                ancestor = project "ancestor" Nothing
+                response = { workspaceId = "ws", target = Api.NavigationTaskSummary { id = "child", workspaceId = "ws", projectId = Just "source", parentId = Nothing, title = "Child", status = Api.Todo, priority = 5, dueAt = Nothing, completedAt = Nothing, dependencyCount = 0, createdAt = "now", updatedAt = "now", directSubtaskCount = 0, hasChildren = False, readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = True } }, ancestors = [ Api.NavigationProjectSummary { ancestor | status = Api.ProjCompleted }, Api.NavigationProjectSummary parent ], ancestorsTruncated = False, nextAncestorOffset = Nothing }
+                focused = step (MoveFocusFetched (readId "@focus" opened) (Ok response)) opened
+            in
+            Expect.equal (Just ( [ ( "ancestor", 0 ), ( "source", 1 ) ], True, True ))
+                (focused.move.dialog |> Maybe.map (\d -> ( Move.visibleRows d, Set.member "ancestor" d.expanded, Set.member "source" d.expanded )))
+        , test "live revalidation preserves full displayed membership until exhaustion and clears a removed selection" <| \_ ->
+            let
+                selected = ready |> step (MoveSelect (Just "destination")) |> mapDialog (\d -> { d | refreshRequested = True })
+                refreshed = Move.reconcile ( selected, Cmd.none ) |> Tuple.first
+                firstPage = step (MoveBranchFetched (readId "" refreshed) (Ok (page (List.range 1 50 |> List.map (\n -> project (String.fromInt n) Nothing)) True))) refreshed
+                finished = step (MoveBranchFetched (readId "" firstPage) (Ok (page [ project "last" Nothing ] False))) firstPage
+                focused = step (MoveFocusFetched (readId "@focus" finished) (Ok childFocus)) finished
+                settled = step (MoveBranchFetched (readId "source" focused) (Ok (page [] False))) focused
+                    |> (\current -> step (MoveFocusFetched (readId "@selection" current) (Err (Http.BadStatus 404))) current)
+            in
+            Expect.equal ( Just [ "source", "destination" ], Just (Just "destination"), ( Nothing, Just 51 ) )
+                ( firstPage.move.dialog |> Maybe.andThen (.branches >> Dict.get "" >> Maybe.map .ids)
+                , firstPage.move.dialog |> Maybe.andThen .selected
+                , ( settled.move.dialog |> Maybe.andThen .selected
+                  , finished.move.dialog |> Maybe.andThen (.branches >> Dict.get "" >> Maybe.map (.ids >> List.length)) ) )
+        , test "live refresh generations fence delayed pre-refresh membership while retaining valid selection" <| \_ ->
+            let
+                selected = ready |> step (MoveSelect (Just "destination"))
+                old = readId "@focus" selected
+                refreshed = Move.reconcile (mapDialog (\d -> { d | refreshRequested = True }) selected, Cmd.none) |> Tuple.first
+                loaded = loadRoot [ project "source" Nothing, project "destination" Nothing, project "new" Nothing ] refreshed
+                delayed = step (MoveFocusFetched old (Err Http.Timeout)) loaded
+            in
+            Expect.equal ( Just (Just "destination"), Nothing, True )
+                ( delayed.move.dialog |> Maybe.andThen .selected
+                , delayed.move.dialog |> Maybe.andThen .focusError
+                , delayed.move.dialog |> Maybe.map (.projects >> Dict.member "new") |> Maybe.withDefault False )
+        , test "rechecking a description-only match preserves selection until its fresh result" <| \_ ->
+            let
+                loaded = step (OpenMove "task" "child") base |> step (MoveQueryChanged "needle") |> loadRoot [ project "destination" Nothing ]
+                full = Api.projectFromCardSummary (project "destination" Nothing)
+                matched = step (MoveMatchFetched (readId "@match:destination" loaded) (Ok { full | description = Just "needle description" })) loaded
+                selected = step (MoveSelect (Just "destination")) matched
+                refreshing = Move.reconcile (mapDialog (\d -> { d | refreshRequested = True }) selected, Cmd.none) |> Tuple.first
+                currentGeneration = refreshing.move.dialog |> Maybe.map .generation |> Maybe.withDefault -1
+                drained = Dict.toList refreshing.move.admissions |> List.filter (Tuple.second >> .generation >> (/=) currentGeneration)
+                    |> List.foldl (\( id, _ ) current -> step (MoveBranchFetched id (Err Http.Timeout)) current) refreshing
+                reloaded = loadRoot [ project "destination" Nothing ] drained
+                rechecked = step (MoveMatchFetched (readId "@match:destination" reloaded) (Ok { full | description = Just "needle description" })) reloaded
+            in
+            Expect.equal ( Just (Just "destination"), Just (Just "destination") )
+                ( reloaded.move.dialog |> Maybe.andThen .selected
+                , rechecked.move.dialog |> Maybe.andThen .selected )
+        , test "selected non-context destination survives new-parent completion before old-parent completion" <| \_ ->
+            checkReparentRace True
+        , test "selected non-context destination survives old-parent completion before new-parent completion" <| \_ ->
+            checkReparentRace False
+        , test "empty status membership settles after live focus refresh and permits root confirmation" <| \_ ->
+            let
+                empty = ready |> step (MoveStatusChanged "active") |> step (MoveStatusChanged "paused")
+                selected = empty |> step (MoveSelect Nothing) |> mapDialog (\d -> { d | refreshRequested = True })
+                refreshing = Move.reconcile ( selected, Cmd.none ) |> Tuple.first |> drainRetiredReads
+                settled = step (MoveFocusFetched (readId "@focus" refreshing) (Ok childFocus)) refreshing
+                confirmed = step MoveConfirm settled
+            in
+            Expect.equal ( Just ( True, False, Just Nothing ), True )
+                ( settled.move.dialog |> Maybe.map (\d -> ( d.focusComplete, d.revalidating, d.selected ))
+                , confirmed.move.dialog |> Maybe.andThen .saving |> (/=) Nothing )
+        , test "canonical selected path preserves a destination moved below a collapsed unloaded parent" <| \_ ->
+            let
+                opened = step (OpenMove "task" "child") base |> loadRoot [ project "source" Nothing, project "a" Nothing, project "b" Nothing ] |> mapDialog (\d -> { d | focusComplete = True })
+                expanded = step (MoveToggleBranch "a") opened
+                loaded = step (MoveBranchFetched (readId "a" expanded) (Ok (page [ project "chosen" (Just "a") ] False))) expanded
+                selected = step (MoveSelect (Just "chosen")) loaded |> mapDialog (\d -> { d | refreshRequested = True })
+                refreshed = Move.reconcile ( selected, Cmd.none ) |> Tuple.first |> drainRetiredReads
+                    |> loadRoot [ project "source" Nothing, project "a" Nothing, project "b" Nothing ]
+                focused = step (MoveFocusFetched (readId "@focus" refreshed) (Ok childFocus)) refreshed
+                oldFinished = step (MoveBranchFetched (readId "a" focused) (Ok (page [] False))) focused
+                    |> (\current -> step (MoveBranchFetched (readId "source" current) (Ok (page [] False))) current)
+                canonical = step (MoveFocusFetched (readId "@selection" oldFinished) (Ok (projectFocus (project "chosen" (Just "b")) [ project "b" Nothing ]))) oldFinished
+                settled = step (MoveBranchFetched (readId "b" canonical) (Ok (page [ project "chosen" (Just "b") ] False))) canonical
+                confirmed = step MoveConfirm settled
+            in
+            Expect.equal ( Just (Just "chosen"), Just ( True, False, True ), True )
+                ( oldFinished.move.dialog |> Maybe.andThen .selected
+                , settled.move.dialog |> Maybe.map (\d -> ( Set.member "b" d.expanded, d.revalidating, List.member ( "chosen", 1 ) (Move.visibleRows d) ))
+                , confirmed.move.dialog |> Maybe.andThen .saving |> (/=) Nothing )
+        , test "selected destination validation retries and rejects stale or foreign focus replies" <| \_ ->
+            let
+                selected = ready |> step (MoveSelect (Just "destination")) |> mapDialog (\d -> { d | refreshRequested = True })
+                refreshed = Move.reconcile ( selected, Cmd.none ) |> Tuple.first |> drainRetiredReads
+                old = readId "@selection" refreshed
+                failed = step (MoveFocusFetched old (Ok (projectFocus (project "foreign" Nothing) []))) refreshed
+                retry = step (MoveRetry "@selection") failed
+                new = readId "@selection" retry
+                late = step (MoveFocusFetched old (Ok (projectFocus (project "destination" Nothing) []))) retry
+                accepted = step (MoveFocusFetched new (Ok (projectFocus (project "destination" Nothing) []))) late
+                deleted = step (MoveFocusFetched old (Err (Http.BadStatus 404))) refreshed
+            in
+            Expect.equal ( True, Just False, ( Just True, Nothing ) )
+                ( new > old
+                , late.move.dialog |> Maybe.andThen .selectionValidation |> Maybe.map .complete
+                , ( accepted.move.dialog |> Maybe.andThen .selectionValidation |> Maybe.map .complete, deleted.move.dialog |> Maybe.andThen .selected ) )
+        , test "switching to root retires held destination validation without blocking a ready source" <| \_ ->
+            let
+                selected = ready |> step (MoveSelect (Just "destination")) |> mapDialog (\d -> { d | refreshRequested = True })
+                refreshed = Move.reconcile ( selected, Cmd.none ) |> Tuple.first |> drainRetiredReads |> loadRoot [ project "source" Nothing, project "destination" Nothing ]
+                focused = step (MoveFocusFetched (readId "@focus" refreshed) (Ok childFocus)) refreshed
+                loaded = step (MoveBranchFetched (readId "source" focused) (Ok (page [] False))) focused
+                old = readId "@selection" loaded
+                root = step (MoveSelect Nothing) loaded
+                delayed = step (MoveFocusFetched old (Err (Http.BadStatus 404))) root
+                confirmed = step MoveConfirm delayed
+            in
+            Expect.equal ( Just Nothing, True )
+                ( delayed.move.dialog |> Maybe.andThen .selected
+                , confirmed.move.dialog |> Maybe.andThen .saving |> (/=) Nothing )
+        , test "view mounts 25 ordinary rows plus root with keyboard-accessible separate expand actions" <| \_ ->
             let
                 loaded = step (OpenMove "task" "child") base |> loadRoot (List.range 1 50 |> List.map (\n -> project (String.fromInt n) Nothing))
             in
-            Move.view loaded |> Query.fromHtml |> Query.findAll [ Selector.class "move-project-row" ] |> Query.count (Expect.equal 25)
+            Move.view loaded |> Query.fromHtml |> Query.findAll [ Selector.class "move-project-row" ] |> Query.count (Expect.equal 26)
         ]
+
+
+checkReparentRace : Bool -> Expect.Expectation
+checkReparentRace newParentFirst =
+    let
+        roots = [ project "source" Nothing, project "a" Nothing, project "b" Nothing ]
+        opened = step (OpenMove "task" "child") base |> loadRoot roots |> mapDialog (\d -> { d | focusComplete = True })
+        oldParent = step (MoveToggleBranch "a") opened
+        oldLoaded = step (MoveBranchFetched (readId "a" oldParent) (Ok (page [ project "chosen" (Just "a") ] False))) oldParent
+        newParent = step (MoveToggleBranch "b") oldLoaded
+        newLoaded = step (MoveBranchFetched (readId "b" newParent) (Ok (page [] False))) newParent
+        selected = step (MoveSelect (Just "chosen")) newLoaded |> mapDialog (\d -> { d | refreshRequested = True })
+        refreshed = Move.reconcile ( selected, Cmd.none ) |> Tuple.first |> drainRetiredReads |> loadRoot roots
+        coherent = step (MoveFocusFetched (readId "@focus" refreshed) (Ok childFocus)) refreshed
+        finishOld model = step (MoveBranchFetched (readId "a" model) (Ok (page [] False))) model
+        finishNew model = step (MoveBranchFetched (readId "b" model) (Ok (page [ project "chosen" (Just "b") ] False))) model
+        partial = if newParentFirst then finishNew coherent else finishOld coherent
+        final = if newParentFirst then finishOld partial else finishNew partial
+    in
+    Expect.equal ( Just (Just "chosen"), Just ( Just "b", Just (Just "chosen"), ( True, False ) ) )
+        ( partial.move.dialog |> Maybe.andThen .selected
+        , final.move.dialog |> Maybe.map (\d -> ( Dict.get "chosen" d.projects |> Maybe.andThen .parentId, d.selected
+            , ( List.member ( "chosen", 1 ) (Move.visibleRows d), Set.member "chosen" d.contextIds ) )) )
+
+
+drainRetiredReads : Model -> Model
+drainRetiredReads model =
+    let generation = model.move.dialog |> Maybe.map .generation |> Maybe.withDefault -1 in
+    Dict.toList model.move.admissions |> List.filter (Tuple.second >> .generation >> (/=) generation)
+        |> List.foldl (\( id, _ ) current -> step (MoveBranchFetched id (Err Http.Timeout)) current) model
+
+
+projectFocus : Api.ProjectCardSummary -> List Api.ProjectCardSummary -> Api.NavigationFocusResponse
+projectFocus target ancestors =
+    { workspaceId = "ws", target = Api.NavigationProjectSummary target, ancestors = List.map Api.NavigationProjectSummary ancestors, ancestorsTruncated = False, nextAncestorOffset = Nothing }
+
+
+childFocus : Api.NavigationFocusResponse
+childFocus =
+    { workspaceId = "ws", target = Api.NavigationTaskSummary
+        { id = "child", workspaceId = "ws", projectId = Just "source", parentId = Nothing, title = "Child", status = Api.Todo, priority = 5, dueAt = Nothing, completedAt = Nothing, dependencyCount = 0, createdAt = "now", updatedAt = "now", directSubtaskCount = 0, hasChildren = False
+        , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = True } }
+    , ancestors = [ Api.NavigationProjectSummary (project "source" Nothing) ], ancestorsTruncated = False, nextAncestorOffset = Nothing }
 
 
 step : Msg -> Model -> Model

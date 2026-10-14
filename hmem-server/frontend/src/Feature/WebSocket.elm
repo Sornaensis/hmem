@@ -403,7 +403,7 @@ updateRaw msg model =
                                             }
                                     }
                             in
-                            Feature.DataLoading.revalidateNavigationForChangedSummaries model currentSummaries updated
+                            deferMoveNavigation (Feature.DataLoading.revalidateNavigationForChangedSummaries model currentSummaries) updated
 
                         else
                             canonicalHttpFailure guard.request (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model
@@ -658,7 +658,10 @@ applyScopedFrames scope frames model =
                                 move = current.move
                             in
                             if scopeMatchesSelectedWorkspace scope current && List.any supersedes frames then
-                                { current | move = { move | dialog = Nothing, resumeOrdinary = True } }
+                                if dialog.saving /= Nothing then
+                                    { current | move = { move | dialog = Nothing, resumeOrdinary = True } }
+                                else
+                                    { current | move = { move | dialog = Just { dialog | refreshRequested = True } } }
                             else current)
     in
     applyActions scope actions
@@ -667,6 +670,18 @@ applyScopedFrames scope frames model =
                 |> List.filter (Tuple.first >> (==) "project") |> List.map Tuple.second |> Set.fromList |> Set.toList
                 |> List.foldl (\id current -> advanceCanonicalTarget scope ("entity:project:" ++ id) current) updated
          else updated)
+
+
+{-| Picker and ordinary root revalidation cannot admit separate HTTP waves.
+Keep canonical entity summaries current; defer ordinary membership until picker
+transport has physically completed and the dialog retires.
+-}
+deferMoveNavigation : (Model -> ( Model, Cmd Msg )) -> Model -> ( Model, Cmd Msg )
+deferMoveNavigation refresh model =
+    if model.move.dialog /= Nothing || not (Dict.isEmpty model.move.admissions) then
+        let move = model.move in
+        ( { model | move = { move | refreshOrdinary = True } }, Cmd.none )
+    else refresh model
 
 
 requiredScopes : Model -> List ChangeStream.Scope
@@ -1025,7 +1040,7 @@ applyActions scope actions model =
 
         ( navigationModel, navigationCmd ) =
             if scopeMatchesSelectedWorkspace scope model && List.member ChangeStream.RefreshNavigation actions then
-                Feature.DataLoading.revalidateNavigationForFilters model
+                deferMoveNavigation Feature.DataLoading.revalidateNavigationForFilters model
 
             else
                 ( model, Cmd.none )
@@ -2135,7 +2150,7 @@ refreshProjectCascade root model =
 
         Just workspaceId ->
             let
-                ( navigationModel, navigationCmd ) = Feature.DataLoading.revalidateNavigationForFilters model
+                ( navigationModel, navigationCmd ) = deferMoveNavigation Feature.DataLoading.revalidateNavigationForFilters model
                 targets = loadedProjectCascadeTargets root model
                 ( summaryModel, summaryCmd ) = requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) targets (invalidateCascadeRequests (ChangeStream.Workspace workspaceId) targets navigationModel)
             in
@@ -2171,7 +2186,7 @@ refreshTaskPlacement taskId oldParent source destination model =
                 taskIds = Dict.keys model.tasks ++ Dict.keys model.dataLoading.taskCardSummaries |> Set.fromList |> Set.toList |> List.filter (within Set.empty)
                 projectTargets = List.filterMap identity [ source, destination ] |> Set.fromList |> Set.toList |> List.concatMap (\id -> loadedProjectCascadeTargets id model)
                 targets = List.map (Tuple.pair "task") (taskIds ++ (oldParent |> Maybe.map List.singleton |> Maybe.withDefault [])) ++ projectTargets |> Set.fromList |> Set.toList
-                ( navigation, navigationCmd ) = Feature.DataLoading.revalidateNavigationForFilters model
+                ( navigation, navigationCmd ) = deferMoveNavigation Feature.DataLoading.revalidateNavigationForFilters model
                 ( summaries, summaryCmd ) = requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) targets (invalidateCascadeRequests (ChangeStream.Workspace workspaceId) targets navigation)
             in
             ( summaries, Cmd.batch [ navigationCmd, summaryCmd, refreshProjectNextTaskCaches summaries ] )

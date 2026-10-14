@@ -153,6 +153,41 @@ To run bundled migrations separately during maintenance:
 docker compose run --rm migrate
 ```
 
+## V038 maintenance upgrade
+
+Follow the [coordinated upgrade procedure](README.md#upgrading-across-v038),
+including a named backup owner, an explicit finite UTC expiry/disposition, and
+retained compatible rollback artifacts. Keep the previous image under a distinct
+tag before rebuilding a reused tag. Stop old application/MCP writers while
+leaving PostgreSQL available, then take and verify the pre-upgrade backup above.
+Include separately launched MCP clients and prevent automatic old-service restart.
+For the standard Compose stack:
+
+```bash
+docker compose --profile mcp stop hmem mcp
+# Take and verify the backup before continuing.
+docker compose build hmem migrate mcp
+docker compose run --rm migrate
+docker compose --profile mcp up -d hmem mcp
+```
+
+Run the final command only after migration succeeds. If you do not operate the
+MCP sidecar, omit `mcp` from stop/build/start. All three services use the same
+selected image; the migration command dispatches `hmem-ctl migrate` against
+bundled `/opt/hmem/migrations`. Server startup also migrates before serving.
+Refresh external MCP processes/tool discovery and browser assets with the matched
+release. A failed V038 leaves its schema/snapshot changes and ledger entry
+uncommitted; diagnose before retrying. Compatible snapshots remain valid, while
+retired due-bearing full-workspace snapshots require fresh resync.
+
+For rollback, keep writers stopped and use the restore commands above through
+the successful `pg_restore` step. Select the previous compatible image/binaries
+before running their final restart command. Restarting the new image immediately
+after restoration would apply V038 again. No automatic down migration reconstructs
+removed deadlines. Dispose
+of host and container temporary backup copies under the named owner's recorded
+expiry and existing backup obligations.
+
 ## Optional vectors and GPU setup
 
 The default `postgres:17-bookworm` image does not supply pgvector. To add vector

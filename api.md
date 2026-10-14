@@ -81,6 +81,50 @@ allow up to 100. Observation limits are 1–200 and offsets 0–100000. Check Op
 for route-specific pagination, especially unified search and similarity, whose
 response shapes differ.
 
+## Removed due fields
+
+Current task and subtask JSON omits due fields in detail, lists, navigation
+summaries, overviews, mutation/dependency effects, project-embedded tasks, and
+fresh snapshots. Project JSON was already due-free. MCP tool discovery and
+compact task results also omit due properties; completion timestamps, hierarchy,
+priority, readiness and lifecycle rules retain their existing meaning.
+
+The exact keys `due_at`, `dueAt`, `due`, `due_date`, and `dueDate` are rejected
+at modeled planning input boundaries, including an explicit null. This covers
+project/task create and update bodies, project specifications and their nested
+task entries, batch-update wrappers/items, task batch-move bodies, and dependency
+link bodies. MCP also checks planning create/update/spec/archive, task
+move/dependency/start/finish
+arguments before sending HTTP. Remove these keys rather than setting them null.
+
+REST JSON decoding returns HTTP 400 with parser error text containing
+`Due scheduling fields are no longer supported`; this is not a dedicated JSON
+error code. MCP returns a tool result with `isError: true` and a text content
+message, without dispatching the rejected HTTP request. Unrelated unknown keys
+retain their existing handling; the check does not recursively scrub free-form
+`metadata` or saved-view query data. Other nullable update fields retain their
+omit/null/value semantics. For example, this task update is due-free:
+
+```json
+{"title":"Prepare release","description":null,"priority":7}
+```
+
+Authorized historical task-update replay applies only changed supported mutable
+fields (`title`, `description`, `project_id`, `parent_id`, `status`, `priority`,
+`metadata`). Mixed historical updates can revert those fields while ignoring
+obsolete due values; unchanged placement/status do not establish new intent.
+An update that changed only due fields returns HTTP 409 before any write:
+
+```json
+{"error":"audit_due_operation_obsolete","message":"This historical update only changed due scheduling, which is no longer supported."}
+```
+
+Historical payloads remain inspectable. Existing authorization, create/delete and
+soft-delete replay behavior still applies; Observation reversion remains
+unsupported. Retired due-bearing snapshot tokens require a fresh canonical
+resync; see [V038 storage behavior](database.md#due-field-removal-v038) and the
+[upgrade procedure](README.md#upgrading-across-v038).
+
 ## Create an Observation
 
 An Observation records an insight about repository files at a Git revision.

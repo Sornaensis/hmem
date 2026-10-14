@@ -36,7 +36,6 @@ classDiagram
       task_status_enum status
       SMALLINT priority
       JSONB metadata
-      TIMESTAMPTZ? due_at
       TIMESTAMPTZ? completed_at
       TIMESTAMPTZ created_at
       TIMESTAMPTZ updated_at
@@ -305,3 +304,32 @@ classDiagram
   note for task_flatten_migration_report "V018 migration repair report\nUNIQUE (task_id, issue)"
   note for delete_cascade_migration_report "V019 migration repair report\nUNIQUE (entity_type, entity_id, issue)"
 ```
+
+## Due-field removal (V038)
+
+`V038__remove_task_due.sql` drops `idx_tasks_due` and `tasks.due_at`, including
+values on soft-deleted tasks. Subtasks use the same table; projects have no due
+column. Fresh installs run the ordered migration chain and reach this schema.
+The migration owns one transaction containing snapshot retirement, schema
+changes, and its version-38 ledger entry. A failure rolls these changes back;
+after correcting the failure, retry through the migration runner. An already
+registered V038 is skipped.
+
+Only saved workspace `full_v1` snapshot sessions containing a task item with a
+`due_at` key (even null) are retired, together with their linked resume tokens,
+including successor tokens, and cascading cached items/page tokens. Clients
+must obtain a fresh snapshot when those tokens are refused. Compatible global,
+workspace-shell, and empty full snapshots remain valid. Fresh task snapshot
+envelopes retain schema version 1 and omit due fields.
+
+Historical audit values and persisted outbox envelopes are retained unchanged;
+they can still contain obsolete due data. Task IDs, unrelated values and
+timestamps are preserved. There is no down migration or recovery of removed
+deadline values from current task rows. Follow the
+[coordinated upgrade and backup rollback procedure](README.md#upgrading-across-v038).
+
+Older versioned migrations retain their due-column references to describe and
+upgrade the historical schema. Audit/outbox fixtures may retain obsolete due
+values as compatibility evidence. Operational retry times, job eligibility,
+leases, token expiry and request timeouts are separate from removed planning
+deadlines and remain supported.

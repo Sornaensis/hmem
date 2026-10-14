@@ -66,6 +66,25 @@ pagination. Reload always requests a fresh snapshot.
 
 ## Editing and navigation gotchas
 
+Current task, subtask and project-embedded cards consume due-free detail and
+summary payloads and show no due badge or editor. Completion dates and the
+existing priority, hierarchy, dependency, readiness and lifecycle presentation
+remain available. There is no supported due filter, sort or timeline series;
+free-form metadata and saved-view data are not rewritten.
+
+Historical audit values remain visible with the label **Due at (obsolete)** and
+normal minute-precision date formatting. Authorized mixed-field replay follows
+the server's supported-field projection; a due-only replay shows the structured
+`audit_due_operation_obsolete` refusal and leaves planning state untouched.
+Reload matching assets after the [V038 upgrade](../../README.md#upgrading-across-v038)
+and obtain a fresh canonical snapshot when an old due-bearing snapshot token is
+refused. Compatible shell/global snapshots retain their existing behavior.
+
+The focused `tests-js/ui-adjustments.browser.test.js` regression exercises
+due-free task/subtask/project cards, canonical resync and obsolete audit replay
+guidance against production Main with intercepted HTTP/WebSocket fixtures.
+These checks do not establish a deployed upgrade or a new performance result.
+
 The regular and sticky workspace headers share authoritative open-project and
 open-task totals from the authorized planning-counts read. They include collapsed,
 unloaded, nested and unassigned work and remain independent of navigation pages,

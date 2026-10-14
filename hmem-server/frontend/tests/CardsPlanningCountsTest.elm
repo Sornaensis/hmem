@@ -16,7 +16,7 @@ import Url
 suite : Test
 suite =
     describe "planning count presentation"
-        [ test "two tasks sharing a prerequisite show two blocked tasks and two relationships" <| \_ ->
+        [ test "two tasks sharing a prerequisite show two blocked tasks and two dependencies" <| \_ ->
             let
                 base = project "shared"
                 rollup = base.readinessRollup
@@ -26,10 +26,10 @@ suite =
                 linked = { seeded | dependencies = { dependencies | taskDependencyLinks = [ { taskId = "a", dependsOnId = "prerequisite" }, { taskId = "b", dependsOnId = "prerequisite" } ] } }
             in
             Expect.all
-                [ \_ -> cardSummary counted.id linked |> Query.has [ Selector.text "3 tasks", Selector.text "2 dependency-blocked tasks among open tasks", Selector.text "2 open prerequisite relationships" ]
+                [ \_ -> cardSummary counted.id linked |> Query.has [ Selector.text "3 tasks", Selector.text "2 blocked tasks", Selector.text "2 open dependencies" ]
                 , \_ -> Cards.cardTreeProjection workspaceId linked |> .taskDirectOpenDependencyCounts |> Expect.equal (Dict.fromList [ ( "a", 1 ), ( "b", 1 ) ])
                 ] ()
-        , test "one task with several prerequisites counts relationships separately from blocked tasks" <| \_ ->
+        , test "one task with several prerequisites counts dependencies separately from blocked tasks" <| \_ ->
             let
                 base = project "multiple"
                 rollup = base.readinessRollup
@@ -39,7 +39,7 @@ suite =
                 linked = { seeded | dependencies = { dependencies | taskDependencyLinks = List.map (\id -> { taskId = "a", dependsOnId = id }) [ "p1", "p2", "p3" ] } }
             in
             Expect.all
-                [ \_ -> cardSummary counted.id linked |> Query.has [ Selector.text "4 tasks", Selector.text "1 dependency-blocked task among open tasks", Selector.text "3 open prerequisite relationships" ]
+                [ \_ -> cardSummary counted.id linked |> Query.has [ Selector.text "4 tasks", Selector.text "1 blocked task", Selector.text "3 open dependencies" ]
                 , \_ -> Cards.cardTreeProjection workspaceId linked |> .taskDirectOpenDependencyCounts |> Expect.equal (Dict.singleton "a" 3)
                 ] ()
         , test "ancestor and child cards retain overlapping canonical subtree counts" <| \_ ->
@@ -53,8 +53,8 @@ suite =
                 seeded = DataLoading.mergeNavigationSummaries [ parent, child ] [] model
             in
             Expect.all
-                [ \_ -> cardSummary parent.id seeded |> Query.has [ Selector.text "3 tasks", Selector.text "Subtree includes descendant projects and subtasks; overlaps ancestor totals." ]
-                , \_ -> cardSummary child.id seeded |> Query.has [ Selector.text "2 tasks", Selector.text "Subtree includes descendant projects and subtasks; overlaps ancestor totals." ]
+                [ \_ -> cardSummary parent.id seeded |> Query.has [ Selector.text "3 tasks" ]
+                , \_ -> cardSummary child.id seeded |> Query.has [ Selector.text "2 tasks" ]
                 ] ()
         , describe "closed project and task counts"
             (List.map projectClosedTest [ ( "done only", 2, 0 ), ( "cancelled only", 0, 2 ), ( "mixed terminal", 1, 1 ) ])
@@ -79,14 +79,14 @@ suite =
                 cards = seeded.cards
                 recovering = { seeded | dependencies = { dependencies | projectReadinessRollups = Dict.empty }, cards = { cards | collapsedNodes = Dict.singleton "proj-fallback" True }, tasks = Dict.empty }
             in
-            cardSummary counted.id recovering |> Query.has [ Selector.text "60/75 tasks remaining", Selector.text "2 dependency-blocked tasks among open tasks", Selector.text "3 open prerequisite relationships" ]
+            cardSummary counted.id recovering |> Query.has [ Selector.text "60/75 tasks remaining", Selector.text "2 blocked tasks", Selector.text "3 open dependencies" ]
         , test "known zero remains visible without inventing dependency blockers" <| \_ ->
             let
                 seeded = DataLoading.mergeNavigationSummaries [ project "empty" ] [] model
             in
             Expect.all
                 [ \_ -> cardSummary "empty" seeded |> Query.has [ Selector.text "0 tasks" ]
-                , \_ -> cardSummary "empty" seeded |> Query.hasNot [ Selector.text "dependency-blocked" ]
+                , \_ -> cardSummary "empty" seeded |> Query.hasNot [ Selector.text "blocked task" ]
                 ] ()
         , test "missing authoritative totals stay unavailable" <| \_ ->
             let

@@ -66,7 +66,7 @@ viewReadableWorkspacePage wsId model ws =
                     let counts = model.observations.counts in
                     span [ class "workspace-observation-total", attribute "aria-live" "polite" ]
                         [ text ((if List.isEmpty summaryParts then "" else " · ") ++
-                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " Observations total") |> Maybe.withDefault "Observation total unavailable"
+                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations") |> Maybe.withDefault "Observation total unavailable"
                              else if counts.error /= Nothing then "Observation total unavailable"
                              else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
                         , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]
@@ -214,7 +214,7 @@ viewStickyWorkspaceBar model ws summaryParts =
                     let counts = model.observations.counts in
                     span [ class "workspace-observation-total" ]
                         [ text ((if List.isEmpty summaryParts then "" else " · ") ++
-                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " Observations total") |> Maybe.withDefault "Observation total unavailable"
+                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations") |> Maybe.withDefault "Observation total unavailable"
                              else if counts.error /= Nothing then "Observation total unavailable"
                              else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
                         , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]

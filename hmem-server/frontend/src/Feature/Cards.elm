@@ -1742,12 +1742,12 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                             Just _ ->
                                 countLabel remainingTasks closedTasks "task" "tasks" |> Maybe.withDefault "0 tasks" |> Just
                         , if dependencyBlockedTasks > 0 then
-                            Just (countPhrase dependencyBlockedTasks "dependency-blocked task" "dependency-blocked tasks" ++ " among open tasks")
+                            Just (countPhrase dependencyBlockedTasks "blocked task" "blocked tasks")
 
                           else
                             Nothing
                         , if openDependencyCount > 0 then
-                            Just (countPhrase openDependencyCount "open prerequisite relationship" "open prerequisite relationships")
+                            Just (countPhrase openDependencyCount "open dependency" "open dependencies")
 
                           else
                             Nothing
@@ -1759,7 +1759,6 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
               else
                 div [ class "card-summary" ]
                     [ text (String.join " · " summaryParts)
-                    , span [ class "card-count-scope" ] [ text " · Subtree includes descendant projects and subtasks; overlaps ancestor totals." ]
                     ]
             , div [ class "card-body card-expanded" ]
                 [ div [ class "card-desc-row" ]
@@ -2359,10 +2358,10 @@ viewTaskCardBody descendants projection showProject model task =
                 List.filterMap identity
                     [ subtaskLabel
                     , if openDependencyCount > 0 then
-                        Just (countPhrase openDependencyCount "open prerequisite relationship" "open prerequisite relationships")
+                        Just (countPhrase openDependencyCount "open dependency" "open dependencies")
 
                       else if depCount > 0 then
-                        Just (countPhrase depCount "prerequisite relationship" "prerequisite relationships")
+                        Just (countPhrase depCount "dependency" "dependencies")
 
                       else
                         Nothing

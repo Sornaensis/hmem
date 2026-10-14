@@ -189,7 +189,7 @@ validateCreateProjectSpecInput spec =
         (validateCreateTaskInput CreateTask
           { workspaceId = spec.workspaceId, projectId = Nothing, parentId = Nothing
           , title = task.title, description = task.description, priority = task.priority
-          , metadata = Nothing, dueAt = Nothing }
+          , metadata = Nothing }
          <> validateOptionalIntRange "priority" 1 10 task.priority)
     | (index, task) <- zip [0 :: Int ..] spec.tasks
     ]
@@ -1170,7 +1170,6 @@ data Task = Task
   , status          :: TaskStatus
   , priority        :: Int
   , metadata        :: Value
-  , dueAt           :: Maybe UTCTime
   , completedAt     :: Maybe UTCTime
   , dependencyCount :: Int
   , createdAt       :: UTCTime
@@ -1319,7 +1318,6 @@ data CreateTask = CreateTask
   , description :: Maybe Text
   , priority    :: Maybe Int
   , metadata    :: Maybe Value
-  , dueAt       :: Maybe UTCTime
   } deriving (Show, Eq, Generic)
 
 instance ToJSON CreateTask where
@@ -1335,7 +1333,6 @@ data UpdateTask = UpdateTask
   , status      :: Maybe TaskStatus
   , priority    :: Maybe Int
   , metadata    :: Maybe Value
-  , dueAt       :: FieldUpdate UTCTime
   } deriving (Show, Eq, Generic)
 
 data TaskListQuery = TaskListQuery
@@ -1363,7 +1360,7 @@ instance FromJSON TaskReadinessRollup where parseJSON = genericParseJSON jsonOpt
 -- names are deliberately fetched on demand.
 data TaskCardSummary = TaskCardSummary
   { id :: UUID, workspaceId :: UUID, projectId :: Maybe UUID, parentId :: Maybe UUID, title :: Text
-  , status :: TaskStatus, priority :: Int, dueAt :: Maybe UTCTime, completedAt :: Maybe UTCTime
+  , status :: TaskStatus, priority :: Int, completedAt :: Maybe UTCTime
   , dependencyCount :: Int, createdAt :: UTCTime, updatedAt :: UTCTime
   , directSubtaskCount :: Int, hasChildren :: Bool, readinessRollup :: TaskReadinessRollup
   } deriving (Show, Eq, Generic)
@@ -1513,7 +1510,6 @@ instance ToJSON UpdateTask where
     , ("status" .=)   <$> ut.status
     , ("priority" .=) <$> ut.priority
     , ("metadata" .=) <$> ut.metadata
-    , fieldUpdatePair "due_at" ut.dueAt
     ]
 instance FromJSON UpdateTask where
   parseJSON = withObject "UpdateTask" $ \o -> UpdateTask
@@ -1524,7 +1520,6 @@ instance FromJSON UpdateTask where
     <*> o .:? "status"
     <*> o .:? "priority"
     <*> o .:? "metadata"
-    <*> parseFieldUpdate o "due_at"
 
 ------------------------------------------------------------------------
 -- Workspace groups

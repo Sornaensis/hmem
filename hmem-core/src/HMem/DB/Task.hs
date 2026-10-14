@@ -75,7 +75,6 @@ rowToTask r = Task
   , status          = r.taskStatus
   , priority        = fromIntegral r.taskPriority
   , metadata        = r.taskMetadata
-  , dueAt           = r.taskDueAt
   , completedAt     = r.taskCompletedAt
   , dependencyCount = 0
   , createdAt       = r.taskCreatedAt
@@ -96,7 +95,6 @@ rawTaskRowDecoder = do
     Nothing -> fail $ "Unexpected task_status_enum value: " <> show taskStatusText
   taskPriority <- Dec.column (Dec.nonNullable Dec.int2)
   taskMetadata <- Dec.column (Dec.nonNullable Dec.jsonb)
-  taskDueAt <- Dec.column (Dec.nullable Dec.timestamptz)
   taskCompletedAt <- Dec.column (Dec.nullable Dec.timestamptz)
   taskCreatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
   taskUpdatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
@@ -110,7 +108,6 @@ rawTaskRowDecoder = do
     , status = taskStatus
     , priority = fromIntegral taskPriority
     , metadata = taskMetadata
-    , dueAt = taskDueAt
     , completedAt = taskCompletedAt
     , dependencyCount = 0
       , createdAt = taskCreatedAt
@@ -837,7 +834,6 @@ createTask pool ct = do
               , taskStatus      = unsafeDefault
               , taskPriority    = lit pri
               , taskMetadata    = lit meta
-              , taskDueAt       = lit ct.dueAt
               , taskCompletedAt = lit (Nothing :: Maybe UTCTime)
               , taskSearchVector = unsafeDefault
               , taskDeletedAt   = unsafeDefault
@@ -985,7 +981,6 @@ updateTaskWithDependencySnapshots pool tid ut = do
                         , taskStatus      = maybe row.taskStatus      lit ut.status
                         , taskPriority    = maybe row.taskPriority    (lit . fromIntegral) ut.priority
                         , taskMetadata    = maybe row.taskMetadata    lit ut.metadata
-                        , taskDueAt       = applyNullableUpdate row.taskDueAt ut.dueAt
                         -- completed_at is managed by the hmem_task_completion trigger
                         , taskCompletedAt = row.taskCompletedAt
                         }
@@ -1315,7 +1310,7 @@ filteredTaskChildrenStatement = Statement.Statement sql encoder (Dec.rowList raw
       [ "WITH RECURSIVE task_tree(root_id,id) AS ("
       , " SELECT t.id,t.id FROM tasks t WHERE t.workspace_id=$1 AND t.project_id IS NOT DISTINCT FROM $2 AND t.parent_id IS NOT DISTINCT FROM $3 AND t.deleted_at IS NULL"
       , " UNION SELECT tree.root_id,child.id FROM tasks child JOIN task_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL AND child.workspace_id=$1"
-      , ") SELECT t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.description,t.status::text,t.priority,t.metadata,t.due_at,t.completed_at,t.created_at,t.updated_at"
+      , ") SELECT t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.description,t.status::text,t.priority,t.metadata,t.completed_at,t.created_at,t.updated_at"
       , " FROM tasks t WHERE t.id IN (SELECT DISTINCT root_id FROM task_tree) AND ("
       , " (cardinality($4::text[])=0 OR t.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND t.priority=$6) OR ($5='above' AND t.priority>$6) OR ($5='below' AND t.priority<$6)) AND ($7 IS NULL OR lower(t.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(t.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')"
       , " OR EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=t.id) AND descendant.deleted_at IS NULL AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')))"
@@ -1388,9 +1383,9 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "     AND child.status IN ('active'::project_status_enum, 'paused'::project_status_enum)"
       , "     AND child.workspace_id = pt.workspace_id"
       , "),"
-      , "scoped_tasks(id, workspace_id, project_id, parent_id, title, description, status, priority, metadata, due_at, completed_at, created_at, updated_at, scope_project_id, scope_project_priority) AS ("
+      , "scoped_tasks(id, workspace_id, project_id, parent_id, title, description, status, priority, metadata, completed_at, created_at, updated_at, scope_project_id, scope_project_priority) AS ("
       , "  SELECT t.id, t.workspace_id, t.project_id, t.parent_id, t.title, t.description,"
-      , "         t.status, t.priority, t.metadata, t.due_at, t.completed_at, t.created_at, t.updated_at,"
+      , "         t.status, t.priority, t.metadata, t.completed_at, t.created_at, t.updated_at,"
       , "         pt.id, pt.priority"
       , "    FROM tasks t"
       , "    JOIN project_tree pt ON t.project_id = pt.id"
@@ -1398,7 +1393,7 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "     AND t.workspace_id = pt.workspace_id"
       , "  UNION"
       , "  SELECT child.id, child.workspace_id, child.project_id, child.parent_id, child.title, child.description,"
-      , "         child.status, child.priority, child.metadata, child.due_at, child.completed_at, child.created_at, child.updated_at,"
+      , "         child.status, child.priority, child.metadata, child.completed_at, child.created_at, child.updated_at,"
       , "         coalesce(child_pt.id, parent.scope_project_id), coalesce(child_pt.priority, parent.scope_project_priority)"
       , "    FROM tasks child"
       , "    JOIN scoped_tasks parent ON child.parent_id = parent.id"
@@ -1444,7 +1439,7 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , ")"
       , "SELECT candidate.id, candidate.workspace_id, candidate.project_id, candidate.parent_id,"
       , "       candidate.title, candidate.description, candidate.status::text, candidate.priority,"
-      , "       candidate.metadata, candidate.due_at, candidate.completed_at,"
+      , "       candidate.metadata, candidate.completed_at,"
       , "       candidate.created_at, candidate.updated_at,"
       , "       coalesce(open_desc.open_descendant_count, 0) > 0 AS completion_gated,"
       , "       coalesce(open_desc.open_descendant_count, 0)::bigint AS open_descendant_count,"
@@ -1564,7 +1559,7 @@ dependencyAutoBlockSnapshotsStatement = Statement.Statement sql encoder decoder 
       , "  SELECT DISTINCT id FROM affected_tasks"
       , ")"
       , "SELECT t.id, t.workspace_id, t.project_id, t.parent_id, t.title, t.description,"
-      , "       t.status::text, t.priority, t.metadata, t.due_at, t.completed_at,"
+      , "       t.status::text, t.priority, t.metadata, t.completed_at,"
       , "       t.created_at, t.updated_at,"
       , "       t.auto_blocked,"
       , "       coalesce(open_dep.open_dependency_count, 0)::bigint,"

@@ -58,7 +58,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       dependency <- createTask env.pool (newTask workspace.id (Just project.id) "dependency")
       task <- createTask env.pool (newTask workspace.id (Just project.id) "task")
       subtask <- createTask env.pool (newTask workspace.id (Just project.id) "subtask")
-      updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged (SetTo task.id) Nothing Nothing Nothing Unchanged) >>= (`shouldSatisfy` maybe False (const True))
+      updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged (SetTo task.id) Nothing Nothing Nothing) >>= (`shouldSatisfy` maybe False (const True))
       addDependency env.pool task.id dependency.id
 
       projectBatch <- projectCardSummaries env.pool [child, project]
@@ -98,9 +98,9 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
       child <- createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
       parent <- createTask env.pool (newTask workspace.id (Just child.id) "parent")
-      _ <- updateTask env.pool parent.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just InProgress) Nothing Nothing Unchanged)
-      subtask <- createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "needle_100%" Nothing (Just 7) Nothing Nothing)
-      _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just InProgress) Nothing Nothing Unchanged)
+      _ <- updateTask env.pool parent.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just InProgress) Nothing Nothing)
+      subtask <- createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "needle_100%" Nothing (Just 7) Nothing)
+      _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just InProgress) Nothing Nothing)
       let selector = emptyNavigationFilter { showEmptyProjects = Just False, showOnly = Just "projects", projectStatuses = [ProjArchived], taskStatuses = [InProgress], priorityMode = Just "exact", priorityValue = Just 7, query = Just "needle_100%" }
       filtered <- listFilteredProjectChildren env.pool workspace.id Nothing selector 50 0
       map (.id) filtered `shouldBe` [root.id]
@@ -112,7 +112,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       summary.readinessRollup.inProgressTaskCount `shouldBe` 1
       overview <- getProjectOverview env.pool root.id
       fmap (\value -> value.readinessRollup.inProgressTaskCount) overview `shouldBe` Just 1
-      _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing Unchanged)
+      _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing)
       [refreshed] <- projectCardSummaries env.pool [root]
       refreshed.readinessRollup.inProgressTaskCount `shouldBe` 0
 
@@ -176,7 +176,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
 newTask :: UUID -> Maybe UUID -> Text -> CreateTask
 newTask workspace project title = CreateTask
   { workspaceId = workspace, projectId = project, parentId = Nothing, title = title
-  , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+  , description = Nothing, priority = Nothing, metadata = Nothing }
 
 emptyNavigationFilter :: NavigationFilter
 emptyNavigationFilter = NavigationFilter

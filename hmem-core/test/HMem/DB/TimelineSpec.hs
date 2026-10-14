@@ -31,16 +31,16 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       nested <- createProject env.pool CreateProject
         { workspaceId = workspace.id, parentId = Just root.id, name = "nested", description = Nothing, priority = Nothing, metadata = Nothing }
       rootTask <- Task.createTask env.pool CreateTask
-        { workspaceId = workspace.id, projectId = Just root.id, parentId = Nothing, title = "root task", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        { workspaceId = workspace.id, projectId = Just root.id, parentId = Nothing, title = "root task", description = Nothing, priority = Nothing, metadata = Nothing }
       subtask <- Task.createTask env.pool CreateTask
-        { workspaceId = workspace.id, projectId = Just root.id, parentId = Just rootTask.id, title = "subtask", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        { workspaceId = workspace.id, projectId = Just root.id, parentId = Just rootTask.id, title = "subtask", description = Nothing, priority = Nothing, metadata = Nothing }
       observation <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Timeline.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "timeline")
       _ <- updateProject env.pool nested.id UpdateProject
         { name = Nothing, description = Unchanged, parentId = Unchanged, status = Just ProjArchived, priority = Nothing, metadata = Nothing }
       _ <- Task.updateTask env.pool subtask.id UpdateTask
-        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged, status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged, status = Just Done, priority = Nothing, metadata = Nothing }
       _ <- Task.updateTask env.pool rootTask.id UpdateTask
-        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged, status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged, status = Just Done, priority = Nothing, metadata = Nothing }
       _ <- updateProject env.pool root.id UpdateProject
         { name = Nothing, description = Unchanged, parentId = Unchanged, status = Just ProjCompleted, priority = Nothing, metadata = Nothing }
       deleteObservation env.pool workspace.id observation.id `shouldReturn` True

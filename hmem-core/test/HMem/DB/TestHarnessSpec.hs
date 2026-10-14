@@ -667,6 +667,43 @@ spec = do
       withTestEnv $ \env -> withRollbackTestEnv env (exerciseRollbackBoundary SavepointRollback)
 
   describe "migration resolution" $ do
+    it "taskDueRemovalMigration upgrades V037 atomically, retries after ledger failure and skips registered work" $
+      withDueRemovalDatabase $ \sandbox migrations pool -> do
+        beforeDir <- copyMigrationSubset sandbox migrations "due-pre-v038" (< "V038")
+        upgradeDir <- copyMigrationSubset sandbox migrations "due-v038-only" (== "V038__remove_task_due.sql")
+        initial <- Migration.runMigrations pool beforeDir
+        initial.failed `shouldBe` Nothing
+        runSession pool $ Session.sql taskDueRemovalFixture
+        preserved <- runSession pool taskDueRemovalPreservedState
+        cached <- runSession pool taskDueRemovalCachedState
+        runSession pool $ Session.sql "CREATE FUNCTION fail_due_ledger() RETURNS trigger AS $$ BEGIN IF NEW.version = 38 THEN RAISE EXCEPTION 'injected V038 ledger failure'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER fail_due_ledger BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION fail_due_ledger();"
+        failed <- Migration.runMigrations pool upgradeDir
+        show failed.failed `shouldSatisfy` isInfixOf "injected V038 ledger failure"
+        runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='tasks' AND column_name='due_at') AND to_regclass('idx_tasks_due') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=38) AND (SELECT due_at='2030-01-01'::timestamptz FROM tasks WHERE title='due deleted')") `shouldReturn` True
+        runSession pool taskDueRemovalPreservedState `shouldReturn` preserved
+        runSession pool taskDueRemovalCachedState `shouldReturn` cached
+        runSession pool $ Session.sql "DROP TRIGGER fail_due_ledger ON schema_migrations; DROP FUNCTION fail_due_ledger();"
+        upgraded <- Migration.runMigrations pool upgradeDir
+        upgraded.failed `shouldBe` Nothing
+        upgraded.applied `shouldBe` ["V038__remove_task_due.sql"]
+        assertTaskDueRemoved pool
+        runSession pool taskDueRemovalPreservedState `shouldReturn` preserved
+        runSession pool (queryBool "SELECT (SELECT count(*) FROM change_stream_snapshot_sessions)=5 AND (SELECT count(*) FROM change_stream_snapshot_items)=4 AND (SELECT count(*) FROM change_stream_snapshot_page_tokens)=5 AND (SELECT count(*) FROM change_stream_resume_tokens)=5 AND NOT EXISTS (SELECT 1 FROM change_stream_resume_tokens WHERE session_hash IN (decode('01','hex'),decode('02','hex')))") `shouldReturn` True
+        retained <- runSession pool taskDueRemovalCachedState
+        skipped <- Migration.runMigrations pool upgradeDir
+        skipped.failed `shouldBe` Nothing
+        skipped.applied `shouldBe` []
+        skipped.skipped `shouldBe` ["V038__remove_task_due.sql"]
+        runSession pool taskDueRemovalPreservedState `shouldReturn` preserved
+        runSession pool taskDueRemovalCachedState `shouldReturn` retained
+
+    it "taskDueRemovalMigration installs the due-free schema through the actual fresh runner" $
+      withDueRemovalDatabase $ \_ migrations pool -> do
+        installed <- Migration.runMigrations pool migrations
+        installed.failed `shouldBe` Nothing
+        installed.applied `shouldSatisfy` elem "V038__remove_task_due.sql"
+        assertTaskDueRemoved pool
+
     it "uses the resolved repository root even when cwd changes" $
       withTestSandbox $ \sandbox ->
         withCurrentDirectory sandbox.sandboxTmpDir $ do
@@ -1538,6 +1575,38 @@ spec = do
 
 -- Apply genuine V001--V034 files, seed historical states, then install only
 -- V035. Its rule installation must preserve the identities/statuses V036 uses.
+-- Fresh and upgrade cases need distinct databases because they exercise the
+-- production runner against different ledgers. The standard sandbox bracket
+-- owns both database and migration copies and removes them after each case.
+withDueRemovalDatabase :: (TestSandbox -> FilePath -> Pool Hasql.Connection -> IO ()) -> IO ()
+withDueRemovalDatabase action = withTestSandbox $ \sandbox -> do
+  migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+  withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+    bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool ->
+      action sandbox migrations pool
+
+assertTaskDueRemoved :: Pool Hasql.Connection -> Expectation
+assertTaskDueRemoved pool = runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='tasks' AND column_name='due_at') AND to_regclass('idx_tasks_due') IS NULL AND (SELECT name='V038__remove_task_due.sql' FROM schema_migrations WHERE version=38)") `shouldReturn` True
+
+taskDueRemovalPreservedState :: Session.Session Text
+taskDueRemovalPreservedState = queryText "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(t)-'due_at' ORDER BY id) FROM tasks t),(SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM projects p),(SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM audit_log a),(SELECT jsonb_agg(to_jsonb(o) ORDER BY scope,workspace_id,cursor) FROM change_stream_outbox o),(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,workspace_id) FROM change_stream_scope_counters c))::text"
+
+taskDueRemovalCachedState :: Session.Session Text
+taskDueRemovalCachedState = queryText "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(s) ORDER BY session_hash) FROM change_stream_snapshot_sessions s),(SELECT jsonb_agg(to_jsonb(i) ORDER BY session_hash,ordinal) FROM change_stream_snapshot_items i),(SELECT jsonb_agg(to_jsonb(p) ORDER BY token_hash) FROM change_stream_snapshot_page_tokens p),(SELECT jsonb_agg(to_jsonb(r) ORDER BY token_hash) FROM change_stream_resume_tokens r))::text"
+
+taskDueRemovalFixture :: BS.ByteString
+taskDueRemovalFixture = B8.unlines
+  [ "INSERT INTO workspaces(id,name) VALUES ('00000000-0000-0000-0000-000000003801','due upgrade');"
+  , "INSERT INTO projects(id,workspace_id,name) VALUES ('00000000-0000-0000-0000-000000003802','00000000-0000-0000-0000-000000003801','due project');"
+  , "INSERT INTO tasks(id,workspace_id,project_id,title,description,priority,metadata,due_at) VALUES ('00000000-0000-0000-0000-000000003803','00000000-0000-0000-0000-000000003801','00000000-0000-0000-0000-000000003802','due parent','preserved specification',9,'{\"due\":\"free-form metadata\"}','2030-01-01');"
+  , "INSERT INTO tasks(id,workspace_id,project_id,parent_id,title,due_at) VALUES ('00000000-0000-0000-0000-000000003804','00000000-0000-0000-0000-000000003801','00000000-0000-0000-0000-000000003802','00000000-0000-0000-0000-000000003803','due subtask',NULL);"
+  , "INSERT INTO tasks(workspace_id,title,due_at,deleted_at) VALUES ('00000000-0000-0000-0000-000000003801','due deleted','2030-01-01','2020-01-01');"
+  , "INSERT INTO change_stream_snapshot_sessions(session_hash,scope,workspace_id,audience_kind,audience_key,authorization_epoch,high_watermark,expires_at,page_token_hash,snapshot_profile) SELECT decode(lpad(n::text,2,'0'),'hex'),CASE WHEN n=6 THEN 'global' ELSE 'workspace' END,CASE WHEN n=6 THEN NULL ELSE '00000000-0000-0000-0000-000000003801'::uuid END,'trusted','due-upgrade',0,0,'2099-01-01',decode(lpad((n+10)::text,2,'0'),'hex'),CASE WHEN n=4 THEN 'workspace_shell_v1' ELSE 'full_v1' END FROM generate_series(1,7) n;"
+  , "INSERT INTO change_stream_snapshot_items(session_hash,ordinal,item) SELECT decode(lpad(n::text,2,'0'),'hex'),0,jsonb_build_object('schema_version',1,'kind',CASE WHEN n=7 THEN 'workspace' ELSE 'task' END,'data',CASE WHEN n=1 THEN '{\"due_at\":null}'::jsonb WHEN n IN (2,4,6) THEN '{\"due_at\":\"2030-01-01T00:00:00Z\"}'::jsonb ELSE '{}'::jsonb END) FROM generate_series(1,7) n WHERE n<>5;"
+  , "INSERT INTO change_stream_snapshot_page_tokens(token_hash,session_hash,start_ordinal,terminal) SELECT page_token_hash,session_hash,0,true FROM change_stream_snapshot_sessions;"
+  , "INSERT INTO change_stream_resume_tokens(token_hash,scope,workspace_id,audience_kind,audience_key,authorization_epoch,watermark,expires_at,session_hash) SELECT decode(lpad((n+20)::text,2,'0'),'hex'),s.scope,s.workspace_id,'trusted','due-upgrade',0,0,'2099-01-01',s.session_hash FROM generate_series(1,10) n JOIN change_stream_snapshot_sessions s ON s.session_hash=decode(lpad((CASE WHEN n>7 THEN 1 ELSE n END)::text,2,'0'),'hex');"
+  ]
+
 withProjectPauseUpgrade :: (Pool Hasql.Connection -> FilePath -> IO ()) -> IO ()
 withProjectPauseUpgrade action = withTestSandbox $ \sandbox -> do
   migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot

@@ -697,9 +697,9 @@ spec = do
       let create parent title = createProject env.pool CreateProject
             { workspaceId = workspace.id, parentId = parent, name = title, description = Nothing, priority = Nothing, metadata = Nothing }
           task project parent title = Task.createTask env.pool CreateTask
-            { workspaceId = workspace.id, projectId = Just project, parentId = parent, title = title, description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+            { workspaceId = workspace.id, projectId = Just project, parentId = parent, title = title, description = Nothing, priority = Nothing, metadata = Nothing }
           projectStatus status = UpdateProject Nothing Unchanged Unchanged (Just status) Nothing Nothing
-          taskStatus status = UpdateTask Nothing Unchanged Unchanged Unchanged (Just status) Nothing Nothing Unchanged
+          taskStatus status = UpdateTask Nothing Unchanged Unchanged Unchanged (Just status) Nothing Nothing
       root <- create Nothing "root"
       active <- create (Just root.id) "active child"
       completed <- create (Just active.id) "completed grandchild"
@@ -818,9 +818,9 @@ spec = do
       project <- createProject env.pool CreateProject
         { workspaceId = workspace.id, parentId = Nothing, name = "project", description = Nothing, priority = Nothing, metadata = Nothing }
       prerequisite <- Task.createTask env.pool CreateTask
-        { workspaceId = workspace.id, projectId = Just project.id, parentId = Nothing, title = "prerequisite", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        { workspaceId = workspace.id, projectId = Just project.id, parentId = Nothing, title = "prerequisite", description = Nothing, priority = Nothing, metadata = Nothing }
       dependent <- Task.createTask env.pool CreateTask
-        { workspaceId = workspace.id, projectId = Just project.id, parentId = Just prerequisite.id, title = "dependent", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        { workspaceId = workspace.id, projectId = Just project.id, parentId = Just prerequisite.id, title = "dependent", description = Nothing, priority = Nothing, metadata = Nothing }
       Task.addDependency env.pool dependent.id prerequisite.id
       _ <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/ChangeStream.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "captured")
       group <- WorkspaceGroup.createGroup env.pool (CreateWorkspaceGroup "change-stream-group" Nothing)
@@ -877,9 +877,9 @@ spec = do
     it "captures every task cascade in one transaction" $ \env -> do
       workspace <- createTestWorkspace env "task-change-stream-cascade"
       root <- Task.createTask env.pool CreateTask
-        { workspaceId = workspace.id, projectId = Nothing, parentId = Nothing, title = "root", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        { workspaceId = workspace.id, projectId = Nothing, parentId = Nothing, title = "root", description = Nothing, priority = Nothing, metadata = Nothing }
       _child <- Task.createTask env.pool CreateTask
-        { workspaceId = workspace.id, projectId = Nothing, parentId = Just root.id, title = "child", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        { workspaceId = workspace.id, projectId = Nothing, parentId = Just root.id, title = "child", description = Nothing, priority = Nothing, metadata = Nothing }
       Task.deleteTaskCascade env.pool root.id >>= (`shouldSatisfy` isJust)
       records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 2 20
       let deleted = [record | record <- records, (field "entity" record.outboxEnvelope >>= field "action") == Just (String "deleted")]
@@ -946,10 +946,10 @@ pauseProject :: TestEnv -> UUID -> Maybe UUID -> Text -> IO Project
 pauseProject env workspace parent name = createProject env.pool (CreateProject workspace parent name Nothing Nothing Nothing)
 
 pauseTask :: TestEnv -> UUID -> Maybe UUID -> Maybe UUID -> Text -> IO Task
-pauseTask env workspace project parent title = Task.createTask env.pool (CreateTask workspace project parent title Nothing Nothing Nothing Nothing)
+pauseTask env workspace project parent title = Task.createTask env.pool (CreateTask workspace project parent title Nothing Nothing Nothing)
 
 pauseTaskStatus :: TaskStatus -> UpdateTask
-pauseTaskStatus status = UpdateTask Nothing Unchanged Unchanged Unchanged (Just status) Nothing Nothing Unchanged
+pauseTaskStatus status = UpdateTask Nothing Unchanged Unchanged Unchanged (Just status) Nothing Nothing
 
 pauseProjectsStatement :: Statement.Statement [UUID] ()
 pauseProjectsStatement = Statement.Statement

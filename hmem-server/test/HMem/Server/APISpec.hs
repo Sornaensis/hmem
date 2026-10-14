@@ -168,10 +168,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
     it "returns eligible subtasks under auto-blocked parents while excluding child and parent blockers" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-next-subtasks"
       project <- Project.createProject env.pool (CreateProject workspace.id Nothing "project" Nothing Nothing Nothing)
-      parent <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "parent" Nothing Nothing Nothing Nothing)
-      child <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "ready child" Nothing (Just 9) Nothing Nothing)
-      blocked <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "blocked child" Nothing Nothing Nothing Nothing)
-      prerequisite <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "prerequisite" Nothing Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "parent" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "ready child" Nothing (Just 9) Nothing)
+      blocked <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "blocked child" Nothing Nothing Nothing)
+      prerequisite <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "prerequisite" Nothing Nothing Nothing)
       Task.addDependency env.pool blocked.id prerequisite.id
       ready <- request app methodGet (pauseProjectPath project.id <> "/next-tasks?limit=1") ""
       responseStatus ready `shouldBe` status200
@@ -202,7 +202,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
       children <- forM [1..23 :: Int] $ \n -> do
         project <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) (T.pack (show n)) Nothing Nothing Nothing)
-        _ <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "ready" Nothing Nothing Nothing Nothing)
+        _ <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "ready" Nothing Nothing Nothing)
         pure project
       response <- putJson app (pauseProjectPath root.id) (object ["status" .= ("paused" :: T.Text)])
       responseStatus response `shouldBe` status200
@@ -233,12 +233,12 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       workspace <- createTestWorkspace env "http-pause-combined"
       forM_ [(False,False),(True,False),(False,True),(True,True)] $ \(dependencies, subtasks) -> do
         project <- Project.createProject env.pool (CreateProject workspace.id Nothing "combination" Nothing Nothing Nothing)
-        parent <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "parent" Nothing Nothing Nothing Nothing)
+        parent <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "parent" Nothing Nothing Nothing)
         if dependencies then do
-          prerequisite <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "prerequisite" Nothing Nothing Nothing Nothing)
+          prerequisite <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "prerequisite" Nothing Nothing Nothing)
           Task.addDependency env.pool parent.id prerequisite.id
         else pure ()
-        child <- if subtasks then Just <$> Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "subtask" Nothing Nothing Nothing Nothing) else pure Nothing
+        child <- if subtasks then Just <$> Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "subtask" Nothing Nothing Nothing) else pure Nothing
         paused <- putJson app (pauseProjectPath project.id) (object ["status" .= ("paused" :: T.Text)])
         let Just mutation = decode (responseBody paused) :: Maybe ProjectMutationResult
             Just effect = find (\item -> item.task.id == parent.id) mutation.pauseEffects.tasks
@@ -265,7 +265,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         _ <- putJson app (pauseProjectPath destination.id) (object ["status" .= ("paused" :: T.Text)])
         closed <- Project.createProject env.pool (CreateProject workspace.id (if move then Nothing else Just destination.id) "closed" Nothing Nothing Nothing)
         branch <- if move then Project.createProject env.pool (CreateProject workspace.id (Just closed.id) "historical branch" Nothing Nothing Nothing) else pure closed
-        historicalTasks <- forM [1..21 :: Int] $ \n -> Task.createTask env.pool (CreateTask workspace.id (Just branch.id) Nothing (T.pack (show n)) Nothing Nothing Nothing Nothing)
+        historicalTasks <- forM [1..21 :: Int] $ \n -> Task.createTask env.pool (CreateTask workspace.id (Just branch.id) Nothing (T.pack (show n)) Nothing Nothing Nothing)
         DBPool.runTransaction env.pool $ do
           Session.sql "ALTER TABLE projects DISABLE TRIGGER USER; ALTER TABLE tasks DISABLE TRIGGER USER"
           Session.statement (map (.id) historicalTasks) $ Statement.Statement "UPDATE tasks SET status='todo',auto_blocked=false WHERE id=ANY($1)"
@@ -293,9 +293,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       workspace <- createTestWorkspace env "http-pause-deferred-replay"
       ancestor <- Project.createProject env.pool (CreateProject workspace.id Nothing "deleted ancestor" Nothing Nothing Nothing)
       child <- Project.createProject env.pool (CreateProject workspace.id (Just ancestor.id) "historical paused" Nothing Nothing Nothing)
-      frozenTask <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "frozen todo" Nothing Nothing Nothing Nothing)
-      frozenDone <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "frozen done" Nothing Nothing Nothing Nothing)
-      _ <- Task.updateTask env.pool frozenDone.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing Unchanged)
+      frozenTask <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "frozen todo" Nothing Nothing Nothing)
+      frozenDone <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "frozen done" Nothing Nothing Nothing)
+      _ <- Task.updateTask env.pool frozenDone.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing)
       frozenBefore <- traverse (Task.getTask env.pool) [frozenTask.id,frozenDone.id]
       frozenEvents <- filter (\row -> jsonPath ["entity","type"] row.outboxEnvelope == Just (String "task")) <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
       frozenAudit <- traverse (\id -> Audit.getAuditLog env.pool (AuditLogQuery Nothing (Just "task") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)) [frozenTask.id,frozenDone.id]
@@ -422,9 +422,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       workspace <- createTestWorkspace env "http-cascade-archive"
       root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
       child <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
-      unfinished <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "unfinished" Nothing Nothing Nothing Nothing)
-      done <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "done" Nothing Nothing Nothing Nothing)
-      _ <- Task.updateTask env.pool done.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing Unchanged)
+      unfinished <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "unfinished" Nothing Nothing Nothing)
+      done <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "done" Nothing Nothing Nothing)
+      _ <- Task.updateTask env.pool done.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing)
       beforeDone <- Task.getTask env.pool done.id
       response <- putJson app ("/api/v1/projects/" <> Text.encodeUtf8 (T.pack (show root.id))) (object ["status" .= ("archived" :: T.Text)])
       responseStatus response `shouldBe` status200
@@ -439,8 +439,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
 
     it "rejects parent starts with structured subtask blockers and publishes running-child readiness" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-subtask-parent"
-      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
-      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing)
       let path task = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
       rejected <- putJson app (path parent) (object ["status" .= ("in_progress" :: T.Text)])
       responseStatus rejected `shouldBe` status409
@@ -461,8 +461,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
 
     it "reports manual blocking without claiming unresolved subtask blockers were resolved" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-subtask-manual"
-      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
-      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing)
       let path task = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
       paused <- putJson app (path parent) (object ["status" .= ("blocked" :: T.Text)])
       responseStatus paused `shouldBe` status200
@@ -483,9 +483,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
 
     it "rejects unfinished create reparent and in-progress reopen under a cancelled parent with HM106 guidance" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-cascade-cancelled-parent"
-      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
-      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
-      moving <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "moving" Nothing Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing)
+      moving <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "moving" Nothing Nothing Nothing)
       let path task = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
           expectClosed response = do
             responseStatus response `shouldBe` status409
@@ -503,11 +503,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
 
     it "reverting a reopened task to cancelled invokes the same descendant cascade and audit cause" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-cascade-revert"
-      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
       let path = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show parent.id))
       _ <- putJson app path (object ["status" .= ("cancelled" :: T.Text)])
       _ <- putJson app path (object ["status" .= ("todo" :: T.Text)])
-      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "new child" Nothing Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "new child" Nothing Nothing Nothing)
       response <- request app methodGet ("/api/v1/audit?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "&entity_type=task") ""
       let Just page = decode (responseBody response) :: Maybe (PaginatedResult AuditLogEntry)
           Just entry = find (\audit -> audit.entityId == T.pack (show parent.id) && (audit.oldValues >>= jsonField "status") == Just (String "cancelled")) page.items
@@ -1063,9 +1063,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       readCounts (object ["open_projects" .= (0 :: Int), "open_tasks" .= (0 :: Int)])
       root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
       child <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
-      parent <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "parent" Nothing Nothing Nothing Nothing)
-      _ <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "subtask" Nothing Nothing Nothing Nothing)
-      _ <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "unassigned" Nothing Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "parent" Nothing Nothing Nothing)
+      _ <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "subtask" Nothing Nothing Nothing)
+      _ <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "unassigned" Nothing Nothing Nothing)
       readCounts (object ["open_projects" .= (2 :: Int), "open_tasks" .= (3 :: Int)])
       request app methodGet (path (read "00000000-0000-0000-0000-000000000001" :: UUID)) ""
         >>= (\response -> responseStatus response `shouldBe` status404)
@@ -1186,7 +1186,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
     it "soft-deletes locally without purging contents and denies later active reads" $ \(env, app) -> do
       workspace <- createTestWorkspace env "workspace-delete-local"
       project <- Project.createProject env.pool (CreateProject workspace.id Nothing "retained" Nothing Nothing Nothing)
-      task <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "retained task" Nothing Nothing Nothing Nothing)
+      task <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "retained task" Nothing Nothing Nothing)
       let path = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
       response <- requestWithHeaders app methodDelete path [("X-Request-Id", "workspace-delete-local")] ""
       responseStatus response `shouldBe` status200
@@ -1353,6 +1353,32 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , "start_idempotency_key" .= ("versioned-full-snapshot-global-key" :: T.Text) ])
       responseStatus global `shouldBe` status200
       observations global `shouldReturn` ([] :: [Observation])
+
+    it "returns due-free task and subtask REST records and full snapshot items" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "due-free-rest-snapshot"
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "subtask" Nothing Nothing Nothing)
+      forM_ [parent.id, child.id] $ \taskId -> do
+        response <- request app methodGet ("/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))) ""
+        responseStatus response `shouldBe` status200
+        let Just body = decode (responseBody response) :: Maybe Value
+        jsonField "due_at" body `shouldBe` Nothing
+        jsonField "completed_at" body `shouldBe` Nothing
+      response <- postJson app "/api/v1/change-stream/resync" (object
+        [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+        , "page_size" .= (20 :: Int), "start_idempotency_key" .= ("due-free-rest-snapshot-start-key" :: T.Text) ])
+      responseStatus response `shouldBe` status200
+      let Just body = decode (responseBody response) :: Maybe Value
+      case jsonField "items" body of
+        Just (Array items) -> do
+          let tasks = filter (\item -> jsonField "kind" item == Just (String "task")) (toList items)
+          length tasks `shouldBe` 2
+          forM_ tasks $ \item -> do
+            jsonField "schema_version" item `shouldBe` Just (Number 1)
+            let Just task = jsonField "data" item
+            jsonField "due_at" task `shouldBe` Nothing
+            jsonField "completed_at" task `shouldBe` Just Null
+        _ -> expectationFailure "expected full snapshot items"
 
     it "returns allowlisted snapshot items and an opaque terminal token without a cursor" $ \(env, app) -> do
       workspace <- createTestWorkspace env "canonical-resync"

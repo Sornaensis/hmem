@@ -50,8 +50,8 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     workspace <- createTestWorkspace env "pause-raw-races"
     root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
     active <- createProject env.pool (CreateProject workspace.id Nothing "active" Nothing Nothing Nothing)
-    waiting <- Task.createTask env.pool (CreateTask workspace.id (Just root.id) Nothing "waiting" Nothing Nothing Nothing Nothing)
-    moving <- Task.createTask env.pool (CreateTask workspace.id (Just active.id) Nothing "moving" Nothing Nothing Nothing Nothing)
+    waiting <- Task.createTask env.pool (CreateTask workspace.id (Just root.id) Nothing "waiting" Nothing Nothing Nothing)
+    moving <- Task.createTask env.pool (CreateTask workspace.id (Just active.id) Nothing "moving" Nothing Nothing Nothing)
     let pause = Session.statement root.id projectPauseForRaceStatement
         resume = runSession env.pool $ Session.statement root.id projectResumeForRaceStatement
     started <- planningPauseRace env "pause-raw-start" pause (Session.statement waiting.id cascadeReopenStatement)
@@ -70,6 +70,73 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     refused `shouldSatisfy` \case Just (Left (DBLifecycleViolation "PROJECT_PAUSE_BLOCKED_BY_RUNNING_TASKS" _ _ _)) -> True; _ -> False
     fmap (fmap (.status)) (Project.getProject env.pool root.id) `shouldReturn` Just ProjActive
     fmap (fmap (.status)) (Task.getTask env.pool waiting.id) `shouldReturn` Just InProgress
+
+  it "retires only due-bearing full workspace task snapshots and resume lineages in V038" $ \env -> do
+    workspace <- createTestWorkspace env "snapshot-due-upgrade"
+    original <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "snapshot task" Nothing Nothing Nothing)
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "snapshot-due-upgrade"
+        item kind value = object ["schema_version" .= (1 :: Int), "kind" .= (kind :: T.Text), "data" .= value]
+        canonical = item "task" (toJSON original)
+        legacy = item "task" (case toJSON original of Object fields -> Object (KeyMap.insert "due_at" Null fields); value -> value)
+        root = item "workspace" (toJSON workspace)
+        unwrap = either (fail . show) pure
+        begin key profile values = beginResyncWithStartKeyAndProfile env.pool 60 scope audience key 1 profile (pure values) >>= unwrap
+        page token = readSnapshotPageWithStoredTtls env.pool 60 600 scope audience token >>= unwrap
+        resume value = maybe (fail "terminal snapshot omitted resume bearer") pure value.snapshotResumeToken
+    valued <- begin "due-upgrade-valued-start" FullV1 [item "task" (object ["due_at" .= ("2030-01-01T00:00:00Z" :: T.Text)])]
+    valuedPage <- page valued.snapshotToken
+    valuedResume <- resume valuedPage
+    incompatible <- begin "due-upgrade-incompatible-start" FullV1 [root, legacy]
+    first <- page incompatible.snapshotToken
+    next <- maybe (fail "expected continuation page") pure first.snapshotNextToken
+    terminal <- page next
+    oldResume <- resume terminal
+    rotated <- replayAndRotateResumeToken env.pool 600 scope audience oldResume 100 >>= unwrap
+    successor <- replayAndRotateResumeToken env.pool 600 scope audience rotated.replayPageResumeToken 100 >>= unwrap
+    preserved <- mapM (\(key, profile, values) -> do
+      started <- begin key profile values
+      saved <- page started.snapshotToken
+      pure (started, saved))
+      [ ("due-upgrade-valid-start", FullV1, [canonical])
+      , ("due-upgrade-shell-start", WorkspaceShellV1, [root])
+      , ("due-upgrade-unrelated-start", FullV1, [root])
+      , ("due-upgrade-empty-start", FullV1, []) ]
+    global <- beginResyncWithStartKeyAndProfile env.pool 60 GlobalScope audience "due-upgrade-global-start" 1 FullV1 (pure [root]) >>= unwrap
+    globalPage <- readSnapshotPageWithStoredTtls env.pool 60 600 GlobalScope audience global.snapshotToken >>= unwrap
+    auditBefore <- getAuditLogRows env.pool "task" (T.pack (show original.id))
+    outboxBefore <- listOutboxAfter env.pool scope 0 100
+    -- Reintroduce only the previous column/index in the isolated fixture; the real V037 runner upgrade is covered by TestHarnessSpec.
+    runSession env.pool $ Session.sql "ALTER TABLE tasks ADD COLUMN due_at timestamptz; CREATE INDEX idx_tasks_due ON tasks(due_at) WHERE due_at IS NOT NULL; DELETE FROM schema_migrations WHERE version = 38"
+    upgraded <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    upgraded.failed `shouldBe` Nothing
+    upgraded.applied `shouldBe` ["V038__remove_task_due.sql"]
+    mapM_ (\token -> readSnapshotPageWithStoredTtls env.pool 60 600 scope audience token `shouldReturn` Left SnapshotNotFound)
+      [incompatible.snapshotToken, next, valued.snapshotToken]
+    mapM_ (\token -> replayUnacknowledgedResumeToken env.pool scope audience token 100 `shouldReturn` Left ResumeNotFound)
+      [oldResume, rotated.replayPageResumeToken, successor.replayPageResumeToken, valuedResume]
+    runSession env.pool (Session.statement workspace.id countSnapshotSessionsStatement) `shouldReturn` 4
+    runSession env.pool (Session.statement workspace.id countSnapshotPageTokensStatement) `shouldReturn` 4
+    mapM_ (\(started, saved) -> do
+      page started.snapshotToken `shouldReturn` saved
+      token <- resume saved
+      replayUnacknowledgedResumeToken env.pool scope audience token 100 >>= (`shouldSatisfy` isRight)) preserved
+    readSnapshotPageWithStoredTtls env.pool 60 600 GlobalScope audience global.snapshotToken `shouldReturn` Right globalPage
+    globalResume <- resume globalPage
+    replayUnacknowledgedResumeToken env.pool GlobalScope audience globalResume 100 >>= (`shouldSatisfy` isRight)
+    Task.getTask env.pool original.id `shouldReturn` Just original
+    getAuditLogRows env.pool "task" (T.pack (show original.id)) `shouldReturn` auditBefore
+    listOutboxAfter env.pool scope 0 100 `shouldReturn` outboxBefore
+    fresh <- begin "due-upgrade-incompatible-start" FullV1 [canonical]
+    fresh.snapshotToken `shouldNotBe` incompatible.snapshotToken
+    freshPage <- page fresh.snapshotToken
+    freshPage.snapshotPageItems `shouldBe` [canonical]
+    freshResume <- resume freshPage
+    freshResume `shouldNotBe` oldResume
+    replayUnacknowledgedResumeToken env.pool scope audience freshResume 100 >>= (`shouldSatisfy` isRight)
+    repeated <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    repeated.failed `shouldBe` Nothing
+    repeated.applied `shouldBe` []
 
   it "retires only tokenless full Observation snapshots and their complete resume lineages in V031" $ \env -> do
     workspace <- createTestWorkspace env "snapshot-version-upgrade"
@@ -228,8 +295,8 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     source <- createProject env.pool (CreateProject workspace.id Nothing "source" Nothing Nothing Nothing)
     destination <- createProject env.pool (CreateProject workspace.id Nothing "destination" Nothing Nothing Nothing)
     let family title = do
-          parent <- Task.createTask env.pool (CreateTask workspace.id (Just source.id) Nothing title Nothing Nothing Nothing Nothing)
-          child <- Task.createTask env.pool (CreateTask workspace.id (Just source.id) (Just parent.id) "unfinished" Nothing Nothing Nothing Nothing)
+          parent <- Task.createTask env.pool (CreateTask workspace.id (Just source.id) Nothing title Nothing Nothing Nothing)
+          child <- Task.createTask env.pool (CreateTask workspace.id (Just source.id) (Just parent.id) "unfinished" Nothing Nothing Nothing)
           -- V028 permitted this history. V029 must not sweep it on a move.
           bracket_
             (runSession env.pool $ Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER")
@@ -241,7 +308,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     before <- mapM (Task.getTask env.pool) [singleParent.id, singleChild.id, batchParent.id, batchChild.id]
     outboxBefore <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
     single <- try @DBException $ Task.updateTask env.pool singleParent.id
-      (UpdateTask Nothing Unchanged (SetTo destination.id) Unchanged Nothing Nothing Nothing Unchanged)
+      (UpdateTask Nothing Unchanged (SetTo destination.id) Unchanged Nothing Nothing Nothing)
     batch <- try @DBException $ Task.moveTasksBatch env.pool [batchParent.id] (Just destination.id)
     let isClosed = \case Left (DBLifecycleViolation "TASK_OPEN_UNDER_CANCELLED_TASK" _ _ _) -> True; _ -> False
     single `shouldSatisfy` isClosed
@@ -265,9 +332,9 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
 
   it "cascade overlapping parent and child task updates converge in one SQL statement" $ \env -> do
     workspace <- createTestWorkspace env "cascade-overlapping-tasks"
-    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
-    child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
-    sibling <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "sibling" Nothing Nothing Nothing Nothing)
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
+    child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing)
+    sibling <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "sibling" Nothing Nothing Nothing)
     updated <- runTransaction env.pool $ do
       Session.sql "SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off"
       Session.statement (parent.id, child.id) cascadeCancelPairStatement
@@ -279,7 +346,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     workspace <- createTestWorkspace env "cascade-atomic-rollback"
     root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
     child <- createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
-    task <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "task" Nothing Nothing Nothing Nothing)
+    task <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "task" Nothing Nothing Nothing)
     beforeRoot <- Project.getProject env.pool root.id
     beforeChild <- Project.getProject env.pool child.id
     beforeTask <- Task.getTask env.pool task.id
@@ -297,9 +364,9 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
 
   it "cascade cancelled-parent policy rejects raw SQL insert reparent and reopen without partial writes" $ \env -> do
     workspace <- createTestWorkspace env "cascade-sql-parent-policy"
-    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
-    child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
-    moving <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "moving" Nothing Nothing Nothing Nothing)
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
+    child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing)
+    moving <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "moving" Nothing Nothing Nothing)
     runSession env.pool $ Session.statement parent.id cascadeCancelStatement
     before <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
     let expectClosed action = do
@@ -314,7 +381,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
 
   it "serializes a concurrent child insert behind a parent start and auto-blocks the parent" $ \_ -> withTestEnv $ \env -> do
     workspace <- createTestWorkspace env "subtask-concurrent-insert"
-    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
     acquired <- newEmptyMVar
     release <- newEmptyMVar
     let holder = withConn env.pool $ \connection ->
@@ -344,7 +411,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
 
   it "refuses a concurrent parent start after a child insert commits" $ \_ -> withTestEnv $ \env -> do
     workspace <- createTestWorkspace env "subtask-concurrent-start"
-    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
     acquired <- newEmptyMVar
     release <- newEmptyMVar
     let holder = withConn env.pool $ \connection ->
@@ -374,7 +441,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
 
   it "cascade cancellation serializes a concurrent unfinished child insert behind the cancelled parent" $ \_ -> withTestEnv $ \env -> do
     workspace <- createTestWorkspace env "cascade-concurrent-insert"
-    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing)
     acquired <- newEmptyMVar
     release <- newEmptyMVar
     let holder = withConn env.pool $ \connection ->
@@ -670,10 +737,10 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     workspace <- createTestWorkspace env "change-stream-fk-dependency-cascade"
     prerequisite <- Task.createTask env.pool CreateTask
       { workspaceId = workspace.id, projectId = Nothing, parentId = Nothing, title = "prerequisite", description = Nothing
-      , priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      , priority = Nothing, metadata = Nothing }
     dependent <- Task.createTask env.pool CreateTask
       { workspaceId = workspace.id, projectId = Nothing, parentId = Nothing, title = "dependent", description = Nothing
-      , priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      , priority = Nothing, metadata = Nothing }
     Task.addDependency env.pool dependent.id prerequisite.id
     beforeDelete <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
     runSession env.pool $ Session.statement prerequisite.id hardDeleteTaskStatement
@@ -847,7 +914,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     project <- createProject env.pool CreateProject
       { workspaceId = workspace.id, parentId = Nothing, name = "outbox project", description = Nothing, priority = Nothing, metadata = Nothing }
     task <- Task.createTask env.pool CreateTask
-      { workspaceId = workspace.id, projectId = Just project.id, parentId = Nothing, title = "outbox task", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      { workspaceId = workspace.id, projectId = Just project.id, parentId = Nothing, title = "outbox task", description = Nothing, priority = Nothing, metadata = Nothing }
     let scope = WorkspaceScope workspace.id
         assertOne cursor entity action expected = do
           records <- listOutboxAfter env.pool scope cursor 20
@@ -1054,11 +1121,11 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     newProject <- createProject env.pool CreateProject
       { workspaceId = workspace.id, parentId = Nothing, name = "new project", description = Nothing, priority = Nothing, metadata = Nothing }
     oldParent <- Task.createTask env.pool CreateTask
-      { workspaceId = workspace.id, projectId = Just oldProject.id, parentId = Nothing, title = "old parent", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      { workspaceId = workspace.id, projectId = Just oldProject.id, parentId = Nothing, title = "old parent", description = Nothing, priority = Nothing, metadata = Nothing }
     newParent <- Task.createTask env.pool CreateTask
-      { workspaceId = workspace.id, projectId = Just newProject.id, parentId = Nothing, title = "new parent", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      { workspaceId = workspace.id, projectId = Just newProject.id, parentId = Nothing, title = "new parent", description = Nothing, priority = Nothing, metadata = Nothing }
     moved <- Task.createTask env.pool CreateTask
-      { workspaceId = workspace.id, projectId = Just oldProject.id, parentId = Just oldParent.id, title = "moved task", description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      { workspaceId = workspace.id, projectId = Just oldProject.id, parentId = Just oldParent.id, title = "moved task", description = Nothing, priority = Nothing, metadata = Nothing }
     priorRecords <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 20
     runSession env.pool $ Session.statement (moved.id, newProject.id, newParent.id) moveTaskStatement
     records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) (maybe 0 (.outboxCursor) (safeLast priorRecords)) 10

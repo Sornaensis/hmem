@@ -1,7 +1,7 @@
 module HMem.DB.TaskSpec (spec) where
 
 import Control.Exception (try)
-import Data.Aeson (Value(..), object, (.=))
+import Data.Aeson (Value(..), object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Either (isLeft)
@@ -28,6 +28,27 @@ import HMem.Types
 
 spec :: Spec
 spec = do
+  around withTestEnv $ describe "Due-free task projections" $ do
+    it "reads task, subtask, filtered and next-task rows and card summaries after column removal" $ \env -> do
+      workspace <- createTestWorkspace env "due-free-projections"
+      project <- createProjectFor env workspace.id "project"
+      parent <- createTaskFor env workspace.id (Just project.id) Nothing "parent"
+      child <- createTaskFor env workspace.id (Just project.id) (Just parent.id) "subtask"
+      loaded <- getTask env.pool parent.id
+      fmap (.status) loaded `shouldBe` Just Blocked
+      listed <- listTasks env.pool project.id Nothing Nothing Nothing
+      children <- listTaskChildren env.pool workspace.id (Just project.id) (Just parent.id) 20 0
+      map (.id) children `shouldBe` [child.id]
+      filtered <- listFilteredTaskChildren env.pool workspace.id (Just project.id) Nothing (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing) 20 0
+      map (.id) filtered `shouldBe` [parent.id]
+      candidates <- listNextTasks env.pool project.id False 20
+      map (\candidate -> candidate.task.id) candidates `shouldBe` [child.id]
+      cards <- taskCardSummaries env.pool listed
+      mapM_ (\value -> case value of
+        Object fields -> KeyMap.member "due_at" fields `shouldBe` False
+        _ -> expectationFailure "Task projection must encode an object")
+        (map toJSON listed <> map toJSON children <> map (toJSON . (.task)) candidates <> map toJSON cards)
+
   around withTestEnv $ describe "Next-task card pagination" $ do
     it "exhausts more than 200 distinct ready candidates while legacy callers stay capped" $ \env -> do
       workspace <- createTestWorkspace env "next-card-pages"
@@ -130,7 +151,7 @@ spec = do
       closed <- createTaskFor env workspace.id (Just project.id) Nothing "closed"
       _ <- updateTask env.pool closed.id (cancelStatusUpdate Cancelled)
       _ <- Project.updateProject env.pool project.id (projectStatusUpdate ProjPaused)
-      _ <- updateTask env.pool child.id (UpdateTask Nothing Unchanged Unchanged (SetTo parent.id) Nothing Nothing Nothing Unchanged)
+      _ <- updateTask env.pool child.id (UpdateTask Nothing Unchanged Unchanged (SetTo parent.id) Nothing Nothing Nothing)
       _ <- updateTask env.pool closed.id (cancelStatusUpdate Todo)
       mapM (fmap (fmap (.status)) . getTask env.pool) [child.id, closed.id] `shouldReturn` replicate 2 (Just Blocked)
       Just paused <- getTaskOverview env.pool parent.id
@@ -311,14 +332,14 @@ taskLifecycleSpec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       observation <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Task.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "independent")
       task <- createTask env.pool CreateTask
         { workspaceId = workspace.id, projectId = Nothing, parentId = Nothing, title = "task", description = Nothing
-        , priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        , priority = Nothing, metadata = Nothing }
       deleteTaskCascade env.pool task.id >>= (`shouldSatisfy` isJust)
       getObservation env.pool workspace.id observation.id >>= (`shouldSatisfy` isJust)
     it "rejects a multi-hop dependency cycle atomically" $ \env -> do
       workspace <- createTestWorkspace env "task-dependency-cycle"
       let create title = createTask env.pool CreateTask
             { workspaceId = workspace.id, projectId = Nothing, parentId = Nothing, title = title, description = Nothing
-            , priority = Nothing, metadata = Nothing, dueAt = Nothing }
+            , priority = Nothing, metadata = Nothing }
       taskA <- create "A"
       taskB <- create "B"
       taskC <- create "C"
@@ -427,7 +448,7 @@ createProjectFor env workspaceId name = Project.createProject env.pool CreatePro
 cancelStatusUpdate :: TaskStatus -> UpdateTask
 cancelStatusUpdate status = UpdateTask
   { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
-  , status = Just status, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+  , status = Just status, priority = Nothing, metadata = Nothing }
 
 cancelTaskStatement :: Statement.Statement UUID ()
 cancelTaskStatement = Statement.Statement
@@ -477,7 +498,7 @@ taskRowForCascadeStatement = Statement.Statement
 createTaskFor :: TestEnv -> UUID -> Maybe UUID -> Maybe UUID -> Text -> IO Task
 createTaskFor env workspaceId projectId parentId title = createTask env.pool CreateTask
   { workspaceId = workspaceId, projectId = projectId, parentId = parentId, title = title
-  , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+  , description = Nothing, priority = Nothing, metadata = Nothing }
 
 projectStatusUpdate :: ProjectStatus -> UpdateProject
 projectStatusUpdate status = UpdateProject

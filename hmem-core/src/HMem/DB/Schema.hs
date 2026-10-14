@@ -214,7 +214,6 @@ data TaskT f = TaskT
   , taskStatus       :: Column f TaskStatus
   , taskPriority     :: Column f Int16
   , taskMetadata     :: Column f Value
-  , taskDueAt        :: Column f (Maybe UTCTime)
   , taskCompletedAt  :: Column f (Maybe UTCTime)
   , taskSearchVector :: Column f PgTSVector
   , taskDeletedAt    :: Column f (Maybe UTCTime)
@@ -236,7 +235,6 @@ taskSchema = TableSchema
       , taskStatus       = "status"
       , taskPriority     = "priority"
       , taskMetadata     = "metadata"
-      , taskDueAt        = "due_at"
       , taskCompletedAt  = "completed_at"
       , taskSearchVector = "search_vector"
       , taskDeletedAt    = "deleted_at"

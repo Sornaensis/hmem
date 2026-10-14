@@ -26,7 +26,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       workspace <- createTestWorkspace env "planning-counts-mixed"
       other <- createTestWorkspace env "planning-counts-other"
       let project parent name = Project.createProject env.pool (CreateProject workspace.id parent name Nothing Nothing Nothing)
-          task projectId parent title = Task.createTask env.pool (CreateTask workspace.id projectId parent title Nothing Nothing Nothing Nothing)
+          task projectId parent title = Task.createTask env.pool (CreateTask workspace.id projectId parent title Nothing Nothing Nothing)
           status table entityId value = runSession env.pool $ Session.statement (entityId, value) $
             Statement.Statement ("UPDATE " <> table <> " SET status = $2::" <> (if table == "projects" then "project_status_enum" else "task_status_enum") <> " WHERE id = $1")
               (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.text))) Dec.noResult True
@@ -59,7 +59,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       Task.addDependency env.pool assigned.id manualBlocked.id
       Task.addDependency env.pool assigned.id running.id
       _ <- Project.createProject env.pool (CreateProject other.id Nothing "foreign" Nothing Nothing Nothing)
-      _ <- Task.createTask env.pool (CreateTask other.id Nothing Nothing "foreign" Nothing Nothing Nothing Nothing)
+      _ <- Task.createTask env.pool (CreateTask other.id Nothing Nothing "foreign" Nothing Nothing Nothing)
       getWorkspacePlanningCounts env.pool workspace.id `shouldReturn` Just (WorkspacePlanningCounts 3 5)
       getWorkspacePlanningCounts env.pool other.id `shouldReturn` Just (WorkspacePlanningCounts 1 1)
 

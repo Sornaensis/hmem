@@ -37,7 +37,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       task <- createTask env.pool CreateTask
         { workspaceId = workspace.id, projectId = Just project.id, parentId = Nothing
         , title = "needle task", description = Nothing, priority = Nothing
-        , metadata = Nothing, dueAt = Nothing }
+        , metadata = Nothing }
       results <- searchAll env.pool (unifiedQuery (Just workspace.id) (Just [SearchObservation]) (Just SubjectFile) (Just "src/Search.hs") (Just canonicalSha))
       map (.id) results.observations `shouldBe` [matching.id]
       results.projects `shouldBe` []
@@ -62,7 +62,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       tasks <- forM [1 .. 2 :: Int] $ \index -> createTask env.pool CreateTask
         { workspaceId = workspace.id, projectId = Just (head projects).id, parentId = Nothing
         , title = "needle task " <> showText index, description = Nothing, priority = Nothing
-        , metadata = Nothing, dueAt = Nothing }
+        , metadata = Nothing }
       let base :: UnifiedSearchQuery
           base = (unifiedQuery (Just workspace.id) Nothing Nothing Nothing Nothing) { limit = Nothing, offset = Nothing }
       first <- searchAll env.pool base

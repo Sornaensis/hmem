@@ -13,9 +13,22 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 
 spec :: Spec
 spec = do
+  describe "Due-free task JSON" $ do
+    it "round-trips tasks and create/update DTOs without a modeled due field" $ do
+      let task = Task workspace workspace Nothing Nothing "task" Nothing Todo 5 (object []) Nothing 0 observedAt observedAt
+          createTask = CreateTask workspace Nothing Nothing "task" Nothing Nothing Nothing
+          updateTask = UpdateTask Nothing SetNull Unchanged SetNull Nothing Nothing Nothing
+      eitherDecode (encode task) `shouldBe` Right task
+      eitherDecode (encode createTask) `shouldBe` Right createTask
+      eitherDecode (encode updateTask) `shouldBe` Right updateTask
+      mapM_ (\value -> case value of
+        Object fields -> KM.member "due_at" fields `shouldBe` False
+        _ -> expectationFailure "Task DTO must encode an object") [toJSON task, toJSON createTask, toJSON updateTask]
+      toJSON updateTask `shouldBe` object ["description" .= Null, "parent_id" .= Null]
+
   describe "Project pause JSON compatibility" $ do
     it "defaults new diagnostic fields when decoding older task responses" $ do
-      let task = Task workspace workspace Nothing Nothing "task" Nothing Todo 5 (object []) Nothing Nothing 0 observedAt observedAt
+      let task = Task workspace workspace Nothing Nothing "task" Nothing Todo 5 (object []) Nothing 0 observedAt observedAt
           legacyNext = object ["task" .= task, "completion_gated" .= False, "open_descendant_count" .= (0 :: Int), "dependency_blocked" .= False, "open_dependency_count" .= (0 :: Int)]
           legacyChange = object ["task" .= task, "previous_status" .= Todo, "current_status" .= Blocked,
             "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int),

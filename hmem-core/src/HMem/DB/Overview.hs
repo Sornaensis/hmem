@@ -103,7 +103,7 @@ taskCardSummaries pool values = do
           rollup = Map.findWithDefault emptyTaskReadinessRollup value.id rollups
       in TaskCardSummary
           { id = value.id, workspaceId = value.workspaceId, projectId = value.projectId, parentId = value.parentId
-          , title = value.title, status = value.status, priority = value.priority, dueAt = value.dueAt, completedAt = value.completedAt
+          , title = value.title, status = value.status, priority = value.priority, completedAt = value.completedAt
           , dependencyCount = value.dependencyCount, createdAt = value.createdAt, updatedAt = value.updatedAt
           , directSubtaskCount = childTasks, hasChildren = childTasks > 0, readinessRollup = rollup }
     | value <- values

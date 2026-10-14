@@ -150,7 +150,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       const request = route.request(), url = new URL(request.url()), path = url.pathname
       const navigation = path.endsWith('/navigation')
       const detail = /^\/api\/v1\/(projects|tasks)\/[^/]+$/.test(path)
-      const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', includeBlocked: url.searchParams.get('include_blocked') === 'true', arrived: performance.now(), done: false }
+      const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), includeBlocked: url.searchParams.get('include_blocked') === 'true', arrived: performance.now(), done: false }
       requests.push(receipt)
       if (navigation) { activeBranches++; maxBranches = Math.max(maxBranches, activeBranches) }
       if (detail) { activeDetails++; maxDetails = Math.max(maxDetails, activeDetails) }
@@ -200,6 +200,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           if (request.method() === 'PUT') {
             const update = request.postDataJSON(); assert.equal(typeof update.request_id, 'string'); receipt.update = update
             if (path.includes('/projects/') && authority) value = authority.updateProject(fixture, entityId, update)
+            else if (path.includes('/tasks/') && authority?.updateTask) value = authority.updateTask(fixture, entityId, update)
             else { assert.deepEqual(Object.keys(update).sort(), ['request_id','title']); value.title = update.title }
           }
         }

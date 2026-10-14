@@ -8,6 +8,7 @@ import Feature.AuditLog
 import Feature.Cards
 import Feature.DataLoading
 import Feature.Dependencies
+import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
@@ -123,6 +124,21 @@ route msg model =
 
         LogoutRequested ->
             Err (HandleInAppShell AppShell.LogoutRequestedMsg)
+
+        OpenMove _ _ -> Ok (Feature.Move.update msg model)
+        CloseMove -> Ok (Feature.Move.update msg model)
+        MoveQueryChanged _ -> Ok (Feature.Move.update msg model)
+        MoveStatusChanged _ -> Ok (Feature.Move.update msg model)
+        MoveToggleBranch _ -> Ok (Feature.Move.update msg model)
+        MoveSelect _ -> Ok (Feature.Move.update msg model)
+        MoveRows _ -> Ok (Feature.Move.update msg model)
+        MoveRetry _ -> Ok (Feature.Move.update msg model)
+        MoveConfirm -> Ok (Feature.Move.update msg model)
+        MoveBranchFetched _ _ -> Ok (Feature.Move.update msg model)
+        MoveFocusFetched _ _ -> Ok (Feature.Move.update msg model)
+        MoveMatchFetched _ _ -> Ok (Feature.Move.update msg model)
+        MoveProjectSaved _ _ _ -> Ok (Feature.Move.update msg model)
+        MoveTaskSaved _ _ _ -> Ok (Feature.Move.update msg model)
 
         -- HTTP responses
         GotWorkspaces _ _ ->

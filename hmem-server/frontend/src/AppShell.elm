@@ -10,6 +10,7 @@ import Feature.Cards
 import Feature.ChangeStream
 import Feature.DataLoading
 import Feature.Dependencies
+import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
@@ -94,6 +95,7 @@ initModel key url page flags storedFilters legacyFrag =
             , memory = emptyMemoryModel
             , dependencies = Feature.Dependencies.init
             , cards = Feature.Cards.init
+            , move = Feature.Move.init
             , dragDrop = Feature.DragDrop.init
             , focus = Feature.Focus.init frag.focus
             , mutations = Feature.Mutations.init
@@ -933,6 +935,7 @@ clearSessionScopedState model =
         , memory = emptyMemoryModel
         , dependencies = Feature.Dependencies.resetCache model.dependencies
         , cards = Feature.Cards.init
+        , move = Feature.Move.retire model.move
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
         , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
@@ -995,7 +998,8 @@ viewDocument model =
             , viewConnectionStatus model.webSocket.state
             , if model.auth.status == AuthReady then
                 div []
-                    [ Feature.Editing.viewCreateFormModal model
+                    [ Feature.Move.view model
+                    , Feature.Editing.viewCreateFormModal model
                     , Feature.DragDrop.viewDropActionModal model
                     , Feature.Cards.viewDeleteConfirmModal model
                     , Feature.AuditLog.viewRevertConfirmModal model

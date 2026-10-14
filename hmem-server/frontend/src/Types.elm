@@ -61,6 +61,7 @@ type alias Model =
     , memory : MemoryModel
     , dependencies : DependenciesModel
     , cards : CardsModel
+    , move : MoveModel
     , dragDrop : DragDropModel
     , focus : FocusModel
     , mutations : MutationsModel
@@ -68,6 +69,64 @@ type alias Model =
     , auditLog : AuditLogModel
     , timeline : TimelineModel
     , workspaceAdmin : WorkspaceAdminModel
+    }
+
+
+type alias MoveModel =
+    { dialog : Maybe MoveDialog
+    , resumeOrdinary : Bool
+    , nextToken : Int
+    , nextReadId : Int
+    , admissions : Dict Int MoveRead
+    }
+
+
+type alias MoveDialog =
+    { token : Int
+    , guard : CanonicalRequestGuard
+    , entityType : String
+    , entityId : String
+    , name : String
+    , currentProject : Maybe String
+    , taskParent : Maybe String
+    , sourceOpen : Bool
+    , sourceRunning : Bool
+    , query : String
+    , statuses : Set String
+    , generation : Int
+    , expanded : Set String
+    , projects : Dict String Api.ProjectCardSummary
+    , matches : Dict String Bool
+    , matchPending : Dict String Int
+    , matchErrors : Dict String String
+    , branches : Dict String MoveBranch
+    , selected : Maybe (Maybe String)
+    , rowOffset : Int
+    , focusOffset : Int
+    , focusPending : Maybe Int
+    , focusComplete : Bool
+    , focusError : Maybe String
+    , taskParentName : Maybe String
+    , saving : Maybe String
+    , error : Maybe String
+    }
+
+
+type alias MoveBranch =
+    { ids : List String
+    , offset : Int
+    , complete : Bool
+    , pending : Maybe Int
+    , error : Maybe String
+    , lastIssued : Int
+    }
+
+
+type alias MoveRead =
+    { token : Int
+    , generation : Int
+    , branch : String
+    , offset : Int
     }
 
 
@@ -1099,6 +1158,20 @@ type Msg
     | RequestProjectNextTasks (Maybe String) Int String Bool
     | ProjectUpdated CanonicalRequestGuard (Result Api.ApiError Api.ProjectMutationResult)
     | TaskUpdated (Result Api.ApiError Api.TaskMutationResult)
+    | OpenMove String String
+    | CloseMove
+    | MoveQueryChanged String
+    | MoveStatusChanged String
+    | MoveToggleBranch String
+    | MoveSelect (Maybe String)
+    | MoveRows Int
+    | MoveRetry String
+    | MoveConfirm
+    | MoveBranchFetched Int (Result Http.Error Api.NavigationBranchResponse)
+    | MoveFocusFetched Int (Result Http.Error Api.NavigationFocusResponse)
+    | MoveMatchFetched Int (Result Http.Error Api.Project)
+    | MoveProjectSaved Int CanonicalRequestGuard (Result Api.ApiError Api.ProjectMutationResult)
+    | MoveTaskSaved Int CanonicalRequestGuard (Result Api.ApiError Api.TaskMutationResult)
     | MemoryUpdated (Result Http.Error Api.Memory)
     | WorkspaceUpdated String (Result Api.ApiError Api.Workspace)
     | WorkspaceCreated (Result Http.Error Api.Workspace)

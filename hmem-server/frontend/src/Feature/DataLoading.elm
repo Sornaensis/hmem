@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -529,7 +529,7 @@ pumpNavigationQueue budget model =
     let
         loading = model.dataLoading
     in
-    if budget <= 0 || Dict.size loading.navigationAdmissions >= navigationConcurrency || model.activeTab /= ProjectsTab || loading.backgroundAdmission.remaining <= 0 || not (StartupAdmission.canOrdinary loading.startupAdmission) || (loading.backgroundAdmission.branches >= 2 && ordinaryDetailsPending model) then
+    if budget <= 0 || model.move.dialog /= Nothing || Dict.size loading.navigationAdmissions + Dict.size model.move.admissions >= navigationConcurrency || model.activeTab /= ProjectsTab || loading.backgroundAdmission.remaining <= 0 || not (StartupAdmission.canOrdinary loading.startupAdmission) || (loading.backgroundAdmission.branches >= 2 && ordinaryDetailsPending model) then
         ( model, Cmd.none )
     else
         case loading.navigationQueue of
@@ -2111,7 +2111,7 @@ beginProjectCardDetail summary ( model, commands ) =
                     )
                 |> Maybe.withDefault False
     in
-    if alreadyCurrent || Set.size model.dataLoading.cardDetailAdmissions >= 6 then
+    if alreadyCurrent || model.move.dialog /= Nothing || Set.size model.dataLoading.cardDetailAdmissions + (Dict.values model.move.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then
         ( model, commands )
 
     else
@@ -2154,7 +2154,7 @@ beginTaskCardDetail summary ( model, commands ) =
                     )
                 |> Maybe.withDefault False
     in
-    if alreadyCurrent || Set.size model.dataLoading.cardDetailAdmissions >= 6 then
+    if alreadyCurrent || model.move.dialog /= Nothing || Set.size model.dataLoading.cardDetailAdmissions + (Dict.values model.move.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then
         ( model, commands )
 
     else

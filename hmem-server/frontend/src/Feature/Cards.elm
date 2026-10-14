@@ -37,6 +37,7 @@ import Dict
 import Feature.DataLoading
 import Feature.AuditLog
 import Feature.Dependencies
+import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
@@ -1690,7 +1691,8 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     , Feature.Editing.viewEditableText model "project" project.id "name" project.name
                 ]
             , div [ class "card-actions" ]
-                [ Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
+                [ Feature.Move.viewAction model "project" project.id
+                , Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
                 , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
                 , if Permissions.canEditCurrentWorkspace model then
                         button [ class "btn-icon btn-danger", onClick (ConfirmDelete "project" project.id), title "Delete" ] [ text "✕" ]
@@ -2323,7 +2325,8 @@ viewTaskCardBody descendants projection showProject model task =
                 , Feature.Editing.viewEditableText model "task" task.id "title" task.title
                 ]
             , div [ class "card-actions" ]
-                [ Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
+                [ Feature.Move.viewAction model "task" task.id
+                , Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
                     button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]

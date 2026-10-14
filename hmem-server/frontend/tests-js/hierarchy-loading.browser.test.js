@@ -143,6 +143,8 @@ test('real Markdown and native Tab cross virtual rows, while removing the tab re
     })
     const root = h.page.locator('#entity-root-project')
     await root.locator('.btn-extras-toggle').click()
+    await h.idle()
+    await h.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     const link = root.getByRole('link', { name: 'Markdown link', exact: true })
     await link.waitFor(); await link.focus(); await h.page.keyboard.press('Tab')
     assert.ok(await h.page.evaluate(() => document.activeElement?.closest('[data-hierarchy-key]')?.dataset.hierarchyKey), 'Native Tab must remain in a mounted hierarchy row')
@@ -159,6 +161,7 @@ test('real Markdown and native Tab cross virtual rows, while removing the tab re
     assert.equal(await h.page.locator('[data-hierarchy-key="' + next.next + '"]').count(), 0, 'Keyboard successor must start outside the mounted window')
     await h.page.keyboard.press('Tab')
     await h.page.waitForFunction(key => document.activeElement?.closest('[data-hierarchy-key]')?.dataset.hierarchyKey === key, next.next)
+      .catch(async error => { throw new Error(error.message + '\n' + JSON.stringify({expected:next,keydownPhases:await h.page.evaluate(()=>window.hierarchyKeyboardPhases),active:await h.page.evaluate(()=>({element:document.activeElement?.outerHTML.slice(0,600),row:document.activeElement?.closest('[data-hierarchy-key]')?.dataset.hierarchyKey,rows:[...document.querySelectorAll('[data-hierarchy-key]')].map(e=>e.dataset.hierarchyKey)}))})) })
     const keyboardPhase = () => h.page.evaluate(() => {
       const active = document.activeElement, row = active?.closest('[data-hierarchy-key]')
       return { active: active?.outerHTML.slice(0, 600), row: row?.dataset.hierarchyKey, previous: row?.dataset.hierarchyPrevious,

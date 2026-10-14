@@ -1,5 +1,6 @@
 module Feature.WebSocket exposing
     ( refreshProjectCascade
+    , refreshTaskPlacement
     , connectCmd
     , init
     , subscriptions
@@ -640,6 +641,25 @@ applyScopedFrames scope frames model =
         updated =
             updateWebSocket (\webSocket -> { webSocket | streams = streams, state = connectionState }) model
                 |> (\current -> if planningChanged || (scopeMatchesSelectedWorkspace scope model && next.live && not prior.live) then Feature.DataLoading.invalidatePlanningCounts current else current)
+                |> (\current ->
+                    case current.move.dialog of
+                        Nothing -> current
+                        Just dialog ->
+                            let
+                                supersedes frame =
+                                    case frame of
+                                        Api.CanonicalChange envelope ->
+                                            not (List.member envelope.eventId prior.eventIds)
+                                                && List.member envelope.eventId next.eventIds
+                                                && (envelope.entityType == "project"
+                                                    || (envelope.entityType == "task" && (envelope.entityId == dialog.entityId || Just envelope.entityId == dialog.taskParent)))
+                                                && not (dialog.saving /= Nothing && envelope.requestId == dialog.saving)
+                                        _ -> False
+                                move = current.move
+                            in
+                            if scopeMatchesSelectedWorkspace scope current && List.any supersedes frames then
+                                { current | move = { move | dialog = Nothing, resumeOrdinary = True } }
+                            else current)
     in
     applyActions scope actions
         (if scopeMatchesSelectedWorkspace scope updated then
@@ -2133,3 +2153,25 @@ invalidateCascadeRequests scope targets model =
             else
                 current)
         model targets
+
+
+{-| Reconcile loaded task descendants, old parent and both project scopes after
+placement acknowledgement, including no-project placements.
+-}
+refreshTaskPlacement : String -> Maybe String -> Maybe String -> Maybe String -> Model -> ( Model, Cmd Msg )
+refreshTaskPlacement taskId oldParent source destination model =
+    case model.selectedWorkspaceId of
+        Nothing -> ( model, Cmd.none )
+        Just workspaceId ->
+            let
+                parent id = Dict.get id model.tasks |> Maybe.andThen .parentId
+                    |> (\known -> if known /= Nothing then known else Dict.get id model.dataLoading.taskCardSummaries |> Maybe.andThen .parentId)
+                within visited id =
+                    id == taskId || (not (Set.member id visited) && (parent id |> Maybe.map (within (Set.insert id visited)) |> Maybe.withDefault False))
+                taskIds = Dict.keys model.tasks ++ Dict.keys model.dataLoading.taskCardSummaries |> Set.fromList |> Set.toList |> List.filter (within Set.empty)
+                projectTargets = List.filterMap identity [ source, destination ] |> Set.fromList |> Set.toList |> List.concatMap (\id -> loadedProjectCascadeTargets id model)
+                targets = List.map (Tuple.pair "task") (taskIds ++ (oldParent |> Maybe.map List.singleton |> Maybe.withDefault [])) ++ projectTargets |> Set.fromList |> Set.toList
+                ( navigation, navigationCmd ) = Feature.DataLoading.revalidateNavigationForFilters model
+                ( summaries, summaryCmd ) = requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) targets (invalidateCascadeRequests (ChangeStream.Workspace workspaceId) targets navigation)
+            in
+            ( summaries, Cmd.batch [ navigationCmd, summaryCmd, refreshProjectNextTaskCaches summaries ] )

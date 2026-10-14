@@ -3,6 +3,48 @@ import { installObservationNavigation } from './observation-navigation.js'
 import { installObservationViewport } from './observation-viewport.js'
 import { installObservationPreferences } from './observation-preferences.js'
 import { Elm } from './Main.elm'
+
+// Native modal semantics contain keyboard focus and make the background inert.
+// Elm owns lifetime and actions; this bridge only manages native DOM focus.
+let activeMoveDialog = null
+let moveOrigin = null
+let moveDialogToken = null
+const moveDialogObserver = new MutationObserver(() => {
+  const next = document.getElementById('move-dialog')
+  if (next === activeMoveDialog && next?.dataset.moveToken === moveDialogToken) return
+  if (activeMoveDialog) {
+    const origin = document.getElementById(moveOrigin)
+    const fallback = document.getElementById('main-content-scroll')
+    if (origin && !origin.disabled) origin.focus()
+    else if (fallback) {
+      fallback.setAttribute('tabindex', '-1')
+      fallback.focus()
+    }
+  }
+  activeMoveDialog = next
+  moveDialogToken = next?.dataset.moveToken
+  if (next) {
+    moveOrigin = next.dataset.moveOrigin
+    if (!next.open) next.showModal()
+    next.querySelector('#move-search')?.focus()
+    if (!next.dataset.moveFocusInstalled) {
+      next.dataset.moveFocusInstalled = 'true'
+      next.addEventListener('keydown', event => {
+        if (event.key !== 'Tab') return
+        const choices = [...next.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+          .filter(element => !element.disabled && element.tabIndex >= 0 && element.getClientRects().length > 0)
+        if (!choices.length) return
+        const first = choices[0], last = choices.at(-1), active = document.activeElement
+        if (!next.contains(active) || (event.shiftKey && active === first) || (!event.shiftKey && active === last)) {
+          event.preventDefault()
+          ;(event.shiftKey ? last : first).focus()
+        }
+      })
+    }
+  }
+})
+moveDialogObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-move-token', 'data-move-origin'] })
+
 import { createCanonicalFrameBatcher, createCanonicalStateHandler, createChangeStreamManager } from './change-stream.js'
 
 function createSessionId() {

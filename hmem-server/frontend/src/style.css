@@ -4429,3 +4429,27 @@ textarea.observation-edit-content {
 /* Native disclosures retain independent keyboard and pointer controls. */
 .card-disclosure > summary { cursor: pointer; padding: 6px 0; }
 .card-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+/* Move chooser keeps destination browsing separate from the main hierarchy. */
+.btn-move { font-size: 15px; }
+.move-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; box-sizing: border-box; margin: auto; border: 1px solid var(--border); border-radius: 10px; padding: 20px; background: var(--bg-surface); color: var(--text); }
+.move-dialog::backdrop { background: rgba(0, 0, 0, .5); }
+.move-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+.move-dialog #move-search { box-sizing: border-box; width: 100%; margin: 12px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text); font: inherit; }
+.move-dialog button:disabled { opacity: .5; cursor: default; }
+.move-row-pages button, .move-load-error button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-elevated); color: var(--text); cursor: pointer; }
+.move-status-filters, .move-row-pages { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 12px; }
+.move-status-filters label { display: flex; gap: 5px; align-items: center; text-transform: capitalize; }
+.move-tree { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; padding: 6px; }
+.move-project-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-height: 34px; }
+.move-project-choice { text-align: left; padding: 6px 8px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+.move-project-choice:hover, .move-project-choice.selected { background: var(--bg-elevated); border-color: var(--accent); }
+.move-project-choice:disabled { opacity: .55; cursor: default; }
+.move-project-status { margin-left: 10px; font-size: 11px; opacity: .7; }
+.move-choice-reason { font-size: 11px; opacity: .7; }
+.move-row-pages { justify-content: space-between; margin-top: 8px; font-size: 12px; }
+.move-location { font-size: 13px; overflow-wrap: anywhere; margin: 8px 0; }
+.move-effects { font-size: 12px; opacity: .8; }
+.move-load-error { color: var(--error); font-size: 13px; margin: 10px 0; }
+.move-load-error button { margin-left: 10px; }
+.move-loading { font-size: 12px; opacity: .7; }

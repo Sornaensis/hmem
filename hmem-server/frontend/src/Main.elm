@@ -5,6 +5,7 @@ import AppShell
 import Browser
 import Browser.Navigation as Nav
 import Feature.Cards as Cards
+import Feature.Move
 import Feature.DataLoading
 import Feature.Observation
 import Helpers exposing (parseFragment)
@@ -120,7 +121,7 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case UpdateRouter.update msg model of
         Ok result ->
-            Feature.DataLoading.syncPlanningCountsResult result |> Cards.refreshViewport (Tuple.first result)
+            Feature.DataLoading.syncPlanningCountsResult result |> Cards.refreshViewport (Tuple.first result) |> Feature.Move.reconcile
 
         Err mainOwnedMsg ->
             (case mainOwnedMsg of
@@ -132,7 +133,7 @@ update msg model =
 
                 UpdateRouter.HandleInAppShell ownedMsg ->
                     AppShell.handleOwned ownedMsg model
-            ) |> Feature.Observation.refreshViewport model |> Feature.DataLoading.syncPlanningCountsResult |> Cards.refreshViewport model
+            ) |> Feature.Observation.refreshViewport model |> Feature.DataLoading.syncPlanningCountsResult |> Cards.refreshViewport model |> Feature.Move.reconcile
 
 
 

@@ -41,7 +41,7 @@ test('Observation counts exhaust all backing pages while the DTO remains constan
   assert.equal(queryObservationCounts(fixture, { ...query, query: 'Observation 02000' }).match_count, 1, 'last backing page contributes')
   assert.equal(Object.keys(queryObservationCounts(fixture, query)).length, 3)
   assert.ok(Buffer.byteLength(JSON.stringify(queryObservationCounts(fixture, query))) < 128)
-  assert.equal(fixtureHash(fixture), '0c966ae9c5476317ba8f7f05ad0200a9c8526e16c430e6068a8a4daf9e35a077', 'count reads do not change frozen fixture rows')
+  assert.equal(fixtureHash(fixture), 'b98d53a1a1ca28641dc90cbb598f3026949edf702f0ae4696614520b5140dd63', 'count reads do not change frozen fixture rows')
 })
 
 test('Observation count composes search, same-subject filters and creation/current/history provenance', () => {

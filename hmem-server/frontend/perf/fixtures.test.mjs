@@ -34,11 +34,11 @@ for (const size of ['small', 'large']) {
     assert.deepEqual(validateFixture(first), [])
     assert.equal(stableFixtureJson(first), stableFixtureJson(second))
     assert.equal(fixtureHash(first), fixtureHash(second))
-    // Current schema-2 generator at c9df488b3e25a789fc14a8fcb012d8efea7d6ada,
+    // Current due-free schema-2 generator; legacy parity is proved in due-removal.test.mjs,
     // including latest_sequence/current_provenance; historical contracts stay frozen below.
     assert.equal(fixtureHash(first), {
-      small: '2f269eb2256dc4dde701cf769e2d83c73a99c29de26b1da8ae24a343cd39e3cb',
-      large: '0c966ae9c5476317ba8f7f05ad0200a9c8526e16c430e6068a8a4daf9e35a077'
+      small: '0c425c77e5069b8d4cf26dbdebcf94037a22ee977e61d63ab3cceb1a7f090bc4',
+      large: 'b98d53a1a1ca28641dc90cbb598f3026949edf702f0ae4696614520b5140dd63'
     }[size])
   })
 }
@@ -414,7 +414,7 @@ test('overview fixtures match decoder dependency schema and recursive readiness 
     in_progress_subtask_count: 0, can_start_subtasks: false
   })
   assert.equal(taskReadinessRollup(fixture, 't2').completion_ready, true)
-  assert.deepEqual(taskOverviewResponse(fixture, 't1').dependencies, [{ id: 't3', name: 'Blocked dependency' }])
+  assert.deepEqual(taskOverviewResponse(fixture, 't1').dependencies, [{ id: 't3', name: 'Blocked dependency', status: 'blocked' }])
   assert.deepEqual(projectReadinessRollup(fixture, 'p0'), {
     open_project_count: 1, closed_project_count: 1, open_task_count: 2, in_progress_task_count: 0, done_task_count: 2,
     cancelled_task_count: 0, blocked_task_count: 1, dependency_blocked_task_count: 1,

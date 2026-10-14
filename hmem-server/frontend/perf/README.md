@@ -50,6 +50,7 @@ measurement. These recipes select distinct task-owned outputs:
 | Observation rendering | `ed3aca53afe346f928dc00f2e2a7b0a8e07aaecb` | `cbb38fd2-fc89-449c-a308-168374f23f82` |
 | Expanded hierarchy | `d9ff753763f086fa4faef078b451f2e48ca1a7a4` | `555ebf6e-8442-43f4-a75d-c33fcffc76f4` |
 | Planning counts | `f546cafd26adae37772d2383262e87596ea7151b` | `b401c358-1a68-404e-bd18-86f40bb3b771` |
+| Due removal | `33abd80dd13dbc6c850397eeb13f79047d0f7c91` | `1e420484-81b9-4251-b485-82abca34c800` |
 
 For example:
 
@@ -115,6 +116,47 @@ failure diagnostics expire on resolution or task closure. No planning-count
 qualification writes historical evidence in this directory.
 
 ## Measurement boundaries and evidence
+
+### Due-removal qualification
+
+After the matched source, assets and documentation freeze, the final-verification
+owner runs:
+
+```powershell
+$env:HMEM_EVIDENCE_BASE_COMMIT = '33abd80dd13dbc6c850397eeb13f79047d0f7c91'
+npm run perf:self-check
+npm run perf:record-after
+npm run perf:check
+```
+
+The `due-removal.v1` profile belongs to final task
+`1e420484-81b9-4251-b485-82abca34c800` in project
+`9f1a1a40-afc5-4825-851c-b71aaf498b58`. Its immutable review base is separate
+from the current implementation commit recorded in source provenance and input
+fingerprints. Baseline bytes must equal those at that review base. It uses the
+ordinary navigation fixtures and existing measurement phases, runtime comparison
+rules and all unchanged budgets; it does not enable Observation scaling.
+Current generator goldens omit due payloads. A legacy projection in
+`due-removal.test.mjs` reproduces the original exact hashes, proving that all
+other fixture bytes remain unchanged. Historical profiles and evidence stay intact.
+
+The existing record-after argument spellings map to the five isolated files
+`final-working-tree.{after,trace-manifest,validation-record,evidence-manifest}.due-removal.v1.json`
+and `final-working-tree.complete.due-removal.v1.diff` in the verified OS temporary
+directory `hmem-due-removal-1e420484-81b9-4251-b485-82abca34c800`. Check reads
+those same files. Baseline recording, arbitrary redirects, foreign owner/base/
+revision and unadmitted or redirected roots fail without historical-output writes.
+Each retained file is bounded to 64 MiB. The parent final-verification owner
+retains them through project closure plus 30 days, then disposes of them;
+unresolved targeted diagnostics expire at resolution or task closure.
+
+The only transient archive is `temporary/large-due-removal-trace.zip`, bounded to
+64 MiB and captured during the complete final large sample with snapshots on,
+screenshots/source capture off. Size and double-hash verification, owned archive
+retirement, browser/Chromium/server retirement, and record/check evaluations all
+precede qualification success. The manifest truthfully marks the archive
+unavailable after retirement. Local routing/self-check tests do not constitute
+fresh measurement or qualification; final verification owns record and check.
 
 The [harness](harness.mjs), [contracts](contracts.mjs),
 [fixtures](fixtures.mjs), and [Observation overlay](observation-scaling.mjs)

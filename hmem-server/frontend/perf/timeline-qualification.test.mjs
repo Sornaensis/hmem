@@ -72,7 +72,7 @@ test('current Timeline contract source anchors 30-day weekly SVG separately from
     assert.equal(queryTimelineBuckets(fixture, TIMELINE_DEFAULT_UI_QUERY).buckets.length, 13)
     assert.equal(expectedFor(fixture).buckets.buckets.length, 5)
     assert.equal(expectedFor(fixture).chart.points.length, 25)
-    assert.equal(fixtureHash(fixture), scale === 'small' ? '2f269eb2256dc4dde701cf769e2d83c73a99c29de26b1da8ae24a343cd39e3cb' : '0c966ae9c5476317ba8f7f05ad0200a9c8526e16c430e6068a8a4daf9e35a077')
+    assert.equal(fixtureHash(fixture), scale === 'small' ? '0c425c77e5069b8d4cf26dbdebcf94037a22ee977e61d63ab3cceb1a7f090bc4' : 'b98d53a1a1ca28641dc90cbb598f3026949edf702f0ae4696614520b5140dd63')
   }
   assert.equal(typeof measureRun, 'function'); assert.equal(typeof staticServer, 'function')
 })

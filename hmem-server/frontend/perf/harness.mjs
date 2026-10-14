@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
 import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
-import { evidenceProfile, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
+import { evidenceProfile, evidenceOwnerFields, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
 import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, LIVE_OBSERVATION_REFRESH_CONTRACT, classifyLiveObservationHydration, aggregateLiveHydration, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
@@ -109,18 +109,19 @@ function sourceProvenance(capture = createEvidenceCapture({ cwd: path.resolve(fr
   return { reviewBaseCommit: baseCommit, headCommit, orderedCommits, workingTreeQualification: 'exact source and production-asset SHA-256 list; complete diff from review base retained separately' }
 }
 
-export function inputQualification({ plan = evidencePlan, io = fs } = {}) {
+export function inputQualification({ plan = evidencePlan, io = fs, capture = createEvidenceCapture({ cwd: path.resolve(frontendRoot, '..', '..') }) } = {}) {
   const collect = directory => io.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const file = path.join(directory, entry.name)
     return entry.isDirectory() ? collect(file) : [file]
   }).sort()
   const source = [...collect(path.join(frontendRoot, 'src')),
     ...io.readdirSync(here).filter(name => name.endsWith('.mjs')).sort().map(name => path.join(here, name)),
-    ...(plan.rendering ? [path.join(frontendRoot, 'tests-js/observation-viewport-fixture.mjs')] : []),
+    ...(plan.rendering || plan.dueRemoval ? [path.join(frontendRoot, 'tests-js/observation-viewport-fixture.mjs')] : []),
     ...['package.json', 'package-lock.json', 'README.md'].map(name => path.join(frontendRoot, name))]
     .map(file => ({ path: normalizedRepositoryPath(file), sha256: createHash('sha256').update(io.readFileSync(file)).digest('hex') }))
   const productionAssets = collect(staticRoot).map(file => ({ path: normalizedRepositoryPath(file), sha256: createHash('sha256').update(io.readFileSync(file)).digest('hex') }))
-  return { evidenceBaseCommit: plan.baseCommit, source, productionAssets }
+  return { evidenceBaseCommit: plan.baseCommit, source, productionAssets,
+    ...(plan.dueRemoval ? { implementationCommit: capture.read(['rev-parse', 'HEAD'], { label: 'qualified implementation revision' }).toString('utf8').trim() } : {}) }
 }
 
 export function assertQualifiedInputs(expected, actual, message) {
@@ -171,6 +172,7 @@ export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write =
   const manifest = {
     schemaVersion: 1,
     taskId: evidenceTask?.taskId || null,
+    ...evidenceOwnerFields(plan),
     parentTaskId: evidenceTask?.parentTaskId || null,
     measurementRevision: plan.revision,
     measurementPhase: HARNESS_CONFIGURATION.scenarioIsolation,
@@ -190,6 +192,14 @@ export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write =
     changedPaths,
     retention: plan.retention,
     completeDiff: { path: evidenceArtifactPath(evidenceDiffPath), sha256: sha256File(evidenceDiffPath), sizeBytes: io.statSync(evidenceDiffPath).size }
+  }
+  if (plan.dueRemoval) {
+    manifest.traceArchive = { path: plan.trace, available: io.existsSync(plan.trace) }
+    if (manifest.qualificationPassed && manifest.traceArchive.available) throw new Error('Due-removal qualification cannot retain the temporary trace archive')
+    const validation = JSON.parse(io.readFileSync(validationRecordPath, 'utf8'))
+    assertEvidenceIdentity(plan, validation)
+    if (validation.inputQualification?.implementationCommit !== manifest.sourceProvenance.headCommit) throw new Error('Due-removal implementation revision changed before evidence finalization')
+    assertEvidenceIdentity(plan, manifest)
   }
   if (!manifest.equality.byteForByteEqual) throw new Error('immutable baseline differs from evidence base')
   write(evidenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
@@ -1731,11 +1741,39 @@ function evaluate(result, comparableEnvironment = true) {
   return { comparableEnvironment, passed: metrics.every(metric => metric.pass), metrics }
 }
 
+export function verifyTaskTrace({ plan = evidencePlan, io = fs, operations = evidenceOperations, captureOptions = traceCaptureOptions, onAdmission = () => {} } = {}) {
+  operations.verify()
+  if (!io.existsSync(plan.trace)) throw new Error(`record trace was not created: ${plan.trace}`)
+  const sizeBytes = io.statSync(plan.trace).size
+  const admission = traceAdmissionReceipt(sizeBytes, 64 * 1024 * 1024, captureOptions)
+  onAdmission(admission)
+  if (!admission.withinLimit) throw Object.assign(new Error('Task temporary trace exceeds its 64 MiB bound: ' + sizeBytes + ' bytes'), { traceAdmission: admission })
+  const digest = () => createHash('sha256').update(io.readFileSync(plan.trace)).digest('hex')
+  const firstHash = digest(), secondHash = digest()
+  if (firstHash !== secondHash) throw new Error('record trace hash was not reproducible during verification')
+  return { sha256: firstHash, sizeBytes }
+}
+
+export function retireTaskTrace(plan, operations, io = fs) {
+  operations.verify()
+  try { operations.remove(plan.trace) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  const temporary = path.dirname(plan.trace)
+  if (!io.existsSync(temporary)) return
+  if (io.readdirSync(temporary).length !== 0) throw new Error('Unexpected temporary trace remains in task scratch')
+  operations.verify()
+  io.rmdirSync(temporary)
+}
+
 function persistQualification(result, prerequisite, qualifiedInputs, command, retirement) {
   if (!retirement.passed) throw new Error('Cannot finalize qualification before every owned resource retires')
   assertQualifiedInputs(qualifiedInputs, inputQualification(), 'qualification inputs changed before finalization')
+  if (evidencePlan.dueRemoval) {
+    if (fs.existsSync(tracePath)) throw new Error('Due-removal qualification cannot retain the temporary trace archive')
+    result.trace = { ...result.trace, archiveAvailable: false }
+    assertEvidenceIdentity(evidencePlan, result)
+  }
   if (mode === 'record') {
-    const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, taskId: evidenceTask?.taskId || null, evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, contracts: result.contracts, trace: result.trace, retirement }
+    const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, taskId: evidenceTask?.taskId || null, ...evidenceOwnerFields(evidencePlan), evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, contracts: result.contracts, trace: result.trace, retirement }
     writeEvidence(recordOutputPath, JSON.stringify(result, null, 2) + '\n')
     writeEvidence(recordTraceManifestPath, JSON.stringify(traceManifest, null, 2) + '\n')
     if (recordOutputPath !== baselinePath && !evidencePlan.qualifiedRetirement) finalWorkingTreeEvidence()
@@ -1747,6 +1785,7 @@ function persistQualification(result, prerequisite, qualifiedInputs, command, re
     const commands = previous ? [...previous.commands, command] : [prerequisite, command]
     const validation = {
       schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
+      ...evidenceOwnerFields(evidencePlan),
       inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, commands, retirement,
       passed: mode === 'check' && checkQualification({ recordEvaluation: previous?.recordEvaluation, checkEvaluation: result.evaluation, commands, retirement }).passed,
       recordEvaluation: previous?.recordEvaluation || result.evaluation,
@@ -1767,6 +1806,7 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
     verify: evidenceOperations.verify,
     manifestPath: evidenceManifestPath, validationPath: validationRecordPath,
     failureValidation: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId,
+      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.dueRemoval ? { sourceProvenance: attemptState.sourceProvenance } : {}),
       evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
       commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
@@ -1774,6 +1814,7 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
       ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
     failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
+      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.dueRemoval ? { sourceProvenance: attemptState.sourceProvenance } : {}),
       qualificationPassed: false, failure: error.message, retirement,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
@@ -1807,6 +1848,7 @@ async function main() {
   const fixtures = { small: generate('small'), large: generate('large') }
   const qualifiedInputs = inputQualification()
   const qualifiedProvenance = sourceProvenance()
+  attemptState.sourceProvenance = qualifiedProvenance
   const contracts = {
     budgetsHash: hashJson(budgets),
     configurationHash: hashJson(HARNESS_CONFIGURATION),
@@ -1904,13 +1946,14 @@ async function main() {
         console.log('TRACE_ARCHIVE_ADMISSION=' + JSON.stringify(admission))
         if (!admission.withinLimit) throw Object.assign(new Error('Task temporary trace exceeds its 64 MiB bound: ' + traceSizeBytes + ' bytes'), { traceAdmission: admission })
       }
-      const firstHash = sha256File(tracePath)
-      const secondHash = sha256File(tracePath)
-      if (firstHash !== secondHash) throw new Error('record trace hash was not reproducible during verification')
+      const verified = evidencePlan.dueRemoval
+        ? verifyTaskTrace({ onAdmission: () => {} })
+        : { sha256: sha256File(tracePath) }
+      if (!evidencePlan.dueRemoval && verified.sha256 !== sha256File(tracePath)) throw new Error('record trace hash was not reproducible during verification')
       attemptState.traceVerified = true
       trace = {
         logicalName: 'large measured sample 5/5 Playwright trace',
-        sha256: firstHash,
+        sha256: verified.sha256,
         sizeBytes: traceSizeBytes,
         ...(evidencePlan.isolatedEvidence ? { captureOptions: traceCaptureOptions, temporaryLimitBytes: 64 * 1024 * 1024 } : {}),
         capturedRun: 'large sample 5/5 after two warmups',
@@ -1929,6 +1972,7 @@ async function main() {
       settledNavigationFeedbackContract: SETTLED_NAVIGATION_FEEDBACK_CONTRACT,
       liveObservationRefreshContract: LIVE_OBSERVATION_REFRESH_CONTRACT,
       taskId: evidenceTask?.taskId || null, parentTaskId: evidenceTask?.parentTaskId || null, evidenceBaseCommit,
+      ...evidenceOwnerFields(evidencePlan),
       inputQualification: qualifiedInputs, sourceProvenance: qualifiedProvenance, measurementRevision: evidenceRevision,
       fixtures: {
         schemaVersion: fixtures.large.schemaVersion, seed: fixtures.large.seed, directFocusContract: DIRECT_FOCUS_CONTRACT,
@@ -1968,6 +2012,7 @@ async function main() {
       } },
       { resource: 'task trace', close: async () => {
         if (!evidencePlan.qualifiedRetirement) return
+        if (evidencePlan.dueRemoval) { retireTaskTrace(evidencePlan, evidenceOperations); return }
         if (evidencePlan.isolatedEvidence) evidenceOperations.verify()
         try { evidenceOperations.remove(tracePath) } catch (error) { if (error.code !== 'ENOENT') throw error }
         if (evidencePlan.isolatedEvidence) {

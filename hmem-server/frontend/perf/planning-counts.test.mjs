@@ -48,9 +48,9 @@ test('planning evidence is isolated without enabling Observation measurements or
   assert.equal(BASE_COMMIT, 'ca04f51c3494c83c433d12bd7791f89be876daea')
   assert.equal(HARNESS_CONFIGURATION.warmups, 2)
   assert.equal(HARNESS_CONFIGURATION.samples, 5)
-  // Exact pre-adapter generator bytes at c9df488b3e25a789fc14a8fcb012d8efea7d6ada.
-  assert.equal(fixtureHash(generateFixture('small')), '2f269eb2256dc4dde701cf769e2d83c73a99c29de26b1da8ae24a343cd39e3cb')
-  assert.equal(fixtureHash(generateFixture('large')), '0c966ae9c5476317ba8f7f05ad0200a9c8526e16c430e6068a8a4daf9e35a077')
+  // Current due-free generator; legacy payload parity is proved in due-removal.test.mjs.
+  assert.equal(fixtureHash(generateFixture('small')), '0c425c77e5069b8d4cf26dbdebcf94037a22ee977e61d63ab3cceb1a7f090bc4')
+  assert.equal(fixtureHash(generateFixture('large')), 'b98d53a1a1ca28641dc90cbb598f3026949edf702f0ae4696614520b5140dd63')
 })
 
 test('planning output authorization rejects baseline recording, redirects and foreign identity', () => {

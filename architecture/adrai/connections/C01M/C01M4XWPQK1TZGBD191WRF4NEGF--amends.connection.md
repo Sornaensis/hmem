@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4XWPQK1TZGBD191WRF4NEGF"
+relation = "amends"
+from_record = "R01M4XWPQK1P7CY5E5Y9V0AZMX9"
+subject_adr = "A01M3KDJARNRK4M33PDRS42AGV4"
+to_records = ["R01M3KP2DJPHCD67F6TBSZZNQSP"]
++++
+
+Remove modeled due scheduling fields from current planning results while preserving compact summaries, complete descriptions and dependency effects.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6IjMzYWJkODBkZDEzZGJjNmM4NTAzOTdlZWIxM2Y3OTA0N2QwZjdjOTEiLCJpIjoic2hhMjU2OlhsVjlHM1l5UFVHMktVNVZ0X0FkNkZxRXN6X1ZhRmZZOFBmR0xKUDNvcE0iLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRYV1BRSzFUWkdCRDE5MVdSRjRORUdGIiwib3AiOiJPMDFNNFhXUFFLMVA3Q1k1RTVZOVYwQVpNWDkiLCJwIjpbIlIwMU0zS1AyREpQSENENjdGNlRCU1paTlFTUCJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpLRlg0bVF2b3JQMVFRUjZVLTFsNVlaakVGNnF2SGRpTUgzbmNEVW9DYjRnIiwidCI6MTc5MjAwNDU0NjE0NSwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

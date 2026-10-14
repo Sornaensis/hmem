@@ -10,7 +10,12 @@ import Test exposing (Test, describe, test)
 suite : Test
 suite =
     describe "bounded navigation API transport"
-        [ test "encodes exact branch, focus, dependency page, and summary batch requests" <|
+        [ test "due-free task decoding retains completion and hierarchy fields" <|
+            \_ ->
+                Decode.decodeString Api.taskDecoder """{"id":"subtask","workspace_id":"workspace","project_id":"project","parent_id":"parent","title":"Subtask","description":null,"status":"done","priority":7,"completed_at":"2026-10-14T12:00:00Z","dependency_count":2,"created_at":"created","updated_at":"updated"}"""
+                    |> Result.map (\task -> ( task.parentId, task.completedAt, task.dependencyCount ))
+                    |> Expect.equal (Ok ( Just "parent", Just "2026-10-14T12:00:00Z", 2 ))
+        , test "encodes exact branch, focus, dependency page, and summary batch requests" <|
             \_ ->
                 Expect.equal
                     { branch = "https://api.example/api/v1/workspaces/workspace-1/navigation?parent_kind=project&parent_id=parent-1&project_limit=50&project_offset=50&task_limit=50&task_offset=0&query=needle"

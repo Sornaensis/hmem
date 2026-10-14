@@ -61,7 +61,6 @@ function makeTasks(workspaceId, projects, scale) {
     status: ['todo', 'in_progress', 'blocked', 'done', 'cancelled'][index % 5],
     priority: (index % 10) + 1,
     metadata: {},
-    due_at: index % 4 === 0 ? timestamp(index + 5000) : null,
     completed_at: index % 5 === 3 ? timestamp(index + 2500) : null,
     dependency_count: 0,
     created_at: timestamp(index),
@@ -80,7 +79,6 @@ function makeTasks(workspaceId, projects, scale) {
       status: ['todo', 'in_progress', 'blocked', 'done', 'cancelled'][childIndex % 5],
       priority: (childIndex % 10) + 1,
       metadata: {},
-      due_at: childIndex % 4 === 0 ? timestamp(index + 5000) : null,
       completed_at: childIndex % 5 === 3 ? timestamp(index + 2500) : null,
       dependency_count: 0,
       created_at: timestamp(index),
@@ -719,7 +717,7 @@ function taskCardSummary(fixture, task) {
   const directSubtasks = fixture.tasks.filter(candidate => candidate.parent_id === task.id).length
   return {
     id: task.id, workspace_id: task.workspace_id, project_id: task.project_id, parent_id: task.parent_id, title: task.title,
-    status: task.status, priority: task.priority, due_at: task.due_at, completed_at: task.completed_at,
+    status: task.status, priority: task.priority, completed_at: task.completed_at,
     dependency_count: task.dependency_count, created_at: task.created_at, updated_at: task.updated_at,
     direct_subtask_count: directSubtasks, has_children: directSubtasks > 0, readiness_rollup: taskReadinessRollup(fixture, task.id)
   }

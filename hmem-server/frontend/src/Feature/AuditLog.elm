@@ -367,10 +367,10 @@ update msg model =
                     , Cmd.batch [ toastCmd, refreshHistoryCmd, refreshAuditCmd ]
                     )
 
-                Err _ ->
+                Err err ->
                     let
                         ( toastModel, toastCmd ) =
-                            addToast Error "Failed to revert change" (updateAuditLogModel (\al -> { al | revertConfirmation = Nothing, revertInFlight = False }) model)
+                            addToast Error (Api.apiErrorToUserMessage "Failed to revert change" err) (updateAuditLogModel (\al -> { al | revertConfirmation = Nothing, revertInFlight = False }) model)
                     in
                     ( toastModel, toastCmd )
 
@@ -1205,7 +1205,7 @@ auditFieldLabel field =
             "Depends on task ID"
 
         "due_at" ->
-            "Due at"
+            "Due at (obsolete)"
 
         "entity_id" ->
             "Entity ID"
@@ -1277,7 +1277,7 @@ auditFieldFromLabel label =
         "Depends on task ID" ->
             "depends_on_id"
 
-        "Due at" ->
+        "Due at (obsolete)" ->
             "due_at"
 
         "Entity ID" ->
@@ -1757,7 +1757,7 @@ viewAuditValue labelText value =
                     else text "Unsupported subject kind") subjects)
             Err _ -> text (truncateAuditValue 160 value)
     else if isTypedAuditField labelText && value /= "(unset)" && value /= "null" && value /= "(empty)" then Helpers.copyableValue "" labelText value value
-    else if List.member (String.toLower labelText) [ "timestamp", "created at", "updated at", "changed at", "recorded at", "completed at", "due at", "deleted at" ] && String.length value >= 16 then text (formatDate value)
+    else if List.member (String.toLower labelText) [ "timestamp", "created at", "updated at", "changed at", "recorded at", "completed at", "due at", "due at (obsolete)", "deleted at" ] && String.length value >= 16 then text (formatDate value)
     else text value
 
 

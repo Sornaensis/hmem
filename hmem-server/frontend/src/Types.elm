@@ -1430,7 +1430,7 @@ type Msg
     | ConfirmRevert Api.AuditLogEntry
     | PerformRevert
     | CancelRevert
-    | GotRevertResult String String (Result Http.Error Api.RevertResult)
+    | GotRevertResult String String (Result Api.ApiError Api.RevertResult)
     | NoOp
 
 

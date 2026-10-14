@@ -47,6 +47,68 @@ async function workspaceFixture() {
   return { ...h, first, second, requests, setSuperadmin(value) { superadmin = value }, setCatalogue(values) { catalogue = values }, renameGroup(name) { group.name = name }, holdSession() { let release; holdSession = new Promise(resolve => { release = resolve }); return release }, holdCatalogue() { let release; holdCatalogue = new Promise(resolve => { release = resolve }); return release }, failDeletion() { deleteStatus = 500 }, allowDeletion() { deleteStatus = 200 }, holdDeletion() { let release; holdDelete = new Promise(resolve => { release = resolve }); return release } }
 }
 
+test('due-free project task and subtask cards retain completion and recover through canonical resync', { timeout: 60000 }, async () => {
+  const fixture = smallFixture()
+  const parent = { ...fixture.tasks[0], id: 'due-free-parent', status: 'blocked', title: 'Parent' }
+  const child = { ...parent, id: 'due-free-child', parent_id: parent.id, title: 'Subtask', status: 'done', completed_at: '2026-10-14T12:00:00Z' }
+  fixture.projects = [fixture.projects[0]]
+  fixture.tasks = [parent, child]
+  for (const task of fixture.tasks) assert.equal(Object.hasOwn(task, 'due_at'), false)
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    const keys = await h.logicalKeys()
+    for (const key of ['project:root-project', 'task:due-free-parent', 'task:due-free-child']) assert.ok(keys.has(key), key)
+    const row = await h.scrollTo('task:due-free-child')
+    await row.locator('.btn-extras-toggle').click(); await h.idle()
+    assert.match(await row.innerText(), /Completed:/)
+    assert.equal(await h.page.locator('.card-meta-due').count(), 0)
+    assert.doesNotMatch(await h.page.locator('#hierarchy-viewport').innerText(), /Due:/)
+    const previousResyncs = h.requests.filter(request => request.path === '/api/v1/change-stream/resync').length
+    await h.page.evaluate(() => window.pushHierarchyFrames([{ schema_version: 1, type: 'resync_required' }]))
+    await h.page.waitForFunction(() => document.querySelector('#entity-root-project'))
+    await h.idle()
+    assert.ok(h.requests.filter(request => request.path === '/api/v1/change-stream/resync').length > previousResyncs)
+    const refreshed = await h.logicalKeys()
+    assert.ok(refreshed.has('task:due-free-parent') && refreshed.has('task:due-free-child'))
+    assert.equal(await h.page.locator('.card-meta-due').count(), 0)
+    assert.ok(h.caps().maxBranches <= 4 && h.caps().maxDetails <= 6)
+  } finally { await h.close() }
+})
+
+test('obsolete due audit values remain inspectable and structured replay refusal reaches the user', { timeout: 60000 }, async () => {
+  const h = await workspaceFixture()
+  h.page.setDefaultTimeout(5000)
+  const message = 'This historical update only changed due scheduling, which is no longer supported.'
+  const entry = { id: 'obsolete-due', workspace_id: h.fixture.workspace.id, entity_type: 'task', entity_id: 'working-task', action: 'update', old_values: { title: 'Historical task', due_at: null }, new_values: { title: 'Historical task', due_at: '2026-10-08T12:34:00Z' }, changed_at: '2026-10-08T12:34:00Z' }
+  let reverts = 0
+  await h.page.route('**/api/v1/audit**', async route => {
+    if (route.request().method() === 'POST') {
+      reverts++
+      return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'audit_due_operation_obsolete', message }) })
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [entry], has_more: false }) })
+  })
+  try {
+    await h.start(); await h.idle()
+    await h.page.locator('a[href="/audit"]').click()
+    await h.page.locator('.audit-entry').waitFor()
+    await h.page.locator('.audit-expand-icon').click()
+    const detail = h.page.locator('.audit-entry-detail')
+    await detail.waitFor()
+    assert.match(await detail.innerText(), /Due at \(obsolete\)/)
+    assert.match(await detail.innerText(), /2026-10-08 12:34/)
+    await h.page.locator('.audit-entry .btn-revert').click()
+    await h.page.locator('.revert-confirm-modal').getByRole('button', { name: 'Revert', exact: true }).click()
+    await h.page.getByText(message, { exact: true }).waitFor()
+    await h.page.locator('.revert-confirm-modal').waitFor({ state: 'detached' })
+    assert.equal(reverts, 1)
+    assert.equal(entry.new_values.due_at, '2026-10-08T12:34:00Z')
+    assert.equal(h.fixture.tasks[0].status, 'in_progress')
+    assert.equal(await detail.count(), 1)
+  } finally { await h.close() }
+})
+
 test('compact UUID controls retain keyboard copying and activity accent is independent of task filters', { timeout: 60000 }, async () => {
   const h = await openHierarchy(smallFixture())
   try {

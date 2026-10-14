@@ -2437,13 +2437,7 @@ viewTaskCardBody descendants projection showProject model task =
                 , Helpers.copyableValue "card-meta card-id card-id-copy" "task ID" task.id task.id
                 ]
             , div [ class "card-meta-row" ]
-                [ case task.dueAt of
-                    Just due ->
-                        span [ class "card-meta card-meta-due" ] [ text ("Due: " ++ formatDate due) ]
-
-                    Nothing ->
-                        text ""
-                , case task.completedAt of
+                [ case task.completedAt of
                     Just completed ->
                         span [ class "card-meta" ] [ text ("Completed: " ++ formatDate completed) ]
 

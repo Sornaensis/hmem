@@ -270,7 +270,6 @@ type alias Task =
     , description : Maybe String
     , status : TaskStatus
     , priority : Int
-    , dueAt : Maybe String
     , completedAt : Maybe String
     , dependencyCount : Int
     , memoryLinkCount : Int
@@ -303,7 +302,6 @@ type alias TaskCardSummary =
     , title : String
     , status : TaskStatus
     , priority : Int
-    , dueAt : Maybe String
     , completedAt : Maybe String
     , dependencyCount : Int
     , createdAt : String
@@ -342,7 +340,6 @@ taskFromCardSummary summary =
     , description = Nothing
     , status = summary.status
     , priority = summary.priority
-    , dueAt = summary.dueAt
     , completedAt = summary.completedAt
     , dependencyCount = summary.dependencyCount
     , memoryLinkCount = 0
@@ -1451,7 +1448,6 @@ taskDecoder =
         |> optional "description" (D.nullable D.string) Nothing
         |> required "status" taskStatusDecoder
         |> required "priority" D.int
-        |> optional "due_at" (D.nullable D.string) Nothing
         |> optional "completed_at" (D.nullable D.string) Nothing
         |> optional "dependency_count" D.int 0
         |> optional "memory_link_count" D.int 0
@@ -1562,7 +1558,6 @@ taskCardSummaryDecoder =
         |> required "title" D.string
         |> required "status" taskStatusDecoder
         |> required "priority" D.int
-        |> optional "due_at" (D.nullable D.string) Nothing
         |> optional "completed_at" (D.nullable D.string) Nothing
         |> required "dependency_count" D.int
         |> required "created_at" D.string
@@ -4015,14 +4010,14 @@ fetchEntityHistory apiUrl entityType entityId mLimit toMsg =
         }
 
 
-revertAuditEntry : String -> String -> String -> (Result Http.Error RevertResult -> msg) -> Cmd msg
+revertAuditEntry : String -> String -> String -> (Result ApiError RevertResult -> msg) -> Cmd msg
 revertAuditEntry apiUrl auditId requestId toMsg =
     Http.request
         { method = "POST"
         , headers = [ Http.header "X-Request-ID" requestId ]
         , url = apiUrl ++ "/api/v1/audit/" ++ auditId ++ "/revert"
         , body = Http.emptyBody
-        , expect = Http.expectJson toMsg revertResultDecoder
+        , expect = expectJsonWithApiError revertResultDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

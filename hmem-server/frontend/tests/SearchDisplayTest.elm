@@ -130,7 +130,6 @@ task id title =
     , description = Just "Task description"
     , status = Api.InProgress
     , priority = 5
-    , dueAt = Nothing
     , completedAt = Nothing
     , dependencyCount = 0
     , createdAt = "2026-01-01T00:00:00Z"

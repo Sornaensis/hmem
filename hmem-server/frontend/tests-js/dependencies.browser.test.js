@@ -74,7 +74,6 @@ async function startFixtureServer(requests) {
           title: 'Current task',
           status: 'todo',
           priority: 1,
-          due_at: null,
           completed_at: null,
           dependency_count: dependencyPresent ? 1 : 0,
           created_at: '2026-01-01T00:00:00Z',

@@ -32,7 +32,22 @@ import Url
 suite : Test
 suite =
     describe "lifecycle blocker frontend handling"
-        [ test "pause availability uses canonical deep running work even with no hydrated tasks" <|
+        [ test "obsolete due-only replay shows structured guidance and leaves planning state untouched" <|
+            \_ ->
+                let
+                    audit = lifecycleModel.auditLog
+                    pending = { lifecycleModel | auditLog = { audit | revertInFlight = True } }
+                    message = "This historical update only changed due scheduling, which is no longer supported."
+                    error = Api.decodeApiErrorBody 409 """{"error":"audit_due_operation_obsolete","message":"This historical update only changed due scheduling, which is no longer supported."}"""
+                    ( updated, _ ) = Feature.AuditLog.update (GotRevertResult "task" "task-a" (Err error)) pending
+                in
+                Expect.all
+                    [ \_ -> List.map .message updated.toast.toasts |> Expect.equal [ message ]
+                    , \_ -> updated.auditLog.revertInFlight |> Expect.equal False
+                    , \_ -> updated.tasks |> Expect.equal pending.tasks
+                    , \_ -> updated.projects |> Expect.equal pending.projects
+                    ] ()
+        , test "pause availability uses canonical deep running work even with no hydrated tasks" <|
             \_ ->
                 let
                     deps = lifecycleModel.dependencies
@@ -958,7 +973,7 @@ suite =
             \_ ->
                 let
                     body =
-                        """{"action":"add","task_id":"dependent","depends_on_id":"dependency","affected_tasks":[{"task":{"id":"dependent","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependent","description":null,"status":"blocked","priority":5,"due_at":null,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:01Z"},"previous_status":"todo","current_status":"blocked","previous_auto_blocked":false,"auto_blocked":true,"previous_open_dependency_count":0,"open_dependency_count":1,"reason":"blocked_by_open_dependencies"}]}"""
+                        """{"action":"add","task_id":"dependent","depends_on_id":"dependency","affected_tasks":[{"task":{"id":"dependent","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependent","description":null,"status":"blocked","priority":5,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:01Z"},"previous_status":"todo","current_status":"blocked","previous_auto_blocked":false,"auto_blocked":true,"previous_open_dependency_count":0,"open_dependency_count":1,"reason":"blocked_by_open_dependencies"}]}"""
                 in
                 case Decode.decodeString Api.dependencyMutationResultDecoder body of
                     Ok result ->
@@ -984,7 +999,7 @@ suite =
             \_ ->
                 let
                     body =
-                        """{"id":"dependency","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependency","description":null,"status":"done","priority":5,"due_at":null,"completed_at":"2026-01-01T00:00:02Z","dependency_count":0,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:02Z","dependency_effects":[{"task":{"id":"dependent","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependent","description":null,"status":"todo","priority":5,"due_at":null,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:02Z"},"previous_status":"blocked","current_status":"todo","previous_auto_blocked":true,"auto_blocked":false,"previous_open_dependency_count":1,"open_dependency_count":0,"reason":"unblocked_dependencies_resolved"}]}"""
+                        """{"id":"dependency","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependency","description":null,"status":"done","priority":5,"completed_at":"2026-01-01T00:00:02Z","dependency_count":0,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:02Z","dependency_effects":[{"task":{"id":"dependent","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependent","description":null,"status":"todo","priority":5,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:02Z"},"previous_status":"blocked","current_status":"todo","previous_auto_blocked":true,"auto_blocked":false,"previous_open_dependency_count":1,"open_dependency_count":0,"reason":"unblocked_dependencies_resolved"}]}"""
                 in
                 case ( Decode.decodeString Api.taskDecoder body, Decode.decodeString Api.taskMutationResultDecoder body ) of
                     ( Ok plainTask, Ok mutationResult ) ->
@@ -1005,7 +1020,7 @@ suite =
             \_ ->
                 let
                     taskOverviewBody =
-                        """{"task":{"id":"task-a","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Task A","description":null,"status":"todo","priority":5,"due_at":null,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"dependencies":[],"connected_memories":[],"readiness_rollup":{"open_subtask_count":2,"done_subtask_count":3,"cancelled_subtask_count":1,"blocked_subtask_count":1,"dependency_blocked_task_count":1,"open_dependency_count":4,"completion_ready":false}}"""
+                        """{"task":{"id":"task-a","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Task A","description":null,"status":"todo","priority":5,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"dependencies":[],"connected_memories":[],"readiness_rollup":{"open_subtask_count":2,"done_subtask_count":3,"cancelled_subtask_count":1,"blocked_subtask_count":1,"dependency_blocked_task_count":1,"open_dependency_count":4,"completion_ready":false}}"""
 
                     projectOverviewBody =
                         """{"project":{"id":"project-a","workspace_id":"workspace-a","parent_id":null,"name":"Project A","description":null,"status":"active","priority":5,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"tasks":[],"subprojects":[],"linked_memories":[],"connected_memories":[],"readiness_rollup":{"open_project_count":1,"closed_project_count":2,"open_task_count":3,"done_task_count":4,"cancelled_task_count":1,"blocked_task_count":1,"dependency_blocked_task_count":1,"open_dependency_count":5,"completion_ready":false}}"""
@@ -1035,7 +1050,7 @@ suite =
             \_ ->
                 let
                     body =
-                        """{"task":{"id":"task-a","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Task A","description":null,"status":"todo","priority":8,"due_at":null,"completed_at":null,"dependency_count":0,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"completion_gated":true,"open_descendant_count":2,"dependency_blocked":false,"open_dependency_count":0}"""
+                        """{"task":{"id":"task-a","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Task A","description":null,"status":"todo","priority":8,"completed_at":null,"dependency_count":0,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"completion_gated":true,"open_descendant_count":2,"dependency_blocked":false,"open_dependency_count":0}"""
                 in
                 case Decode.decodeString Api.nextTaskCandidateDecoder body of
                     Ok candidate ->
@@ -1505,7 +1520,6 @@ task id parentId projectId =
     , description = Nothing
     , status = Api.Todo
     , priority = 5
-    , dueAt = Nothing
     , completedAt = Nothing
     , dependencyCount = 0
     , memoryLinkCount = 0

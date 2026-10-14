@@ -1279,10 +1279,6 @@ a:hover {
   color: var(--accent);
 }
 
-.card-meta-due {
-  color: var(--warning);
-}
-
 .clickable-text {
   cursor: pointer;
 }

@@ -75,7 +75,7 @@ test('two independent clients converge after canonical pause/resume, including c
     oldReady.release(); oldNext.release(); await b.idle(); await paint(b.page)
     assert.equal(await b.page.locator('#entity-root-project .card-project select').first().inputValue(), 'paused')
     assert.equal(await b.page.locator('#entity-root-project .project-next-tasks-section > .project-next-tasks-list').count(), 0, 'late ready response cannot revive work under pause')
-    const mixed = b.page.locator('#entity-root-project .next-task-candidate').filter({ hasText:'Mixed blockers' })
+    const mixed = b.page.locator('#entity-root-project .next-task-candidate').filter({ has:b.page.locator('.popover-card-title').filter({ hasText:/^Mixed blockers$/ }) })
     assert.match(await mixed.innerText(), /Paused by this project or an ancestor/)
     assert.match(await mixed.innerText(), /1 open dependency/)
     assert.match(await mixed.innerText(), /1 open subtask/)

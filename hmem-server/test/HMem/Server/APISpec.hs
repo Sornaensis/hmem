@@ -164,6 +164,31 @@ createVersionObservation env app name = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "project next-subtasks HTTP contract" $ do
+    it "returns eligible subtasks under auto-blocked parents while excluding child and parent blockers" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-next-subtasks"
+      project <- Project.createProject env.pool (CreateProject workspace.id Nothing "project" Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "parent" Nothing Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "ready child" Nothing (Just 9) Nothing Nothing)
+      blocked <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "blocked child" Nothing Nothing Nothing Nothing)
+      prerequisite <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "prerequisite" Nothing Nothing Nothing Nothing)
+      Task.addDependency env.pool blocked.id prerequisite.id
+      ready <- request app methodGet (pauseProjectPath project.id <> "/next-tasks?limit=1") ""
+      responseStatus ready `shouldBe` status200
+      let Just [candidate] = decode (responseBody ready) :: Maybe [NextTaskCandidate]
+      candidate.task.id `shouldBe` child.id
+      candidate.task.parentId `shouldBe` Just parent.id
+      candidate.task.status `shouldBe` Todo
+      candidate.task.priority `shouldBe` 9
+      candidate.dependencyBlocked `shouldBe` False
+      candidate.completionGated `shouldBe` False
+      diagnostics <- request app methodGet (pauseProjectPath project.id <> "/next-tasks?include_blocked=true&limit=100") ""
+      let Just candidates = decode (responseBody diagnostics) :: Maybe [NextTaskCandidate]
+      sort (map (\row -> row.task.id) candidates) `shouldBe` sort [parent.id, child.id, blocked.id]
+      Task.addDependency env.pool parent.id prerequisite.id
+      parentBlocked <- request app methodGet (pauseProjectPath project.id <> "/next-tasks?limit=100") ""
+      decode (responseBody parentBlocked) `shouldBe` Just ([] :: [NextTaskCandidate])
+
   describe "project pause HTTP contract" $ do
     it "returns bounded truthful cascade samples and paused subtask diagnostics" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-pause-bounded"

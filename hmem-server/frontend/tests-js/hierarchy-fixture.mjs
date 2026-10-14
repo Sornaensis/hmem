@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { resolve, sep } from 'node:path'
 import { chromium } from '@playwright/test'
-import { generateFixture, queryObservations, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, projectOverviewResponse, taskOverviewResponse, workspaceShellSnapshotItems } from '../perf/fixtures.mjs'
+import { generateFixture, queryObservations, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, projectOverviewResponse, taskOverviewResponse, taskReadinessRollup, workspaceShellSnapshotItems } from '../perf/fixtures.mjs'
 
 // Controlled HTTP-fixture equivalent; backend predicate equivalence is tested
 // separately against PostgreSQL. Never count a paginated fixture prefix.
@@ -34,6 +34,50 @@ export function hierarchyFixture() {
   return { ...base, projects: [project('root-project'), ...Array.from({ length: 63 }, (_, i) => project('project-' + String(i).padStart(3, '0'), 'root-project'))],
     tasks: [...Array.from({ length: 121 }, (_, i) => task('task-' + String(i).padStart(3, '0'))), ...Array.from({ length: 113 }, (_, i) => task('subtask-' + String(i).padStart(3, '0'), 'task-000'))],
     dependencies: [], observations: [], timelineEvents: [], timelineBuckets: [], liveFrames: [] }
+}
+
+// Match the production candidate contract, including unloaded subtasks. The
+// database remains the authority; this supplies controlled browser responses.
+export function projectNextTasksResponse(fixture, projectId, includeBlocked, limit) {
+  const projects = new Map(fixture.projects.map(project => [project.id, project]))
+  const tasks = new Map(fixture.tasks.map(task => [task.id, task]))
+  const open = task => task && !task.deleted_at && ['todo', 'in_progress', 'blocked'].includes(task.status)
+  const projectScope = new Set()
+  const visitProject = id => {
+    const project = projects.get(id)
+    if (!project || project.deleted_at || !['active', 'paused'].includes(project.status) || projectScope.has(id)) return
+    projectScope.add(id)
+    for (const child of fixture.projects) if (child.parent_id === id && child.workspace_id === project.workspace_id) visitProject(child.id)
+  }
+  visitProject(projectId)
+  const scope = new Map(fixture.tasks.filter(task => !task.deleted_at && projectScope.has(task.project_id) && task.workspace_id === projects.get(task.project_id).workspace_id).map(task => [task.id, task.project_id]))
+  for (let changed = true; changed;) {
+    changed = false
+    for (const task of fixture.tasks) if (!task.deleted_at && scope.has(task.parent_id) && !scope.has(task.id) && task.workspace_id === tasks.get(task.parent_id).workspace_id) {
+      scope.set(task.id, scope.get(task.parent_id)); changed = true
+    }
+  }
+  const ancestryHas = (rows, initial, predicate) => {
+    const seen = new Set()
+    for (let id = initial; id != null && !seen.has(id); id = rows.get(id)?.parent_id) {
+      seen.add(id)
+      if (predicate(rows.get(id))) return true
+    }
+    return false
+  }
+  const projectPaused = task => ancestryHas(tasks, task.id, ancestor => ancestor && ancestryHas(projects, ancestor.project_id, project => project?.status === 'paused'))
+  const closedPlacement = task => ancestryHas(tasks, task.parent_id, ancestor => !ancestor || ancestor.deleted_at || ['done', 'cancelled'].includes(ancestor.status))
+    || ancestryHas(tasks, task.id, ancestor => ancestor && ancestryHas(projects, ancestor.project_id, project => !project || project.deleted_at || ['completed', 'archived'].includes(project.status)))
+  const dependencies = task => fixture.dependencies.filter(edge => edge.task_id === task.id && open(tasks.get(edge.depends_on_id))).length
+  const descendants = task => [...scope.keys()].filter(id => id !== task.id && open(tasks.get(id)) && ancestryHas(tasks, tasks.get(id).parent_id, ancestor => ancestor?.id === task.id)).length
+  return [...scope.keys()].map(id => tasks.get(id))
+    .filter(task => open(task) && !closedPlacement(task)
+      && (includeBlocked || (task.status !== 'blocked' && !projectPaused(task)))
+      && (!task.parent_id || (tasks.has(task.parent_id) && !projectPaused(tasks.get(task.parent_id)) && taskReadinessRollup(fixture, task.parent_id).can_start_subtasks) || (includeBlocked && projectPaused(task))))
+    .map(task => { const openDescendants = descendants(task), openDependencies = dependencies(task); return { task, completion_gated: openDescendants > 0, open_descendant_count: openDescendants, dependency_blocked: openDependencies > 0, open_dependency_count: openDependencies, project_paused: projectPaused(task) } })
+    .filter(candidate => includeBlocked || !candidate.dependency_blocked)
+    .sort((a, b) => projects.get(scope.get(b.task.id)).priority - projects.get(scope.get(a.task.id)).priority || b.task.priority - a.task.priority || a.task.created_at.localeCompare(b.task.created_at) || a.task.id.localeCompare(b.task.id))
+    .slice(0, Math.min(200, Math.max(1, limit)))
 }
 
 async function bounded(action, milliseconds, label) {
@@ -137,12 +181,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         else if (path.includes('/navigation/focus/')) { const parts = path.split('/'); value = navigationFocusResponse(fixture, parts.at(-2), parts.at(-1), Number(url.searchParams.get('ancestor_offset') || 0)) }
         else if (/^\/api\/v1\/projects\/[^/]+\/overview$/.test(path)) value = projectOverviewResponse(fixture, path.split('/')[4])
         else if (/^\/api\/v1\/projects\/[^/]+\/next-tasks$/.test(path)) {
-          const projects = new Map(fixture.projects.map(project => [project.id, project]))
-          const paused = projectId => { const seen = new Set(); for (let id = projectId; id != null && !seen.has(id); id = projects.get(id)?.parent_id) { seen.add(id); if (projects.get(id)?.status === 'paused') return true }; return false }
-          value = fixture.tasks.filter(task => task.project_id === entityId && !task.parent_id && !['done','cancelled'].includes(task.status))
-            .map(task => { const descendants = fixture.tasks.filter(child => child.parent_id === task.id && !['done','cancelled'].includes(child.status)); const dependencies = fixture.dependencies.filter(edge => edge.task_id === task.id && !['done','cancelled'].includes(fixture.tasks.find(other => other.id === edge.depends_on_id)?.status)); return {task,completion_gated:descendants.length > 0,open_descendant_count:descendants.length,dependency_blocked:dependencies.length > 0,open_dependency_count:dependencies.length,project_paused:paused(task.project_id)} })
-            .filter(candidate => receipt.includeBlocked || (!candidate.project_paused && !candidate.dependency_blocked && candidate.task.status !== 'blocked'))
-            .slice(0, Number(url.searchParams.get('limit')))
+          value = projectNextTasksResponse(fixture, entityId, receipt.includeBlocked, Number(url.searchParams.get('limit')))
         }
         else if (/^\/api\/v1\/tasks\/[^/]+\/overview$/.test(path)) value = taskOverviewResponse(fixture, path.split('/')[4])
         else if (detail) {

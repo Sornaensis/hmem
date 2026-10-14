@@ -38,6 +38,10 @@ spec = do
       expectLifecycleCode "TASK_START_BLOCKED_BY_SUBTASKS" $ updateTask env.pool parent.id (cancelStatusUpdate InProgress)
       candidates <- listNextTasks env.pool project.id False 20
       map (\candidate -> candidate.task.id) candidates `shouldBe` [child.id]
+      map (\candidate -> candidate.task.parentId) candidates `shouldBe` [Just parent.id]
+      map (\candidate -> candidate.task.priority) candidates `shouldBe` [child.priority]
+      map (\candidate -> candidate.task.status) candidates `shouldBe` [Todo]
+      map (.dependencyBlocked) candidates `shouldBe` [False]
       _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
       Just overview <- getTaskOverview env.pool parent.id
       overview.task.status `shouldBe` Blocked

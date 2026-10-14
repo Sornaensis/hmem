@@ -631,6 +631,22 @@ spec = do
       jsonField "next_offset" searched `shouldBe` Just (object ["projects" .= (2 :: Int)])
       BL.length (encode searched) `shouldSatisfy` (< 700)
 
+    it "preserves ready subtask identity and parent links in project next tasks" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        result <- call manager base "project_next_tasks" (object ["project_id" .= ("bbbbbbbb-cccc-dddd-eeee-ffffffffffff" :: Text)])
+        case result of
+          Array rows -> case toList rows of
+            [candidate] -> do
+              jsonPath ["task", "id"] candidate `shouldBe` Just (String "cccccccc-dddd-eeee-ffff-aaaaaaaaaaaa")
+              jsonPath ["task", "parent_id"] candidate `shouldBe` Just (toJSON observationId)
+              jsonPath ["task", "priority"] candidate `shouldBe` Just (Number 9)
+              jsonPath ["task", "status"] candidate `shouldBe` Just (String "todo")
+              jsonPath ["task", "description"] candidate `shouldBe` Nothing
+              jsonField "dependency_blocked" candidate `shouldBe` Just (Bool False)
+            _ -> expectationFailure "Expected one ready subtask candidate"
+          _ -> expectationFailure "Expected next-task candidate array"
+
     it "keeps aggregate and mutation replies bounded and focused details lossless" $ do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
@@ -1503,6 +1519,7 @@ responseFor method path rawQuery body
   | method == methodPost && path == "/api/v1/projects/spec" = object ["project_id" .= observationId, "task_ids" .= take (taskCount body) [observationId, workspaceId, "99999999-2222-3333-4444-555555555555" :: Text]]
   | method == methodPost && path == "/api/v1/tasks" = task
   | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview" = object ["project" .= project, "tasks" .= [task], "subprojects" .= [project], "readiness_rollup" .= object ["completion_ready" .= True]]
+  | path == "/api/v1/projects/bbbbbbbb-cccc-dddd-eeee-ffffffffffff/next-tasks" = toJSON [object ["task" .= object ["id" .= ("cccccccc-dddd-eeee-ffff-aaaaaaaaaaaa" :: Text), "parent_id" .= observationId, "project_id" .= ("bbbbbbbb-cccc-dddd-eeee-ffffffffffff" :: Text), "title" .= ("Ready subtask" :: Text), "description" .= T.replicate 10000 "s", "status" .= ("todo" :: Text), "priority" .= (9 :: Int)], "completion_gated" .= False, "open_descendant_count" .= (0 :: Int), "dependency_blocked" .= False, "open_dependency_count" .= (0 :: Int)]]
   | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/next-tasks" = toJSON [object ["task" .= task, "completion_gated" .= True, "open_descendant_count" .= (2 :: Int), "dependency_blocked" .= False, "open_dependency_count" .= (0 :: Int)]]
   | path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview" = object ["task" .= task, "dependencies" .= [object ["id" .= workspaceId, "name" .= ("Prerequisite" :: Text)]], "readiness_rollup" .= object ["completion_ready" .= True]]
   | method == methodPut && path == "/api/v1/workspaces/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "name" .= ("Renamed" :: Text), "workspace_type" .= ("repository" :: Text)]

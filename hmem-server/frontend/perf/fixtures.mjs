@@ -431,9 +431,9 @@ function projectBranchMatches(fixture, project, filters) {
   const showOnly = filters.showOnly || 'all'
   const projectMatch = showOnly !== 'tasks'
     && descendantProjects(fixture, project.id).some(candidate => projectFilterMatches(candidate, filters))
-  const taskMatch = showOnly !== 'projects'
+  if (projectMatch) return true
+  return showOnly !== 'projects'
     && descendantProjectTasks(fixture, project.id).some(candidate => taskFilterMatches(candidate, filters))
-  return projectMatch || taskMatch
 }
 
 function taskBranchMatches(fixture, task, filters) {
@@ -749,11 +749,13 @@ export function navigationBranchResponse(fixture, options = {}) {
   const filteredTaskChildren = taskChildren.filter(task => taskBranchMatches(fixture, task, filters))
   const projectOrder = [...projectChildren].sort((a, b) => projectStatusRank(a.status) - projectStatusRank(b.status) || (b.priority - a.priority) || compareText(a.name.toLowerCase(), b.name.toLowerCase()) || compareText(a.id, b.id))
   const taskOrder = [...filteredTaskChildren].sort((a, b) => taskStatusRank(a.status) - taskStatusRank(b.status) || (b.priority - a.priority) || compareText(a.title.toLowerCase(), b.title.toLowerCase()) || compareText(a.id, b.id))
+  const projects = navigationPage(projectOrder, projectOffset, projectLimit)
+  const tasks = navigationPage(taskOrder, taskOffset, taskLimit)
   return {
     workspace_id: fixture.workspace.id,
     parent: parentKind === 'workspace_root' ? { kind: 'workspace_root' } : { kind: parentKind, parent_id: parentId },
-    projects: navigationPage(projectOrder.map(project => projectCardSummary(fixture, project)), projectOffset, projectLimit),
-    tasks: navigationPage(taskOrder.map(task => taskCardSummary(fixture, task)), taskOffset, taskLimit)
+    projects: { items: projects.items.map(project => projectCardSummary(fixture, project)), has_more: projects.has_more },
+    tasks: { items: tasks.items.map(task => taskCardSummary(fixture, task)), has_more: tasks.has_more }
   }
 }
 

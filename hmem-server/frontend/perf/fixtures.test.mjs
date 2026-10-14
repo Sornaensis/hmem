@@ -12,6 +12,92 @@ import { untrackedFileDiff, navigateToFirstUsefulViewport, waitForFirstUsefulVie
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
+const navigationRepairBase = '7249b786947938697d085b545dc4fa3f67abc5c8'
+let navigationReference
+async function navigationImplementations() {
+  if (!navigationReference) navigationReference = (async () => {
+    const capture = createEvidenceCapture({ cwd: path.resolve(here, '../../..') })
+    const before = capture.read(['show', navigationRepairBase + ':hmem-server/frontend/perf/fixtures.mjs'], { label: 'immutable pre-repair navigation producer' }).toString('utf8')
+    const current = fs.readFileSync(path.join(here, 'fixtures.mjs'), 'utf8')
+    const load = source => import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { projectBranchMatches };\n').toString('base64'))
+    return { before: await load(before), current: await load(current) }
+  })()
+  return navigationReference
+}
+
+function navigationBranches(fixture) {
+  const root = fixture.projects.find(project => project.parent_id == null)
+  const subtask = fixture.tasks.find(task => task.parent_id != null)
+  return [{ parentKind: 'workspace_root' }, { parentKind: 'project', parentId: root.id }, { parentKind: 'task', parentId: subtask.parent_id }]
+}
+
+for (const size of ['small', 'large']) {
+  test(`${size} navigation repair preserves exact pre-repair route/page/filter bytes`, async () => {
+    const { before } = await navigationImplementations()
+    const fixture = generateFixture(size)
+    const assertParity = options => assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(before.navigationBranchResponse(fixture, options)), JSON.stringify(options))
+    const boundaries = [[undefined, undefined], [-20, -10], [0, 0], [1, 1], [2, 3], [99, 100], [101, 999], [100000, 1], [100001, Infinity], ['invalid', 'invalid'], [1.5, 2.5], ['2', '3']]
+    const filters = [{}, { showOnly: 'projects' }, { showOnly: 'tasks' }, { showEmptyProjects: false },
+      { projectStatuses: ['active', 'paused'], taskStatuses: ['todo', 'in_progress'] },
+      { projectStatuses: ['completed', 'archived'], taskStatuses: ['done', 'cancelled'] },
+      { priorityMode: 'exact', priorityValue: 5 }, { priorityMode: 'above', priorityValue: '3' },
+      { priorityMode: 'below', priorityValue: 9 }, { priorityMode: 'exact', priorityValue: 'invalid' },
+      { query: fixture.projects[1].name }, { query: fixture.tasks.find(task => task.project_id != null).title }, { query: 'no match' }]
+    for (const branch of navigationBranches(fixture)) {
+      for (const [offset, limit] of boundaries) assertParity({ ...branch, projectOffset: offset, taskOffset: offset, projectLimit: limit, taskLimit: limit })
+      for (const filter of filters) {
+        assertParity({ ...branch, ...filter, projectLimit: 1, taskLimit: 1 })
+        assertParity({ ...branch, ...filter, projectOffset: 1, taskOffset: 1, projectLimit: 3, taskLimit: 3 })
+      }
+    }
+  })
+
+  test(`${size} navigation repair preserves pre-repair bytes after live status/placement/deletion`, async () => {
+    const { before } = await navigationImplementations()
+    const original = generateFixture(size)
+    const variants = [
+      { ...original, projects: original.projects.map((p, index) => index < 3 ? { ...p, status: ['completed', 'active', 'archived'][index], priority: 10-index } : p), tasks: original.tasks.map((t, index) => index < 3 ? { ...t, status: ['done', 'in_progress', 'cancelled'][index] } : t) },
+      { ...original, projects: original.projects.map((p, index) => index === 1 ? { ...p, parent_id: null } : p), tasks: original.tasks.map((t, index) => index === 1 ? { ...t, project_id: original.projects[0].id, parent_id: null } : index === 2 ? { ...t, project_id: original.tasks[0].project_id, parent_id: original.tasks[0].id } : t) },
+      { ...original, tasks: original.tasks.filter(t => t.id !== original.tasks.at(-1).id), projects: original.projects.filter(p => p.id !== original.projects.at(-1).id), dependencies: original.dependencies.filter(edge => edge.task_id !== original.tasks.at(-1).id && edge.depends_on_id !== original.tasks.at(-1).id) }
+    ]
+    for (const fixture of variants) for (const branch of navigationBranches(fixture)) for (const filter of [{}, { showEmptyProjects: false }, { query: 'Task', taskStatuses: ['todo', 'in_progress'] }, { showOnly: 'projects', projectStatuses: ['active', 'paused'] }]) {
+      const options = { ...branch, ...filter, projectLimit: 2, taskLimit: 2 }
+      assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(before.navigationBranchResponse(fixture, options)))
+    }
+  })
+
+  test(`${size} navigation constructs summaries only for the returned ordered page`, async () => {
+    const { before } = await navigationImplementations()
+    for (const kind of ['projects', 'tasks']) for (const offset of [0, 1, 100000]) {
+      const fixture = generateFixture(size)
+      const options = { showOnly: kind, projectLimit: 1, taskLimit: 1, projectOffset: offset, taskOffset: offset }
+      const expected = navigationBranchResponse(fixture, options)
+      const selected = new Set(expected[kind].items.map(row => row.id))
+      let summaries = 0
+      const key = kind === 'projects' ? 'updated_at' : 'completed_at'
+      for (const row of fixture[kind]) {
+        const value = row[key]
+        Object.defineProperty(row, key, { get() { if (!selected.has(row.id)) throw new Error('off-page summary'); summaries += 1; return value } })
+      }
+      assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(expected))
+      assert.equal(summaries, selected.size)
+      assert.throws(() => before.navigationBranchResponse(fixture, options), /off-page summary/, 'the original implementation performs the eliminated work')
+    }
+  })
+}
+
+test('proven project matching avoids irrelevant task traversal while gates remain effective', async () => {
+  const { before, current } = await navigationImplementations()
+  const fixture = generateFixture('small'), project = fixture.projects[0]
+  Object.defineProperty(fixture, 'tasks', { get() { throw new Error('irrelevant task traversal') } })
+  const filters = { showOnly: 'all', showEmptyProjects: true, projectStatuses: [], taskStatuses: [], priorityMode: 'any' }
+  assert.equal(current.projectBranchMatches(fixture, project, filters), true)
+  assert.throws(() => before.projectBranchMatches(fixture, project, filters), /irrelevant task traversal/)
+  assert.equal(current.projectBranchMatches(fixture, project, { ...filters, projectStatuses: ['archived'] }), false)
+  assert.equal(current.projectBranchMatches(fixture, project, { ...filters, priorityMode: 'exact', priorityValue: 99 }), false)
+  assert.throws(() => current.projectBranchMatches(fixture, project, { ...filters, showEmptyProjects: false }), /irrelevant task traversal/, 'show-empty=false retains its independent task-membership gate')
+})
+
 function independentlyOrderedSnapshot(fixture) {
   const records = [
     ...fixture.observations.map(data => ({ schema_version: 1, kind: 'observation', data })),

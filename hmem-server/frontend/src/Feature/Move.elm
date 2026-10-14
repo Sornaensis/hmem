@@ -775,8 +775,8 @@ view model =
                                 rowClass = "move-project-row" ++ (if moving then " move-source" else "") ++ (if current then " move-current" else "") ++ (if destination == Just (Just projectId) then " move-selected" else "")
                             in
                             div [ class rowClass, attribute "data-project-id" projectId, attribute "data-row-index" (String.fromInt index), style "padding-left" (String.fromInt (Basics.min depth 8 * 18) ++ "px") ]
-                                [ span [ class "move-tree-guides", attribute "aria-hidden" "true" ] (List.repeat (Basics.min depth 8) (span [] []))
-                                , if project.directProjectCount > 0 then
+                                [ div [ class "move-project-card" ]
+                                    [ if project.directProjectCount > 0 then
                                     button [ class "tree-toggle", disabled saving, attribute "aria-label" ((if Set.member projectId dialog.expanded then "Collapse " else "Expand ") ++ project.name), attribute "aria-expanded" (if Set.member projectId dialog.expanded then "true" else "false"), onClick (MoveToggleBranch projectId), onFocus (MoveRowFocused projectId), custom "keydown" (keys index |> Decode.map (\( message, _ ) -> { message = message, stopPropagation = True, preventDefault = True })) ] [ text (if Set.member projectId dialog.expanded then "▾" else "▸") ]
                                   else span [ class "tree-toggle-spacer" ] []
                                 , button [ Html.Attributes.id ("move-choice-" ++ projectId), class ("move-project-choice" ++ (if destination == Just (Just projectId) then " selected" else "")), disabled saving
@@ -784,9 +784,10 @@ view model =
                                     , title (Maybe.withDefault ("Select " ++ project.name) reason)
                                     , attribute "aria-label" (project.name ++ (role projectId |> Maybe.map ((++) ", ") |> Maybe.withDefault "") ++ (reason |> Maybe.map ((++) ". ") |> Maybe.withDefault ""))
                                     , attribute "aria-pressed" (if destination == Just (Just projectId) then "true" else "false"), onClick (MoveSelect (Just projectId)), onFocus (MoveRowFocused projectId), custom "keydown" (keys index |> Decode.map (\( message, _ ) -> { message = message, stopPropagation = True, preventDefault = True })) ]
-                                    [ span [ class "move-project-name" ] [ text project.name ]
-                                    , span [ class "move-project-meta" ] [ span [ class "move-project-status" ] [ text (Api.projectStatusToString project.status) ], role projectId |> Maybe.map badge |> Maybe.withDefault (text "") ] ]
+                                    [ span [ class "move-project-name", title project.name ] [ text project.name ]
+                                    , span [ class "move-project-meta" ] [ span [ class ("entity-type-label entity-type-project" ++ (if role projectId /= Nothing then " move-role" else "")) ] [ text ("PRJ" ++ (role projectId |> Maybe.map ((++) " · ") |> Maybe.withDefault "")) ] ] ]
                                 , if Dict.member projectId dialog.matchErrors then button [ class "btn", disabled saving, onClick (MoveRetry ("@match:" ++ projectId)), title "Retry search match", attribute "aria-label" ("Retry search match for " ++ project.name) ] [ text "Retry" ] else text ""
+                                    ]
                                 ]
                 pieces =
                     let
@@ -834,12 +835,13 @@ view model =
                     , preventDefaultOn "keydown" (keys (dialog.rowOffset - 1))
                     ]
                     ([ div [ class ("move-project-row move-root" ++ (if dialog.currentProject == Nothing then " move-current" else "") ++ (if destination == Just Nothing then " move-selected" else "")) ]
-                        [ button [ class ("move-project-choice" ++ (if destination == Just Nothing then " selected" else "")), disabled saving
+                        [ div [ class "move-project-card" ]
+                            [ button [ class ("move-project-choice" ++ (if destination == Just Nothing then " selected" else "")), disabled saving
                             , attribute "aria-label" (if dialog.entityType == "project" then "Workspace root" else "No project")
                             , attribute "aria-disabled" (if destinationReason model dialog Nothing /= Nothing then "true" else "false")
                             , title (destinationReason model dialog Nothing |> Maybe.withDefault "Select root placement"), onClick (MoveSelect Nothing), attribute "aria-pressed" (if destination == Just Nothing then "true" else "false") ]
                             [ span [ class "move-project-name" ] [ text (if dialog.entityType == "project" then "Workspace root" else "No project") ]
-                            , if dialog.currentProject == Nothing then badge "Current parent" else if destination == Just Nothing then badge "Selected" else text "" ] ] ]
+                            , if dialog.currentProject == Nothing then badge "Current parent" else if destination == Just Nothing then badge "Selected" else text "" ] ] ] ]
                         ++ pieces
                         ++ (if List.isEmpty rows && (Dict.get "" dialog.branches |> Maybe.map .complete |> Maybe.withDefault False) then [ p [] [ text "No matching projects." ] ] else [])
                         ++ (if Set.isEmpty dialog.statuses then [ p [] [ text "Select a status to browse." ] ] else [])

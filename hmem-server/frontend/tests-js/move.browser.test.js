@@ -39,6 +39,7 @@ function authority(data) {
   }
 }
 
+const visualDirectory = process.env.HMEM_MOVE_VISUAL_DIR || '.task-scratch/move-dialog'
 const dialog = h => h.page.locator('#move-dialog')
 async function open(h,kind,id) {
   await h.page.locator('#move-origin-'+kind+'-'+id).click()
@@ -106,10 +107,22 @@ test('project move carries subtree and can return to workspace root; current/sel
     await h.scrollTo('project:root-project'); await open(h,'project','root-project')
     await choose(h,'Workspace root')
     if (process.env.HMEM_MOVE_VISUALS === '1') {
-      await mkdir('.task-scratch/move-dialog', {recursive:true})
-      await h.page.screenshot({path:'.task-scratch/move-dialog/project-desktop.png'})
+      await mkdir(visualDirectory, {recursive:true})
+      assert.equal(await dialog(h).locator('.move-tree-guides, .move-project-status').count(),0)
+      assert.equal(await dialog(h).locator('[data-project-id] .entity-type-label.entity-type-project').count(),await dialog(h).locator('[data-project-id]').count())
+      assert.ok(await dialog(h).locator('[data-project-id] .move-project-meta').evaluateAll(badges=>badges.every(badge=>badge.children.length===1)))
+      assert.ok(await dialog(h).locator('[data-project-id] .move-project-name').evaluateAll(names=>names.every(name=>name.title===name.textContent)))
+      assert.match(await dialog(h).locator('.move-current .entity-type-label').innerText(),/^PRJ · Current parent$/)
+      assert.match(await dialog(h).locator('[data-project-id="root-project"] .entity-type-label').innerText(),/^PRJ · Moving$/)
+      assert.match(await dialog(h).locator('[data-project-id="nested"] .entity-type-label').innerText(),/^PRJ · Moves with$/)
+      assert.ok(await dialog(h).locator('.move-project-row').evaluateAll(rows=>rows.every(row=>row.getBoundingClientRect().height===56 && row.querySelector('.move-project-card').getBoundingClientRect().height===48)))
+      await h.page.screenshot({path:`${visualDirectory}/project-desktop.png`})
       await h.page.setViewportSize({width:390,height:844})
-      await h.page.screenshot({path:'.task-scratch/move-dialog/project-narrow.png'})
+      await h.page.screenshot({path:`${visualDirectory}/project-narrow.png`})
+      await h.page.setViewportSize({width:860,height:480})
+      const confirmBox=await dialog(h).getByRole('button',{name:'Confirm',exact:true}).boundingBox()
+      assert.ok(confirmBox.y>=0 && confirmBox.y+confirmBox.height<=480,'short viewport keeps footer visible')
+      await h.page.screenshot({path:`${visualDirectory}/project-short.png`})
       await h.page.setViewportSize({width:1440,height:1000})
     }
     await save(h); await h.idle()
@@ -142,12 +155,12 @@ test('search discovers unloaded descendants and description matches, statuses/ma
     const closed=dialog(h).locator('.move-project-choice').filter({hasText:'Closed'})
     assert.equal(await closed.isDisabled(),true)
     if (process.env.HMEM_MOVE_VISUALS === '1') {
-      await mkdir('.task-scratch/move-dialog', {recursive:true})
-      await h.page.screenshot({path:'.task-scratch/move-dialog/desktop.png'})
+      await mkdir(visualDirectory, {recursive:true})
+      await h.page.screenshot({path:`${visualDirectory}/desktop.png`})
     }
     await h.page.setViewportSize({width:390,height:844})
     const box=await dialog(h).boundingBox(); assert.ok(box.x>=0 && box.x+box.width<=390)
-    if (process.env.HMEM_MOVE_VISUALS === '1') await h.page.screenshot({path:'.task-scratch/move-dialog/narrow.png'})
+    if (process.env.HMEM_MOVE_VISUALS === '1') await h.page.screenshot({path:`${visualDirectory}/narrow.png`})
     await h.page.keyboard.press('Escape'); await h.idle()
     assert.equal(await dialog(h).count(),0)
     assert.match(await h.page.evaluate(()=>document.activeElement?.id||''),/^(move-origin-task-parent|main-content-scroll)$/)

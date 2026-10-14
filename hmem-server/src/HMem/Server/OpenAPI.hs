@@ -55,7 +55,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/projects/{projectId}" . _Just . put %~ fmap documentProjectPause
-  & paths . at "/api/v1/audit/{auditId}/revert" . _Just . post . _Just . description ?~ "Authorized project replay restores canonical independent and retained pause intent. Ambiguous legacy transitions return audit_pause_provenance_missing (409); malformed canonical provenance returns audit_pause_provenance_invalid (409). Metadata replays preserve current pause intent. Lifecycle guards remain authoritative."
+  & paths . at "/api/v1/audit/{auditId}/revert" . _Just . post . _Just . description ?~ "Authorized project replay restores canonical independent and retained pause intent. Ambiguous legacy transitions return audit_pause_provenance_missing (409); malformed canonical provenance returns audit_pause_provenance_invalid (409). Metadata replays preserve current pause intent. Task replay restores only supported fields changed by the historical operation. Due-only historical task updates return audit_due_operation_obsolete (409) without entity, timestamp, audit or outbox writes. Stored audit payloads remain unchanged. Lifecycle guards remain authoritative."
   & paths . at "/api/v1/tasks/batch-move" . _Just . post %~ fmap documentTaskBatchMove
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . post %~ fmap documentDependencyAdd
@@ -387,14 +387,14 @@ instance ToSchema WorkspaceGroup where declareNamedSchema = genericDeclareNamedS
 instance ToSchema CreateWorkspaceGroup where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceGroupMemberInput where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Project where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema CreateProject where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema ProjectSpecTask where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema CreateProject where declareNamedSchema = fmap dueFreePlanningSchema . genericDeclareNamedSchema opts
+instance ToSchema ProjectSpecTask where declareNamedSchema = fmap dueFreePlanningSchema . genericDeclareNamedSchema opts
 instance ToSchema CreateProjectSpec where
   declareNamedSchema _ = do
     task <- declareSchemaRef (Proxy @ProjectSpecTask)
     pure $ NamedSchema (Just "CreateProjectSpec") $ mempty
       & type_ ?~ OpenApiObject
-      & description ?~ "Creates a project and all initial tasks atomically. Every task is top-level under the new project."
+      & description ?~ "Creates a project and all initial tasks atomically. Every task is top-level under the new project. Retired due scheduling keys are rejected on the project and initial tasks, including null."
       & properties . at "workspace_id" ?~ Inline uuidSchema
       & properties . at "name" ?~ Inline (mempty & type_ ?~ OpenApiString)
       & properties . at "description" ?~ Inline (mempty & type_ ?~ OpenApiString & nullable ?~ True)
@@ -402,7 +402,7 @@ instance ToSchema CreateProjectSpec where
       & properties . at "tasks" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject task & minItems ?~ 1 & maxItems ?~ 50)
       & required .~ ["workspace_id", "name", "tasks"]
 instance ToSchema ProjectSpecResult where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema UpdateProject where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema UpdateProject where declareNamedSchema = fmap dueFreePlanningSchema . genericDeclareNamedSchema opts
 instance ToSchema CascadeResult where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectOverview where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectCardSummary where declareNamedSchema = genericDeclareNamedSchema opts
@@ -531,8 +531,12 @@ instance ToSchema ProjectMutationResult where
       & required %~ (<> ["pause_effects"])
 instance ToSchema NextTaskCandidate where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Task where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema CreateTask where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema UpdateTask where declareNamedSchema = genericDeclareNamedSchema opts
+dueFreePlanningSchema :: NamedSchema -> NamedSchema
+dueFreePlanningSchema (NamedSchema name schema) = NamedSchema name $ schema
+  & description ?~ "Modeled due scheduling fields (due_at, dueAt, due, due_date, dueDate) are rejected, including null. Other unknown-key behavior is unchanged."
+
+instance ToSchema CreateTask where declareNamedSchema = fmap dueFreePlanningSchema . genericDeclareNamedSchema opts
+instance ToSchema UpdateTask where declareNamedSchema = fmap dueFreePlanningSchema . genericDeclareNamedSchema opts
 instance ToSchema TaskMutationResult where
   declareNamedSchema _ = do
     NamedSchema _ schema <- genericDeclareNamedSchema opts (Proxy @Task)
@@ -543,7 +547,7 @@ instance ToSchema TaskMutationResult where
 instance ToSchema BatchMoveTasksRequest where
   declareNamedSchema _ = pure $ NamedSchema (Just "BatchMoveTasksRequest") $ mempty
     & type_ ?~ OpenApiObject
-    & description ?~ "Atomic task-project relocation. Duplicate task IDs are accepted but affect each task once; active descendants are moved with requested roots."
+    & description ?~ "Atomic task-project relocation. Duplicate task IDs are accepted but affect each task once; active descendants are moved with requested roots. Retired due scheduling keys are rejected, including null."
     & properties . at "task_ids" ?~ Inline (mempty
         & type_ ?~ OpenApiArray
         & items ?~ OpenApiItemsObject (Inline uuidSchema)

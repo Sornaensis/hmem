@@ -164,6 +164,165 @@ createVersionObservation env app name = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "Due-free planning contracts" $ do
+    it "omits due from detail list search navigation overview next-task and mutation response shapes" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "due-response-shapes"
+      project <- Project.createProject env.pool (CreateProject workspace.id Nothing "project" Nothing Nothing Nothing)
+      task <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "task" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just task.id) "child" Nothing Nothing Nothing)
+      prerequisite <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "prerequisite" Nothing Nothing Nothing)
+      let bytes = Text.encodeUtf8 . T.pack . show
+          taskPath = "/api/v1/tasks/" <> bytes task.id
+          projectPath = pauseProjectPath project.id
+          workspacePath = "/api/v1/workspaces/" <> bytes workspace.id
+          hasDue (Object fields) = any (`KeyMap.member` fields) ["due_at", "dueAt", "due", "due_date", "dueDate"] || any hasDue (KeyMap.elems (KeyMap.delete "metadata" fields))
+          hasDue (Array values) = any hasDue values
+          hasDue _ = False
+          check response = do
+            responseStatus response `shouldBe` status200
+            let Just body = decode (responseBody response) :: Maybe Value
+            body `shouldNotSatisfy` hasDue
+      forM_ [taskPath, taskPath <> "/overview", taskPath <> "/dependencies", "/api/v1/tasks?workspace_id=" <> bytes workspace.id,
+        "/api/v1/projects?workspace_id=" <> bytes workspace.id, projectPath, projectPath <> "/overview", projectPath <> "/next-tasks?include_blocked=true",
+        projectPath <> "/next-task-page?include_blocked=true", workspacePath <> "/navigation?parent_kind=project&parent_id=" <> bytes project.id] $ \path ->
+          request app methodGet path "" >>= check
+      postJson app "/api/v1/search" (object ["workspace_id" .= workspace.id, "entity_types" .= ["project" :: T.Text,"task"]]) >>= check
+      postJson app (workspacePath <> "/navigation/summaries") (object ["project_ids" .= [project.id], "task_ids" .= [task.id,child.id]]) >>= check
+      putJson app taskPath (object ["title" .= ("renamed" :: T.Text)]) >>= check
+      postJson app (taskPath <> "/dependencies") (object ["depends_on_id" .= prerequisite.id]) >>= check
+      putJson app ("/api/v1/tasks/" <> bytes child.id) (object ["status" .= ("done" :: T.Text)]) >>= check
+      postJson app "/api/v1/tasks/batch-move" (object ["task_ids" .= [task.id], "project_id" .= project.id]) >>= check
+      postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "title" .= ("created" :: T.Text)]) >>= check
+
+    it "rejects removed keys including null on project task spec and batch writes without side effects" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "due-input-rejection"
+      project <- Project.createProject env.pool (CreateProject workspace.id Nothing "project" Nothing Nothing Nothing)
+      task <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "task" Nothing Nothing Nothing)
+      let add key value (Object fields) = Object (KeyMap.insert (Key.fromText key) value fields)
+          add _ _ value = value
+          taskPath = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
+          specBody = object ["workspace_id" .= workspace.id, "name" .= ("new project" :: T.Text), "tasks" .= [object ["title" .= ("new task" :: T.Text)]]]
+          cases =
+            [ (methodPost, "/api/v1/projects", object ["workspace_id" .= workspace.id, "name" .= ("new project" :: T.Text)])
+            , (methodPut, pauseProjectPath project.id, object ["name" .= ("changed" :: T.Text)])
+            , (methodPost, "/api/v1/tasks", object ["workspace_id" .= workspace.id, "title" .= ("new task" :: T.Text)])
+            , (methodPut, taskPath, object ["title" .= ("changed" :: T.Text)])
+            , (methodPost, "/api/v1/projects/spec", specBody)
+            , (methodPost, "/api/v1/tasks/batch-move", object ["task_ids" .= [task.id], "project_id" .= project.id]) ]
+      before <- planningDueState env
+      forM_ ["due_at", "dueAt", "due", "due_date", "dueDate"] $ \key ->
+        forM_ [Null, String "2030-01-01T00:00:00Z"] $ \value -> do
+          forM_ cases $ \(method, path, body) -> do
+            response <- request app method path (encode (add key value body))
+            responseStatus response `shouldBe` status400
+          nested <- postJson app "/api/v1/projects/spec" (object ["workspace_id" .= workspace.id, "name" .= ("new project" :: T.Text), "tasks" .= [object ["title" .= ("new task" :: T.Text), Key.fromText key .= value]]])
+          responseStatus nested `shouldBe` status400
+      planningDueState env `shouldReturn` before
+      allowed <- putJson app taskPath (object ["unrelated" .= True, "description" .= Null, "metadata" .= object ["due_at" .= Null]])
+      responseStatus allowed `shouldBe` status200
+      fmap (fmap (.metadata)) (Task.getTask env.pool task.id) `shouldReturn` Just (object ["due_at" .= Null])
+
+    it "replays mixed historical updates without unchanged placement or status intent and rejects due-only reversions" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "due-audit-compatibility"
+      source <- Project.createProject env.pool (CreateProject workspace.id Nothing "source" Nothing Nothing Nothing)
+      target <- Project.createProject env.pool (CreateProject workspace.id Nothing "target" Nothing Nothing Nothing)
+      task <- Task.createTask env.pool (CreateTask workspace.id (Just source.id) Nothing "original" Nothing Nothing Nothing)
+      let path = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
+      changed <- putJson app path (object ["title" .= ("changed" :: T.Text)])
+      responseStatus changed `shouldBe` status200
+      entries <- taskDueAudits env task.id
+      let Just mixed = find (\entry -> entry.action == AuditUpdate && (entry.oldValues >>= jsonField "title") == Just (String "original")) entries
+      DBPool.runSession env.pool $ Session.statement mixed.id $ Statement.Statement
+        "UPDATE audit_log SET old_values=old_values || '{\"due_at\":null}'::jsonb,new_values=new_values || '{\"due_at\":\"2030-01-01T00:00:00Z\"}'::jsonb WHERE id=$1"
+        (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      historical <- Audit.getAuditEntry env.pool mixed.id
+      moved <- putJson app path (object ["project_id" .= target.id, "status" .= ("in_progress" :: T.Text)])
+      responseStatus moved `shouldBe` status200
+      replay <- request app methodPost (pauseAuditPath mixed.id) ""
+      responseStatus replay `shouldBe` status200
+      restored <- Task.getTask env.pool task.id
+      fmap (.title) restored `shouldBe` Just "original"
+      fmap (.projectId) restored `shouldBe` Just (Just target.id)
+      fmap (.status) restored `shouldBe` Just InProgress
+      Audit.getAuditEntry env.pool mixed.id `shouldReturn` historical
+      latest <- taskDueAudits env task.id
+      let Just dueOnly = find (\entry -> entry.action == AuditUpdate && entry.id /= mixed.id) latest
+      DBPool.runSession env.pool $ Session.statement dueOnly.id $ Statement.Statement
+        "UPDATE audit_log SET old_values=old_values || '{\"due_at\":null}'::jsonb,new_values=old_values || '{\"due_at\":\"2030-01-01T00:00:00Z\"}'::jsonb WHERE id=$1"
+        (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      before <- planningDueState env
+      obsolete <- request app methodPost (pauseAuditPath dueOnly.id) ""
+      responseStatus obsolete `shouldBe` status409
+      let Just errorBody = decode (responseBody obsolete) :: Maybe Value
+      jsonField "error" errorBody `shouldBe` Just (String "audit_due_operation_obsolete")
+      planningDueState env `shouldReturn` before
+
+    it "authorizes historical task replay and denies readers before decoding obsolete or malformed evidence" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "due-audit-authorization"
+        admin <- createDeployedSandboxUser ctx.deployedEnv False False
+        reader <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership admin Auth.WorkspaceRoleAdmin) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership reader Auth.WorkspaceRoleRead) Nothing
+        adminToken <- issueDeployedSandboxPAT ctx.deployedEnv admin "Due audit admin"
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv reader "Due audit reader"
+        task <- Task.createTask ctx.deployedEnv.pool (CreateTask workspace.id Nothing Nothing "task" Nothing Nothing Nothing)
+        _ <- Task.updateTask ctx.deployedEnv.pool task.id (UpdateTask (Just "changed") Unchanged Unchanged Unchanged Nothing Nothing Nothing)
+        entries <- taskDueAudits ctx.deployedEnv task.id
+        let Just entry = find (\audit -> audit.action == AuditUpdate) entries
+            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        DBPool.runSession ctx.deployedEnv.pool $ Session.statement entry.id $ Statement.Statement
+          "UPDATE audit_log SET old_values=old_values || '{\"due_at\":null}'::jsonb,new_values=new_values || '{\"due_at\":\"2030-01-01T00:00:00Z\"}'::jsonb WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        historical <- Audit.getAuditEntry ctx.deployedEnv.pool entry.id
+        replay <- requestWithHeaders ctx.deployedApplication methodPost (pauseAuditPath entry.id) (headers adminToken) ""
+        responseStatus replay `shouldBe` status200
+        fmap (fmap (.title)) (Task.getTask ctx.deployedEnv.pool task.id) `shouldReturn` Just "task"
+        Audit.getAuditEntry ctx.deployedEnv.pool entry.id `shouldReturn` historical
+        DBPool.runSession ctx.deployedEnv.pool $ Session.statement entry.id $ Statement.Statement
+          "UPDATE audit_log SET new_values=old_values || '{\"due_at\":\"2030-01-01T00:00:00Z\"}'::jsonb WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        dueState <- planningDueState ctx.deployedEnv
+        requestWithHeaders ctx.deployedApplication methodPost (pauseAuditPath entry.id) (headers readerToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        obsolete <- requestWithHeaders ctx.deployedApplication methodPost (pauseAuditPath entry.id) (headers adminToken) ""
+        responseStatus obsolete `shouldBe` status409
+        let Just obsoleteBody = decode (responseBody obsolete) :: Maybe Value
+        jsonField "error" obsoleteBody `shouldBe` Just (String "audit_due_operation_obsolete")
+        planningDueState ctx.deployedEnv `shouldReturn` dueState
+        DBPool.runSession ctx.deployedEnv.pool $ Session.statement entry.id $ Statement.Statement
+          "UPDATE audit_log SET old_values='[]'::jsonb,new_values='[]'::jsonb WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+        before <- planningDueState ctx.deployedEnv
+        request ctx.deployedApplication methodPost (pauseAuditPath entry.id) "" >>= (\response -> responseStatus response `shouldBe` status401)
+        requestWithHeaders ctx.deployedApplication methodPost (pauseAuditPath entry.id) (headers readerToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodPost (pauseAuditPath entry.id) (headers adminToken) "" >>= (\response -> responseStatus response `shouldBe` status409)
+        planningDueState ctx.deployedEnv `shouldReturn` before
+
+    it "preserves legacy task create delete and soft-delete replay without decoding retired fields" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "due-legacy-lifecycle"
+      created <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "created" Nothing Nothing Nothing)
+      entries <- taskDueAudits env created.id
+      let Just createEntry = find (\entry -> entry.action == AuditCreate) entries
+      DBPool.runSession env.pool $ Session.statement createEntry.id $ Statement.Statement
+        "UPDATE audit_log SET new_values=new_values || '{\"due_at\":\"2030-01-01T00:00:00Z\"}'::jsonb WHERE id=$1"
+        (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+      historicalCreate <- Audit.getAuditEntry env.pool createEntry.id
+      request app methodPost (pauseAuditPath createEntry.id) "" >>= (\response -> responseStatus response `shouldBe` status200)
+      Task.getTask env.pool created.id `shouldReturn` Nothing
+      Audit.getAuditEntry env.pool createEntry.id `shouldReturn` historicalCreate
+      forM_ [False, True] $ \historicalDelete -> do
+        task <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "restorable" Nothing Nothing Nothing)
+        _ <- Task.deleteTaskCascade env.pool task.id
+        deleted <- taskDueAudits env task.id
+        let Just entry = find (\audit -> audit.action == AuditUpdate && (audit.oldValues >>= jsonField "deleted_at") == Just Null) deleted
+        DBPool.runSession env.pool $ Session.statement (entry.id,historicalDelete) $ Statement.Statement
+          "UPDATE audit_log SET old_values=old_values || '{\"due_at\":null}'::jsonb,action=CASE WHEN $2 THEN 'delete' ELSE action END,new_values=CASE WHEN $2 THEN NULL ELSE new_values || '{\"due_at\":null}'::jsonb END WHERE id=$1"
+          ((fst >$< Enc.param (Enc.nonNullable Enc.uuid)) <> (snd >$< Enc.param (Enc.nonNullable Enc.bool))) Dec.noResult True
+        historical <- Audit.getAuditEntry env.pool entry.id
+        request app methodPost (pauseAuditPath entry.id) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        Task.getTask env.pool task.id >>= (`shouldSatisfy` isJust)
+        Audit.getAuditEntry env.pool entry.id `shouldReturn` historical
+
   describe "project next-subtasks HTTP contract" $ do
     it "returns eligible subtasks under auto-blocked parents while excluding child and parent blockers" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-next-subtasks"
@@ -2572,6 +2731,15 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       entityTypeToText ETObservation `shouldBe` "observation"
 
   describe "OpenAPI" $ do
+    it "omits due properties from every planning input and task read schema" $ \(_env, app) -> do
+      response <- request app methodGet "/api/v1/openapi.json" ""
+      responseStatus response `shouldBe` status200
+      let Just document = decode (responseBody response) :: Maybe Value
+      forM_ ["CreateProject", "UpdateProject", "CreateProjectSpec", "ProjectSpecTask", "CreateTask", "UpdateTask", "Task", "TaskCardSummary", "BatchMoveTasksRequest"] $ \name ->
+        case jsonPath ["components", "schemas", name, "properties"] document of
+          Just (Object fields) -> forM_ ["due_at", "dueAt", "due", "due_date", "dueDate"] $ \key -> KeyMap.member key fields `shouldBe` False
+          _ -> expectationFailure ("Missing planning schema " <> T.unpack name)
+
     it "documents the constant-size workspace planning counts read and authorization errors" $ \(_env, app) -> do
       response <- request app methodGet "/api/v1/openapi.json" ""
       responseStatus response `shouldBe` status200
@@ -2912,6 +3080,16 @@ pauseAuditPath id = "/api/v1/audit/" <> Text.encodeUtf8 (T.pack (show id)) <> "/
 pauseProjectAudits :: TestEnv -> UUID -> IO [AuditLogEntry]
 pauseProjectAudits env id = Audit.getAuditLog env.pool
   (AuditLogQuery Nothing (Just "project") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)
+
+taskDueAudits :: TestEnv -> UUID -> IO [AuditLogEntry]
+taskDueAudits env taskId = Audit.getAuditLog env.pool
+  (AuditLogQuery Nothing (Just "task") (Just (T.pack (show taskId))) Nothing Nothing Nothing (Just 100) Nothing)
+
+-- Complete state comparison detects timestamp, entity, audit and outbox writes.
+planningDueState :: TestEnv -> IO Value
+planningDueState env = DBPool.runSession env.pool $ Session.statement () $ Statement.Statement
+  "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM tasks t),(SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM projects p),(SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM audit_log a),(SELECT jsonb_agg(to_jsonb(o) ORDER BY scope,workspace_id,cursor) FROM change_stream_outbox o),(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,workspace_id) FROM change_stream_scope_counters c))"
+  Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.jsonb))) True
 
 pauseDeniedApp :: TestEnv -> IO Application
 pauseDeniedApp env = do

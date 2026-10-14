@@ -1056,7 +1056,7 @@ audit pool = listH :<|> revertH :<|> getH where
         case deleted of Nothing -> throwError err409; Just _ -> pure Nothing
       ("task", AuditUpdate) | isSoftDelete entry -> restoreTask workspaceId entityId
       ("task", AuditUpdate) -> do
-        old <- decodeOld entry
+        old <- taskAuditUpdate entry
         handleDBErrors (Task.updateTask pool entityId old) >>= maybe (throwError err409) (pure . Just . toJSON)
       ("task", AuditDelete) -> do
         restored <- handleDBErrors $ Task.restoreTask pool entityId
@@ -1069,6 +1069,28 @@ audit pool = listH :<|> revertH :<|> getH where
       ("observation", _) -> throwError unsupportedObservation
       _ -> throwError err409
     pure RevertResult { auditEntry = entry, entity = entity }
+  -- Audit snapshots are private evidence. Replay only changed supported fields
+  -- so unchanged placement and status do not establish new lifecycle intent.
+  taskAuditUpdate :: AuditLogEntry -> Handler UpdateTask
+  taskAuditUpdate entry = do
+    old <- auditObject entry.oldValues
+    new <- auditObject entry.newValues
+    let mutable = ["title", "description", "project_id", "parent_id", "status", "priority", "metadata"]
+        changed = [key | key <- mutable, AesonKeyMap.lookup key old /= AesonKeyMap.lookup key new]
+        dueChanged = any (\key -> AesonKeyMap.lookup key old /= AesonKeyMap.lookup key new)
+          ["due_at", "dueAt", "due", "due_date", "dueDate"]
+        projected = Aeson.Object $ AesonKeyMap.fromList
+          [(key, fromMaybe Aeson.Null (AesonKeyMap.lookup key old)) | key <- changed]
+    when (changed == [] && dueChanged) $ throwError err409
+      { errBody = Aeson.encode $ object
+          [ "error" .= ("audit_due_operation_obsolete" :: Text)
+          , "message" .= ("This historical update only changed due scheduling, which is no longer supported." :: Text) ] }
+    case Aeson.fromJSON projected of
+      Aeson.Success value -> pure value
+      Aeson.Error _ -> throwError err409
+  auditObject (Just (Aeson.Object values)) = pure values
+  auditObject _ = throwError err409
+
   projectAuditUpdate :: AuditLogEntry -> Handler (UpdateProject, Maybe Project.ProjectAuditPauseIntent)
   projectAuditUpdate entry = do
     decoded <- (decodeOld entry :: Handler UpdateProject)

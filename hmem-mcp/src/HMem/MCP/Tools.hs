@@ -137,8 +137,8 @@ toolDefinitions =
           ]
       ] ["name", "tasks"])
   , tool "project_archive" "Archive a project and all descendant projects, including completed projects, and cancel non-done tasks in that subtree. Done tasks and dependency links are preserved; unrelated dependent tasks are not cancelled. Reopening does not reopen descendants." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
-  , tool "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks. Reopen a cancelled or done parent before adding unfinished subtasks." (schema ["project_id" .= prop "string" "Optional project UUID", "title" .= prop "string" "Atomic task title", "description" .= prop "string" "Optional durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates", "parent_id" .= prop "string" "Optional parent task UUID; use it to create a subtask for later-discovered atomic work", "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time"] ["title"])
-  , tool "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks. Cancelling also cancels non-done subtasks while preserving done subtasks. Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it. Reopening does not reopen descendants." (schema ["task_id" .= prop "string" "Task UUID; the only required field", "title" .= prop "string" "Task title", "description" .= nullableProp "Durable task specification: scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates", "project_id" .= nullableProp "Project UUID; omit to keep the existing project or use null to clear it", "parent_id" .= nullableProp "Parent task UUID to make this an atomic subtask for later-discovered work; omit to keep the existing parent or use null to clear it", "status" .= enumProp "Execution state; record progress here, not in the description" ["todo", "in_progress", "blocked", "done", "cancelled"], "priority" .= prop "integer" "Priority", "due_at" .= nullableProp "ISO-8601 due time; omit to keep the existing due time or use null to clear it"] ["task_id"])
+  , tool "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks. Reopen a cancelled or done parent before adding unfinished subtasks." (schema ["project_id" .= prop "string" "Optional project UUID", "title" .= prop "string" "Atomic task title", "description" .= prop "string" "Optional durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates", "parent_id" .= prop "string" "Optional parent task UUID; use it to create a subtask for later-discovered atomic work", "priority" .= prop "integer" "Priority"] ["title"])
+  , tool "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks. Cancelling also cancels non-done subtasks while preserving done subtasks. Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it. Reopening does not reopen descendants." (schema ["task_id" .= prop "string" "Task UUID; the only required field", "title" .= prop "string" "Task title", "description" .= nullableProp "Durable task specification: scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates", "project_id" .= nullableProp "Project UUID; omit to keep the existing project or use null to clear it", "parent_id" .= nullableProp "Parent task UUID to make this an atomic subtask for later-discovered work; omit to keep the existing parent or use null to clear it", "status" .= enumProp "Execution state; record progress here, not in the description" ["todo", "in_progress", "blocked", "done", "cancelled"], "priority" .= prop "integer" "Priority"] ["task_id"])
   , tool "task_move_batch" "Atomically move one to 100 tasks and their active descendants to one project or no project. Submit every dependency-connected task that must move so no dependency edge crosses a project boundary." (strictSchema
       [ "task_ids" .= object
           [ "type" .= ("array" :: Text)
@@ -205,36 +205,40 @@ data ToolCall
   deriving (Show, Eq)
 
 parseToolCall :: Text -> Value -> Either String ToolCall
-parseToolCall name args = case name of
-  "observation_create" -> ObservationCreate <$> parseCreateObservation args
-  "observation_get" -> ObservationGet <$> required "observation_id"
-  "observation_update" -> ObservationUpdate <$> required "observation_id" <*> required "expected_content_version" <*> parseReviewedObservationUpdate args
-  "observation_history" -> ObservationHistory <$> required "observation_id" <*> optional "limit" <*> optional "offset"
-  "observation_list" -> ObservationList <$> parse args
-  "observation_match" -> ObservationMatchCall <$> parse args
-  "observation_delete" -> ObservationDelete <$> required "observation_id"
-  "observation_set_embedding" -> ObservationSetEmbedding <$> required "observation_id" <*> (ObservationEmbedding <$> required "embedding" <*> optionalFingerprint args)
-  "observation_similar" -> ObservationSimilar <$> parse args
-  "workspace_list" -> WorkspaceList <$> optional "limit"
-  "workspace_register" -> WorkspaceRegister <$> parse args
-  "workspace_update" -> WorkspaceUpdate <$> required "workspace_id" <*> parseWorkspaceUpdate args
-  "search" -> UnifiedSearch <$> parse args
-  "project_create" -> ProjectCreate <$> parse args
-  "project_update" -> ProjectUpdate <$> required "project_id" <*> parse args
-  "project_detail" -> ProjectDetail <$> required "project_id"
-  "project_overview" -> ProjectOverviewCall <$> required "project_id"
-  "project_next_tasks" -> ProjectNextTasks <$> required "project_id" <*> optional "limit" <*> (fromMaybe False <$> optional "include_blocked")
-  "project_spec" -> ProjectSpec <$> parse args
-  "project_archive" -> ProjectArchive <$> required "project_id"
-  "task_create" -> TaskCreate <$> parse args
-  "task_update" -> TaskUpdate <$> required "task_id" <*> parse args
-  "task_move_batch" -> uncurry TaskMoveBatch <$> parseBatchMoveTasks args
-  "task_detail" -> TaskDetail <$> required "task_id"
-  "task_overview" -> TaskOverviewCall <$> required "task_id"
-  "task_dependency" -> TaskDependency <$> required "task_id" <*> required "depends_on_id" <*> required "action"
-  "task_start" -> TaskStart <$> required "task_id"
-  "task_finish" -> TaskFinish <$> required "task_id" <*> required "status"
-  _ -> Left ("Unknown tool: " <> T.unpack name)
+parseToolCall name args = do
+  if name `elem` ["project_create", "project_update", "project_spec", "project_archive", "task_create", "task_update", "task_move_batch", "task_dependency", "task_start", "task_finish"]
+    then parseEither (withObject "planning arguments" rejectPlanningDueFields) args
+    else pure ()
+  case name of
+    "observation_create" -> ObservationCreate <$> parseCreateObservation args
+    "observation_get" -> ObservationGet <$> required "observation_id"
+    "observation_update" -> ObservationUpdate <$> required "observation_id" <*> required "expected_content_version" <*> parseReviewedObservationUpdate args
+    "observation_history" -> ObservationHistory <$> required "observation_id" <*> optional "limit" <*> optional "offset"
+    "observation_list" -> ObservationList <$> parse args
+    "observation_match" -> ObservationMatchCall <$> parse args
+    "observation_delete" -> ObservationDelete <$> required "observation_id"
+    "observation_set_embedding" -> ObservationSetEmbedding <$> required "observation_id" <*> (ObservationEmbedding <$> required "embedding" <*> optionalFingerprint args)
+    "observation_similar" -> ObservationSimilar <$> parse args
+    "workspace_list" -> WorkspaceList <$> optional "limit"
+    "workspace_register" -> WorkspaceRegister <$> parse args
+    "workspace_update" -> WorkspaceUpdate <$> required "workspace_id" <*> parseWorkspaceUpdate args
+    "search" -> UnifiedSearch <$> parse args
+    "project_create" -> ProjectCreate <$> parse args
+    "project_update" -> ProjectUpdate <$> required "project_id" <*> parse args
+    "project_detail" -> ProjectDetail <$> required "project_id"
+    "project_overview" -> ProjectOverviewCall <$> required "project_id"
+    "project_next_tasks" -> ProjectNextTasks <$> required "project_id" <*> optional "limit" <*> (fromMaybe False <$> optional "include_blocked")
+    "project_spec" -> ProjectSpec <$> parse args
+    "project_archive" -> ProjectArchive <$> required "project_id"
+    "task_create" -> TaskCreate <$> parse args
+    "task_update" -> TaskUpdate <$> required "task_id" <*> parse args
+    "task_move_batch" -> uncurry TaskMoveBatch <$> parseBatchMoveTasks args
+    "task_detail" -> TaskDetail <$> required "task_id"
+    "task_overview" -> TaskOverviewCall <$> required "task_id"
+    "task_dependency" -> TaskDependency <$> required "task_id" <*> required "depends_on_id" <*> required "action"
+    "task_start" -> TaskStart <$> required "task_id"
+    "task_finish" -> TaskFinish <$> required "task_id" <*> required "status"
+    _ -> Left ("Unknown tool: " <> T.unpack name)
   where
     parse :: FromJSON a => Value -> Either String a
     parse = parseEither parseJSON
@@ -552,7 +556,7 @@ fullProjectDetail :: Value -> Value
 fullProjectDetail value = addDescription value (compactProjectSummary value)
 
 compactTaskSummary :: Value -> Value
-compactTaskSummary value = object (catMaybes [copy "id", copy "title", copy "status", copy "priority", copy "project_id", copy "parent_id", copy "due_at"])
+compactTaskSummary value = object (catMaybes [copy "id", copy "title", copy "status", copy "priority", copy "project_id", copy "parent_id"])
   where copy key = (Key.fromText key .=) <$> field key value
 
 fullTaskDetail :: Value -> Value

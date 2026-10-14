@@ -15,8 +15,7 @@
       "status": "done",
       "priority": 5,
       "project_id": "11111111-2222-3333-4444-555555555555",
-      "parent_id": null,
-      "due_at": null
+      "parent_id": null
     }
   },
   "observation_create": {

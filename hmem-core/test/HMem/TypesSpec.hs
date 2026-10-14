@@ -1,6 +1,7 @@
 module HMem.TypesSpec (spec) where
 
 import Data.Aeson (Value(Null, Object), eitherDecode, encode, object, toJSON, (.=))
+import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Either (isLeft)
 import Data.Text qualified as T
@@ -14,6 +15,33 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 spec :: Spec
 spec = do
   describe "Due-free task JSON" $ do
+    it "rejects all retired spellings including null on planning inputs, nested specs and batches" $ do
+      let add key value (Object fields) = Object (KM.insert (Key.fromText key) value fields)
+          add _ _ value = value
+          task = CreateTask workspace Nothing Nothing "task" Nothing Nothing Nothing
+          project = CreateProject workspace Nothing "project" Nothing Nothing Nothing
+          specTask = ProjectSpecTask "task" Nothing Nothing
+          projectSpec = CreateProjectSpec workspace "project" Nothing Nothing [specTask]
+      mapM_ (\key -> mapM_ (\value -> do
+        eitherDecode (encode (add key value (toJSON task))) `shouldSatisfy` (isLeft :: Either String CreateTask -> Bool)
+        eitherDecode (encode (add key value (toJSON project))) `shouldSatisfy` (isLeft :: Either String CreateProject -> Bool)
+        eitherDecode (encode (object [Key.fromText key .= value])) `shouldSatisfy` (isLeft :: Either String UpdateTask -> Bool)
+        eitherDecode (encode (object [Key.fromText key .= value])) `shouldSatisfy` (isLeft :: Either String UpdateProject -> Bool)
+        eitherDecode (encode (add key value (toJSON projectSpec))) `shouldSatisfy` (isLeft :: Either String CreateProjectSpec -> Bool)
+        eitherDecode (encode (object ["workspace_id" .= workspace, "name" .= ("project" :: String), "tasks" .= [add key value (toJSON specTask)]])) `shouldSatisfy` (isLeft :: Either String CreateProjectSpec -> Bool)
+        eitherDecode (encode (object ["items" .= [object ["id" .= workspace, Key.fromText key .= value]]])) `shouldSatisfy` (isLeft :: Either String BatchUpdateTaskRequest -> Bool)
+        eitherDecode (encode (object ["items" .= [object ["id" .= workspace, Key.fromText key .= value]]])) `shouldSatisfy` (isLeft :: Either String BatchUpdateProjectRequest -> Bool)
+        eitherDecode (encode (object ["items" .= ([] :: [Value]), Key.fromText key .= value])) `shouldSatisfy` (isLeft :: Either String BatchUpdateTaskRequest -> Bool)
+        eitherDecode (encode (object ["items" .= ([] :: [Value]), Key.fromText key .= value])) `shouldSatisfy` (isLeft :: Either String BatchUpdateProjectRequest -> Bool)
+        eitherDecode (encode (object ["task_ids" .= [workspace], Key.fromText key .= value])) `shouldSatisfy` (isLeft :: Either String BatchMoveTasksRequest -> Bool))
+        [Null, toJSON ("2030-01-01T00:00:00Z" :: String)]) ["due_at", "dueAt", "due", "due_date", "dueDate"]
+
+    it "preserves unrelated unknown keys, metadata and nullable update semantics" $ do
+      eitherDecode "{\"description\":null,\"parent_id\":null,\"unrelated\":true,\"metadata\":{\"due_at\":null}}"
+        `shouldBe` Right (UpdateTask Nothing SetNull Unchanged SetNull Nothing Nothing (Just (object ["due_at" .= Null])))
+      eitherDecode "{\"description\":null,\"unrelated\":true}"
+        `shouldBe` Right (UpdateProject Nothing SetNull Unchanged Nothing Nothing Nothing)
+
     it "round-trips tasks and create/update DTOs without a modeled due field" $ do
       let task = Task workspace workspace Nothing Nothing "task" Nothing Todo 5 (object []) Nothing 0 observedAt observedAt
           createTask = CreateTask workspace Nothing Nothing "task" Nothing Nothing Nothing

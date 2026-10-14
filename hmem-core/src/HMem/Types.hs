@@ -23,7 +23,7 @@ module HMem.Types
   , BatchDeleteRequest(..), BatchMoveTasksRequest(..), BatchResult(..), CascadeResult(..), BatchUpdateProjectItem(..), BatchUpdateProjectRequest(..), BatchUpdateTaskItem(..), BatchUpdateTaskRequest(..)
   , validateBatchDeleteRequest, validateBatchMoveTasksRequest, validateBatchUpdateProjectRequest, validateBatchUpdateTaskRequest
   , projectStatusToText, projectStatusFromText, taskStatusToText, taskStatusFromText, workspaceTypeToText, workspaceTypeFromText
-  , FieldUpdate(..), parseFieldUpdate, fieldUpdatePair, applyNullableUpdate
+  , FieldUpdate(..), parseFieldUpdate, fieldUpdatePair, applyNullableUpdate, rejectPlanningDueFields
   , maxNameBytes, maxDescriptionBytes, validFtsLanguage, maxPaginationOffset, maxPaginationLimit, capPagination, capPaginationOverfetch
   , validateCreateWorkspaceInput, validateUpdateWorkspaceInput, validateCreateProjectInput, validateCreateProjectSpecInput, validateUpdateProjectInput, validateProjectListQuery, validateCreateTaskInput, validateUpdateTaskInput, validateTaskListQuery, validateCreateWorkspaceGroupInput, validateCreateSavedViewInput, validateUpdateSavedViewInput
   ) where
@@ -105,6 +105,18 @@ fieldUpdatePair :: ToJSON a => Key -> FieldUpdate a -> Maybe Pair
 fieldUpdatePair _ Unchanged = Nothing
 fieldUpdatePair k SetNull   = Just (k .= Null)
 fieldUpdatePair k (SetTo v) = Just (k .= v)
+
+-- Reject only retired modeled keys at planning input boundaries. Free-form
+-- metadata and unrelated unknown keys retain their existing behavior.
+rejectPlanningDueFields :: Object -> Parser ()
+rejectPlanningDueFields fields =
+  case filter (`KM.member` fields) ["due_at", "dueAt", "due", "due_date", "dueDate"] of
+    [] -> pure ()
+    keys -> fail ("Due scheduling fields are no longer supported: " <> show keys)
+
+parsePlanningInput :: (Value -> Parser a) -> Value -> Parser a
+parsePlanningInput parser = withObject "planning input" $ \fields ->
+  rejectPlanningDueFields fields >> parser (Object fields)
 
 -- | Apply a 'FieldUpdate' to a nullable Rel8 column expression.
 applyNullableUpdate :: Sql DBType (Maybe a) => Expr (Maybe a) -> FieldUpdate a -> Expr (Maybe a)
@@ -1074,20 +1086,20 @@ data CreateProject = CreateProject
 instance ToJSON CreateProject where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON CreateProject where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON  = parsePlanningInput (genericParseJSON jsonOptions)
 
 data ProjectSpecTask = ProjectSpecTask
   { title :: Text, description :: Maybe Text, priority :: Maybe Int
   } deriving (Show, Eq, Generic)
 instance ToJSON ProjectSpecTask where toJSON = genericToJSON jsonOptions
-instance FromJSON ProjectSpecTask where parseJSON = genericParseJSON jsonOptions
+instance FromJSON ProjectSpecTask where parseJSON = parsePlanningInput (genericParseJSON jsonOptions)
 
 data CreateProjectSpec = CreateProjectSpec
   { workspaceId :: UUID, name :: Text, description :: Maybe Text
   , priority :: Maybe Int, tasks :: [ProjectSpecTask]
   } deriving (Show, Eq, Generic)
 instance ToJSON CreateProjectSpec where toJSON = genericToJSON jsonOptions
-instance FromJSON CreateProjectSpec where parseJSON = genericParseJSON jsonOptions
+instance FromJSON CreateProjectSpec where parseJSON = parsePlanningInput (genericParseJSON jsonOptions)
 
 data ProjectSpecResult = ProjectSpecResult
   { projectId :: UUID, taskIds :: [UUID]
@@ -1148,7 +1160,7 @@ instance ToJSON UpdateProject where
     , ("metadata" .=) <$> up.metadata
     ]
 instance FromJSON UpdateProject where
-  parseJSON = withObject "UpdateProject" $ \o -> UpdateProject
+  parseJSON = parsePlanningInput $ withObject "UpdateProject" $ \o -> UpdateProject
     <$> o .:? "name"
     <*> parseFieldUpdate o "description"
     <*> parseFieldUpdate o "parent_id"
@@ -1276,7 +1288,7 @@ data LinkDependency = LinkDependency
 instance ToJSON LinkDependency where
   toJSON = genericToJSON jsonOptions
 instance FromJSON LinkDependency where
-  parseJSON = genericParseJSON jsonOptions
+  parseJSON = parsePlanningInput (genericParseJSON jsonOptions)
 
 data DependencyMutationResult = DependencyMutationResult
   { action        :: Text
@@ -1323,7 +1335,7 @@ data CreateTask = CreateTask
 instance ToJSON CreateTask where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON CreateTask where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON  = parsePlanningInput (genericParseJSON jsonOptions)
 
 data UpdateTask = UpdateTask
   { title       :: Maybe Text
@@ -1512,7 +1524,7 @@ instance ToJSON UpdateTask where
     , ("metadata" .=) <$> ut.metadata
     ]
 instance FromJSON UpdateTask where
-  parseJSON = withObject "UpdateTask" $ \o -> UpdateTask
+  parseJSON = parsePlanningInput $ withObject "UpdateTask" $ \o -> UpdateTask
     <$> o .:? "title"
     <*> parseFieldUpdate o "description"
     <*> parseFieldUpdate o "project_id"
@@ -2159,7 +2171,7 @@ data BatchMoveTasksRequest = BatchMoveTasksRequest
 instance ToJSON BatchMoveTasksRequest where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON BatchMoveTasksRequest where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON  = parsePlanningInput (genericParseJSON jsonOptions)
 
 newtype BatchResult = BatchResult { affected :: Int } deriving (Show, Eq, Generic)
 instance ToJSON BatchResult where toJSON = genericToJSON jsonOptions
@@ -2202,7 +2214,7 @@ newtype BatchUpdateProjectRequest = BatchUpdateProjectRequest
 instance ToJSON BatchUpdateProjectRequest where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON BatchUpdateProjectRequest where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON  = parsePlanningInput (genericParseJSON jsonOptions)
 
 data BatchUpdateTaskItem = BatchUpdateTaskItem
   { id     :: UUID
@@ -2225,7 +2237,7 @@ newtype BatchUpdateTaskRequest = BatchUpdateTaskRequest
 instance ToJSON BatchUpdateTaskRequest where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON BatchUpdateTaskRequest where
-  parseJSON  = genericParseJSON jsonOptions
+  parseJSON  = parsePlanningInput (genericParseJSON jsonOptions)
 
 validateBatchUpdateProjectRequest :: BatchUpdateProjectRequest -> [Text]
 validateBatchUpdateProjectRequest br =

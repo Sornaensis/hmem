@@ -169,12 +169,37 @@ spec = do
         malformed `shouldSatisfy` contains "outcome is uncertain"
 
   describe "Partial and nullable project and task updates" $ do
+    it "rejects removed due keys before any planning HTTP dispatch, including nested project specs" $ do
+      requests <- newTVarIO []
+      let add key value (Object fields) = Object (KM.insert (Key.fromText key) value fields)
+          add _ _ value = value
+          planning =
+            [ ("project_create", object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text)])
+            , ("project_update", object ["project_id" .= observationId])
+            , ("project_spec", object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text), "tasks" .= [object ["title" .= ("task" :: Text)]]])
+            , ("project_archive", object ["project_id" .= observationId])
+            , ("task_create", object ["workspace_id" .= workspaceId, "title" .= ("task" :: Text)])
+            , ("task_update", object ["task_id" .= observationId])
+            , ("task_move_batch", object ["task_ids" .= [observationId]])
+            , ("task_dependency", object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)])
+            , ("task_start", object ["task_id" .= observationId])
+            , ("task_finish", object ["task_id" .= observationId, "status" .= ("done" :: Text)]) ]
+      withMock requests $ \manager base ->
+        forM_ ["due_at", "dueAt", "due", "due_date", "dueDate"] $ \key ->
+          forM_ [Null, toJSON ("2030-01-01T00:00:00Z" :: Text)] $ \value -> do
+            forM_ planning $ \(name, arguments) -> do
+              parseToolCall name (add key value arguments) `shouldSatisfy` isLeft
+              handleToolCall manager base Nothing (object ["name" .= name, "arguments" .= add key value arguments]) >>= (`shouldSatisfy` isMcpError)
+            let nested = object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text), "tasks" .= [object ["title" .= ("task" :: Text), Key.fromText key .= value]]]
+            handleToolCall manager base Nothing (object ["name" .= ("project_spec" :: Text), "arguments" .= nested]) >>= (`shouldSatisfy` isMcpError)
+      readTVarIO requests >>= (\observed -> length observed `shouldBe` 0)
+
     it "advertises exactly the clearable fields as string or null and requires only the entity ID" $ do
       sort (schemaProperties "project_update") `shouldBe` sort ["project_id", "name", "description", "parent_id", "status", "priority"]
-      sort (schemaProperties "task_update") `shouldBe` sort ["task_id", "title", "description", "project_id", "parent_id", "status", "priority", "due_at"]
+      sort (schemaProperties "task_update") `shouldBe` sort ["task_id", "title", "description", "project_id", "parent_id", "status", "priority"]
       schemaRequired "project_update" `shouldBe` ["project_id"]
       schemaRequired "task_update" `shouldBe` ["task_id"]
-      forM_ [("project_update", ["description", "parent_id"]), ("task_update", ["description", "project_id", "parent_id", "due_at"])] $ \(name, fields) ->
+      forM_ [("project_update", ["description", "parent_id"]), ("task_update", ["description", "project_id", "parent_id"])] $ \(name, fields) ->
         forM_ fields $ \field ->
           (schemaProperty name field >>= jsonField "anyOf") `shouldSatisfy` maybe False stringOrNullTypes
       forM_ [("project_update", ["project_id", "name", "status", "priority"]), ("task_update", ["task_id", "title", "status", "priority"])] $ \(name, fields) ->
@@ -197,10 +222,10 @@ spec = do
             [ (object ["task_id" .= observationId], object [])
             , (object ["task_id" .= observationId, "title" .= ("New title" :: Text)]
               , object ["title" .= ("New title" :: Text)])
-            , (object ["task_id" .= observationId, "description" .= Null, "project_id" .= Null, "parent_id" .= Null, "due_at" .= Null]
-              , object ["description" .= Null, "project_id" .= Null, "parent_id" .= Null, "due_at" .= Null])
-            , (object ["task_id" .= observationId, "description" .= ("Task specification" :: Text), "project_id" .= workspaceId, "parent_id" .= workspaceId, "due_at" .= ("2026-10-01T12:00:00Z" :: Text)]
-              , object ["description" .= ("Task specification" :: Text), "project_id" .= workspaceId, "parent_id" .= workspaceId, "due_at" .= ("2026-10-01T12:00:00Z" :: Text)])
+            , (object ["task_id" .= observationId, "description" .= Null, "project_id" .= Null, "parent_id" .= Null]
+              , object ["description" .= Null, "project_id" .= Null, "parent_id" .= Null])
+            , (object ["task_id" .= observationId, "description" .= ("Task specification" :: Text), "project_id" .= workspaceId, "parent_id" .= workspaceId]
+              , object ["description" .= ("Task specification" :: Text), "project_id" .= workspaceId, "parent_id" .= workspaceId])
             ]
           cases = [("project_update", "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", arguments, body) | (arguments, body) <- projectCases]
                <> [("task_update", "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", arguments, body) | (arguments, body) <- taskCases]
@@ -306,7 +331,6 @@ spec = do
       schemaPropertyDescriptionIs "task_update" "description" "Durable task specification: scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates"
       schemaPropertyDescriptionIs "task_update" "project_id" "Project UUID; omit to keep the existing project or use null to clear it"
       schemaPropertyDescriptionIs "task_update" "parent_id" "Parent task UUID to make this an atomic subtask for later-discovered work; omit to keep the existing parent or use null to clear it"
-      schemaPropertyDescriptionIs "task_update" "due_at" "ISO-8601 due time; omit to keep the existing due time or use null to clear it"
       schemaPropertyDescriptionIs "task_update" "status" "Execution state; record progress here, not in the description"
       schemaPropertyDescriptionIs "project_spec" "tasks" "One to 50 initial atomic tasks, created in input order; later-discovered atomic work must be created as subtasks, not appended to a parent description"
       projectSpecTaskPropertyDescriptionIs "title" "Atomic task title"
@@ -601,6 +625,17 @@ spec = do
         jsonField key payload `shouldBe` jsonField key (object ["workspace_id" .= workspaceId, "query" .= ("needle" :: Text), "entity_types" .= (["project", "task"] :: [Text]), "project_status" .= ("archived" :: Text), "task_status" .= ("done" :: Text), "project_id" .= workspaceId, "limit" .= (2 :: Int), "offset" .= (4 :: Int)])
 
   describe "Project and Task response shaping" $ do
+    it "omits due across every planning tool response even when old upstream task data contains it" $ do
+      requests <- newTVarIO []
+      let hasDue (Object fields) = any (`KM.member` fields) ["due_at", "dueAt", "due", "due_date", "dueDate"] || any hasDue (KM.elems fields)
+          hasDue (Array values) = any hasDue values
+          hasDue _ = False
+      withMock requests $ \manager base ->
+        forM_ [(name,args) | (name,args) <- toolSamples, "task_" `T.isPrefixOf` name || "project_" `T.isPrefixOf` name] $ \(name,args) -> do
+          result <- call manager base name args
+          result `shouldNotSatisfy` isMcpError
+          result `shouldNotSatisfy` hasDue
+
     it "preserves project pause counts, retained guidance and compact task causes" $ do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
@@ -1559,5 +1594,6 @@ responseFor method path rawQuery body
 
 projectWithLongDescription, taskWithLongDescription, dependencyChange :: Value
 projectWithLongDescription = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "description" .= T.replicate 10000 "p", "status" .= ("archived" :: Text), "priority" .= (5 :: Int), "parent_id" .= Null, "pause_effects" .= object ["project_count" .= (23 :: Int), "task_count" .= (23 :: Int), "projects" .= ([] :: [Value]), "tasks" .= [dependencyChange], "has_more_projects" .= True, "has_more_tasks" .= True, "remaining_own_pause" .= False, "remaining_ancestor_pause" .= True]]
-taskWithLongDescription = object ["id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("done" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "due_at" .= Null, "dependency_effects" .= [dependencyChange]]
-dependencyChange = object ["task" .= object ["id" .= observationId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("blocked" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "due_at" .= Null], "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int), "open_dependency_count" .= (1 :: Int), "previous_open_subtask_count" .= (0 :: Int), "open_subtask_count" .= (0 :: Int), "previous_project_paused" .= False, "project_paused" .= True, "reason" .= ("blocked_by_paused_project_and_open_dependencies" :: Text)]
+-- Synthetic old upstream fields verify that MCP projections drop retired data.
+taskWithLongDescription = object ["due_at" .= ("2030-01-01T00:00:00Z" :: Text), "id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("done" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "dependency_effects" .= [dependencyChange]]
+dependencyChange = object ["task" .= object ["due_at" .= Null, "id" .= observationId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("blocked" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null], "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int), "open_dependency_count" .= (1 :: Int), "previous_open_subtask_count" .= (0 :: Int), "open_subtask_count" .= (0 :: Int), "previous_project_paused" .= False, "project_paused" .= True, "reason" .= ("blocked_by_paused_project_and_open_dependencies" :: Text)]

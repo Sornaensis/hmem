@@ -4,6 +4,7 @@ module Api exposing
     , AuditLogEntry
     , CanonicalEnvelope
     , CanonicalFrame(..)
+    , sessionContextDecoder
     , CanonicalInvalidation
     , CascadeResult
     , ChangeEvent
@@ -224,6 +225,7 @@ module Api exposing
     , workspaceTypeToString
     )
 
+import ActorAttribution
 import Http
 import Json.Decode as D exposing (Decoder)
 import Json.Decode.Pipeline exposing (custom, optional, required)
@@ -479,6 +481,7 @@ type alias ObservationProvenance =
     , actorType : Maybe String
     , actorId : Maybe String
     , actorLabel : Maybe String
+    , botIdentity : Maybe ActorAttribution.BotIdentity
     }
 
 
@@ -502,6 +505,7 @@ observationProvenanceDecoder =
         |> required "actor_type" (D.nullable D.string)
         |> required "actor_id" (D.nullable D.string)
         |> required "actor_label" (D.nullable D.string)
+        |> optional "bot_identity" (D.nullable ActorAttribution.botIdentityDecoder) Nothing
 
 
 observationRevisionDecoder : Decoder ObservationRevision
@@ -762,6 +766,7 @@ type alias AuditLogEntry =
     , actorType : Maybe String
     , actorId : Maybe String
     , actorLabel : Maybe String
+    , botIdentity : Maybe ActorAttribution.BotIdentity
     , changedAt : String
     }
 
@@ -787,6 +792,7 @@ type alias TimelineActor =
     { actorType : Maybe String
     , actorId : Maybe String
     , actorLabel : Maybe String
+    , botIdentity : Maybe ActorAttribution.BotIdentity
     }
 
 
@@ -1105,6 +1111,7 @@ shortId idValue =
 
 type alias SessionContext =
     { authMode : String
+    , effectiveActor : Maybe ActorAttribution.Actor
     , principal : SessionPrincipal
     , globalPermissions : SessionGlobalPermissions
     , workspace : Maybe SessionWorkspaceContext
@@ -1842,10 +1849,20 @@ sessionContextDecoder : Decoder SessionContext
 sessionContextDecoder =
     D.succeed SessionContext
         |> required "auth_mode" D.string
+        |> optional "effective_actor" (D.nullable sessionActorDecoder) Nothing
         |> required "principal" sessionPrincipalDecoder
         |> required "global_permissions" sessionGlobalPermissionsDecoder
         |> optional "workspace" (D.nullable sessionWorkspaceContextDecoder) Nothing
 
+
+-- Attribution is separate from the grant-bearing principal and audience keys.
+sessionActorDecoder : Decoder ActorAttribution.Actor
+sessionActorDecoder =
+    D.succeed ActorAttribution.Actor
+        |> optional "actor_type" (D.nullable D.string) Nothing
+        |> optional "actor_id" (D.nullable D.string) Nothing
+        |> optional "actor_label" (D.nullable D.string) Nothing
+        |> optional "bot_identity" (D.nullable ActorAttribution.botIdentityDecoder) Nothing
 
 sessionPrincipalDecoder : Decoder SessionPrincipal
 sessionPrincipalDecoder =
@@ -2024,6 +2041,7 @@ auditLogEntryDecoder =
         |> optional "actor_type" (D.nullable D.string) Nothing
         |> optional "actor_id" (D.nullable D.string) Nothing
         |> optional "actor_label" (D.nullable D.string) Nothing
+        |> optional "bot_identity" (D.nullable ActorAttribution.botIdentityDecoder) Nothing
         |> required "changed_at" D.string
 
 
@@ -2051,6 +2069,7 @@ timelineActorDecoder =
         |> optional "type" (D.nullable D.string) Nothing
         |> optional "id" (D.nullable D.string) Nothing
         |> optional "label" (D.nullable D.string) Nothing
+        |> optional "bot_identity" (D.nullable ActorAttribution.botIdentityDecoder) Nothing
 
 
 timelineProjectContextDecoder : Decoder TimelineProjectContext
@@ -2171,6 +2190,7 @@ type alias ChangeEvent =
     , actorType : Maybe String
     , actorId : Maybe String
     , actorLabel : Maybe String
+    , botIdentity : Maybe ActorAttribution.BotIdentity
     , payload : Maybe D.Value
     }
 
@@ -2213,7 +2233,8 @@ type alias CanonicalInvalidation =
 
 
 type alias CanonicalEnvelope =
-    { eventId : String
+    { actor : ActorAttribution.Actor
+    , eventId : String
     , scope : ChangeStreamScope
     , workspaceId : Maybe String
     , entityType : String
@@ -2388,9 +2409,9 @@ canonicalTransactionDecoder =
         (D.field "request_id" (D.nullable nonEmptyStringDecoder))
 
 
-canonicalActorDecoder : Decoder ()
+canonicalActorDecoder : Decoder ActorAttribution.Actor
 canonicalActorDecoder =
-    D.map2 (\_ _ -> ())
+    D.map4 (\actorType actorId actorLabel botIdentity -> ActorAttribution.Actor (Just actorType) actorId actorLabel botIdentity)
         (D.field "type" nonEmptyStringDecoder
             |> D.andThen
                 (\actorType ->
@@ -2402,6 +2423,8 @@ canonicalActorDecoder =
                 )
         )
         (D.field "id" (D.nullable nonEmptyStringDecoder))
+        (D.maybe (D.field "label" D.string))
+        (D.maybe (D.field "bot_identity" ActorAttribution.botIdentityDecoder))
 
 
 canonicalEnvelopeDecoder : Decoder CanonicalEnvelope
@@ -2410,7 +2433,8 @@ canonicalEnvelopeDecoder =
         fieldsDecoder =
             D.map7
                 (\eventId scope workspaceId entityType entityId entityAction invalidations ->
-                    { eventId = eventId
+                    { actor = ActorAttribution.empty
+                    , eventId = eventId
                     , scope = scope
                     , workspaceId = workspaceId
                     , entityType = entityType
@@ -2429,11 +2453,11 @@ canonicalEnvelopeDecoder =
                 (D.field "invalidations" (nonEmptyListDecoder canonicalInvalidationDecoder))
 
         metadataDecoder =
-            D.map4 (\envelope _ _ requestId -> { envelope | requestId = requestId })
+            D.map4 (\envelope _ _ ( requestId, actor ) -> { envelope | requestId = requestId, actor = actor })
                 fieldsDecoder
                 schemaVersionOneDecoder
                 (D.field "occurred_at" nonEmptyStringDecoder)
-                (D.map2 (\requestId _ -> requestId)
+                (D.map2 (\requestId actor -> ( requestId, actor ))
                     (D.field "transaction" canonicalTransactionDecoder)
                     (D.field "actor" canonicalActorDecoder)
                 )
@@ -2615,6 +2639,7 @@ changeEventDecoder =
         |> optional "actor_type" (D.nullable D.string) Nothing
         |> optional "actor_id" (D.nullable D.string) Nothing
         |> optional "actor_label" (D.nullable D.string) Nothing
+        |> optional "bot_identity" (D.nullable ActorAttribution.botIdentityDecoder) Nothing
         |> optional "data" (D.nullable D.value) Nothing
 
 

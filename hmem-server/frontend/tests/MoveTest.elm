@@ -399,7 +399,7 @@ base =
             Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
     in
     { initial | selectedWorkspaceId = Just "ws", auth = { status = AuthReady, mode = Just "local" }
-        , sessionContext = Just { authMode = "local", principal = { actorType = "user", actorId = "local", actorLabel = "Local", authority = "local_superadmin", grantUserId = Nothing }, globalPermissions = { createWorkspace = True, superadmin = True }, workspace = Nothing }
+        , sessionContext = Just { authMode = "local", effectiveActor = Nothing, principal = { actorType = "user", actorId = "local", actorLabel = "Local", authority = "local_superadmin", grantUserId = Nothing }, globalPermissions = { createWorkspace = True, superadmin = True }, workspace = Nothing }
         , projects = [ project "source" Nothing, project "destination" Nothing ] |> List.map (\p -> ( p.id, Api.projectFromCardSummary p )) |> Dict.fromList
         , tasks = Dict.singleton "child" child
     }

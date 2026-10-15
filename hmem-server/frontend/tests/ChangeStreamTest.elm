@@ -109,7 +109,7 @@ suite =
                         ChangeStream.init (ChangeStream.Workspace "a") []
 
                     event =
-                        { eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "task", entityId = "t", entityAction = "updated", invalidations = [ { kind = "entity", target = "task:t" } ], requestId = Nothing }
+                        { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "task", entityId = "t", entityAction = "updated", invalidations = [ { kind = "entity", target = "task:t" } ], requestId = Nothing }
 
                     wrong =
                         { event | scope = Api.WorkspaceScope "b" }
@@ -126,7 +126,7 @@ suite =
                         ChangeStream.init (ChangeStream.Workspace "w") []
 
                     event =
-                        { eventId = "rename", scope = Api.WorkspaceScope "w", workspaceId = Just "w", entityType = "workspace", entityId = "w", entityAction = "updated", invalidations = [ { kind = "entity", target = "workspace:w" } ], requestId = Nothing }
+                        { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = "rename", scope = Api.WorkspaceScope "w", workspaceId = Just "w", entityType = "workspace", entityId = "w", entityAction = "updated", invalidations = [ { kind = "entity", target = "workspace:w" } ], requestId = Nothing }
                 in
                 ChangeStream.reduceFrame (Api.CanonicalChange event) state
                     |> Tuple.second
@@ -147,7 +147,7 @@ suite =
                     actions entityType entityAction invalidations =
                         ChangeStream.reduceFrame
                             (Api.CanonicalChange
-                                { eventId = entityType ++ "-" ++ entityAction
+                                { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = entityType ++ "-" ++ entityAction
                                 , scope = Api.WorkspaceScope "w"
                                 , workspaceId = Just "w"
                                 , entityType = entityType
@@ -198,7 +198,7 @@ suite =
                         { kind = "entity", target = "project:p" }
 
                     event =
-                        { eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "project", entityId = "p", entityAction = "updated", invalidations = [ duplicate, duplicate ], requestId = Nothing }
+                        { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "project", entityId = "p", entityAction = "updated", invalidations = [ duplicate, duplicate ], requestId = Nothing }
 
                     unknown =
                         { event | eventId = "next", invalidations = [ { kind = "unrecognised", target = "project:p" } ] }
@@ -276,7 +276,7 @@ suite =
                         ChangeStream.init (ChangeStream.Workspace "w") []
 
                     workspaceEvent =
-                        { eventId = "workspace-matrix"
+                        { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = "workspace-matrix"
                         , scope = Api.WorkspaceScope "w"
                         , workspaceId = Just "w"
                         , entityType = "task"
@@ -301,7 +301,7 @@ suite =
                         }
 
                     globalEvent =
-                        { eventId = "global-matrix"
+                        { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = "global-matrix"
                         , scope = Api.GlobalScope
                         , workspaceId = Nothing
                         , entityType = "workspace"
@@ -340,7 +340,7 @@ suite =
                         ChangeStream.init (ChangeStream.Workspace "w") []
 
                     base =
-                        { eventId = "bad"
+                        { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = "bad"
                         , scope = Api.WorkspaceScope "w"
                         , workspaceId = Just "w"
                         , entityType = "task"
@@ -373,7 +373,7 @@ suite =
 
                     event eventId =
                         Api.CanonicalChange
-                            { eventId = eventId
+                            { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = eventId
                             , scope = Api.WorkspaceScope "w"
                             , workspaceId = Just "w"
                             , entityType = "task"
@@ -392,7 +392,7 @@ suite =
                 let
                     workspace action eventId =
                         Api.CanonicalChange
-                            { eventId = eventId
+                            { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = eventId
                             , scope = Api.GlobalScope
                             , workspaceId = Nothing
                             , entityType = "workspace"
@@ -404,7 +404,7 @@ suite =
 
                     entity kind identity action eventId =
                         Api.CanonicalChange
-                            { eventId = eventId
+                            { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = eventId
                             , scope = Api.WorkspaceScope "w"
                             , workspaceId = Just "w"
                             , entityType = kind
@@ -437,7 +437,7 @@ suite =
                 let
                     event action eventId requestId =
                         Api.CanonicalChange
-                            { eventId = eventId
+                            { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = eventId
                             , scope = Api.WorkspaceScope "w"
                             , workspaceId = Just "w"
                             , entityType = "task_dependency"
@@ -475,7 +475,7 @@ suite =
                 let
                     event action eventId =
                         Api.CanonicalChange
-                            { eventId = eventId
+                            { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = eventId
                             , scope = Api.WorkspaceScope "w"
                             , workspaceId = Just "w"
                             , entityType = "observation"
@@ -564,7 +564,7 @@ suite =
             \_ ->
                 let
                     event =
-                        { eventId = "workspace-deleted"
+                        { actor = { actorType = Nothing, actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, eventId = "workspace-deleted"
                         , scope = Api.GlobalScope
                         , workspaceId = Nothing
                         , entityType = "workspace"
@@ -707,7 +707,7 @@ streamModel =
     { base
         | auth = { status = AuthReady, mode = Just "test" }
         , selectedWorkspaceId = Just "a"
-        , sessionContext = Just { authMode = "test", principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = True }, workspace = Just { workspaceId = "a", role = Just "read", canRead = True, canEdit = False, canAdmin = False } }
+        , sessionContext = Just { authMode = "test", effectiveActor = Nothing, principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = True }, workspace = Just { workspaceId = "a", role = Just "read", canRead = True, canEdit = False, canAdmin = False } }
     }
 
 

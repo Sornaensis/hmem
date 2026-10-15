@@ -1,5 +1,6 @@
 module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, auditReturnFilters, init, nextAuditOffset, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
 
+import ActorAttribution
 import Api
 import Dict
 import Feature.Focus as Focus
@@ -678,6 +679,8 @@ auditContextDetailItems entry =
     ]
         ++ maybeDetail "Actor type" entry.actorType
         ++ maybeDetail "Actor ID" entry.actorId
+        ++ maybeDetail "Actor label" entry.actorLabel
+        ++ (entry.botIdentity |> Maybe.map (\identity -> [ ( "Declared role", identity.role ), ( "Model", identity.modelId ) ]) |> Maybe.withDefault [])
         ++ maybeDetail "Workspace ID" entry.workspaceId
         ++ maybeDetail "Request ID" entry.requestId
 
@@ -1385,6 +1388,7 @@ viewAuditLogEntry model entry =
 
                 Nothing ->
                     text ""
+            , span [ class "audit-actor" ] [ text ("By " ++ auditActorSummary entry) ]
             , span [ class "audit-timestamp" ] [ text (formatDate entry.changedAt) ]
             ]
         , if expanded then
@@ -1395,7 +1399,7 @@ viewAuditLogEntry model entry =
                 , div [ class "audit-entry-meta" ]
                     [ span [ class "audit-entry-id" ] [ text "Entry: ", Helpers.copyableValue "" "audit entry ID" entry.id (String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text "Entity: ", Helpers.copyableValue "" "entity ID" entry.entityId (String.left 8 entry.entityId) ]
-                    , span [ class "audit-actor" ] [ text "Actor: ", if entry.actorLabel == Nothing then entry.actorId |> Maybe.map (\value -> Helpers.copyableValue "" "actor ID" value (String.left 12 value)) |> Maybe.withDefault (text "unknown") else text (auditActorSummary entry) ]
+                    , span [ class "audit-actor" ] [ text "Actor: ", text (auditActorSummary entry) ]
                     , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model && model.page == AuditLogPage then
                         button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
 
@@ -1456,20 +1460,8 @@ auditContextDetailItemsForView model entry =
 
 
 auditActorSummary : Api.AuditLogEntry -> String
-auditActorSummary entry =
-    case entry.actorLabel of
-        Just label ->
-            label
-
-        Nothing ->
-            case entry.actorId of
-                Just actorId ->
-                    String.left 12 actorId
-
-                Nothing ->
-                    "unknown"
-
-
+auditActorSummary =
+    ActorAttribution.label
 
 -- ENTITY HISTORY
 
@@ -1563,6 +1555,8 @@ viewHistoryEntry model entry =
               else
                 text ""
             ]
+        , span [ class "history-actor" ] [ text ("By " ++ ActorAttribution.label entry) ]
+        , ActorAttribution.viewDetails entry
         , changedFields
         ]
 
@@ -1767,7 +1761,7 @@ viewAuditContext model entry =
         [ h4 [ class "audit-detail-heading" ] [ text "Audit context" ]
         , dl [ class "audit-detail-grid" ]
             (List.concatMap (\( labelText, valueText ) ->
-                if labelText == "Actor" && entry.actorLabel == Nothing && entry.actorId /= Nothing then
+                if labelText == "Actor ID" && entry.actorId /= Nothing then
                     [ dt [ class "audit-detail-label" ] [ text labelText ]
                     , dd [ class "audit-detail-value" ] [ Helpers.copyableValue "" "actor ID" (Maybe.withDefault "" entry.actorId) valueText ] ]
                 else if labelText == "Target entity" then

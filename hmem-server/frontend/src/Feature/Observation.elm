@@ -64,6 +64,7 @@ module Feature.Observation exposing
     , projectResultRows
     )
 
+import ActorAttribution
 import Api
 import Array
 import Char
@@ -4809,6 +4810,7 @@ viewRevisionSummary observation =
         [ text (revision.label ++ ": ")
         , Helpers.copyableValue "" (String.toLower revision.label) revision.sha (String.left 12 revision.sha ++ "…")
         , text (" · " ++ formatObservationTimestamp revision.recordedAt)
+        , span [ class "observation-actor" ] [ text (" · " ++ observationActorLabel observation) ]
         ]
 
 
@@ -4819,6 +4821,8 @@ viewCurrentProvenance observation state =
         [ dt [ class "observation-detail-meta-label" ] [ text revision.label ]
         , dd [ class "observation-detail-meta-value" ]
             [ span [ class "observation-revision-value" ] [ Helpers.copyableValue "" (String.toLower revision.label) revision.sha revision.sha, text (" · " ++ formatObservationTimestamp revision.recordedAt) ]
+            , span [ class "observation-actor" ] [ text ("By " ++ observationActorLabel observation) ]
+            , observation.currentProvenance |> Maybe.map ActorAttribution.viewDetails |> Maybe.withDefault (text "")
             , viewHistory observation state
             ]
         ]
@@ -4844,6 +4848,8 @@ viewHistory observation state =
             li [ class "observation-history-entry" ]
                 [ Helpers.copyableValue "" "recorded revision" event.provenance.reviewedGitSha event.provenance.reviewedGitSha
                 , span [ class "observation-history-time" ] [ text (formatObservationTimestamp event.provenance.recordedAt) ]
+                , span [ class "observation-actor" ] [ text ("By " ++ ActorAttribution.label event.provenance) ]
+                , ActorAttribution.viewDetails event.provenance
                 ]
     in
     section [ class "observation-history", attribute "aria-label" "Revision history" ]
@@ -4859,3 +4865,7 @@ viewHistory observation state =
                 ]
           else text ""
         ]
+
+observationActorLabel : Api.Observation -> String
+observationActorLabel observation =
+    observation.currentProvenance |> Maybe.map ActorAttribution.label |> Maybe.withDefault "Local User"

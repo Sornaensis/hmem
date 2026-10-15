@@ -374,7 +374,7 @@ workspace =
 
 editorSession : Api.SessionContext
 editorSession =
-    { authMode = "test"
+    { authMode = "test", effectiveActor = Nothing
     , principal = { actorType = "user", actorId = "editor", actorLabel = "Editor", authority = "local", grantUserId = Nothing }
     , globalPermissions = { createWorkspace = False, superadmin = False }
     , workspace = Just { workspaceId = workspaceId, role = Just "edit", canRead = True, canEdit = True, canAdmin = False }

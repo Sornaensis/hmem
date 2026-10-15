@@ -13,6 +13,7 @@ module Permissions exposing
     , isImplicitLocalSuperadminSession
     , isLocalMode
     , isSuperadmin
+    , principalAttributionDetails
     , principalAttributionLabel
     , shouldShowAuthDetailsForSession
     , shouldShowLocalSessionDetails
@@ -20,6 +21,9 @@ module Permissions exposing
     , shouldShowPermissionSummary
     )
 
+import Html exposing (Html)
+import Html.Attributes
+import ActorAttribution
 import Api
 import Types exposing (AuthStatus(..), Model)
 
@@ -157,43 +161,24 @@ currentWorkspaceRoleLabel model =
 
 principalAttributionLabel : Model -> Maybe String
 principalAttributionLabel model =
-    model.sessionContext
-        |> Maybe.map
-            (\session ->
-                let
-                    principal =
-                        session.principal
+    model.sessionContext |> Maybe.map (sessionActor >> ActorAttribution.label)
 
-                    actorPrefix =
-                        case ( session.authMode, principal.actorType ) of
-                            ( mode, "bot" ) ->
-                                if mode == localAuthMode then
-                                    "Local bot"
 
-                                else
-                                    "Bot"
+principalAttributionDetails : Model -> Html msg
+principalAttributionDetails model =
+    model.sessionContext |> Maybe.map (\session ->
+        Html.div []
+            [ ActorAttribution.viewDetails (sessionActor session)
+            , Html.div [ Html.Attributes.class "actor-authority-details" ]
+                [ Html.text ("Authenticated principal: " ++ session.principal.actorLabel ++ " · " ++ session.principal.actorId ++ " · " ++ session.principal.authority) ]
+            ]) |> Maybe.withDefault (Html.text "")
 
-                            ( mode, _ ) ->
-                                if mode == localAuthMode then
-                                    "Local user"
 
-                                else
-                                    "User"
-
-                    authoritySuffix =
-                        case principal.authority of
-                            authority ->
-                                if authority == localSuperadminAuthority then
-                                    " · implicit superadmin"
-
-                                else if authority == "grant_user" then
-                                    " · grant-backed"
-
-                                else
-                                    ""
-                in
-                actorPrefix ++ ": " ++ principal.actorLabel ++ authoritySuffix
-            )
+sessionActor : Api.SessionContext -> ActorAttribution.Actor
+sessionActor session =
+    Maybe.withDefault
+        { actorType = Just session.principal.actorType, actorId = Just session.principal.actorId, actorLabel = Just session.principal.actorLabel, botIdentity = Nothing }
+        session.effectiveActor
 
 currentWorkspacePermission : (Api.SessionWorkspaceContext -> Bool) -> Model -> Bool
 currentWorkspacePermission selector model =

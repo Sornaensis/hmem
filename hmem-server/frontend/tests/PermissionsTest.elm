@@ -22,7 +22,7 @@ suite =
 
 implicitLocalSuperadmin : Api.SessionContext
 implicitLocalSuperadmin =
-    { authMode = "local"
+    { authMode = "local", effectiveActor = Nothing
     , principal = localPrincipal
     , globalPermissions = { createWorkspace = True, superadmin = True }
     , workspace = Nothing

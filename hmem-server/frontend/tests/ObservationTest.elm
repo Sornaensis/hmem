@@ -3653,7 +3653,7 @@ editableModel observations =
 
 editorSession : Api.SessionContext
 editorSession =
-    { authMode = "deployed"
+    { authMode = "deployed", effectiveActor = Nothing
     , principal =
         { actorType = "user"
         , actorId = "editor"
@@ -4737,5 +4737,5 @@ revisionProvenance sequence sha =
     { sequence = sequence, eventKind = "update", reviewedGitSha = sha
     , contentVersion = Just "20000000-0000-4000-8000-000000000000"
     , contentDigest = Just (String.repeat 64 "a"), recordedAt = "2026-01-01T00:00:00Z"
-    , actorType = Just "user", actorId = Just "reviewer", actorLabel = Just "Reviewer"
+    , actorType = Just "user", actorId = Just "reviewer", actorLabel = Just "Reviewer", botIdentity = Nothing
     }

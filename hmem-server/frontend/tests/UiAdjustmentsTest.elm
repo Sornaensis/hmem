@@ -151,7 +151,7 @@ base =
 
 session : Api.SessionContext
 session =
-    { authMode = "local", principal = { actorType = "user", actorId = "owner", actorLabel = "Owner", authority = "local", grantUserId = Nothing }
+    { authMode = "local", effectiveActor = Nothing, principal = { actorType = "user", actorId = "owner", actorLabel = "Owner", authority = "local", grantUserId = Nothing }
     , globalPermissions = { createWorkspace = True, superadmin = True }
     , workspace = Just { workspaceId = "a", role = Just "admin", canRead = True, canEdit = True, canAdmin = True }
     }

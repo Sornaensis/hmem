@@ -1617,7 +1617,7 @@ observationWithWorkspace id workspaceId =
 
 sessionContext : String -> String -> String -> Bool -> Bool -> Maybe String -> Api.SessionContext
 sessionContext authMode actorType authority createWorkspace superadmin workspaceRole =
-    { authMode = authMode
+    { authMode = authMode, effectiveActor = Nothing
     , principal =
         { actorType = actorType
         , actorId = "principal-a"

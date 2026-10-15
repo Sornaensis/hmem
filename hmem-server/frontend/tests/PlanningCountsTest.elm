@@ -116,7 +116,7 @@ settle value model = Main.update (GotWorkspacePlanningCounts (guard model) (Ok v
 
 sessionFor : String -> String -> Api.SessionContext
 sessionFor workspace actor =
-    { authMode = "test", principal = { actorType = "user", actorId = actor, actorLabel = actor, authority = "local", grantUserId = Nothing }
+    { authMode = "test", effectiveActor = Nothing, principal = { actorType = "user", actorId = actor, actorLabel = actor, authority = "local", grantUserId = Nothing }
     , globalPermissions = { createWorkspace = False, superadmin = False }
     , workspace = Just { workspaceId = workspace, role = Just "edit", canRead = True, canEdit = True, canAdmin = False }
     }

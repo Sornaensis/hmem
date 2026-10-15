@@ -36,7 +36,7 @@ model =
         flags = { apiUrl = "https://api.invalid", wsUrl = "wss://api.invalid", sessionId = "runtime", runtimeMode = "test", authTokenStorageKey = "auth", authTokenPresent = False, loginUrl = Nothing, logoutUrl = Nothing }
         base = AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing (Helpers.parseFragment url.fragment) |> AppShell.finalizeInit (WorkspacePage workspaceId)
         workspace = { id = workspaceId, name = "Repository", workspaceType = Api.Repository, ghOwner = Nothing, ghRepo = Nothing, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z" }
-        session = { authMode = "local", principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }
+        session = { authMode = "local", effectiveActor = Nothing, principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }
             , workspace = Just { workspaceId = workspaceId, role = Just "owner", canRead = True, canEdit = True, canAdmin = True } }
         state = O.startReloadForSession 3 workspaceId O.init
     in
@@ -118,7 +118,7 @@ suite = describe "automatic observation refresh and scoped preferences"
             foreign = { started | selectedWorkspaceId = Just "foreign" } |> reply
             epoch = { started | sessionRequestEpoch = 4 } |> reply
             revoked = { started | auth = { status = AuthBooting, mode = Just "local" } } |> reply
-            session = started.sessionContext |> Maybe.withDefault { authMode = "local", principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }, workspace = Nothing }
+            session = started.sessionContext |> Maybe.withDefault { authMode = "local", effectiveActor = Nothing, principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }, workspace = Nothing }
             principal = session.principal
             actor = { started | sessionContext = Just { session | principal = { principal | actorId = "other-actor" } } } |> reply
             readRevoked = { started | sessionContext = Just { session | workspace = Just { workspaceId = workspaceId, role = Just "read", canRead = False, canEdit = False, canAdmin = False } } } |> reply

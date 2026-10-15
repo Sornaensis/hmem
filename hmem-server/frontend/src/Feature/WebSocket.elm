@@ -7,6 +7,7 @@ module Feature.WebSocket exposing
     , update
     )
 
+import ActorAttribution
 import Api
 import Dict
 import Feature.ChangeStream as ChangeStream
@@ -2102,13 +2103,7 @@ changeEventDescription event =
 
 actorSuffix : Api.ChangeEvent -> String
 actorSuffix event =
-    case event.actorLabel of
-        Just label ->
-            " by " ++ label
-
-        Nothing ->
-            ""
-
+    " by " ++ ActorAttribution.label event
 
 scopeAuthority : ChangeStream.Scope -> Model -> Maybe Api.SessionContext
 scopeAuthority scope model =

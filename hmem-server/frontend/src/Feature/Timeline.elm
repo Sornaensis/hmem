@@ -1,5 +1,6 @@
 module Feature.Timeline exposing (chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel)
 
+import ActorAttribution
 import Api
 import Char
 import Dict
@@ -1657,6 +1658,7 @@ viewTimelineEvent event =
                 ]
             , viewStatusTransition event.statusTransition
             , viewTimelineContext event
+            , div [ class "timeline-actor-details" ] (event.actor |> Maybe.map (ActorAttribution.details >> List.map (\( name, value ) -> span [] [ text (name ++ ": " ++ value ++ " ") ])) |> Maybe.withDefault [])
             ]
         ]
 
@@ -1705,21 +1707,8 @@ timelineContextSegments event =
 
 
 eventActorLabel : Maybe Api.TimelineActor -> Maybe String
-eventActorLabel maybeActor =
-    maybeActor
-        |> Maybe.andThen
-            (\actor ->
-                case ( actor.actorLabel, actor.actorType ) of
-                    ( Just label, _ ) ->
-                        Just ("By " ++ label)
-
-                    ( Nothing, Just actorType ) ->
-                        Just ("By " ++ actorType)
-
-                    _ ->
-                        Nothing
-            )
-
+eventActorLabel actor =
+    Just ("By " ++ (actor |> Maybe.map ActorAttribution.label |> Maybe.withDefault "Local User"))
 
 timelineStatusSummary : Maybe Api.TimelineStatusTransition -> Maybe String
 timelineStatusSummary maybeTransition =

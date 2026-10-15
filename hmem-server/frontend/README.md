@@ -27,6 +27,14 @@ value has a compact History disclosure with copyable SHAs and recorded dates.
 Open history follows sequential pages of 25 records in recorded order; collapsing
 stops continuation, and a failed page offers an explicit Retry.
 
+Actor labels in audits, entity history, Timeline, sessions and Observation
+assertions show the declared role and complete `harness:model:reasoning` when
+available. Actor details retain the original ID and label. Older records keep
+known human, bot, service, system and Local User attribution; unknown legacy
+attribution displays Local User without inventing model metadata. Session
+attribution is a display value: permissions and request lifetimes continue to
+use the authenticated principal.
+
 All and Subject mode switches preserve the current physical scroll position,
 including newer scrolling while results load. Observation and Project card
 surfaces are left aligned with a responsive maximum outer width of 78rem; their

@@ -22,7 +22,16 @@ suite =
         ([ HomePage, WorkspacePage "a" ]
             |> List.concatMap
                 (\page ->
-                    [ test ("unchanged superadmin refresh preserves catalogue, loading and live guards on " ++ pageName page) <|
+                    [ test ("effective actor display changes preserve principal-owned lifetimes on " ++ pageName page) <|
+                        \_ ->
+                            let
+                                before = populated page
+                                after = refresh { superadmin | effectiveActor = Just { actorType = Just "bot", actorId = Just "declared-persona", actorLabel = Just "Reviewer", botIdentity = Just { role = "Reviewer", modelId = "pi:gpt-6.1-sol:extra-high" } } } before
+                            in
+                            Expect.equal
+                                ( before.webSocket, before.dataLoading, before.sessionRequestEpoch )
+                                ( after.webSocket, after.dataLoading, after.sessionRequestEpoch )
+                    , test ("unchanged superadmin refresh preserves catalogue, loading and live guards on " ++ pageName page) <|
                         \_ ->
                             let
                                 before =
@@ -339,7 +348,7 @@ globalGuard page =
 
 superadmin : Api.SessionContext
 superadmin =
-    { authMode = "test", principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = True, superadmin = True }, workspace = Just { workspaceId = "a", role = Just "read", canRead = True, canEdit = False, canAdmin = False } }
+    { authMode = "test", effectiveActor = Nothing, principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = True, superadmin = True }, workspace = Just { workspaceId = "a", role = Just "read", canRead = True, canEdit = False, canAdmin = False } }
 
 
 reader : Api.SessionContext

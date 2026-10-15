@@ -324,7 +324,7 @@ viewSidebar model =
 
 viewSessionFooter : Model -> Html Msg
 viewSessionFooter model =
-    if not (Permissions.shouldShowLocalSessionDetails model) then
+    if not (Permissions.shouldShowLocalSessionDetails model) && (model.sessionContext |> Maybe.andThen .effectiveActor) == Nothing then
         text ""
 
     else
@@ -340,7 +340,7 @@ viewSessionFooter model =
                                 "Signed in"
                             )
                         ]
-                    , div [ class "sidebar-session-principal" ] [ text attribution ]
+                    , div [ class "sidebar-session-principal" ] [ text attribution, Permissions.principalAttributionDetails model ]
                     , if not (Permissions.isLocalMode model) && (model.flags.authTokenPresent || model.flags.logoutUrl /= Nothing) then
                         button [ class "sidebar-session-action", onClick LogoutRequested ] [ text "Sign out" ]
 

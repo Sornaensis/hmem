@@ -219,7 +219,7 @@ ready =
         flags = { apiUrl = "https://api.example", wsUrl = "wss://api.example", sessionId = "session", runtimeMode = "test", authTokenStorageKey = "hmem-token", authTokenPresent = False, loginUrl = Nothing, logoutUrl = Nothing }
         url = { protocol = Url.Https, host = "app.example", port_ = Nothing, path = "/workspace/workspace-1", query = Nothing, fragment = Nothing }
         initial = AppShell.initModel Nothing url (WorkspacePage "workspace-1") flags Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing } |> AppShell.finalizeInit (WorkspacePage "workspace-1")
-        session = { authMode = "test", principal = { actorType = "user", actorId = "reader", actorLabel = "reader", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }, workspace = Just { workspaceId = "workspace-1", role = Just "edit", canRead = True, canEdit = True, canAdmin = False } }
+        session = { authMode = "test", effectiveActor = Nothing, principal = { actorType = "user", actorId = "reader", actorLabel = "reader", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }, workspace = Just { workspaceId = "workspace-1", role = Just "edit", canRead = True, canEdit = True, canAdmin = False } }
         workspace = { id = "workspace-1", name = "Workspace", workspaceType = Api.Planning, ghOwner = Nothing, ghRepo = Nothing, createdAt = "now", updatedAt = "now" }
         loading = initial.dataLoading
     in

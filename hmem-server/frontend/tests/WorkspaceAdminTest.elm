@@ -23,7 +23,7 @@ workspace =
 
 session : String -> Bool -> String -> Api.SessionContext
 session role superadmin authority =
-    { authMode = "local"
+    { authMode = "local", effectiveActor = Nothing
     , principal = { actorType = "user", actorId = "actor", actorLabel = "Owner", authority = authority, grantUserId = Nothing }
     , globalPermissions = { createWorkspace = False, superadmin = superadmin }
     , workspace = Just { workspaceId = "a", role = Just role, canRead = True, canEdit = role /= "read", canAdmin = List.member role [ "admin", "owner" ] }

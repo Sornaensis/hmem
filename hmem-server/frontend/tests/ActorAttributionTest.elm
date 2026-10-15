@@ -29,6 +29,53 @@ suite =
         , test "retains the authenticated human label when declaration metadata is present" <| \_ ->
             Actor.label { actorType = Just "user", actorId = Just "alice", actorLabel = Just "Alice", botIdentity = Just declared }
                 |> Expect.equal "Alice · Reviewer · pi:gpt-6.1-sol:extra-high"
+        , test "inline model attribution takes precedence over a human actor type and retains the human name" <| \_ ->
+            let
+                rendered =
+                    Actor.viewInline { actorType = Just "user", actorId = Just "alice", actorLabel = Just "Alice", botIdentity = Just declared }
+                        |> Query.fromHtml
+            in
+            Expect.all
+                [ \_ -> rendered |> Query.find [ Selector.class "actor-attribution-kind" ] |> Query.has [ Selector.text "Model" ]
+                , \_ -> rendered |> Query.find [ Selector.class "actor-attribution-label" ] |> Query.has [ Selector.text "Alice · Reviewer · pi:gpt-6.1-sol:extra-high" ]
+                , \_ -> rendered |> Query.findAll [ Selector.tag "details" ] |> Query.count (Expect.equal 0)
+                ] ()
+        , test "inline human and historical actors retain honest classifications and known labels" <| \_ ->
+            [ ( { actorType = Just "user", actorId = Just "alice", actorLabel = Just "Alice", botIdentity = Nothing }, "User", "Alice" )
+            , ( { actorType = Just "bot", actorId = Just "old-bot", actorLabel = Nothing, botIdentity = Nothing }, "Bot", "old-bot" )
+            , ( { actorType = Just "service", actorId = Just "worker", actorLabel = Nothing, botIdentity = Nothing }, "Service", "worker" )
+            , ( { actorType = Just "system", actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing }, "System", "System" )
+            , ( { actorType = Just "local", actorId = Nothing, actorLabel = Just "Local User", botIdentity = Nothing }, "User", "Local User" )
+            , ( { actorType = Just "historical", actorId = Nothing, actorLabel = Just "Imported actor", botIdentity = Nothing }, "Actor", "Imported actor" )
+            , ( Actor.empty, "User", "Local User" )
+            ]
+                |> List.map (\( actor, kind, name ) ->
+                    let
+                        rendered = Actor.viewInline actor |> Query.fromHtml
+                    in
+                    Expect.all
+                        [ \_ -> rendered |> Query.find [ Selector.class "actor-attribution-kind" ] |> Query.has [ Selector.text kind ]
+                        , \_ -> rendered |> Query.has [ Selector.text name ]
+                        , \_ -> rendered |> Query.hasNot [ Selector.text "Model" ]
+                        ] ()
+                )
+                |> (\expectations -> Expect.all (List.map always expectations) ())
+        , test "inline attribution retains complete long values without extra metadata or controls" <| \_ ->
+            let
+                longModel = "codex:" ++ String.repeat 10 "complete-model-name-" ++ ":extra-high"
+                longName = String.repeat 10 "Complete human name "
+                rendered =
+                    Actor.viewInline { actorType = Just "bot", actorId = Just "private-id", actorLabel = Just "Authenticated bot", botIdentity = Just { role = "Reviewer", modelId = longModel } }
+                        |> Query.fromHtml
+            in
+            Expect.all
+                [ \_ -> rendered |> Query.has [ Selector.text ("Reviewer · " ++ longModel) ]
+                , \_ -> rendered |> Query.hasNot [ Selector.text "private-id" ]
+                , \_ -> rendered |> Query.hasNot [ Selector.text "Authenticated bot" ]
+                , \_ -> rendered |> Query.findAll [ Selector.tag "button" ] |> Query.count (Expect.equal 0)
+                , \_ -> Actor.viewInline { actorType = Just "user", actorId = Just "alice", actorLabel = Just longName, botIdentity = Nothing }
+                    |> Query.fromHtml |> Query.has [ Selector.text longName ]
+                ] ()
         , test "renders full actor ID and original label as inspectable detail content" <| \_ ->
             Actor.viewDetails { actorType = Just "bot", actorId = Just "credential-derived-bot-id", actorLabel = Just "Authenticated bot", botIdentity = Just declared }
                 |> Query.fromHtml

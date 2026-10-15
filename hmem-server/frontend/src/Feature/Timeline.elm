@@ -1,11 +1,11 @@
-module Feature.Timeline exposing (chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel)
+module Feature.Timeline exposing (chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, timestampSources, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel, visibleTimelineEvents)
 
 import ActorAttribution
 import Api
 import Char
 import Dict
 import Feature.Focus as Focus
-import Helpers exposing (buildFragment, focusElement, formatDate, pushUrl, saveFiltersCmd)
+import Helpers exposing (buildFragment, focusElement, pushUrl, saveFiltersCmd)
 import Html exposing (..)
 import Html.Attributes exposing (attribute, class, disabled, selected, title, type_, value)
 import Html.Events exposing (onClick, onInput, preventDefaultOn)
@@ -16,6 +16,7 @@ import Svg
 import Svg.Attributes as SA
 import Task
 import Time
+import TimestampDisplay
 import Types exposing (..)
 
 
@@ -862,23 +863,51 @@ viewWorkspaceTimelinePanel wsId model =
             [ h3 [] [ text "Timeline" ]
             , p [] [ text "Curated task and project lifecycle events for this workspace." ]
             ]
-        , viewTimelineHistogram timeline
+        , viewTimelineHistogram model.timestamps timeline
         , if timeline.loading && List.isEmpty timeline.events then
             div [ class "loading-indicator" ] [ text "Loading timeline..." ]
 
           else
-            viewTimelineBody wsId timeline
+            viewTimelineBody model.timestamps wsId timeline
         ]
 
 
-viewTimelineHistogram : TimelineModel -> Html Msg
-viewTimelineHistogram timeline =
+visibleTimelineEvents : TimelineModel -> List Api.WorkspaceTimelineEvent
+visibleTimelineEvents timeline =
+    timeline.events
+        |> filterTimelineEventsForSelection timeline.histogramSelectedBucket timeline.entityFilter timeline.eventFilter
+        |> sortTimelineEvents
+
+
+timestampSources : TimelineModel -> List String
+timestampSources timeline =
+    let
+        eventBodyVisible =
+            not (timeline.loading && List.isEmpty timeline.events) && not (timelineErrorIsBlocking timeline)
+
+        selection =
+            if eventBodyVisible then
+                timeline.histogramSelectedBucket |> Maybe.map (\value -> [ value.since, value.until ]) |> Maybe.withDefault []
+            else []
+    in
+    List.concatMap (\bucket -> [ bucket.bucketStart, bucket.bucketEnd ]) timeline.histogramBuckets
+        ++ selection
+        ++ (if eventBodyVisible then List.map .occurredAt (visibleTimelineEvents timeline) else [])
+
+
+timelineRangeLabel : TimestampDisplay.State -> String -> String -> String
+timelineRangeLabel display since until =
+    "[" ++ TimestampDisplay.lookup display since ++ ", " ++ TimestampDisplay.lookup display until ++ ")"
+
+
+viewTimelineHistogram : TimestampDisplay.State -> TimelineModel -> Html Msg
+viewTimelineHistogram display timeline =
     div [ class "timeline-chart-panel" ]
         [ viewTimelineHistogramControls timeline
         , viewTimelineChartToggles timeline.chartSeries
         , div [ class "timeline-chart-toggles", attribute "aria-label" "Visible lifecycle events" ]
             (List.map (\( key, labelText ) -> button [ class ("timeline-series-toggle timeline-series-" ++ key), attribute "aria-pressed" (if Dict.get key timeline.chartActions |> Maybe.withDefault False then "true" else "false"), onClick (ToggleTimelineChartAction key) ] [ span [ class "timeline-series-marker" ] [], text labelText ]) lifecycleActions)
-        , viewTimelineHistogramContent timeline
+        , viewTimelineHistogramContent display timeline
         ]
 
 
@@ -906,8 +935,8 @@ viewTimelineHistogramControls timeline =
         ]
 
 
-viewTimelineHistogramContent : TimelineModel -> Html Msg
-viewTimelineHistogramContent timeline =
+viewTimelineHistogramContent : TimestampDisplay.State -> TimelineModel -> Html Msg
+viewTimelineHistogramContent display timeline =
     let
         hasBuckets =
             not (List.isEmpty timeline.histogramBuckets)
@@ -928,17 +957,17 @@ viewTimelineHistogramContent timeline =
             div [ class "timeline-graph-state" ] [ text "No lifecycle activity in this date range." ]
 
           else if hasBuckets then
-            viewTimelineHistogramChart timeline
+            viewTimelineHistogramChart display timeline
 
           else
             text ""
         ]
 
 
-viewTimelineHistogramChart : TimelineModel -> Html Msg
-viewTimelineHistogramChart timeline =
-    div [ class "timeline-line-graphs", title "Lifecycle activity by UTC bucket" ]
-        [ viewTimelineLineChart timeline "Lifecycle activity" "lifecycle" ]
+viewTimelineHistogramChart : TimestampDisplay.State -> TimelineModel -> Html Msg
+viewTimelineHistogramChart display timeline =
+    div [ class "timeline-line-graphs", title "Lifecycle activity by UTC bucket, with endpoints in your browser timezone" ]
+        [ viewTimelineLineChart display timeline "Lifecycle activity" "lifecycle" ]
 
 
 lifecycleActions : List ( String, String )
@@ -1000,8 +1029,8 @@ toggleTimelineChartSeries key series =
             series
 
 
-viewTimelineLineChart : TimelineModel -> String -> String -> Html Msg
-viewTimelineLineChart timeline actionLabel action =
+viewTimelineLineChart : TimestampDisplay.State -> TimelineModel -> String -> String -> Html Msg
+viewTimelineLineChart display timeline actionLabel action =
     let
         visibleSeries =
             lifecycleChartSeries timeline
@@ -1026,12 +1055,12 @@ viewTimelineLineChart timeline actionLabel action =
                 , SA.class "timeline-line-chart"
                 , attribute "aria-labelledby" ("timeline-chart-" ++ action ++ "-title timeline-chart-" ++ action ++ "-description")
                 ]
-                ([ Svg.title [ SA.id ("timeline-chart-" ++ action ++ "-title") ] [ Svg.text (actionLabel ++ " lifecycle counts by UTC bucket") ]
-                 , Svg.desc [ SA.id ("timeline-chart-" ++ action ++ "-description") ] [ Svg.text "Each interactive point selects its half-open UTC bucket for the event cards." ]
+                ([ Svg.title [ SA.id ("timeline-chart-" ++ action ++ "-title") ] [ Svg.text (actionLabel ++ " lifecycle counts by UTC bucket, displayed in your browser timezone") ]
+                 , Svg.desc [ SA.id ("timeline-chart-" ++ action ++ "-description") ] [ Svg.text "Each interactive point selects its half-open UTC bucket for the event cards. Endpoint labels use your browser timezone." ]
                  ]
                     ++ timelineChartGrid canvasWidth actualMaximum renderDomain
-                    ++ timelineXLabels canvasWidth timeline.histogramBuckets
-                    ++ List.concatMap (viewTimelineSeriesSvg timeline.chartPointFocus timeline.histogramSelectedBucket actionLabel action renderDomain canvasWidth bucketCount) visibleSeries
+                    ++ timelineXLabels display canvasWidth timeline.histogramBuckets
+                    ++ List.concatMap (viewTimelineSeriesSvg display timeline.chartPointFocus timeline.histogramSelectedBucket actionLabel action renderDomain canvasWidth bucketCount) visibleSeries
                 )
             ]
         ]
@@ -1151,8 +1180,8 @@ uniqueInts values =
         values
 
 
-timelineXLabels : Int -> List Api.WorkspaceTimelineBucket -> List (Svg.Svg Msg)
-timelineXLabels canvasWidth buckets =
+timelineXLabels : TimestampDisplay.State -> Int -> List Api.WorkspaceTimelineBucket -> List (Svg.Svg Msg)
+timelineXLabels display canvasWidth buckets =
     let
         bucketCount =
             List.length buckets
@@ -1169,13 +1198,14 @@ timelineXLabels canvasWidth buckets =
                     [ SA.x (chartPercentX canvasWidth (chartXWithWidth canvasWidth bucketCount index))
                     , SA.y "264"
                     , SA.class "timeline-chart-x-axis"
+                    , attribute "aria-label" (timelineRangeLabel display bucket.bucketStart bucket.bucketEnd)
                     ]
-                    [ Svg.text bucket.label ]
+                    [ Svg.text (TimestampDisplay.lookup display bucket.bucketStart) ]
             )
 
 
-viewTimelineSeriesSvg : Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> Int -> Int -> Int -> TimelineSeriesDefinition -> List (Svg.Svg Msg)
-viewTimelineSeriesSvg pointFocus selectedBucket actionLabel action renderDomain canvasWidth bucketCount series =
+viewTimelineSeriesSvg : TimestampDisplay.State -> Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> Int -> Int -> Int -> TimelineSeriesDefinition -> List (Svg.Svg Msg)
+viewTimelineSeriesSvg display pointFocus selectedBucket actionLabel action renderDomain canvasWidth bucketCount series =
     let
         points =
             List.indexedMap (\index point -> { x = chartXWithWidth canvasWidth bucketCount index, y = chartY renderDomain (toFloat point.count), label = point.label, since = point.since, until = point.until, count = point.count }) series.values
@@ -1184,11 +1214,11 @@ viewTimelineSeriesSvg pointFocus selectedBucket actionLabel action renderDomain 
     -- with percentage x coordinates matching this nested viewport exactly.
     Svg.svg [ SA.viewBox ("0 0 " ++ String.fromInt canvasWidth ++ " 280"), SA.width "100%", SA.height "280", SA.preserveAspectRatio "none", attribute "aria-hidden" "true" ]
         [ Svg.path [ SA.d (timelinePath points), SA.class ("timeline-line timeline-series-" ++ series.key), SA.fill "none" ] [] ]
-        :: List.indexedMap (viewTimelinePoint pointFocus selectedBucket actionLabel action series canvasWidth (List.length points)) points
+        :: List.indexedMap (viewTimelinePoint display pointFocus selectedBucket actionLabel action series canvasWidth (List.length points)) points
 
 
-viewTimelinePoint : Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> TimelineSeriesDefinition -> Int -> Int -> Int -> { x : Float, y : Float, label : String, since : String, until : String, count : Int } -> Svg.Svg Msg
-viewTimelinePoint pointFocus selectedBucket actionLabel action series canvasWidth pointCount index point =
+viewTimelinePoint : TimestampDisplay.State -> Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> TimelineSeriesDefinition -> Int -> Int -> Int -> { x : Float, y : Float, label : String, since : String, until : String, count : Int } -> Svg.Svg Msg
+viewTimelinePoint display pointFocus selectedBucket actionLabel action series canvasWidth pointCount index point =
     let
         matchingBucket =
             -- Every action line has a roving keyboard point for bucket activation.
@@ -1211,7 +1241,7 @@ viewTimelinePoint pointFocus selectedBucket actionLabel action series canvasWidt
         , attribute "role" "button"
         , attribute "tabindex" (if isRovingTarget then "0" else "-1")
         , attribute "aria-pressed" (if matchingBucket then "true" else "false")
-        , attribute "aria-label" (actionLabel ++ ", " ++ series.label ++ ", " ++ point.label ++ ", " ++ formatDate point.since ++ " to " ++ formatDate point.until ++ " exclusive, " ++ String.fromInt point.count ++ ", " ++ if matchingBucket then "selected" else "not selected")
+        , attribute "aria-label" (actionLabel ++ ", " ++ series.label ++ ", " ++ TimestampDisplay.lookup display point.since ++ " to " ++ TimestampDisplay.lookup display point.until ++ " exclusive, " ++ String.fromInt point.count ++ ", " ++ if matchingBucket then "selected" else "not selected")
         , onClick (SelectTimelineHistogramBucket point.label point.since point.until)
         , onTimelinePointKey action series.key index pointCount (SelectTimelineHistogramBucket point.label point.since point.until)
         ]
@@ -1229,7 +1259,7 @@ viewTimelinePoint pointFocus selectedBucket actionLabel action series canvasWidt
             , SA.class "timeline-point"
             ]
             []
-        , Svg.title [] [ Svg.text (actionLabel ++ " — " ++ series.label ++ " — " ++ point.label ++ " [" ++ formatDate point.since ++ ", " ++ formatDate point.until ++ "): " ++ String.fromInt point.count) ]
+        , Svg.title [] [ Svg.text (actionLabel ++ " — " ++ series.label ++ " — " ++ timelineRangeLabel display point.since point.until ++ ": " ++ String.fromInt point.count) ]
         ]
 
 
@@ -1336,15 +1366,15 @@ floatString value =
     String.fromFloat value
 
 
-viewTimelineBody : String -> TimelineModel -> Html Msg
-viewTimelineBody wsId timeline =
+viewTimelineBody : TimestampDisplay.State -> String -> TimelineModel -> Html Msg
+viewTimelineBody display wsId timeline =
     case timeline.error of
         Just message ->
             if not (timelineErrorIsBlocking timeline) then
                 div [ class "timeline-stale-notice" ]
                     [ p [] [ text (message ++ " Showing the last successful timeline.") ]
                     , button [ class "btn-secondary", onClick RetryTimelineRefresh ] [ text "Retry" ]
-                    , viewTimelineEvents wsId timeline
+                    , viewTimelineEvents display wsId timeline
                     ]
 
             else
@@ -1355,11 +1385,11 @@ viewTimelineBody wsId timeline =
                     ]
 
         Nothing ->
-            viewTimelineEvents wsId timeline
+            viewTimelineEvents display wsId timeline
 
 
-viewTimelineEvents : String -> TimelineModel -> Html Msg
-viewTimelineEvents wsId timeline =
+viewTimelineEvents : TimestampDisplay.State -> String -> TimelineModel -> Html Msg
+viewTimelineEvents display wsId timeline =
     if List.isEmpty timeline.events && timeline.histogramSelectedBucket == Nothing then
         div [ class "empty-state timeline-state" ]
             [ h3 [] [ text "No timeline events yet" ]
@@ -1369,15 +1399,13 @@ viewTimelineEvents wsId timeline =
     else
         let
             visibleEvents =
-                timeline.events
-                    |> filterTimelineEventsForSelection timeline.histogramSelectedBucket timeline.entityFilter timeline.eventFilter
-                    |> sortTimelineEvents
+                visibleTimelineEvents timeline
 
             groupedEvents =
-                groupTimelineEvents visibleEvents
+                groupTimelineEvents display visibleEvents
         in
         div []
-            [ viewTimelineSelectionNote timeline.histogramSelectedBucket
+            [ viewTimelineSelectionNote display timeline.histogramSelectedBucket
             , viewTimelineFilters timeline
             , if timeline.hasMore then
                 p [ class "timeline-more-note" ] [ text (timelineMoreNote timeline.histogramSelectedBucket) ]
@@ -1385,21 +1413,21 @@ viewTimelineEvents wsId timeline =
               else
                 text ""
             , if List.isEmpty visibleEvents then
-                viewEmptyTimelineSelection timeline.histogramSelectedBucket
+                viewEmptyTimelineSelection display timeline.histogramSelectedBucket
 
               else
                 div [ class "timeline-event-list", title ("Timeline for workspace " ++ wsId) ]
-                    (List.map viewTimelineGroup groupedEvents)
+                    (List.map (viewTimelineGroup display) groupedEvents)
             ]
 
 
-viewTimelineSelectionNote : Maybe TimelineHistogramSelection -> Html Msg
-viewTimelineSelectionNote maybeSelection =
+viewTimelineSelectionNote : TimestampDisplay.State -> Maybe TimelineHistogramSelection -> Html Msg
+viewTimelineSelectionNote display maybeSelection =
     case maybeSelection of
         Just selection ->
             div [ class "timeline-selection-note" ]
-                [ span [] [ text ("Showing events for " ++ selection.label) ]
-                , span [ class "timeline-selection-range" ] [ text (formatDate selection.since ++ " → " ++ formatDate selection.until) ]
+                [ span [] [ text "Showing events in selected interval" ]
+                , span [ class "timeline-selection-range" ] [ text (timelineRangeLabel display selection.since selection.until) ]
                 , button [ class "btn-secondary timeline-selection-reset", onClick ResetTimelineHistogramSelection ] [ text "Reset range" ]
                 ]
 
@@ -1407,13 +1435,13 @@ viewTimelineSelectionNote maybeSelection =
             text ""
 
 
-viewEmptyTimelineSelection : Maybe TimelineHistogramSelection -> Html Msg
-viewEmptyTimelineSelection maybeSelection =
+viewEmptyTimelineSelection : TimestampDisplay.State -> Maybe TimelineHistogramSelection -> Html Msg
+viewEmptyTimelineSelection display maybeSelection =
     case maybeSelection of
         Just selection ->
             div [ class "empty-state timeline-state" ]
                 [ h3 [] [ text "No timeline events in this bucket" ]
-                , p [] [ text ("No loaded events match " ++ selection.label ++ " after applying the current filters. Reset the range or broaden the entity/lifecycle filters.") ]
+                , p [] [ text ("No loaded events match " ++ timelineRangeLabel display selection.since selection.until ++ " after applying the current filters. Reset the range or broaden the entity/lifecycle filters.") ]
                 , button [ class "btn-secondary", onClick ResetTimelineHistogramSelection ] [ text "Reset range" ]
                 ]
 
@@ -1579,8 +1607,8 @@ timelineEventMatches eventFilter event =
             String.contains "cancelled" event.eventType
 
 
-groupTimelineEvents : List Api.WorkspaceTimelineEvent -> List ( String, List Api.WorkspaceTimelineEvent )
-groupTimelineEvents events =
+groupTimelineEvents : TimestampDisplay.State -> List Api.WorkspaceTimelineEvent -> List ( String, List Api.WorkspaceTimelineEvent )
+groupTimelineEvents display events =
     case events of
         [] ->
             []
@@ -1588,25 +1616,25 @@ groupTimelineEvents events =
         first :: rest ->
             let
                 key =
-                    timelineDateKey first
+                    timelineDateKey display first
 
                 ( sameDay, remaining ) =
-                    spanTimelineGroup key rest
+                    spanTimelineGroup display key rest
             in
-            ( key, first :: sameDay ) :: groupTimelineEvents remaining
+            ( key, first :: sameDay ) :: groupTimelineEvents display remaining
 
 
-spanTimelineGroup : String -> List Api.WorkspaceTimelineEvent -> ( List Api.WorkspaceTimelineEvent, List Api.WorkspaceTimelineEvent )
-spanTimelineGroup key events =
+spanTimelineGroup : TimestampDisplay.State -> String -> List Api.WorkspaceTimelineEvent -> ( List Api.WorkspaceTimelineEvent, List Api.WorkspaceTimelineEvent )
+spanTimelineGroup display key events =
     case events of
         [] ->
             ( [], [] )
 
         first :: rest ->
-            if timelineDateKey first == key then
+            if timelineDateKey display first == key then
                 let
                     ( matching, remaining ) =
-                        spanTimelineGroup key rest
+                        spanTimelineGroup display key rest
                 in
                 ( first :: matching, remaining )
 
@@ -1614,30 +1642,22 @@ spanTimelineGroup key events =
                 ( [], events )
 
 
-timelineDateKey : Api.WorkspaceTimelineEvent -> String
-timelineDateKey event =
-    let
-        datePart =
-            String.left 10 event.occurredAt
-    in
-    if datePart == "" then
-        "Unknown date"
-
-    else
-        datePart
+timelineDateKey : TimestampDisplay.State -> Api.WorkspaceTimelineEvent -> String
+timelineDateKey display event =
+    TimestampDisplay.dayKey display event.occurredAt
 
 
-viewTimelineGroup : ( String, List Api.WorkspaceTimelineEvent ) -> Html Msg
-viewTimelineGroup ( dateLabel, events ) =
+viewTimelineGroup : TimestampDisplay.State -> ( String, List Api.WorkspaceTimelineEvent ) -> Html Msg
+viewTimelineGroup display ( dateLabel, events ) =
     div [ class "timeline-date-group" ]
         [ div [ class "timeline-date-heading" ] [ text dateLabel ]
         , div [ class "timeline-date-events" ]
-            (List.map viewTimelineEvent events)
+            (List.map (viewTimelineEvent display) events)
         ]
 
 
-viewTimelineEvent : Api.WorkspaceTimelineEvent -> Html Msg
-viewTimelineEvent event =
+viewTimelineEvent : TimestampDisplay.State -> Api.WorkspaceTimelineEvent -> Html Msg
+viewTimelineEvent display event =
     button
         [ Html.Attributes.id ("timeline-event-" ++ event.id)
         , class ("timeline-event-card " ++ timelineEventToneClass event.eventType ++ " timeline-entity-" ++ event.entityType)
@@ -1650,7 +1670,7 @@ viewTimelineEvent event =
             [ div [ class "timeline-event-topline" ]
                 [ span [ class "timeline-event-label" ] [ text (timelineEventLabel event.eventType) ]
                 , span [ class ("timeline-entity-pill timeline-entity-pill-" ++ event.entityType) ] [ text (entityTypeLabel event.entityType) ]
-                , span [ class "timeline-event-time" ] [ text (formatDate event.occurredAt) ]
+                , span [ class "timeline-event-time" ] [ text (TimestampDisplay.lookup display event.occurredAt) ]
                 ]
             , div [ class "timeline-event-title-row" ]
                 [ span [ class "timeline-event-title" ] [ text event.title ]

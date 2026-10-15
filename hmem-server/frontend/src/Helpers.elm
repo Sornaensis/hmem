@@ -1322,11 +1322,6 @@ scrollToElement elemId =
     Ports.scrollHierarchyTarget elemId
 
 
-formatDate : String -> String
-formatDate dateStr =
-    String.left 16 (String.replace "T" " " dateStr)
-
-
 {-| Bound plain text by Unicode codepoints, including the ellipsis, without
 splitting a surrogate pair. The full value remains in canonical detail.
 -}

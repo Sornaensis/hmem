@@ -4,11 +4,15 @@ import Api
 import Browser
 import Dict
 import Feature.Timeline
+import Feature.TimestampDisplay as Presentation
 import Helpers exposing (focusElement)
 import Html exposing (Html, button, div, h1, p, section, text)
 import Html.Attributes exposing (attribute, class)
 import Html.Events exposing (onClick)
+import Json.Decode as Decode
+import Ports
 import String
+import TimestampDisplay
 import Types exposing (TimelineModel)
 
 
@@ -19,26 +23,56 @@ type Fixture
     | Spike
     | Many
     | Error
+    | Dst
 
 
 type Msg
     = Choose Fixture
     | TimelineMessage Types.Msg
+    | TimestampsFormatted Decode.Value
 
 
-main : Program () TimelineModel Msg
+type alias Model =
+    { timeline : TimelineModel, timestamps : TimestampDisplay.State }
+
+
+main : Program () Model Msg
 main =
     Browser.element
-        { init = \_ -> ( fixtureTimeline Spike, Cmd.none )
+        { init = \_ -> reconcile ( { timeline = fixtureTimeline Spike, timestamps = TimestampDisplay.empty }, Cmd.none )
         , update = update
-        , subscriptions = \_ -> Sub.none
+        , subscriptions = \_ -> Ports.timestampsFormatted TimestampsFormatted
         , view = view
         }
 
 
-update : Msg -> TimelineModel -> ( TimelineModel, Cmd Msg )
+reconcile : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+reconcile ( model, command ) =
+    let
+        ( timestamps, request ) = TimestampDisplay.reconcile "timeline-fixture" (Feature.Timeline.timestampSources model.timeline) model.timestamps
+    in
+    ( { model | timestamps = timestamps }, Cmd.batch [ command, request |> Maybe.map Presentation.requestCommand |> Maybe.withDefault Cmd.none ] )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        TimestampsFormatted payload ->
+            case Decode.decodeValue Presentation.replyDecoder payload of
+                Ok reply -> reconcile ( { model | timestamps = TimestampDisplay.receive reply model.timestamps }, Cmd.none )
+                Err _ -> ( model, Cmd.none )
+
+        _ ->
+            let ( timeline, command ) = updateTimeline msg model.timeline in
+            reconcile ( { model | timeline = timeline }, command )
+
+
+updateTimeline : Msg -> TimelineModel -> ( TimelineModel, Cmd Msg )
+updateTimeline msg model =
+    case msg of
+        TimestampsFormatted _ ->
+            ( model, Cmd.none )
+
         Choose fixture ->
             ( fixtureTimelineWithFocus model fixture, Cmd.none )
 
@@ -78,8 +112,13 @@ update msg model =
                     ( model, Cmd.none )
 
 
-view : TimelineModel -> Html Msg
+view : Model -> Html Msg
 view model =
+    viewTimeline model.timestamps model.timeline
+
+
+viewTimeline : TimestampDisplay.State -> TimelineModel -> Html Msg
+viewTimeline display model =
     div [ class "timeline-fixture", attribute "data-testid" "timeline-fixture" ]
         [ h1 [] [ text "Lifecycle line graph deterministic fixture" ]
         , p [] [ text "This local fixture renders the production chart with no network or authentication dependency." ]
@@ -90,13 +129,15 @@ view model =
             , fixtureButton Spike "Spike"
             , fixtureButton Many "Many buckets"
             , fixtureButton Error "Graph error"
+            , fixtureButton Dst "DST"
             ]
-        , Html.map TimelineMessage (Feature.Timeline.viewTimelineHistogram model)
+        , Html.map TimelineMessage (Feature.Timeline.viewTimelineHistogram display model)
         , section [ class "timeline-fixture-cards", attribute "data-testid" "timeline-fixture-cards" ]
             [ p [] [ text "Event cards remain available independently of the graph state." ]
             , case model.histogramSelectedBucket of
                 Just selection ->
-                    p [ attribute "data-testid" "timeline-fixture-selection" ] [ text ("Selected [" ++ selection.since ++ ", " ++ selection.until ++ ")") ]
+                    p [ attribute "data-testid" "timeline-fixture-selection", attribute "data-since" selection.since, attribute "data-until" selection.until ]
+                        [ text ("Selected [" ++ TimestampDisplay.lookup display selection.since ++ ", " ++ TimestampDisplay.lookup display selection.until ++ ")") ]
 
                 Nothing ->
                     p [ attribute "data-testid" "timeline-fixture-selection" ] [ text "No bucket selected" ]
@@ -140,6 +181,11 @@ fixtureTimeline fixture =
 
                 Error ->
                     [ bucket 2 1, bucket 4 2 ]
+
+                Dst ->
+                    [ bucketForDates 1 "2026-03-29T00:00:00Z" "2026-03-30T00:00:00Z" "UTC spring bucket"
+                    , bucketForDates 2 "2026-10-25T00:00:00Z" "2026-10-26T00:00:00Z" "UTC autumn bucket"
+                    ]
     in
     { base
         | histogramSince = "2026-01-01"

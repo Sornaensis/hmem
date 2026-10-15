@@ -19,20 +19,31 @@ function fixtureDocument() {
 <body>
   <div id="app"></div>
   <script src="/TimelineFixture.js"></script>
-  <script>Elm.TimelineFixture.init({ node: document.getElementById('app') })</script>
+  <script type="module">
+    import { installTimestampDisplay } from '/timestamp-display.js'
+    const app = Elm.TimelineFixture.init({ node: document.getElementById('app') })
+    installTimestampDisplay(app)
+  </script>
 </body>
 </html>`
 }
 
 async function startFixtureServer() {
-  const [ bundle, stylesheet ] = await Promise.all([
+  const [ bundle, stylesheet, timestampBridge ] = await Promise.all([
     readFile(fixtureBundle),
     readFile(resolve(process.cwd(), 'src/style.css')),
+    readFile(resolve(process.cwd(), 'src/timestamp-display.js')),
   ])
   const server = createServer((request, response) => {
     if (request.url === '/TimelineFixture.js') {
       response.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' })
       response.end(bundle)
+      return
+    }
+
+    if (request.url === '/timestamp-display.js') {
+      response.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' })
+      response.end(timestampBridge)
       return
     }
 
@@ -58,12 +69,17 @@ async function waitForSelection(page, day) {
 async function waitForRange(page, since) {
   await page.waitForFunction((selectedDay) => {
     const selection = document.querySelector('[data-testid="timeline-fixture-selection"]')
-    return selection?.textContent?.includes(selectedDay)
+    return selection?.dataset.since === selectedDay
   }, since)
 }
 
 async function waitForNoSelection(page) {
   await page.waitForFunction(() => document.querySelector('[data-testid="timeline-fixture-selection"]')?.textContent === 'No bucket selected')
+}
+
+async function waitForFormattedPoints(page) {
+  await page.waitForFunction(() => [...document.querySelectorAll('g.timeline-point-control')]
+    .every(point => !point.getAttribute('aria-label').includes('…')))
 }
 
 async function clickMarker(page, point) {
@@ -93,7 +109,7 @@ async function renderedGeometry(page) {
       return near(point.x, target.x) && near(point.y, target.y) && (!reference || near(point.x, center(reference, reference.cx.baseVal.value, reference.cy.baseVal.value).x))
     })
     const labelsMatch = [...chart.querySelectorAll('.timeline-chart-x-axis')].every(label => {
-      const control = controls.find(control => control.getAttribute('aria-label').includes(', ' + label.textContent + ','))
+      const control = controls.find(control => control.getAttribute('aria-label').includes(', ' + label.textContent + ' to '))
       const marker = control?.querySelector('.timeline-point')
       return marker && near(center(label, label.x.baseVal[0].value, 0).x, center(marker, marker.cx.baseVal.value, 0).x)
     })
@@ -102,7 +118,11 @@ async function renderedGeometry(page) {
       return { text: label.textContent, width: bounds.width, height: bounds.height, a: transform.a, d: transform.d }
     })
     const allInBounds = controls.every(control => { const box = control.getBBox(); return box.width >= 22 && box.height >= 22 && box.x >= 0 && box.x + box.width <= chart.getBoundingClientRect().width })
-    return { pathsMatch, sharedX, labelsMatch, allInBounds, labels, width: chart.getBoundingClientRect().width, height: chart.getBoundingClientRect().height }
+    const chartBounds = chart.getBoundingClientRect()
+    const axisBounds = [...chart.querySelectorAll('.timeline-chart-x-axis')].map(label => label.getBoundingClientRect())
+    const axisSeparated = axisBounds.every((box, index) => index === 0 || axisBounds[index - 1].right + 4 <= box.left)
+    const axisInBounds = axisBounds.every(box => box.left >= chartBounds.left && box.right <= chartBounds.right && box.top >= chartBounds.top && box.bottom <= chartBounds.bottom)
+    return { pathsMatch, sharedX, labelsMatch, allInBounds, axisSeparated, axisInBounds, labels, width: chartBounds.width, height: chartBounds.height }
   })
 }
 
@@ -111,9 +131,10 @@ test('single lifecycle chart preserves counts, accessible controls and shared bu
   let browser
   try {
     browser = await chromium.launch({ headless: true })
-    const context = await browser.newContext({ viewport: { width: 366, height: 768 } })
+    const context = await browser.newContext({ viewport: { width: 366, height: 768 }, timezoneId: 'UTC' })
     const page = await context.newPage()
     await page.goto(url)
+    await waitForFormattedPoints(page)
     assert.equal(await page.locator('.timeline-line-chart-panel').count(), 1)
     assert.equal(await page.locator('.timeline-series-toggle').count(), 9)
     assert.equal(await page.locator('.timeline-value-table').count(), 0)
@@ -155,6 +176,7 @@ test('single lifecycle chart preserves counts, accessible controls and shared bu
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
       const geometry = await renderedGeometry(page)
       assert.ok(geometry.pathsMatch && geometry.sharedX && geometry.labelsMatch && geometry.allInBounds, JSON.stringify(geometry))
+      assert.ok(geometry.axisSeparated && geometry.axisInBounds, 'localized axis text overlaps or clips: ' + JSON.stringify(geometry))
       assert.equal(geometry.height, 280)
       assert.ok(geometry.labels.every(label => label.a === 1 && label.d === 1 && label.height >= 8 && label.height <= 18), JSON.stringify(geometry.labels))
       if (referenceLabels) assert.deepEqual(geometry.labels, referenceLabels, 'rendered glyph bounds stay constant through resize')
@@ -168,10 +190,12 @@ test('single lifecycle chart preserves counts, accessible controls and shared bu
     await page.setViewportSize({ width: 366, height: 768 })
     await page.getByTestId('fixture-many-buckets').click()
     await page.waitForFunction(() => document.querySelectorAll('g.timeline-point-control').length === 1830)
+    await waitForFormattedPoints(page)
     assert.equal(await page.locator('g.timeline-point-control[tabindex="0"]').count(), 5)
     assert.equal(await page.locator('.timeline-svg-scroll').evaluate(scroll => scroll.scrollWidth > scroll.clientWidth), true)
     const geometry = await renderedGeometry(page)
     assert.ok(geometry.allInBounds && geometry.sharedX && geometry.pathsMatch && geometry.labelsMatch, JSON.stringify(geometry))
+    assert.ok(geometry.axisSeparated && geometry.axisInBounds, 'many-bucket axis text overlaps or clips: ' + JSON.stringify(geometry))
     const ranges = await page.locator('g.timeline-series-created').evaluateAll(points => points.map(point => point.getAttribute('aria-label').match(/, (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) to (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) exclusive/)))
     assert.equal(ranges.every((range, index) => range && Date.parse(range[1]) < Date.parse(range[2]) && (index === 0 || ranges[index - 1][2] === range[1])), true)
     await point('created', 0).focus()
@@ -182,6 +206,7 @@ test('single lifecycle chart preserves counts, accessible controls and shared bu
     await clickMarker(page, point('created', 365)); await waitForRange(page, '2028-12-31T00:00:00Z')
     await page.getByTestId('fixture-spike').click()
     await page.waitForFunction(() => document.querySelectorAll('g.timeline-point-control').length === 15)
+    await waitForFormattedPoints(page)
     assert.equal(await point('created', 2).getAttribute('tabindex'), '0')
     await page.getByTestId('fixture-zero').click()
     await page.waitForFunction(() => document.getElementById('timeline-point-lifecycle-created-1')?.getAttribute('aria-label').endsWith(', 6, not selected'))
@@ -206,6 +231,47 @@ test('single lifecycle chart preserves counts, accessible controls and shared bu
     assert.equal(await page.getByTestId('timeline-fixture-card-count').textContent(), '2')
     assert.equal(await page.getByTestId('timeline-fixture-card-inside').count(), 1)
     assert.equal(await page.getByTestId('timeline-fixture-card-outside').count(), 1)
+
+    // Every new page begins with preloaded buckets and a formatting Cmd in init.
+    // Awaiting real labels proves the first request reaches the installed bridge.
+    for (const [timezoneId, start, end] of [
+      ['Europe/Copenhagen', '2026-01-01 01:00', '2026-01-02 01:00'],
+      ['America/Los_Angeles', '2025-12-31 16:00', '2026-01-01 16:00'],
+      ['Asia/Kathmandu', '2026-01-01 05:45', '2026-01-02 05:45']
+    ]) {
+      const zoned = await browser.newContext({ timezoneId, viewport: { width: 366, height: 768 } })
+      try {
+        const localPage = await zoned.newPage()
+        await localPage.goto(url)
+        await waitForFormattedPoints(localPage)
+        const firstPoint = localPage.locator('#timeline-point-lifecycle-created-0')
+        assert.equal(await localPage.locator('.timeline-chart-x-axis').first().textContent(), start)
+        assert.ok((await firstPoint.getAttribute('aria-label')).includes(`${start} to ${end} exclusive, 6, not selected`))
+        assert.ok((await firstPoint.locator('title').textContent()).includes(`[${start}, ${end})`))
+        assert.equal((await firstPoint.getAttribute('aria-label')).includes('Jan 1'), false)
+        const geometry = await renderedGeometry(localPage)
+        assert.ok(geometry.pathsMatch && geometry.sharedX && geometry.labelsMatch && geometry.allInBounds)
+        assert.ok(geometry.axisSeparated && geometry.axisInBounds, timezoneId + ' axis text overlaps or clips')
+        await clickMarker(localPage, firstPoint)
+        await waitForSelection(localPage, '01')
+        assert.equal(await localPage.getByTestId('timeline-fixture-card-count').textContent(), '0')
+        assert.match(await firstPoint.getAttribute('aria-label'), /, 6, selected$/)
+        await localPage.reload()
+        await waitForFormattedPoints(localPage)
+        assert.equal(await localPage.locator('.timeline-chart-x-axis').first().textContent(), start)
+        if (timezoneId === 'Europe/Copenhagen') {
+          await localPage.getByTestId('fixture-dst').click()
+          await localPage.waitForFunction(() => document.querySelectorAll('g.timeline-point-control').length === 10)
+          await waitForFormattedPoints(localPage)
+          assert.ok((await localPage.locator('#timeline-point-lifecycle-created-0').getAttribute('aria-label'))
+            .includes('2026-03-29 01:00 to 2026-03-30 02:00 exclusive'))
+          assert.ok((await localPage.locator('#timeline-point-lifecycle-created-1').getAttribute('aria-label'))
+            .includes('2026-10-25 02:00 to 2026-10-26 01:00 exclusive'))
+        }
+      } finally {
+        await zoned.close()
+      }
+    }
     assert.equal(await page.getByTestId('timeline-fixture-card-inside').textContent(), 'Fixture inside event')
     assert.equal(await page.getByTestId('timeline-fixture-card-outside').textContent(), 'Fixture outside event')
     await page.getByTestId('fixture-empty').click(); await page.getByText('No lifecycle activity in this date range.', { exact: true }).waitFor()

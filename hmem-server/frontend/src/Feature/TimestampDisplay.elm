@@ -1,4 +1,4 @@
-module Feature.TimestampDisplay exposing (receive, reconcile)
+module Feature.TimestampDisplay exposing (receive, reconcile, replyDecoder, requestCommand)
 
 import Api
 import Json.Decode as Decode
@@ -7,6 +7,7 @@ import Dict
 import Feature.AuditLog
 import Feature.Cards
 import Feature.Observation
+import Feature.Timeline
 import Feature.WorkspaceAdmin
 import Permissions
 import Ports
@@ -42,7 +43,7 @@ sources model =
                                                 if Permissions.canViewCurrentWorkspaceAudit model && model.auditLog.filters.workspaceId == Just workspaceId then
                                                     Feature.AuditLog.timestampSources model
                                                 else []
-                                            TimelineTab -> []
+                                            TimelineTab -> Feature.Timeline.timestampSources model.timeline
                                             _ ->
                                                 if model.search.isSearching || model.search.searchError /= Nothing || model.search.unifiedResults /= Nothing then []
                                                 else if model.activeTab == ObservationsTab then
@@ -77,19 +78,21 @@ reconcile ( model, commands ) =
     , Cmd.batch
         [ commands
         , request
-            |> Maybe.map
-                (\batch ->
-                    Ports.formatTimestamps
-                        (Encode.object
-                            [ ( "context", Encode.string batch.context )
-                            , ( "id", Encode.int batch.id )
-                            , ( "sources", Encode.list Encode.string batch.sources )
-                            ]
-                        )
-                )
+            |> Maybe.map requestCommand
             |> Maybe.withDefault Cmd.none
         ]
     )
+
+
+requestCommand : TimestampDisplay.Request -> Cmd msg
+requestCommand batch =
+    Ports.formatTimestamps
+        (Encode.object
+            [ ( "context", Encode.string batch.context )
+            , ( "id", Encode.int batch.id )
+            , ( "sources", Encode.list Encode.string batch.sources )
+            ]
+        )
 
 
 receive : Decode.Value -> Model -> ( Model, Cmd Msg )

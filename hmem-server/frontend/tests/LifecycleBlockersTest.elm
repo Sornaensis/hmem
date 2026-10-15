@@ -25,8 +25,19 @@ import String
 import Test exposing (..)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
+import TimestampDisplay
 import Types exposing (FocusReturnSource(..), Msg(..), TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
 import Url
+
+
+timelineGroupingDisplay : TimestampDisplay.State
+timelineGroupingDisplay =
+    let empty = TimestampDisplay.empty in
+    { empty | cache = Dict.fromList
+        [ ( "2026-05-26T08:00:00Z", Just { text = "2026-05-26 10:00", day = "2026-05-26" } )
+        , ( "2026-05-26T07:00:00Z", Just { text = "2026-05-26 09:00", day = "2026-05-26" } )
+        , ( "2026-05-25T09:00:00Z", Just { text = "2026-05-25 11:00", day = "2026-05-25" } )
+        ] }
 
 
 suite : Test
@@ -747,7 +758,7 @@ suite =
                 , timelineEvent "newer-b" "2026-05-26T07:00:00Z" "audit-newer-b"
                 , timelineEvent "older" "2026-05-25T09:00:00Z" "audit-older"
                 ]
-                    |> Feature.Timeline.groupTimelineEvents
+                    |> Feature.Timeline.groupTimelineEvents timelineGroupingDisplay
                     |> List.map (\( label, events ) -> ( label, List.map .id events ))
                     |> Expect.equal [ ( "2026-05-26", [ "newer-a", "newer-b" ] ), ( "2026-05-25", [ "older" ] ) ]
         , test "task cascade delete preview covers empty, small, and large descendant trees" <|

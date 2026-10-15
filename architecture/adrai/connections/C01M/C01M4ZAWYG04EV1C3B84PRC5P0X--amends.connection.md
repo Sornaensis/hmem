@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M4ZAWYG04EV1C3B84PRC5P0X"
+relation = "amends"
+from_record = "R01M4ZAWYG0269733D300EXFGVX"
+subject_adr = "A01M38Z69R241CHNFSBT53227BK"
+to_records = ["R01M4BXN9X2VJ1X2JPGDN84VT9B"]
++++
+
+Separate effective declared attribution from unchanged authorization and preserve historical provenance
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6Ijc4ZjI3NjI1NzE4OTIwZmJlYTZlMjI3MjdkZTA1N2I1YjIxYjViYzYiLCJpIjoic2hhMjU2OndrZ0pFQTBfRHdla3lYQUM0bm9XMWlXdTVRSkFuSXZlNzkzdGtuc1BSRXciLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTRaQVdZRzA0RVYxQzNCODRQUkM1UDBYIiwib3AiOiJPMDFNNFpBV1lHMDI2OTczM0QzMDBFWEZHVlgiLCJwIjpbIlIwMU00QlhOOVgyVkoxWDJKUEdETjg0VlQ5QiJdLCJyIjoiY29kZXgvZGVjbGFyZWQtYm90LWlkZW50aXR5IiwicyI6InNoYTI1NjpMenQ1ZTFXdkF3RUJpa2Z2YktFbkNXZ0V4R3pWb2tSbWRiZGVtM0NmT0NnIiwidCI6MTc5MjA1Mjk4NDMyMCwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

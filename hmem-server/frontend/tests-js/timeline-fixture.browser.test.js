@@ -7,32 +7,13 @@ import { chromium } from '@playwright/test'
 
 const fixtureBundle = resolve(process.cwd(), '.timeline-fixture-test.js')
 
-function fixtureDocument() {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Timeline fixture</title>
-  <link rel="stylesheet" href="/style.css" />
-</head>
-<body>
-  <div id="app"></div>
-  <script src="/TimelineFixture.js"></script>
-  <script type="module">
-    import { installTimestampDisplay } from '/timestamp-display.js'
-    const app = Elm.TimelineFixture.init({ node: document.getElementById('app') })
-    installTimestampDisplay(app)
-  </script>
-</body>
-</html>`
-}
-
 async function startFixtureServer() {
-  const [ bundle, stylesheet, timestampBridge ] = await Promise.all([
+  const [ bundle, stylesheet, timestampBridge, entrypoint, fixtureHtml ] = await Promise.all([
     readFile(fixtureBundle),
     readFile(resolve(process.cwd(), 'src/style.css')),
     readFile(resolve(process.cwd(), 'src/timestamp-display.js')),
+    readFile(resolve(process.cwd(), 'src/timeline-fixture.js')),
+    readFile(resolve(process.cwd(), 'timeline-fixture.html'), 'utf8'),
   ])
   const server = createServer((request, response) => {
     if (request.url === '/TimelineFixture.js') {
@@ -41,20 +22,24 @@ async function startFixtureServer() {
       return
     }
 
-    if (request.url === '/timestamp-display.js') {
+    if (request.url === '/src/timestamp-display.js') {
       response.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' })
       response.end(timestampBridge)
       return
     }
 
-    if (request.url === '/style.css') {
+    if (request.url === '/src/style.css') {
       response.writeHead(200, { 'content-type': 'text/css; charset=utf-8' })
       response.end(stylesheet)
       return
     }
 
+    if (request.url === '/src/timeline-fixture.js') { response.writeHead(200, { 'content-type': 'application/javascript' }); response.end(entrypoint); return }
+    // The compiler import is replaced only by a module shim around the exact
+    // compiled Elm program; HTML and browser bootstrap come from the real fixture.
+    if (request.url === '/src/TimelineFixture.elm') { response.writeHead(200, { 'content-type': 'application/javascript' }); response.end('export const Elm = window.Elm'); return }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    response.end(fixtureDocument())
+    response.end(fixtureHtml.replace('<script type="module"', '<script src="/TimelineFixture.js"></script><script type="module"'))
   })
   await new Promise((resolveServer) => server.listen(0, '127.0.0.1', resolveServer))
   const address = server.address()

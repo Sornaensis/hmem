@@ -47,8 +47,8 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     }
     assert.equal(await h.page.locator('.observation-summary').first().textContent().then(value => value.endsWith('…')), true)
     assert.equal(await h.page.evaluate(() => !!window.previewUnsafe), false)
-    assert.equal(await h.page.locator('.observation-sha').first().textContent(), 'Provenance revision: ' + h.sha.slice(0, 12) + '…')
-    assert.match(await h.page.locator('.observation-updated').first().textContent(), /2026-10-06 12:35:56\.123 UTC/)
+    assert.equal(await h.page.locator('.observation-sha').first().textContent(), 'Creation revision: ' + h.sha.slice(0, 12) + '… · 2026-01-01 00:00 · Local User')
+    assert.match(await h.page.locator('.observation-updated').first().textContent(), /2026-10-06 12:35/)
     const originalStamp = await h.page.locator('#observation-panel').getAttribute('data-observation-context'), before = h.receipts.length
     await h.page.locator('.observation-sha .copyable-value').first().click()
     await h.page.waitForFunction(() => window.previewCopies.length === 1, null, { timeout: 5000 })
@@ -76,7 +76,7 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     await detail.locator('.observation-subject-row .observation-subject-copy').first().waitFor({ timeout: 5000 })
     assert.deepEqual(await detail.locator('.observation-subject-row .observation-subject-copy').allTextContents(), [longSubject, 'src/**/*.elm', 'src/Extra.elm'])
     assert.equal(await detail.locator('.observation-detail-sha .copyable-value').textContent(), h.sha)
-    assert.match(await detail.locator('.observation-detail-meta').textContent(), /Content updated2026-10-06 12:35:56\.123 UTC/)
+    assert.match(await detail.locator('.observation-detail-meta').textContent(), /Content updated2026-10-06 12:35/)
     const returnCalls = await h.page.evaluate(() => window.previewReturnFocus)
     await h.page.locator('[data-observation-detail-anchor]').click()
     await h.page.waitForFunction(({ id, count }) => !document.getElementById('observation-detail') && window.previewReturnFocus > count && document.activeElement?.id === id, { id: cardId, count: returnCalls }, { timeout: 5000 })

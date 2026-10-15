@@ -112,7 +112,7 @@ const socketScript = () => {
   new MutationObserver(() => { window.hierarchyMaximum = Math.max(window.hierarchyMaximum, document.querySelectorAll('[data-hierarchy-key]').length) }).observe(document, { childList: true, subtree: true })
 }
 
-export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = [], authority = null) {
+export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = [], authority = null, pageOptions = {}) {
   const fixtures = [fixture, ...additionalFixtures]
   const staticRoot = resolve(process.cwd(), '../static')
   const server = createServer(async (request, response) => {
@@ -143,7 +143,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
   try {
     browserServer = await chromium.launchServer({ headless: true })
     browser = await chromium.connect(browserServer.wsEndpoint())
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', ...pageOptions })
     page.on('pageerror', error => errors.push(error.message))
     await page.addInitScript(socketScript)
     await page.route('**/api/v1/**', async route => {

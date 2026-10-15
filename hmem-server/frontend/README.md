@@ -18,8 +18,16 @@ The workspace Timeline shows one horizontal lifecycle graph with entity and
 Create, Complete, Delete, Archive, and Cancel toggles. Its default window is the
 last 30 days with weekly buckets. Window and bucket choices persist per workspace.
 All time starts at the earliest lifecycle event and the client follows bounded
-bucket pages without changing the selected bucket size. Displayed timestamps use
-the database timestamp's represented date and time, formatted `YYYY-MM-DD HH:MM`.
+bucket pages without changing the selected bucket size.
+
+All timestamp displays use the browser timezone captured when the page loads,
+formatted `YYYY-MM-DD HH:MM` with per-instant DST rules. Reload after changing the
+browser timezone. Raw API timestamps, UTC histogram intervals/counts and request
+bounds remain unchanged; Timeline day headings use local event dates. Missing
+values show `—`, pending conversion shows `…`, and invalid or unsupported values
+show `Invalid timestamp` (`Unknown date` for grouping). Grouping remains `Date
+pending` until conversion completes. Formatting is deduplicated in batches of up
+to 128, with one outstanding batch and a cache limited to current display demand.
 
 Observation cards show the bound current reviewed revision when available, or
 the immutable creation revision for legacy observations. The expanded revision

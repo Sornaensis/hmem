@@ -52,6 +52,7 @@ route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
         OpenAuditDiff _ _ -> Ok (Feature.AuditDiff.update msg model)
+        OpenAuditDiffFrom _ _ _ -> Ok (Feature.AuditDiff.update msg model)
         CloseAuditDiff -> Ok (Feature.AuditDiff.update msg model)
         AuditDiffMode _ -> Ok (Feature.AuditDiff.update msg model)
         AuditDiffBaseline _ -> Ok (Feature.AuditDiff.update msg model)

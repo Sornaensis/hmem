@@ -57,6 +57,12 @@ Before and After snapshots, with numbered unified hunks and word emphasis. Null,
 empty text and unavailable/malformed snapshots remain distinct. Markdown and
 HTML-like strings display as source. Unusually large inputs use a complete
 simplified before/after presentation instead of an expensive line comparison.
+Eligible Audit entries also offer View diff while collapsed. It opens the first
+changed name/title, then description, and the field selector exposes the other
+changed text fields. The action leaves the entry collapsed and returns keyboard
+focus to its original row or field control after closing. The centered panel
+uses the app's slate/indigo controls and retains a contained source scroller on
+narrow screens.
 
 **Against current** makes one authorized full entity read and freezes that
 snapshot for the opening. Switching fields or the historical baseline reuses it;

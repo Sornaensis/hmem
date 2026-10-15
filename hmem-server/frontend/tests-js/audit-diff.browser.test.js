@@ -71,6 +71,98 @@ const content = h => dialog(h).locator('.audit-diff-content')
 const frame = (h, kind, id, eventId, invalidations = [{ kind: 'entity', target: kind + ':' + id }]) => ({ schema_version: 1, type: 'change', event: { schema_version: 1, event_id: eventId, scope: 'workspace', workspace_id: h.f.workspace.id, occurred_at: '2026-10-15T12:00:00Z', transaction: { id: eventId, cause: 'rest', request_id: 'other-request' }, actor: { type: 'system', id: null }, entity: { type: kind, id, action: 'updated' }, invalidations } })
 const emit = (h, frames) => h.page.evaluate(frames => window.pushHierarchyFrames(frames), frames)
 
+test('production collapsed audit row action has stable eligibility/defaults and preserves row/field keyboard origins', { timeout: 45000 }, async () => {
+  const h = await setup()
+  const unchanged = { title: 'Same title', description: 'Same description' }
+  h.events.push(
+    { ...h.events[1], id: 'status-only', old_values: { ...unchanged, status: 'todo' }, new_values: { ...unchanged, status: 'in_progress' } },
+    { ...h.events[1], id: 'created', action: 'create', old_values: null },
+    { ...h.events[1], id: 'deleted', action: 'delete', new_values: null },
+    { ...h.events[1], id: 'observation', entity_type: 'observation' },
+    { ...h.events[1], id: 'description-only', old_values: { title: 'Same title', description: 'Old description' }, new_values: { title: 'Same title', description: 'New description' } },
+  )
+  try {
+    await h.start(); await h.idle()
+    await h.page.getByRole('button', { name: 'Audit', exact: true }).click()
+    await h.page.locator('#audit-diff-row-event-parent').waitFor()
+    for (const surface of ['workspace', 'global']) {
+      if (surface === 'global') {
+        await h.page.getByRole('link', { name: 'Audit Log', exact: true }).click()
+        await h.page.locator('#audit-diff-row-event-parent').waitFor()
+      }
+      assert.equal(await h.page.locator('.audit-row-diff').count(), 4)
+      for (const id of ['status-only', 'created', 'deleted', 'observation']) assert.equal(await h.page.locator('#audit-diff-row-' + id).count(), 0)
+      const location = h.page.url(), origin = h.page.locator('#audit-diff-row-event-parent')
+      for (const key of ['Enter', 'Space']) {
+        await origin.focus(); await h.page.keyboard.press(key); await dialog(h).waitFor()
+        assert.equal(await dialog(h).getByLabel('Field', { exact: true }).inputValue(), 'title')
+        assert.equal(await dialog(h).getAttribute('data-dialog-origin'), 'audit-diff-row-event-parent')
+        assert.equal(await h.page.locator('.audit-entry-detail').count(), 0)
+        assert.equal(h.page.url(), location)
+        await dialog(h).getByLabel('Field', { exact: true }).selectOption('description')
+        await h.page.keyboard.press('Escape'); await dialog(h).waitFor({ state: 'detached' })
+        await h.page.waitForFunction(() => document.activeElement?.id === 'audit-diff-row-event-parent')
+      }
+      await h.page.locator('#audit-diff-row-event-root-project').click(); await dialog(h).waitFor()
+      assert.equal(await dialog(h).getByLabel('Field', { exact: true }).inputValue(), 'name')
+      assert.equal(await h.page.locator('.audit-entry-detail').count(), 0)
+      await close(h)
+      await h.page.locator('#audit-diff-row-description-only').click(); await dialog(h).waitFor()
+      assert.equal(await dialog(h).getByLabel('Field', { exact: true }).inputValue(), 'description')
+      await close(h)
+    }
+    const entry = h.page.locator('.audit-entry').filter({ has: h.page.locator('#audit-diff-row-event-parent') })
+    await entry.locator('.audit-expand-icon').click()
+    await entry.locator('.audit-entry-detail').waitFor()
+    assert.equal(await entry.locator('.audit-row-diff, .audit-view-diff').count(), 3)
+    assert.equal(await h.page.locator('[id]').evaluateAll(elements => new Set(elements.map(element => element.id)).size === elements.length), true)
+    await entry.locator('#audit-diff-row-event-parent').click(); await dialog(h).waitFor()
+    await dialog(h).getByLabel('Field', { exact: true }).selectOption('description')
+    await h.page.keyboard.press('Escape'); await dialog(h).waitFor({ state: 'detached' })
+    await h.page.waitForFunction(() => document.activeElement?.id === 'audit-diff-row-event-parent')
+    await entry.locator('#audit-diff-origin-event-parent-title').click(); await dialog(h).waitFor()
+    await dialog(h).getByLabel('Field', { exact: true }).selectOption('description')
+    await h.page.keyboard.press('Escape'); await dialog(h).waitFor({ state: 'detached' })
+    await h.page.waitForFunction(() => document.activeElement?.id === 'audit-diff-origin-event-parent-title')
+    await h.idle()
+  } finally { await h.close() }
+})
+
+test('production panel stays centered, theme-native and scrollable at desktop and 320px', { timeout: 45000 }, async () => {
+  const h = await setup()
+  try {
+    await h.start(); await h.idle()
+    await h.page.getByRole('button', { name: 'Audit', exact: true }).click()
+    await h.page.locator('#audit-diff-row-event-parent').click(); await dialog(h).waitFor()
+    await dialog(h).getByLabel('Field', { exact: true }).selectOption('description')
+    const geometry = () => dialog(h).evaluate(element => {
+      const box = element.getBoundingClientRect()
+      return { centeredX: Math.abs(box.x + box.width / 2 - innerWidth / 2) < 1, centeredY: Math.abs(box.y + box.height / 2 - innerHeight / 2) < 1, contained: box.x >= 0 && box.y >= 0 && box.right <= innerWidth && box.bottom <= innerHeight }
+    })
+    assert.deepEqual(await geometry(), { centeredX: true, centeredY: true, contained: true })
+    assert.equal(await dialog(h).evaluate(element => getComputedStyle(element).colorScheme), 'dark')
+    await h.page.evaluate(() => { const root = document.documentElement; root.style.setProperty('--bg-surface', '#243247'); root.style.setProperty('--text', '#eef2f7'); root.style.setProperty('--border', '#52637c'); root.style.setProperty('--accent', '#715ee8') })
+    await h.page.waitForFunction(() => getComputedStyle(document.querySelector('#audit-diff-dialog [aria-pressed="true"]')).backgroundColor === 'rgb(113, 94, 232)')
+    assert.deepEqual(await dialog(h).evaluate(element => {
+      const panel = getComputedStyle(element), active = getComputedStyle(element.querySelector('[aria-pressed="true"]')), select = getComputedStyle(element.querySelector('select'))
+      return { surface: panel.backgroundColor, text: panel.color, border: panel.borderTopColor, active: active.backgroundColor, select: select.backgroundColor }
+    }), { surface: 'rgb(36, 50, 71)', text: 'rgb(238, 242, 247)', border: 'rgb(82, 99, 124)', active: 'rgb(113, 94, 232)', select: 'rgb(15, 23, 42)' })
+    await current(h)
+    for (const height of [740, 480]) {
+      await h.page.setViewportSize({ width: 320, height })
+      assert.deepEqual(await geometry(), { centeredX: true, centeredY: true, contained: true })
+      await content(h).evaluate(element => { element.scrollLeft = element.scrollWidth })
+      assert.ok(await content(h).evaluate(element => element.scrollLeft) > 0)
+      const closeBox = await dialog(h).getByRole('button', { name: 'Close', exact: true }).boundingBox()
+      assert.ok(closeBox.y >= 0 && closeBox.y + closeBox.height <= height)
+    }
+    await h.page.keyboard.press('Escape'); await dialog(h).waitFor({ state: 'detached' })
+    assert.ok((await h.page.locator('#audit-diff-row-event-parent').boundingBox()).height >= 32)
+    assert.equal(await h.page.locator('.audit-entry-detail').count(), 0)
+    await h.idle()
+  } finally { await h.close() }
+})
+
 test('production shared diff opens from project/task/subtask History and workspace/global Audit with complete literal text', { timeout: 60000 }, async () => {
   const h = await setup()
   try {

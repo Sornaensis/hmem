@@ -1397,6 +1397,12 @@ viewAuditLogEntry model entry =
         navigable =
             resolveAuditNavigationTarget entry /= Nothing
 
+        diffField =
+            if entry.action == Api.AuditUpdate then
+                Feature.AuditDiff.fields entry |> List.head
+            else
+                Nothing
+
         summaryAttrs =
             if navigable then
                 [ class "audit-entity-summary"
@@ -1433,6 +1439,15 @@ viewAuditLogEntry model entry =
                     text ""
             , span [ class "audit-actor" ] [ ActorAttribution.viewInline entry ]
             , span [ class "audit-timestamp" ] [ text (TimestampDisplay.lookup model.timestamps entry.changedAt) ]
+            , diffField |> Maybe.map (\field ->
+                let origin = "audit-diff-row-" ++ entry.id in
+                button
+                    [ id origin
+                    , class "btn btn-secondary audit-row-diff"
+                    , attribute "aria-label" ("View diff for " ++ entitySummary)
+                    , stopPropagationOn "click" (Decode.succeed ( OpenAuditDiffFrom origin entry field, True ))
+                    ]
+                    [ text "View diff" ]) |> Maybe.withDefault (text "")
             ]
         , if expanded then
             div [ class "audit-entry-detail" ]
@@ -1622,7 +1637,7 @@ viewChangedField : TimestampDisplay.State -> Api.AuditLogEntry -> AuditFieldChan
 viewChangedField display entry change =
     div [ class "history-diff-field" ]
         [ span [ class "history-diff-field-name" ] [ text change.label ]
-        , if List.member change.field (Feature.AuditDiff.fields entry) then button [ id ("audit-diff-origin-" ++ entry.id ++ "-" ++ change.field), class "btn audit-view-diff", onClick (OpenAuditDiff entry change.field), attribute "aria-label" ("View diff for " ++ change.label) ] [ text "View diff" ] else text ""
+        , if List.member change.field (Feature.AuditDiff.fields entry) then button [ id ("audit-diff-origin-" ++ entry.id ++ "-" ++ change.field), class "btn btn-secondary audit-view-diff", onClick (OpenAuditDiff entry change.field), attribute "aria-label" ("View diff for " ++ change.label) ] [ text "View diff" ] else text ""
         , case ( change.oldValue, change.newValue ) of
             ( Just oldValue, Just newValue ) ->
                 span []

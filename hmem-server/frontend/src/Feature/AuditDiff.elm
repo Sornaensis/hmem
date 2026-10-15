@@ -52,11 +52,10 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         OpenAuditDiff entry field ->
-            if not (authorized model) || otherModal model || not (List.member field (fields entry)) then ( model, Cmd.none ) else
-            let
-                state = model.auditDiff
-                dialog = { entry = entry, field = field, againstCurrent = False, beforeBaseline = False, token = state.nextToken, request = Nothing, queued = False, current = Nothing, error = Nothing, changed = False, epoch = model.sessionRequestEpoch, audience = model.sessionContext, route = Url.toString model.url, workspace = model.selectedWorkspaceId, comparison = Equal }
-            in ( set dialog { model | auditDiff = { state | nextToken = state.nextToken + 1 } }, Cmd.none )
+            open (originId entry field) entry field model
+
+        OpenAuditDiffFrom origin entry field ->
+            open origin entry field model
 
         CloseAuditDiff -> ( close model, Cmd.none )
 
@@ -87,6 +86,14 @@ update msg model =
                             -- Retire logical request immediately; physical occupancy lasts until its callback.
                             ( set { dialog | queued = True, request = Nothing, error = Nothing, changed = False } model, Cmd.none )
                         _ -> ( model, Cmd.none )
+
+open : String -> Api.AuditLogEntry -> String -> Model -> ( Model, Cmd Msg )
+open origin entry field model =
+    if not (authorized model) || otherModal model || not (List.member field (fields entry)) then ( model, Cmd.none ) else
+    let
+        state = model.auditDiff
+        dialog = { entry = entry, field = field, origin = origin, againstCurrent = False, beforeBaseline = False, token = state.nextToken, request = Nothing, queued = False, current = Nothing, error = Nothing, changed = False, epoch = model.sessionRequestEpoch, audience = model.sessionContext, route = Url.toString model.url, workspace = model.selectedWorkspaceId, comparison = Equal }
+    in ( set dialog { model | auditDiff = { state | nextToken = state.nextToken + 1 } }, Cmd.none )
 
 finish : Int -> Int -> Result Http.Error { id : String, workspaceId : String, name : String, description : Maybe String, updatedAt : String } -> Model -> ( Model, Cmd Msg )
 finish token request result model =
@@ -221,24 +228,19 @@ view model =
                 loading = dialog.request /= Nothing || dialog.queued
                 notice = if dialog.changed then "Current has changed — Refresh." else ""
             in
-            node "dialog" [ id "audit-diff-dialog", class "audit-diff-dialog", attribute "aria-labelledby" "audit-diff-title", attribute "data-dialog-token" (String.fromInt dialog.token), attribute "data-dialog-origin" (originId dialog.entry dialog.field), preventDefaultOn "cancel" (Decode.succeed ( CloseAuditDiff, True )) ]
-                [ header [ class "audit-diff-header" ] [ h2 [ id "audit-diff-title" ] [ text "View diff" ], button [ class "btn", attribute "autofocus" "", onClick CloseAuditDiff ] [ text "Close" ] ]
-                , div [ class "audit-diff-controls" ]
-                    [ label [] [ text "Field ", select [ attribute "aria-label" "Field", onInput AuditDiffField ] (fields dialog.entry |> List.map (\field -> option [ value field, selected (field == dialog.field) ] [ text field ])) ]
-                    , button [ class "btn", attribute "aria-pressed" (if dialog.againstCurrent then "false" else "true"), onClick (AuditDiffMode False) ] [ text "This change" ]
-                    , button [ class "btn", attribute "aria-pressed" (if dialog.againstCurrent then "true" else "false"), onClick (AuditDiffMode True) ] [ text "Against current" ]
-                    , if dialog.againstCurrent then label [] [ text "Historical baseline ", select [ attribute "aria-label" "Historical baseline", onInput ((==) "before" >> AuditDiffBaseline) ] [ option [ value "after", selected (not dialog.beforeBaseline) ] [ text "After" ], option [ value "before", selected dialog.beforeBaseline ] [ text "Before" ] ] ] else text ""
+            node "dialog" [ id "audit-diff-dialog", class "audit-diff-dialog", attribute "aria-labelledby" "audit-diff-title", attribute "data-dialog-token" (String.fromInt dialog.token), attribute "data-dialog-origin" dialog.origin, preventDefaultOn "cancel" (Decode.succeed ( CloseAuditDiff, True )) ]
+                [ header [ class "audit-diff-header" ]
+                    [ div [] [ h2 [ id "audit-diff-title" ] [ text "View diff" ], p [ class "audit-diff-event" ] [ text ("Audit event · " ++ timestamp dialog.entry.changedAt) ] ]
+                    , button [ class "btn btn-secondary", attribute "autofocus" "", onClick CloseAuditDiff ] [ text "Close" ]
                     ]
-                , if dialog.againstCurrent then div [ class "audit-diff-current", attribute "role" "status" ]
-                    [ p [] [ text (dialog.current |> Maybe.map (\snapshot -> "Current loaded at " ++ timestamp (loadedTime snapshot.loadedAt) ++ "; entity updated at " ++ timestamp snapshot.updatedAt) |> Maybe.withDefault "Current not loaded.") ]
-                    , button [ class "btn", onClick RefreshAuditDiff ] [ text "Refresh" ]
-                    , if loading then p [] [ text "Loading current…" ] else text ""
-                    , dialog.error |> Maybe.map (\error -> p [ class "audit-diff-error" ] [ text error ]) |> Maybe.withDefault (text "")
-                    , p [] [ text notice ]
-                    , if model.webSocket.state /= Connected then p [] [ text "Freshness unknown: disconnected or resynchronizing." ] else text ""
-                    , if model.page == AuditLogPage then p [] [ text "Global Audit does not subscribe to every workspace. Loaded-at and Refresh are the freshness guarantee; change notices reflect only observed evidence." ] else text ""
-                    ] else text ""
-                , p [ class "audit-diff-event" ] [ text ("Audit event: " ++ timestamp dialog.entry.changedAt) ]
+                , div [ class "audit-diff-controls" ]
+                    [ div [ class "audit-diff-modes", attribute "role" "group", attribute "aria-label" "Comparison mode" ]
+                        [ button [ class ("btn btn-secondary" ++ (if dialog.againstCurrent then "" else " is-active")), attribute "aria-pressed" (if dialog.againstCurrent then "false" else "true"), onClick (AuditDiffMode False) ] [ text "This change" ]
+                        , button [ class ("btn btn-secondary" ++ (if dialog.againstCurrent then " is-active" else "")), attribute "aria-pressed" (if dialog.againstCurrent then "true" else "false"), onClick (AuditDiffMode True) ] [ text "Against current" ]
+                        ]
+                    , label [] [ text "Field", select [ class "filter-select audit-diff-select", attribute "aria-label" "Field", onInput AuditDiffField ] (fields dialog.entry |> List.map (\field -> option [ value field, selected (field == dialog.field) ] [ text (fieldLabel field) ])) ]
+                    , if dialog.againstCurrent then label [] [ text "Baseline", select [ class "filter-select audit-diff-select", attribute "aria-label" "Historical baseline", onInput ((==) "before" >> AuditDiffBaseline) ] [ option [ value "after", selected (not dialog.beforeBaseline) ] [ text "After" ], option [ value "before", selected dialog.beforeBaseline ] [ text "Before" ] ] ] else text ""
+                    ]
                 , div [ class "audit-diff-endpoints" ] [ endpoint "-" oldLabel (timestamp oldTime) before, endpoint "+" newLabel (timestamp newTime) after ]
                 , div [ class "audit-diff-content", tabindex 0, attribute "aria-label" "Text comparison" ]
                     [ case dialog.comparison of
@@ -247,13 +249,27 @@ view model =
                         Simplified -> div [ class "audit-diff-simplified" ] [ p [] [ text "Large input: simplified full before/after presentation. Text is complete; line and word comparison was skipped." ], fullEndpoint oldLabel before, fullEndpoint newLabel after ]
                         Unified hunks -> div [] (List.map viewHunk hunks)
                     ]
+                , if dialog.againstCurrent then div [ class "audit-diff-current", attribute "role" "status" ]
+                    [ div [ class "audit-diff-current-heading" ]
+                        [ p [] [ text (dialog.current |> Maybe.map (\snapshot -> "Current loaded at " ++ timestamp (loadedTime snapshot.loadedAt) ++ "; entity updated at " ++ timestamp snapshot.updatedAt) |> Maybe.withDefault "Current not loaded.") ]
+                        , button [ class "btn btn-secondary", onClick RefreshAuditDiff ] [ text "Refresh" ]
+                        ]
+                    , if loading then p [] [ text "Loading current…" ] else text ""
+                    , dialog.error |> Maybe.map (\error -> p [ class "audit-diff-error" ] [ text error ]) |> Maybe.withDefault (text "")
+                    , if dialog.changed then p [ class "audit-diff-notice" ] [ text notice ] else text ""
+                    , if model.webSocket.state /= Connected then p [] [ text "Freshness unknown: disconnected or resynchronizing." ] else text ""
+                    , if model.page == AuditLogPage then p [] [ text "Global Audit does not subscribe to every workspace. Loaded-at and Refresh are the freshness guarantee; change notices reflect only observed evidence." ] else text ""
+                    ] else text ""
                 ]
+
+fieldLabel : String -> String
+fieldLabel field = String.toUpper (String.left 1 field) ++ String.dropLeft 1 field
 
 originId : Api.AuditLogEntry -> String -> String
 originId entry field = "audit-diff-origin-" ++ entry.id ++ "-" ++ field
 
 endpoint : String -> String -> String -> Value -> Html Msg
-endpoint sign labelText timestamp value_ = div [ class "audit-diff-endpoint" ] [ strong [] [ text (sign ++ " " ++ labelText) ], span [] [ text (" · " ++ timestamp ++ " · " ++ AuditDiff.describe value_) ] ]
+endpoint sign labelText timestamp value_ = div [ class "audit-diff-endpoint" ] [ strong [] [ text (sign ++ " " ++ labelText) ], span [] [ text (timestamp ++ " · " ++ AuditDiff.describe value_) ] ]
 
 fullEndpoint : String -> Value -> Html Msg
 fullEndpoint labelText value_ = section [] [ h3 [] [ text labelText ], pre [] [ text (case value_ of

@@ -50,6 +50,12 @@ suite = describe "literal audit text comparison and frozen-current lifetime"
         let loaded = load opened
             changed = loaded |> step (AuditDiffField "description") |> step (AuditDiffBaseline True) |> step (AuditDiffMode False) |> step (AuditDiffMode True)
         in Expect.equal ( 0, Just "current", Just True ) ( Dict.size changed.auditDiff.admissions, changed.auditDiff.dialog |> Maybe.andThen .current |> Maybe.map .name, changed.auditDiff.dialog |> Maybe.map .beforeBaseline )
+    , test "explicit row invoker survives field changes independently of selected field" <| \_ ->
+        let changed = base |> step (OpenAuditDiffFrom "audit-diff-row-event" entry "title") |> step (AuditDiffField "description")
+        in Expect.equal ( Just "audit-diff-row-event", Just "description" ) ( changed.auditDiff.dialog |> Maybe.map .origin, changed.auditDiff.dialog |> Maybe.map .field )
+    , test "field shortcuts retain their own origin and stable title-before-description order" <| \_ ->
+        let fieldOpened = base |> step (OpenAuditDiff entry "description")
+        in Expect.equal ( [ "title", "description" ], Just "audit-diff-origin-event-description" ) ( Dialog.fields entry, fieldOpened.auditDiff.dialog |> Maybe.map .origin )
     , test "close/reopen rejects HTTP and loaded-at callbacks and retains physical occupancy" <| \_ ->
         let request = requestId opened
             token = dialogToken opened

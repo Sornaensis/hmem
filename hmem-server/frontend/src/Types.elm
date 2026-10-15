@@ -848,6 +848,7 @@ type alias AuditDiffModel =
 type alias AuditDiffDialog =
     { entry : Api.AuditLogEntry
     , field : String
+    , origin : String
     , againstCurrent : Bool
     , beforeBaseline : Bool
     , token : Int
@@ -1414,6 +1415,7 @@ type Msg
     | FocusEntityKeepForward String String
     | NavigateToAuditEntity Api.AuditLogEntry
     | OpenAuditDiff Api.AuditLogEntry String
+    | OpenAuditDiffFrom String Api.AuditLogEntry String
     | CloseAuditDiff
     | AuditDiffMode Bool
     | AuditDiffBaseline Bool

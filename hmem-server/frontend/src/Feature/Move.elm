@@ -331,7 +331,7 @@ pump model =
                     else case List.head ready of
                         Just ( key, branch ) -> Just ( key, branch.offset )
                         Nothing ->
-                            if Set.size model.dataLoading.cardDetailAdmissions + (Dict.values state.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then Nothing
+                            if Set.size model.dataLoading.cardDetailAdmissions + Dict.size model.auditDiff.admissions + (Dict.values state.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then Nothing
                             else List.head matchDemand |> Maybe.map (\id -> ( "@match:" ++ id, 0 ))
             in
             if Dict.size state.admissions + Dict.size model.dataLoading.navigationAdmissions + (if model.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False then 1 else 0) >= 4 then ( model, Cmd.none )

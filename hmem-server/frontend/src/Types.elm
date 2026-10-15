@@ -1,6 +1,7 @@
 module Types exposing (..)
 
 import Api exposing (..)
+import AuditDiff
 import Browser
 import Browser.Navigation as Nav
 import Dict exposing (Dict)
@@ -69,6 +70,7 @@ type alias Model =
     , mutations : MutationsModel
     , groups : GroupsModel
     , auditLog : AuditLogModel
+    , auditDiff : AuditDiffModel
     , timeline : TimelineModel
     , workspaceAdmin : WorkspaceAdminModel
     }
@@ -836,6 +838,40 @@ type alias GroupsModel =
     }
 
 
+type alias AuditDiffModel =
+    { dialog : Maybe AuditDiffDialog
+    , nextToken : Int
+    , admissions : Dict Int ()
+    }
+
+
+type alias AuditDiffDialog =
+    { entry : Api.AuditLogEntry
+    , field : String
+    , againstCurrent : Bool
+    , beforeBaseline : Bool
+    , token : Int
+    , request : Maybe Int
+    , queued : Bool
+    , current : Maybe AuditDiffCurrent
+    , error : Maybe String
+    , changed : Bool
+    , epoch : Int
+    , audience : Maybe Api.SessionContext
+    , route : String
+    , workspace : Maybe String
+    , comparison : AuditDiff.Comparison
+    }
+
+
+type alias AuditDiffCurrent =
+    { name : String
+    , description : Maybe String
+    , updatedAt : String
+    , loadedAt : Time.Posix
+    }
+
+
 type alias AuditLogModel =
     { entityHistory : Dict String (List Api.AuditLogEntry)
     , entityHistoryHasMore : Dict String Bool
@@ -1377,6 +1413,15 @@ type Msg
     | FocusEntity String String
     | FocusEntityKeepForward String String
     | NavigateToAuditEntity Api.AuditLogEntry
+    | OpenAuditDiff Api.AuditLogEntry String
+    | CloseAuditDiff
+    | AuditDiffMode Bool
+    | AuditDiffBaseline Bool
+    | AuditDiffField String
+    | RefreshAuditDiff
+    | AuditDiffProjectFetched Int Int (Result Http.Error Api.Project)
+    | AuditDiffTaskFetched Int Int (Result Http.Error Api.Task)
+    | AuditDiffLoaded Int Int (Result String { name : String, description : Maybe String, updatedAt : String }) Time.Posix
     | NavigateToTimelineEntity Api.WorkspaceTimelineEvent
     | ReturnToFocusSource
     | FocusBreadcrumbNav Int

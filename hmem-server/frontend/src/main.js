@@ -4,6 +4,9 @@ import { installObservationViewport } from './observation-viewport.js'
 import { installObservationPreferences } from './observation-preferences.js'
 import { installTimestampDisplay } from './timestamp-display.js'
 import { Elm } from './Main.elm'
+import { installNativeDialog } from './native-dialog.js'
+
+installNativeDialog({ document, id: 'audit-diff-dialog' })
 
 // Native modal semantics contain keyboard focus and make the background inert.
 // Elm owns lifetime and actions; this bridge only manages native DOM focus.

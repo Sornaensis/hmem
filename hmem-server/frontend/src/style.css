@@ -4520,3 +4520,28 @@ textarea.observation-edit-content {
   .audit-detail-value:last-child { margin-bottom: 0; }
   .audit-entry-meta { gap: 0.375rem 0.75rem; }
 }
+.audit-diff-dialog { width: min(1100px, calc(100vw - 24px)); max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); box-sizing: border-box; padding: 20px; color: var(--text-primary, #e2e8f0); background: var(--bg-secondary, #1e293b); border: 1px solid var(--border-color, #64748b); border-radius: 10px; overflow: auto; }
+.audit-diff-dialog::backdrop { background: #0009; }
+.audit-diff-header, .audit-diff-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.audit-diff-header { justify-content: space-between; }
+.audit-diff-header h2 { margin: 0 0 12px; }
+.audit-diff-controls { margin: 12px 0; }
+.audit-diff-controls label { display: flex; align-items: center; gap: 6px; }
+.audit-diff-controls [aria-pressed="true"] { outline: 2px solid currentColor; }
+.audit-diff-endpoints { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.audit-diff-endpoint { flex: 1 1 300px; overflow-wrap: anywhere; }
+.audit-diff-content { max-height: 60dvh; overflow: auto; border: 1px solid var(--border-color, #64748b); padding: 8px; }
+.audit-diff-hunk { margin-bottom: 16px; min-width: max-content; }
+.audit-diff-hunk-heading { color: var(--text-secondary, #94a3b8); font-family: monospace; padding: 6px; }
+.audit-diff-line { display: flex; align-items: flex-start; font: 13px/1.65 monospace; white-space: pre; min-height: 1.65em; }
+.audit-diff-number { min-width: 4ch; padding: 0 6px; text-align: right; color: var(--text-secondary, #94a3b8); user-select: none; }
+.audit-diff-sign { width: 2ch; flex-shrink: 0; }
+.audit-diff-line code { font: inherit; white-space: pre; }
+.audit-diff-line.removed { background: #b91c1c30; }
+.audit-diff-line.added { background: #15803d30; }
+.audit-diff-line mark { color: inherit; background: #facc1540; font-weight: bold; text-decoration: underline; }
+.audit-diff-no-newline { color: var(--text-secondary, #94a3b8); font-style: italic; }
+.audit-diff-simplified pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.audit-diff-error { color: #fda4af; }
+.audit-view-diff { margin: 0 8px; font-size: .8rem; }
+@media (max-width: 600px) { .audit-diff-dialog { padding: 12px; } .audit-diff-controls { align-items: flex-start; } .audit-diff-content { max-height: 55dvh; } }

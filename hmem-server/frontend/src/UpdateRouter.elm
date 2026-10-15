@@ -5,6 +5,7 @@ import Api
 import AppShell
 import Browser
 import Feature.AuditLog
+import Feature.AuditDiff
 import Feature.Cards
 import Feature.DataLoading
 import Feature.Dependencies
@@ -50,6 +51,16 @@ update msg model =
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
+        OpenAuditDiff _ _ -> Ok (Feature.AuditDiff.update msg model)
+        CloseAuditDiff -> Ok (Feature.AuditDiff.update msg model)
+        AuditDiffMode _ -> Ok (Feature.AuditDiff.update msg model)
+        AuditDiffBaseline _ -> Ok (Feature.AuditDiff.update msg model)
+        AuditDiffField _ -> Ok (Feature.AuditDiff.update msg model)
+        RefreshAuditDiff -> Ok (Feature.AuditDiff.update msg model)
+        AuditDiffProjectFetched _ _ _ -> Ok (Feature.AuditDiff.update msg model)
+        AuditDiffTaskFetched _ _ _ -> Ok (Feature.AuditDiff.update msg model)
+        AuditDiffLoaded _ _ _ _ -> Ok (Feature.AuditDiff.update msg model)
+
         TimestampsFormatted payload ->
             Ok (Feature.TimestampDisplay.receive payload model)
 

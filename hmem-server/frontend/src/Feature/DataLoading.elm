@@ -2111,7 +2111,7 @@ beginProjectCardDetail summary ( model, commands ) =
                     )
                 |> Maybe.withDefault False
     in
-    if alreadyCurrent || model.move.dialog /= Nothing || Set.size model.dataLoading.cardDetailAdmissions + (Dict.values model.move.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then
+    if alreadyCurrent || model.move.dialog /= Nothing || Set.size model.dataLoading.cardDetailAdmissions + Dict.size model.auditDiff.admissions + (Dict.values model.move.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then
         ( model, commands )
 
     else
@@ -2154,7 +2154,7 @@ beginTaskCardDetail summary ( model, commands ) =
                     )
                 |> Maybe.withDefault False
     in
-    if alreadyCurrent || model.move.dialog /= Nothing || Set.size model.dataLoading.cardDetailAdmissions + (Dict.values model.move.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then
+    if alreadyCurrent || model.move.dialog /= Nothing || Set.size model.dataLoading.cardDetailAdmissions + Dict.size model.auditDiff.admissions + (Dict.values model.move.admissions |> List.filter (.branch >> String.startsWith "@match:") |> List.length) >= 6 then
         ( model, commands )
 
     else

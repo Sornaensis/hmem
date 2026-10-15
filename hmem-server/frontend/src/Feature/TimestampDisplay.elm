@@ -5,6 +5,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Dict
 import Feature.AuditLog
+import Feature.AuditDiff
 import Feature.Cards
 import Feature.Observation
 import Feature.Timeline
@@ -72,7 +73,7 @@ reconcile : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
 reconcile ( model, commands ) =
     let
         ( timestamps, request ) =
-            TimestampDisplay.reconcile (context model) (sources model) model.timestamps
+            TimestampDisplay.reconcile (context model) (sources model ++ Feature.AuditDiff.timestampSources model) model.timestamps
     in
     ( { model | timestamps = timestamps }
     , Cmd.batch

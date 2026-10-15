@@ -2,6 +2,7 @@ module Main exposing (main, update)
 
 import Api exposing (..)
 import AppShell
+import Feature.AuditDiff
 import Browser
 import Browser.Navigation as Nav
 import Feature.Cards as Cards
@@ -120,7 +121,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.TimestampDisplay.reconcile
+    updateCore msg model |> Feature.AuditDiff.reconcile model |> Feature.TimestampDisplay.reconcile
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )

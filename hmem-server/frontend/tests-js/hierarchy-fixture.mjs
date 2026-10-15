@@ -98,6 +98,9 @@ const socketScript = () => {
     emit(frame) { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(frame) }) }
   }
   window.WebSocket = FixtureSocket
+  // Explicit raw frames allow tests to observe a non-live phase before a later
+  // checkpoint. The established helpers below retain their automatic checkpoint.
+  window.pushHierarchyRawFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1)) for (const frame of frames) socket.emit(frame) }
   window.pushHierarchyGlobalFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1 && new URL(s.url).searchParams.get('ticket') === 'global-ticket')) { for (const frame of frames) socket.emit(frame); socket.emit({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'global-refresh' }) } }
   window.pushHierarchyFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1)) { for (const frame of frames) socket.emit(frame); socket.emit({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'browser-next' }) } }
   const NativeObserver = window.ResizeObserver

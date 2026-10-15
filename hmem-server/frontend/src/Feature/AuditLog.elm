@@ -4,6 +4,7 @@ import ActorAttribution
 import Api
 import Dict
 import Feature.Focus as Focus
+import Feature.AuditDiff
 import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, pushUrl)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -1458,7 +1459,7 @@ viewAuditEntryChangeDetails : TimestampDisplay.State -> Api.AuditLogEntry -> Htm
 viewAuditEntryChangeDetails display entry =
     case entry.action of
         Api.AuditUpdate ->
-            viewChangedFields display entry.oldValues entry.newValues
+            viewChangedFields display entry
 
         Api.AuditCreate ->
             text ""
@@ -1569,7 +1570,7 @@ viewHistoryEntry model entry =
         changedFields =
             case entry.action of
                 Api.AuditUpdate ->
-                    viewChangedFields model.timestamps entry.oldValues entry.newValues
+                    viewChangedFields model.timestamps entry
 
                 Api.AuditCreate ->
                     case entry.newValues of
@@ -1597,11 +1598,15 @@ viewHistoryEntry model entry =
         ]
 
 
-viewChangedFields : TimestampDisplay.State -> Maybe Decode.Value -> Maybe Decode.Value -> Html Msg
-viewChangedFields display mOld mNew =
+viewChangedFields : TimestampDisplay.State -> Api.AuditLogEntry -> Html Msg
+viewChangedFields display entry =
     let
         changes =
-            auditChangedFieldItemsFromValues mOld mNew
+            let
+                displayed = auditChangedFieldItemsFromValues entry.oldValues entry.newValues
+                unavailableFields = Feature.AuditDiff.fields entry |> List.filter (\field -> not (List.any (.field >> (==) field) displayed))
+            in
+            displayed ++ List.map (\field -> { field = field, label = auditFieldLabel field, oldValue = auditOldValueFor field entry, newValue = auditNewValueFor field entry }) unavailableFields
     in
     if List.isEmpty changes then
         text ""
@@ -1609,14 +1614,15 @@ viewChangedFields display mOld mNew =
     else
         div [ class "history-diff audit-changed-fields" ]
             (h4 [ class "audit-detail-heading" ] [ text "Changed fields" ]
-                :: List.map (viewChangedField display) changes
+                :: List.map (viewChangedField display entry) changes
             )
 
 
-viewChangedField : TimestampDisplay.State -> AuditFieldChange -> Html Msg
-viewChangedField display change =
+viewChangedField : TimestampDisplay.State -> Api.AuditLogEntry -> AuditFieldChange -> Html Msg
+viewChangedField display entry change =
     div [ class "history-diff-field" ]
         [ span [ class "history-diff-field-name" ] [ text change.label ]
+        , if List.member change.field (Feature.AuditDiff.fields entry) then button [ id ("audit-diff-origin-" ++ entry.id ++ "-" ++ change.field), class "btn audit-view-diff", onClick (OpenAuditDiff entry change.field), attribute "aria-label" ("View diff for " ++ change.label) ] [ text "View diff" ] else text ""
         , case ( change.oldValue, change.newValue ) of
             ( Just oldValue, Just newValue ) ->
                 span []

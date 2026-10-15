@@ -51,6 +51,23 @@ effective-model metadata, raw principal/authority fields or an actor disclosure.
 Permissions and request lifetimes continue to use that authenticated principal;
 event attribution and stored provenance remain separate and unchanged.
 
+Changed project names, task/subtask titles and descriptions in Audit and History
+offer **View diff**. The shared read-only modal compares the complete literal
+Before and After snapshots, with numbered unified hunks and word emphasis. Null,
+empty text and unavailable/malformed snapshots remain distinct. Markdown and
+HTML-like strings display as source. Unusually large inputs use a complete
+simplified before/after presentation instead of an expensive line comparison.
+
+**Against current** makes one authorized full entity read and freezes that
+snapshot for the opening. Switching fields or the historical baseline reuses it;
+**Refresh** explicitly replaces it. The modal shows when it loaded and the entity
+update timestamp. Observed changes mark the snapshot stale without replacing its
+text, including changes observed during a pending read. Global Audit does not
+subscribe to every workspace, so loaded-at plus Refresh are the freshness
+guarantee. Disconnected/resynchronizing streams make freshness unknown. Read
+denial, unavailable entities, network errors and malformed replies leave the
+historical comparison usable; a 404 alone does not establish deletion.
+
 All and Subject mode switches preserve the current physical scroll position,
 including newer scrolling while results load. Observation and Project card
 surfaces are left aligned with a responsive maximum outer width of 78rem; their

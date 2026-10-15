@@ -5,6 +5,7 @@ import Browser
 import Browser.Events
 import Browser.Navigation as Nav
 import Dict
+import Feature.AuditDiff
 import Feature.AuditLog
 import Feature.Cards
 import Feature.ChangeStream
@@ -103,6 +104,7 @@ initModel key url page flags storedFilters legacyFrag =
             , mutations = Feature.Mutations.init
             , groups = Feature.Groups.init
             , auditLog = Feature.AuditLog.init
+            , auditDiff = Feature.AuditDiff.init
             , timeline = Feature.Timeline.init
             , workspaceAdmin = Feature.WorkspaceAdmin.init
             }
@@ -458,7 +460,10 @@ handleOwnedRaw ownedMsg model =
                 ( navigationModel, navigationCmd )
 
         GlobalKeyDownMsg keyCode ->
-            if keyCode == 27 then
+            if keyCode == 27 && model.auditDiff.dialog /= Nothing then
+                Feature.AuditDiff.update CloseAuditDiff model
+
+            else if keyCode == 27 then
                 case
                     List.filterMap identity
                         [ Feature.Cards.handleEscape model
@@ -942,6 +947,7 @@ clearSessionScopedState model =
         , focus = Feature.Focus.init Nothing
         , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
         , auditLog = Feature.AuditLog.init
+        , auditDiff = let state = model.auditDiff in { state | dialog = Nothing }
         , timeline = Feature.Timeline.init
         , workspaceAdmin = Feature.WorkspaceAdmin.retireSessionState model.workspaceAdmin
         , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
@@ -1001,7 +1007,8 @@ viewDocument model =
             , viewConnectionStatus model.webSocket.state
             , if model.auth.status == AuthReady then
                 div []
-                    [ Feature.Move.view model
+                    [ Feature.AuditDiff.view model
+                    , Feature.Move.view model
                     , Feature.Editing.viewCreateFormModal model
                     , Feature.DragDrop.viewDropActionModal model
                     , Feature.Cards.viewDeleteConfirmModal model

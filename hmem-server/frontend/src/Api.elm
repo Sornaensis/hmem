@@ -129,6 +129,7 @@ module Api exposing
     , fetchObservations
     , fetchObservationsPage
     , fetchProject
+    , fetchProjectForComparison
     , fetchProjectMemories
     , fetchProjectNextTasks
     , fetchProjectOverview
@@ -140,6 +141,7 @@ module Api exposing
     , fetchNavigationSummaries
     , fetchSessionContext
     , fetchTask
+    , fetchTaskForComparison
     , fetchTaskMemories
     , fetchTaskOverview
     , fetchTaskDependencyPage
@@ -2987,15 +2989,20 @@ fetchProjectsPage apiUrl wsId offset toMsg =
 
 fetchProject : String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
 fetchProject apiUrl projId toMsg =
-    Http.request
-        { method = "GET"
-        , headers = []
-        , url = apiUrl ++ "/api/v1/projects/" ++ projId
-        , body = Http.emptyBody
-        , expect = Http.expectJson toMsg projectDecoder
-        , timeout = Just 20000
-        , tracker = Nothing
-        }
+    fetchFullRecord projectDecoder apiUrl ("projects/" ++ projId) toMsg
+
+
+{-| Comparison cannot conflate an omitted or malformed description with explicit
+null. Keep ordinary consumers' backward-compatible decoder unchanged.
+-}
+fetchProjectForComparison : String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
+fetchProjectForComparison apiUrl projId toMsg =
+    fetchFullRecord (comparisonRecordDecoder projectDecoder) apiUrl ("projects/" ++ projId) toMsg
+
+
+comparisonRecordDecoder : Decoder a -> Decoder a
+comparisonRecordDecoder decoder =
+    D.map2 (\_ record -> record) (D.field "description" (D.nullable D.string)) decoder
 
 
 fetchTasks : String -> String -> (Result Http.Error (PaginatedResult Task) -> msg) -> Cmd msg
@@ -3013,12 +3020,22 @@ fetchTasksPage apiUrl wsId offset toMsg =
 
 fetchTask : String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
 fetchTask apiUrl taskId toMsg =
+    fetchFullRecord taskDecoder apiUrl ("tasks/" ++ taskId) toMsg
+
+
+fetchTaskForComparison : String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
+fetchTaskForComparison apiUrl taskId toMsg =
+    fetchFullRecord (comparisonRecordDecoder taskDecoder) apiUrl ("tasks/" ++ taskId) toMsg
+
+
+fetchFullRecord : Decoder a -> String -> String -> (Result Http.Error a -> msg) -> Cmd msg
+fetchFullRecord decoder apiUrl entityPath toMsg =
     Http.request
         { method = "GET"
         , headers = []
-        , url = apiUrl ++ "/api/v1/tasks/" ++ taskId
+        , url = apiUrl ++ "/api/v1/" ++ entityPath
         , body = Http.emptyBody
-        , expect = Http.expectJson toMsg taskDecoder
+        , expect = Http.expectJson toMsg decoder
         , timeout = Just 20000
         , tracker = Nothing
         }

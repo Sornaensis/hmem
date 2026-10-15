@@ -35,13 +35,21 @@ value has a compact History disclosure with copyable SHAs and recorded dates.
 Open history follows sequential pages of 25 records in recorded order; collapsing
 stops continuation, and a failed page offers an explicit Retry.
 
-Actor labels in audits, entity history, Timeline, sessions and Observation
-assertions show the declared role and complete `harness:model:reasoning` when
-available. Actor details retain the original ID and label. Older records keep
-known human, bot, service, system and Local User attribution; unknown legacy
-attribution displays Local User without inventing model metadata. Session
-attribution is a display value: permissions and request lifetimes continue to
-use the authenticated principal.
+Audits, entity history, Timeline and Observation assertions show one inline actor
+attribution in the secondary metadata style, without a separate actor disclosure
+or raw field dump. Declaration metadata identifies a model action even when the
+stored actor type is `user`: show the declared role and complete
+`harness:model:reasoning`, retaining the human name for those actions. Full names
+and model identifiers wrap naturally without truncation. Human actions without a
+model show their user badge/name; historical bot, service, system and Local User
+labels remain accurate, and unknown legacy attribution falls back to Local User
+without inventing model metadata. Observation history groups each revision/date
+above its actor and preserves full-value revision copy controls.
+
+The sidebar shows the signed-in principal name or local user fallback, without
+effective-model metadata, raw principal/authority fields or an actor disclosure.
+Permissions and request lifetimes continue to use that authenticated principal;
+event attribution and stored provenance remain separate and unchanged.
 
 All and Subject mode switches preserve the current physical scroll position,
 including newer scrolling while results load. Observation and Project card

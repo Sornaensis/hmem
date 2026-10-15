@@ -1,6 +1,6 @@
-module ActorAttribution exposing (Actor, BotIdentity, botIdentityDecoder, details, empty, label, viewDetails, viewInline)
+module ActorAttribution exposing (Actor, BotIdentity, botIdentityDecoder, empty, label, viewInline)
 
-import Html exposing (Html, dd, dl, dt, span, summary, text)
+import Html exposing (Html, span, text)
 import Html.Attributes exposing (class)
 import Json.Decode as D exposing (Decoder)
 
@@ -83,21 +83,3 @@ viewInline actor =
                     [ text " ", span [ class "actor-attribution-label" ] [ text actorLabel ] ]
                )
         )
-
-
-details : { a | actorType : Maybe String, actorId : Maybe String, actorLabel : Maybe String, botIdentity : Maybe BotIdentity } -> List ( String, String )
-details actor =
-    List.filterMap identity
-        [ Maybe.map (Tuple.pair "Actor type") actor.actorType
-        , Maybe.map (Tuple.pair "Actor ID") actor.actorId
-        , Maybe.map (Tuple.pair "Actor label") actor.actorLabel
-        ]
-        ++ (actor.botIdentity |> Maybe.map (\identity -> [ ( "Declared role", identity.role ), ( "Model", identity.modelId ) ]) |> Maybe.withDefault [])
-
-
-viewDetails : { a | actorType : Maybe String, actorId : Maybe String, actorLabel : Maybe String, botIdentity : Maybe BotIdentity } -> Html msg
-viewDetails actor =
-    Html.details [ class "actor-details" ]
-        [ summary [] [ text "Actor details" ]
-        , dl [] (List.concatMap (\( name, value ) -> [ dt [] [ text name ], dd [] [ text value ] ]) (details actor))
-        ]

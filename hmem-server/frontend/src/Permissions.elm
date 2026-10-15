@@ -13,7 +13,6 @@ module Permissions exposing
     , isImplicitLocalSuperadminSession
     , isLocalMode
     , isSuperadmin
-    , principalAttributionDetails
     , principalAttributionLabel
     , shouldShowAuthDetailsForSession
     , shouldShowLocalSessionDetails
@@ -21,8 +20,6 @@ module Permissions exposing
     , shouldShowPermissionSummary
     )
 
-import Html exposing (Html)
-import Html.Attributes
 import ActorAttribution
 import Api
 import Types exposing (AuthStatus(..), Model)
@@ -169,22 +166,6 @@ principalAttributionLabel model =
             , botIdentity = Nothing
             })
 
-
-principalAttributionDetails : Model -> Html msg
-principalAttributionDetails model =
-    model.sessionContext |> Maybe.map (\session ->
-        Html.div []
-            [ ActorAttribution.viewDetails (sessionActor session)
-            , Html.div [ Html.Attributes.class "actor-authority-details" ]
-                [ Html.text ("Authenticated principal: " ++ session.principal.actorLabel ++ " · " ++ session.principal.actorId ++ " · " ++ session.principal.authority) ]
-            ]) |> Maybe.withDefault (Html.text "")
-
-
-sessionActor : Api.SessionContext -> ActorAttribution.Actor
-sessionActor session =
-    Maybe.withDefault
-        { actorType = Just session.principal.actorType, actorId = Just session.principal.actorId, actorLabel = Just session.principal.actorLabel, botIdentity = Nothing }
-        session.effectiveActor
 
 currentWorkspacePermission : (Api.SessionWorkspaceContext -> Bool) -> Model -> Bool
 currentWorkspacePermission selector model =

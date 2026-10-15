@@ -4495,25 +4495,17 @@ textarea.observation-edit-content {
 }
 .actor-attribution-label { white-space: normal; overflow-wrap: anywhere; }
 
-/* Existing attribution callers remain compatible during inline migration. */
-.actor-details, .actor-details dd, .observation-actor, .sidebar-session-principal,
-.timeline-actor-details, .timeline-event-context, .timeline-context-chip, .audit-actor,
-.actor-authority-details {
+/* Supporting event metadata wraps alongside the inline attribution. */
+.observation-actor, .sidebar-session-principal, .timeline-event-context,
+.timeline-context-chip, .audit-actor {
   min-width: 0;
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: normal;
 }
-.actor-details { font-size: 0.8rem; margin-top: 0.35rem; }
-.actor-details summary { cursor: pointer; }
-.actor-details dl { margin: 0.4rem 0; }
-.actor-details dt { font-weight: 600; }
-.actor-details dd { margin: 0 0 0.4rem; }
 .sidebar-session { padding-bottom: 3rem; flex-shrink: 0; }
 .audit-entry-row { flex-wrap: wrap; }
 .audit-entry-row .audit-actor { flex: 1 1 100%; order: 1; }
-.timeline-actor-details { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; font-size: 0.75rem; }
-.observation-actor { display: block; }
 
 @media (max-width: 700px) {
   /* The connection indicator is below the content, outside the mobile sidebar. */

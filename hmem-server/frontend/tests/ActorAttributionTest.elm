@@ -76,10 +76,6 @@ suite =
                 , \_ -> Actor.viewInline { actorType = Just "user", actorId = Just "alice", actorLabel = Just longName, botIdentity = Nothing }
                     |> Query.fromHtml |> Query.has [ Selector.text longName ]
                 ] ()
-        , test "renders full actor ID and original label as inspectable detail content" <| \_ ->
-            Actor.viewDetails { actorType = Just "bot", actorId = Just "credential-derived-bot-id", actorLabel = Just "Authenticated bot", botIdentity = Just declared }
-                |> Query.fromHtml
-                |> Query.has [ Selector.text "credential-derived-bot-id", Selector.text "Authenticated bot", Selector.text declared.modelId ]
         , test "old session data remains compatible and keeps effective actor separate from principal" <| \_ ->
             let
                 wire = """{"auth_mode":"local","principal":{"actor_type":"user","actor_id":"local","actor_label":"Local User","authority":"local_superadmin"},"global_permissions":{"create_workspace":true,"superadmin":true}}"""

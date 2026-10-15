@@ -3,6 +3,13 @@ port module Ports exposing (..)
 import Json.Encode as Encode
 
 
+-- Presentation-only browser timezone formatting.
+port formatTimestamps : Encode.Value -> Cmd msg
+
+
+port timestampsFormatted : (Encode.Value -> msg) -> Sub msg
+
+
 
 -- PORTS: WebSocket
 

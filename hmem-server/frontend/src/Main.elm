@@ -8,6 +8,7 @@ import Feature.Cards as Cards
 import Feature.Move
 import Feature.DataLoading
 import Feature.Observation
+import Feature.TimestampDisplay
 import Helpers exposing (parseFragment)
 import Json.Decode as Decode
 import Route exposing (handleUrlChange, handleUrlRequest, urlToPage)
@@ -119,6 +120,11 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
+    updateCore msg model |> Feature.TimestampDisplay.reconcile
+
+
+updateCore : Msg -> Model -> ( Model, Cmd Msg )
+updateCore msg model =
     case UpdateRouter.update msg model of
         Ok result ->
             Feature.DataLoading.syncPlanningCountsResult result |> Cards.refreshViewport (Tuple.first result) |> Feature.Move.reconcile

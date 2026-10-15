@@ -35,6 +35,7 @@ import Page.Workspace
 import Permissions
 import Ports exposing (authSessionError, authTokenChanged, authUnauthorized, clearChangeStreamScope, disconnectChangeStreamScope, disconnectWebSocket, localStorageReceived, loginAuth, logoutAuth, onMainContentScroll)
 import Toast
+import TimestampDisplay
 import Types exposing (..)
 import Url
 
@@ -79,6 +80,7 @@ initModel key url page flags storedFilters legacyFrag =
             , auth = { status = AuthBooting, mode = Nothing }
             , sessionContext = Nothing
             , sessionRequestEpoch = 0
+            , timestamps = TimestampDisplay.empty
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
             , mainContentScrollY = 0
@@ -975,6 +977,7 @@ subscriptions =
         , Ports.onObservationViewport ObservationViewportChanged
         , Ports.observationPreferencesReceived ObservationPreferencesReceived
         , Ports.clipboardResult ClipboardResult
+        , Ports.timestampsFormatted TimestampsFormatted
         , onMainContentScroll MainContentScrolled
         ]
 

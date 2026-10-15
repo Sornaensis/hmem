@@ -17,6 +17,7 @@ import Feature.Mutations
 import Feature.Observation
 import Feature.Search
 import Feature.Timeline
+import Feature.TimestampDisplay
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
 import Helpers
@@ -49,6 +50,9 @@ update msg model =
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
+        TimestampsFormatted payload ->
+            Ok (Feature.TimestampDisplay.receive payload model)
+
         ObservationViewportChanged payload ->
             Ok (Feature.Observation.updateViewport payload model)
 

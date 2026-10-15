@@ -2,6 +2,7 @@ import { installHierarchyViewport } from './hierarchy-viewport.js'
 import { installObservationNavigation } from './observation-navigation.js'
 import { installObservationViewport } from './observation-viewport.js'
 import { installObservationPreferences } from './observation-preferences.js'
+import { installTimestampDisplay } from './timestamp-display.js'
 import { Elm } from './Main.elm'
 
 // Native modal semantics contain keyboard focus and make the background inert.
@@ -703,3 +704,4 @@ installHierarchyViewport(app)
 const observationViewport = installObservationViewport(app)
 installObservationNavigation(app, { viewport: observationViewport })
 installObservationPreferences(app)
+installTimestampDisplay(app)

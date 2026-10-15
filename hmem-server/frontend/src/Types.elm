@@ -14,6 +14,7 @@ import Http
 import Json.Encode as Encode
 import Set exposing (Set)
 import Time
+import TimestampDisplay
 import Url
 
 
@@ -45,6 +46,7 @@ type alias Model =
     , auth : AuthModel
     , sessionContext : Maybe Api.SessionContext
     , sessionRequestEpoch : Int
+    , timestamps : TimestampDisplay.State
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
     , mainContentScrollY : Float
@@ -1118,6 +1120,7 @@ type Route
 
 type Msg
     = UrlRequested Browser.UrlRequest
+    | TimestampsFormatted Encode.Value
     | ObservationViewportChanged Encode.Value
     | UrlChanged Url.Url
       -- WebSocket

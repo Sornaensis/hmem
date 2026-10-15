@@ -4843,10 +4843,10 @@ viewRevisionSummary : TimestampDisplay.State -> Api.Observation -> Html Msg
 viewRevisionSummary display observation =
     let revision = revisionDisplay observation in
     span [ class "card-meta observation-sha" ]
-        [ text (revision.label ++ ": ")
+        [ span [] [ text (revision.label ++ ":") ]
         , Helpers.copyableValue "" (String.toLower revision.label) revision.sha (String.left 12 revision.sha ++ "…")
-        , text (" · " ++ TimestampDisplay.lookup display revision.recordedAt)
-        , span [ class "observation-actor" ] [ text (" · " ++ observationActorLabel observation) ]
+        , span [ class "observation-history-time" ] [ text (TimestampDisplay.lookup display revision.recordedAt) ]
+        , span [ class "observation-actor" ] [ viewObservationActor observation ]
         ]
 
 
@@ -4856,9 +4856,11 @@ viewCurrentProvenance display observation state =
     div [ class ("observation-detail-meta-row observation-current-provenance" ++ (if boundCurrentProvenance observation == Nothing then " observation-detail-sha" else "")) ]
         [ dt [ class "observation-detail-meta-label" ] [ text revision.label ]
         , dd [ class "observation-detail-meta-value" ]
-            [ span [ class "observation-revision-value" ] [ Helpers.copyableValue "" (String.toLower revision.label) revision.sha revision.sha, text (" · " ++ TimestampDisplay.lookup display revision.recordedAt) ]
-            , span [ class "observation-actor" ] [ text ("By " ++ observationActorLabel observation) ]
-            , observation.currentProvenance |> Maybe.map ActorAttribution.viewDetails |> Maybe.withDefault (text "")
+            [ span [ class "observation-revision-value" ]
+                [ Helpers.copyableValue "" (String.toLower revision.label) revision.sha revision.sha
+                , span [ class "observation-history-time" ] [ text (TimestampDisplay.lookup display revision.recordedAt) ]
+                ]
+            , span [ class "observation-actor" ] [ viewObservationActor observation ]
             , viewHistory display observation state
             ]
         ]
@@ -4882,10 +4884,11 @@ viewHistory display observation state =
         saved = currentHistory (Just observation) state.history
         entry event =
             li [ class "observation-history-entry" ]
-                [ Helpers.copyableValue "" "recorded revision" event.provenance.reviewedGitSha event.provenance.reviewedGitSha
-                , span [ class "observation-history-time" ] [ text (TimestampDisplay.lookup display event.provenance.recordedAt) ]
-                , span [ class "observation-actor" ] [ text ("By " ++ ActorAttribution.label event.provenance) ]
-                , ActorAttribution.viewDetails event.provenance
+                [ span [ class "observation-revision-value" ]
+                    [ Helpers.copyableValue "" "recorded revision" event.provenance.reviewedGitSha event.provenance.reviewedGitSha
+                    , span [ class "observation-history-time" ] [ text (TimestampDisplay.lookup display event.provenance.recordedAt) ]
+                    ]
+                , span [ class "observation-actor" ] [ ActorAttribution.viewInline event.provenance ]
                 ]
     in
     section [ class "observation-history", attribute "aria-label" "Revision history" ]
@@ -4902,6 +4905,6 @@ viewHistory display observation state =
           else text ""
         ]
 
-observationActorLabel : Api.Observation -> String
-observationActorLabel observation =
-    observation.currentProvenance |> Maybe.map ActorAttribution.label |> Maybe.withDefault "Local User"
+viewObservationActor : Api.Observation -> Html Msg
+viewObservationActor observation =
+    observation.currentProvenance |> Maybe.map ActorAttribution.viewInline |> Maybe.withDefault (ActorAttribution.viewInline ActorAttribution.empty)

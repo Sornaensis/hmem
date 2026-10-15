@@ -1678,7 +1678,8 @@ viewTimelineEvent display event =
                 ]
             , viewStatusTransition event.statusTransition
             , viewTimelineContext event
-            , div [ class "timeline-actor-details" ] (event.actor |> Maybe.map (ActorAttribution.details >> List.map (\( name, value ) -> span [] [ text (name ++ ": " ++ value ++ " ") ])) |> Maybe.withDefault [])
+            , div [ class "timeline-event-attribution" ]
+                [ ActorAttribution.viewInline (Maybe.withDefault ActorAttribution.empty event.actor) ]
             ]
         ]
 
@@ -1720,15 +1721,10 @@ viewTimelineContextChip label =
 timelineContextSegments : Api.WorkspaceTimelineEvent -> List String
 timelineContextSegments event =
     List.filterMap identity
-        [ eventActorLabel event.actor
-        , event.project |> Maybe.map (\project -> "Project: " ++ project.name)
+        [ event.project |> Maybe.map (\project -> "Project: " ++ project.name)
         , event.parentTask |> Maybe.map (\task -> "Parent: " ++ task.title)
         ]
 
-
-eventActorLabel : Maybe Api.TimelineActor -> Maybe String
-eventActorLabel actor =
-    Just ("By " ++ (actor |> Maybe.map ActorAttribution.label |> Maybe.withDefault "Local User"))
 
 timelineStatusSummary : Maybe Api.TimelineStatusTransition -> Maybe String
 timelineStatusSummary maybeTransition =

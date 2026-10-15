@@ -9,6 +9,7 @@ import Helpers
 import Http
 import Test exposing (..)
 import Test.Html.Query as Query
+import Test.Html.Event as Event
 import Test.Html.Selector as Selector
 import Types exposing (Flags, Model, Msg(..), Page(..), TimelineModel, WorkspaceTab(..))
 import Url
@@ -185,6 +186,29 @@ suite =
                 , Feature.Timeline.chartTickValues 101
                 ]
                     |> Expect.equal [ [ 0 ], [ 0, 1 ], [ 0, 1, 2 ], [ 0, 1, 2, 3 ], [ 0, 2, 4, 6, 7 ], [ 0, 2, 4, 5 ], [ 0, 26, 52, 78, 101 ] ]
+        , test "event rows show one inline actor while retaining title, status and project context" <| \_ ->
+            let
+                original = timelineEvent "Review completed"
+                event =
+                    { original
+                        | actor = Just { actorType = Just "user", actorId = Just "raw-user-id", actorLabel = Just "Alice", botIdentity = Just { role = "Reviewer", modelId = "codex:gpt-6.1-sol:extra-high" } }
+                        , project = Just { id = "project-1", name = "Release" }
+                        , statusTransition = Just { from = "todo", to = "in_progress" }
+                    }
+                initial = Feature.Timeline.init
+                rendered = Feature.Timeline.viewWorkspaceTimelinePanel "workspace-1" (timelineModel { initial | events = [ event ] }) |> Query.fromHtml
+                card = rendered |> Query.find [ Selector.class "timeline-event-card" ]
+            in
+            Expect.all
+                [ \_ -> card |> Query.has [ Selector.text "Review completed", Selector.text "Project: Release", Selector.text "In progress" ]
+                , \_ -> card |> Event.simulate Event.click |> Event.expect (NavigateToTimelineEntity event)
+                , \_ -> card |> Query.findAll [ Selector.class "actor-attribution" ] |> Query.count (Expect.equal 1)
+                , \_ -> card |> Query.has [ Selector.text "Alice · Reviewer · codex:gpt-6.1-sol:extra-high" ]
+                , \_ -> card |> Query.findAll [ Selector.class "timeline-actor-details" ] |> Query.count (Expect.equal 0)
+                , \_ -> card |> Query.findAll [ Selector.tag "details" ] |> Query.count (Expect.equal 0)
+                , \_ -> card |> Query.hasNot [ Selector.text "raw-user-id" ]
+                , \_ -> card |> Query.findAll [ Selector.class "timeline-context-chip" ] |> Query.count (Expect.equal 1)
+                ] ()
         , test "canvas grows with capped bucket counts while retaining interactive point spacing" <|
             \_ ->
                 let

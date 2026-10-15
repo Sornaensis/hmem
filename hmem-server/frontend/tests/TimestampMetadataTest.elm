@@ -10,6 +10,8 @@ import Feature.Cards as Cards
 import Feature.Observation as Observation
 import Feature.TimestampDisplay as Presentation
 import Feature.WorkspaceAdmin as Admin
+import Feature.Groups as Groups
+import Permissions
 import Json.Encode as Encode
 import Main
 import ObservationViewport
@@ -17,6 +19,7 @@ import Page.Workspace
 import Set
 import Test exposing (Test, describe, test)
 import Test.Html.Query as Query
+import Test.Html.Event as Event
 import Test.Html.Selector as Selector
 import TimestampDisplay as Display
 import Types exposing (..)
@@ -134,6 +137,8 @@ suite =
                 , \_ -> view |> Query.hasNot [ Selector.text "Invalid timestamp" ]
                 , \_ -> Audit.timestampSources model |> Set.fromList |> Expect.equal (Set.fromList [ raw, later, latest, "" ])
                 , \_ -> model.auditLog.entries |> Expect.equal [ audit ]
+                , \_ -> view |> Query.findAll [ Selector.class "actor-attribution" ] |> Query.count (Expect.equal 1)
+                , \_ -> view |> Query.hasNot [ Selector.text "Actor ID" ]
                 ] ()
         , test "audit timestamps appear only with their mounted expanded entity history and use shared invalid fallback" <| \_ ->
             let
@@ -167,7 +172,44 @@ suite =
                 , \_ -> Observation.viewObservationsState display workspace paginated |> Query.fromHtml |> Query.find [ Selector.class "observation-history-content" ] |> Query.has [ Selector.text "2025-12-31 16:02" ]
                 , \_ -> Observation.timestampSources paginated |> List.member latest |> Expect.equal True
                 , \_ -> selected.content |> Expect.equal raw
+                , \_ -> view |> Query.find [ Selector.class "observation-history-content" ] |> Query.findAll [ Selector.class "observation-revision-value" ] |> Query.count (Expect.equal 25)
+                , \_ -> view |> Query.findAll [ Selector.class "actor-details" ] |> Query.count (Expect.equal 0)
                 ] ()
+        , test "sidebar shows the signed-in principal and sign-out control without effective model or raw authority" <| \_ ->
+            case base.sessionContext of
+                Nothing -> Expect.fail "Expected session fixture"
+                Just original ->
+                    let
+                        principal = original.principal
+                        flags = base.flags
+                        session = { original | authMode = "deployed", principal = { principal | actorLabel = "Alice", actorId = "raw-principal-id", authority = "grant_user" }
+                            , effectiveActor = Just { actorType = Just "bot", actorId = Just "persona", actorLabel = Just "Reviewer", botIdentity = Just { role = "Reviewer", modelId = "codex:gpt-6.1-sol:high" } } }
+                        model = { base | sessionContext = Just session, flags = { flags | authTokenPresent = True } }
+                        view = Groups.viewSidebar model |> Query.fromHtml
+                    in
+                    Expect.all
+                        [ \_ -> Permissions.principalAttributionLabel model |> Expect.equal (Just "Alice")
+                        , \_ -> view |> Query.has [ Selector.text "Signed in", Selector.text "Alice" ]
+                        , \_ -> view |> Query.hasNot [ Selector.text "codex:gpt-6.1-sol:high" ]
+                        , \_ -> view |> Query.hasNot [ Selector.text "raw-principal-id" ]
+                        , \_ -> view |> Query.hasNot [ Selector.text "grant_user" ]
+                        , \_ -> view |> Query.findAll [ Selector.class "actor-details" ] |> Query.count (Expect.equal 0)
+                        , \_ -> view |> Query.find [ Selector.class "sidebar-session-action" ] |> Event.simulate Event.click |> Event.expect LogoutRequested
+                        , \_ -> model.sessionContext |> Maybe.map .globalPermissions |> Expect.equal (Just original.globalPermissions)
+                        ] ()
+        , test "local sidebar keeps an honest user fallback when the principal name is absent" <| \_ ->
+            case base.sessionContext of
+                Nothing -> Expect.fail "Expected session fixture"
+                Just original ->
+                    let
+                        principal = original.principal
+                        model = { base | sessionContext = Just { original | principal = { principal | actorLabel = " " } } }
+                    in
+                    Expect.all
+                        [ \_ -> Permissions.principalAttributionLabel model |> Expect.equal (Just "Local User")
+                        , \_ -> Groups.viewSidebar model |> Query.fromHtml |> Query.has [ Selector.text "Local session", Selector.text "Local User" ]
+                        , \_ -> Groups.viewSidebar model |> Query.fromHtml |> Query.findAll [ Selector.class "sidebar-session-action" ] |> Query.count (Expect.equal 0)
+                        ] ()
         , test "Observation mounted demand excludes offscreen cards and accepts live timestamp updates" <| \_ ->
             let
                 first = observation "1"

@@ -324,32 +324,20 @@ viewSidebar model =
 
 viewSessionFooter : Model -> Html Msg
 viewSessionFooter model =
-    if not (Permissions.shouldShowLocalSessionDetails model) && (model.sessionContext |> Maybe.andThen .effectiveActor) == Nothing then
-        text ""
+    case Permissions.principalAttributionLabel model of
+        Just attribution ->
+            div [ class "sidebar-session" ]
+                [ div [ class "sidebar-session-mode" ]
+                    [ text (if Permissions.isLocalMode model then "Local session" else "Signed in") ]
+                , div [ class "sidebar-session-principal" ] [ text attribution ]
+                , if not (Permissions.isLocalMode model) && (model.flags.authTokenPresent || model.flags.logoutUrl /= Nothing) then
+                    button [ class "sidebar-session-action", onClick LogoutRequested ] [ text "Sign out" ]
+                  else
+                    text ""
+                ]
 
-    else
-        case Permissions.principalAttributionLabel model of
-            Just attribution ->
-                div [ class "sidebar-session" ]
-                    [ div [ class "sidebar-session-mode" ]
-                        [ text
-                            (if Permissions.isLocalMode model then
-                                "Local session"
-
-                             else
-                                "Signed in"
-                            )
-                        ]
-                    , div [ class "sidebar-session-principal" ] [ text attribution, Permissions.principalAttributionDetails model ]
-                    , if not (Permissions.isLocalMode model) && (model.flags.authTokenPresent || model.flags.logoutUrl /= Nothing) then
-                        button [ class "sidebar-session-action", onClick LogoutRequested ] [ text "Sign out" ]
-
-                      else
-                        text ""
-                    ]
-
-            Nothing ->
-                text ""
+        Nothing ->
+            text ""
 
 
 viewSidebarGroup : Model -> Api.WorkspaceGroup -> Html Msg

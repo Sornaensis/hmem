@@ -1261,7 +1261,7 @@ suite =
                         , Just "project:project-a"
                         , Nothing
                         ]
-        , test "audit expanded context includes actor target action timestamp and request identifiers" <|
+        , test "audit expanded context keeps target action timestamp and request identifiers without repeating actor fields" <|
             \_ ->
                 case decodeAuditFixture createProjectAuditJson of
                     Ok entry ->
@@ -1269,9 +1269,9 @@ suite =
                             contextRows =
                                 Feature.AuditLog.auditContextDetailItems entry
                         in
-                        [ List.member ( "Actor", "Local User" ) contextRows
-                        , List.member ( "Actor type", "user" ) contextRows
-                        , List.member ( "Actor ID", "user-1" ) contextRows
+                        [ not (List.member ( "Actor", "Local User" ) contextRows)
+                        , not (List.member ( "Actor type", "user" ) contextRows)
+                        , not (List.member ( "Actor ID", "user-1" ) contextRows)
                         , List.member ( "Action type", "Create" ) contextRows
                         , List.member ( "Target entity", "project" ) contextRows
                         , List.member ( "Target ID", "project-1" ) contextRows

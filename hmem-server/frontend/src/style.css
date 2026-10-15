@@ -3844,6 +3844,8 @@ textarea.observation-edit-content {
   flex: 1;
 }
 
+.timeline-event-attribution { margin-top: 0.375rem; }
+
 .timeline-event-topline,
 .timeline-event-title-row,
 .timeline-event-context,
@@ -4279,7 +4281,7 @@ textarea.observation-edit-content {
 }
 
 .audit-entry-detail {
-  padding: 0.5rem 0.75rem 0.75rem 2.375rem;
+  padding: 0.5rem 0.75rem 0.75rem;
   border-top: 1px solid var(--border);
   background: var(--bg);
 }
@@ -4326,6 +4328,7 @@ textarea.observation-edit-content {
 
 .audit-entry-meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 1rem;
   margin-top: 0.5rem;
   font-size: 0.6875rem;
@@ -4412,7 +4415,12 @@ textarea.observation-edit-content {
 .observation-history-toggle { background: none; border: none; padding: 0; color: var(--text-muted); font: inherit; font-size: 0.75rem; cursor: pointer; }
 .observation-history-toggle:hover { color: var(--text); }
 .observation-history ol { list-style: none; margin: 0.5rem 0; padding: 0; }
-.observation-history-entry { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; padding: 0.125rem 0; overflow-wrap: anywhere; font-size: 0.75rem; }
+.observation-history-entry { display: block; padding: 0.5rem 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; font-size: 0.75rem; }
+.observation-history-entry:first-child { border-top: 0; }
+.observation-revision-value, .observation-sha { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.5rem; min-width: 0; }
+.observation-revision-value > .copyable-value { min-width: 0; }
+.observation-actor, .history-actor { display: block; margin-top: 0.25rem; }
+.observation-sha > .observation-actor { flex-basis: 100%; margin-top: 0; }
 .observation-history-time { color: var(--text-muted); white-space: nowrap; }
 .observation-current-provenance .observation-detail-meta-value { overflow-wrap: anywhere; }
 .observation-provenance-match { overflow-wrap: anywhere; }
@@ -4506,3 +4514,17 @@ textarea.observation-edit-content {
 .audit-entry-row .audit-actor { flex: 1 1 100%; order: 1; }
 .timeline-actor-details { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; font-size: 0.75rem; }
 .observation-actor { display: block; }
+
+@media (max-width: 700px) {
+  /* The connection indicator is below the content, outside the mobile sidebar. */
+  .sidebar-session { padding-bottom: 0.875rem; }
+  .sidebar > * { flex-shrink: 0; }
+}
+@media (max-width: 480px) {
+  .audit-entry-detail { padding: 0.375rem 0.5rem 0.625rem; }
+  .audit-detail-section { padding: 0.5rem; }
+  .audit-detail-grid { grid-template-columns: minmax(0, 1fr); gap: 0.125rem; }
+  .audit-detail-value { margin-bottom: 0.375rem; }
+  .audit-detail-value:last-child { margin-bottom: 0; }
+  .audit-entry-meta { gap: 0.375rem 0.75rem; }
+}

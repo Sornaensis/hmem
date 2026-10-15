@@ -161,7 +161,13 @@ currentWorkspaceRoleLabel model =
 
 principalAttributionLabel : Model -> Maybe String
 principalAttributionLabel model =
-    model.sessionContext |> Maybe.map (sessionActor >> ActorAttribution.label)
+    model.sessionContext |> Maybe.map (\session ->
+        ActorAttribution.label
+            { actorType = Just session.principal.actorType
+            , actorId = Just session.principal.actorId
+            , actorLabel = Just (if isLocalMode model && String.trim session.principal.actorLabel == "" then "Local User" else session.principal.actorLabel)
+            , botIdentity = Nothing
+            })
 
 
 principalAttributionDetails : Model -> Html msg

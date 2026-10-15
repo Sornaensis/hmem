@@ -47,7 +47,7 @@ import Crypto.JWT qualified as JWT
 import Crypto.JOSE.JWK qualified as JWK
 import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), TokenLookupMode(..), authMcpProvenanceToken, authStaticBearerEnabled, authStaticBearerToken)
 import HMem.DB.Auth qualified as Auth
-import HMem.BotIdentity (BotIdentity)
+import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, resolveEffectiveActor, withEffectiveActorContext, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
@@ -162,7 +162,7 @@ principalContextMiddleware jwksCache authCfg pool app req respond = do
 -- on reads and injected-principal paths so malformed metadata never falls back
 -- to the implicit Local User. Unknown no-auth clients cannot be identified as bots.
 botIdentityMiddleware :: AuthConfig -> Middleware
-botIdentityMiddleware authCfg app req respond = case declaration of
+botIdentityMiddleware authCfg app req respond = case requestBotIdentity (Wai.requestHeaders req) of
   Left message -> respond (jsonResponse status400 "invalid_bot_identity" message)
   Right identity -> do
     original <- currentPrincipal
@@ -170,15 +170,6 @@ botIdentityMiddleware authCfg app req respond = case declaration of
       then respond (jsonResponse status400 "bot_identity_required" "Bot mutations require X-HMem-Bot-Identity with role and model-id")
       else withEffectiveActorContext (fmap (\p -> resolveEffectiveActor (authCfg.mode == AuthModeLocal) p identity) original) (app req respond)
   where
-    declaration :: Either Text (Maybe BotIdentity)
-    declaration = case [value | (name, value) <- Wai.requestHeaders req, name == "X-HMem-Bot-Identity"] of
-      [] -> Right Nothing
-      [raw]
-        | BS.length raw > 4096 -> Left "X-HMem-Bot-Identity exceeds 4096 bytes"
-        | otherwise -> case Aeson.eitherDecodeStrict' raw of
-            Left message -> Left (T.pack message)
-            Right identity -> Right (Just identity)
-      _ -> Left "X-HMem-Bot-Identity must occur exactly once"
     isBot = maybe False (\p -> p.actorType == ActorBot)
     isMutation = take 2 (Wai.pathInfo req) == ["api", "v1"]
       && Wai.requestMethod req `notElem` [methodGet, methodHead, methodOptions]

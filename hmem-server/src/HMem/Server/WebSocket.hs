@@ -58,6 +58,8 @@ import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
 import HMem.DB.Auth qualified as Auth
 import HMem.Server.Event (ChangeEvent(..), EntityType(..))
+import HMem.Server.BotIdentity (requestBotIdentity)
+import Network.HTTP.Types (hContentType, status400)
 import HMem.Types (WebSocketTicketResponse(..))
 
 -- | Server-wide WebSocket state: a map of connection IDs to live
@@ -327,7 +329,10 @@ ticketTtlSeconds = 60
 wsMiddleware :: AuthConfig -> Pool Hasql.Connection -> WSState -> Wai.Middleware
 wsMiddleware authCfg pool st app req respond
   | Wai.pathInfo req == ["api", "v1", "ws"] =
-      websocketsOr WS.defaultConnectionOptions (wsApp authCfg pool st) app req respond
+      case requestBotIdentity (Wai.requestHeaders req) of
+        Left message -> respond $ Wai.responseLBS status400 [(hContentType, "application/json")]
+          (encode (object ["error" .= ("invalid_bot_identity" :: Text), "message" .= message]))
+        Right _ -> websocketsOr WS.defaultConnectionOptions (wsApp authCfg pool st) app req respond
   | otherwise = app req respond
 
 ------------------------------------------------------------------------

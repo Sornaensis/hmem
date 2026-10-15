@@ -14,6 +14,16 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 
 spec :: Spec
 spec = do
+  describe "Session attribution compatibility" $ do
+    it "accepts historical session JSON without guessing effective attribution" $ do
+      let legacy = object
+            ["auth_mode" .= ("local" :: T.Text)
+            , "principal" .= SessionPrincipal "user" "local-user" "Local User" "local_superadmin" Nothing
+            , "global_permissions" .= SessionGlobalPermissions True True]
+      eitherDecode (encode legacy) `shouldBe` Right
+        (SessionContext "local" (SessionPrincipal "user" "local-user" "Local User" "local_superadmin" Nothing)
+          (SessionGlobalPermissions True True) Nothing Nothing)
+
   describe "Due-free task JSON" $ do
     it "rejects all retired spellings including null on planning inputs, nested specs and batches" $ do
       let add key value (Object fields) = Object (KM.insert (Key.fromText key) value fields)

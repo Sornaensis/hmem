@@ -2,6 +2,7 @@ module HMem.Server.BotIdentitySpec (spec) where
 
 import Data.Aeson (Result(..), decode, encode, fromJSON, object, (.=))
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.ByteString.Lazy qualified as LBS
 import Data.UUID qualified as UUID
 import HMem.Config qualified as Config
@@ -10,12 +11,15 @@ import HMem.Server.App (botIdentityMiddleware)
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.DB.Pool qualified as Pool
 import HMem.DB.ChangeStream (ChangeScope(..))
+import HMem.DB.Auth qualified as Auth
+import HMem.BotIdentity (mkBotIdentity)
 import HMem.Server.Snapshot (materializeSnapshot)
-import HMem.Server.TestHarness (LocalSandboxApp(..), withLocalSandboxAppContext)
-import HMem.Types (Workspace(..), Observation(..), ObservationProvenance(..), ObservationRevisionEvent(..), PaginatedResult(..))
+import HMem.Server.TestHarness (LocalSandboxApp(..), DeployedSandboxApp(..), withLocalSandboxAppContext, withDeployedSandboxAppContext, createDeployedSandboxUser, issueDeployedSandboxPAT)
+import HMem.Server.AuthTokens (IssuedAccessToken(..))
+import HMem.Types (Workspace(..), Observation(..), ObservationProvenance(..), ObservationRevisionEvent(..), PaginatedResult(..), SessionContext(..), SessionPrincipal(..), SessionActor(..))
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson (Value(..))
-import Network.HTTP.Types (Header, Method, methodGet, methodPost, status200, status400)
+import Network.HTTP.Types (Header, Method, methodGet, methodPost, status200, status400, status403)
 import Network.Wai (Application, defaultRequest, responseLBS)
 import Network.Wai qualified as Wai
 import Network.Wai.Test
@@ -70,6 +74,44 @@ spec = describe "HTTP declared bot identity" $ do
     currentEffectiveActor `shouldReturn` Nothing
     currentPrincipal `shouldReturn` Nothing
 
+  it "exposes session attribution changes while retaining local authority permissions and cache identity" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.localEnv "declared-local-session"
+      plain <- sessionRequest ctx.localApplication [] workspace.id >>= sessionBody
+      first <- sessionRequest ctx.localApplication [identityHeader] workspace.id >>= sessionBody
+      second <- sessionRequest ctx.localApplication [otherIdentityHeader] workspace.id >>= sessionBody
+      map (.principal) [first, second] `shouldBe` replicate 2 plain.principal
+      map (.globalPermissions) [first, second] `shouldBe` replicate 2 plain.globalPermissions
+      map (.workspace) [first, second] `shouldBe` replicate 2 plain.workspace
+      let Just human = plain.effectiveActor
+          Just actorA = first.effectiveActor
+          Just actorB = second.effectiveActor
+      human.actorType `shouldBe` "user"
+      human.actorId `shouldBe` plain.principal.actorId
+      actorA.actorType `shouldBe` "bot"
+      actorA.actorId `shouldNotBe` actorB.actorId
+      actorA.botIdentity `shouldBe` either (const Nothing) Just (mkBotIdentity "Reviewer" "pi:gpt-6.1-sol:extra-high")
+
+  it "keeps deployed grant user and workspace access independent of declared role and model" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "declared-deployed-session"
+      forbidden <- createTestWorkspace ctx.deployedEnv "declared-forbidden-session"
+      user <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+        (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
+      credential <- issueDeployedSandboxPAT ctx.deployedEnv user "Declared PAT"
+      let authorization = ("Authorization", "Bearer " <> TE.encodeUtf8 credential.rawToken)
+      first <- sessionRequest ctx.deployedApplication [authorization, identityHeader] workspace.id >>= sessionBody
+      second <- sessionRequest ctx.deployedApplication [authorization, otherIdentityHeader] workspace.id >>= sessionBody
+      second.principal `shouldBe` first.principal
+      second.principal.grantUserId `shouldBe` Just user
+      second.globalPermissions `shouldBe` first.globalPermissions
+      second.workspace `shouldBe` first.workspace
+      fmap (.actorId) second.effectiveActor `shouldBe` Just first.principal.actorId
+      fmap (.botIdentity) second.effectiveActor `shouldNotBe` fmap (.botIdentity) first.effectiveActor
+      denied <- sessionRequest ctx.deployedApplication [authorization, otherIdentityHeader] forbidden.id
+      simpleStatus denied `shouldBe` status403
+
   it "carries declared identity through REST history and the existing full snapshot projection" $
     withLocalSandboxAppContext $ \ctx -> do
       workspace <- createTestWorkspace ctx.localEnv "declared-rest-snapshot"
@@ -105,6 +147,20 @@ botPrincipal = Principal ActorBot "credential-bot" "Credential Bot" (PrincipalGr
 
 identityHeader :: Header
 identityHeader = ("X-HMem-Bot-Identity", "{\"role\":\"Reviewer\",\"model-id\":\"pi:gpt-6.1-sol:extra-high\"}")
+
+otherIdentityHeader :: Header
+otherIdentityHeader = ("X-HMem-Bot-Identity", "{\"role\":\"Superadmin\",\"model-id\":\"other:model:default\"}")
+
+sessionRequest :: Application -> [Header] -> UUID.UUID -> IO SResponse
+sessionRequest app headers workspace = runSession (srequest (SRequest defaultRequest
+  { Wai.requestMethod = methodGet, Wai.pathInfo = ["api", "v1", "session"]
+  , Wai.queryString = [("workspace_id", Just (TE.encodeUtf8 (UUID.toText workspace)))]
+  , Wai.requestHeaders = headers } "")) app
+
+sessionBody :: SResponse -> IO SessionContext
+sessionBody response = do
+  simpleStatus response `shouldBe` status200
+  maybe (fail "expected session response") pure (decode (simpleBody response))
 
 call :: Config.AuthConfig -> Principal -> Method -> [Header] -> IO SResponse
 call cfg original method headers =

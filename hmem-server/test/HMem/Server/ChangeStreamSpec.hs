@@ -2,9 +2,9 @@ module HMem.Server.ChangeStreamSpec (spec) where
 
 import Control.Concurrent (Chan, MVar, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryTakeMVar, writeChan)
 import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch)
-import Control.Exception (AsyncException(..), MaskingState(..), SomeException, bracket, catch, fromException, getMaskingState, try)
-import Control.Monad (forever)
-import Data.Aeson (FromJSON, Value(..), decode, encode, object, (.=))
+import Control.Exception (AsyncException(..), MaskingState(..), SomeException, bracket, catch, fromException, getMaskingState, mask, throwIO, try)
+import Control.Monad (forM_, replicateM_)
+import Data.Aeson (FromJSON, Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
@@ -29,16 +29,18 @@ import Network.Wai.Handler.Warp (testWithApplication)
 import Network.Wai.Test qualified as WaiTest
 import Network.WebSockets qualified as WS
 import System.Timeout (timeout)
+import System.IO (hPutStrLn, stderr)
 import Test.Hspec
 
 import HMem.Config qualified as Config
+import HMem.BotIdentity (BotIdentity, mkBotIdentity, localDeclaredBotId)
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.ChangeStream
 import HMem.DB.Pool (runSession)
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.Project qualified as Project
 import HMem.DB.Workspace qualified as WorkspaceDB
-import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withRequestContext, emptyRequestContext)
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppContext)
@@ -50,6 +52,73 @@ import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..),
 
 spec :: Spec
 spec = describe "canonical change-stream loopback" $ do
+  it "keeps declared HTTP and WebSocket audiences stable while replaying bot metadata and genuine system work" $
+    withLocalSandboxAppContext $ \ctx -> boundedDeclaredScenario $ do
+      workspace <- declaredPhase "workspace setup" (createTestWorkspace ctx.localEnv "declared-stream-audience")
+      let identityA = declaredIdentity "Reviewer" "pi:gpt-6.1-sol:extra-high"
+          identityB = declaredIdentity "Developer" "other:model:default"
+          header identity = ("X-HMem-Bot-Identity", LBS.toStrict (encode identity))
+          scope = object ["scope" .= ("workspace" :: Text), "workspace_id" .= workspace.id]
+          createWith identity title = declaredPhase (T.unpack title) $ do
+            response <- apiRequest ctx.localApplication methodPost "/api/v1/projects" [header identity]
+              (encode (object ["workspace_id" .= workspace.id, "name" .= (title :: Text)]))
+            responseStatus response `shouldBe` status200
+            decodeResponse response :: IO Project
+          actor identity = object ["type" .= ("service" :: Text), "id" .= localDeclaredBotId identity, "bot_identity" .= identity]
+          eventActor frame = jsonField "event" frame >>= jsonField "actor"
+          persistedActor identifier records =
+            [jsonField "actor" record.outboxEnvelope | record <- records
+            , (jsonField "entity" record.outboxEnvelope >>= jsonField "id") == Just (toJSON identifier)]
+      started <- declaredPhase "snapshot setup" $ apiRequest ctx.localApplication methodPost "/api/v1/change-stream/resync" [header identityA]
+        (encode (object ["scope" .= scope, "page_size" .= (100 :: Int), "start_idempotency_key" .= ("declared-stream-audience-snapshot" :: Text)]))
+      responseStatus started `shouldBe` status200
+      snapshot <- decodeResponse started :: IO ChangeStreamResyncResponse
+      resume <- maybe (fail "expected terminal local snapshot") pure snapshot.resumeToken
+      issued <- declaredPhase "ticket setup" $ apiRequest ctx.localApplication methodPost "/api/v1/change-stream/ticket" [header identityB]
+        (encode (object ["scope" .= scope, "resume_token" .= resume]))
+      responseStatus issued `shouldBe` status200
+      ticket <- decodeResponse issued :: IO WebSocketTicketResponse
+      backlog <- createWith identityA "declared backlog"
+      system <- declaredPhase "system write" $ withRequestContext emptyRequestContext $
+        Project.createProject ctx.localEnv.pool (CreateProject workspace.id Nothing "genuine system work" Nothing Nothing Nothing)
+      backlogRecords <- declaredPhase "backlog metadata read" $ listOutboxAfter ctx.localEnv.pool (WorkspaceScope workspace.id) 0 100
+      let path = "/api/v1/ws?ticket=" <> Text.encodeUtf8 ticket.ticket
+          upgrade = [("Connection", "Upgrade"), ("Upgrade", "websocket"), ("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")]
+      forM_ [[header identityA, header identityA], [("X-HMem-Bot-Identity", "null")]] $ \invalid -> do
+        rejected <- declaredPhase "ticket declaration rejection" $ apiRequest ctx.localApplication methodGet path (upgrade <> invalid) ""
+        responseStatus rejected `shouldBe` HTTP.status400
+        body <- decodeResponse rejected :: IO Value
+        jsonField "error" body `shouldBe` Just (String "invalid_bot_identity")
+      testWithApplication (pure ctx.localApplication) $ \port -> do
+        frames <- newChan
+        let receive phase = declaredPhase phase (readChan frames >>= decodeFrame)
+            start = asyncWithUnmask $ \unmask -> unmask $
+              WS.runClientWith "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket)
+                WS.defaultConnectionOptions [header identityA] $ \conn -> do
+                  replicateM_ 5 (WS.receiveData conn >>= writeChan frames)
+                  WS.sendClose conn ("declared scenario complete" :: Text)
+        withDeclaredClient start $ \_client -> do
+          replayed <- receive "backlog receive"
+          frameType replayed `shouldBe` Just "change"
+          (jsonField "event" replayed >>= jsonField "entity" >>= jsonField "id") `shouldBe` Just (toJSON backlog.id)
+          eventActor replayed `shouldBe` Just (actor identityA)
+          [eventActor replayed] `shouldBe` persistedActor backlog.id backlogRecords
+          systemFrame <- receive "system receive"
+          frameType systemFrame `shouldBe` Just "change"
+          (jsonField "event" systemFrame >>= jsonField "entity" >>= jsonField "id") `shouldBe` Just (toJSON system.id)
+          eventActor systemFrame `shouldBe` Just (object ["type" .= ("system" :: Text), "id" .= Null])
+          [eventActor systemFrame] `shouldBe` persistedActor system.id backlogRecords
+          frameType <$> receive "backlog checkpoint" `shouldReturn` Just "checkpoint"
+          live <- createWith identityB "declared live"
+          records <- declaredPhase "live metadata read" $ listOutboxAfter ctx.localEnv.pool (WorkspaceScope workspace.id) 0 100
+          declaredPhase "live dispatch" (dispatchCanonicalOutbox ctx.localEnv.pool ctx.localWSState records)
+          delivered <- receive "live receive"
+          frameType delivered `shouldBe` Just "change"
+          (jsonField "event" delivered >>= jsonField "entity" >>= jsonField "id") `shouldBe` Just (toJSON live.id)
+          eventActor delivered `shouldBe` Just (actor identityB)
+          [eventActor delivered] `shouldBe` persistedActor live.id records
+          frameType <$> receive "live checkpoint" `shouldReturn` Just "checkpoint"
+
   it "stops an acquired dispatcher when subsequent harness setup fails" $
     withLocalSandboxAppContext $ \ctx -> do
       stopped <- newEmptyMVar
@@ -812,6 +881,39 @@ authHeaders :: Text -> [Header]
 authHeaders token =
   [("Authorization", "Bearer " <> Text.encodeUtf8 token)
   , ("X-HMem-Bot-Identity", "{\"role\":\"Stream Test Bot\",\"model-id\":\"test:fixture:default\"}")]
+
+declaredIdentity :: Text -> Text -> BotIdentity
+declaredIdentity role model = either (error . T.unpack) id (mkBotIdentity role model)
+
+-- These guards belong only to this integration scenario. Preserve the original
+-- assertion/timeout exception if bounded client cleanup also fails.
+boundedDeclaredScenario :: IO a -> IO a
+boundedDeclaredScenario action = timeout 20000000 action >>=
+  maybe (fail "declared stream overall scenario deadline (setup/ticket/backlog/system/live)") pure
+
+declaredPhase :: String -> IO a -> IO a
+declaredPhase phase action = timeout 5000000 action >>=
+  maybe (fail ("declared stream " <> phase <> " deadline")) pure
+
+withDeclaredClient :: IO (Async a) -> (Async a -> IO b) -> IO b
+withDeclaredClient acquire use = mask $ \restore -> do
+  client <- acquire
+  primary <- try @SomeException (restore (use client))
+  cleanup <- try @SomeException $ timeout 1000000 $ case primary of
+    Right _ -> fmap (fmap (const ())) (waitCatch client)
+    Left _ -> cancel client >> pure (Right ())
+  let diagnostic disposition = Just ("declared stream cleanup failure: ownedThreadId=" <> show (asyncThreadId client)
+          <> "; " <> disposition <> "; Warp fixture teardown follows")
+      cleanupProblem = case cleanup of
+        Right (Just (Right ())) -> Nothing
+        Right (Just (Left childError)) -> diagnostic ("client joined with exception: " <> show childError)
+        Right Nothing -> diagnostic "client unjoined after deadline"
+        Left cleanupError -> diagnostic ("join disposition unknown; cleanup exception: " <> show cleanupError)
+  case primary of
+    Left original -> do
+      maybe (pure ()) (hPutStrLn stderr) cleanupProblem
+      throwIO original
+    Right result -> maybe (pure result) fail cleanupProblem
 
 apiRequest :: Application -> BS.ByteString -> BS.ByteString -> [Header] -> LBS.ByteString -> IO WaiTest.SResponse
 apiRequest app method path headers body = WaiTest.runSession (WaiTest.srequest (WaiTest.SRequest request body)) app

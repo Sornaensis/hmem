@@ -52,7 +52,7 @@ import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, runSession)
 import HMem.DB.Project qualified as Project
-import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, withWorkspaceIdContext)
+import HMem.DB.RequestContext (Principal(..), EffectiveActor(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, currentEffectiveActor, withWorkspaceIdContext)
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
@@ -424,6 +424,7 @@ serverWithChangeStream authConfig changeStreamConfig pool tracker wsState _ =
 session :: Config.AuthConfig -> Pool Hasql.Connection -> Maybe UUID -> Handler SessionContext
 session config pool selectedWorkspace = do
   principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
+  actor <- liftIO currentEffectiveActor
   createAllowed <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalCreateWorkspace
   superAllowed <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalSuperadmin
   workspace <- traverse (sessionWorkspace pool principal superAllowed) selectedWorkspace
@@ -433,6 +434,7 @@ session config pool selectedWorkspace = do
                                    , actorLabel = principal.actorLabel, authority = authorityText principal.authority
                                    , grantUserId = case principal.authority of PrincipalGrantUser userId -> Just userId; _ -> Nothing }
     , globalPermissions = SessionGlobalPermissions { createWorkspace = createAllowed, superadmin = superAllowed }
+    , effectiveActor = fmap (\a -> SessionActor (actorTypeToText a.actorType) a.actorId a.actorLabel a.botIdentity) actor
     , workspace = workspace }
   where
     authorityText PrincipalNoAuthority = "none"

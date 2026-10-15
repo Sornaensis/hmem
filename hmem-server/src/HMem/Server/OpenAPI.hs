@@ -599,6 +599,7 @@ instance ToSchema ChangeStreamResyncResponse where declareNamedSchema = genericD
 instance ToSchema CanonicalWebSocketTicketRequest where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionContext where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionPrincipal where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionActor where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionGlobalPermissions where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionWorkspaceContext where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema a => ToSchema (PaginatedResult a) where declareNamedSchema = genericDeclareNamedSchema opts

@@ -19,7 +19,7 @@ module HMem.Types
   , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), TimelineBucketSeriesCounts(..), TimelineBucketSeries(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
   , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
   , AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), RevertResult(..), auditActionToText, auditActionFromText
-  , WebSocketTicketRequest(..), WebSocketTicketResponse(..), ChangeStreamScopeRequest(..), SnapshotProfile(..), snapshotProfileToText, ChangeStreamResyncRequest(..), ChangeStreamSnapshotItem(..), ChangeStreamResyncResponse(..), CanonicalWebSocketTicketRequest(..), SessionContext(..), SessionPrincipal(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
+  , WebSocketTicketRequest(..), WebSocketTicketResponse(..), ChangeStreamScopeRequest(..), SnapshotProfile(..), snapshotProfileToText, ChangeStreamResyncRequest(..), ChangeStreamSnapshotItem(..), ChangeStreamResyncResponse(..), CanonicalWebSocketTicketRequest(..), SessionContext(..), SessionPrincipal(..), SessionActor(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
   , BatchDeleteRequest(..), BatchMoveTasksRequest(..), BatchResult(..), CascadeResult(..), BatchUpdateProjectItem(..), BatchUpdateProjectRequest(..), BatchUpdateTaskItem(..), BatchUpdateTaskRequest(..)
   , validateBatchDeleteRequest, validateBatchMoveTasksRequest, validateBatchUpdateProjectRequest, validateBatchUpdateTaskRequest
   , projectStatusToText, projectStatusFromText, taskStatusToText, taskStatusFromText, workspaceTypeToText, workspaceTypeFromText
@@ -2107,6 +2107,18 @@ instance ToJSON SessionPrincipal where
 instance FromJSON SessionPrincipal where
   parseJSON = genericParseJSON jsonOptions
 
+-- | Display/operation attribution only. SessionPrincipal remains the authority
+-- and stable cache/audience identity even when a local persona changes.
+data SessionActor = SessionActor
+  { actorType :: Text
+  , actorId :: Text
+  , actorLabel :: Text
+  , botIdentity :: Maybe BotIdentity
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SessionActor where toJSON = genericToJSON jsonOptions
+instance FromJSON SessionActor where parseJSON = genericParseJSON jsonOptions
+
 data SessionGlobalPermissions = SessionGlobalPermissions
   { createWorkspace :: Bool
   , superadmin      :: Bool
@@ -2135,6 +2147,7 @@ data SessionContext = SessionContext
   , principal         :: SessionPrincipal
   , globalPermissions :: SessionGlobalPermissions
   , workspace         :: Maybe SessionWorkspaceContext
+  , effectiveActor    :: Maybe SessionActor
   } deriving (Show, Eq, Generic)
 
 instance ToJSON SessionContext where

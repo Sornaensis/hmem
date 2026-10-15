@@ -66,6 +66,7 @@ library
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
+      HMem.Server.BotIdentity
       HMem.Server.ChangeStream
       HMem.Server.CtlEmbeddings
       HMem.Server.CtlEmbeddingsCli

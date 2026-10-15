@@ -26,7 +26,7 @@ toolsDispatched :: [Tool]
 toolsDispatched =
   [ Tool "workspace_list" "WorkspaceList", Tool "workspace_register" "WorkspaceRegister", Tool "workspace_update" "WorkspaceUpdate", Tool "search" "UnifiedSearch"
   , Tool "observation_create" "ObservationCreate", Tool "observation_get" "ObservationGet", Tool "observation_update" "ObservationUpdate"
-  , Tool "observation_list" "ObservationList", Tool "observation_match" "ObservationMatchCall", Tool "observation_delete" "ObservationDelete", Tool "observation_set_embedding" "ObservationSetEmbedding", Tool "observation_similar" "ObservationSimilar"
+  , Tool "observation_history" "ObservationHistory", Tool "observation_list" "ObservationList", Tool "observation_match" "ObservationMatchCall", Tool "observation_delete" "ObservationDelete", Tool "observation_set_embedding" "ObservationSetEmbedding", Tool "observation_similar" "ObservationSimilar"
   , Tool "project_create" "ProjectCreate", Tool "project_update" "ProjectUpdate", Tool "project_detail" "ProjectDetail", Tool "project_overview" "ProjectOverviewCall", Tool "project_next_tasks" "ProjectNextTasks", Tool "project_spec" "ProjectSpec", Tool "project_archive" "ProjectArchive"
   , Tool "task_create" "TaskCreate", Tool "task_update" "TaskUpdate", Tool "task_move_batch" "TaskMoveBatch", Tool "task_detail" "TaskDetail", Tool "task_overview" "TaskOverviewCall", Tool "task_dependency" "TaskDependency", Tool "task_start" "TaskStart", Tool "task_finish" "TaskFinish"
   ]
@@ -103,9 +103,18 @@ parserAndDispatchChecks source = concatMap check toolsDispatched
     dispatchBody = dropWhileNot ("execute manager base apiKey" `isPrefixOf`) (lines source)
     check tool =
       require ("parser mapping missing: " <> toolName tool <> " -> " <> toolConstructor tool)
-        (("\"" <> toolName tool <> "\" -> " <> toolConstructor tool) `isInfixOf` source)
+        (any (parserMapping tool) (lines source))
       <> require ("dispatcher case missing constructor: " <> toolConstructor tool)
         (any (isPrefixOf ("  " <> toolConstructor tool <> " ")) dispatchBody)
+
+-- Anchor a supported direct/uncurry mapping to its tool line and constructor token.
+parserMapping :: Tool -> String -> Bool
+parserMapping tool line = any (\prefix -> prefix `isPrefixOf` trimmed && tokenBoundary (drop (length prefix) trimmed)) prefixes
+  where
+    trimmed = dropWhile (\c -> c == ' ' || c == '\t') line
+    prefixes = [quoted (toolName tool) <> " -> " <> wrapper <> toolConstructor tool | wrapper <- ["", "uncurry "]]
+    tokenBoundary [] = True
+    tokenBoundary (c:_) = c == ' ' || c == '\t'
 
 observationSubjectChecks :: String -> [String]
 observationSubjectChecks source = concat
@@ -180,15 +189,21 @@ selfTest = do
       staleAlias = guardSources (mutateTools (<> "\nlegacyAlias = \"memory_create\"\n"))
       missingTool = guardSources (mutateTools (replaceFirst "tool \"observation_get\"" "tool \"observation_missing\""))
       dispatcherMismatch = guardSources (mutateTools (replaceFirst "ObservationGet oid" "MissingObservationGet oid"))
+      missingHistory = guardSources (mutateTools (replaceFirst "tool \"observation_history\"" "tool \"observation_missing\""))
+      missingHistoryMapping = guardSources (mutateTools (replaceFirst "\"observation_history\" -> ObservationHistory" "\"observation_history\" -> MissingObservationHistory"))
+      wrongUncurry = guardSources (mutateTools (replaceFirst "\"task_move_batch\" -> uncurry TaskMoveBatch" "\"task_move_batch\" -> uncurry TaskMoveBatchWrong"))
       missingSubjects = guardSources (mutateTools (replaceFirst "\"subjects\" .= object" "\"subject_set\" .= object"))
       missingMatch = guardSources (mutateTools (replaceFirst "tool \"observation_match\"" "tool \"observation_missing\""))
   unless (null (guardSources sources)) $ failContract ["self-test baseline unexpectedly failed"]
   requireSelfTest "stale legacy alias" "forbidden removed-Memory alias `memory_create`" staleAlias
   requireSelfTest "missing accepted tool" "registry missing live tool(s): observation_get" missingTool
   requireSelfTest "registry/dispatcher mismatch" "dispatcher case missing constructor: ObservationGet" dispatcherMismatch
+  requireSelfTest "missing history registry" "registry missing live tool(s): observation_history" missingHistory
+  requireSelfTest "missing history mapping" "parser mapping missing: observation_history -> ObservationHistory" missingHistoryMapping
+  requireSelfTest "wrong uncurry constructor" "parser mapping missing: task_move_batch -> TaskMoveBatch" wrongUncurry
   requireSelfTest "missing subjects" "observation_create must advertise canonical subjects" missingSubjects
   requireSelfTest "missing observation_match" "registry missing live tool(s): observation_match" missingMatch
-  putStrLn "Observation MCP contract self-test passed (baseline, stale alias, missing tool, dispatcher mismatch, subjects, and match fixtures)."
+  putStrLn "Observation MCP contract self-test passed (baseline, stale alias, missing tool, dispatcher mismatch, subjects, match, history, and uncurry fixtures)."
 
 requireSelfTest :: String -> String -> [String] -> IO ()
 requireSelfTest label expected diagnostics =

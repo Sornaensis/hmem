@@ -1,10 +1,13 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 export const api = process.env.HMEM_TIMELINE_API ?? 'http://127.0.0.1:5180';
 export const token = 'sandbox-local-bot-token';
+export const identity = Object.freeze({ role: 'Timeline integration', 'model-id': 'test:fixture:default' });
 
 export async function json(path, options = {}) {
   const response = await fetch(api + path, {
@@ -12,6 +15,7 @@ export async function json(path, options = {}) {
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      'X-HMem-Bot-Identity': JSON.stringify(identity),
       ...(options.headers ?? {}),
     },
   });
@@ -42,8 +46,12 @@ export async function restoreLatestSoftDelete(workspaceId, entityType, entityId)
 export async function startLocalMcp(workspaceId) {
   const repositoryRoot = process.env.HMEM_REPO_ROOT
     ?? fileURLToPath(new URL('../../../../', import.meta.url));
-  const child = spawn('stack', [
-    'exec', 'hmem-mcp', '--',
+  // Resolve the built executable without an intermediate stdio-forwarding process.
+  const { stdout: installRoot } = await promisify(execFile)('stack', ['path', '--local-install-root'], {
+    cwd: repositoryRoot, env: process.env, windowsHide: true, timeout: 15000, maxBuffer: 65536,
+  });
+  const executable = join(installRoot.trim(), 'bin', process.platform === 'win32' ? 'hmem-mcp.exe' : 'hmem-mcp');
+  const child = spawn(executable, [
     '--server-url', api,
     '--auth-token', token,
   ], {
@@ -81,17 +89,26 @@ export async function startLocalMcp(workspaceId) {
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, ...(params ? { params } : {}) })}\n`);
   });
 
-  await rpc('initialize');
-  await rpc('tools/call', { name: 'set_workspace', arguments: { workspace_id: workspaceId } });
+  const close = async () => {
+    child.stdin.end();
+    await Promise.race([
+      once(child, 'close'),
+      new Promise((resolve) => setTimeout(() => { child.kill(); resolve(); }, 5000)),
+    ]);
+  };
+  try {
+    await rpc('initialize');
+    const declaration = await rpc('tools/call', {
+      name: 'set_workspace', arguments: { workspace_id: workspaceId, identity },
+    });
+    if (declaration.isError) throw new Error(`MCP declaration rejected: ${JSON.stringify(declaration.content)}`);
+  } catch (error) {
+    await close();
+    throw error;
+  }
 
   return {
     callTool: (name, args) => rpc('tools/call', { name, arguments: args }),
-    async close() {
-      child.stdin.end();
-      await Promise.race([
-        once(child, 'close'),
-        new Promise((resolve) => setTimeout(() => { child.kill(); resolve(); }, 5000)),
-      ]);
-    },
+    close,
   };
 }

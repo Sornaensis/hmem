@@ -14,11 +14,12 @@ import Feature.Observation
 import Feature.Search
 import Feature.Timeline
 import Feature.WorkspaceAdmin
-import Helpers exposing (formatDate)
+import Helpers
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick)
 import Permissions
+import TimestampDisplay
 import Types exposing (..)
 
 
@@ -98,11 +99,11 @@ viewReadableWorkspacePage wsId model ws =
                         text ""
                 , div [ class "workspace-detail" ]
                     [ span [ class "workspace-detail-label" ] [ text "Created" ]
-                    , span [ class "workspace-detail-value" ] [ text (formatDate ws.createdAt) ]
+                    , span [ class "workspace-detail-value" ] [ text (TimestampDisplay.lookup model.timestamps ws.createdAt) ]
                     ]
                 , div [ class "workspace-detail" ]
                     [ span [ class "workspace-detail-label" ] [ text "Updated" ]
-                    , span [ class "workspace-detail-value" ] [ text (formatDate ws.updatedAt) ]
+                    , span [ class "workspace-detail-value" ] [ text (TimestampDisplay.lookup model.timestamps ws.updatedAt) ]
                     ]
                 ]
             ]

@@ -11,11 +11,12 @@ module Feature.WorkspaceAdmin exposing
     , viewDeleteConfirmModal
     , viewPurgeConfirmModal
     , viewWorkspaceAdminPanel
+    , timestampSources
     )
 
 import Api
 import Dict
-import Helpers exposing (beginTrackedMutation, formatDate, pushUrl, trackLocalMutation)
+import Helpers exposing (beginTrackedMutation, pushUrl, trackLocalMutation)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -24,6 +25,7 @@ import Json.Encode as Encode
 import Set
 import Permissions
 import Toast exposing (addToast)
+import TimestampDisplay
 import Types exposing (..)
 
 
@@ -437,6 +439,13 @@ viewWorkspaceAdminPanel ws model =
                 ]
         ]
 
+
+timestampSources : String -> Model -> List String
+timestampSources workspaceId model =
+    if model.auth.status == AuthReady && model.sessionContext /= Nothing && canManageTarget workspaceId model then
+        Dict.get workspaceId model.workspaceAdmin.memberships |> Maybe.withDefault [] |> List.map .updatedAt
+    else []
+
 viewMembershipManager : Api.Workspace -> Model -> Html Msg
 viewMembershipManager ws model =
     let
@@ -464,7 +473,7 @@ viewMembershipManager ws model =
                 p [ class "form-help", attribute "role" "status" ] [ text "No explicit memberships. Superadmins may still have access." ]
             else text ""
           else
-            div [ class "membership-list" ] (List.map (viewMembershipRow ws.id busy) memberships)
+            div [ class "membership-list" ] (List.map (viewMembershipRow model.timestamps ws.id busy) memberships)
         , Html.form [ class "membership-form", onSubmit (SubmitWorkspaceMembership ws.id) ]
             [ div [ class "filter-group membership-user-field" ]
                 [ label [ class "filter-label", for "workspace-membership-user" ] [ text "User UUID" ]
@@ -489,12 +498,12 @@ viewMembershipManager ws model =
             Nothing -> text ""
         ]
 
-viewMembershipRow : String -> Bool -> Api.WorkspaceMembership -> Html Msg
-viewMembershipRow wsId busy membership =
+viewMembershipRow : TimestampDisplay.State -> String -> Bool -> Api.WorkspaceMembership -> Html Msg
+viewMembershipRow display wsId busy membership =
     div [ class "membership-row", attribute "data-member-user" membership.userId ]
         [ Helpers.copyableValue "membership-user" "user ID" membership.userId membership.userId
         , span [ class ("badge badge-" ++ membership.role) ] [ text membership.role ]
-        , span [ class "membership-updated" ] [ text ("Updated " ++ formatDate membership.updatedAt) ]
+        , span [ class "membership-updated" ] [ text ("Updated " ++ TimestampDisplay.lookup display membership.updatedAt) ]
         , button [ class "btn-small btn-danger-subtle", type_ "button", disabled busy, onClick (RemoveWorkspaceMembership wsId membership.userId) ] [ text "Remove" ]
         ]
 

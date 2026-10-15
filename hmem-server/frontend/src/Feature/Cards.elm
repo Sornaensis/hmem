@@ -25,6 +25,7 @@ module Feature.Cards exposing
     , updateViewport
     , logicalRows
     , mountedViewportKeys
+    , timestampSources
     , visibleTaskTreeForCriteria
     , viewDeleteConfirmModal
     , viewProjectsTree
@@ -53,6 +54,7 @@ import Json.Decode as Decode
 import Ports exposing (copyToClipboard)
 import Set
 import Toast exposing (addToast)
+import TimestampDisplay
 import Types exposing (..)
 
 
@@ -1810,8 +1812,8 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "task"
             , div [ class "card-meta-group" ]
                 [ div [ class "card-meta-row" ]
-                    [ span [ class "card-meta" ] [ text ("Created: " ++ formatDate project.createdAt) ]
-                    , span [ class "card-meta" ] [ text ("Updated: " ++ formatDate project.updatedAt) ]
+                    [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps project.createdAt) ]
+                    , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps project.updatedAt) ]
                     , Helpers.copyableValue "card-meta card-id card-id-copy" "project ID" project.id project.id
                     ]
                 ]
@@ -2432,14 +2434,14 @@ viewTaskCardBody descendants projection showProject model task =
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
         , div [ class "card-meta-group" ]
             [ div [ class "card-meta-row" ]
-                [ span [ class "card-meta" ] [ text ("Created: " ++ formatDate task.createdAt) ]
-                , span [ class "card-meta" ] [ text ("Updated: " ++ formatDate task.updatedAt) ]
+                [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps task.createdAt) ]
+                , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps task.updatedAt) ]
                 , Helpers.copyableValue "card-meta card-id card-id-copy" "task ID" task.id task.id
                 ]
             , div [ class "card-meta-row" ]
                 [ case task.completedAt of
                     Just completed ->
-                        span [ class "card-meta" ] [ text ("Completed: " ++ formatDate completed) ]
+                        span [ class "card-meta" ] [ text ("Completed: " ++ TimestampDisplay.lookup model.timestamps completed) ]
 
                     Nothing ->
                         text ""
@@ -3334,6 +3336,31 @@ mountedViewportKeys model =
             Viewport.Row _ key _ -> Just key
             _ -> Nothing
         )
+
+
+timestampSources : Model -> List String
+timestampSources model =
+    let
+        history id =
+            if isExpanded model id then Feature.AuditLog.entityHistoryTimestampSources model id else []
+
+        rowSources row =
+            case row.kind of
+                "project" ->
+                    Dict.get row.entityId model.projects
+                        |> Maybe.map (\project -> [ project.createdAt, project.updatedAt ] ++ history project.id)
+                        |> Maybe.withDefault []
+
+                "task" ->
+                    Dict.get row.entityId model.tasks
+                        |> Maybe.map (\task -> [ task.createdAt, task.updatedAt ] ++ Maybe.withDefault [] (Maybe.map List.singleton task.completedAt) ++ history task.id)
+                        |> Maybe.withDefault []
+
+                _ -> []
+    in
+    mountedViewportKeys model
+        |> List.filterMap (\key -> Dict.get key model.cards.viewport.rows)
+        |> List.concatMap rowSources
 
 
 viewportDetailDemand : Model -> ( Model, Cmd Msg )

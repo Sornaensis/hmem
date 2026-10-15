@@ -1,10 +1,10 @@
-module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, auditReturnFilters, init, nextAuditOffset, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
+module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, auditReturnFilters, entityHistoryTimestampSources, init, nextAuditOffset, timestampSources, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
 
 import ActorAttribution
 import Api
 import Dict
 import Feature.Focus as Focus
-import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, formatDate, pushUrl)
+import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, pushUrl)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -12,6 +12,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
 import Toast exposing (addToast)
+import TimestampDisplay
 import Types exposing (..)
 
 
@@ -674,7 +675,7 @@ auditContextDetailItems entry =
     , ( "Action type", auditActionToDisplay entry.action )
     , ( "Target entity", auditEntityTypeLabel entry.entityType )
     , ( "Target ID", entry.entityId )
-    , ( "Timestamp", formatDate entry.changedAt )
+    , ( "Timestamp", entry.changedAt )
     , ( "Audit entry ID", entry.id )
     ]
         ++ maybeDetail "Actor type" entry.actorType
@@ -683,6 +684,52 @@ auditContextDetailItems entry =
         ++ (entry.botIdentity |> Maybe.map (\identity -> [ ( "Declared role", identity.role ), ( "Model", identity.modelId ) ]) |> Maybe.withDefault [])
         ++ maybeDetail "Workspace ID" entry.workspaceId
         ++ maybeDetail "Request ID" entry.requestId
+
+
+isTimestampField : String -> Bool
+isTimestampField field =
+    List.member (field |> auditFieldFromLabel |> String.toLower)
+        [ "timestamp", "created_at", "updated_at", "changed_at", "recorded_at", "completed_at", "due_at", "deleted_at" ]
+
+
+timestampSource : String -> String
+timestampSource value =
+    if List.member value [ "(unset)", "null", "(empty)" ] then "" else value
+
+
+detailTimestampSources : List ( String, String ) -> List String
+detailTimestampSources rows =
+    rows |> List.filter (Tuple.first >> isTimestampField) |> List.map (Tuple.second >> timestampSource)
+
+
+changedTimestampSources : Api.AuditLogEntry -> List String
+changedTimestampSources entry =
+    auditChangedFieldItems entry
+        |> List.filter (.field >> isTimestampField)
+        |> List.concatMap (\change -> List.filterMap identity [ change.oldValue, change.newValue ] |> List.map timestampSource)
+
+
+timestampSources : Model -> List String
+timestampSources model =
+    model.auditLog.entries
+        |> List.concatMap (\entry ->
+            entry.changedAt ::
+                (if Dict.get entry.id model.auditLog.expandedEntries == Just True then
+                    detailTimestampSources (auditContextDetailItems entry ++ auditActionDetailItems entry)
+                        ++ (if entry.action == Api.AuditUpdate then changedTimestampSources entry else [])
+                 else []))
+
+
+entityHistoryTimestampSources : Model -> String -> List String
+entityHistoryTimestampSources model entityId =
+    if Dict.get entityId model.auditLog.historyExpanded /= Just True then []
+    else
+        Dict.get entityId model.auditLog.entityHistory |> Maybe.withDefault []
+            |> List.concatMap (\entry -> entry.changedAt ::
+                (case entry.action of
+                    Api.AuditUpdate -> changedTimestampSources entry
+                    Api.AuditCreate -> entry.newValues |> Maybe.map (auditSnapshotDetailItemsFromValue >> detailTimestampSources) |> Maybe.withDefault []
+                    Api.AuditDelete -> []))
 
 
 auditActionDetailItems : Api.AuditLogEntry -> List ( String, String )
@@ -1389,13 +1436,13 @@ viewAuditLogEntry model entry =
                 Nothing ->
                     text ""
             , span [ class "audit-actor" ] [ text ("By " ++ auditActorSummary entry) ]
-            , span [ class "audit-timestamp" ] [ text (formatDate entry.changedAt) ]
+            , span [ class "audit-timestamp" ] [ text (TimestampDisplay.lookup model.timestamps entry.changedAt) ]
             ]
         , if expanded then
             div [ class "audit-entry-detail" ]
                 [ viewAuditContext model entry
-                , viewAuditDetailSection "Action details" (auditActionDetailItems entry)
-                , viewAuditEntryChangeDetails entry
+                , viewAuditDetailSection model.timestamps "Action details" (auditActionDetailItems entry)
+                , viewAuditEntryChangeDetails model.timestamps entry
                 , div [ class "audit-entry-meta" ]
                     [ span [ class "audit-entry-id" ] [ text "Entry: ", Helpers.copyableValue "" "audit entry ID" entry.id (String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text "Entity: ", Helpers.copyableValue "" "entity ID" entry.entityId (String.left 8 entry.entityId) ]
@@ -1413,11 +1460,11 @@ viewAuditLogEntry model entry =
         ]
 
 
-viewAuditEntryChangeDetails : Api.AuditLogEntry -> Html Msg
-viewAuditEntryChangeDetails entry =
+viewAuditEntryChangeDetails : TimestampDisplay.State -> Api.AuditLogEntry -> Html Msg
+viewAuditEntryChangeDetails display entry =
     case entry.action of
         Api.AuditUpdate ->
-            viewChangedFields entry.oldValues entry.newValues
+            viewChangedFields display entry.oldValues entry.newValues
 
         Api.AuditCreate ->
             text ""
@@ -1426,8 +1473,8 @@ viewAuditEntryChangeDetails entry =
             text ""
 
 
-viewAuditDetailSection : String -> List ( String, String ) -> Html Msg
-viewAuditDetailSection titleText rows =
+viewAuditDetailSection : TimestampDisplay.State -> String -> List ( String, String ) -> Html Msg
+viewAuditDetailSection display titleText rows =
     if List.isEmpty rows then
         text ""
 
@@ -1435,14 +1482,14 @@ viewAuditDetailSection titleText rows =
         div [ class "audit-detail-section" ]
             [ h4 [ class "audit-detail-heading" ] [ text titleText ]
             , dl [ class "audit-detail-grid" ]
-                (List.concatMap viewAuditDetailItem rows)
+                (List.concatMap (viewAuditDetailItem display) rows)
             ]
 
 
-viewAuditDetailItem : ( String, String ) -> List (Html Msg)
-viewAuditDetailItem ( labelText, valueText ) =
+viewAuditDetailItem : TimestampDisplay.State -> ( String, String ) -> List (Html Msg)
+viewAuditDetailItem display ( labelText, valueText ) =
     [ dt [ class "audit-detail-label" ] [ text labelText ]
-    , dd [ class "audit-detail-value" ] [ viewAuditValue labelText valueText ]
+    , dd [ class "audit-detail-value" ] [ viewAuditValue display labelText valueText ]
     ]
 
 
@@ -1532,12 +1579,12 @@ viewHistoryEntry model entry =
         changedFields =
             case entry.action of
                 Api.AuditUpdate ->
-                    viewChangedFields entry.oldValues entry.newValues
+                    viewChangedFields model.timestamps entry.oldValues entry.newValues
 
                 Api.AuditCreate ->
                     case entry.newValues of
                         Just nv ->
-                            viewJsonSummary "Initial" nv
+                            viewJsonSummary model.timestamps "Initial" nv
 
                         Nothing ->
                             text ""
@@ -1548,7 +1595,7 @@ viewHistoryEntry model entry =
     div [ class "history-entry" ]
         [ div [ class "history-entry-header" ]
             [ span [ class ("history-action-badge " ++ actionClass) ] [ text actionLabel ]
-            , span [ class "history-timestamp" ] [ text (formatDate entry.changedAt) ]
+            , span [ class "history-timestamp" ] [ text (TimestampDisplay.lookup model.timestamps entry.changedAt) ]
             , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model && model.page == AuditLogPage then
                 button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩" ]
 
@@ -1561,8 +1608,8 @@ viewHistoryEntry model entry =
         ]
 
 
-viewChangedFields : Maybe Decode.Value -> Maybe Decode.Value -> Html Msg
-viewChangedFields mOld mNew =
+viewChangedFields : TimestampDisplay.State -> Maybe Decode.Value -> Maybe Decode.Value -> Html Msg
+viewChangedFields display mOld mNew =
     let
         changes =
             auditChangedFieldItemsFromValues mOld mNew
@@ -1573,36 +1620,36 @@ viewChangedFields mOld mNew =
     else
         div [ class "history-diff audit-changed-fields" ]
             (h4 [ class "audit-detail-heading" ] [ text "Changed fields" ]
-                :: List.map viewChangedField changes
+                :: List.map (viewChangedField display) changes
             )
 
 
-viewChangedField : AuditFieldChange -> Html Msg
-viewChangedField change =
+viewChangedField : TimestampDisplay.State -> AuditFieldChange -> Html Msg
+viewChangedField display change =
     div [ class "history-diff-field" ]
         [ span [ class "history-diff-field-name" ] [ text change.label ]
         , case ( change.oldValue, change.newValue ) of
             ( Just oldValue, Just newValue ) ->
                 span []
-                    [ span [ class "history-diff-old" ] [ viewAuditValue change.label oldValue ]
+                    [ span [ class "history-diff-old" ] [ viewAuditValue display change.field oldValue ]
                     , text " → "
-                    , span [ class "history-diff-new" ] [ viewAuditValue change.label newValue ]
+                    , span [ class "history-diff-new" ] [ viewAuditValue display change.field newValue ]
                     ]
 
             ( Nothing, Just newValue ) ->
-                span [ class "history-diff-new" ] [ viewAuditValue change.label newValue ]
+                span [ class "history-diff-new" ] [ viewAuditValue display change.field newValue ]
 
             ( Just oldValue, Nothing ) ->
-                span [ class "history-diff-old" ] [ viewAuditValue change.label oldValue ]
+                span [ class "history-diff-old" ] [ viewAuditValue display change.field oldValue ]
 
             ( Nothing, Nothing ) ->
                 text ""
         ]
 
 
-viewJsonSummary : String -> Decode.Value -> Html Msg
-viewJsonSummary titleText val =
-    viewAuditDetailSection titleText (auditSnapshotDetailItemsFromValue val)
+viewJsonSummary : TimestampDisplay.State -> String -> Decode.Value -> Html Msg
+viewJsonSummary display titleText val =
+    viewAuditDetailSection display titleText (auditSnapshotDetailItemsFromValue val)
 
 
 viewRevertConfirmModal : Model -> Html Msg
@@ -1737,12 +1784,12 @@ isTypedAuditField field =
 auditTypedDisplayValue : String -> Decode.Value -> String
 auditTypedDisplayValue field value =
     if field == "subjects" then Encode.encode 0 value
-    else if isTypedAuditField field then Decode.decodeValue flexibleStringDecoder value |> Result.withDefault (auditDisplayValue value)
+    else if isTypedAuditField field || isTimestampField field then Decode.decodeValue flexibleStringDecoder value |> Result.withDefault (auditDisplayValue value)
     else auditDisplayValue value
 
 
-viewAuditValue : String -> String -> Html Msg
-viewAuditValue labelText value =
+viewAuditValue : TimestampDisplay.State -> String -> String -> Html Msg
+viewAuditValue display labelText value =
     if labelText == "subjects" then
         case Decode.decodeString (Decode.list (Decode.map2 Tuple.pair (Decode.field "subject_kind" Decode.string) (Decode.field "subject" Decode.string))) value of
             Ok subjects ->
@@ -1751,7 +1798,7 @@ viewAuditValue labelText value =
                     else text "Unsupported subject kind") subjects)
             Err _ -> text (truncateAuditValue 160 value)
     else if isTypedAuditField labelText && value /= "(unset)" && value /= "null" && value /= "(empty)" then Helpers.copyableValue "" labelText value value
-    else if List.member (String.toLower labelText) [ "timestamp", "created at", "updated at", "changed at", "recorded at", "completed at", "due at", "due at (obsolete)", "deleted at" ] && String.length value >= 16 then text (formatDate value)
+    else if isTimestampField labelText then text (TimestampDisplay.lookup display (timestampSource value))
     else text value
 
 
@@ -1767,7 +1814,7 @@ viewAuditContext model entry =
                 else if labelText == "Target entity" then
                     [ dt [ class "audit-detail-label" ] [ text labelText ]
                     , dd [ class "audit-detail-value" ] [ text (valueText ++ " · "), viewAuditSummary model entry ] ]
-                else viewAuditDetailItem ( labelText, valueText )) (auditContextDetailItemsForView model entry))
+                else viewAuditDetailItem model.timestamps ( labelText, valueText )) (auditContextDetailItemsForView model entry))
         ]
 
 

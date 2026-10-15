@@ -23,6 +23,7 @@ import Html.Keyed as Keyed
 import Json.Decode as Decode
 import Permissions
 import Toast exposing (addToast)
+import TimestampDisplay
 import Types exposing (..)
 
 
@@ -485,8 +486,8 @@ viewMemoryCard model memory =
             ]
         , div [ class "card-meta-group" ]
             [ div [ class "card-meta-row" ]
-                [ span [ class "card-meta" ] [ text ("Created: " ++ formatDate memory.createdAt) ]
-                , span [ class "card-meta" ] [ text ("Updated: " ++ formatDate memory.updatedAt) ]
+                [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps memory.createdAt) ]
+                , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps memory.updatedAt) ]
                 , Helpers.copyableValue "card-meta card-id card-id-copy" "memory ID" memory.id memory.id
                 ]
             ]

@@ -12,6 +12,7 @@ import Http
 import Json.Decode as D
 import Json.Encode as E
 import ObservationPreferences as P
+import TimestampDisplay
 import Test exposing (..)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
@@ -73,7 +74,7 @@ suite = describe "automatic observation refresh and scoped preferences"
         Expect.all
             [ \_ -> Expect.equal Nothing draft.observations.counts.active
             , \_ -> Expect.equal ( True, Just 300 ) ( applied.observations.counts.current, Maybe.map .totalCount applied.observations.counts.value )
-            , \_ -> O.viewObservationsState workspaceFixture applied.observations |> Query.fromHtml |> Query.has [ Selector.text "Counting matching Observations…" ]
+            , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture applied.observations |> Query.fromHtml |> Query.has [ Selector.text "Counting matching Observations…" ]
             ] ()
     , test "stale B cannot relabel A when C then B is applied while a successor is held" <| \_ ->
         let
@@ -89,7 +90,7 @@ suite = describe "automatic observation refresh and scoped preferences"
         in
         Expect.all
             [ \_ -> Expect.equal a.observations.counts.valueFingerprint bAgain.observations.counts.valueFingerprint
-            , \_ -> O.viewObservationsState workspaceFixture bAgain.observations |> Query.fromHtml |> Query.has [ Selector.text "Counting matching Observations…" ]
+            , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture bAgain.observations |> Query.fromHtml |> Query.has [ Selector.text "Counting matching Observations…" ]
             ] ()
     , test "inactive-tab invalidations coalesce and stale success dispatches one current successor" <| \_ ->
         let

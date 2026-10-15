@@ -18,6 +18,7 @@ import ObservationViewport
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Route
+import TimestampDisplay
 import Test exposing (..)
 import Test.Html.Query as Query
 import Test.Html.Event as Event
@@ -62,7 +63,7 @@ suite =
                         Feature.Observation.markResultsStale initial
 
                     view =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) stale |> Query.fromHtml
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) stale |> Query.fromHtml
                 in
                 Expect.all
                     [ \_ -> Feature.Observation.isLoadedOrSelected "loaded" stale |> Expect.equal True
@@ -371,7 +372,7 @@ suite =
                                 Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict stale))) observed |> Tuple.first
 
                             view =
-                                Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) checking.observations |> Query.fromHtml
+                                Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty True (observationWorkspace Api.Repository) checking.observations |> Query.fromHtml
                         in
                         case checking.observations.edit |> Maybe.andThen .activeCanonicalRequest of
                             Nothing ->
@@ -577,10 +578,10 @@ suite =
                         observationWorkspace Api.Repository
 
                     readOnly =
-                        Feature.Observation.viewObservationsStateWithPermission False repository state |> Query.fromHtml
+                        Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty False repository state |> Query.fromHtml
 
                     editor =
-                        Feature.Observation.viewObservationsStateWithPermission True repository state |> Query.fromHtml
+                        Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty True repository state |> Query.fromHtml
                 in
                 Expect.all
                     [ \_ -> readOnly |> Query.hasNot [ Selector.text "Edit content" ]
@@ -602,7 +603,7 @@ suite =
                             |> Tuple.first
 
                     view =
-                        Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) started.observations
+                        Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty True (observationWorkspace Api.Repository) started.observations
                             |> Query.fromHtml
                 in
                 Expect.all
@@ -623,7 +624,7 @@ suite =
                         let
                             state = original.observations
                             retained = { state | edit = Maybe.map (\edit -> { edit | saving = saving, conflict = conflict }) state.edit }
-                            view = Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) retained |> Query.fromHtml
+                            view = Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty True (observationWorkspace Api.Repository) retained |> Query.fromHtml
                             canonical = Maybe.map .content retained.selectedDetail |> Maybe.withDefault ""
                         in
                         Expect.all
@@ -924,7 +925,7 @@ suite =
                             |> Tuple.first
 
                     view =
-                        Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) opened.observations
+                        Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty True (observationWorkspace Api.Repository) opened.observations
                             |> Query.fromHtml
                 in
                 Expect.all
@@ -966,7 +967,7 @@ suite =
                             |> Feature.Observation.reconcileCurationPermission
 
                     readOnlyView =
-                        Feature.Observation.viewObservationsStateWithPermission False (observationWorkspace Api.Repository) opened.observations
+                        Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty False (observationWorkspace Api.Repository) opened.observations
                             |> Query.fromHtml
 
                     lateDeleteIsInert =
@@ -1033,7 +1034,7 @@ suite =
                             |> Tuple.first
 
                     finalView =
-                        Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) final.observations
+                        Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty True (observationWorkspace Api.Repository) final.observations
                             |> Query.fromHtml
                 in
                 Expect.all
@@ -1461,7 +1462,7 @@ suite =
                                 Feature.Observation.update (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Err Http.NetworkError)) returned |> Tuple.first
 
                             view =
-                                Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
+                                Feature.Observation.viewObservationsStateWithPermission TimestampDisplay.empty True (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
                         in
                         Expect.all
                             [ \_ -> failed.observations.edit |> Expect.equal dirty.observations.edit
@@ -1890,15 +1891,15 @@ suite =
                         { loaded | loading = True }
                 in
                 Expect.all
-                    [ \_ -> Feature.Observation.viewObservationsState unavailable empty |> Query.fromHtml |> Query.has [ Selector.text "Observations unavailable" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Creation revision", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
-                    , \_ -> Feature.Observation.viewObservationsState repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
-                    , \_ -> Feature.Observation.viewObservationsState repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository detailError |> Query.fromHtml |> Query.has [ Selector.text "Failed to load observation detail." ]
+                    [ \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty unavailable empty |> Query.fromHtml |> Query.has [ Selector.text "Observations unavailable" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Creation revision", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository detailError |> Query.fromHtml |> Query.has [ Selector.text "Failed to load observation detail." ]
                     ]
                     ()
         , test "uses scoped app controls, selectable card rows, and structured detail metadata" <|
@@ -1919,7 +1920,7 @@ suite =
                         }
 
                     view =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) state
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) state
                             |> Query.fromHtml
                 in
                 Expect.all
@@ -1982,7 +1983,7 @@ suite =
             \_ ->
                 let
                     initial = Feature.Observation.init
-                    view state = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) state |> Query.fromHtml
+                    view state = Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) state |> Query.fromHtml
                     opened = { initial | fileComposerOpen = True, advancedFiltersOpen = True }
                 in
                 Expect.all
@@ -2003,7 +2004,7 @@ suite =
                         ]
                     observation = { original | content = content }
                     selected = selectedObservationState observation
-                    view = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) { selected | expandedSubjects = Dict.singleton observation.id True } |> Query.fromHtml
+                    view = Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) { selected | expandedSubjects = Dict.singleton observation.id True } |> Query.fromHtml
                 in
                 Expect.all
                     [ \_ -> Helpers.plainTextExcerpt 3 "😀 😀 😀" |> Expect.equal "😀 …"
@@ -2014,18 +2015,22 @@ suite =
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Creation revision", Selector.text "Content updated", Selector.class "copyable-value" ]
                     ] ()
-        , test "Observation timestamps display the database date and minute without timezone conversion" <|
+        , test "Observation timestamps stay pending until browser-local presentation is available" <|
             \_ ->
-                [ Helpers.formatObservationTimestamp "2026-10-06T12:34:56.123Z"
-                , Helpers.formatObservationTimestamp "2026-10-06T12:35:56+00:00"
-                , Helpers.formatObservationTimestamp "2026-10-06T12:34:56+02:00"
-                ] |> Expect.equal [ "2026-10-06 12:34", "2026-10-06 12:35", "2026-10-06 12:34" ]
+                let
+                    original = fixtureObservation "pending-time" "2026-10-06T12:34:56.123Z"
+                    state = selectedObservationState original
+                in
+                Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) state
+                    |> Query.fromHtml
+                    |> Query.find [ Selector.class "observation-detail-card" ]
+                    |> Query.hasNot [ Selector.text "2026-10-06 12:34" ]
         , test "large detail reader uses the UTF-8 threshold and retains an exact read-only value" <|
             \_ ->
                 let
                     original = fixtureObservation "reader" "2026-01-01T00:00:00Z"
                     view content =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository)
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository)
                             (selectedObservationState { original | content = content }) |> Query.fromHtml
                     large = String.repeat 4097 "😀"
                 in
@@ -2056,11 +2061,11 @@ suite =
                         }
                 in
                 Expect.all
-                    [ \_ -> Feature.Observation.viewObservationsState repository { empty | loading = True } |> Query.fromHtml |> Query.find [ Selector.class "observation-state-loading" ] |> Query.has [ Selector.class "loading-indicator" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository empty |> Query.fromHtml |> Query.find [ Selector.class "observation-state-empty" ] |> Query.has [ Selector.class "empty-state" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository { empty | error = Just "Failed" } |> Query.fromHtml |> Query.find [ Selector.class "observation-state-error" ] |> Query.has [ Selector.text "Failed" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository paginating |> Query.fromHtml |> Query.find [ Selector.class "observation-load-more" ] |> Query.has [ Selector.class "btn-secondary", Selector.disabled True ]
-                    , \_ -> Feature.Observation.viewObservationsState (observationWorkspace Api.Personal) empty |> Query.fromHtml |> Query.has [ Selector.class "observation-state-unavailable", Selector.class "empty-state" ]
+                    [ \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | loading = True } |> Query.fromHtml |> Query.find [ Selector.class "observation-state-loading" ] |> Query.has [ Selector.class "loading-indicator" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository empty |> Query.fromHtml |> Query.find [ Selector.class "observation-state-empty" ] |> Query.has [ Selector.class "empty-state" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | error = Just "Failed" } |> Query.fromHtml |> Query.find [ Selector.class "observation-state-error" ] |> Query.has [ Selector.text "Failed" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository paginating |> Query.fromHtml |> Query.find [ Selector.class "observation-load-more" ] |> Query.has [ Selector.class "btn-secondary", Selector.disabled True ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Personal) empty |> Query.fromHtml |> Query.has [ Selector.class "observation-state-unavailable", Selector.class "empty-state" ]
                     ]
                     ()
         , test "ranked FTS and unfiltered pages retain server order when appended" <|
@@ -2176,7 +2181,7 @@ suite =
                         }
 
                     view =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) state |> Query.fromHtml
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) state |> Query.fromHtml
                 in
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.class "observation-match-results" ] |> Query.has [ Selector.text "src/Main.elm", Selector.text "src/**/*.elm", Selector.text "1 loaded", Selector.class "copyable-value" ]
@@ -2253,13 +2258,13 @@ suite =
                         observationWorkspace Api.Repository
                 in
                 Expect.all
-                    [ \_ -> Feature.Observation.viewObservationsState repository { base | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Matching repository files..." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository base |> Query.fromHtml |> Query.has [ Selector.text "No matching observations", Selector.text "Every supplied path is shown below. Try different paths or clear the match.", Selector.text "No loaded matches for this path." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository { base | error = Just "Failed to match repository files." } |> Query.fromHtml |> Query.has [ Selector.text "Failed to match repository files." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.hasNot [ Selector.id "observation-subject" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.class "observation-subject-copy", Selector.text "1 loaded", Selector.text "src/Main.elm", Selector.text "src/**/*.elm" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.findAll [ Selector.class "observation-subject-copy", Selector.tag "button" ] |> Query.count (Expect.equal 1)
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.class "observation-load-more" ] |> Query.hasNot [ Selector.disabled True ]
+                    [ \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { base | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Matching repository files..." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository base |> Query.fromHtml |> Query.has [ Selector.text "No matching observations", Selector.text "Every supplied path is shown below. Try different paths or clear the match.", Selector.text "No loaded matches for this path." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { base | error = Just "Failed to match repository files." } |> Query.fromHtml |> Query.has [ Selector.text "Failed to match repository files." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.hasNot [ Selector.id "observation-subject" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.has [ Selector.class "observation-subject-copy", Selector.text "1 loaded", Selector.text "src/Main.elm", Selector.text "src/**/*.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.findAll [ Selector.class "observation-subject-copy", Selector.tag "button" ] |> Query.count (Expect.equal 1)
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.find [ Selector.class "observation-load-more" ] |> Query.hasNot [ Selector.disabled True ]
                     ]
                     ()
         , test "late list, match, and workspace responses cannot overwrite an active match" <|
@@ -2632,7 +2637,7 @@ suite =
                         ( query.subjectKind, query.subject )
 
                     view =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) oppositeKind.observations
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) oppositeKind.observations
                             |> Query.fromHtml
                 in
                 Expect.all
@@ -2695,7 +2700,7 @@ suite =
                         Feature.Observation.update ApplyObservationFilters drafted |> Tuple.first
 
                     results =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) drafted.observations
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) drafted.observations
                             |> Query.fromHtml
                             |> Query.find [ Selector.class "observation-match-results" ]
                 in
@@ -3039,7 +3044,7 @@ suite =
                         Feature.Observation.update loadMessage drafted |> Tuple.first
 
                     view model =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) model.observations |> Query.fromHtml
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) model.observations |> Query.fromHtml
 
                     pagingClass =
                         if mode == ObservationFacetMode then "observation-facet-load-more" else "observation-load-more"
@@ -3208,7 +3213,7 @@ suite =
                                 draftQueryInputs failed |> Feature.Observation.update ApplyObservationFilters |> Tuple.first
 
                             view =
-                                Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
+                                Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
                         in
                         Expect.all
                             [ \_ -> view |> Query.has [ Selector.class "observation-state-error", Selector.class "empty-state", Selector.text "Retry results" ]
@@ -3246,7 +3251,7 @@ suite =
                                     |> Maybe.map (\fresh -> Feature.Observation.update (GotObservationDetail "workspace-1" "off-page" 3 fresh.token (Ok canonical)) retried |> Tuple.first)
                         in
                         Expect.all
-                            [ \_ -> Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Retry detail" ] ] |> Event.simulate Event.click |> Event.expect RetryObservationDetail
+                            [ \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Retry detail" ] ] |> Event.simulate Event.click |> Event.expect RetryObservationDetail
                             , \_ -> retried.observations.activeDetailRequest |> Maybe.map (\fresh -> fresh.token > request.token) |> Expect.equal (Just True)
                             , \_ -> (Feature.Observation.update failure retried |> Tuple.first).observations |> Expect.equal retried.observations
                             , \_ -> (Feature.Observation.update (GotObservationDetail "workspace-1" "off-page" 3 request.token (Ok canonical)) retried |> Tuple.first).observations |> Expect.equal retried.observations
@@ -3280,7 +3285,7 @@ suite =
                                 Feature.Observation.update RetryObservationDetail failed |> Tuple.first
 
                             view =
-                                Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
+                                Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
                         in
                         Expect.all
                             [ \_ -> Feature.Observation.viewObservations (observationWorkspace Api.Repository) failed |> Query.fromHtml |> Query.has [ Selector.class "observation-edit-form", Selector.text "Save reviewed content", Selector.text "Cancel", Selector.text "Retry detail" ]
@@ -3421,7 +3426,7 @@ suite =
                         }
 
                     facetView =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) facetState |> Query.fromHtml
+                        Feature.Observation.viewObservationsState (let empty = TimestampDisplay.empty in { empty | cache = Dict.singleton facet.latestUpdatedAt (Just { text = "2026-08-30 17:45", day = "2026-08-30" }) }) (observationWorkspace Api.Repository) facetState |> Query.fromHtml
 
                     repeated =
                         observationWithSubjects "repeated"
@@ -3451,15 +3456,15 @@ suite =
                         }
 
                     collapsed =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) matchState |> Query.fromHtml
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) matchState |> Query.fromHtml
 
                     oneExpanded =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository)
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository)
                             { matchState | expandedMatchGroups = Dict.singleton fileGroup True }
                             |> Query.fromHtml
 
                     bothExpanded =
-                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository)
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository)
                             { matchState | expandedMatchGroups = Dict.fromList [ ( fileGroup, True ), ( globGroup, True ) ] }
                             |> Query.fromHtml
 
@@ -4692,14 +4697,14 @@ revisionTests =
                 in Expect.all
                     [ \_ -> request.offset |> Expect.equal 100000
                     , \_ -> completed.observations.history |> Maybe.map (\saved -> ( saved.nextOffset, saved.hasMore, ( saved.error, saved.active ) )) |> Expect.equal (Just ( 100025, True, ( Just "History is incomplete at the bounded page limit.", Nothing ) ))
-                    , \_ -> Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) completed.observations |> Query.fromHtml |> Query.hasNot [ Selector.id "observation-history-load" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) completed.observations |> Query.fromHtml |> Query.hasNot [ Selector.id "observation-history-load" ]
                     ] ()
     , test "legacy current claim objects remain creation revisions while bound assertions take precedence" <| \_ ->
         let
             original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
             current = revisionProvenance 1 (String.repeat 40 "b")
             legacy = { current | eventKind = "legacy_creation", contentVersion = Nothing, contentDigest = Nothing }
-            view claim = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) (selectedObservationState { original | currentProvenance = Just claim }) |> Query.fromHtml
+            view claim = Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) (selectedObservationState { original | currentProvenance = Just claim }) |> Query.fromHtml
         in Expect.all
             [ \_ -> view legacy |> Query.find [ Selector.class "observation-current-provenance" ] |> Query.has [ Selector.text "Creation revision", Selector.text fullSha ]
             , \_ -> view current |> Query.find [ Selector.class "observation-current-provenance" ] |> Query.has [ Selector.text "Current reviewed revision", Selector.text (String.repeat 40 "b") ]

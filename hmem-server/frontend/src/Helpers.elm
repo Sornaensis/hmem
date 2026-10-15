@@ -1327,14 +1327,6 @@ formatDate dateStr =
     String.left 16 (String.replace "T" " " dateStr)
 
 
-{-| Display the date and minute represented by the database timestamp.
-Transport values remain unchanged; presentation does not convert timezones.
--}
-formatObservationTimestamp : String -> String
-formatObservationTimestamp timestamp =
-    formatDate timestamp
-
-
 {-| Bound plain text by Unicode codepoints, including the ellipsis, without
 splitting a surrogate pair. The full value remains in canonical detail.
 -}

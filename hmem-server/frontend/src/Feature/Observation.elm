@@ -62,6 +62,7 @@ module Feature.Observation exposing
     , refreshViewport
     , updateViewport
     , projectResultRows
+    , timestampSources
     )
 
 import ActorAttribution
@@ -69,7 +70,7 @@ import Api
 import Array
 import Char
 import Dict
-import Helpers exposing (beginTrackedMutation, focusElement, formatDate, formatObservationTimestamp, plainTextExcerpt, replaceFragment)
+import Helpers exposing (beginTrackedMutation, focusElement, plainTextExcerpt, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (custom, onClick, onInput, onSubmit, stopPropagationOn)
@@ -86,6 +87,7 @@ import ObservationPreferences as Preferences
 import Ports exposing (copyToClipboard)
 import Set
 import Toast exposing (addToast)
+import TimestampDisplay
 import Types exposing (..)
 import Url
 
@@ -3658,14 +3660,48 @@ updateViewport payload model =
                 , Cmd.batch [ Ports.syncObservationViewport (ObservationViewport.syncReceipt (settled && not releaseExtent) adjustment target finalViewport), navigation ] )
 
 
-viewResultRows : Bool -> ObservationModel -> Html Msg
-viewResultRows canEdit state =
+resultPresentation : ObservationModel -> ( Array.Array ObservationResultRow, ObservationViewport.State, Maybe String )
+resultPresentation state =
     let
         -- Pure view callers (fixtures/tests) may not have passed through routing.
         uninitialized = state.viewport.stamp.workspace == "" && Array.isEmpty state.resultRows
         rows = if uninitialized then projectResultRows state else state.resultRows
         viewport = if uninitialized then ObservationViewport.rebuild state.viewport.stamp (Array.toList rows |> List.map resultRowKey) state.viewport else state.viewport
         owner = selectedOwner state
+    in
+    ( rows, viewport, owner )
+
+
+timestampSources : ObservationModel -> List String
+timestampSources state =
+    let
+        ( rows, viewport, owner ) = resultPresentation state
+        rowSources piece =
+            case piece of
+                HierarchyViewport.Row at _ _ ->
+                    case Array.get at rows of
+                        Just (ObservationCardRow context observation) ->
+                            if owner == Just (observationCardDomId context observation.id) then []
+                            else [ observation.updatedAt, (revisionDisplay observation).recordedAt ]
+                        Just (ObservationFacetRow facet) -> [ facet.latestUpdatedAt ]
+                        _ -> []
+                _ -> []
+        detail =
+            if state.selectedId == Nothing then []
+            else state.selectedDetail |> Maybe.map (\observation ->
+                [ observation.createdAt, observation.updatedAt, (revisionDisplay observation).recordedAt ]
+                    ++ (if state.historyExpanded then
+                            currentHistory (Just observation) state.history
+                                |> Maybe.map (.items >> List.map (.provenance >> .recordedAt)) |> Maybe.withDefault []
+                        else [])) |> Maybe.withDefault []
+    in
+    detail ++ (ObservationViewport.piecesWithOwner owner state.detailReturnTarget viewport |> List.concatMap rowSources)
+
+
+viewResultRows : TimestampDisplay.State -> Bool -> ObservationModel -> Html Msg
+viewResultRows display canEdit state =
+    let
+        ( rows, viewport, owner ) = resultPresentation state
         piece item =
             case item of
                 HierarchyViewport.Gap at height ->
@@ -3673,7 +3709,7 @@ viewResultRows canEdit state =
                 HierarchyViewport.Row at key _ ->
                     ( key, Array.get at rows |> Maybe.map (\row ->
                         div [ class "observation-viewport-row", attribute "data-observation-key" key, attribute "data-observation-position" (String.fromInt at) ]
-                            [ Lazy.lazy4 viewResultRow canEdit owner state row ]) |> Maybe.withDefault (text "") )
+                            [ Lazy.lazy5 viewResultRow display canEdit owner state row ]) |> Maybe.withDefault (text "") )
     in
     Keyed.node "div"
         [ id "observation-viewport", class "observation-list-rows observation-viewport"
@@ -3687,11 +3723,11 @@ viewResultRows canEdit state =
         (ObservationViewport.piecesWithOwner owner state.detailReturnTarget viewport |> List.map piece)
 
 
-viewResultRow : Bool -> Maybe String -> ObservationModel -> ObservationResultRow -> Html Msg
-viewResultRow canEdit owner state row =
+viewResultRow : TimestampDisplay.State -> Bool -> Maybe String -> ObservationModel -> ObservationResultRow -> Html Msg
+viewResultRow display canEdit owner state row =
     case row of
-        ObservationCardRow context observation -> viewObservationRow canEdit owner state context observation
-        ObservationFacetRow facet -> viewFacet facet
+        ObservationCardRow context observation -> viewObservationRow display canEdit owner state context observation
+        ObservationFacetRow facet -> viewFacet display facet
         ObservationPathRow path empty ->
             section [ class "observation-path-group" ]
                 [ h3 [ id ("observation-path-" ++ domToken path), class "observation-path-heading" ] [ Helpers.copyableValue "" "file path" path path ]
@@ -3729,17 +3765,17 @@ viewObservations workspace model =
                 Just message -> p noticeAttributes [ text message ]
                 Nothing -> if Result.toMaybe (Helpers.completeObservationUrl model) == Nothing then p noticeAttributes [ text Helpers.excludedObservationNotice ] else text ""
           else text ""
-        , viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
+        , viewObservationsStateWithPermission model.timestamps (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
         ]
 
 
-viewObservationsState : Api.Workspace -> ObservationModel -> Html Msg
-viewObservationsState workspace state =
-    viewObservationsStateWithPermission False workspace state
+viewObservationsState : TimestampDisplay.State -> Api.Workspace -> ObservationModel -> Html Msg
+viewObservationsState display workspace state =
+    viewObservationsStateWithPermission display False workspace state
 
 
-viewObservationsStateWithPermission : Bool -> Api.Workspace -> ObservationModel -> Html Msg
-viewObservationsStateWithPermission canEdit workspace state =
+viewObservationsStateWithPermission : TimestampDisplay.State -> Bool -> Api.Workspace -> ObservationModel -> Html Msg
+viewObservationsStateWithPermission display canEdit workspace state =
     if workspace.workspaceType /= Api.Repository then
         div [ class "empty-state observation-state observation-state-unavailable" ]
             [ h3 [] [ text "Observations unavailable" ]
@@ -3774,10 +3810,10 @@ viewObservationsStateWithPermission canEdit workspace state =
                                     [ observationToggle True "observation-detached-toggle" "Selected observation" ReturnObservationResults
                                     , span [ class "observation-subject" ] [ text "Selected observation" ]
                                     ]
-                            , viewDetail canEdit state
+                            , viewDetail display canEdit state
                             ]
                       else text ""
-                    , viewList canEdit workspace.id state
+                    , viewList display canEdit workspace.id state
                     ]
                 ]
             , viewDeleteConfirmation canEdit state
@@ -4047,24 +4083,24 @@ viewModeNavigation state =
         ]
 
 
-viewList : Bool -> String -> ObservationModel -> Html Msg
-viewList canEdit workspaceId state =
+viewList : TimestampDisplay.State -> Bool -> String -> ObservationModel -> Html Msg
+viewList display canEdit workspaceId state =
     case state.requestMode of
         ObservationFacetMode ->
-            viewFacetCatalogue canEdit workspaceId state
+            viewFacetCatalogue display canEdit workspaceId state
 
         ObservationMatchMode ->
-            viewMatchResults canEdit workspaceId state
+            viewMatchResults display canEdit workspaceId state
 
         ObservationExactSubjectMode ->
-            viewObservationResults canEdit workspaceId "Exact subject observations" "No observations share this exact subject" state
+            viewObservationResults display canEdit workspaceId "Exact subject observations" "No observations share this exact subject" state
 
         ObservationFlatMode ->
-            viewObservationResults canEdit workspaceId "Observations" "No observations found" state
+            viewObservationResults display canEdit workspaceId "Observations" "No observations found" state
 
 
-viewObservationResults : Bool -> String -> String -> String -> ObservationModel -> Html Msg
-viewObservationResults canEdit workspaceId ariaLabel emptyHeading state =
+viewObservationResults : TimestampDisplay.State -> Bool -> String -> String -> String -> ObservationModel -> Html Msg
+viewObservationResults display canEdit workspaceId ariaLabel emptyHeading state =
     let
         observations =
             state.orderedIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
@@ -4100,7 +4136,7 @@ viewObservationResults canEdit workspaceId ariaLabel emptyHeading state =
 
                 else
                     text ""
-        , Lazy.lazy2 viewResultRows canEdit state
+        , Lazy.lazy3 viewResultRows display canEdit state
         , if state.loading && not (List.isEmpty observations) then
             viewPageLoading state.expectedOffset "observations"
           else
@@ -4163,8 +4199,8 @@ viewPageLoading offset labelText =
         ]
 
 
-viewFacetCatalogue : Bool -> String -> ObservationModel -> Html Msg
-viewFacetCatalogue canEdit workspaceId state =
+viewFacetCatalogue : TimestampDisplay.State -> Bool -> String -> ObservationModel -> Html Msg
+viewFacetCatalogue display canEdit workspaceId state =
     let
         facets =
             state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets)
@@ -4189,7 +4225,7 @@ viewFacetCatalogue canEdit workspaceId state =
 
                 else
                     text ""
-        , Lazy.lazy2 viewResultRows canEdit state
+        , Lazy.lazy3 viewResultRows display canEdit state
         , if state.facetLoading && not (List.isEmpty facets) then
             viewPageLoading state.facetExpectedOffset "shared subjects"
           else
@@ -4212,8 +4248,8 @@ viewFacetCatalogue canEdit workspaceId state =
         ]
 
 
-viewFacet : Api.ObservationSubjectFacet -> Html Msg
-viewFacet facet =
+viewFacet : TimestampDisplay.State -> Api.ObservationSubjectFacet -> Html Msg
+viewFacet display facet =
     div [ class "card observation-facet" ]
         [ div [ class "card-header observation-card-header" ]
             [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel facet.subjectKind) ]
@@ -4222,11 +4258,11 @@ viewFacet facet =
             , onClick (SelectObservationFacet facet.subjectKind facet.subject)
             , attribute "aria-label" ("Open " ++ subjectKindLabel facet.subjectKind ++ " subject " ++ facet.subject ++ " with " ++ String.fromInt facet.observationCount ++ " observations") ]
             [ strong [] [ text (String.fromInt facet.observationCount ++ " observations") ]
-            , span [ class "card-meta" ] [ text ("Latest update: " ++ formatDate facet.latestUpdatedAt) ] ] ]
+            , span [ class "card-meta" ] [ text ("Latest update: " ++ TimestampDisplay.lookup display facet.latestUpdatedAt) ] ] ]
 
 
-viewMatchResults : Bool -> String -> ObservationModel -> Html Msg
-viewMatchResults canEdit workspaceId state =
+viewMatchResults : TimestampDisplay.State -> Bool -> String -> ObservationModel -> Html Msg
+viewMatchResults display canEdit workspaceId state =
     let
         paths =
             state.matchAppliedPaths
@@ -4259,7 +4295,7 @@ viewMatchResults canEdit workspaceId state =
                      )
                     )
         , if state.error == Nothing || not (List.isEmpty state.orderedIds) then
-            Lazy.lazy2 viewResultRows canEdit state
+            Lazy.lazy3 viewResultRows display canEdit state
           else
             text ""
         , if state.loading && not (List.isEmpty state.orderedIds) then
@@ -4286,8 +4322,8 @@ viewMatchResults canEdit workspaceId state =
         ]
 
 
-viewObservationRow : Bool -> Maybe String -> ObservationModel -> String -> Api.Observation -> Html Msg
-viewObservationRow canEdit owner state context observation =
+viewObservationRow : TimestampDisplay.State -> Bool -> Maybe String -> ObservationModel -> String -> Api.Observation -> Html Msg
+viewObservationRow display canEdit owner state context observation =
     let
         cardId = observationCardDomId context observation.id
         expanded = owner == Just cardId
@@ -4295,15 +4331,15 @@ viewObservationRow canEdit owner state context observation =
     div [ class "card observation-result", attribute "data-observation-id" observation.id, attribute "data-observation-context-key" context ]
         [ viewObservationHeader expanded cardId observation
         , if expanded then
-            viewDetail canEdit state
+            viewDetail display canEdit state
           else
             div [ id (cardId ++ "-body"), class "observation-folded-content" ]
                 [ div [ class "card-body observation-summary" ] [ text (plainTextExcerpt 240 observation.content) ]
                 , div [ class "card-meta-group observation-card-meta observation-card-footer" ]
                     [ dl [ class "observation-detail-meta" ] [ viewSubjects cardId observation.id state.expandedSubjects observation.subjects ]
                     , div [ class "card-meta-row" ]
-                        [ viewRevisionSummary observation
-                        , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
+                        [ viewRevisionSummary display observation
+                        , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ TimestampDisplay.lookup display observation.updatedAt) ]
                         ]
                     ]
                 ]
@@ -4367,8 +4403,8 @@ resolveSelectedOwner rows viewport state =
                         _ -> Nothing) |> List.head
 
 
-viewDetail : Bool -> ObservationModel -> Html Msg
-viewDetail canEdit state =
+viewDetail : TimestampDisplay.State -> Bool -> ObservationModel -> Html Msg
+viewDetail display canEdit state =
     case state.selectedId of
         Nothing ->
             text ""
@@ -4404,10 +4440,10 @@ viewDetail canEdit state =
                                 , dl [ class "observation-detail-meta" ]
                                     [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
                                     , viewSubjects (Maybe.withDefault "observation-detached" (selectedOwner state)) observation.id state.expandedSubjects observation.subjects
-                                    , viewCurrentProvenance observation state
+                                    , viewCurrentProvenance display observation state
                                     , if boundCurrentProvenance observation /= Nothing then viewProvenanceRevision observation.gitSha else text ""
-                                    , viewDetailMeta "Created" (formatObservationTimestamp observation.createdAt) ""
-                                    , viewDetailMeta "Content updated" (formatObservationTimestamp observation.updatedAt) ""
+                                    , viewDetailMeta "Created" (TimestampDisplay.lookup display observation.createdAt) ""
+                                    , viewDetailMeta "Content updated" (TimestampDisplay.lookup display observation.updatedAt) ""
                                     ]
                                 , if canEdit && state.edit == Nothing then
                                     div [ class "observation-detail-actions" ]
@@ -4803,27 +4839,27 @@ revisionDisplay observation =
         Nothing -> { label = "Creation revision", sha = observation.gitSha, recordedAt = observation.createdAt }
 
 
-viewRevisionSummary : Api.Observation -> Html Msg
-viewRevisionSummary observation =
+viewRevisionSummary : TimestampDisplay.State -> Api.Observation -> Html Msg
+viewRevisionSummary display observation =
     let revision = revisionDisplay observation in
     span [ class "card-meta observation-sha" ]
         [ text (revision.label ++ ": ")
         , Helpers.copyableValue "" (String.toLower revision.label) revision.sha (String.left 12 revision.sha ++ "…")
-        , text (" · " ++ formatObservationTimestamp revision.recordedAt)
+        , text (" · " ++ TimestampDisplay.lookup display revision.recordedAt)
         , span [ class "observation-actor" ] [ text (" · " ++ observationActorLabel observation) ]
         ]
 
 
-viewCurrentProvenance : Api.Observation -> ObservationModel -> Html Msg
-viewCurrentProvenance observation state =
+viewCurrentProvenance : TimestampDisplay.State -> Api.Observation -> ObservationModel -> Html Msg
+viewCurrentProvenance display observation state =
     let revision = revisionDisplay observation in
     div [ class ("observation-detail-meta-row observation-current-provenance" ++ (if boundCurrentProvenance observation == Nothing then " observation-detail-sha" else "")) ]
         [ dt [ class "observation-detail-meta-label" ] [ text revision.label ]
         , dd [ class "observation-detail-meta-value" ]
-            [ span [ class "observation-revision-value" ] [ Helpers.copyableValue "" (String.toLower revision.label) revision.sha revision.sha, text (" · " ++ formatObservationTimestamp revision.recordedAt) ]
+            [ span [ class "observation-revision-value" ] [ Helpers.copyableValue "" (String.toLower revision.label) revision.sha revision.sha, text (" · " ++ TimestampDisplay.lookup display revision.recordedAt) ]
             , span [ class "observation-actor" ] [ text ("By " ++ observationActorLabel observation) ]
             , observation.currentProvenance |> Maybe.map ActorAttribution.viewDetails |> Maybe.withDefault (text "")
-            , viewHistory observation state
+            , viewHistory display observation state
             ]
         ]
 
@@ -4840,14 +4876,14 @@ viewMatchContext matched =
                  ++ [ text "History may include a migrated unbound creation claim; prior content is not reconstructed." ])
 
 
-viewHistory : Api.Observation -> ObservationModel -> Html Msg
-viewHistory observation state =
+viewHistory : TimestampDisplay.State -> Api.Observation -> ObservationModel -> Html Msg
+viewHistory display observation state =
     let
         saved = currentHistory (Just observation) state.history
         entry event =
             li [ class "observation-history-entry" ]
                 [ Helpers.copyableValue "" "recorded revision" event.provenance.reviewedGitSha event.provenance.reviewedGitSha
-                , span [ class "observation-history-time" ] [ text (formatObservationTimestamp event.provenance.recordedAt) ]
+                , span [ class "observation-history-time" ] [ text (TimestampDisplay.lookup display event.provenance.recordedAt) ]
                 , span [ class "observation-actor" ] [ text ("By " ++ ActorAttribution.label event.provenance) ]
                 , ActorAttribution.viewDetails event.provenance
                 ]

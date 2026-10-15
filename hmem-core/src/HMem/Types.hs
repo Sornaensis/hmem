@@ -28,6 +28,7 @@ module HMem.Types
   , validateCreateWorkspaceInput, validateUpdateWorkspaceInput, validateCreateProjectInput, validateCreateProjectSpecInput, validateUpdateProjectInput, validateProjectListQuery, validateCreateTaskInput, validateUpdateTaskInput, validateTaskListQuery, validateCreateWorkspaceGroupInput, validateCreateSavedViewInput, validateUpdateSavedViewInput
   ) where
 
+import HMem.BotIdentity (BotIdentity)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
@@ -450,24 +451,27 @@ data ObservationProvenance = ObservationProvenance
   , actorType :: Maybe Text
   , actorId :: Maybe Text
   , actorLabel :: Maybe Text
+  , botIdentity :: Maybe BotIdentity
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ObservationProvenance where
-  toJSON = genericToJSON jsonOptions { omitNothingFields = False }
+  toJSON p = case genericToJSON jsonOptions { omitNothingFields = False } p of
+    Object fields | p.botIdentity == Nothing -> Object (KM.delete "bot_identity" fields)
+    value -> value
 instance FromJSON ObservationProvenance where
   parseJSON = withObject "ObservationProvenance" $ \o -> do
     p <- ObservationProvenance <$> o .: "sequence" <*> o .: "event_kind"
       <*> o .: "reviewed_git_sha" <*> o .: "content_version" <*> o .: "content_digest"
-      <*> o .: "recorded_at" <*> o .: "actor_type" <*> o .: "actor_id" <*> o .: "actor_label"
+      <*> o .: "recorded_at" <*> o .: "actor_type" <*> o .: "actor_id" <*> o .: "actor_label" <*> o .:? "bot_identity"
     let legacy = p.eventKind == "legacy_creation"
         bound = isJust p.contentVersion && maybe False (\d -> T.length d == 64 && T.all (\c -> c `elem` ['0'..'9'] <> ['a'..'f']) d) p.contentDigest
     unless (p.sequence >= 1 && p.sequence <= 9007199254740991
       && null (validateGitSha p.reviewedGitSha)
       && p.eventKind `elem` ["creation", "update", "legacy_creation"]
       && (if legacy then p.contentVersion == Nothing && p.contentDigest == Nothing
-             && p.actorType == Nothing && p.actorId == Nothing && p.actorLabel == Nothing else bound)
+             && p.actorType == Nothing && p.actorId == Nothing && p.actorLabel == Nothing && p.botIdentity == Nothing else bound)
       && (case (p.actorType, p.actorId) of
-            (Nothing, Nothing) -> p.actorLabel == Nothing
+            (Nothing, Nothing) -> p.actorLabel == Nothing && p.botIdentity == Nothing
             (Just kind, Just actor) -> kind `elem` ["user", "bot"] && not (T.null actor)
             _ -> False)) $ fail "Invalid Observation provenance assertion"
     pure p
@@ -1615,6 +1619,7 @@ data TimelineActor = TimelineActor
   { actorType  :: Maybe Text
   , actorId    :: Maybe Text
   , actorLabel :: Maybe Text
+  , botIdentity :: Maybe BotIdentity
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TimelineActor where
@@ -1622,6 +1627,7 @@ instance ToJSON TimelineActor where
     [ ("type" .=) <$> actorType
     , ("id" .=) <$> actorId
     , ("label" .=) <$> actorLabel
+    , ("bot_identity" .=) <$> botIdentity
     ]
 instance FromJSON TimelineActor where
   parseJSON = withObject "TimelineActor" $ \o ->
@@ -1629,6 +1635,7 @@ instance FromJSON TimelineActor where
       <$> o .:? "type"
       <*> o .:? "id"
       <*> o .:? "label"
+      <*> o .:? "bot_identity"
 
 data TimelineProjectContext = TimelineProjectContext
   { projectContextId   :: UUID
@@ -1933,6 +1940,7 @@ data AuditLogEntry = AuditLogEntry
   , actorType  :: Maybe Text
   , actorId    :: Maybe Text
   , actorLabel :: Maybe Text
+  , botIdentity :: Maybe BotIdentity
   , changedAt  :: UTCTime
   } deriving (Show, Eq, Generic)
 

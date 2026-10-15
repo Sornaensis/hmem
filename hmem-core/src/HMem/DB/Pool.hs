@@ -17,7 +17,6 @@ import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Pool (Pool, newPool, defaultPoolConfig, setNumStripes, withResource)
-import Data.Text.Encoding qualified as TE
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Conc (getNumCapabilities)
@@ -31,7 +30,10 @@ import Hasql.Statement qualified as Statement
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 
-import HMem.DB.RequestContext (Principal(..), RequestContext(..), actorTypeToText, changeCauseToText, currentRequestContext)
+import HMem.DB.RequestContext (EffectiveActor(..), RequestContext(..), actorTypeToText, changeCauseToText, currentRequestContext, resolveEffectiveActor)
+import Data.Aeson (encode)
+import Data.ByteString.Lazy qualified as LBS
+import Data.Text.Encoding qualified as TE
 
 ------------------------------------------------------------------------
 -- Pool metrics (process-wide)
@@ -293,31 +295,38 @@ applyRequestContext :: RequestContext -> Session.Session ()
 applyRequestContext reqCtx = do
   let mRequestId = case reqCtx of
         RequestContext { requestId = rid } -> rid
-      mPrincipal = case reqCtx of
-        RequestContext { principal = p } -> p
+      mActor = case reqCtx.effectiveActor of
+        Just actor -> Just actor
+        Nothing -> fmap (\p -> resolveEffectiveActor False p Nothing) reqCtx.principal
       mWorkspaceId = case reqCtx of
         RequestContext { workspaceId = wsId } -> wsId
       mChangeCause = case reqCtx of
         RequestContext { changeCause = cause } -> cause
   void $ Session.statement (maybe "" id mRequestId) setRequestIdStatement
-  maybe clearPrincipalContext applyPrincipalContext mPrincipal
+  maybe clearPrincipalContext applyActorContext mActor
   void $ Session.statement (maybe "" (T.pack . show) mWorkspaceId) setWorkspaceIdStatement
   void $ Session.statement (maybe "core" changeCauseToText mChangeCause) setChangeCauseStatement
 
-applyPrincipalContext :: Principal -> Session.Session ()
-applyPrincipalContext principal = do
-  let pActorType = case principal of Principal { actorType = a } -> a
-      pActorId = case principal of Principal { actorId = a } -> a
-      pActorLabel = case principal of Principal { actorLabel = a } -> a
-  void $ Session.statement (actorTypeToText pActorType) setActorTypeStatement
-  void $ Session.statement pActorId setActorIdStatement
-  void $ Session.statement pActorLabel setActorLabelStatement
+applyActorContext :: EffectiveActor -> Session.Session ()
+applyActorContext actor = do
+  void $ Session.statement (actorTypeToText actor.actorType) setActorTypeStatement
+  void $ Session.statement actor.actorId setActorIdStatement
+  void $ Session.statement actor.actorLabel setActorLabelStatement
+  void $ Session.statement (maybe "" (TE.decodeUtf8 . LBS.toStrict . encode) actor.botIdentity) setBotIdentityStatement
 
 clearPrincipalContext :: Session.Session ()
 clearPrincipalContext = do
   void $ Session.statement "" setActorTypeStatement
   void $ Session.statement "" setActorIdStatement
   void $ Session.statement "" setActorLabelStatement
+  void $ Session.statement "" setBotIdentityStatement
+
+setBotIdentityStatement :: Statement.Statement Text Text
+setBotIdentityStatement = Statement.Statement
+  "SELECT set_config('hmem.bot_identity', $1, true)"
+  (E.param (E.nonNullable E.text))
+  (D.singleRow (D.column (D.nonNullable D.text)))
+  True
 
 setRequestIdStatement :: Statement.Statement Text Text
 setRequestIdStatement = Statement.Statement

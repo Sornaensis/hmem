@@ -1,11 +1,20 @@
 module HMem.Server.BotIdentitySpec (spec) where
 
-import Data.Aeson (encode, object, (.=))
+import Data.Aeson (Result(..), decode, encode, fromJSON, object, (.=))
+import Data.Text qualified as T
 import Data.ByteString.Lazy qualified as LBS
 import Data.UUID qualified as UUID
 import HMem.Config qualified as Config
 import HMem.DB.RequestContext
 import HMem.Server.App (botIdentityMiddleware)
+import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
+import HMem.DB.Pool qualified as Pool
+import HMem.DB.ChangeStream (ChangeScope(..))
+import HMem.Server.Snapshot (materializeSnapshot)
+import HMem.Server.TestHarness (LocalSandboxApp(..), withLocalSandboxAppContext)
+import HMem.Types (Workspace(..), Observation(..), ObservationProvenance(..), ObservationRevisionEvent(..), PaginatedResult(..))
+import Data.Aeson.KeyMap qualified as KM
+import Data.Aeson (Value(..))
 import Network.HTTP.Types (Header, Method, methodGet, methodPost, status200, status400)
 import Network.Wai (Application, defaultRequest, responseLBS)
 import Network.Wai qualified as Wai
@@ -60,6 +69,31 @@ spec = describe "HTTP declared bot identity" $ do
     _ <- call local principal methodPost [identityHeader]
     currentEffectiveActor `shouldReturn` Nothing
     currentPrincipal `shouldReturn` Nothing
+
+  it "carries declared identity through REST history and the existing full snapshot projection" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.localEnv "declared-rest-snapshot"
+      let request method path headers body = runSession (srequest (SRequest defaultRequest
+            { Wai.requestMethod = method, Wai.pathInfo = path, Wai.requestHeaders = ("Content-Type", "application/json") : headers } body)) ctx.localApplication
+      created <- request methodPost ["api", "v1", "observations"] [identityHeader] $ encode $ object
+        ["workspace_id" .= workspace.id, "subject_kind" .= ("file" :: T.Text)
+        , "subject" .= ("src/Identity.hs" :: T.Text), "git_sha" .= T.replicate 40 "a", "content" .= ("identity" :: T.Text)]
+      simpleStatus created `shouldBe` status200
+      row <- maybe (fail "expected Observation") pure (decode (simpleBody created) :: Maybe Observation)
+      let Just provenance = row.currentProvenance
+      fmap (const True) provenance.botIdentity `shouldBe` Just True
+      provenance.actorType `shouldBe` Just "bot"
+      history <- request methodGet ["api", "v1", "observations", UUID.toText row.id, "history"] [] ""
+      simpleStatus history `shouldBe` status200
+      events <- maybe (fail "expected history page") pure (decode (simpleBody history) :: Maybe (PaginatedResult ObservationRevisionEvent))
+      map (.provenance) events.items `shouldBe` [provenance]
+      snapshots <- Pool.runSession ctx.localEnv.pool (materializeSnapshot (WorkspaceScope workspace.id))
+      let observationItems = [fields | Object item <- snapshots, KM.lookup "kind" item == Just (String "observation"), Just (Object fields) <- [KM.lookup "data" item]]
+      decoded <- mapM (\value -> case fromJSON value of
+        Success result -> pure result
+        Error message -> fail message)
+        [value | fields <- observationItems, Just value <- [KM.lookup "current_provenance" fields]]
+      decoded `shouldBe` [provenance]
 
 local, deployed :: Config.AuthConfig
 local = Config.defaultConfig.auth

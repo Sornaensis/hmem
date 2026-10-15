@@ -135,7 +135,7 @@ spec = do
             , "UPDATE observations SET latest_sequence = latest_sequence + 1"
             , "UPDATE observation_revision_events SET reviewed_git_sha = repeat('b',40)"
             , "DELETE FROM observation_revision_events"
-            , "INSERT INTO observation_revision_events SELECT observation_id,sequence+1,event_kind,reviewed_git_sha,content_version,content_digest,recorded_at,actor_type,actor_id,actor_label FROM observation_revision_events" ] $ \sql ->
+            , "INSERT INTO observation_revision_events (observation_id,sequence,event_kind,reviewed_git_sha,content_version,content_digest,recorded_at,actor_type,actor_id,actor_label) SELECT observation_id,sequence+1,event_kind,reviewed_git_sha,content_version,content_digest,recorded_at,actor_type,actor_id,actor_label FROM observation_revision_events" ] $ \sql ->
         expectRejected $ runSession env.pool (Session.sql sql)
       allEffects env row.id `shouldReturn` before
       deleteObservation env.pool workspace.id row.id `shouldReturn` True

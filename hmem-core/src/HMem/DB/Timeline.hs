@@ -5,6 +5,7 @@ module HMem.DB.Timeline
   ) where
 
 import Data.ByteString.Char8 qualified as BS8
+import Data.Aeson qualified as Aeson
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32)
 import Data.Maybe (fromMaybe)
@@ -73,6 +74,7 @@ listWorkspaceTimelineStatement = Statement.Statement sql encoder decoder True
       , "    a.actor_type::text AS actor_type,"
       , "    a.actor_id AS actor_id,"
       , "    a.actor_label AS actor_label,"
+      , "    a.bot_identity AS bot_identity,"
       , "    a.entity_type AS raw_entity_type,"
       , "    a.action::text AS action_text,"
       , "    NULLIF(a.old_values ->> 'status', '') AS old_status,"
@@ -129,6 +131,7 @@ listWorkspaceTimelineStatement = Statement.Statement sql encoder decoder True
       , "  e.actor_type,"
       , "  e.actor_id,"
       , "  e.actor_label,"
+      , "  e.bot_identity,"
       , "  e.task_project_uuid,"
       , "  COALESCE(project_ctx.name, 'Untitled project') AS project_name,"
       , "  e.parent_task_uuid,"
@@ -322,6 +325,10 @@ timelineRowDecoder = do
   mActorType <- Dec.column (Dec.nullable Dec.text)
   mActorId <- Dec.column (Dec.nullable Dec.text)
   mActorLabel <- Dec.column (Dec.nullable Dec.text)
+  identityJson <- Dec.column (Dec.nullable Dec.jsonb)
+  identity <- traverse (\value -> case Aeson.fromJSON value of
+    Aeson.Success result -> pure result
+    Aeson.Error message -> fail message) identityJson
   mProjectId <- Dec.column (Dec.nullable Dec.uuid)
   mProjectName <- Dec.column (Dec.nullable Dec.text)
   mParentTaskId <- Dec.column (Dec.nullable Dec.uuid)
@@ -335,6 +342,7 @@ timelineRowDecoder = do
           { actorType = mActorType
           , actorId = mActorId
           , actorLabel = mActorLabel
+          , botIdentity = identity
           }
       timelineProject = case mProjectId of
         Nothing -> Nothing

@@ -17,6 +17,7 @@ import Servant.OpenApi (toOpenApi)
 
 import HMem.Server.API (HMemAPI, CreateObservationRequest, ReviewedObservationRequest, ObservationMatchRequest, ObservationCountRequest, LinkDependencyRequest, UpdateWorkspaceRequest)
 import HMem.Types
+import HMem.BotIdentity (BotIdentity)
 
 openApiSpec :: OpenApi
 openApiSpec = toOpenApi (Proxy @HMemAPI)
@@ -218,6 +219,15 @@ instance ToSchema CreateObservation where
     & description ?~ "Create with exactly one non-empty canonical `subjects` array or the complete deprecated legacy `subject_kind` plus `subject` pair. The forms are mutually exclusive; missing or half legacy pairs are rejected. Duplicate canonical subjects are de-duplicated in first-occurrence order. Subjects and Git provenance are immutable after creation."
     & oneOf ?~ [Inline canonicalCreateObservationSchema, Inline legacyCreateObservationSchema]
 instance ToSchema CreateObservationRequest where declareNamedSchema _ = declareNamedSchema (Proxy @CreateObservation)
+instance ToSchema BotIdentity where
+  declareNamedSchema _ = pure $ NamedSchema (Just "BotIdentity") (mempty
+    & type_ ?~ OpenApiObject & required .~ ["role", "model-id"]
+    & additionalProperties ?~ AdditionalPropertiesAllowed False
+    & properties . at "role" ?~ Inline (mempty & type_ ?~ OpenApiString
+        & description ?~ "Declared role, at most 128 UTF-8 bytes before stripping outer whitespace; no controls or format characters.")
+    & properties . at "model-id" ?~ Inline (mempty & type_ ?~ OpenApiString
+        & description ?~ "At most 256 UTF-8 bytes; harness:model:reasoning with ASCII letters, digits, dot, underscore, slash or hyphen per component."))
+
 instance ToSchema ObservationProvenanceMatch where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ObservationProvenance where
   declareNamedSchema _ = do

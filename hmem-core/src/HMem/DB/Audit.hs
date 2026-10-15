@@ -8,6 +8,7 @@ module HMem.DB.Audit
   ) where
 
 import Data.ByteString.Char8 qualified as BS8
+import Data.Aeson qualified as Aeson
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32)
 import Data.Pool (Pool)
@@ -40,6 +41,10 @@ auditLogRowDecoder = do
   alActorType  <- Dec.column (Dec.nullable Dec.text)
   alActorId    <- Dec.column (Dec.nullable Dec.text)
   alActorLabel <- Dec.column (Dec.nullable Dec.text)
+  identityJson <- Dec.column (Dec.nullable Dec.jsonb)
+  identity <- traverse (\value -> case Aeson.fromJSON value of
+    Aeson.Success result -> pure result
+    Aeson.Error message -> fail message) identityJson
   alChangedAt  <- Dec.column (Dec.nonNullable Dec.timestamptz)
   let alAction = case auditActionFromText alActionText of
         Just a  -> a
@@ -56,6 +61,7 @@ auditLogRowDecoder = do
     , actorType  = alActorType
     , actorId    = alActorId
     , actorLabel = alActorLabel
+    , botIdentity = identity
     , changedAt  = alChangedAt
     }
 
@@ -71,7 +77,7 @@ getAuditEntryStatement :: Statement.Statement UUID (Maybe AuditLogEntry)
 getAuditEntryStatement = Statement.Statement sql encoder decoder True
   where
     sql = "SELECT id, workspace_id, entity_type, entity_id, action::text, old_values, new_values, \
-           \request_id, actor_type::text, actor_id, actor_label, changed_at \
+           \request_id, actor_type::text, actor_id, actor_label, bot_identity, changed_at \
            \FROM audit_log WHERE id = $1"
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowMaybe auditLogRowDecoder
@@ -94,7 +100,7 @@ getAuditByEntityStatement :: Statement.Statement (Text, Text, Int32) [AuditLogEn
 getAuditByEntityStatement = Statement.Statement sql encoder decoder True
   where
     sql = "SELECT id, workspace_id, entity_type, entity_id, action::text, old_values, new_values, \
-           \request_id, actor_type::text, actor_id, actor_label, changed_at \
+           \request_id, actor_type::text, actor_id, actor_label, bot_identity, changed_at \
           \FROM audit_log \
           \WHERE entity_type = $1 AND entity_id = $2 \
           \ORDER BY changed_at DESC, id DESC \
@@ -130,7 +136,7 @@ getAuditLogStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
       [ "SELECT id, workspace_id, entity_type, entity_id, action::text, old_values, new_values,"
-      , "       request_id, actor_type::text, actor_id, actor_label, changed_at"
+      , "       request_id, actor_type::text, actor_id, actor_label, bot_identity, changed_at"
       , "FROM audit_log"
       , "WHERE ($1::uuid IS NULL OR workspace_id = $1)"
       , "  AND ($2::text IS NULL OR entity_type = $2)"

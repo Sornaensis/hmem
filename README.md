@@ -113,10 +113,24 @@ Configure your MCP client to launch this command as a stdio server:
 hmem-mcp --server-url http://127.0.0.1:8420
 ```
 
-Keep hmem-server running. In the client, use `workspace_list` to find a workspace,
-then `set_workspace` with its UUID so scoped tools can omit `workspace_id`.
-The context belongs to that MCP session; the bridge does not read
-`.hmem.workspace` automatically.
+Keep hmem-server running. After the MCP initialization handshake, call
+`set_workspace` with both required arguments before ordinary tools:
+
+```json
+{"workspace_id":null,"identity":{"role":"Developer","model-id":"codex:gpt-6.1-sol:high"}}
+```
+
+You can now use `workspace_list` or `workspace_register`. Call `set_workspace`
+again with the selected UUID and the complete identity so scoped tools can omit
+`workspace_id`. Explicit workspace IDs do not bypass identity declaration. The
+context belongs to that MCP process; the bridge does not read `.hmem.workspace`
+automatically. Repeated initialization preserves it; process exit clears it.
+Older clients must upgrade their startup call. See the [MCP guide](hmem-mcp/README.md)
+for selection, clearing, validation, and error examples.
+
+Local bootstrap needs no token. Add `--no-auth` to explicitly suppress credential
+forwarding. Declared role/model values are self-reported attribution and do not
+change local superadmin access or server permissions.
 
 For a server that requires a token, set `HMEM_MCP_AUTH_TOKEN` in the MCP process's
 environment. Use a service/PAT token for shared installations; see

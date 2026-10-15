@@ -7,7 +7,7 @@
 module HMem.Server.OpenAPI (openApiSpec) where
 
 import Control.Lens ((&), (.~), (%~), (?~), (^.), at, traversed, _Just)
-import Data.Aeson (Value)
+import Data.Aeson (Value(..))
 import Data.HashMap.Strict.InsOrd qualified as InsOrdMap
 import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.OpenApi
@@ -23,9 +23,10 @@ openApiSpec :: OpenApi
 openApiSpec = toOpenApi (Proxy @HMemAPI)
   & info . title .~ "hmem API"
   & info . version .~ "0.2.0.0"
-  & info . description ?~ "Repository-scoped observation API with immutable provenance. Task placement mutations can return structured lifecycle conflicts when project, hierarchy, or dependency invariants reject the requested state."
+  & info . description ?~ "Repository-scoped observation API with immutable provenance. Automated callers declare self-reported role/model metadata in X-HMem-Bot-Identity; it grants no permissions and local bootstrap remains tokenless. Known credential bots must declare on unsafe API requests. Session effective_actor is attribution alongside the unchanged authority-bearing principal. Task placement mutations can return structured lifecycle conflicts when project, hierarchy, or dependency invariants reject the requested state."
   & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
   & components . schemas . at "ObservationContentConflict" ?~ observationContentConflictSchema
+  & paths . traversed . parameters %~ (<> [Inline botIdentityHeader])
   & tags .~ InsOrdSet.fromList
       [ Tag "Observations" (Just "Repository-scoped, provenance-bound observations.") Nothing
       , Tag "Workspace Groups" (Just "Global-superadmin workspace group management.") Nothing
@@ -138,6 +139,17 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
     lifecycleConflictResponse = mempty
       & description .~ "A placement, hierarchy, dependency, completion, or closed-project invariant rejected the atomic move; no tasks were moved."
       & content . at "application/json" ?~ (mempty & schema ?~ Ref (Reference "LifecycleConflictError"))
+
+-- Middleware accepts this optional metadata independently of authentication.
+-- Path-level placement makes it discoverable for every generated operation.
+botIdentityHeader :: Param
+botIdentityHeader = mempty
+  & name .~ "X-HMem-Bot-Identity"
+  & in_ .~ ParamHeader
+  & required ?~ False
+  & description ?~ "One JSON object serialized as a header value, with exactly role and model-id strings (see BotIdentity). At most 4096 bytes. Malformed, repeated, oversized or invalid declarations return 400 invalid_bot_identity even on reads. Known credential-authenticated bots must include it on unsafe /api/v1 requests (all methods except GET, HEAD and OPTIONS), otherwise 400 bot_identity_required. Optional for humans and undeclared local bootstrap. Self-reported attribution grants no permissions; original principal, grants, CSRF and stream audiences remain unchanged."
+  & schema ?~ Inline (mempty & type_ ?~ OpenApiString
+      & example ?~ String "{\"role\":\"Reviewer\",\"model-id\":\"pi:gpt-6.1-sol:extra-high\"}")
 
 capNavigationParameter parameterRef = case parameterRef of
   Inline parameter

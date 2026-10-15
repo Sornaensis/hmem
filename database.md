@@ -145,6 +145,7 @@ classDiagram
       TEXT? actor_type
       TEXT? actor_id
       TEXT? actor_label
+      JSONB? bot_identity
     }
     class embedding_jobs {
       UUID observation_id PK FK
@@ -253,6 +254,7 @@ classDiagram
       actor_type_enum? actor_type
       TEXT? actor_id
       TEXT? actor_label
+      JSONB? bot_identity
     }
     class task_flatten_migration_report {
       UUID id PK
@@ -304,6 +306,33 @@ classDiagram
   note for task_flatten_migration_report "V018 migration repair report\nUNIQUE (task_id, issue)"
   note for delete_cascade_migration_report "V019 migration repair report\nUNIQUE (entity_type, entity_id, issue)"
 ```
+
+## Declared attribution (V039)
+
+`V039__declared_bot_identity.sql` adds nullable `bot_identity` JSONB to
+`audit_log` and `observation_revision_events`. The validated object contains only
+`role` and `model-id`. Transaction-local settings carry the effective actor and
+optional declaration to generic, Observation, and project-pause audit writers,
+revision events, Timeline reads, and the durable outbox. Pooled transactions
+explicitly clear absent actor/declaration settings so requests cannot inherit
+an earlier caller's attribution. Authorization continues to use the original
+Principal and its grants.
+
+Observation events and `current_provenance` use the same canonical projection:
+omit only the new `bot_identity` key when absent, retain existing mandatory
+nullable actor fields, and require exact event/projection equality. Append-only
+history, contiguous sequences, and the current head remain enforced. Outbox
+actors keep `user`, `service`, and `system`; a bot maps to `service`, and genuinely
+absent request context maps to `system`.
+
+The migration owns its transaction and version-39 ledger entry. Existing history,
+audit records, current projections, and stored outbox envelopes are not rewritten
+or assigned inferred declarations. This additive metadata does not change
+snapshot envelope versions or require a new resync of otherwise valid tokens.
+Older payloads remain readable. New same-declaration local personas group across
+workspaces/sessions; credential-backed bots keep their credential actor IDs
+instead of substituting authorization grant-user IDs. See
+[the trust contract](auth.md#declared-bot-identity).
 
 ## Due-field removal (V038)
 

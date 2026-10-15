@@ -46,8 +46,10 @@ Malformed or repeated declaration headers return `400 invalid_bot_identity`.
 Known credential-authenticated bots must declare identity for unsafe `/api/v1`
 requests or receive `400 bot_identity_required`; reads may omit it.
 
-Declarations describe attribution and grant no permissions. Only local mode's
-implicit `local-user` with synthetic superadmin authority becomes a declared bot
+Declarations are self-reported metadata; the server does not verify that a caller
+uses the named model or performs the named role. They describe attribution and
+grant no permissions. Only local mode's implicit `local-user` with synthetic
+superadmin authority becomes a declared bot
 persona. Its ID is `local-declared-bot:v1:` followed by lowercase SHA-256 of the
 UTF-8 JSON array `["hmem-local-declared-bot","v1",role,model-id]`, using canonical
 field values and compact JSON encoding. Identical declarations share that local
@@ -56,6 +58,17 @@ credential actor IDs; authenticated humans keep their identities. The original
 principal, grants, and session/stream audience remain unchanged. Undeclared
 no-auth requests remain Local User because the server cannot identify them as
 bots.
+
+`GET /api/v1/session` keeps the original authority-bearing `principal` and exposes
+attribution separately as optional `effective_actor`. New audit, Observation
+revision, Timeline, and live-event records carry optional `bot_identity`; the
+browser shows its role and complete model ID while retaining original actor
+details. Historical records are not relabeled or given inferred declarations.
+Genuine absent-context system events retain their system meaning.
+
+MCP clients must declare identity through [`set_workspace`](hmem-mcp/README.md)
+before HTTP forwarding, even in tokenless local mode or with explicit workspace
+IDs. This startup requirement does not introduce a credential requirement.
 
 ## Shared installation
 

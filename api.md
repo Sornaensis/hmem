@@ -5,11 +5,12 @@ The HTTP API is available at `/api/v1` on your hmem server, normally
 
 ## Connect and discover endpoints
 
-Choose a credential using [the authentication guide](auth.md). Service and MCP
-clients use a bearer token; the browser normally uses an OIDC session. Local
-native bootstrap can work without a token, but the default Docker setup requires
-one. Cookie-authenticated POST, PUT, and DELETE requests need the CSRF header,
-including POST endpoints that only search or count.
+For shared access, choose a credential using [the authentication guide](auth.md):
+service and MCP clients can forward a bearer token, and the browser normally uses
+an OIDC session. Local native bootstrap supports tokenless API and MCP access;
+the default Docker setup requires a token. Cookie-authenticated POST, PUT, and
+DELETE requests need the CSRF header, including POST endpoints that only search
+or count.
 
 With your token in `HMEM_AUTH_TOKEN`, check your session and fetch the server's
 OpenAPI document:
@@ -24,7 +25,41 @@ curl --fail-with-body -H "Authorization: Bearer $HMEM_AUTH_TOKEN" \
 Use that OpenAPI document for the current routes, request fields, and response
 schemas. Send `Content-Type: application/json` with JSON bodies. Use HTTPS for
 shared installations. [MCP setup](README.md) shows how to use hmem through tools;
-it uses a bearer credential and an active workspace context.
+its startup declares a workspace (or null) and bot identity, with a bearer
+credential only when required by the server.
+
+## Declared attribution
+
+Automated HTTP callers send one JSON-valued `X-HMem-Bot-Identity` header. This
+local example uses bootstrap without credentials:
+
+```bash
+curl --fail-with-body \
+  -H 'X-HMem-Bot-Identity: {"role":"Reviewer","model-id":"pi:gpt-6.1-sol:extra-high"}' \
+  http://127.0.0.1:8420/api/v1/session
+```
+
+For a credential-protected server, also send `Authorization: Bearer $HMEM_AUTH_TOKEN`
+(or the normal cookie and required CSRF header). Known credential-authenticated
+bots must include the declaration on unsafe `/api/v1` requests, including POST
+search/count operations. Humans and undeclared local bootstrap requests may omit
+it. See [validation and local persona rules](auth.md#declared-bot-identity) for
+UTF-8 bounds, canonicalization, and deterministic same-declaration grouping.
+
+| Response | Meaning |
+| --- | --- |
+| 400 `invalid_bot_identity` | Malformed, repeated, oversized, or invalid declaration, even on a read or WebSocket upgrade. |
+| 400 `bot_identity_required` | A known credential bot omitted the declaration on an unsafe API request. |
+| 401 / 403 | The ordinary authentication, authorization, or cookie CSRF check failed; declaring a role/model grants no access. |
+
+The session response retains the original `principal`, global permissions, and
+workspace access. Its optional `effective_actor` is attribution only. Audit,
+Timeline, Observation history and `current_provenance` expose optional
+`bot_identity` using the public keys `role` and `model-id`. Canonical live events
+carry it inside `actor`, whose types remain `user`, `service`, and `system`; bots
+use `service`. Snapshot/resume/ticket audiences stay bound to the original
+principal across declaration changes. Historical payloads without the new
+metadata remain valid and are not retroactively attributed.
 
 ## Workspace lifecycle graph
 

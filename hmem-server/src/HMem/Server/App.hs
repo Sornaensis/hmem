@@ -7,6 +7,7 @@ module HMem.Server.App
   , resolveRequestPrincipal
   , resolveRequestPrincipalIO
   , authMiddleware
+  , botIdentityMiddleware
   ) where
 
 import Control.Applicative ((<|>))
@@ -36,7 +37,7 @@ import Network.HTTP.Client (httpLbs, method, newManager, parseRequest, requestHe
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.Wai (Application, Middleware)
 import Network.Wai qualified as Wai
-import Network.HTTP.Types (HeaderName, Status, status200, status302, status401, status403, status404, status429, status503, hContentType, hLocation, methodGet, methodHead, methodOptions, methodPost, statusCode)
+import Network.HTTP.Types (HeaderName, Status, status200, status302, status400, status401, status403, status404, status429, status503, hContentType, hLocation, methodGet, methodHead, methodOptions, methodPost, statusCode)
 import Network.HTTP.Types.URI (renderQuery, urlDecode, urlEncode)
 import Network.Wai.Middleware.Cors
     (cors, simpleCorsResourcePolicy, corsRequestHeaders, corsMethods, corsOrigins, CorsResourcePolicy(..))
@@ -46,7 +47,8 @@ import Crypto.JWT qualified as JWT
 import Crypto.JOSE.JWK qualified as JWK
 import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), TokenLookupMode(..), authMcpProvenanceToken, authStaticBearerEnabled, authStaticBearerToken)
 import HMem.DB.Auth qualified as Auth
-import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
+import HMem.BotIdentity (BotIdentity)
+import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, resolveEffectiveActor, withEffectiveActorContext, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
 import HMem.Server.API (HMemAPI, serverWithChangeStream)
@@ -153,7 +155,33 @@ principalContextMiddleware jwksCache authCfg pool app req respond = do
     Just principal -> pure (Just principal)
     Nothing -> resolveRequestPrincipalWithCache jwksCache pool authCfg req
   withPrincipalContext resolvedPrincipal $
-    withChangeCauseContext (Just (changeCauseFromRequest authCfg req)) (app req respond)
+    withChangeCauseContext (Just (changeCauseFromRequest authCfg req)) $
+      botIdentityMiddleware authCfg app req respond
+
+-- | One JSON declaration header; clients cannot supply actor IDs. Validate even
+-- on reads and injected-principal paths so malformed metadata never falls back
+-- to the implicit Local User. Unknown no-auth clients cannot be identified as bots.
+botIdentityMiddleware :: AuthConfig -> Middleware
+botIdentityMiddleware authCfg app req respond = case declaration of
+  Left message -> respond (jsonResponse status400 "invalid_bot_identity" message)
+  Right identity -> do
+    original <- currentPrincipal
+    if isBot original && isMutation && identity == Nothing
+      then respond (jsonResponse status400 "bot_identity_required" "Bot mutations require X-HMem-Bot-Identity with role and model-id")
+      else withEffectiveActorContext (fmap (\p -> resolveEffectiveActor (authCfg.mode == AuthModeLocal) p identity) original) (app req respond)
+  where
+    declaration :: Either Text (Maybe BotIdentity)
+    declaration = case [value | (name, value) <- Wai.requestHeaders req, name == "X-HMem-Bot-Identity"] of
+      [] -> Right Nothing
+      [raw]
+        | BS.length raw > 4096 -> Left "X-HMem-Bot-Identity exceeds 4096 bytes"
+        | otherwise -> case Aeson.eitherDecodeStrict' raw of
+            Left message -> Left (T.pack message)
+            Right identity -> Right (Just identity)
+      _ -> Left "X-HMem-Bot-Identity must occur exactly once"
+    isBot = maybe False (\p -> p.actorType == ActorBot)
+    isMutation = take 2 (Wai.pathInfo req) == ["api", "v1"]
+      && Wai.requestMethod req `notElem` [methodGet, methodHead, methodOptions]
 
 resolveRequestPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
 resolveRequestPrincipal authCfg req =
@@ -726,7 +754,7 @@ corsMiddleware authCfg corsCfg = cors $ \req ->
       | otherwise = False
     policy = simpleCorsResourcePolicy
       { corsMethods        = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match"]
+      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match", "X-HMem-Bot-Identity"]
       , corsExposedHeaders = Just ["X-Request-Id"]
       }
 

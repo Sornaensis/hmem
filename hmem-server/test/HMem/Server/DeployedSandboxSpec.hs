@@ -96,6 +96,11 @@ spec = describe "deployed-mode sandbox profile" $ do
           (encode (object ["name" .= ("deployed-no-principal" :: T.Text)]))
         respStatus createResp `shouldBe` 401
 
+        declaredAnonymous <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("X-HMem-Bot-Identity", "{\"role\":\"Reviewer\",\"model-id\":\"pi:m:r\"}")]
+          (encode (object ["name" .= ("declared-no-principal" :: T.Text)]))
+        respStatus declaredAnonymous `shouldBe` 401
+
         ambientBearerResp <- runReqWithHeaders app methodGet "/api/v1/session"
           [("Authorization", "Bearer ambient-local-api-key")]
           ""
@@ -122,8 +127,14 @@ spec = describe "deployed-mode sandbox profile" $ do
       session.principal.grantUserId `shouldBe` Just userId
       session.globalPermissions.createWorkspace `shouldBe` True
 
-      createResp <- runReqWithHeaders ctx.deployedApplication methodPost "/api/v1/workspaces"
+      undeclared <- runReqWithHeaders ctx.deployedApplication methodPost "/api/v1/workspaces"
         [("Authorization", "Bearer " <> encodeUtf8 issued.rawToken)]
+        (encode (object ["name" .= ("undeclared-bot-ws" :: T.Text)]))
+      respStatus undeclared `shouldBe` 400
+
+      createResp <- runReqWithHeaders ctx.deployedApplication methodPost "/api/v1/workspaces"
+        [("Authorization", "Bearer " <> encodeUtf8 issued.rawToken)
+        , ("X-HMem-Bot-Identity", "{\"role\":\"Sandbox Test Bot\",\"model-id\":\"test:fixture:default\"}")]
         (encode (object ["name" .= ("deployed-pat-created-ws" :: T.Text)]))
       respStatus createResp `shouldBe` 200
 

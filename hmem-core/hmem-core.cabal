@@ -16,6 +16,7 @@ build-type:     Simple
 
 library
   exposed-modules:
+      HMem.BotIdentity
       HMem.Config
       HMem.DB.Audit
       HMem.DB.Auth
@@ -85,6 +86,7 @@ test-suite hmem-core-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      HMem.BotIdentitySpec
       HMem.ConfigSpec
       HMem.DB.AuditSpec
       HMem.DB.AuthSpec

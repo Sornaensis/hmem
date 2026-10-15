@@ -55,6 +55,10 @@ import HMem.Types
 request :: Application -> BS.ByteString -> BS.ByteString -> LBS.ByteString -> IO SResponse
 request app method path = requestWithHeaders app method path []
 
+-- Explicit metadata for credential-backed bot fixtures, independent of grants.
+botIdentityHeader :: Header
+botIdentityHeader = ("X-HMem-Bot-Identity", "{\"role\":\"API Test Bot\",\"model-id\":\"test:fixture:default\"}")
+
 requestWithHeaders :: Application -> BS.ByteString -> BS.ByteString -> [Header] -> LBS.ByteString -> IO SResponse
 requestWithHeaders app method path headers body = runSession (srequest (SRequest req body)) app where
   (rawPath, rawQuery) = BS.break (== 63) path
@@ -270,7 +274,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         _ <- Task.updateTask ctx.deployedEnv.pool task.id (UpdateTask (Just "changed") Unchanged Unchanged Unchanged Nothing Nothing Nothing)
         entries <- taskDueAudits ctx.deployedEnv task.id
         let Just entry = find (\audit -> audit.action == AuditUpdate) entries
-            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            headers token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
         DBPool.runSession ctx.deployedEnv.pool $ Session.statement entry.id $ Statement.Statement
           "UPDATE audit_log SET old_values=old_values || '{\"due_at\":null}'::jsonb,new_values=new_values || '{\"due_at\":\"2030-01-01T00:00:00Z\"}'::jsonb WHERE id=$1"
           (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
@@ -787,7 +791,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
         readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Project spec reader"
         let body target = encode (object ["workspace_id" .= target, "name" .= ("denied" :: T.Text), "tasks" .= [object ["title" .= ("task" :: T.Text)]]])
-            headers = [("Authorization", "Bearer " <> Text.encodeUtf8 readerToken.rawToken)]
+            headers = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 readerToken.rawToken)]
         request ctx.deployedApplication methodPost "/api/v1/projects/spec" (body workspace.id) >>= (\response -> responseStatus response `shouldBe` status401)
         requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects/spec" headers (body workspace.id) >>= (\response -> responseStatus response `shouldBe` status403)
         requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects/spec" headers (body otherWorkspace.id) >>= (\response -> responseStatus response `shouldBe` status403)
@@ -911,7 +915,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Navigation reader"
         outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Navigation outsider"
         superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Navigation superadmin"
-        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let authHeader token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
             navigationPath = workspacePath <> "/navigation?parent_kind=workspace_root"
         created <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects" (authHeader superadminToken)
@@ -1045,7 +1049,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Dependency reader"
         editorToken <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Dependency editor"
         superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Dependency superadmin"
-        let headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let headers token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             create workspaceId title = requestWithHeaders ctx.deployedApplication methodPost "/api/v1/tasks" (headers superadminToken)
               (encode (object ["workspace_id" .= workspaceId, "title" .= (title :: T.Text)]))
             taskPath taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
@@ -1185,7 +1189,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         editorToken <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Batch editor"
         outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Batch outsider"
         superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Batch superadmin"
-        let headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let headers token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             create path body = requestWithHeaders ctx.deployedApplication methodPost path (headers superadminToken) (encode body)
             batch token body = requestWithHeaders ctx.deployedApplication methodPost "/api/v1/tasks/batch-move" (headers token) (encode body)
         sourceResponse <- create "/api/v1/projects" (object ["workspace_id" .= workspace.id, "name" .= ("source" :: T.Text)])
@@ -1242,7 +1246,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         reader <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Planning counts reader"
         outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Planning counts outsider"
         let path workspaceId = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspaceId)) <> "/planning-counts"
-            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            headers token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             getCounts workspaceId requestHeaders = requestWithHeaders ctx.deployedApplication methodGet (path workspaceId) requestHeaders ""
         getCounts workspace.id [] >>= (\response -> responseStatus response `shouldBe` status401)
         getCounts workspace.id (headers outsider) >>= (\response -> responseStatus response `shouldBe` status403)
@@ -1306,7 +1310,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Workspace rename outsider"
         let path = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
             headers :: IssuedAccessToken -> [Header]
-            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            headers token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             rename token name = requestWithHeaders ctx.deployedApplication methodPut path (headers token) (encode (object ["name" .= (name :: T.Text)]))
             rawRename requestHeaders raw = requestWithHeaders ctx.deployedApplication methodPut path requestHeaders raw
             latestCursor scope = do
@@ -1375,7 +1379,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "delete outsider"
         admin <- issueDeployedSandboxPAT ctx.deployedEnv adminId "delete admin"
         let path = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
-            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            headers token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
         request ctx.deployedApplication methodDelete path "" >>= (\value -> responseStatus value `shouldBe` status401)
         mapM_ (\token -> requestWithHeaders ctx.deployedApplication methodDelete path (headers token) "" >>= (\value -> responseStatus value `shouldBe` status403)) [reader, editor, outsider]
         requestWithHeaders ctx.deployedApplication methodGet path (headers admin) "" >>= (\value -> responseStatus value `shouldBe` status200)
@@ -1652,7 +1656,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         botUserId <- createDeployedSandboxUser ctx.deployedEnv False True
         botToken <- issueDeployedSandboxPAT ctx.deployedEnv botUserId "mcp"
         response <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects"
-          [ ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
+          [ botIdentityHeader
+          , ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
           , ("X-HMem-Change-Cause", "mcp")
           ]
           (encode (object ["workspace_id" .= workspace.id, "name" .= ("spoofed MCP cause" :: T.Text)]))
@@ -1672,7 +1677,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         botUserId <- createDeployedSandboxUser ctx.deployedEnv False True
         botToken <- issueDeployedSandboxPAT ctx.deployedEnv botUserId "mcp-blank"
         response <- requestWithHeaders blankApp methodPost "/api/v1/projects"
-          [ ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
+          [ botIdentityHeader
+          , ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
           , ("X-HMem-Change-Cause", "mcp")
           , ("X-HMem-MCP-Provenance", " \t ")
           ]
@@ -1693,7 +1699,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         botUserId <- createDeployedSandboxUser ctx.deployedEnv False True
         botToken <- issueDeployedSandboxPAT ctx.deployedEnv botUserId "mcp-proxy"
         response <- requestWithHeaders trustedApp methodPost "/api/v1/projects"
-          [ ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
+          [ botIdentityHeader
+          , ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
           , ("X-HMem-Change-Cause", "mcp")
           , ("X-HMem-MCP-Provenance", "test-mcp-provenance")
           ]
@@ -1720,11 +1727,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       withDeployedSandboxAppContext $ \ctx -> do
         operatorId <- createDeployedSandboxUser ctx.deployedEnv True False
         operatorToken <- issueDeployedSandboxPAT ctx.deployedEnv operatorId "Group operator"
-        denied <- requestWithHeaders ctx.deployedApplication methodGet "/api/v1/groups" [("Authorization", "Bearer " <> Text.encodeUtf8 operatorToken.rawToken)] ""
+        denied <- requestWithHeaders ctx.deployedApplication methodGet "/api/v1/groups" [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 operatorToken.rawToken)] ""
         responseStatus denied `shouldBe` status403
         superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
         superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Group superadmin"
-        allowed <- requestWithHeaders ctx.deployedApplication methodGet "/api/v1/groups" [("Authorization", "Bearer " <> Text.encodeUtf8 superadminToken.rawToken)] ""
+        allowed <- requestWithHeaders ctx.deployedApplication methodGet "/api/v1/groups" [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 superadminToken.rawToken)] ""
         responseStatus allowed `shouldBe` status200
 
     it "delivers global group events through deployed superadmin tickets only" $ \_ ->
@@ -1736,7 +1743,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           (Auth.UpsertWorkspaceMembership memberId Auth.WorkspaceRoleRead) Nothing
         superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Group event superadmin"
         memberToken <- issueDeployedSandboxPAT ctx.deployedEnv memberId "Group event member"
-        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let authHeader token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             ticketRequest = encode (object ["workspace_id" .= workspace.id])
         superTicketResponse <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/ws-ticket" (authHeader superadminToken) ticketRequest
         memberTicketResponse <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/ws-ticket" (authHeader memberToken) ticketRequest
@@ -1764,7 +1771,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool firstWorkspace.id
           (Auth.UpsertWorkspaceMembership workspaceAdminId Auth.WorkspaceRoleAdmin) Nothing
         workspaceAdminToken <- issueDeployedSandboxPAT ctx.deployedEnv workspaceAdminId "Audit workspace admin"
-        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let authHeader token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             projectInput workspace name = object
               [ "workspace_id" .= workspace.id, "name" .= (name :: T.Text) ]
             projectPath = "/api/v1/projects"
@@ -2002,7 +2009,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Timeline superadmin"
         let timelinePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "/timeline"
             bucketPath = timelinePath <> "/buckets?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z&bucket=day"
-            authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            authHeader token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
         requestWithHeaders ctx.deployedApplication methodGet timelinePath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
         requestWithHeaders ctx.deployedApplication methodGet timelinePath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
         requestWithHeaders ctx.deployedApplication methodGet timelinePath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
@@ -2149,7 +2156,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         editor <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Conditional editor"
         reader <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Conditional reader"
         outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Conditional foreign editor"
-        let auth token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let auth token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             createInput = encode (object ["workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectFile "src/Private.hs"], "git_sha" .= T.replicate 40 "a", "content" .= ("private base" :: T.Text)])
         createdResponse <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations" (auth editor) createInput
         responseStatus createdResponse `shouldBe` status200
@@ -2352,7 +2359,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         reader <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Count reader"
         outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Count outsider"
         let body = encode (object ["workspace_id" .= workspace.id])
-            auth token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            auth token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             call headers = requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/count" headers body
         call [] >>= (\response -> responseStatus response `shouldBe` status401)
         call (auth outsider) >>= (\response -> responseStatus response `shouldBe` status403)
@@ -2534,7 +2541,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Observation match reader"
         outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Observation match outsider"
         superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Observation match superadmin"
-        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let authHeader token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             input = object
               [ "workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectGlob "src/**/*.hs"]
               , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text), "content" .= ("auth observation" :: T.Text) ]
@@ -2562,7 +2569,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Observation curation reader"
         editorToken <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Observation curation editor"
         outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Observation curation outsider"
-        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        let authHeader token = [botIdentityHeader, ("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
             workspaceText = Text.encodeUtf8 (T.pack (show workspace.id))
             subjectsValue = [ObservationSubject SubjectFile "src/Curation.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
             createInput = object

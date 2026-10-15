@@ -5,16 +5,20 @@ module HMem.DB.RequestContext
   , changeCauseToText
   , PrincipalAuthority(..)
   , Principal(..)
+  , EffectiveActor(..)
+  , resolveEffectiveActor
   , RequestContext(..)
   , emptyRequestContext
   , withRequestContext
   , withRequestIdContext
   , withPrincipalContext
+  , withEffectiveActorContext
   , withWorkspaceIdContext
   , withChangeCauseContext
   , currentRequestContext
   , currentRequestId
   , currentPrincipal
+  , currentEffectiveActor
   , currentWorkspaceId
   , currentChangeCause
   ) where
@@ -27,6 +31,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.UUID (UUID)
 import System.IO.Unsafe (unsafePerformIO)
+import HMem.BotIdentity (BotIdentity, botRole, localDeclaredBotId)
 
 data ActorType
   = ActorUser
@@ -50,6 +55,23 @@ data Principal = Principal
   , authority  :: !PrincipalAuthority
   } deriving stock (Show, Eq)
 
+-- | Operation attribution has no authority. Keep Principal for every grant,
+-- session and stream-audience decision, including implicit local superadmin.
+data EffectiveActor = EffectiveActor
+  { actorType :: !ActorType
+  , actorId :: !Text
+  , actorLabel :: !Text
+  , botIdentity :: !(Maybe BotIdentity)
+  } deriving stock (Show, Eq)
+
+resolveEffectiveActor :: Bool -> Principal -> Maybe BotIdentity -> EffectiveActor
+resolveEffectiveActor isLocal original declaration = case declaration of
+  Just identity
+    | isLocal, original.actorType == ActorUser, original.actorId == "local-user"
+    , original.authority == PrincipalSyntheticLocalSuperadmin ->
+        EffectiveActor ActorBot (localDeclaredBotId identity) (botRole identity) declaration
+  _ -> EffectiveActor original.actorType original.actorId original.actorLabel declaration
+
 -- | The initiating writer is deliberately a closed set.  It is persisted by
 -- V022 and must never be populated from arbitrary client text.
 data ChangeCause
@@ -71,6 +93,7 @@ changeCauseToText = \case
 data RequestContext = RequestContext
   { requestId   :: !(Maybe Text)
   , principal   :: !(Maybe Principal)
+  , effectiveActor :: !(Maybe EffectiveActor)
   , workspaceId :: !(Maybe UUID)
   , changeCause :: !(Maybe ChangeCause)
   } deriving stock (Show, Eq)
@@ -79,6 +102,7 @@ emptyRequestContext :: RequestContext
 emptyRequestContext = RequestContext
   { requestId = Nothing
   , principal = Nothing
+  , effectiveActor = Nothing
   , workspaceId = Nothing
   , changeCause = Nothing
   }
@@ -98,7 +122,10 @@ withRequestIdContext mRequestId = bracket (pushContext update) popContext . cons
 withPrincipalContext :: Maybe Principal -> IO a -> IO a
 withPrincipalContext mPrincipal = bracket (pushContext update) popContext . const
   where
-    update ctx = ctx { principal = mPrincipal }
+    update ctx = ctx { principal = mPrincipal, effectiveActor = Nothing }
+
+withEffectiveActorContext :: Maybe EffectiveActor -> IO a -> IO a
+withEffectiveActorContext actor = bracket (pushContext (\ctx -> ctx { effectiveActor = actor })) popContext . const
 
 withWorkspaceIdContext :: Maybe UUID -> IO a -> IO a
 withWorkspaceIdContext mWorkspaceId = bracket (pushContext update) popContext . const
@@ -120,6 +147,13 @@ currentRequestId = (.requestId) <$> currentRequestContext
 
 currentPrincipal :: IO (Maybe Principal)
 currentPrincipal = (.principal) <$> currentRequestContext
+
+currentEffectiveActor :: IO (Maybe EffectiveActor)
+currentEffectiveActor = do
+  ctx <- currentRequestContext
+  pure $ case ctx.effectiveActor of
+    Just actor -> Just actor
+    Nothing -> fmap (\p -> resolveEffectiveActor False p Nothing) ctx.principal
 
 currentWorkspaceId :: IO (Maybe UUID)
 currentWorkspaceId = (.workspaceId) <$> currentRequestContext

@@ -70,13 +70,21 @@ spec = describe "local-mode sandbox profile" $ do
       session.globalPermissions.createWorkspace `shouldBe` True
       session.globalPermissions.superadmin `shouldBe` True
 
+      declaredResp <- runReqWithHeaders app methodGet "/api/v1/session"
+        [("X-HMem-Bot-Identity", "{\"role\":\"Test Bot\",\"model-id\":\"test:fixture:default\"}")] ""
+      respStatus declaredResp `shouldBe` 200
+      declared <- expectDecoded (respBody declaredResp) :: IO SessionContext
+      declared.principal `shouldBe` session.principal
+      declared.globalPermissions `shouldBe` session.globalPermissions
+
   it "records configured local bot attribution and not ambient static-bearer attribution" $
     withEnvVar "HMEM_API_KEY" (Just "ambient-api-key") $
       withLocalSandboxAppContext $ \ctx -> do
         let app = ctx.localApplication
             env = ctx.localEnv
         botResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
-          [("Authorization", "Bearer " <> encodeUtf8Text localSandboxBotToken)]
+          [("Authorization", "Bearer " <> encodeUtf8Text localSandboxBotToken)
+          , ("X-HMem-Bot-Identity", "{\"role\":\"Test Bot\",\"model-id\":\"test:fixture:default\"}")]
           (encode (object ["name" .= ("local-sandbox-bot-ws" :: T.Text)]))
         respStatus botResp `shouldBe` 200
         botWs <- expectDecoded (respBody botResp) :: IO Workspace

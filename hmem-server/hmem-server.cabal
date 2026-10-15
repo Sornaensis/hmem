@@ -455,6 +455,7 @@ test-suite hmem-server-test
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
+      HMem.Server.BotIdentitySpec
       HMem.Server.ChangeStreamSpec
       HMem.Server.CtlEmbeddingsCliSpec
       HMem.Server.CtlEmbeddingsSpec

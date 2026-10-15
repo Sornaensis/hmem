@@ -809,7 +809,9 @@ assertChangeIdentity record entityId frame = do
     `shouldBe` Just (String $ UUID.toText entityId)
 
 authHeaders :: Text -> [Header]
-authHeaders token = [("Authorization", "Bearer " <> Text.encodeUtf8 token)]
+authHeaders token =
+  [("Authorization", "Bearer " <> Text.encodeUtf8 token)
+  , ("X-HMem-Bot-Identity", "{\"role\":\"Stream Test Bot\",\"model-id\":\"test:fixture:default\"}")]
 
 apiRequest :: Application -> BS.ByteString -> BS.ByteString -> [Header] -> LBS.ByteString -> IO WaiTest.SResponse
 apiRequest app method path headers body = WaiTest.runSession (WaiTest.srequest (WaiTest.SRequest request body)) app

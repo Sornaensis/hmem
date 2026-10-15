@@ -12,7 +12,8 @@ import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.UUID (UUID)
+import Data.Text.Encoding qualified as TE
+import HMem.BotIdentity (BotIdentity, mkBotIdentity)
 import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, newManager)
 import Network.HTTP.Types (hContentType, status200)
 import Network.Wai qualified as Wai
@@ -22,7 +23,7 @@ import System.IO (Handle, SeekMode(..), hClose, hSeek, openTempFile)
 import GHC.Conc (ThreadStatus(..), threadStatus)
 import Test.Hspec
 
-import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, injectWorkspaceContext, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, sendResponseToHandle)
+import HMem.MCP.Server (MCPContext(..), encodeStdioResponse, handleStdioLine, injectWorkspaceContext, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, sendResponseToHandle)
 import HMem.MCP.Tools (toolDefinitions)
 
 spec :: Spec
@@ -125,6 +126,114 @@ spec = do
           linesOut -> expectationFailure $ "Expected one response line, got: " <> show linesOut
 
   describe "workspace context ordering" $ do
+    it "requires a complete validated declaration and rejects failures atomically" $
+      withStdioState $ \mgr initialized context -> do
+        atomically $ modifyTVar' initialized (const True)
+        _ <- workspaceCall mgr initialized context "set" (Just (String workspaceA))
+        let malformed =
+              [ object ["workspace_id" .= workspaceB]
+              , object ["identity" .= secondIdentity]
+              , object ["workspace_id" .= workspaceB, "identity" .= Null]
+              , object ["workspace_id" .= workspaceB, "identity" .= object ["role" .= ("Reviewer" :: Text)]]
+              , object ["workspace_id" .= workspaceB, "identity" .= object ["model-id" .= ("pi:gpt-6.1-sol:high" :: Text)]]
+              , object ["workspace_id" .= workspaceB, "identity" .= object ["role" .= (5 :: Int), "model-id" .= ("pi:gpt-6.1-sol:high" :: Text)]]
+              , object ["workspace_id" .= workspaceB, "identity" .= object ["role" .= (" " :: Text), "model-id" .= ("pi:gpt-6.1-sol:high" :: Text)]]
+              , object ["workspace_id" .= workspaceB, "identity" .= object ["role" .= ("Reviewer" :: Text), "model-id" .= ("missing-components" :: Text)]]
+              , object ["workspace_id" .= workspaceB, "identity" .= object ["role" .= ("Reviewer" :: Text), "model-id" .= ("pi:gpt-6.1-sol:high" :: Text), "actor_id" .= ("forged" :: Text)]]
+              , object ["workspace_id" .= ("invalid" :: Text), "identity" .= secondIdentity]
+              ]
+        mapM_ (\arguments -> do
+          response <- localToolCall mgr unusedServerUrl initialized context "set_workspace" arguments
+          (response >>= jsonField "result" >>= jsonField "isError") `shouldBe` Just (Bool True)
+          readTVarIO context `shouldReturn` Just (MCPContext (Just (read (T.unpack workspaceA))) testIdentity)
+          ) malformed
+
+    it "blocks all forwarding before declaration, including explicit-workspace and global calls" $
+      withStdioState $ \mgr initialized context -> do
+        atomically $ modifyTVar' initialized (const True)
+        mapM_ (\(name, arguments) -> do
+          response <- localToolCall mgr unusedServerUrl initialized context name arguments
+          responseContains "Call set_workspace" response `shouldBe` True
+          ) [("project_create", object ["workspace_id" .= workspaceA, "name" .= ("bypass" :: Text)])
+            , ("workspace_list", object [])
+            , ("workspace_register", object ["name" .= ("bypass" :: Text)])]
+        getResponse <- workspaceCall mgr initialized context "get" Nothing
+        contextPayload getResponse `shouldBe` Just (object ["workspace_id" .= Null, "identity" .= Null])
+
+    it "bootstraps with null workspace, keeps identity on clear and initialize, and gates a fresh session" $
+      withStdioState $ \mgr initialized context -> do
+        atomically $ modifyTVar' initialized (const True)
+        captured <- newTVarIO []
+        withIdentityCaptureServer captured (pure ()) $ \httpManager base -> do
+          declared <- workspaceCall mgr initialized context "set" Nothing
+          (contextPayload declared >>= jsonField "identity") `shouldBe` Just (toJSON testIdentity)
+          mapM_ (\(name, args) -> do
+            response <- localToolCall httpManager base initialized context name args
+            (response >>= jsonField "result" >>= jsonField "isError") `shouldBe` Nothing
+            ) [("workspace_list", object []), ("workspace_register", object ["name" .= ("new workspace" :: Text)])]
+          scoped <- localToolCall httpManager base initialized context "project_create" (object ["name" .= ("missing workspace" :: Text)])
+          (scoped >>= jsonField "result" >>= jsonField "isError") `shouldBe` Just (Bool True)
+          _ <- workspaceCall mgr initialized context "set" (Just (String workspaceA))
+          _ <- handleStdioLine mgr unusedServerUrl Nothing initialized context (jsonLine (initializeRequest "reinitialize"))
+          preserved <- workspaceCall mgr initialized context "get" Nothing
+          contextPayload preserved `shouldBe` Just (object ["workspace_id" .= workspaceA, "identity" .= testIdentity])
+          _ <- workspaceCall mgr initialized context "set" Nothing
+          cleared <- workspaceCall mgr initialized context "get" Nothing
+          contextPayload cleared `shouldBe` Just (object ["workspace_id" .= Null, "identity" .= testIdentity])
+          observed <- readTVarIO captured
+          length observed `shouldBe` 2
+        fresh <- newTVarIO Nothing
+        response <- localToolCall mgr unusedServerUrl initialized fresh "workspace_list" (object [])
+        responseContains "Call set_workspace" response `shouldBe` True
+
+    it "keeps full identity snapshots for queued and in-flight calls across an epoch switch" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        captured <- newTVarIO []
+        firstSeen <- newEmptyMVar
+        release <- newEmptyMVar
+        completed <- newEmptyMVar
+        withIdentityCaptureServer captured (tryPutMVar firstSeen () >> readMVar release) $ \mgr base -> do
+          let requests = [initializeRequest "init", setWorkspaceRequest "a" (Just (String workspaceA))]
+                <> map projectCreateRequest ["old-1", "old-2", "old-3"]
+                <> [setWorkspaceRequestWithIdentity "b" (Just (String workspaceB)) secondIdentity, projectCreateRequest "new"]
+          BL.hPut input (BL.intercalate "\n" (map encode requests) <> "\n")
+          hSeek input AbsoluteSeek 0
+          thread <- forkIO $ try @SomeException (runMCPServerWithHandles 1 8 input output errHandle mgr base Nothing) >>= putMVar completed
+          result <- (do
+            waitForSignal firstSeen
+            observed <- readTVarIO captured
+            map snd observed `shouldBe` [[BL.toStrict (encode testIdentity)]]
+            putMVar release ()
+            waitForResult "Timed out switching identity epoch" completed) `finally` (tryPutMVar release () >> killThread thread)
+          case result of Left err -> expectationFailure (show err); Right () -> pure ()
+        observed <- readTVarIO captured
+        map snd observed `shouldBe` map (pure . BL.toStrict . encode) [testIdentity, testIdentity, testIdentity, secondIdentity]
+        map (\(body, _) -> body >>= jsonField "workspace_id") observed `shouldBe` map (Just . String) [workspaceA, workspaceA, workspaceA, workspaceB]
+
+    it "starts independent stdio process lifetimes without another process's declaration" $
+      withTempResponseFile $ \firstInput ->
+      withTempResponseFile $ \firstOutput ->
+      withTempResponseFile $ \secondInput ->
+      withTempResponseFile $ \secondOutput ->
+      withTempResponseFile $ \errHandle -> do
+        captured <- newTVarIO []
+        withIdentityCaptureServer captured (pure ()) $ \mgr base -> do
+          let firstRequests = [initializeRequest "init", setWorkspaceRequest "declare" Nothing, projectCreateRequest "missing-workspace"]
+              secondRequests = [initializeRequest "init", projectCreateRequest "undeclared"]
+          BL.hPut firstInput (BL.intercalate "\n" (map encode firstRequests) <> "\n")
+          BL.hPut secondInput (BL.intercalate "\n" (map encode secondRequests) <> "\n")
+          hSeek firstInput AbsoluteSeek 0
+          hSeek secondInput AbsoluteSeek 0
+          runMCPServerWithHandles 1 4 firstInput firstOutput errHandle mgr base Nothing
+          runMCPServerWithHandles 1 4 secondInput secondOutput errHandle mgr base Nothing
+          hSeek secondOutput AbsoluteSeek 0
+          responses <- BL8.lines <$> strictHandleContents secondOutput
+          let decoded = [value | Just value <- map decode responses]
+          responseFor "undeclared" decoded `shouldSatisfy` maybe False (valueContains "Call set_workspace")
+          readTVarIO captured `shouldReturn` []
+
     it "sets, gets, clears, and rejects invalid values without mutating direct session state" $
       withStdioState $ \mgr initialized wsContext -> do
         atomically $ modifyTVar' initialized (const True)
@@ -147,13 +256,15 @@ spec = do
         secondInitialized <- newTVarIO True
         secondContext <- newTVarIO Nothing
         _ <- workspaceCall mgr initialized firstContext "set" (Just (String workspaceA))
-        _ <- workspaceCall mgr secondInitialized secondContext "set" (Just (String workspaceB))
+        _ <- localToolCall mgr unusedServerUrl secondInitialized secondContext "set_workspace" (object ["workspace_id" .= workspaceB, "identity" .= secondIdentity])
         firstGet <- workspaceCall mgr initialized firstContext "get" Nothing
         secondGet <- workspaceCall mgr secondInitialized secondContext "get" Nothing
         responseContains workspaceA firstGet `shouldBe` True
         responseContains workspaceB firstGet `shouldBe` False
         responseContains workspaceB secondGet `shouldBe` True
         responseContains workspaceA secondGet `shouldBe` False
+        (contextPayload firstGet >>= jsonField "identity") `shouldBe` Just (toJSON testIdentity)
+        (contextPayload secondGet >>= jsonField "identity") `shouldBe` Just (toJSON secondIdentity)
 
         injected <- injectWorkspaceContext firstContext $ object
           [ "name" .= ("project_create" :: Text)
@@ -257,7 +368,7 @@ spec = do
                         ]
                     ]
                 ]
-          BL.hPut input (encode initRequest <> "\n" <> encode blockingSearch <> "\n")
+          BL.hPut input (encode initRequest <> "\n" <> encode (setWorkspaceRequest "declare" (Just (String workspaceA))) <> "\n" <> encode blockingSearch <> "\n")
           hSeek input AbsoluteSeek 0
           (runMCPServerWithHandlesObserved
               (\workerIds -> putMVar workerIdsVar workerIds >> waitForSignal requestSeen)
@@ -339,19 +450,18 @@ initializeRequest requestId = object
   ]
 
 setWorkspaceRequest :: Text -> Maybe Value -> Value
-setWorkspaceRequest requestId workspace = object
+setWorkspaceRequest requestId workspace = setWorkspaceRequestWithIdentity requestId workspace testIdentity
+
+setWorkspaceRequestWithIdentity :: Text -> Maybe Value -> BotIdentity -> Value
+setWorkspaceRequestWithIdentity requestId workspace identity = object
   [ "jsonrpc" .= ("2.0" :: Text)
   , "id" .= requestId
   , "method" .= ("tools/call" :: Text)
   , "params" .= object
       [ "name" .= ("set_workspace" :: Text)
-      , "arguments" .= workspaceArguments workspace
+      , "arguments" .= object ["workspace_id" .= maybe Null id workspace, "identity" .= identity]
       ]
   ]
-
-workspaceArguments :: Maybe Value -> Value
-workspaceArguments Nothing = object []
-workspaceArguments (Just value) = object ["workspace_id" .= value]
 
 getWorkspaceRequest :: Text -> Value
 getWorkspaceRequest requestId = object
@@ -372,7 +482,7 @@ projectCreateRequest requestId = object
       ]
   ]
 
-workspaceCall :: Manager -> TVar Bool -> TVar (Maybe UUID) -> Text -> Maybe Value -> IO (Maybe Value)
+workspaceCall :: Manager -> TVar Bool -> TVar (Maybe MCPContext) -> Text -> Maybe Value -> IO (Maybe Value)
 workspaceCall mgr initialized wsContext action workspace =
   handleStdioLine mgr unusedServerUrl Nothing initialized wsContext $ jsonLine request
   where
@@ -407,7 +517,7 @@ withWorkspaceCaptureServer bodies action =
         Left _ -> pure ()
       respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"
 
-withStdioState :: (Manager -> TVar Bool -> TVar (Maybe UUID) -> IO a) -> IO a
+withStdioState :: (Manager -> TVar Bool -> TVar (Maybe MCPContext) -> IO a) -> IO a
 withStdioState action = bracket (newManager defaultManagerSettings) closeManager $ \mgr -> do
   initialized <- newTVarIO False
   wsContext <- newTVarIO Nothing
@@ -530,3 +640,36 @@ jsonField _ _ = Nothing
 
 errorField :: Text -> Value -> Maybe Value
 errorField field value = jsonField "error" value >>= jsonField field
+
+testIdentity :: BotIdentity
+testIdentity = either (error . T.unpack) id (mkBotIdentity "Developer" "codex:gpt-6.1-sol:high")
+
+secondIdentity :: BotIdentity
+secondIdentity = either (error . T.unpack) id (mkBotIdentity "Reviewer" "pi:gpt-6.1-sol:extra-high")
+
+localToolCall :: Manager -> String -> TVar Bool -> TVar (Maybe MCPContext) -> Text -> Value -> IO (Maybe Value)
+localToolCall manager base initialized context name arguments =
+  handleStdioLine manager base Nothing initialized context $ jsonLine $ object
+    [ "jsonrpc" .= ("2.0" :: Text), "id" .= ("identity-call" :: Text), "method" .= ("tools/call" :: Text)
+    , "params" .= object ["name" .= name, "arguments" .= arguments]
+    ]
+
+contextPayload :: Maybe Value -> Maybe Value
+contextPayload response = do
+  result <- response >>= jsonField "result"
+  Array content <- jsonField "content" result
+  case foldr (:) [] content of
+    first : _ -> do
+      String text <- jsonField "text" first
+      decode (BL.fromStrict (TE.encodeUtf8 text))
+    _ -> Nothing
+
+withIdentityCaptureServer :: TVar [(Maybe Value, [BS8.ByteString])] -> IO () -> (Manager -> String -> IO a) -> IO a
+withIdentityCaptureServer captured wait action = testWithApplication (pure app) $ \port ->
+  bracket (newManager defaultManagerSettings) closeManager $ \mgr -> action mgr ("http://127.0.0.1:" <> show port)
+  where
+    app request respond = do
+      body <- Wai.strictRequestBody request
+      atomically $ modifyTVar' captured (<> [(decode body, [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"])])
+      wait
+      respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"

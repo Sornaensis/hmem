@@ -28,7 +28,8 @@ import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace, withTestEnv)
-import HMem.MCP.Server (handleStdioLine)
+import HMem.BotIdentity (BotIdentity, mkBotIdentity)
+import HMem.MCP.Server (MCPContext(..), handleStdioLine)
 import HMem.MCP.Tools
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithChangeStream)
@@ -38,12 +39,30 @@ import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), Observation
 
 spec :: Spec
 spec = do
+  describe "Declared identity forwarding" $ do
+    it "adds exactly one accepted identity on JSON, conditional and no-content helpers without changing credentials or provenance" $ do
+      requests <- newTVarIO []
+      withEnvironment "HMEM_MCP_PROVENANCE_TOKEN" "identity-test-provenance" $
+        withMock requests $ \manager base -> do
+          _ <- callWithKey manager base (Just "existing-credential") "observation_get" (object ["observation_id" .= observationId])
+          _ <- callWithKey manager base (Just "existing-credential") "observation_update" (object
+            ["observation_id" .= observationId, "content" .= ("updated" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= workspaceId])
+          _ <- callWithKey manager base (Just "existing-credential") "observation_delete" (object ["observation_id" .= observationId])
+          _ <- callWithKey manager base Nothing "observation_set_embedding" (object ["observation_id" .= observationId, "embedding" .= embedding])
+          pure ()
+      observed <- readTVarIO requests
+      map (.requestIdentityHeaders) observed `shouldBe` replicate 4 [BL.toStrict (encode testIdentity)]
+      map (.authorization) observed `shouldBe` [Just "Bearer existing-credential", Just "Bearer existing-credential", Just "Bearer existing-credential", Nothing]
+      map (.requestChangeCause) observed `shouldBe` replicate 4 (Just "mcp")
+      map (.requestMcpProvenance) observed `shouldBe` replicate 4 (Just "identity-test-provenance")
+      map (.requestIfMatch) observed `shouldBe` [Nothing, Just (TE.encodeUtf8 ("\"" <> workspaceId <> "\"")), Nothing, Nothing]
+
   describe "Workspace deletion boundary" $ do
     it "does not advertise or dispatch workspace_delete" $ do
       toolNames `shouldNotContain` ["workspace_delete"]
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
-        result <- handleToolCall manager base Nothing (object ["name" .= ("workspace_delete" :: Text), "arguments" .= object ["workspace_id" .= workspaceId]])
+        result <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("workspace_delete" :: Text), "arguments" .= object ["workspace_id" .= workspaceId]])
         result `shouldSatisfy` isMcpError
       (length <$> readTVarIO requests) `shouldReturn` 0
 
@@ -57,7 +76,7 @@ spec = do
             omit key (Object fields) = Object (KM.delete key fields)
             omit _ value = value
         forM_ [omit "reviewed_git_sha" complete, omit "expected_content_version" complete, replace "expected_content_version" Null complete, replace "expected_content_version" (String "BAD") complete, replace "reviewed_git_sha" Null complete, replace "reviewed_git_sha" (String "BAD") complete] $ \args -> do
-          result <- handleToolCall manager base Nothing (object ["name" .= ("observation_update" :: Text), "arguments" .= args])
+          result <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_update" :: Text), "arguments" .= args])
           result `shouldSatisfy` isMcpError
       (length <$> readTVarIO requests) `shouldReturn` 0
 
@@ -105,20 +124,20 @@ spec = do
       requests <- newTVarIO []
       withMock requests $ \manager base ->
         forM_ ["   ", T.replicate 1025 "x"] $ \workspaceName -> do
-          response <- handleToolCall manager base Nothing (object ["name" .= ("workspace_update" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "name" .= workspaceName]])
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("workspace_update" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "name" .= workspaceName]])
           response `shouldNotSatisfy` isMcpError
       readTVarIO requests >>= \observed -> length observed `shouldBe` 2
     it "surfaces structured workspace REST 400, 403, and 404 messages as MCP errors" $
       forM_ [(status400, "Workspace name cannot be blank."), (status403, "Workspace edit permission is required."), (status404, "Workspace not found.")] $ \(status, message) ->
         withWorkspaceStructuredStatusMock status message $ \manager base -> do
-          response <- handleToolCall manager base Nothing (object ["name" .= ("workspace_update" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "name" .= ("Valid workspace name" :: Text)]])
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("workspace_update" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "name" .= ("Valid workspace name" :: Text)]])
           response `shouldSatisfy` isMcpError
           response `shouldSatisfy` contains ("[HTTP_" <> T.pack (show (statusCode status)) <> "] " <> message)
     it "returns stable errors through the real deployed-mode application proxy" $
       forM_ renameProxyErrorCases $ \(principal, useMissingWorkspace, workspaceName, expected) ->
         withRenameProxyApp principal $ \workspaceId' manager base -> do
           let targetWorkspaceId = if useMissingWorkspace then missingWorkspaceId else workspaceId'
-          response <- handleToolCall manager base Nothing (object
+          response <- handleToolCall manager base Nothing testIdentity (object
             [ "name" .= ("workspace_update" :: Text)
             , "arguments" .= object ["workspace_id" .= targetWorkspaceId, "name" .= workspaceName]
             ])
@@ -150,7 +169,7 @@ spec = do
 
     it "rejects invalid specifications before HTTP and preserves server failures as errors" $ do
       requests <- newTVarIO []
-      let invoke manager base arguments = handleToolCall manager base Nothing
+      let invoke manager base arguments = handleToolCall manager base Nothing testIdentity
             (object ["name" .= ("project_spec" :: Text), "arguments" .= arguments])
       withMock requests $ \manager base -> do
         forM_ [[], [object ["title" .= (" " :: Text)]], [object ["title" .= ("task" :: Text), "priority" .= (11 :: Int)]], replicate 51 (object ["title" .= ("task" :: Text)])] $ \tasks ->
@@ -189,9 +208,9 @@ spec = do
           forM_ [Null, toJSON ("2030-01-01T00:00:00Z" :: Text)] $ \value -> do
             forM_ planning $ \(name, arguments) -> do
               parseToolCall name (add key value arguments) `shouldSatisfy` isLeft
-              handleToolCall manager base Nothing (object ["name" .= name, "arguments" .= add key value arguments]) >>= (`shouldSatisfy` isMcpError)
+              handleToolCall manager base Nothing testIdentity (object ["name" .= name, "arguments" .= add key value arguments]) >>= (`shouldSatisfy` isMcpError)
             let nested = object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text), "tasks" .= [object ["title" .= ("task" :: Text), Key.fromText key .= value]]]
-            handleToolCall manager base Nothing (object ["name" .= ("project_spec" :: Text), "arguments" .= nested]) >>= (`shouldSatisfy` isMcpError)
+            handleToolCall manager base Nothing testIdentity (object ["name" .= ("project_spec" :: Text), "arguments" .= nested]) >>= (`shouldSatisfy` isMcpError)
       readTVarIO requests >>= (\observed -> length observed `shouldBe` 0)
 
     it "advertises exactly the clearable fields as string or null and requires only the entity ID" $ do
@@ -281,6 +300,9 @@ spec = do
       schemaProperties "search" `shouldNotContain` ["memory_type", "tags", "pinned_only", "min_importance"]
       (schemaProperty "set_workspace" "workspace_id" >>= jsonField "anyOf")
         `shouldSatisfy` maybe False stringOrNullTypes
+      schemaRequired "set_workspace" `shouldBe` ["workspace_id", "identity"]
+      (schemaProperty "set_workspace" "identity" >>= jsonField "required") `shouldBe` Just (toJSON (["role", "model-id"] :: [Text]))
+      (schemaProperty "set_workspace" "identity" >>= jsonField "additionalProperties") `shouldBe` Just (Bool False)
       toolDescription "task_finish" `shouldSatisfy` maybe False ("does not create an observation" `T.isInfixOf`)
       toolDescription "project_archive" `shouldSatisfy` maybe False (not . ("summary" `T.isInfixOf`))
       sort (schemaProperties "task_dependency") `shouldBe` sort ["task_id", "depends_on_id", "action"]
@@ -372,7 +394,7 @@ spec = do
         removed <- call manager base "task_dependency" removeArguments
         removed `shouldSatisfy` hasFields ["ok", "action", "entity_type", "task_id", "depends_on_id", "affected_tasks"]
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO Nothing
+        workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
         jsonRpcToolCall manager base initialized workspaceContext "task_dependency" addArguments
           >>= (`shouldSatisfy` maybe False (not . isJsonRpcMcpError))
       [addRequest, removeRequest, jsonRpcRequest] <- readTVarIO requests
@@ -386,12 +408,12 @@ spec = do
     it "preserves structured dependency-cycle errors through the MCP and JSON-RPC bridges" $
       withDependencyCycleMock $ \manager base -> do
         let arguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)]
-        response <- handleToolCall manager base Nothing (object ["name" .= ("task_dependency" :: Text), "arguments" .= arguments])
+        response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("task_dependency" :: Text), "arguments" .= arguments])
         response `shouldSatisfy` isMcpError
         response `shouldSatisfy` contains "[HTTP_400] Task dependency would create a cycle"
         response `shouldSatisfy` contains "dependency_cycle"
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO Nothing
+        workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
         jsonRpcToolCall manager base initialized workspaceContext "task_dependency" arguments
           >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "dependency_cycle" value))
 
@@ -431,8 +453,8 @@ spec = do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO Nothing
-        _ <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+        workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
+        _ <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId, "identity" .= testIdentity])
         jsonRpcToolCall manager base initialized workspaceContext "task_move_batch" arguments
           >>= (`shouldSatisfy` maybe False (not . isJsonRpcMcpError))
       observed <- readTVarIO requests
@@ -453,7 +475,7 @@ spec = do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+        workspaceContext <- newTVarIO (Just (MCPContext (Just (read (T.unpack workspaceId))) testIdentity))
         forM_
           [ object ["task_ids" .= [observationId], "workspace_id" .= ("not-a-uuid" :: Text)]
           , object ["task_ids" .= [observationId], "workspace_id" .= True]
@@ -476,7 +498,7 @@ spec = do
           requests <- newTVarIO []
           withBatchMovePreflightMock requests taskResponse projectResponse $ \manager base -> do
             initialized <- newTVarIO True
-            workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+            workspaceContext <- newTVarIO (Just (MCPContext (Just (read (T.unpack workspaceId))) testIdentity))
             jsonRpcToolCall manager base initialized workspaceContext "task_move_batch"
               (object ["task_ids" .= [observationId], "project_id" .= workspaceId])
               >>= (`shouldSatisfy` maybe False isJsonRpcMcpError)
@@ -487,7 +509,7 @@ spec = do
       requests <- newTVarIO []
       withBatchMoveEveryTaskMismatchMock requests $ \manager base -> do
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+        workspaceContext <- newTVarIO (Just (MCPContext (Just (read (T.unpack workspaceId))) testIdentity))
         jsonRpcToolCall manager base initialized workspaceContext "task_move_batch"
           (object ["task_ids" .= [observationId, workspaceId], "project_id" .= workspaceId])
           >>= (`shouldSatisfy` maybe False isJsonRpcMcpError)
@@ -499,7 +521,7 @@ spec = do
       requests <- newTVarIO []
       withBatchMoveGetErrorMock requests $ \manager base -> do
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+        workspaceContext <- newTVarIO (Just (MCPContext (Just (read (T.unpack workspaceId))) testIdentity))
         response <- jsonRpcToolCall manager base initialized workspaceContext "task_move_batch"
           (object ["task_ids" .= [observationId], "project_id" .= workspaceId])
         response `shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "[HTTP_404] Task not found." value)
@@ -510,25 +532,25 @@ spec = do
     it "preserves structured lifecycle conflicts through the MCP and JSON-RPC bridges" $
       withLifecycleConflictMock $ \manager base -> do
         let arguments = object ["task_ids" .= [observationId], "project_id" .= workspaceId]
-        response <- handleToolCall manager base Nothing (object ["name" .= ("task_move_batch" :: Text), "arguments" .= arguments])
+        response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("task_move_batch" :: Text), "arguments" .= arguments])
         response `shouldSatisfy` isMcpError
         response `shouldSatisfy` contains "[HTTP_409] Cannot move tasks because dependency endpoints would span projects."
         response `shouldSatisfy` contains "lifecycle_conflict"
         response `shouldSatisfy` contains "TASK_DEPENDENCY_CROSS_PROJECT"
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO Nothing
+        workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
         jsonRpcToolCall manager base initialized workspaceContext "task_move_batch" arguments
           >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "TASK_DEPENDENCY_CROSS_PROJECT" value))
 
     it "preserves parent-start subtask blockers through MCP and JSON-RPC" $
       withLifecycleConflictMock $ \manager base -> do
         let arguments = object ["task_id" .= observationId]
-        response <- handleToolCall manager base Nothing (object ["name" .= ("task_start" :: Text), "arguments" .= arguments])
+        response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("task_start" :: Text), "arguments" .= arguments])
         response `shouldSatisfy` isMcpError
         response `shouldSatisfy` contains "TASK_START_BLOCKED_BY_SUBTASKS"
         response `shouldSatisfy` contains "blocker_count"
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO Nothing
+        workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
         jsonRpcToolCall manager base initialized workspaceContext "task_start" arguments
           >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "TASK_START_BLOCKED_BY_SUBTASKS" value))
 
@@ -538,7 +560,7 @@ spec = do
       requests <- newTVarIO []
       withMock requests $ \manager base ->
         forM_ toolSamples $ \(name, arguments) -> do
-          response <- handleToolCall manager base Nothing (object ["name" .= name, "arguments" .= arguments])
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= name, "arguments" .= arguments])
           response `shouldSatisfy` not . isMcpError
       dispatched <- readTVarIO requests
       all (`elem` map (.requestPath) dispatched)
@@ -549,8 +571,8 @@ spec = do
         ] `shouldBe` True
       manager <- newManager defaultManagerSettings
       initialized <- newTVarIO True
-      workspaceContext <- newTVarIO Nothing
-      setResponse <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+      workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
+      setResponse <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId, "identity" .= testIdentity])
       setResponse `shouldSatisfy` maybe False (contains "workspace_context")
       getResponse <- serverToolCall manager initialized workspaceContext "get_workspace" (object [])
       getResponse `shouldSatisfy` maybe False (contains workspaceId)
@@ -559,11 +581,11 @@ spec = do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO Nothing
+        workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
         forM_ toolSamples $ \(name, arguments) -> do
           response <- jsonRpcToolCall manager base initialized workspaceContext name arguments
           response `shouldSatisfy` maybe False (not . isJsonRpcMcpError)
-        setResponse <- jsonRpcToolCall manager base initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+        setResponse <- jsonRpcToolCall manager base initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId, "identity" .= testIdentity])
         setResponse `shouldSatisfy` maybe False (not . isJsonRpcMcpError)
         getResponse <- jsonRpcToolCall manager base initialized workspaceContext "get_workspace" (object [])
         getResponse `shouldSatisfy` maybe False (contains workspaceId)
@@ -572,8 +594,8 @@ spec = do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
         initialized <- newTVarIO True
-        workspaceContext <- newTVarIO Nothing
-        _ <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+        workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
+        _ <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId, "identity" .= testIdentity])
         response <- jsonRpcToolCall manager base initialized workspaceContext "observation_match"
           (object ["paths" .= (["src/HMem/Types.hs"] :: [Text])])
         response `shouldSatisfy` maybe False (not . isJsonRpcMcpError)
@@ -649,7 +671,7 @@ spec = do
       sent.requestMethod `shouldBe` methodPut
       jsonField "own_paused" (maybe Null id (decode sent.requestBody)) `shouldBe` Nothing
       withWorkspaceStructuredStatusMock status403 "Denied" $ \manager base -> do
-        denied <- handleToolCall manager base Nothing (object ["name" .= ("project_update" :: Text), "arguments" .= object ["project_id" .= observationId, "status" .= ("paused" :: Text)]])
+        denied <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("project_update" :: Text), "arguments" .= object ["project_id" .= observationId, "status" .= ("paused" :: Text)]])
         denied `shouldSatisfy` isMcpError
         jsonField "pause_effects" denied `shouldBe` Nothing
 
@@ -795,7 +817,7 @@ spec = do
     it "rejects incomplete legacy create forms before any HTTP request" $ do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
-        let malformed fields = handleToolCall manager base Nothing
+        let malformed fields = handleToolCall manager base Nothing testIdentity
               (object ["name" .= ("observation_create" :: Text), "arguments" .= object (["workspace_id" .= workspaceId, "git_sha" .= gitSha, "content" .= ("content" :: Text)] <> fields)])
         subjectOnly <- malformed ["subject" .= ("src/HMem/Types.hs" :: Text)]
         kindOnly <- malformed ["subject_kind" .= ("file" :: Text)]
@@ -809,11 +831,11 @@ spec = do
       let tooManySubjects = [ObservationSubject SubjectFile ("src/File" <> T.pack (show index) <> ".hs") | index <- [1 .. maxObservationSubjects + 1]]
           tooManyPaths = ["src/File" <> T.pack (show index) <> ".hs" | index <- [1 .. 257 :: Int]]
       withMock requests $ \manager base -> do
-        tooManyCreate <- handleToolCall manager base Nothing (object
+        tooManyCreate <- handleToolCall manager base Nothing testIdentity (object
           [ "name" .= ("observation_create" :: Text)
           , "arguments" .= object ["workspace_id" .= workspaceId, "subjects" .= tooManySubjects, "git_sha" .= gitSha, "content" .= ("content" :: Text)]
           ])
-        tooManyMatch <- handleToolCall manager base Nothing (object
+        tooManyMatch <- handleToolCall manager base Nothing testIdentity (object
           [ "name" .= ("observation_match" :: Text)
           , "arguments" .= object ["workspace_id" .= workspaceId, "paths" .= tooManyPaths]
           ])
@@ -848,7 +870,7 @@ spec = do
         result <- call manager base "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha])
         jsonField "observations" result `shouldSatisfy` maybe False (arrayFirst (hasFields ["id", "subject_kind", "subject", "git_sha", "content_preview"]))
         result `shouldSatisfy` not . contains "linked_memories"
-      [RequestInfo _ _ _ body _ _ _ _ _] <- readTVarIO requests
+      [RequestInfo _ _ _ body _ _ _ _ _ _] <- readTVarIO requests
       decode body `shouldSatisfy` maybe False (\value -> hasFields ["subject_kind", "subject", "git_sha"] value)
 
     it "forwards list filters and gives an exact next offset only when the server reports another page" $ do
@@ -959,7 +981,7 @@ spec = do
 
     it "propagates REST failures, including pgvector capability errors" $ do
       withErrorMock $ \manager base -> do
-        result <- handleToolCall manager base Nothing (object ["name" .= ("observation_set_embedding" :: Text), "arguments" .= object ["observation_id" .= observationId, "embedding" .= embedding]])
+        result <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_set_embedding" :: Text), "arguments" .= object ["observation_id" .= observationId, "embedding" .= embedding]])
         result `shouldSatisfy` contains "[HTTP_400] pgvector extension is required"
 
     it "propagates HTTP status failures and forwards Bearer authorization on Observation reads" $ do
@@ -967,7 +989,7 @@ spec = do
       withStatusMock requests $ \manager base -> do
         let run :: Text -> Value -> Text -> IO ()
             run name arguments expected = do
-              response <- handleToolCall manager base (Just "test-token") (object ["name" .= name, "arguments" .= arguments])
+              response <- handleToolCall manager base (Just "test-token") testIdentity (object ["name" .= name, "arguments" .= arguments])
               response `shouldSatisfy` contains expected
         run "observation_get" (object ["observation_id" .= observationId]) "[HTTP_401] status 401"
         run "observation_list" observationListArguments "[HTTP_403] status 403"
@@ -1253,7 +1275,7 @@ call manager base = callWithKey manager base Nothing
 
 callWithKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
 callWithKey manager base apiKey name arguments = do
-  response <- handleToolCall manager base apiKey (object ["name" .= name, "arguments" .= arguments])
+  response <- handleToolCall manager base apiKey testIdentity (object ["name" .= name, "arguments" .= arguments])
   case jsonField "content" response >>= arrayText >>= (either (const Nothing) Just . eitherDecodeStrict' . TE.encodeUtf8) of
     Just value -> pure value
     Nothing -> expectationFailure ("Expected MCP JSON response, got " <> show response) >> pure Null
@@ -1263,7 +1285,7 @@ callWithKey manager base apiKey name arguments = do
       _ -> Nothing
     arrayText _ = Nothing
 
-serverToolCall :: Manager -> TVar Bool -> TVar (Maybe UUID) -> Text -> Value -> IO (Maybe Value)
+serverToolCall :: Manager -> TVar Bool -> TVar (Maybe MCPContext) -> Text -> Value -> IO (Maybe Value)
 serverToolCall manager initialized workspaceContext name arguments =
   handleStdioLine manager "http://unused.invalid" Nothing initialized workspaceContext
     (BL.toStrict (encode (object
@@ -1273,7 +1295,7 @@ serverToolCall manager initialized workspaceContext name arguments =
       , "params" .= object ["name" .= name, "arguments" .= arguments]
       ])))
 
-jsonRpcToolCall :: Manager -> String -> TVar Bool -> TVar (Maybe UUID) -> Text -> Value -> IO (Maybe Value)
+jsonRpcToolCall :: Manager -> String -> TVar Bool -> TVar (Maybe MCPContext) -> Text -> Value -> IO (Maybe Value)
 jsonRpcToolCall manager base initialized workspaceContext name arguments =
   handleStdioLine manager base Nothing initialized workspaceContext
     (BL.toStrict (encode (object
@@ -1307,6 +1329,7 @@ data RequestInfo = RequestInfo
   , requestChangeCause :: Maybe ByteString
   , requestMcpProvenance :: Maybe ByteString
   , requestIfMatch :: Maybe ByteString
+  , requestIdentityHeaders :: [ByteString]
   , requestId :: Maybe ByteString
   }
 
@@ -1336,7 +1359,7 @@ withBatchMoveEveryTaskMismatchMock requests action =
 batchMovePreflightApp :: TVar [RequestInfo] -> Value -> Value -> Wai.Application
 batchMovePreflightApp requests taskResponse projectResponse request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"] (lookup "X-Request-Id" request.requestHeaders)])
   let path = request.rawPathInfo
       response
         | "/api/v1/tasks/" `BS.isPrefixOf` path = taskResponse
@@ -1347,7 +1370,7 @@ batchMovePreflightApp requests taskResponse projectResponse request respond = do
 batchMoveGetErrorApp :: TVar [RequestInfo] -> Wai.Application
 batchMoveGetErrorApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"] (lookup "X-Request-Id" request.requestHeaders)])
   let response
         | "/api/v1/tasks/" `BS.isPrefixOf` request.rawPathInfo = Wai.responseLBS status404 [("Content-Type", "application/json")] (encode (object ["error" .= ("not_found" :: Text), "message" .= ("Task not found." :: Text)]))
         | otherwise = Wai.responseLBS status200 [("Content-Type", "application/json")] (encode projectWithWorkspace)
@@ -1356,7 +1379,7 @@ batchMoveGetErrorApp requests request respond = do
 batchMoveEveryTaskMismatchApp :: TVar [RequestInfo] -> Wai.Application
 batchMoveEveryTaskMismatchApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"] (lookup "X-Request-Id" request.requestHeaders)])
   let response
         | request.rawPathInfo == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = taskWithWorkspace
         | request.rawPathInfo == "/api/v1/tasks/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "workspace_id" .= ("99999999-2222-3333-4444-555555555555" :: Text)]
@@ -1456,7 +1479,7 @@ withEnvironment name value = bracket acquire restore . const
 mockApp :: TVar [RequestInfo] -> Wai.Application
 mockApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"] (lookup "X-Request-Id" request.requestHeaders)])
   case request.requestMethod of
     method | method == methodDelete && "/dependencies/" `T.isInfixOf` TE.decodeUtf8 request.rawPathInfo -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
     method | method == methodDelete -> respond $ Wai.responseLBS status204 [] ""
@@ -1523,7 +1546,7 @@ workspaceStructuredStatusApp status message _ respond =
 statusApp :: TVar [RequestInfo] -> Wai.Application
 statusApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"] (lookup "X-Request-Id" request.requestHeaders)])
   let status
         | request.rawPathInfo == "/api/v1/observations/match" = status500
         | request.rawPathInfo == "/api/v1/observations/similar" = status400
@@ -1597,3 +1620,6 @@ projectWithLongDescription = object ["id" .= observationId, "workspace_id" .= wo
 -- Synthetic old upstream fields verify that MCP projections drop retired data.
 taskWithLongDescription = object ["due_at" .= ("2030-01-01T00:00:00Z" :: Text), "id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("done" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "dependency_effects" .= [dependencyChange]]
 dependencyChange = object ["task" .= object ["due_at" .= Null, "id" .= observationId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("blocked" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null], "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int), "open_dependency_count" .= (1 :: Int), "previous_open_subtask_count" .= (0 :: Int), "open_subtask_count" .= (0 :: Int), "previous_project_paused" .= False, "project_paused" .= True, "reason" .= ("blocked_by_paused_project_and_open_dependencies" :: Text)]
+
+testIdentity :: BotIdentity
+testIdentity = either (error . T.unpack) id (mkBotIdentity "Developer" "codex:gpt-6.1-sol:high")

@@ -21,6 +21,7 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (parseEither)
+import HMem.BotIdentity (BotIdentity)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (toList)
@@ -46,8 +47,8 @@ import HMem.Types
 -- on every scoped tool.
 toolDefinitions :: [Value]
 toolDefinitions =
-  [ tool "set_workspace" "Set the active workspace context. Scoped calls can then omit workspace_id." (schema ["workspace_id" .= nullableProp "Workspace UUID (or null to clear)"] [])
-  , tool "get_workspace" "Get the active workspace context UUID, if any." (schema [] [])
+  [ tool "set_workspace" "Declare workspace and bot identity before ordinary tools. Explicit null clears workspace and accepts identity; initialize preserves both. Identity lasts until process exit. Invalid declarations change neither value." (strictSchema ["workspace_id" .= nullableProp "Workspace UUID (explicit null clears workspace while accepting identity)", "identity" .= strictSchema ["role" .= prop "string" "Declared role (1..128 UTF-8 bytes)", "model-id" .= prop "string" "harness:model:reasoning (1..256 UTF-8 bytes)"] ["role", "model-id"]] ["workspace_id", "identity"])
+  , tool "get_workspace" "Get the accepted workspace and declared bot identity; both are null before declaration." (schema [] [])
   , tool "workspace_list" "List registered workspaces." (schema ["limit" .= prop "integer" "Maximum results (default 50)"] [])
   , tool "workspace_register" "Register a workspace." (schema ["name" .= prop "string" "Workspace name", "workspace_type" .= enumProp "Workspace type" ["repository", "planning", "personal", "organization"]] ["name"])
   , tool "workspace_update" "Rename a workspace. Only its display name is mutable." (strictSchema ["workspace_id" .= prop "string" "Workspace UUID", "name" .= prop "string" "New workspace display name"] ["workspace_id", "name"])
@@ -321,15 +322,17 @@ validateToolCall call = case call of
     validateEmbedding values = ["embedding must contain exactly 1536 finite dimensions"
       | length values /= observationEmbeddingDimensions || any (\value -> isNaN value || isInfinite value) values]
 
-handleToolCall :: Manager -> String -> Maybe Text -> Value -> IO Value
-handleToolCall manager base apiKey params = case parseParams params >>= uncurry parseToolCall >>= validateToolCall of
+data ForwardingContext = ForwardingContext (Maybe Text) BotIdentity
+
+handleToolCall :: Manager -> String -> Maybe Text -> BotIdentity -> Value -> IO Value
+handleToolCall manager base token identity params = case parseParams params >>= uncurry parseToolCall >>= validateToolCall of
   Left err -> pure (mcpError (T.pack err))
-  Right call -> execute manager base apiKey call
+  Right call -> execute manager base (ForwardingContext token identity) call
 
 parseParams :: Value -> Either String (Text, Value)
 parseParams = parseEither $ withObject "params" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []
 
-execute :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
+execute :: Manager -> String -> ForwardingContext -> ToolCall -> IO Value
 execute manager base apiKey = \case
   ObservationCreate input -> request manager base apiKey "POST" "/api/v1/observations" (Just (encode input)) (mutationAck "created" "observation" . compactObservationSummary)
   ObservationGet oid -> request manager base apiKey "GET" ("/api/v1/observations/" <> uuidPath oid) Nothing compactObservationDetail
@@ -367,7 +370,7 @@ execute manager base apiKey = \case
   TaskStart tid -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= ("in_progress" :: Text)]))) (taskMutationAck "started")
   TaskFinish tid status -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= status]))) (taskMutationAck "finished")
 
-dispatchBatchMove :: Manager -> String -> Maybe Text -> BatchMoveTasksRequest -> IO Value
+dispatchBatchMove :: Manager -> String -> ForwardingContext -> BatchMoveTasksRequest -> IO Value
 dispatchBatchMove manager base apiKey input =
   request manager base apiKey "POST" "/api/v1/tasks/batch-move" (Just (encode input)) (compactTaskBatchMove input.projectId)
 
@@ -375,7 +378,7 @@ dispatchBatchMove manager base apiKey input =
 -- the batch-move REST DTO.  Verify every explicitly supplied endpoint before
 -- allowing the mutation so a stale or foreign task/project cannot be moved by
 -- a contextual call.
-validateBatchMoveWorkspace :: Manager -> String -> Maybe Text -> UUID -> BatchMoveTasksRequest -> IO (Either Value ())
+validateBatchMoveWorkspace :: Manager -> String -> ForwardingContext -> UUID -> BatchMoveTasksRequest -> IO (Either Value ())
 validateBatchMoveWorkspace manager base apiKey activeWorkspace input = do
   taskResults <- mapM (fetch "task" . ("/api/v1/tasks/" <>) . uuidPath) (nub input.taskIds)
   projectResult <- traverse (fetch "project" . ("/api/v1/projects/" <>) . uuidPath) input.projectId
@@ -396,7 +399,7 @@ verifyWorkspace activeWorkspace (entity, value) = case textField "workspace_id" 
     | otherwise -> Left (mcpError ("task_move_batch " <> entity <> " workspace_id does not match the active workspace context"))
   Nothing -> Left (mcpError ("task_move_batch " <> entity <> " response omitted a valid workspace_id"))
 
-executeProjectSpec :: Manager -> String -> Maybe Text -> CreateProjectSpec -> IO Value
+executeProjectSpec :: Manager -> String -> ForwardingContext -> CreateProjectSpec -> IO Value
 executeProjectSpec manager base apiKey input = do
   result <- rawRequest manager base apiKey "POST" "/api/v1/projects/spec" (Just (encode input))
   pure $ case result of
@@ -409,24 +412,26 @@ executeProjectSpec manager base apiKey input = do
             [ "ok" .= True, "action" .= ("created" :: Text), "entity_type" .= ("project_spec" :: Text)
             , "project_id" .= created.projectId, "task_ids" .= created.taskIds ])
 
-request :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> (Value -> Value) -> IO Value
+request :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> (Value -> Value) -> IO Value
 request manager base apiKey method path body shape = do
   result <- rawRequest manager base apiKey method path body
   pure $ either id (mcpJSON . shape) result
 
-requestWithHeaders :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> (Value -> Value) -> IO Value
+requestWithHeaders :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> (Value -> Value) -> IO Value
 requestWithHeaders manager base apiKey method path body headers shape = do
   result <- rawRequestWithHeaders manager base apiKey method path body headers
   pure $ either id (mcpJSON . shape) result
 
-noContentRequest :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> Value -> IO Value
+noContentRequest :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> Value -> IO Value
 noContentRequest manager base apiKey method path body acknowledgement = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
     provenance <- mcpProvenanceHeaders
     requestId <- UUIDv4.nextRandom
-    let auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) apiKey
-        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
+    let ForwardingContext credential identity = apiKey
+        identityHeaders = [("X-HMem-Bot-Identity", BL.toStrict (encode identity))]
+        auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) credential
+        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth <> identityHeaders, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
     response <- httpLbs requestValue manager
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then pure (Right ())
@@ -437,17 +442,19 @@ noContentRequest manager base apiKey method path body acknowledgement = do
       case fromException exception :: Maybe SomeAsyncException of Just _ -> throwIO exception; Nothing -> pure ()
       pure (mcpError "Could not connect to hmem-server")
 
-rawRequest :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> IO (Either Value Value)
+rawRequest :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> IO (Either Value Value)
 rawRequest manager base apiKey method path body = rawRequestWithHeaders manager base apiKey method path body []
 
-rawRequestWithHeaders :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> IO (Either Value Value)
+rawRequestWithHeaders :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> IO (Either Value Value)
 rawRequestWithHeaders manager base apiKey method path body extraHeaders = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
     provenance <- mcpProvenanceHeaders
     requestId <- UUIDv4.nextRandom
-    let auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) apiKey
-        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth <> extraHeaders, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
+    let ForwardingContext credential identity = apiKey
+        identityHeaders = [("X-HMem-Bot-Identity", BL.toStrict (encode identity))]
+        auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) credential
+        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth <> identityHeaders <> extraHeaders, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
     response <- httpLbs requestValue manager
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then case eitherDecode (responseBody response) of

@@ -30,6 +30,7 @@ init =
     { taskDependencies = Dict.empty
     , taskDependencyLinks = []
     , taskReadinessRollups = Dict.empty
+    , taskOverviewRequests = Dict.empty
     , projectReadinessRollups = Dict.empty
     , addingDependencyFor = Nothing
     , taskDependencyHasMore = Dict.empty
@@ -93,6 +94,7 @@ resetCache dependencies =
         , taskDependencyLoading = Dict.empty
         , taskDependencyErrors = Dict.empty
         , taskDependencyRequests = Dict.empty
+        , taskOverviewRequests = Dict.empty
         , taskDependencyRefreshItems = Dict.empty
         , taskDependencyMutations = []
         , nextTaskDependencyRequestGeneration = dependencies.nextTaskDependencyRequestGeneration + 1
@@ -297,6 +299,7 @@ beginDependencyRefresh taskId model =
                         | taskDependencyLoading = Dict.insert taskId True dependencies.taskDependencyLoading
                         , taskDependencyErrors = Dict.remove taskId dependencies.taskDependencyErrors
                         , taskDependencyRequests = Dict.insert taskId request dependencies.taskDependencyRequests
+                        , taskOverviewRequests = Dict.remove taskId dependencies.taskOverviewRequests
                         , taskDependencyRefreshItems = Dict.insert taskId [] dependencies.taskDependencyRefreshItems
                         , nextTaskDependencyRequestGeneration = request.generation + 1
                     }
@@ -322,6 +325,7 @@ invalidateDependencyPage taskId model =
                 , taskDependencyLoading = Dict.remove taskId dependencies.taskDependencyLoading
                 , taskDependencyErrors = Dict.remove taskId dependencies.taskDependencyErrors
                 , taskDependencyRequests = Dict.remove taskId dependencies.taskDependencyRequests
+                , taskOverviewRequests = Dict.remove taskId dependencies.taskOverviewRequests
                 , taskDependencyRefreshItems = Dict.remove taskId dependencies.taskDependencyRefreshItems
                 , nextTaskDependencyRequestGeneration = dependencies.nextTaskDependencyRequestGeneration + 1
             }
@@ -331,6 +335,18 @@ invalidateDependencyPage taskId model =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        RequestTaskOverview workspace epoch taskId ->
+            if workspace /= model.selectedWorkspaceId || epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspace) |> Maybe.withDefault False) then
+                ( model, Cmd.none )
+            else
+                let
+                    ( revision, issued ) = allocatePlanningRead model
+                    dependencies = issued.dependencies
+                    request = { dependencyGeneration = dependencies.nextTaskDependencyRequestGeneration, readRevision = revision }
+                    requested = { issued | dependencies = { dependencies | taskOverviewRequests = Dict.insert taskId request dependencies.taskOverviewRequests, nextTaskDependencyRequestGeneration = request.dependencyGeneration + 1 } }
+                in
+                ( requested, Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId workspace epoch request) )
+
         RefreshTaskDependencies taskId ->
             beginDependencyRefresh taskId model
 
@@ -386,8 +402,8 @@ update msg model =
                 Nothing ->
                     ( model, Cmd.none )
 
-        GotTaskDependencies taskId workspaceId sessionEpoch dependencyGeneration result ->
-            if model.auth.status /= AuthReady || model.sessionContext == Nothing || model.selectedWorkspaceId /= workspaceId || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspaceId) |> Maybe.withDefault False) || model.sessionRequestEpoch /= sessionEpoch || model.dependencies.nextTaskDependencyRequestGeneration /= dependencyGeneration || Dict.member taskId model.dependencies.taskDependencyRequests || Dict.member taskId model.dependencies.taskDependencyRefreshItems then
+        GotTaskDependencies taskId workspaceId sessionEpoch request result ->
+            if model.auth.status /= AuthReady || model.sessionContext == Nothing || model.selectedWorkspaceId /= workspaceId || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspaceId) |> Maybe.withDefault False) || model.sessionRequestEpoch /= sessionEpoch || Dict.get taskId model.dependencies.taskOverviewRequests /= Just request || Dict.member taskId model.dependencies.taskDependencyRequests || Dict.member taskId model.dependencies.taskDependencyRefreshItems then
                 ( model, Cmd.none )
 
             else
@@ -400,9 +416,8 @@ update msg model =
                             in
                             ( { model
                                 | dependencies =
-                                    cacheCompleteTaskDependencies taskId overview.dependencies dependenciesModel
-                                        |> (\updated -> { updated | taskReadinessRollups = Dict.insert taskId overview.readinessRollup updated.taskReadinessRollups })
-                              }
+                                    cacheCompleteTaskDependencies taskId overview.dependencies { dependenciesModel | taskOverviewRequests = Dict.remove taskId dependenciesModel.taskOverviewRequests }
+                              } |> applyTaskReadiness request.readRevision taskId overview.readinessRollup
                             , Cmd.none
                             )
 
@@ -410,21 +425,20 @@ update msg model =
                             ( model, Cmd.none )
 
                     Err _ ->
-                        addToast Error "Failed to load task dependencies" model
+                        let dependencies = model.dependencies
+                        in
+                        addToast Error "Failed to load task dependencies"
+                            { model | dependencies = { dependencies | taskOverviewRequests = Dict.remove taskId dependencies.taskOverviewRequests, taskDependencyLoading = Dict.insert taskId False dependencies.taskDependencyLoading, taskDependencyErrors = Dict.insert taskId "Failed to load task dependencies" dependencies.taskDependencyErrors } }
 
-        GotProjectOverview _ projectId result ->
-            case result of
+        GotProjectOverview guard projectId result ->
+            if not (projectRequestIsCurrent guard model) then ( model, Cmd.none )
+            else case result of
                 Ok overview ->
                     let
                         dependenciesModel =
                             model.dependencies
                     in
-                    ( { model
-                        | dependencies =
-                            { dependenciesModel
-                                | projectReadinessRollups = Dict.insert projectId overview.readinessRollup dependenciesModel.projectReadinessRollups
-                            }
-                      }
+                    ( planningReadRevision guard model |> Maybe.map (\revision -> applyProjectReadiness revision projectId overview.readinessRollup model) |> Maybe.withDefault model
                     , Cmd.none
                     )
 

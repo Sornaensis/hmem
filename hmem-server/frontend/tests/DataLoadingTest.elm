@@ -32,7 +32,66 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "cached subtask focus completes summary ancestry once and retires stale pages after clearing focus" <| \_ ->
+        [ test "task and project readiness follows read admission order across families in both response orders" <| \_ ->
+            List.concatMap (\( kind, family ) -> List.concatMap (\summaryOlder -> List.map (planningReadinessRace kind family summaryOlder) [ False, True ]) [ False, True ])
+                [ ( "task", "dependency" ), ( "task", "plain" ), ( "task", "canonical" ), ( "project", "dependency" ), ( "project", "plain" ) ]
+                |> Expect.equal (List.repeat 20 { rollup = Just 1, summary = Just 1, dataSettled = True })
+        , test "independent task overview lifetimes settle data and failures separately" <| \_ ->
+            let
+                first = task "overview-first" Nothing
+                second = task "overview-second" Nothing
+                seed = DataLoading.mergeNavigationSummaries [] [ first, second ] (unfilteredSyncModel [])
+                issue id source = Main.update (RequestTaskOverview source.selectedWorkspaceId source.sessionRequestEpoch id) source |> Tuple.first
+                pending = seed |> issue first.id |> issue second.id
+                reply id result source = case Dict.get id pending.dependencies.taskOverviewRequests of
+                    Just request -> Main.update (GotTaskDependencies id pending.selectedWorkspaceId pending.sessionRequestEpoch request result) source |> Tuple.first
+                    Nothing -> source
+                successful = reply first.id (Ok { task = Api.taskFromCardSummary first, dependencies = [ { id = "independent-row", name = "Independent", status = Api.Todo } ], readinessRollup = first.readinessRollup }) pending
+                completed = reply second.id (Err Http.NetworkError) successful
+                retired = reply first.id (Ok { task = Api.taskFromCardSummary first, dependencies = [], readinessRollup = first.readinessRollup }) completed
+            in
+            Expect.equal { data = Just [ "independent-row" ], independent = True, settled = True, failed = True, retired = True }
+                { data = Dict.get first.id completed.dependencies.taskDependencies |> Maybe.map (List.map .id)
+                , independent = Dict.member second.id successful.dependencies.taskOverviewRequests
+                , settled = Dict.isEmpty completed.dependencies.taskOverviewRequests && not (Dict.get second.id completed.dependencies.taskDependencyLoading |> Maybe.withDefault False)
+                , failed = Dict.member second.id completed.dependencies.taskDependencyErrors
+                , retired = retired.dependencies == completed.dependencies }
+        , test "stale canonical overview and readiness404 cannot remove a newer task or project summary" <| \_ ->
+            List.map stalePlanningMissing [ "task-overview", "task-readiness", "project-overview" ]
+                |> Expect.equal (List.repeat 3 ( True, Just 1 ))
+        , test "root branch and direct focus summary writers share overview read ordering" <| \_ ->
+            List.concatMap (\family -> List.concatMap (\summaryOlder -> List.map (navigationPlanningRace family summaryOlder) [ False, True ]) [ False, True ]) [ "root", "branch", "focus" ]
+                |> Expect.equal (List.repeat 12 ( Just 1, Just 1 ))
+        , test "retired initial overview callbacks settle loading without replacing admitted readiness" <| \_ ->
+            let
+                parent = task "initial-parent" Nothing
+                container = project "initial-project" Nothing
+                taskRollup = parent.readinessRollup
+                projectRollup = container.readinessRollup
+                seed = DataLoading.mergeNavigationSummaries [ { container | readinessRollup = { projectRollup | inProgressTaskCount = 1 } } ] [ { parent | readinessRollup = { taskRollup | inProgressSubtaskCount = 1 } } ] rootLoadModel
+                taskDone = DataLoading.update (GotInitialTaskOverview workspaceId 1 parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = taskRollup })) seed |> Tuple.first
+                projectDone = DataLoading.update (GotInitialProjectOverview workspaceId 1 container.id (Ok { project = Api.projectFromCardSummary container, tasks = [], subprojects = [], readinessRollup = projectRollup })) seed |> Tuple.first
+            in
+            Expect.equal ( Just 1, Just 1, True )
+                ( Dict.get parent.id taskDone.dependencies.taskReadinessRollups |> Maybe.map .inProgressSubtaskCount
+                , Dict.get container.id projectDone.dependencies.projectReadinessRollups |> Maybe.map .inProgressTaskCount
+                , taskDone.dataLoading.pendingWorkspaceLoads == 0 && projectDone.dataLoading.pendingWorkspaceLoads == 0 && Dict.member parent.id taskDone.dependencies.taskDependencies )
+        , test "new canonical parent summary supersedes held dependency readiness" <| \_ ->
+            let
+                parent = task "readiness-parent" Nothing
+                child = task "readiness-child" (Just parent.id)
+                seed = DataLoading.mergeNavigationSummaries [] [ parent, child, task "prerequisite" Nothing ] (unfilteredSyncModel [])
+                pending = requestSummaries "readiness-dependency" [ ( "task_dependency", child.id ++ ":prerequisite" ) ] seed
+                key = "dependency-readiness:task:" ++ parent.id
+                guard = { scopeKey = "workspace:" ++ workspaceId, targetKey = key, targetGeneration = Dict.get ("workspace:" ++ workspaceId ++ "|" ++ key) pending.webSocket.targetGenerations |> Maybe.withDefault -1, sessionEpoch = pending.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
+                requested = requestSummaries "new-parent-summary" [ ( "task", parent.id ) ] pending
+                rollup = parent.readinessRollup
+                fresh = { parent | readinessRollup = { rollup | inProgressSubtaskCount = 1 } }
+                summarized = summaryReply requested (batchGuard [ ( "task", parent.id ) ] requested) [] [ parent.id ] { projects = [], tasks = [ fresh ], missingProjectIds = [], missingTaskIds = [] } requested
+                late = WebSocket.update (CanonicalTaskReadinessFetched guard parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = rollup })) summarized |> Tuple.first
+            in
+            Expect.equal (Just 1) (Dict.get parent.id late.dependencies.taskReadinessRollups |> Maybe.map .inProgressSubtaskCount)
+        , test "cached subtask focus completes summary ancestry once and retires stale pages after clearing focus" <| \_ ->
             let
                 subtask = let base = task "subtask" (Just "parent-task") in { base | projectId = Just "external" }
                 parent = let base = task "parent-task" Nothing in { base | projectId = Just "external", hasChildren = True, directSubtaskCount = 1 }
@@ -100,8 +159,8 @@ suite =
                 replayed = List.foldl replay continued (List.range 1 5)
                 completed = timelineFocusReply "project" Nothing continued replayed
             in
-            Expect.equal { focus = continued.dataLoading.activeNavigationFocus, revision = continued.dataLoading.nextNavigationSummaryRevision, completed = Nothing, succeeded = Just True }
-                { focus = replayed.dataLoading.activeNavigationFocus, revision = replayed.dataLoading.nextNavigationSummaryRevision, completed = completed.dataLoading.activeNavigationFocus, succeeded = Dict.get "project:timeline-target" completed.dataLoading.navigationFocuses |> Maybe.map .succeeded }
+            Expect.equal { focus = continued.dataLoading.activeNavigationFocus, revisions = Dict.map (\_ -> .revision) continued.dataLoading.navigationSummaryAuthority, completed = Nothing, succeeded = Just True }
+                { focus = replayed.dataLoading.activeNavigationFocus, revisions = Dict.map (\_ -> .revision) replayed.dataLoading.navigationSummaryAuthority, completed = completed.dataLoading.activeNavigationFocus, succeeded = Dict.get "project:timeline-target" completed.dataLoading.navigationFocuses |> Maybe.map .succeeded }
         , test "a canonical missing focused target cannot be resurrected by a preserved page" <| \_ ->
             let
                 pending = timelineFocusRequest "project"
@@ -1044,6 +1103,8 @@ suite =
                             , sessionContext = Just editorSession
                             , webSocket = { baseWebSocket | targetGenerations = Dict.fromList [ ( guard.scopeKey ++ "|" ++ guard.targetKey, 1 ), ( guard.scopeKey ++ "|navigation-summary:project:" ++ projectSummary.id, 1 ), ( guard.scopeKey ++ "|navigation-summary:task:" ++ taskSummary.id, 1 ) ] }
                         }
+                            |> Helpers.capturePlanningRead (guard.scopeKey ++ "|navigation-summary:project:" ++ projectSummary.id) 1
+                            |> Helpers.capturePlanningRead (guard.scopeKey ++ "|navigation-summary:task:" ++ taskSummary.id) 1
 
                     updated =
                         WebSocket.update
@@ -2189,6 +2250,7 @@ suite =
                             , webSocket = websocket
                             , dataLoading = loading
                         }
+                            |> Helpers.capturePlanningRead (guard.scopeKey ++ "|navigation-summary:project:child") 1
 
                     newParentProject =
                         project "child" (Just "new-parent")
@@ -2234,6 +2296,7 @@ suite =
 
                     source =
                         { model | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession, search = filteredSearch, webSocket = websocket, dataLoading = loading }
+                            |> Helpers.capturePlanningRead (guard.scopeKey ++ "|navigation-summary:project:child") 1
 
                     updated =
                         WebSocket.update (CanonicalNavigationSummariesFetched (summaryGuard guard source [ "child" ] []) workspaceId [ "child" ] [] (Ok { projects = [], tasks = [], missingProjectIds = [ "child" ], missingTaskIds = [] })) source |> Tuple.first
@@ -3145,6 +3208,127 @@ rootLoadModel =
             model.dataLoading
     in
     { model | dataLoading = { loading | activeWorkspaceLoadToken = Just 1, pendingWorkspaceLoads = 1, loadingWorkspaceData = True } }
+
+
+planningReadinessRace : String -> String -> Bool -> Bool -> { rollup : Maybe Int, summary : Maybe Int, dataSettled : Bool }
+planningReadinessRace kind family summaryOlder newerFirst =
+    let
+        parentProject = project "readiness-project" Nothing
+        parent = let base = task "readiness-parent" Nothing in { base | projectId = Just parentProject.id, status = Api.Blocked }
+        child = let base = task "readiness-child" (Just parent.id) in { base | projectId = Just parentProject.id }
+        seed = DataLoading.mergeNavigationSummaries [ parentProject ] [ parent, child, task "prerequisite" Nothing ] (unfilteredSyncModel [])
+        id = if kind == "task" then parent.id else parentProject.id
+        targets = [ ( kind, id ) ]
+        overviewTarget = if kind == "project" then "project-overview:" ++ id else if family == "dependency" then "dependency-readiness:task:" ++ id else "task-overview:" ++ id
+        guard source = { scopeKey = "workspace:" ++ workspaceId, targetKey = overviewTarget, targetGeneration = Dict.get ("workspace:" ++ workspaceId ++ "|" ++ overviewTarget) source.webSocket.targetGenerations |> Maybe.withDefault -1, sessionEpoch = source.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
+        summaryRequest = requestSummaries "planning-summary" targets
+        overviewRequest source =
+            if family == "dependency" then requestSummaries "planning-dependency" [ ( "task_dependency", child.id ++ ":prerequisite" ) ] source
+            else if kind == "project" then Main.update (RequestProjectOverview source.selectedWorkspaceId source.sessionRequestEpoch id) source |> Tuple.first
+            else if family == "plain" then Main.update (RequestTaskOverview source.selectedWorkspaceId source.sessionRequestEpoch id) source |> Tuple.first
+            else case Helpers.prepareProjectRequest source.selectedWorkspaceId source.sessionRequestEpoch overviewTarget source of
+                Just ( request, prepared ) -> Helpers.capturePlanningRead (request.scopeKey ++ "|" ++ request.targetKey) request.targetGeneration prepared
+                Nothing -> source
+        older = if summaryOlder then summaryRequest seed else overviewRequest seed
+        newer = if summaryOlder then overviewRequest older else summaryRequest older
+        taskRollup value = let base = parent.readinessRollup in { base | inProgressSubtaskCount = value }
+        projectRollup value = let base = parentProject.readinessRollup in { base | inProgressTaskCount = value }
+        replySummary captured value current =
+            let
+                prefix = "workspace:" ++ workspaceId ++ "|navigation-summaries:"
+                exactKey = prefix ++ kind ++ ":" ++ id
+                batchKey = if Dict.member exactKey captured.webSocket.targetGenerations then Just exactKey else captured.webSocket.targetGenerations |> Dict.keys |> List.filter (\key -> String.startsWith prefix key && List.member (kind ++ ":" ++ id) (String.dropLeft (String.length prefix) key |> String.split ",")) |> List.head
+                capturedTargets = batchKey |> Maybe.map (String.dropLeft (String.length prefix) >> String.split "," >> List.filterMap (\target -> case String.split ":" target of
+                    [ targetKind, targetId ] -> Just ( targetKind, targetId )
+                    _ -> Nothing)) |> Maybe.withDefault targets
+                projects = [ { parentProject | readinessRollup = if kind == "project" then projectRollup value else parentProject.readinessRollup } ] |> List.filter (\summary -> List.member ( "project", summary.id ) capturedTargets)
+                tasks = [ { parent | readinessRollup = if kind == "task" then taskRollup value else parent.readinessRollup }, child, task "prerequisite" Nothing ] |> List.filter (\summary -> List.member ( "task", summary.id ) capturedTargets)
+            in
+            summaryReply captured (batchGuard capturedTargets captured) (List.map .id projects) (List.map .id tasks)
+                { projects = projects, tasks = tasks, missingProjectIds = [], missingTaskIds = [] } current
+        replyOverview captured value current =
+            if kind == "project" then
+                let result = Ok { project = Api.projectFromCardSummary parentProject, tasks = [], subprojects = [], readinessRollup = projectRollup value }
+                in Main.update (if family == "dependency" then CanonicalProjectOverviewFetched (guard captured) id result else GotProjectOverview (guard captured) id result) current |> Tuple.first
+            else
+                let result = Ok { task = Api.taskFromCardSummary parent, dependencies = [ { id = "dependency-row", name = "Current dependency data", status = Api.Todo } ], readinessRollup = taskRollup value }
+                    message = if family == "dependency" then CanonicalTaskReadinessFetched (guard captured) id result else if family == "canonical" then CanonicalTaskOverviewFetched (guard captured) id result else
+                        GotTaskDependencies id captured.selectedWorkspaceId captured.sessionRequestEpoch (Dict.get id captured.dependencies.taskOverviewRequests |> Maybe.withDefault { dependencyGeneration = -1, readRevision = -1 }) result
+                in Main.update message current |> Tuple.first
+        oldReply = if summaryOlder then replySummary older 0 else replyOverview older 0
+        newReply = if summaryOlder then replyOverview newer 1 else replySummary newer 1
+        completed = if newerFirst then newer |> newReply |> oldReply else newer |> oldReply |> newReply
+    in
+    { rollup = if kind == "task" then Dict.get id completed.dependencies.taskReadinessRollups |> Maybe.map .inProgressSubtaskCount else Dict.get id completed.dependencies.projectReadinessRollups |> Maybe.map .inProgressTaskCount
+    , summary = if kind == "task" then Dict.get id completed.dataLoading.taskCardSummaries |> Maybe.map (.readinessRollup >> .inProgressSubtaskCount) else Dict.get id completed.dataLoading.projectCardSummaries |> Maybe.map (.readinessRollup >> .inProgressTaskCount)
+    , dataSettled = kind /= "task" || family == "dependency" || (Dict.get id completed.dependencies.taskDependencies |> Maybe.map (List.map .id)) == Just [ "dependency-row" ] && not (Dict.get id completed.dependencies.taskDependencyLoading |> Maybe.withDefault False)
+    }
+
+
+stalePlanningMissing : String -> ( Bool, Maybe Int )
+stalePlanningMissing family =
+    let
+        parent = task "missing-parent" Nothing
+        container = project "missing-project" Nothing
+        kind = if family == "project-overview" then "project" else "task"
+        id = if kind == "project" then container.id else parent.id
+        target = (if family == "task-readiness" then "dependency-readiness:task" else family) ++ ":" ++ id
+        seed = DataLoading.mergeNavigationSummaries [ container ] [ parent ] (unfilteredSyncModel [])
+        prepared = Helpers.prepareProjectRequest seed.selectedWorkspaceId seed.sessionRequestEpoch target seed
+        run ( guard, requested ) =
+            let
+                pending = Helpers.capturePlanningRead (guard.scopeKey ++ "|" ++ guard.targetKey) guard.targetGeneration requested
+                taskRollup = parent.readinessRollup
+                projectRollup = container.readinessRollup
+                newer = DataLoading.mergeNavigationSummaries [ { container | readinessRollup = { projectRollup | inProgressTaskCount = 1 } } ] [ { parent | readinessRollup = { taskRollup | inProgressSubtaskCount = 1 } } ] pending
+                message = if family == "project-overview" then CanonicalProjectOverviewFetched guard id (Err (Http.BadStatus 404)) else if family == "task-readiness" then CanonicalTaskReadinessFetched guard id (Err (Http.BadStatus 404)) else CanonicalTaskOverviewFetched guard id (Err (Http.BadStatus 404))
+                completed = Main.update message newer |> Tuple.first
+            in
+            if kind == "project" then ( Dict.member id completed.projects, Dict.get id completed.dependencies.projectReadinessRollups |> Maybe.map .inProgressTaskCount )
+            else ( Dict.member id completed.tasks, Dict.get id completed.dependencies.taskReadinessRollups |> Maybe.map .inProgressSubtaskCount )
+    in
+    prepared |> Maybe.map run |> Maybe.withDefault ( False, Nothing )
+
+
+navigationPlanningRace : String -> Bool -> Bool -> ( Maybe Int, Maybe Int )
+navigationPlanningRace family summaryOlder newerFirst =
+    let
+        container = project "race-container" Nothing
+        parent = let base = task "race-parent" Nothing in { base | projectId = if family == "branch" then Just container.id else Nothing }
+        seeded = DataLoading.mergeNavigationSummaries [] [ parent ] (unfilteredSyncModel [ container ])
+        focus = seeded.focus
+        seed = if family == "focus" then { seeded | focus = { focus | focusedEntity = Just ( "task", parent.id ) } } else seeded
+        summaryRequest source =
+            if family == "root" then DataLoading.revalidateNavigationForFilters source |> Tuple.first
+            else if family == "branch" then paintBranch "project" workspaceId (Just container.id) source |> Tuple.first
+            else DataLoading.revalidateNavigationFocus workspaceId "task" parent.id source |> Tuple.first
+        overviewRequest source = Dependencies.update (RequestTaskOverview source.selectedWorkspaceId source.sessionRequestEpoch parent.id) source |> Tuple.first
+        older = if summaryOlder then summaryRequest seed else overviewRequest seed
+        newer = if summaryOlder then overviewRequest older else summaryRequest older
+        summary value = let rollup = parent.readinessRollup in { parent | readinessRollup = { rollup | inProgressSubtaskCount = value } }
+        replySummary captured value current =
+            if family == "root" then case captured.dataLoading.rootNavigationRequest of
+                Nothing -> current
+                Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch captured.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset
+                    (Ok { workspaceId = workspaceId, projects = { items = [ container ], hasMore = False }, tasks = { items = [ summary value ], hasMore = False } })) current |> Tuple.first
+            else if family == "branch" then case Dict.get ("project:" ++ container.id) captured.dataLoading.loadedNavigationBranches of
+                Nothing -> current
+                Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation ("project:" ++ container.id) request.filterFingerprint request.projectOffset request.taskOffset
+                    (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ summary value ], hasMore = False } })) current |> Tuple.first
+            else case captured.dataLoading.activeNavigationFocus of
+                Nothing -> current
+                Just request -> DataLoading.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "task" parent.id request.ancestorOffset
+                    (Ok { workspaceId = workspaceId, target = Api.NavigationTaskSummary (summary value), ancestors = [], ancestorsTruncated = False, nextAncestorOffset = Nothing })) current |> Tuple.first
+        replyOverview captured value current = case Dict.get parent.id captured.dependencies.taskOverviewRequests of
+            Nothing -> current
+            Just request -> Dependencies.update (GotTaskDependencies parent.id captured.selectedWorkspaceId captured.sessionRequestEpoch request
+                (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = (summary value).readinessRollup })) current |> Tuple.first
+        oldReply = if summaryOlder then replySummary older 0 else replyOverview older 0
+        newReply = if summaryOlder then replyOverview newer 1 else replySummary newer 1
+        completed = if newerFirst then newer |> newReply |> oldReply else newer |> oldReply |> newReply
+    in
+    ( Dict.get parent.id completed.dependencies.taskReadinessRollups |> Maybe.map .inProgressSubtaskCount
+    , Dict.get parent.id completed.dataLoading.taskCardSummaries |> Maybe.map (.readinessRollup >> .inProgressSubtaskCount) )
 
 
 focusDeleteRace : String -> Bool -> { absent : Bool, restarted : Bool, settled : Bool, bounded : Bool }

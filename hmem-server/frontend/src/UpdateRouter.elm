@@ -740,6 +740,9 @@ route msg model =
             Ok ( model, Cmd.none )
 
         -- Task dependencies
+        RequestTaskOverview _ _ _ ->
+            Ok (Feature.Dependencies.update msg model)
+
         GotTaskDependencies _ _ _ _ _ ->
             Ok (Feature.Dependencies.update msg model)
 

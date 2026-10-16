@@ -3418,6 +3418,20 @@ refreshViewportFor msg previous ( model, command ) =
     refreshViewportWithStatusChange statusChanged previous ( reordered, Cmd.batch [ command, membershipCommand ] )
 
 
+{-| Readiness renders from the current model and only changes geometry when its
+effective task rank changes. Every other summary field remains structural.
+-}
+summaryStructureChanged : Dict.Dict String { a | readinessRollup : rollup } -> Dict.Dict String { a | readinessRollup : rollup } -> Bool
+summaryStructureChanged before after =
+    Dict.size before /= Dict.size after
+        || Dict.foldl
+            (\id summary changed ->
+                changed || (Dict.get id before
+                    |> Maybe.map (\previous -> { summary | readinessRollup = previous.readinessRollup } /= previous)
+                    |> Maybe.withDefault True)
+            ) False after
+
+
 refreshViewportWithStatusChange : Bool -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
 refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) =
     let
@@ -3438,8 +3452,8 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
         changed =
             old.workspaceId /= model.selectedWorkspaceId || old.sessionEpoch /= model.sessionRequestEpoch
                 || old.generation /= model.dataLoading.navigationGeneration || old.projection == Nothing
-                || previous.dataLoading.projectCardSummaries /= model.dataLoading.projectCardSummaries
-                || previous.dataLoading.taskCardSummaries /= model.dataLoading.taskCardSummaries
+                || summaryStructureChanged previous.dataLoading.projectCardSummaries model.dataLoading.projectCardSummaries
+                || summaryStructureChanged previous.dataLoading.taskCardSummaries model.dataLoading.taskCardSummaries
                 || presentationOrderChanged
                 || previous.dataLoading.navigationVisibleProjectIds /= model.dataLoading.navigationVisibleProjectIds
                 || previous.dataLoading.navigationVisibleTaskIds /= model.dataLoading.navigationVisibleTaskIds
@@ -3487,11 +3501,17 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
             -- The authoritative final layout must arrive after nested layouts.
             metadataCommand = Cmd.batch [ if previous.dataLoading.backgroundAdmission /= model.dataLoading.backgroundAdmission || viewportBackgroundReady previous /= viewportBackgroundReady model then Ports.syncHierarchyViewport (viewportConfiguration model Nothing 0) else Cmd.none, command ]
         in
-        if previous.dependencies.taskDependencyLinks /= model.dependencies.taskDependencyLinks || taskStatusesChanged then
+        if previous.dependencies.taskDependencyLinks /= model.dependencies.taskDependencyLinks || taskStatusesChanged
+            || previous.dependencies.taskReadinessRollups /= model.dependencies.taskReadinessRollups
+            || previous.dependencies.projectReadinessRollups /= model.dependencies.projectReadinessRollups then
             let
                 cards = model.cards
                 viewport = cards.viewport
-                projection = viewport.projection |> Maybe.map (\cached -> { cached | taskDirectOpenDependencyCounts = directOpenDependencyCounts model.tasks model.dependencies.taskDependencyLinks })
+                projection = viewport.projection |> Maybe.map (\cached -> { cached
+                    | taskDirectOpenDependencyCounts = directOpenDependencyCounts model.tasks model.dependencies.taskDependencyLinks
+                    , taskRollups = model.dependencies.taskReadinessRollups
+                    , projectRollups = model.dependencies.projectReadinessRollups
+                    })
             in
             ( { model | cards = { cards | viewport = { viewport | projection = projection } } }, metadataCommand )
         else

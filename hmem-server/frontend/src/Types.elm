@@ -205,6 +205,26 @@ type alias CanonicalNavigationRequestGuard =
     }
 
 
+type PlanningReadiness
+    = TaskReadiness Api.TaskReadinessRollup
+    | ProjectReadiness Api.ProjectReadinessRollup
+
+
+{-| readRevision orders accepted reads; revision changes only with the payload.
+Identical replay can supersede an older response without restarting focus.
+-}
+type alias PlanningEntityAuthority =
+    { revision : Int
+    , readRevision : Int
+    , summary : Maybe Api.NavigationSummary
+    , readiness : Maybe PlanningReadiness
+    }
+
+
+type alias TaskOverviewRequest =
+    { dependencyGeneration : Int, readRevision : Int }
+
+
 type alias DataLoadingModel =
     { loadingWorkspaces : Bool
     , activeWorkspaceListLoadToken : Maybe Int
@@ -232,8 +252,9 @@ type alias DataLoadingModel =
     , navigationPresentations : Dict String NavigationPresentationState
     , projectCardSummaries : Dict String Api.ProjectCardSummary
     , taskCardSummaries : Dict String Api.TaskCardSummary
-    , navigationSummaryAuthority : Dict String { revision : Int, summary : Maybe Api.NavigationSummary }
+    , navigationSummaryAuthority : Dict String PlanningEntityAuthority
     , nextNavigationSummaryRevision : Int
+    , planningReadRequests : Dict String { generation : Int, sessionEpoch : Int, revision : Int }
     , projectCardDetailRequests : Dict String CardDetailRequest
     , taskCardDetailRequests : Dict String CardDetailRequest
     , nextCardDetailRequestId : Int
@@ -309,6 +330,7 @@ type alias NavigationPass =
 
 type alias NavigationBranchState =
     { workspaceId : String
+    , readRevision : Int
     , sessionEpoch : Int
     , generation : Int
     , filterFingerprint : String
@@ -661,6 +683,7 @@ type alias DependenciesModel =
     , taskDependencyLoading : Dict String Bool
     , taskDependencyErrors : Dict String String
     , taskDependencyRequests : Dict String DependencyPageRequest
+    , taskOverviewRequests : Dict String TaskOverviewRequest
     , taskDependencyRefreshItems : Dict String (List Api.TaskDependencySummary)
     , taskDependencyMutations : List DependencyMutationCorrelation
     , nextTaskDependencyRequestGeneration : Int
@@ -1369,7 +1392,8 @@ type Msg
     | PerformUnlinkEntity String String String
     | CancelLinkEntity
       -- Task dependencies
-    | GotTaskDependencies String (Maybe String) Int Int (Result Http.Error Api.TaskOverview)
+    | GotTaskDependencies String (Maybe String) Int TaskOverviewRequest (Result Http.Error Api.TaskOverview)
+    | RequestTaskOverview (Maybe String) Int String
     | GotTaskDependencyPage String String Int Int Int (Result Http.Error Api.TaskDependencyPage)
     | RefreshTaskDependencies String
     | LoadTaskDependencyPage String

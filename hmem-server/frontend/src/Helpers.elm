@@ -1575,6 +1575,123 @@ observationUrlBytes value =
 
 
 -- Each dispatch shares the canonical target lifetime with live revalidation.
+{-| One clock orders planning reads and accepted authority. Entity comparisons
+remain local: a request for another entity cannot supersede this response.
+-}
+allocatePlanningRead : Model -> ( Int, Model )
+allocatePlanningRead model =
+    let
+        loading = model.dataLoading
+        revision = loading.nextNavigationSummaryRevision + 1
+    in
+    ( revision, { model | dataLoading = { loading | nextNavigationSummaryRevision = revision } } )
+
+
+capturePlanningRead : String -> Int -> Model -> Model
+capturePlanningRead key generation model =
+    let
+        ( revision, issued ) = allocatePlanningRead model
+        loading = issued.dataLoading
+    in
+    { issued | dataLoading = { loading | planningReadRequests = Dict.insert key { generation = generation, sessionEpoch = model.sessionRequestEpoch, revision = revision } loading.planningReadRequests } }
+
+
+planningReadRevision : CanonicalRequestGuard -> Model -> Maybe Int
+planningReadRevision guard model =
+    Dict.get (guard.scopeKey ++ "|" ++ guard.targetKey) model.dataLoading.planningReadRequests
+        |> Maybe.andThen (\request -> if request.generation == guard.targetGeneration && request.sessionEpoch == guard.sessionEpoch then Just request.revision else Nothing)
+
+
+planningReadIsCurrent : Int -> String -> Model -> Bool
+planningReadIsCurrent revision key model =
+    Dict.get key model.dataLoading.navigationSummaryAuthority
+        |> Maybe.map (\authority -> authority.readRevision <= revision)
+        |> Maybe.withDefault True
+
+
+summaryReadiness : Api.NavigationSummary -> PlanningReadiness
+summaryReadiness summary =
+    case summary of
+        Api.NavigationTaskSummary task -> TaskReadiness task.readinessRollup
+        Api.NavigationProjectSummary project -> ProjectReadiness project.readinessRollup
+
+
+recordPlanningAuthority : Int -> String -> Maybe Api.NavigationSummary -> Maybe PlanningReadiness -> Model -> Model
+recordPlanningAuthority revision key summary readiness model =
+    if not (planningReadIsCurrent revision key model) then model
+    else
+        let
+            loading = model.dataLoading
+            previous = Dict.get key loading.navigationSummaryAuthority
+            unchanged = previous |> Maybe.map (\prior -> prior.summary == summary && prior.readiness == readiness) |> Maybe.withDefault False
+            authority = { revision = if unchanged then previous |> Maybe.map .revision |> Maybe.withDefault revision else revision, readRevision = revision, summary = summary, readiness = readiness }
+        in
+        { model | dataLoading = { loading | navigationSummaryAuthority = Dict.insert key authority loading.navigationSummaryAuthority } }
+
+
+recordPlanningSummaries : Int -> List ( String, Maybe Api.NavigationSummary ) -> Model -> Model
+recordPlanningSummaries revision entries model =
+    List.foldl (\( key, summary ) current -> recordPlanningAuthority revision key summary (Maybe.map summaryReadiness summary) current) model entries
+
+
+applyTaskReadiness : Int -> String -> Api.TaskReadinessRollup -> Model -> Model
+applyTaskReadiness revision id rollup model =
+    let key = "task:" ++ id
+    in
+    if not (planningReadIsCurrent revision key model) then model
+    else
+        let
+            dependencies = model.dependencies
+            loading = model.dataLoading
+            updateSummary value = case value of
+                Api.NavigationTaskSummary task -> Api.NavigationTaskSummary { task | readinessRollup = rollup }
+                other -> other
+            summary = Dict.get key loading.navigationSummaryAuthority |> Maybe.andThen .summary |> Maybe.map updateSummary
+            updated = { model | dependencies = { dependencies | taskReadinessRollups = Dict.insert id rollup dependencies.taskReadinessRollups }, dataLoading = { loading | taskCardSummaries = Dict.update id (Maybe.map (\task -> { task | readinessRollup = rollup })) loading.taskCardSummaries } }
+        in
+        recordPlanningAuthority revision key summary (Just (TaskReadiness rollup)) updated
+
+
+applyProjectReadiness : Int -> String -> Api.ProjectReadinessRollup -> Model -> Model
+applyProjectReadiness revision id rollup model =
+    let key = "project:" ++ id
+    in
+    if not (planningReadIsCurrent revision key model) then model
+    else
+        let
+            dependencies = model.dependencies
+            loading = model.dataLoading
+            updateSummary value = case value of
+                Api.NavigationProjectSummary project -> Api.NavigationProjectSummary { project | readinessRollup = rollup }
+                other -> other
+            summary = Dict.get key loading.navigationSummaryAuthority |> Maybe.andThen .summary |> Maybe.map updateSummary
+            updated = { model | dependencies = { dependencies | projectReadinessRollups = Dict.insert id rollup dependencies.projectReadinessRollups }, dataLoading = { loading | projectCardSummaries = Dict.update id (Maybe.map (\project -> { project | readinessRollup = rollup })) loading.projectCardSummaries } }
+        in
+        recordPlanningAuthority revision key summary (Just (ProjectReadiness rollup)) updated
+
+
+taskOverviewCmd : Model -> String -> Cmd Msg
+taskOverviewCmd model taskId =
+    ElmTask.perform identity (ElmTask.succeed (RequestTaskOverview model.selectedWorkspaceId model.sessionRequestEpoch taskId))
+
+
+applyMissingPlanningEntity : Int -> String -> String -> Model -> Model
+applyMissingPlanningEntity revision kind id model =
+    let key = kind ++ ":" ++ id
+    in
+    if not (planningReadIsCurrent revision key model) then model
+    else
+        let
+            loading = model.dataLoading
+            dependencies = model.dependencies
+            removed = if kind == "task" then
+                { model | tasks = Dict.remove id model.tasks, dataLoading = { loading | taskCardSummaries = Dict.remove id loading.taskCardSummaries, navigationVisibleTaskIds = Set.remove id loading.navigationVisibleTaskIds }, dependencies = { dependencies | taskReadinessRollups = Dict.remove id dependencies.taskReadinessRollups } }
+                else
+                { model | projects = Dict.remove id model.projects, dataLoading = { loading | projectCardSummaries = Dict.remove id loading.projectCardSummaries, navigationVisibleProjectIds = Set.remove id loading.navigationVisibleProjectIds }, dependencies = { dependencies | projectReadinessRollups = Dict.remove id dependencies.projectReadinessRollups } }
+        in
+        recordPlanningAuthority revision key Nothing Nothing removed
+
+
 projectRequestIsCurrent : CanonicalRequestGuard -> Model -> Bool
 projectRequestIsCurrent guard model =
     model.auth.status == AuthReady
@@ -1604,7 +1721,8 @@ prepareProjectRequest workspace epoch target model =
 beginProjectRequest : Maybe String -> Int -> String -> (CanonicalRequestGuard -> Cmd Msg) -> Model -> ( Model, Cmd Msg )
 beginProjectRequest workspace epoch target makeCommand model =
     case prepareProjectRequest workspace epoch target model of
-        Just ( guard, requested ) -> ( requested, makeCommand guard )
+        Just ( guard, requested ) ->
+            ( if String.startsWith "project-overview:" target then capturePlanningRead (guard.scopeKey ++ "|" ++ guard.targetKey) guard.targetGeneration requested else requested, makeCommand guard )
         Nothing -> ( model, Cmd.none )
 
 

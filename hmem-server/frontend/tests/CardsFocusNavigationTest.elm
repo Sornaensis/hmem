@@ -103,15 +103,18 @@ suite =
                 cards = seeded.cards
                 websocket = seeded.webSocket
                 source = rootPaint { seeded | cards = { cards | collapsedNodes = Dict.singleton "task-parent" True }, webSocket = { websocket | targetGenerations = Dict.singleton ("workspace:" ++ workspaceId ++ "|task:parent") 0 } }
+                    |> Helpers.capturePlanningRead ("workspace:" ++ workspaceId ++ "|task:parent") 0
                 guard =
                     { scopeKey = "workspace:" ++ workspaceId, targetKey = "task:parent", targetGeneration = 0
                     , sessionEpoch = source.sessionRequestEpoch, routeWorkspace = Just workspaceId
                     , audienceId = source.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault ""
                     }
                 apply request count current =
-                    routed (CanonicalTaskReadinessFetched request parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = { emptyRollup | inProgressSubtaskCount = count } })) current
+                    routed (CanonicalTaskReadinessFetched request parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = { emptyRollup | inProgressSubtaskCount = count, openSubtaskCount = count } })) current
                 running = apply guard 1 source
                 stillRunning = apply guard 2 running
+                dependencies = stillRunning.dependencies
+                cacheCleared = Cards.refreshViewport stillRunning ( { stillRunning | dependencies = { dependencies | taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty } }, Cmd.none ) |> Tuple.first
                 stopped = apply guard 0 stillRunning
                 stale = apply { guard | sessionEpoch = guard.sessionEpoch - 1 } 1 stopped
                 rows current = Array.toList current.cards.viewport.index.keys |> List.filter (String.startsWith "task:")
@@ -121,6 +124,10 @@ suite =
                 , \_ -> rows running |> Expect.equal [ "task:parent", "task:todo" ]
                 , \_ -> rows stopped |> Expect.equal [ "task:todo", "task:parent" ]
                 , \_ -> stillRunning.cards.viewport.revision |> Expect.equal running.cards.viewport.revision
+                , \_ -> (stillRunning.cards.viewport.projection |> Maybe.andThen (\projection -> Dict.get parent.id projection.taskRollups) |> Maybe.map .inProgressSubtaskCount) |> Expect.equal (Just 2)
+                , \_ -> (Helpers.taskReadinessForPresentation cacheCleared parent.id |> Maybe.map .inProgressSubtaskCount) |> Expect.equal (Just 2)
+                , \_ -> cacheCleared.cards.viewport.revision |> Expect.equal stillRunning.cards.viewport.revision
+                , \_ -> Cards.viewProjectsTree workspaceId cacheCleared |> Query.fromHtml |> Query.find [ Selector.id "entity-parent" ] |> Query.has [ Selector.class "card-status-in_progress", Selector.text "2 subtasks" ]
                 , \_ -> stale.cards.viewport.revision |> Expect.equal stopped.cards.viewport.revision
                 , \_ -> rows stale |> Expect.equal (rows stopped)
                 , \_ -> Dict.size running.tasks |> Expect.equal 2
@@ -135,6 +142,7 @@ suite =
                 loading = seeded.dataLoading
                 socket = seeded.webSocket
                 source = { seeded | dataLoading = { loading | rootNavigationRequest = Maybe.map (\request -> { request | taskHasMore = True }) loading.rootNavigationRequest }, webSocket = { socket | targetGenerations = Dict.singleton ("workspace:" ++ workspaceId ++ "|task:unloaded-parent") 1 } }
+                    |> Helpers.capturePlanningRead ("workspace:" ++ workspaceId ++ "|task:unloaded-parent") 1
                 guard = { scopeKey = "workspace:" ++ workspaceId, targetKey = "task:unloaded-parent", targetGeneration = 1, sessionEpoch = source.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = source.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "" }
                 overview = { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = parent.readinessRollup }
                 check msg =

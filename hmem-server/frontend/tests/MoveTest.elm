@@ -44,7 +44,7 @@ suite =
             Expect.equal ( 4, Nothing ) ( Dict.size reopened.move.admissions, settled.move.dialog |> Maybe.andThen (.branches >> Dict.get "" >> Maybe.andThen .error) )
         , test "shared physical budget blocks picker admission when main hierarchy owns four slots" <| \_ ->
             let
-                sample = { workspaceId = "ws", sessionEpoch = 0, generation = 0, filterFingerprint = "", projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False, projectHasMore = False, taskHasMore = False, projectCardCount = 0, taskCardCount = 0, projectRequestPending = True, taskRequestPending = False }
+                sample = { workspaceId = "ws", readRevision = 0, sessionEpoch = 0, generation = 0, filterFingerprint = "", projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False, projectHasMore = False, taskHasMore = False, projectCardCount = 0, taskCardCount = 0, projectRequestPending = True, taskRequestPending = False }
                 loading = base.dataLoading
                 opened = step (OpenMove "task" "child") { base | dataLoading = { loading | navigationAdmissions = Dict.fromList (List.range 1 4 |> List.map (\n -> ( String.fromInt n, sample ))) } }
             in
@@ -125,7 +125,7 @@ suite =
                 move = opened.move
                 waiting = { opened | move = { move | admissions = Dict.empty, dialog = move.dialog |> Maybe.map (\d -> { d | focusPending = Nothing, branches = Dict.empty }) } }
                 loading = waiting.dataLoading
-                sample = { workspaceId = "ws", sessionEpoch = 0, generation = 0, filterFingerprint = "", projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False, projectHasMore = False, taskHasMore = False, projectCardCount = 0, taskCardCount = 0, projectRequestPending = True, taskRequestPending = False }
+                sample = { workspaceId = "ws", readRevision = 0, sessionEpoch = 0, generation = 0, filterFingerprint = "", projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False, projectHasMore = False, taskHasMore = False, projectCardCount = 0, taskCardCount = 0, projectRequestPending = True, taskRequestPending = False }
                 occupied = { waiting | dataLoading = { loading | navigationAdmissions = Dict.fromList (List.range 1 4 |> List.map (\n -> ( String.fromInt n, sample ))) } }
                 full = Move.reconcile ( occupied, Cmd.none ) |> Tuple.first
                 releasedLoading = full.dataLoading

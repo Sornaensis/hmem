@@ -241,7 +241,7 @@ suite =
                             (GotTaskDependencies dependentId
                                 base.selectedWorkspaceId
                                 base.sessionRequestEpoch
-                                base.dependencies.nextTaskDependencyRequestGeneration
+                                { dependencyGeneration = base.dependencies.nextTaskDependencyRequestGeneration, readRevision = base.dataLoading.nextNavigationSummaryRevision }
                                 (Ok
                                     { task = task dependentId "Current task" Api.Todo
                                     , dependencies = oldItems
@@ -249,7 +249,7 @@ suite =
                                     }
                                 )
                             )
-                            base
+                            (registerLegacyOverview base)
                             |> Tuple.first
 
                     afterEvent =
@@ -848,7 +848,7 @@ suite =
                             (GotTaskDependencies dependentId
                                 base.selectedWorkspaceId
                                 base.sessionRequestEpoch
-                                overviewGeneration
+                                { dependencyGeneration = overviewGeneration, readRevision = base.dataLoading.nextNavigationSummaryRevision }
                                 (Ok
                                     { task = task dependentId "Current task" Api.Todo
                                     , dependencies = oldItems
@@ -856,7 +856,7 @@ suite =
                                     }
                                 )
                             )
-                            base
+                            (registerLegacyOverview base)
                             |> Tuple.first
 
                     afterEvent =
@@ -864,7 +864,7 @@ suite =
                             |> Tuple.first
 
                     afterOldOverview =
-                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch overviewGeneration oldOverviewResult) afterEvent
+                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch { dependencyGeneration = overviewGeneration, readRevision = base.dataLoading.nextNavigationSummaryRevision } oldOverviewResult) afterEvent
                             |> Tuple.first
 
                     afterFirstPage =
@@ -874,7 +874,7 @@ suite =
                             |> Tuple.first
 
                     afterOldDuringAccumulator =
-                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch overviewGeneration oldOverviewResult) afterFirstPage
+                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch { dependencyGeneration = overviewGeneration, readRevision = base.dataLoading.nextNavigationSummaryRevision } oldOverviewResult) afterFirstPage
                             |> Tuple.first
 
                     afterFinalPage =
@@ -884,14 +884,14 @@ suite =
                             |> Tuple.first
 
                     afterOldFollowingCompletion =
-                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch overviewGeneration oldOverviewResult) afterFinalPage
+                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch { dependencyGeneration = overviewGeneration, readRevision = base.dataLoading.nextNavigationSummaryRevision } oldOverviewResult) afterFinalPage
                             |> Tuple.first
 
                     afterRouteReset =
                         Route.handleUrlChange { url | path = "/audit" } overviewLoaded |> Tuple.first
 
                     afterOldFollowingReset =
-                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch overviewGeneration oldOverviewResult) afterRouteReset
+                        Dependencies.update (GotTaskDependencies dependentId base.selectedWorkspaceId base.sessionRequestEpoch { dependencyGeneration = overviewGeneration, readRevision = base.dataLoading.nextNavigationSummaryRevision } oldOverviewResult) afterRouteReset
                             |> Tuple.first
                 in
                 Expect.equal
@@ -1124,7 +1124,7 @@ suite =
                             (GotTaskDependencies dependentId
                                 (Just workspaceId)
                                 before.sessionRequestEpoch
-                                overviewGeneration
+                                { dependencyGeneration = overviewGeneration, readRevision = before.dataLoading.nextNavigationSummaryRevision }
                                 (Ok
                                     { task = task dependentId "Late task" Api.Todo
                                     , dependencies = [ { id = "late-dependency", name = "Late dependency", status = Api.Todo } ]
@@ -1790,3 +1790,10 @@ flags =
 url : Url.Url
 url =
     { protocol = Url.Https, host = "app.example", port_ = Nothing, path = "/workspace/workspace-1", query = Nothing, fragment = Nothing }
+
+
+registerLegacyOverview : Model -> Model
+registerLegacyOverview source =
+    let dependencies = source.dependencies
+        request = { dependencyGeneration = dependencies.nextTaskDependencyRequestGeneration, readRevision = source.dataLoading.nextNavigationSummaryRevision }
+    in { source | dependencies = { dependencies | taskOverviewRequests = Dict.insert dependentId request dependencies.taskOverviewRequests } }

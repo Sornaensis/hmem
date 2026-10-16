@@ -259,7 +259,7 @@ suite =
                 let
                     loading = lifecycleModel.dataLoading
                     complete =
-                        { workspaceId = "workspace-a", sessionEpoch = 0, generation = 0, filterFingerprint = ""
+                        { workspaceId = "workspace-a", readRevision = 0, sessionEpoch = 0, generation = 0, filterFingerprint = ""
                         , projectOffset = 0, taskOffset = 0, inFlight = False, succeeded = True
                         , projectHasMore = False, taskHasMore = False, projectCardCount = 0, taskCardCount = 0
                         , projectRequestPending = False, taskRequestPending = False
@@ -302,7 +302,7 @@ suite =
                 let
                     loading = lifecycleModel.dataLoading
                     request =
-                        { workspaceId = "workspace-a", sessionEpoch = 0, generation = 0, filterFingerprint = ""
+                        { workspaceId = "workspace-a", readRevision = 0, sessionEpoch = 0, generation = 0, filterFingerprint = ""
                         , projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False
                         , projectHasMore = True, taskHasMore = True, projectCardCount = 0, taskCardCount = 0
                         , projectRequestPending = False, taskRequestPending = False

@@ -349,7 +349,7 @@ refreshReadinessCaches model =
     Cmd.batch
         [ model.dependencies.taskDependencies
             |> Dict.keys
-            |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration))
+            |> List.map (\taskId -> Helpers.taskOverviewCmd model taskId)
             |> Cmd.batch
         , model.dependencies.projectReadinessRollups
             |> Dict.keys

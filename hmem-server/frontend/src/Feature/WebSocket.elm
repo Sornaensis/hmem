@@ -235,10 +235,9 @@ updateRaw msg model =
                         ( { model
                             | dependencies =
                                 { completeDependencies
-                                    | taskReadinessRollups = Dict.insert taskId overview.readinessRollup completeDependencies.taskReadinessRollups
-                                    , taskDependencyLinks = links ++ retained
+                                    | taskDependencyLinks = links ++ retained
                                 }
-                          }
+                          } |> (\updated -> Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyTaskReadiness revision taskId overview.readinessRollup updated) |> Maybe.withDefault updated)
                         , Cmd.none
                         )
 
@@ -256,7 +255,7 @@ updateRaw msg model =
                                     | taskReadinessRollups = Dict.remove taskId dependencies.taskReadinessRollups
                                     , taskDependencyLinks = List.filter (\link -> link.taskId /= taskId && link.dependsOnId /= taskId) dependencies.taskDependencyLinks
                                 }
-                          }
+                          } |> (\updated -> Helpers.planningReadRevision guard model |> Maybe.map (\revision -> if Helpers.planningReadIsCurrent revision ("task:" ++ taskId) model then Helpers.applyMissingPlanningEntity revision "task" taskId updated else model) |> Maybe.withDefault model)
                         , Cmd.none
                         )
 
@@ -275,7 +274,7 @@ updateRaw msg model =
                                 dependencies =
                                     model.dependencies
                             in
-                            ( { model | dependencies = { dependencies | taskReadinessRollups = Dict.insert taskId overview.readinessRollup dependencies.taskReadinessRollups } }, Cmd.none )
+                            ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyTaskReadiness revision taskId overview.readinessRollup model) |> Maybe.withDefault model, Cmd.none )
 
                         else
                             canonicalHttpFailure guard (Http.BadBody "Task overview identity did not match the readiness request") model
@@ -285,7 +284,7 @@ updateRaw msg model =
                             dependencies =
                                 model.dependencies
                         in
-                        ( { model | dependencies = { dependencies | taskReadinessRollups = Dict.remove taskId dependencies.taskReadinessRollups } }, Cmd.none )
+                        ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyMissingPlanningEntity revision "task" taskId model) |> Maybe.withDefault model, Cmd.none )
 
                     Err error ->
                         canonicalHttpFailure guard error model
@@ -301,14 +300,14 @@ updateRaw msg model =
                             dependencies =
                                 model.dependencies
                         in
-                        ( { model | dependencies = { dependencies | projectReadinessRollups = Dict.insert projectId overview.readinessRollup dependencies.projectReadinessRollups } }, Cmd.none )
+                        ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyProjectReadiness revision projectId overview.readinessRollup model) |> Maybe.withDefault model, Cmd.none )
 
                     Err (Http.BadStatus 404) ->
                         let
                             dependencies =
                                 model.dependencies
                         in
-                        ( { model | dependencies = { dependencies | projectReadinessRollups = Dict.remove projectId dependencies.projectReadinessRollups } }, Cmd.none )
+                        ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyMissingPlanningEntity revision "project" projectId model) |> Maybe.withDefault model, Cmd.none )
 
                     Err error ->
                         canonicalHttpFailure guard error model
@@ -350,15 +349,25 @@ updateRaw msg model =
                                     in
                                     Dict.get key guard.entityGenerations /= Nothing && Dict.get key guard.entityGenerations == Dict.get key model.webSocket.targetGenerations
 
+                                currentMissing kind entityId =
+                                    currentEntity kind entityId && (navigationSummaryReadRevision guard kind entityId model |> Maybe.map (\revision -> Helpers.planningReadIsCurrent revision (kind ++ ":" ++ entityId) model) |> Maybe.withDefault False)
+
                                 currentSummaries =
                                     { projects = List.filter (\summary -> currentEntity "project" summary.id) summaries.projects
                                     , tasks = List.filter (\summary -> currentEntity "task" summary.id) summaries.tasks
-                                    , missingProjectIds = List.filter (currentEntity "project") summaries.missingProjectIds
-                                    , missingTaskIds = List.filter (currentEntity "task") summaries.missingTaskIds
+                                    , missingProjectIds = List.filter (currentMissing "project") summaries.missingProjectIds
+                                    , missingTaskIds = List.filter (currentMissing "task") summaries.missingTaskIds
                                     }
 
                                 merged =
-                                    Feature.DataLoading.mergeNavigationSummaries currentSummaries.projects currentSummaries.tasks model
+                                    let
+                                        mergeProject summary current =
+                                            navigationSummaryReadRevision guard "project" summary.id model
+                                                |> Maybe.map (\revision -> Feature.DataLoading.mergeNavigationSummariesAt revision [ summary ] [] current) |> Maybe.withDefault current
+                                        mergeTask summary current =
+                                            navigationSummaryReadRevision guard "task" summary.id model
+                                                |> Maybe.map (\revision -> Feature.DataLoading.mergeNavigationSummariesAt revision [] [ summary ] current) |> Maybe.withDefault current
+                                    in List.foldl mergeTask (List.foldl mergeProject model currentSummaries.projects) currentSummaries.tasks
 
                                 dependencies =
                                     merged.dependencies
@@ -404,8 +413,11 @@ updateRaw msg model =
                                             }
                                     }
                             in
+                            let
+                                missing kind id current = navigationSummaryReadRevision guard kind id model |> Maybe.map (\revision -> Helpers.applyMissingPlanningEntity revision kind id current) |> Maybe.withDefault current
+                            in
                             deferMoveNavigation (Feature.DataLoading.revalidateNavigationForChangedSummaries model currentSummaries)
-                                (Feature.DataLoading.markMissingNavigationSummaries currentSummaries.missingProjectIds currentSummaries.missingTaskIds updated)
+                                (List.foldl (missing "task") (List.foldl (missing "project") updated currentSummaries.missingProjectIds) currentSummaries.missingTaskIds)
 
                         else
                             canonicalHttpFailure guard.request (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model
@@ -1415,7 +1427,8 @@ requestCanonical scope targetKey makeCommand accumulated model =
                 updated =
                     updateWebSocket (\webSocket -> { webSocket | targetGenerations = Dict.insert target generation webSocket.targetGenerations }) model
             in
-            ( updated, Cmd.batch [ accumulated, makeCommand guard ] )
+            ( if List.any (\prefix -> String.startsWith prefix targetKey) [ "task-overview:", "dependency-readiness:task:", "project-overview:" ] then Helpers.capturePlanningRead target generation updated else updated
+            , Cmd.batch [ accumulated, makeCommand guard ] )
 
 
 requestEntity : ChangeStream.Scope -> String -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
@@ -1524,7 +1537,11 @@ requestNavigationSummaryBatches scope targets model =
                 targetKey =
                     "navigation-summaries:" ++ String.join "," (List.map (\( entityType, entityId ) -> entityType ++ ":" ++ entityId) batch)
                 entityModel =
-                    List.foldl (\( entityType, entityId ) currentModel -> advanceCanonicalTarget scope ("navigation-summary:" ++ entityType ++ ":" ++ entityId) currentModel) current batch
+                    List.foldl (\( entityType, entityId ) currentModel ->
+                        let target = "navigation-summary:" ++ entityType ++ ":" ++ entityId
+                            key = ChangeStream.scopeKey scope ++ "|" ++ target
+                            advanced = advanceCanonicalTarget scope target currentModel
+                        in Helpers.capturePlanningRead key (Dict.get key advanced.webSocket.targetGenerations |> Maybe.withDefault 0) advanced) current batch
 
                 entityGenerations =
                     batch |> List.filterMap (\( entityType, entityId ) ->
@@ -1563,6 +1580,15 @@ requestNavigationSummaryBatches scope targets model =
 requestTaskOverview : ChangeStream.Scope -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
 requestTaskOverview scope taskId accumulated model =
     requestCanonical scope ("task-overview:" ++ taskId) (\guard -> Api.fetchTaskOverview model.flags.apiUrl taskId (CanonicalTaskOverviewFetched guard taskId)) accumulated model
+
+
+navigationSummaryReadRevision : CanonicalNavigationRequestGuard -> String -> String -> Model -> Maybe Int
+navigationSummaryReadRevision guard kind id model =
+    let
+        request = guard.request
+        target = "navigation-summary:" ++ kind ++ ":" ++ id
+    in
+    Helpers.planningReadRevision { request | targetKey = target, targetGeneration = Dict.get (request.scopeKey ++ "|" ++ target) guard.entityGenerations |> Maybe.withDefault -1 } model
 
 
 requestTaskReadiness : ChangeStream.Scope -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
@@ -1891,7 +1917,7 @@ applyChangeEvent event model =
             in
             ( patchedModel
             , Cmd.batch
-                [ Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration)
+                [ Helpers.taskOverviewCmd model taskId
                 , refreshTaskReadinessCaches patchedModel
                 , refreshProjectReadinessCaches patchedModel
                 , reloadCmd
@@ -2000,7 +2026,7 @@ refreshCachedEntityData model =
         dependencyCmds =
             model.dependencies.taskDependencies
                 |> Dict.keys
-                |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration))
+                |> List.map (\taskId -> Helpers.taskOverviewCmd model taskId)
 
         projectReadinessCmds =
             model.dependencies.projectReadinessRollups
@@ -2028,7 +2054,7 @@ refreshTaskReadinessCaches : Model -> Cmd Msg
 refreshTaskReadinessCaches model =
     model.dependencies.taskDependencies
         |> Dict.keys
-        |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration))
+        |> List.map (\taskId -> Helpers.taskOverviewCmd model taskId)
         |> Cmd.batch
 
 

@@ -87,8 +87,17 @@ test('production collapsed audit row action has stable eligibility/defaults and 
     await h.page.locator('#audit-diff-row-event-parent').waitFor()
     for (const surface of ['workspace', 'global']) {
       if (surface === 'global') {
+        const globalSession = h.page.waitForResponse(response => {
+          const url = new URL(response.url())
+          return url.pathname === '/api/v1/session' && !url.searchParams.has('workspace_id')
+        })
+        const globalAudit = h.page.waitForResponse(response => {
+          const url = new URL(response.url())
+          return url.pathname === '/api/v1/audit' && !url.searchParams.has('workspace_id')
+        })
         await h.page.getByRole('link', { name: 'Audit Log', exact: true }).click()
-        await h.page.locator('#audit-diff-row-event-parent').waitFor()
+        await Promise.all([globalSession, globalAudit])
+        await h.page.locator('.page.audit-log-view #audit-diff-row-event-parent').waitFor()
       }
       assert.equal(await h.page.locator('.audit-row-diff').count(), 4)
       for (const id of ['status-only', 'created', 'deleted', 'observation']) assert.equal(await h.page.locator('#audit-diff-row-' + id).count(), 0)

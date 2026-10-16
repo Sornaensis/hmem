@@ -147,46 +147,8 @@ required by the backup. See PostgreSQL's [pg_dump](https://www.postgresql.org/do
 and [pg_restore](https://www.postgresql.org/docs/17/app-pgrestore.html) references
 for other backup/restore needs.
 
-To run bundled migrations separately during maintenance:
-
-```bash
-docker compose run --rm migrate
-```
-
-## V038 maintenance upgrade
-
-Follow the [coordinated upgrade procedure](README.md#upgrading-across-v038),
-including a named backup owner, an explicit finite UTC expiry/disposition, and
-retained compatible rollback artifacts. Keep the previous image under a distinct
-tag before rebuilding a reused tag. Stop old application/MCP writers while
-leaving PostgreSQL available, then take and verify the pre-upgrade backup above.
-Include separately launched MCP clients and prevent automatic old-service restart.
-For the standard Compose stack:
-
-```bash
-docker compose --profile mcp stop hmem mcp
-# Take and verify the backup before continuing.
-docker compose build hmem migrate mcp
-docker compose run --rm migrate
-docker compose --profile mcp up -d hmem mcp
-```
-
-Run the final command only after migration succeeds. If you do not operate the
-MCP sidecar, omit `mcp` from stop/build/start. All three services use the same
-selected image; the migration command dispatches `hmem-ctl migrate` against
-bundled `/opt/hmem/migrations`. Server startup also migrates before serving.
-Refresh external MCP processes/tool discovery and browser assets with the matched
-release. A failed V038 leaves its schema/snapshot changes and ledger entry
-uncommitted; diagnose before retrying. Compatible snapshots remain valid, while
-retired due-bearing full-workspace snapshots require fresh resync.
-
-For rollback, keep writers stopped and use the restore commands above through
-the successful `pg_restore` step. Select the previous compatible image/binaries
-before running their final restart command. Restarting the new image immediately
-after restoration would apply V038 again. No automatic down migration reconstructs
-removed deadlines. Dispose
-of host and container temporary backup copies under the named owner's recorded
-expiry and existing backup obligations.
+For schema changes, use the [upgrade reference](docs/reference/upgrades.md),
+including its matched-release and backup requirements.
 
 ## Optional vectors and GPU setup
 
@@ -254,17 +216,6 @@ the published hmem server. Credential choices and precedence are in
 [authentication](auth.md).
 
 ## Troubleshooting
-
-Before upgrading an existing database, take a restorable backup and stop older
-application writers. Startup applies migrations before serving. V036 makes each
-existing paused project an independent pause, pauses its eligible open descendants,
-and blocks their unfinished tasks, including legacy running work. Done/cancelled
-tasks, manual blocks, deleted rows, and frozen closed branches keep their history.
-Deleted or frozen legacy pauses retain separate provenance until an authorized
-restore, move, or ancestor reopening can materialize it. Ordinary new pause
-requests still refuse running descendants. If migration fails, its data changes,
-compatibility metadata, events, and version registration roll back together;
-resolve the reported failure before retrying startup.
 
 | Problem | Check |
 | --- | --- |

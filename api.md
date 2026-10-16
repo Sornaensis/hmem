@@ -1,4 +1,4 @@
-# API guide
+# API reference
 
 The HTTP API is available at `/api/v1` on your hmem server, normally
 `http://127.0.0.1:8420` for a local installation. Requests and responses use JSON.
@@ -85,7 +85,7 @@ Read `GET /api/v1/workspaces/{workspaceId}/planning-counts` with workspace read
 access for `{ "open_projects": 3, "open_tasks": 12 }`. These authoritative totals
 count each live active/paused project and todo/in_progress/blocked task once,
 including unassigned tasks and subtasks. Deleted and terminal rows are excluded.
-Both counts share one database statement snapshot and are independent of loaded
+Both counts use one consistent snapshot and are independent of loaded
 navigation pages, filters and overlapping project subtree rollups. Unauthenticated,
 forbidden and missing/deleted workspace requests retain the usual 401/403/404 behavior.
 
@@ -157,8 +157,8 @@ An update that changed only due fields returns HTTP 409 before any write:
 Historical payloads remain inspectable. Existing authorization, create/delete and
 soft-delete replay behavior still applies; Observation reversion remains
 unsupported. Retired due-bearing snapshot tokens require a fresh canonical
-resync; see [V038 storage behavior](database.md#due-field-removal-v038) and the
-[upgrade procedure](README.md#upgrading-across-v038).
+resync; see [V038 storage behavior](docs/reference/schema.md#due-field-removal-v038) and the
+[upgrade procedure](docs/reference/upgrades.md#upgrading-across-v038).
 
 ## Create an Observation
 

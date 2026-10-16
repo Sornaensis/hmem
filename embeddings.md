@@ -1,8 +1,7 @@
 # Embeddings and similarity search
 
-Embeddings are optional. hmem works without them. pgvector stores and compares
-vectors; it does not generate them. You can supply vectors yourself or opt into
-automatic GPU vectorization.
+Use optional embeddings for similarity search. Supply vectors yourself or opt
+into automatic GPU vectorization; ordinary search works without them.
 
 ## Enable pgvector
 
@@ -66,20 +65,8 @@ configured target.
    model revision and input formatting. Export selects missing vectors and those
    in another space. Add `--all` when regenerating the complete workspace, such as
    after changing models. Omitting the space selects `hmem:legacy-manual:v1`.
-2. Have your external producer read each exported Observation and write one JSON
-   result per line to `embedding-results.ndjson`. Each result must contain
-   **only** these fields:
-
-   | Field | Value |
-   | --- | --- |
-   | `format_version` | Preserve the exported value (`2`). |
-   | `observation_id`, `workspace_id` | Preserve the exported IDs. |
-   | `content_fingerprint`, `space_fingerprint` | Preserve both exported values. |
-   | `embedding` | Exactly 1536 finite numbers generated from the exported input. |
-
-   Do not copy the export-only `git_sha`, `subjects`, or `content` fields into
-   result records, or recalculate the fingerprint. Duplicate Observation IDs,
-   lines over 1 MiB, and inputs over 100000 records are rejected.
+2. Generate vectors externally from the exported inputs. Write one JSON result
+   per line using the [embedding file format](docs/reference/embedding-files.md).
 3. Import the results:
 
    ```bash
@@ -116,7 +103,7 @@ Generate query vectors externally, then call REST
 `POST /api/v1/observations/similar` or MCP `observation_similar`. There is no
 raw-text query embedding endpoint. Supply the matching `space_fingerprint`;
 omitting it searches only the legacy manual space. Explicit null is invalid.
-See [the API guide](api.md) for authentication and OpenAPI request details.
+See [the API reference](api.md) for authentication and OpenAPI request details.
 
 Content writes, including same-text re-audits, clear an Observation's stored
 vector. It stays out of similarity results until a new vector is stored. A

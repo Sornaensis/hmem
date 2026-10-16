@@ -7,6 +7,8 @@ import Expect
 import Feature.Timeline
 import Helpers
 import Http
+import Json.Decode as Decode
+import TimestampDisplay
 import Test exposing (..)
 import Test.Html.Query as Query
 import Test.Html.Event as Event
@@ -18,7 +20,64 @@ import Url
 suite : Test
 suite =
     describe "lifecycle line graph helpers"
-        [ test "single buckets are centered and multi-bucket coordinates remain in bounds" <|
+        [ test "open inventory decoder distinguishes available, unknown, future and older payloads" <| \_ ->
+            Expect.all
+                [ \_ -> decodeOpenFields "" |> Expect.equal (Ok [ ( Nothing, Nothing, "history_unavailable" ) ])
+                , \_ -> decodeOpenFields ",\"open_counts\":{\"projects\":2,\"tasks\":6},\"open_as_of\":\"2026-01-01T12:00:00Z\",\"open_status\":\"available\"" |> Expect.equal (Ok [ ( Just { projects = 2, tasks = 6 }, Just "2026-01-01T12:00:00Z", "available" ) ])
+                , \_ -> decodeOpenFields ",\"open_counts\":null,\"open_as_of\":\"2026-01-02T00:00:00Z\",\"open_status\":\"history_unavailable\"" |> Expect.equal (Ok [ ( Nothing, Just "2026-01-02T00:00:00Z", "history_unavailable" ) ])
+                , \_ -> decodeOpenFields ",\"open_counts\":null,\"open_as_of\":null,\"open_status\":\"future\"" |> Expect.equal (Ok [ ( Nothing, Nothing, "future" ) ])
+                , \_ -> decodeOpenFields ",\"open_counts\":{\"projects\":-1,\"tasks\":6}" |> Expect.err
+                ] ()
+        , test "stock stacking uses its own total domain with finite zero and extreme geometries" <| \_ ->
+            let
+                normal = Feature.Timeline.openBarGeometry 8 { projects = 2, tasks = 6 }
+                zero = Feature.Timeline.openBarGeometry 0 { projects = 0, tasks = 0 }
+                huge = Feature.Timeline.openBarGeometry 4000000 { projects = 1000000, tasks = 3000000 }
+                unavailable = { stockBucket | openStatus = "history_unavailable" }
+            in
+            Expect.all
+                [ \_ -> normal |> Expect.equal { projectsY = 187, projectsHeight = 49, tasksY = 40, tasksHeight = 147, total = 8 }
+                , \_ -> zero |> Expect.equal { projectsY = 236, projectsHeight = 0, tasksY = 236, tasksHeight = 0, total = 0 }
+                , \_ -> List.all (\value -> not (isNaN value || isInfinite value) && value >= 0) [ huge.projectsY, huge.projectsHeight, huge.tasksY, huge.tasksHeight ] |> Expect.equal True
+                , \_ -> List.map Feature.Timeline.openChartMaximum [ [], [ unavailable ], [ stockBucket ], [ stockBucket, { stockBucket | openCounts = Just { projects = 1000000, tasks = 3000000 } } ] ] |> Expect.equal [ 0, 0, 8, 4000000 ]
+                ] ()
+        , test "pointer hover wins over focus and blur does not erase a different hovered bar" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                base = timelineModel { initial | histogramBuckets = [ stockBucket, stockBucket ] }
+                focused = Feature.Timeline.update (FocusTimelineOpenBar (Just 0)) base |> Tuple.first
+                hovered = Feature.Timeline.update (HoverTimelineOpenBar (Just 1)) focused |> Tuple.first
+                blurred = Feature.Timeline.update (FocusTimelineOpenBar Nothing) hovered |> Tuple.first
+                left = Feature.Timeline.update (HoverTimelineOpenBar Nothing) blurred |> Tuple.first
+            in
+            Expect.equal [ Just 0, Just 1, Just 1, Nothing ] (List.map (.timeline >> Feature.Timeline.activeOpenBar) [ focused, hovered, blurred, left ])
+        , test "accepted bucket data and changed controls reset interaction while stale data cannot do so" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                request = { workspaceId = "workspace-1", since = stockBucket.bucketStart, until = stockBucket.bucketEnd, bucket = "day" }
+                identity = { requestId = 1, refreshGeneration = 0, refreshEpoch = 0 }
+                base = timelineModel { initial | histogramBuckets = [ stockBucket ], histogramActiveRequest = Just request, histogramActiveIdentity = Just identity, chartBarHover = Just 0, chartBarFocus = Just 0 }
+                response = { workspaceId = "workspace-1", since = request.since, until = request.until, bucket = "day", buckets = [ stockBucket ], nextSince = Nothing }
+                accepted = Feature.Timeline.update (GotWorkspaceTimelineBuckets identity request (Ok response)) base |> Tuple.first
+                stale = Feature.Timeline.update (GotWorkspaceTimelineBuckets { identity | requestId = 99 } request (Ok response)) base |> Tuple.first
+                changed = Feature.Timeline.update (SetTimelineHistogramBucket "week") base |> Tuple.first
+            in
+            Expect.equal [ Nothing, Just 0, Nothing ] (List.map (.timeline >> Feature.Timeline.activeOpenBar) [ accepted, stale, changed ])
+        , test "line filters leave stock bars, RHS and semantic inventory available" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                timeline = { initial | histogramBuckets = [ stockBucket ], chartActions = Dict.map (\_ _ -> False) initial.chartActions, chartSeries = { projects = False, tasks = False, subtasks = False, observations = False } }
+                rendered = Feature.Timeline.viewTimelineHistogram TimestampDisplay.empty timeline |> Query.fromHtml
+                partial = { stockBucket | openAsOf = Just "2026-01-01T12:00:00Z" }
+            in
+            Expect.all
+                [ \_ -> rendered |> Query.findAll [ Selector.class "timeline-line" ] |> Query.count (Expect.equal 0)
+                , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-idle" ] |> Query.count (Expect.equal 1)
+                , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-segment" ] |> Query.count (Expect.equal 2)
+                , \_ -> rendered |> Query.has [ Selector.text "Open items", Selector.text "Open work by bucket", Selector.text "Open tasks + subtasks" ]
+                , \_ -> Feature.Timeline.timestampSources { initial | histogramBuckets = [ partial ] } |> List.member "2026-01-01T12:00:00Z" |> Expect.equal True
+                ] ()
+        , test "single buckets are centered and multi-bucket coordinates remain in bounds" <|
             \_ ->
                 [ Feature.Timeline.chartX 0 0
                 , Feature.Timeline.chartX 1 0
@@ -291,6 +350,24 @@ suite =
                 ]
                     |> Expect.equal [ False, False, False, False, False ]
         ]
+
+
+stockBucket : Api.WorkspaceTimelineBucket
+stockBucket =
+    let legacy = { created = 0, completed = 0, cancelled = 0 }
+        zero = { created = 0, completed = 0, deleted = 0, archived = 0, cancelled = 0 }
+    in
+    { bucketStart = "2026-01-01T00:00:00Z", bucketEnd = "2026-01-02T00:00:00Z", label = "A"
+    , counts = { project = legacy, subproject = legacy, task = legacy, subtask = legacy }, totals = legacy
+    , series = { project = zero, task = zero, subtask = zero, observation = zero }, seriesTotals = zero
+    , openCounts = Just { projects = 2, tasks = 6 }, openAsOf = Just "2026-01-02T00:00:00Z", openStatus = "available" }
+
+
+decodeOpenFields : String -> Result Decode.Error (List ( Maybe Api.TimelineOpenCounts, Maybe String, String ))
+decodeOpenFields fields =
+    Decode.decodeString Api.workspaceTimelineBucketsResponseDecoder
+        ("""{"workspace_id":"workspace-1","since":"2026-01-01T00:00:00Z","until":"2026-01-02T00:00:00Z","bucket":"day","buckets":[{"bucket_start":"2026-01-01T00:00:00Z","bucket_end":"2026-01-02T00:00:00Z","label":"A","counts":{"project":{"created":0,"completed":0,"cancelled":0},"subproject":{"created":0,"completed":0,"cancelled":0},"task":{"created":0,"completed":0,"cancelled":0},"subtask":{"created":0,"completed":0,"cancelled":0}},"totals":{"created":0,"completed":0,"cancelled":0},"series":{"project":{"created":0,"completed":0,"deleted":0},"task":{"created":0,"completed":0,"deleted":0},"subtask":{"created":0,"completed":0,"deleted":0},"observation":{"created":0,"completed":0,"deleted":0}},"series_totals":{"created":0,"completed":0,"deleted":0}""" ++ fields ++ "}]}")
+        |> Result.map (\response -> List.map (\bucket -> ( bucket.openCounts, bucket.openAsOf, bucket.openStatus )) response.buckets)
 
 
 timelineModel : TimelineModel -> Model

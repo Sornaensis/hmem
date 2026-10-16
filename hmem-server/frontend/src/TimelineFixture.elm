@@ -24,6 +24,9 @@ type Fixture
     | Many
     | Error
     | Dst
+    | Gaps
+    | StockSpike
+    | LineSpike
 
 
 type Msg
@@ -108,6 +111,12 @@ updateTimeline msg model =
                     , focusElement (Feature.Timeline.timelinePointId action series index) |> Cmd.map TimelineMessage
                     )
 
+                Types.HoverTimelineOpenBar index ->
+                    ( { model | chartBarHover = index }, Cmd.none )
+
+                Types.FocusTimelineOpenBar index ->
+                    ( { model | chartBarFocus = index }, Cmd.none )
+
                 _ ->
                     ( model, Cmd.none )
 
@@ -130,6 +139,9 @@ viewTimeline display model =
             , fixtureButton Many "Many buckets"
             , fixtureButton Error "Graph error"
             , fixtureButton Dst "DST"
+            , fixtureButton Gaps "Gaps"
+            , fixtureButton StockSpike "Stock spike"
+            , fixtureButton LineSpike "Line spike"
             ]
         , Html.map TimelineMessage (Feature.Timeline.viewTimelineHistogram display model)
         , section [ class "timeline-fixture-cards", attribute "data-testid" "timeline-fixture-cards" ]
@@ -186,6 +198,20 @@ fixtureTimeline fixture =
                     [ bucketForDates 1 "2026-03-29T00:00:00Z" "2026-03-30T00:00:00Z" "UTC spring bucket"
                     , bucketForDates 2 "2026-10-25T00:00:00Z" "2026-10-26T00:00:00Z" "UTC autumn bucket"
                     ]
+
+                Gaps ->
+                    let missing = bucket 1 2
+                        future = bucket 1 3
+                    in
+                    [ bucket 1 1, { missing | openCounts = Nothing, openStatus = "history_unavailable" }, { future | openCounts = Nothing, openAsOf = Nothing, openStatus = "future" } ]
+
+                StockSpike ->
+                    let baseBucket = bucket 1 1 in
+                    [ { baseBucket | openCounts = Just { projects = 1000000, tasks = 3000000 } }, bucket 1 2 ]
+
+                LineSpike ->
+                    let baseBucket = bucket 1000000 1 in
+                    [ { baseBucket | openCounts = Just { projects = 1, tasks = 2 } }, bucket 0 2 ]
     in
     { base
         | histogramSince = "2026-01-01"
@@ -251,6 +277,9 @@ bucketForDates count start ending label =
     , totals = legacy
     , series = { project = project, task = task, subtask = subtask, observation = observation }
     , seriesTotals = { created = project.created + task.created + subtask.created + observation.created, completed = 0, deleted = project.deleted + task.deleted + subtask.deleted + observation.deleted, archived = 0, cancelled = 0 }
+    , openCounts = Just { projects = count * 10, tasks = count * 30 }
+    , openAsOf = Just ending
+    , openStatus = "available"
     }
 
 

@@ -48,7 +48,8 @@ bucket =
     in
     { bucketStart = since, bucketEnd = until, label = "server-bucket-identity"
     , counts = { project = legacy, subproject = legacy, task = legacy, subtask = legacy }, totals = legacy
-    , series = { project = zero, task = count, subtask = zero, observation = zero }, seriesTotals = count }
+    , series = { project = zero, task = count, subtask = zero, observation = zero }, seriesTotals = count
+    , openCounts = Just { projects = 2, tasks = 5 }, openAsOf = Just until, openStatus = "available" }
 
 model : TimelineModel -> Model
 model timeline =

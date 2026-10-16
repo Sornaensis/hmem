@@ -111,6 +111,139 @@ async function renderedGeometry(page) {
   })
 }
 
+async function verifyOpenInventory(page) {
+  const active = page.locator('.timeline-open-active')
+  const bar = index => page.locator('#timeline-point-open-items-' + index)
+  const waitActive = index => page.waitForFunction(expected => document.querySelector('.timeline-open-active')?.dataset.bucketIndex === String(expected), index)
+  const leave = async () => { await page.mouse.move(5, 5) }
+  const shot = async name => {
+    if (!process.env.HMEM_TIMELINE_GEOMETRY_SHOTS) return
+    await mkdir(process.env.HMEM_TIMELINE_GEOMETRY_SHOTS, { recursive: true })
+    await page.screenshot({ path: join(process.env.HMEM_TIMELINE_GEOMETRY_SHOTS, name + '.png'), fullPage: true })
+  }
+  const hoverBar = async index => {
+    await bar(index).scrollIntoViewIfNeeded()
+    const box = await bar(index).locator('.timeline-open-hitarea').boundingBox()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 4)
+    await waitActive(index)
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await leave()
+  assert.equal(await page.locator('.timeline-open-idle').count(), 3)
+  assert.equal(await page.locator('.timeline-open-idle .timeline-open-segment').count(), 6)
+  assert.equal(await page.locator('.timeline-open-idle').first().evaluate(node => getComputedStyle(node).opacity), '0.65')
+  assert.equal(await active.count(), 0)
+  const alignment = await page.locator('.timeline-line-chart').evaluate(chart => [...chart.querySelectorAll('.timeline-open-idle')].every((bar, index) => {
+    const project = bar.querySelector('.timeline-open-projects'), task = bar.querySelector('.timeline-open-tasks')
+    const point = chart.querySelector('#timeline-point-lifecycle-created-' + index + ' .timeline-point')
+    const pb = project.getBoundingClientRect(), tb = task.getBoundingClientRect(), cb = point.getBoundingClientRect()
+    return Math.abs(pb.x + pb.width / 2 - cb.x - cb.width / 2) < 0.1 && Math.abs(tb.bottom - pb.top) < 0.1 && pb.height >= 0 && tb.height >= 0
+  }))
+  assert.ok(alignment, 'segments stack at the shared line bucket center')
+  await shot('open-idle-desktop')
+  let requests = 0
+  const countRequest = () => { requests++ }
+  page.on('request', countRequest)
+  await hoverBar(1)
+  assert.equal(await active.evaluate(node => getComputedStyle(node).opacity), '1')
+  assert.equal(await active.evaluate(node => getComputedStyle(node).pointerEvents), 'none')
+  assert.equal(await active.locator('.timeline-open-segment').count(), 2)
+  assert.equal(await active.evaluate(node => node === node.ownerSVGElement.lastElementChild), true, 'whole active paint is above all paths and controls')
+  const projects = await page.locator('.timeline-open-idle[data-bucket-index="1"] .timeline-open-projects').boundingBox()
+  const tasks = await page.locator('.timeline-open-idle[data-bucket-index="1"] .timeline-open-tasks').boundingBox()
+  for (const y of [projects.y + projects.height - 2, projects.y - 1, projects.y + 1, tasks.y + 2]) {
+    await page.mouse.move(projects.x + projects.width / 2, y)
+    await waitActive(1)
+  }
+  const point = page.locator('#timeline-point-lifecycle-deleted-1')
+  const marker = await point.locator('.timeline-point').boundingBox()
+  await page.mouse.move(marker.x + marker.width / 2, marker.y + marker.height / 2)
+  await waitActive(1)
+  assert.equal(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('.timeline-point-control')?.id, { x: marker.x + marker.width / 2, y: marker.y + marker.height / 2 }), 'timeline-point-lifecycle-deleted-1', 'foreground bar does not intercept the lifecycle point')
+  assert.match(await point.locator('title').textContent(), /Lifecycle activity — Delete/)
+  await clickMarker(page, point); await waitForSelection(page, '02')
+  assert.match(await page.locator('.timeline-open-tooltip').textContent(), /90 open projects; 270 open tasks \+ subtasks; 360 open items total.*As of 2026-01-03 00:00/)
+  await shot('open-hover-desktop')
+  assert.equal(requests, 0, 'hover and chart selection in the fixture add no transport')
+  page.off('request', countRequest)
+  await leave()
+  await bar(0).focus(); await waitActive(0)
+  assert.equal(await bar(0).evaluate(node => document.activeElement === node && getComputedStyle(node).outlineStyle !== 'none'), true)
+  await shot('open-focus-desktop')
+  await hoverBar(1)
+  await page.getByRole('button', { name: 'Tasks', exact: true }).focus()
+  await waitActive(1) // Blur clears focus without clearing a different hovered bucket.
+  await leave(); await active.waitFor({ state: 'detached' })
+  await bar(0).focus(); await waitActive(0)
+  await page.keyboard.press('ArrowRight'); await waitActive(1)
+  assert.equal(await bar(1).getAttribute('tabindex'), '0')
+  await page.keyboard.press('End'); await waitActive(2)
+  await page.keyboard.press('Enter'); await waitForSelection(page, '03')
+  await page.keyboard.press('Space'); await waitForNoSelection(page)
+  await page.keyboard.press('Home'); await waitActive(0)
+  await page.getByRole('button', { name: 'Tasks', exact: true }).focus()
+  await active.waitFor({ state: 'detached' })
+  const axis = await page.locator('.timeline-open-axis').allTextContents()
+  for (const action of ['Create', 'Complete', 'Delete', 'Archive', 'Cancel']) await page.getByRole('button', { name: action, exact: true }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.timeline-line').length === 0)
+  assert.equal(await page.locator('.timeline-line').count(), 0)
+  assert.equal(await page.locator('.timeline-open-idle').count(), 3)
+  assert.deepEqual(await page.locator('.timeline-open-axis').allTextContents(), axis)
+  await page.getByText('Open work by bucket', { exact: true }).click()
+  assert.match(await page.locator('.timeline-open-table').textContent(), /Open projects.*Open tasks \+ subtasks.*Total.*90.*270.*360/s)
+  await page.getByText('Open work by bucket', { exact: true }).click()
+  for (const action of ['Create', 'Complete', 'Delete', 'Archive', 'Cancel']) await page.getByRole('button', { name: action, exact: true }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.timeline-line').length === 5)
+  await page.setViewportSize({ width: 366, height: 900 })
+  await leave()
+  await shot('open-narrow')
+  const narrowScroll = page.locator('.timeline-svg-scroll')
+  await narrowScroll.evaluate(node => { node.scrollLeft = node.scrollWidth - node.clientWidth })
+  assert.equal(await narrowScroll.evaluate(node => node.scrollLeft > 0), true)
+  assert.equal(await narrowScroll.evaluate(node => {
+    const viewport = node.getBoundingClientRect()
+    return [...node.querySelectorAll('.timeline-open-axis,.timeline-axis-title-right')].every(label => {
+      const box = label.getBoundingClientRect()
+      return box.left >= viewport.left && box.right <= viewport.right
+    })
+  }), true, 'narrow horizontal scroll reaches all RHS labels and its title')
+  for (const fixture of ['stock-spike', 'line-spike']) {
+    await page.getByTestId('fixture-' + fixture).click()
+    await page.waitForFunction(() => document.querySelectorAll('.timeline-open-idle').length === 2)
+    await waitForFormattedPoints(page)
+    const expected = fixture === 'stock-spike' ? '4000000' : '3'
+    await page.waitForFunction(value => [...document.querySelectorAll('.timeline-open-axis')].some(label => label.textContent === value), expected)
+    assert.ok((await page.locator('.timeline-open-axis').allTextContents()).includes(expected))
+    assert.equal(await page.locator('.timeline-open-idle').evaluateAll(bars => bars.some(bar => /NaN|Infinity/.test(bar.innerHTML))), false)
+    assert.equal(await page.locator('.timeline-open-axis').evaluateAll(labels => labels.every(label => {
+      const box = label.getBoundingClientRect(), chart = label.ownerSVGElement.getBoundingClientRect()
+      return box.left >= chart.left && box.right <= chart.right
+    })), true, 'RHS integer labels fit the reserved plot margin')
+  }
+  await page.getByTestId('fixture-gaps').click()
+  await page.waitForFunction(() => document.querySelectorAll('.timeline-open-gap').length === 2)
+  assert.equal(await page.locator('.timeline-open-idle').count(), 1)
+  await leave(); await bar(1).focus()
+  assert.match(await bar(1).getAttribute('aria-label'), /history unavailable/)
+  assert.equal(await active.count(), 0)
+  await bar(2).focus()
+  assert.match(await bar(2).getAttribute('aria-label'), /Future bucket; open work is not projected/)
+  await page.getByTestId('fixture-zero').click()
+  await page.waitForFunction(() => document.querySelectorAll('.timeline-open-idle').length === 3)
+  assert.equal(await page.locator('.timeline-open-idle .timeline-open-segment').evaluateAll(parts => parts.every(part => Number(part.getAttribute('height')) === 0)), true)
+  assert.deepEqual(await page.locator('.timeline-open-axis').allTextContents(), ['0'])
+  await leave(); await bar(0).focus()
+  assert.match(await bar(0).getAttribute('aria-label'), /0 open projects; 0 open tasks \+ subtasks; 0 open items total/)
+  await page.getByTestId('fixture-one-bucket').click()
+  await page.waitForFunction(() => document.querySelectorAll('.timeline-open-control').length === 1)
+  assert.equal(await active.count(), 0, 'data replacement retires hover and focus paint')
+  await page.getByTestId('fixture-empty').click()
+  await page.locator('.timeline-line-chart').waitFor({ state: 'detached' })
+  assert.equal(await page.locator('.timeline-line-chart').count(), 0)
+  await page.reload()
+  await waitForFormattedPoints(page)
+}
+
 test('single lifecycle chart preserves counts, accessible controls and shared bucket geometry', async () => {
   const { server, url } = await startFixtureServer()
   let browser
@@ -126,6 +259,7 @@ test('single lifecycle chart preserves counts, accessible controls and shared bu
     assert.equal(await page.getByLabel('Time window').inputValue(), '30')
     assert.equal(await page.locator('.timeline-graph-control select').nth(1).inputValue(), 'week')
     assert.equal(await page.locator('input[type="date"]').count(), 0)
+    await verifyOpenInventory(page)
     const styles = await page.locator('.timeline-line-chart').evaluate(chart => ({ fill: getComputedStyle(chart.querySelector('.timeline-line')).fill, pointerEvents: getComputedStyle(chart.querySelector('.timeline-line')).pointerEvents, marker: getComputedStyle(chart.querySelector('.timeline-point')).fill }))
     assert.equal(styles.fill, 'none'); assert.equal(styles.pointerEvents, 'none'); assert.notEqual(styles.marker, 'none')
     const point = (action, index) => page.locator('#timeline-point-lifecycle-' + action + '-' + index)
@@ -175,6 +309,8 @@ test('single lifecycle chart preserves counts, accessible controls and shared bu
     await page.setViewportSize({ width: 366, height: 768 })
     await page.getByTestId('fixture-many-buckets').click()
     await page.waitForFunction(() => document.querySelectorAll('g.timeline-point-control').length === 1830)
+    assert.equal(await page.locator('.timeline-open-idle').count(), 366)
+    assert.equal(await page.locator('.timeline-open-control[tabindex="0"]').count(), 1)
     await waitForFormattedPoints(page)
     assert.equal(await page.locator('g.timeline-point-control[tabindex="0"]').count(), 5)
     assert.equal(await page.locator('.timeline-svg-scroll').evaluate(scroll => scroll.scrollWidth > scroll.clientWidth), true)

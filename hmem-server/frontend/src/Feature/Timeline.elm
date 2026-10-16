@@ -1,4 +1,4 @@
-module Feature.Timeline exposing (chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, timestampSources, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel, visibleTimelineEvents)
+module Feature.Timeline exposing (activeOpenBar, openBarGeometry, openChartMaximum, chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, timestampSources, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel, visibleTimelineEvents)
 
 import ActorAttribution
 import Api
@@ -8,7 +8,7 @@ import Feature.Focus as Focus
 import Helpers exposing (buildFragment, focusElement, pushUrl, saveFiltersCmd)
 import Html exposing (..)
 import Html.Attributes exposing (attribute, class, disabled, selected, title, type_, value)
-import Html.Events exposing (onClick, onInput, preventDefaultOn)
+import Html.Events exposing (onBlur, onClick, onFocus, onInput, onMouseEnter, onMouseLeave, preventDefaultOn)
 import Json.Decode as Decode
 import Process
 import String
@@ -48,6 +48,8 @@ init =
     , chartSeries = { projects = True, tasks = True, subtasks = True, observations = True }
     , chartActions = Dict.fromList (List.map (\key -> ( key, True )) [ "created", "completed", "deleted", "archived", "cancelled" ])
     , chartPointFocus = Dict.empty
+    , chartBarHover = Nothing
+    , chartBarFocus = Nothing
     , refreshGeneration = 0
     , refreshTimerGeneration = Nothing
     , refreshDirty = False
@@ -492,7 +494,7 @@ update msg model =
             if not (List.member window [ "7", "14", "30", "6months", "year", "all" ]) then ( model, Cmd.none ) else
                 let
                     current = model.timeline
-                    next = { model | timeline = { current | histogramWindow = window, histogramSince = "", histogramUntil = "", histogramSelectedBucket = Nothing, histogramActiveRequest = Nothing, histogramActiveIdentity = Nothing, histogramLoadedRequest = Nothing, histogramLoading = True, histogramClockWorkspaceId = model.selectedWorkspaceId } }
+                    next = { model | timeline = { current | histogramWindow = window, histogramSince = "", histogramUntil = "", histogramSelectedBucket = Nothing, histogramActiveRequest = Nothing, histogramActiveIdentity = Nothing, histogramLoadedRequest = Nothing, histogramLoading = True, histogramClockWorkspaceId = model.selectedWorkspaceId, chartBarHover = Nothing, chartBarFocus = Nothing } }
                 in
                 ( next, Cmd.batch [ saveFiltersCmd next, model.selectedWorkspaceId |> Maybe.map (\ws -> Task.perform (GotTimelineHistogramClock ws) Time.now) |> Maybe.withDefault Cmd.none ] )
 
@@ -533,6 +535,14 @@ update msg model =
             ( { model | timeline = { currentTimeline | chartPointFocus = Dict.insert (timelinePointFocusKey action series) index currentTimeline.chartPointFocus } }
             , focusElement targetId
             )
+
+        HoverTimelineOpenBar index ->
+            let current = model.timeline in
+            ( { model | timeline = { current | chartBarHover = index } }, Cmd.none )
+
+        FocusTimelineOpenBar index ->
+            let current = model.timeline in
+            ( { model | timeline = { current | chartBarFocus = index } }, Cmd.none )
 
         GotWorkspaceTimeline identity request result ->
             if model.selectedWorkspaceId /= Just request.workspaceId
@@ -649,6 +659,8 @@ update msg model =
                                     , histogramActiveIdentity = Nothing
                                     , histogramLoadedRequest = Just request
                                     , chartPointFocus = clampTimelinePointFocus (List.length response.buckets) currentTimeline.chartPointFocus
+                                    , chartBarHover = Nothing
+                                    , chartBarFocus = Nothing
                                 }
                           }
                         , Cmd.none
@@ -796,7 +808,8 @@ updateHistogramControls model updateTimeline =
             synchronizeRefreshEpoch model.sessionRequestEpoch model.timeline
 
         updatedTimeline =
-            updateTimeline currentTimeline
+            let updated = updateTimeline currentTimeline in
+            { updated | chartBarHover = Nothing, chartBarFocus = Nothing }
 
         selectionChanged =
             currentTimeline.histogramSelectedBucket /= updatedTimeline.histogramSelectedBucket
@@ -890,7 +903,7 @@ timestampSources timeline =
                 timeline.histogramSelectedBucket |> Maybe.map (\value -> [ value.since, value.until ]) |> Maybe.withDefault []
             else []
     in
-    List.concatMap (\bucket -> [ bucket.bucketStart, bucket.bucketEnd ]) timeline.histogramBuckets
+    List.concatMap (\bucket -> [ bucket.bucketStart, bucket.bucketEnd ] ++ (bucket.openAsOf |> Maybe.map (\asOf -> if List.member asOf [ bucket.bucketStart, bucket.bucketEnd ] then [] else [ asOf ]) |> Maybe.withDefault [])) timeline.histogramBuckets
         ++ selection
         ++ (if eventBodyVisible then List.map .occurredAt (visibleTimelineEvents timeline) else [])
 
@@ -904,8 +917,9 @@ viewTimelineHistogram : TimestampDisplay.State -> TimelineModel -> Html Msg
 viewTimelineHistogram display timeline =
     div [ class "timeline-chart-panel" ]
         [ viewTimelineHistogramControls timeline
+        , p [ class "timeline-line-filter-label" ] [ text "Lifecycle line filters" ]
         , viewTimelineChartToggles timeline.chartSeries
-        , div [ class "timeline-chart-toggles", attribute "aria-label" "Visible lifecycle events" ]
+        , div [ class "timeline-chart-toggles", attribute "aria-label" "Lifecycle line actions" ]
             (List.map (\( key, labelText ) -> button [ class ("timeline-series-toggle timeline-series-" ++ key), attribute "aria-pressed" (if Dict.get key timeline.chartActions |> Maybe.withDefault False then "true" else "false"), onClick (ToggleTimelineChartAction key) ] [ span [ class "timeline-series-marker" ] [], text labelText ]) lifecycleActions)
         , viewTimelineHistogramContent display timeline
         ]
@@ -990,7 +1004,7 @@ lifecycleChartSeries timeline =
 
 viewTimelineChartToggles : TimelineChartSeries -> Html Msg
 viewTimelineChartToggles series =
-    div [ class "timeline-chart-toggles", attribute "aria-label" "Visible entity series" ]
+    div [ class "timeline-chart-toggles", attribute "aria-label" "Lifecycle line entities" ]
         [ viewTimelineChartToggle "projects" "Projects" series.projects
         , viewTimelineChartToggle "tasks" "Tasks" series.tasks
         , viewTimelineChartToggle "subtasks" "Subtasks" series.subtasks
@@ -1046,9 +1060,22 @@ viewTimelineLineChart display timeline actionLabel action =
 
         canvasWidth =
             chartCanvasWidth bucketCount
+
+        openMaximum =
+            openChartMaximum timeline.histogramBuckets
+
+        openDomain =
+            lineChartRenderDomain openMaximum
+
+        active =
+            activeOpenBar timeline
     in
     section [ class "timeline-line-chart-panel" ]
-        [ div [ class "timeline-svg-scroll" ]
+        [ div [ class "timeline-open-legend" ]
+            [ span [] [ span [ class "timeline-open-key timeline-open-projects" ] [], text "Open projects" ]
+            , span [] [ span [ class "timeline-open-key timeline-open-tasks" ] [], text "Open tasks + subtasks" ]
+            ]
+        , div [ class "timeline-svg-scroll" ]
             [ Svg.svg
                 [ SA.width (String.fromInt canvasWidth)
                 , SA.height "280"
@@ -1056,12 +1083,137 @@ viewTimelineLineChart display timeline actionLabel action =
                 , attribute "aria-labelledby" ("timeline-chart-" ++ action ++ "-title timeline-chart-" ++ action ++ "-description")
                 ]
                 ([ Svg.title [ SA.id ("timeline-chart-" ++ action ++ "-title") ] [ Svg.text (actionLabel ++ " lifecycle counts by UTC bucket, displayed in your browser timezone") ]
-                 , Svg.desc [ SA.id ("timeline-chart-" ++ action ++ "-description") ] [ Svg.text "Each interactive point selects its half-open UTC bucket for the event cards. Endpoint labels use your browser timezone." ]
+                 , Svg.desc [ SA.id ("timeline-chart-" ++ action ++ "-description") ] [ Svg.text "Lines show lifecycle events on the left axis. Stacked bars show open projects and tasks plus subtasks on the right axis. Hover or focus a bucket to raise its bar. Bars and points select their half-open UTC bucket for event cards. Arrow keys move between buckets. Dates use your browser timezone; open work by bucket is also available in the table below." ]
                  ]
                     ++ timelineChartGrid canvasWidth actualMaximum renderDomain
+                    ++ timelineOpenAxis canvasWidth openMaximum openDomain
                     ++ timelineXLabels display canvasWidth timeline.histogramBuckets
-                    ++ List.concatMap (viewTimelineSeriesSvg display timeline.chartPointFocus timeline.histogramSelectedBucket actionLabel action renderDomain canvasWidth bucketCount) visibleSeries
+                    ++ List.concat (List.indexedMap (viewTimelineOpenPaint False openDomain canvasWidth bucketCount) timeline.histogramBuckets)
+                    ++ List.map (viewTimelineSeriesPath renderDomain canvasWidth bucketCount) visibleSeries
+                    ++ List.indexedMap (viewTimelineBucketControls display timeline actionLabel action renderDomain openDomain canvasWidth visibleSeries) timeline.histogramBuckets
+                    ++ (active |> Maybe.andThen (\index -> List.drop index timeline.histogramBuckets |> List.head |> Maybe.map (viewTimelineOpenPaint True openDomain canvasWidth bucketCount index)) |> Maybe.withDefault [])
                 )
+            ]
+        , p [ class "timeline-open-tooltip", attribute "role" "status", attribute "aria-live" "polite" ]
+            [ text (active |> Maybe.andThen (\index -> List.drop index timeline.histogramBuckets |> List.head) |> Maybe.map (openBucketSummary display) |> Maybe.withDefault "Open-work bars use the right axis and are independent of lifecycle line filters. Hover or focus a bar for counts and sampling time.") ]
+        , viewTimelineOpenTable display timeline.histogramBuckets
+        ]
+
+
+availableOpenCounts : Api.WorkspaceTimelineBucket -> Maybe Api.TimelineOpenCounts
+availableOpenCounts bucket =
+    if bucket.openStatus == "available" then bucket.openCounts else Nothing
+
+
+openChartMaximum : List Api.WorkspaceTimelineBucket -> Int
+openChartMaximum buckets =
+    buckets |> List.filterMap availableOpenCounts |> List.map (\counts -> counts.projects + counts.tasks) |> List.maximum |> Maybe.withDefault 0
+
+
+openBarGeometry : Int -> Api.TimelineOpenCounts -> { projectsY : Float, projectsHeight : Float, tasksY : Float, tasksHeight : Float, total : Int }
+openBarGeometry domain counts =
+    let
+        projectsY = chartY domain (toFloat counts.projects)
+        tasksY = chartY domain (toFloat (counts.projects + counts.tasks))
+    in
+    { projectsY = projectsY, projectsHeight = 236 - projectsY, tasksY = tasksY, tasksHeight = projectsY - tasksY, total = counts.projects + counts.tasks }
+
+
+activeOpenBar : TimelineModel -> Maybe Int
+activeOpenBar timeline =
+    (case timeline.chartBarHover of
+        Just index -> Just index
+        Nothing -> timeline.chartBarFocus
+    ) |> Maybe.andThen (\index -> if index >= 0 && index < List.length timeline.histogramBuckets then Just index else Nothing)
+
+
+openBucketSummary : TimestampDisplay.State -> Api.WorkspaceTimelineBucket -> String
+openBucketSummary display bucket =
+    let
+        range = timelineRangeLabel display bucket.bucketStart bucket.bucketEnd
+        sample = bucket.openAsOf |> Maybe.map (\asOf -> " As of " ++ TimestampDisplay.lookup display asOf ++ " (exclusive cutoff).") |> Maybe.withDefault ""
+    in
+    case availableOpenCounts bucket of
+        Just counts ->
+            range ++ ": " ++ String.fromInt counts.projects ++ " open projects; " ++ String.fromInt counts.tasks ++ " open tasks + subtasks; " ++ String.fromInt (counts.projects + counts.tasks) ++ " open items total." ++ sample
+        Nothing ->
+            range ++ ": " ++ (if bucket.openStatus == "future" then "Future bucket; open work is not projected." else "Open-work history unavailable: retained audit snapshots cannot establish inventory.") ++ sample
+
+
+viewTimelineOpenPaint : Bool -> Int -> Int -> Int -> Int -> Api.WorkspaceTimelineBucket -> List (Svg.Svg Msg)
+viewTimelineOpenPaint foreground domain canvasWidth bucketCount index bucket =
+    case availableOpenCounts bucket of
+        Nothing -> []
+        Just counts ->
+            let
+                geometry = openBarGeometry domain counts
+                segment segmentClass y height =
+                    Svg.rect [ SA.x (chartPercentX canvasWidth (chartXWithWidth canvasWidth bucketCount index)), SA.y (floatString y), SA.width "36", SA.height (floatString height), SA.class ("timeline-open-segment " ++ segmentClass) ] []
+            in
+            [ Svg.g [ SA.class ("timeline-open-bar " ++ (if foreground then "timeline-open-active" else "timeline-open-idle")), SA.transform "translate(-18 0)", SA.pointerEvents "none", attribute "aria-hidden" "true", attribute "data-bucket-index" (String.fromInt index) ]
+                [ segment "timeline-open-projects" geometry.projectsY geometry.projectsHeight
+                , segment "timeline-open-tasks" geometry.tasksY geometry.tasksHeight
+                ]
+            ]
+
+
+viewTimelineBucketControls : TimestampDisplay.State -> TimelineModel -> String -> String -> Int -> Int -> Int -> List TimelineSeriesDefinition -> Int -> Api.WorkspaceTimelineBucket -> Svg.Svg Msg
+viewTimelineBucketControls display timeline actionLabel action lineDomain openDomain canvasWidth series index bucket =
+    let
+        count = List.length timeline.histogramBuckets
+        x = chartXWithWidth canvasWidth count index
+        top = availableOpenCounts bucket |> Maybe.map (openBarGeometry openDomain >> .tasksY) |> Maybe.withDefault 236
+        isSelected = (timeline.histogramSelectedBucket |> Maybe.map .label) == Just bucket.label
+        activate = SelectTimelineHistogramBucket bucket.label bucket.bucketStart bucket.bucketEnd
+        roving = Dict.get (timelinePointFocusKey "open" "items") timeline.chartPointFocus |> Maybe.withDefault 0
+        linePoint definition =
+            List.drop index definition.values |> List.head |> Maybe.map (\point -> viewTimelinePoint display timeline.chartPointFocus timeline.histogramSelectedBucket actionLabel action definition canvasWidth count index
+                { x = x, y = chartY lineDomain (toFloat point.count), label = point.label, since = point.since, until = point.until, count = point.count })
+    in
+    -- Stable targets stay in place while the pointer-free active paint is raised.
+    -- Point controls remain above the transparent bar target and keep their titles.
+    Svg.g [ SA.class "timeline-bucket-controls", onMouseEnter (HoverTimelineOpenBar (Just index)), onMouseLeave (HoverTimelineOpenBar Nothing) ]
+        (Svg.g
+            [ SA.class "timeline-open-control", SA.id (timelinePointId "open" "items" index)
+            , attribute "role" "button", attribute "tabindex" (if roving == index then "0" else "-1")
+            , attribute "aria-pressed" (if isSelected then "true" else "false")
+            , attribute "aria-label" (openBucketSummary display bucket ++ (if isSelected then " Selected." else " Not selected."))
+            , onFocus (FocusTimelineOpenBar (Just index)), onBlur (FocusTimelineOpenBar Nothing)
+            , onClick activate, onTimelinePointKey "open" "items" index count activate
+            ]
+            [ Svg.rect [ SA.x (chartPercentX canvasWidth x), SA.y (floatString (min 225 top)), SA.width "44", SA.height (floatString (max 22 (236 - top))), SA.transform "translate(-22 0)", SA.class "timeline-open-hitarea" ] []
+            , Svg.title [] [ Svg.text (openBucketSummary display bucket) ]
+            , if availableOpenCounts bucket == Nothing then Svg.text_ [ SA.x (chartPercentX canvasWidth x), SA.y "238", SA.class "timeline-open-gap", SA.pointerEvents "none" ] [ Svg.text "—" ] else Svg.text ""
+            ]
+            :: List.filterMap linePoint series
+        )
+
+
+timelineOpenAxis : Int -> Int -> Int -> List (Svg.Svg Msg)
+timelineOpenAxis canvasWidth maximum domain =
+    [ Svg.text_ [ SA.x (chartPercentX canvasWidth 60), SA.y "20", SA.class "timeline-axis-title" ] [ Svg.text "Lifecycle events" ]
+    , Svg.text_ [ SA.x (chartPercentX canvasWidth (toFloat canvasWidth - 60)), SA.y "20", SA.class "timeline-axis-title timeline-axis-title-right" ] [ Svg.text "Open items" ]
+    ] ++ (chartTickValues maximum |> List.map (\tick -> Svg.text_ [ SA.x (chartPercentX canvasWidth (toFloat canvasWidth - 54)), SA.y (floatString (chartY domain (toFloat tick) + 4)), SA.class "timeline-chart-axis timeline-open-axis" ] [ Svg.text (String.fromInt tick) ]))
+
+
+viewTimelineOpenTable : TimestampDisplay.State -> List Api.WorkspaceTimelineBucket -> Html Msg
+viewTimelineOpenTable display buckets =
+    details [ class "timeline-open-details" ]
+        [ summary [] [ text "Open work by bucket" ]
+        , div [ class "timeline-open-table-scroll" ]
+            [ table [ class "timeline-open-table" ]
+                [ caption [] [ text "Open inventory at each exclusive cutoff; tasks include parents and subtasks once." ]
+                , thead [] [ tr [] (List.map (\heading -> th [ attribute "scope" "col" ] [ text heading ]) [ "Bucket", "Open projects", "Open tasks + subtasks", "Total", "Sample and availability" ]) ]
+                , tbody [] (List.map (\bucket ->
+                    let counts = availableOpenCounts bucket in
+                    tr []
+                        [ th [ attribute "scope" "row" ] [ text (timelineRangeLabel display bucket.bucketStart bucket.bucketEnd) ]
+                        , td [] [ text (counts |> Maybe.map (.projects >> String.fromInt) |> Maybe.withDefault "Unavailable") ]
+                        , td [] [ text (counts |> Maybe.map (.tasks >> String.fromInt) |> Maybe.withDefault "Unavailable") ]
+                        , td [] [ text (counts |> Maybe.map (\value -> String.fromInt (value.projects + value.tasks)) |> Maybe.withDefault "Unavailable") ]
+                        , td [] [ text (openBucketSummary display bucket) ]
+                        ]) buckets)
+                ]
             ]
         ]
 
@@ -1145,8 +1297,8 @@ timelineChartGrid canvasWidth actualMaximum renderDomain =
                 let
                     y = chartY renderDomain (toFloat tick)
                 in
-                [ Svg.line [ SA.x1 (chartPercentX canvasWidth 44), SA.x2 (chartPercentX canvasWidth (toFloat canvasWidth - 20)), SA.y1 (floatString y), SA.y2 (floatString y), SA.class "timeline-chart-grid" ] []
-                , Svg.text_ [ SA.x (chartPercentX canvasWidth 38), SA.y (floatString (y + 4)), SA.class "timeline-chart-axis" ] [ Svg.text (String.fromInt tick) ]
+                [ Svg.line [ SA.x1 (chartPercentX canvasWidth 60), SA.x2 (chartPercentX canvasWidth (toFloat canvasWidth - 60)), SA.y1 (floatString y), SA.y2 (floatString y), SA.class "timeline-chart-grid" ] []
+                , Svg.text_ [ SA.x (chartPercentX canvasWidth 54), SA.y (floatString (y + 4)), SA.class "timeline-chart-axis" ] [ Svg.text (String.fromInt tick) ]
                 ]
             )
 
@@ -1204,17 +1356,16 @@ timelineXLabels display canvasWidth buckets =
             )
 
 
-viewTimelineSeriesSvg : TimestampDisplay.State -> Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> Int -> Int -> Int -> TimelineSeriesDefinition -> List (Svg.Svg Msg)
-viewTimelineSeriesSvg display pointFocus selectedBucket actionLabel action renderDomain canvasWidth bucketCount series =
+viewTimelineSeriesPath : Int -> Int -> Int -> TimelineSeriesDefinition -> Svg.Svg Msg
+viewTimelineSeriesPath renderDomain canvasWidth bucketCount series =
     let
         points =
             List.indexedMap (\index point -> { x = chartXWithWidth canvasWidth bucketCount index, y = chartY renderDomain (toFloat point.count), label = point.label, since = point.since, until = point.until, count = point.count }) series.values
     in
     -- Scale only the path geometry. Root text and circles remain in CSS pixels,
     -- with percentage x coordinates matching this nested viewport exactly.
-    Svg.svg [ SA.viewBox ("0 0 " ++ String.fromInt canvasWidth ++ " 280"), SA.width "100%", SA.height "280", SA.preserveAspectRatio "none", attribute "aria-hidden" "true" ]
+    Svg.svg [ SA.viewBox ("0 0 " ++ String.fromInt canvasWidth ++ " 280"), SA.width "100%", SA.height "280", SA.preserveAspectRatio "none", SA.pointerEvents "none", attribute "aria-hidden" "true" ]
         [ Svg.path [ SA.d (timelinePath points), SA.class ("timeline-line timeline-series-" ++ series.key), SA.fill "none" ] [] ]
-        :: List.indexedMap (viewTimelinePoint display pointFocus selectedBucket actionLabel action series canvasWidth (List.length points)) points
 
 
 viewTimelinePoint : TimestampDisplay.State -> Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> TimelineSeriesDefinition -> Int -> Int -> Int -> { x : Float, y : Float, label : String, since : String, until : String, count : Int } -> Svg.Svg Msg

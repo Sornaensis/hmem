@@ -3636,6 +3636,7 @@ textarea.observation-edit-content {
 
 .timeline-series-toggle:focus-visible,
 .timeline-bucket-button:focus-visible,
+.timeline-open-control:focus-visible,
 .timeline-point-control:focus-visible {
   outline: 3px solid #fbbf24;
   outline-offset: 2px;
@@ -3692,6 +3693,30 @@ textarea.observation-edit-content {
 .timeline-point { fill: currentColor; stroke: var(--bg); stroke-width: 2; }
 .timeline-point-selected { stroke: #fbbf24; stroke-width: 4; }
 .timeline-point-selected .timeline-point { stroke: #fbbf24; stroke-width: 4; }
+
+.timeline-line-filter-label { margin: 0; color: var(--text-muted); font-size: 0.75rem; }
+.timeline-open-legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; font-size: 0.8rem; }
+.timeline-open-legend > span { display: inline-flex; align-items: center; gap: 0.4rem; }
+.timeline-open-key { display: inline-block; width: 0.8rem; height: 0.8rem; border: 1px solid rgba(255,255,255,0.5); }
+.timeline-open-projects { fill: #60a5fa; background: #60a5fa; }
+.timeline-open-tasks { fill: #d8b4fe; background: #d8b4fe; }
+.timeline-open-segment { stroke: #0f172a; stroke-width: 1; }
+.timeline-open-idle { opacity: 0.65; pointer-events: none; }
+.timeline-open-active { opacity: 1; pointer-events: none; }
+.timeline-open-active .timeline-open-segment { stroke: #fbbf24; stroke-width: 1.5; }
+.timeline-open-control { cursor: pointer; }
+.timeline-open-hitarea { fill: transparent; stroke: transparent; }
+.timeline-open-gap { fill: var(--text-muted); text-anchor: middle; font-size: 16px; }
+.timeline-open-axis { text-anchor: start; }
+.timeline-axis-title { fill: var(--text-muted); font-size: 11px; text-anchor: start; }
+.timeline-axis-title-right { text-anchor: end; }
+.timeline-open-tooltip { min-height: 2.6em; margin: 0.5rem 0; color: var(--text-muted); font-size: 0.8rem; line-height: 1.4; }
+.timeline-open-details { font-size: 0.8rem; }
+.timeline-open-details > summary { cursor: pointer; }
+.timeline-open-table-scroll { overflow-x: auto; }
+.timeline-open-table { width: 100%; margin-top: 0.5rem; border-collapse: collapse; font-size: 0.75rem; }
+.timeline-open-table caption { text-align: left; padding: 0.5rem 0; color: var(--text-muted); }
+.timeline-open-table th, .timeline-open-table td { padding: 0.4rem; border-top: 1px solid var(--border); text-align: left; }
 
 .timeline-value-table {
   width: 100%;

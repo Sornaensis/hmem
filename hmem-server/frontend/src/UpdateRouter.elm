@@ -277,6 +277,12 @@ route msg model =
         FocusTimelineChartPoint _ _ _ ->
             Ok (Feature.Timeline.update msg model)
 
+        HoverTimelineOpenBar _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        FocusTimelineOpenBar _ ->
+            Ok (Feature.Timeline.update msg model)
+
         -- Mutation responses
         MutationDone _ _ ->
             Ok (Feature.Mutations.update msg model)

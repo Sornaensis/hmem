@@ -70,6 +70,7 @@ module Api exposing
     , TimelineBucketCounts
     , TimelineBucketEntityCounts
     , TimelineBucketSeries
+    , TimelineOpenCounts
     , TimelineNavigation
     , TimelineProjectContext
     , TimelineStatusTransition
@@ -863,6 +864,10 @@ type alias TimelineBucketActionTotals =
     }
 
 
+type alias TimelineOpenCounts =
+    { projects : Int, tasks : Int }
+
+
 type alias WorkspaceTimelineBucket =
     { bucketStart : String
     , bucketEnd : String
@@ -871,6 +876,9 @@ type alias WorkspaceTimelineBucket =
     , totals : TimelineBucketCounts
     , series : TimelineBucketSeries
     , seriesTotals : TimelineBucketActionTotals
+    , openCounts : Maybe TimelineOpenCounts
+    , openAsOf : Maybe String
+    , openStatus : String
     }
 
 
@@ -2123,6 +2131,15 @@ workspaceTimelineBucketDecoder =
         |> required "totals" timelineBucketCountsDecoder
         |> required "series" timelineBucketSeriesDecoder
         |> required "series_totals" timelineBucketActionTotalsDecoder
+        |> optional "open_counts" (D.nullable timelineOpenCountsDecoder) Nothing
+        |> optional "open_as_of" (D.nullable D.string) Nothing
+        |> optional "open_status" D.string "history_unavailable"
+
+
+timelineOpenCountsDecoder : Decoder TimelineOpenCounts
+timelineOpenCountsDecoder =
+    D.map2 TimelineOpenCounts (D.field "projects" D.int) (D.field "tasks" D.int)
+        |> D.andThen (\counts -> if counts.projects >= 0 && counts.tasks >= 0 then D.succeed counts else D.fail "Open inventory counts must be nonnegative")
 
 
 timelineBucketEntityCountsDecoder : Decoder TimelineBucketEntityCounts

@@ -916,6 +916,8 @@ type alias TimelineModel =
     , chartSeries : TimelineChartSeries
     , chartActions : Dict String Bool
     , chartPointFocus : Dict String Int
+    , chartBarHover : Maybe Int
+    , chartBarFocus : Maybe Int
     , refreshGeneration : Int
     , refreshTimerGeneration : Maybe Int
     , refreshDirty : Bool
@@ -1470,6 +1472,8 @@ type Msg
     | ToggleTimelineChartAction String
     | ToggleTimelineChartSeries String
     | FocusTimelineChartPoint String String Int
+    | HoverTimelineOpenBar (Maybe Int)
+    | FocusTimelineOpenBar (Maybe Int)
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String

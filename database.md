@@ -301,13 +301,13 @@ classDiagram
   change_stream_snapshot_sessions "1" --> "0..*" change_stream_snapshot_page_tokens : session_hash
   tasks "0..1" --> "0..*" task_flatten_migration_report : task_id
 
-  note "PostgreSQL schema through V039\nPK = primary key; UK = unique key; FK = foreign key\n? = nullable; all other columns NOT NULL\nRepeated PK marks a composite key\nLines show declared foreign keys only\nON DELETE CASCADE unless a line says otherwise"
+  note "PK = primary key; UK = unique key; FK = foreign key\n? = nullable; all other columns NOT NULL\nRepeated PK marks a composite key\nLines show declared foreign keys only\nON DELETE CASCADE unless a line says otherwise"
   note for workspaces "UNIQUE (gh_owner, gh_repo)\nWHERE both are non-null AND deleted_at IS NULL"
   note for observations "UNIQUE (id, workspace_id)\nembedding: vector(1536), nullable; present only with pgvector enabled"
   note for observation_subjects "UNIQUE (observation_id, subject_kind, subject)"
   note for change_stream_scope_counters "UNIQUE (scope, coalesce(workspace_id, zero UUID))"
   note for change_stream_outbox "UNIQUE (scope, workspace_id, cursor)\nAlso UNIQUE with workspace_id coalesced to zero UUID"
   note for change_stream_snapshot_sessions "UNIQUE start binding when start_idempotency_hash is non-null:\nscope, coalesce(workspace_id, zero UUID), audience_kind,\naudience_key, coalesce(audience_user_id, zero UUID), start_idempotency_hash"
-  note for task_flatten_migration_report "V018 migration repair report\nUNIQUE (task_id, issue)"
-  note for delete_cascade_migration_report "V019 migration repair report\nUNIQUE (entity_type, entity_id, issue)"
+  note for task_flatten_migration_report "UNIQUE (task_id, issue)"
+  note for delete_cascade_migration_report "UNIQUE (entity_type, entity_id, issue)"
 ```

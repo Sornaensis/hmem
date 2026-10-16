@@ -10,6 +10,7 @@ import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading as DataLoading
 import Feature.Dependencies as Dependencies
 import Feature.Mutations as Mutations
+import Feature.Focus as Focus
 import Feature.Search
 import Feature.WebSocket as WebSocket
 import Http
@@ -31,7 +32,55 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "Timeline focus survives unrelated live tree refresh at first and ancestor pages" <| \_ ->
+        [ test "cached subtask focus completes summary ancestry once and retires stale pages after clearing focus" <| \_ ->
+            let
+                subtask = let base = task "subtask" (Just "parent-task") in { base | projectId = Just "external" }
+                parent = let base = task "parent-task" Nothing in { base | projectId = Just "external", hasChildren = True, directSubtaskCount = 1 }
+                external = project "external" (Just "grandparent")
+                requested = Main.update (FocusEntity "task" subtask.id) (DataLoading.mergeNavigationSummaries [] [ subtask ] model) |> Tuple.first
+                reply ancestors next captured current = case captured.dataLoading.activeNavigationFocus of
+                    Nothing -> current
+                    Just request -> Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "task" subtask.id request.ancestorOffset
+                        (Ok { workspaceId = workspaceId, target = Api.NavigationTaskSummary subtask, ancestors = ancestors, ancestorsTruncated = next /= Nothing, nextAncestorOffset = next })) current |> Tuple.first
+                continued = reply [ Api.NavigationTaskSummary parent, Api.NavigationProjectSummary external ] (Just 64) requested requested
+                completed = reply [ Api.NavigationProjectSummary (project "grandparent" Nothing) ] Nothing continued continued
+                cleared = Main.update (UrlChanged { url | fragment = Just "tab=projects" }) continued |> Tuple.first
+                stale = reply [ Api.NavigationProjectSummary (project "stale-ancestor" Nothing) ] Nothing continued cleared
+                moved = { subtask | parentId = Just "missing-new-parent" }
+                repaired = Main.update (FocusEntity "task" subtask.id) (DataLoading.mergeNavigationSummaries [] [ moved ] completed) |> Tuple.first
+                crumbs = Focus.buildTaskBreadcrumb completed (Api.taskFromCardSummary subtask) [] |> List.map (\( id, _, _ ) -> id)
+            in
+            Expect.equal { page = Just 64, crumbs = [ "grandparent", "external", "parent-task", "subtask" ], complete = Nothing, stale = False, restarted = Just 0, targetOnly = True, noAncestorBranches = True }
+                { page = continued.dataLoading.activeNavigationFocus |> Maybe.map .ancestorOffset, crumbs = crumbs, complete = completed.dataLoading.activeNavigationFocus
+                , stale = Dict.member "stale-ancestor" stale.projects, restarted = repaired.dataLoading.activeNavigationFocus |> Maybe.map .ancestorOffset
+                , targetOnly = Dict.keys completed.dataLoading.taskCardDetailRequests |> List.all ((==) subtask.id)
+                , noAncestorBranches = Dict.isEmpty continued.dataLoading.loadedNavigationBranches }
+        , test "focused project and parent task branches load below collapsed, missing or filtered external ancestry" <| \_ ->
+            List.concatMap (\kind -> List.map (focusedBranchRecovery kind) [ "collapsed", "missing", "filtered" ]) [ "project", "task" ]
+                |> Expect.equal (List.repeat 6 { admitted = True, mounted = True, ancestry = True, collapse = True, restored = True, bounded = True })
+        , test "clearing focus retires child continuation without releasing its physical admission early" <| \_ ->
+            let
+                parent = let base = task "timeline-target" Nothing in { base | projectId = Just "external", hasChildren = True, directSubtaskCount = 51 }
+                seed = DataLoading.mergeNavigationSummaries [] [ parent ] (unfilteredSyncModel [ project "external" Nothing ])
+                cards = seed.cards
+                hidden = { seed | cards = { cards | collapsedNodes = Dict.insert "proj-external" True cards.collapsedNodes } }
+                focused = timelineFocusFrom "task" hidden |> painted
+                requested = paintBranch "task" workspaceId (Just parent.id) focused |> Tuple.first
+                children = List.range 1 50 |> List.map (\n -> let base = task ("child-" ++ String.fromInt n) (Just parent.id) in { base | projectId = Just "external" })
+                continued = branchReply ("task:" ++ parent.id) [] children False True requested
+                captured = Dict.get ("task:" ++ parent.id) continued.dataLoading.loadedNavigationBranches
+                cleared = Main.update (UrlChanged { url | fragment = Just "tab=projects" }) continued |> Tuple.first
+                late = case captured of
+                    Nothing -> cleared
+                    Just request -> Main.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation ("task:" ++ parent.id) request.filterFingerprint request.projectOffset request.taskOffset
+                        (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ task "late-child" (Just parent.id) ], hasMore = False } })) cleared |> Tuple.first
+            in
+            Expect.equal { continuation = Just ( 50, True ), held = True, released = True, stale = False, visible = [ "project:external" ] }
+                { continuation = captured |> Maybe.map (\request -> ( request.taskOffset, request.inFlight ))
+                , held = Dict.size cleared.dataLoading.navigationAdmissions == Dict.size continued.dataLoading.navigationAdmissions
+                , released = Dict.size late.dataLoading.navigationAdmissions < Dict.size cleared.dataLoading.navigationAdmissions
+                , stale = Dict.member "late-child" late.tasks, visible = Cards.mountedViewportKeys late }
+        , test "Timeline focus survives unrelated live tree refresh at first and ancestor pages" <| \_ ->
             List.concatMap (\kind -> List.concatMap (\continuation -> List.map (timelineFocusDuringRefresh kind continuation) [ False, True ]) [ False, True ]) [ "project", "task", "subtask" ]
                 |> Expect.equal (List.repeat 12 { retained = True, mounted = True, complete = True, bounded = True })
         , test "a late focus page cannot overwrite newer canonical target or previously unknown ancestor summaries" <| \_ ->
@@ -2018,13 +2067,13 @@ suite =
             \_ ->
                 let
                     requested = DataLoading.beginNavigationFocus workspaceId "project" "target" focusHydrationModel |> Tuple.first
-                    completed = focusPage 0 Nothing "ancestor-last" requested
+                    completed = focusPage 0 Nothing "ancestor-first" requested
                     hydrated = hydrateFocusWorkspace completed
                 in
                 Expect.equal ( Nothing, Just True, True )
                     ( hydrated.dataLoading.activeNavigationFocus
                     , Dict.get "project:target" hydrated.dataLoading.navigationFocuses |> Maybe.map .succeeded
-                    , Dict.member "target" hydrated.dataLoading.projectCardSummaries && Dict.member "ancestor-last" hydrated.dataLoading.projectCardSummaries
+                    , Dict.member "target" hydrated.dataLoading.projectCardSummaries && Dict.member "ancestor-first" hydrated.dataLoading.projectCardSummaries
                     )
         , test "workspace hydration starts a fresh focus when the retained request belongs to an old session" <|
             \_ ->
@@ -3152,14 +3201,46 @@ focusAuthorityRace changedId =
     }
 
 
+focusedBranchRecovery : String -> String -> { admitted : Bool, mounted : Bool, ancestry : Bool, collapse : Bool, restored : Bool, bounded : Bool }
+focusedBranchRecovery kind ancestry =
+    let
+        external = project "external" Nothing
+        targetProject = let base = project "timeline-target" (Just external.id) in { base | hasChildren = True, directProjectCount = 1 }
+        targetTask = let base = task "timeline-target" Nothing in { base | projectId = Just external.id, hasChildren = True, directSubtaskCount = 1 }
+        seed = DataLoading.mergeNavigationSummaries (if kind == "project" then [ targetProject ] else []) (if kind == "task" then [ targetTask ] else []) (unfilteredSyncModel (if ancestry == "missing" then [] else [ external ]))
+        cards = seed.cards
+        loading = seed.dataLoading
+        hidden = { seed | cards = { cards | collapsedNodes = Dict.insert "proj-external" True cards.collapsedNodes }, dataLoading = { loading | navigationVisibleProjectIds = if ancestry == "filtered" then Set.remove external.id loading.navigationVisibleProjectIds else loading.navigationVisibleProjectIds } }
+        focused = timelineFocusFrom kind hidden |> painted
+        requested = paintBranch kind workspaceId (Just "timeline-target") focused |> Tuple.first
+        childProject = project "focused-child" (Just "timeline-target")
+        childTask = let base = task "focused-child" (Just "timeline-target") in { base | projectId = Just external.id }
+        replied = branchReply (kind ++ ":timeline-target") (if kind == "project" then [ childProject ] else []) (if kind == "task" then [ childTask ] else []) False False requested
+        completed = Cards.refreshViewport requested ( replied, Cmd.none ) |> Tuple.first
+        cleared = Main.update (UrlChanged { url | fragment = Just "tab=projects" }) completed |> Tuple.first
+    in
+    { admitted = Dict.get (kind ++ ":timeline-target") requested.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False
+    , mounted = List.member (kind ++ ":focused-child") (Cards.mountedViewportKeys completed)
+    , ancestry = ancestry /= "missing" || focused.dataLoading.activeNavigationFocus /= Nothing
+    , collapse = Dict.get "proj-external" completed.cards.collapsedNodes == Just True
+    , restored = not (List.member (kind ++ ":focused-child") (Cards.mountedViewportKeys cleared))
+    , bounded = Dict.size completed.dataLoading.navigationAdmissions <= 4 && Set.size completed.dataLoading.cardDetailAdmissions <= 6 && List.length (Cards.mountedViewportKeys completed) <= 25
+    }
+
+
 timelineFocusRequest : String -> Model
 timelineFocusRequest kind =
+    timelineFocusFrom kind model
+
+
+timelineFocusFrom : String -> Model -> Model
+timelineFocusFrom kind source =
     let
         entityType = if kind == "project" then "project" else "task"
         event =
             { id = "timeline-entry", workspaceId = workspaceId, eventType = "created", entityType = entityType, entityId = "timeline-target", title = "Target", occurredAt = "2026-10-16T00:00:00Z"
             , actor = Nothing, project = Nothing, parentTask = Nothing, statusTransition = Nothing, navigation = { entityType = entityType, entityId = "timeline-target" }, sourceAuditId = Nothing }
-        timeline = { model | activeTab = TimelineTab }
+        timeline = { source | activeTab = TimelineTab }
         navigated = Main.update (NavigateToTimelineEntity event) timeline |> Tuple.first
     in
     Main.update (UrlChanged { url | fragment = Just ("tab=projects&focus=" ++ entityType ++ ":timeline-target") }) navigated |> Tuple.first

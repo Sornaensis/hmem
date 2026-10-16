@@ -2,6 +2,34 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 
+test('Timeline focus loads a previously hidden task subtree without reopening its collapsed project', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture()
+  fixture.projects = [fixture.projects[0]]
+  fixture.tasks = fixture.tasks.filter(task => ['task-000', 'subtask-000'].includes(task.id))
+  fixture.timelineEvents = [{ id: 'focus-child', workspace_id: fixture.workspace.id, event_type: 'task_created', entity_type: 'task', entity_id: 'task-000', title: 'Open hidden parent task', occurred_at: '2026-10-16T00:00:00Z', actor: null, project: { id: 'root-project', name: 'root-project' }, parent_task: null, status_transition: null, navigation: { entity_type: 'task', entity_id: 'task-000' }, source_audit_id: null }]
+  const h = await openHierarchy(fixture)
+  try {
+    const held = h.gate(r => r.kind === 'project' && r.parent === 'root-project', { hold: true })
+    await h.start()
+    await h.bounded(held.arrived, 10000, 'Held project membership')
+    await h.page.locator('#entity-root-project .tree-toggle').click()
+    held.release(); await h.idle()
+    assert.equal(await h.page.locator('#entity-task-000').count(), 0)
+    await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
+    await h.page.locator('#timeline-event-focus-child').click()
+    await h.page.locator('#entity-subtask-000').waitFor({ state: 'visible', timeout: 10000 })
+    await h.idle()
+    assert.ok(h.requests.some(r => r.path.includes('/navigation/focus/task/task-000')))
+    assert.ok(h.requests.some(r => r.kind === 'task' && r.parent === 'task-000'))
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    await h.page.evaluate(() => { window.location.hash = 'tab=projects' })
+    await h.page.locator('#entity-root-project').waitFor({ state: 'visible' })
+    assert.equal(await h.page.locator('#entity-task-000').count(), 0, 'External project collapse survives leaving focus')
+    assert.equal(await h.page.locator('#entity-subtask-000').count(), 0)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 test('cold held first membership paints the real root at scroll origin before large expanded batches drain', { timeout: 60000 }, async () => {
   const h=await openHierarchy()
   try{

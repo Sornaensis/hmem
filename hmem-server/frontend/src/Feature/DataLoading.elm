@@ -382,34 +382,40 @@ enqueueNavigation key model =
         { model | dataLoading = { loading | navigationQueue = loading.navigationQueue ++ [ key ] } }
 
 
-{-| Follow canonical ancestry, rather than merely a node's own toggle. Cycles
-and missing visible membership never make a cached descendant discoverable.
+{-| Follow displayed ancestry up to the focused root, retaining canonical
+parents for breadcrumbs and the ordinary tree. External ancestry cannot hide
+the focused subtree, and unrelated cached branches cannot become demand.
 -}
 navigationBranchExpanded : String -> Model -> Bool
 navigationBranchExpanded key model =
     let
+        focused kind id = model.focus.focusedEntity == Just ( kind, id )
+        ordinaryRoot = model.focus.focusedEntity == Nothing
+
         projectExpanded visited id =
             if Set.member ("project:" ++ id) visited || (Dict.get ("proj-" ++ id) model.cards.collapsedNodes |> Maybe.withDefault False) then
                 False
             else
                 case Dict.get id model.dataLoading.projectCardSummaries of
-                    Nothing -> not model.dataLoading.navigationVisibilityActive && Set.isEmpty visited
+                    Nothing -> ordinaryRoot && not model.dataLoading.navigationVisibilityActive && Set.isEmpty visited
                     Just summary ->
-                        (not model.dataLoading.navigationVisibilityActive || Set.member id model.dataLoading.navigationVisibleProjectIds)
-                            && (summary.parentId |> Maybe.map (projectExpanded (Set.insert ("project:" ++ id) visited)) |> Maybe.withDefault True)
+                        Just summary.workspaceId == model.selectedWorkspaceId
+                            && (focused "project" id || not model.dataLoading.navigationVisibilityActive || Set.member id model.dataLoading.navigationVisibleProjectIds)
+                            && (focused "project" id || (summary.parentId |> Maybe.map (projectExpanded (Set.insert ("project:" ++ id) visited)) |> Maybe.withDefault ordinaryRoot))
 
         taskExpanded visited id =
             if Set.member ("task:" ++ id) visited || (Dict.get ("task-" ++ id) model.cards.collapsedNodes |> Maybe.withDefault False) then
                 False
             else
                 case Dict.get id model.dataLoading.taskCardSummaries of
-                    Nothing -> not model.dataLoading.navigationVisibilityActive && Set.isEmpty visited
+                    Nothing -> ordinaryRoot && not model.dataLoading.navigationVisibilityActive && Set.isEmpty visited
                     Just summary ->
-                        (not model.dataLoading.navigationVisibilityActive || Set.member id model.dataLoading.navigationVisibleTaskIds)
-                            && (case summary.parentId of
+                        Just summary.workspaceId == model.selectedWorkspaceId
+                            && (focused "task" id || not model.dataLoading.navigationVisibilityActive || Set.member id model.dataLoading.navigationVisibleTaskIds)
+                            && (focused "task" id || (case summary.parentId of
                                     Just parent -> taskExpanded (Set.insert ("task:" ++ id) visited) parent
-                                    Nothing -> summary.projectId |> Maybe.map (projectExpanded visited) |> Maybe.withDefault True
-                               )
+                                    Nothing -> summary.projectId |> Maybe.map (projectExpanded visited) |> Maybe.withDefault ordinaryRoot
+                               ))
     in
     case String.split ":" key of
         [ "project", id ] -> projectExpanded Set.empty id
@@ -1716,10 +1722,26 @@ revalidateNavigationFocus workspaceId entityType entityId model =
 requestNavigationFocus : Bool -> String -> String -> String -> Model -> ( Model, Cmd Msg )
 requestNavigationFocus force workspaceId entityType entityId model =
     let
+        projectAncestry visited id =
+            if Set.member ( "project", id ) visited then False
+            else
+                Dict.get id model.projects
+                    |> Maybe.map (\project -> project.workspaceId == workspaceId && (project.parentId |> Maybe.map (projectAncestry (Set.insert ( "project", id ) visited)) |> Maybe.withDefault True))
+                    |> Maybe.withDefault False
+
+        taskAncestry visited id =
+            if Set.member ( "task", id ) visited then False
+            else
+                Dict.get id model.tasks
+                    |> Maybe.map (\task -> task.workspaceId == workspaceId && (case task.parentId of
+                        Just parent -> taskAncestry (Set.insert ( "task", id ) visited) parent
+                        Nothing -> task.projectId |> Maybe.map (projectAncestry visited) |> Maybe.withDefault True))
+                    |> Maybe.withDefault False
+
         alreadyPresent =
             case entityType of
-                "project" -> Dict.member entityId model.projects
-                "task" -> Dict.member entityId model.tasks
+                "project" -> Dict.member entityId model.dataLoading.projectCardSummaries && projectAncestry Set.empty entityId
+                "task" -> Dict.member entityId model.dataLoading.taskCardSummaries && taskAncestry Set.empty entityId
                 _ -> True
 
         generation =
@@ -1742,7 +1764,7 @@ requestNavigationFocus force workspaceId entityType entityId model =
             previousRequest |> Maybe.andThen (\focusRequest -> if matchesContext focusRequest then Just focusRequest else Nothing)
 
         requestedAncestorOffset =
-            if force then
+            if force || (currentRequest |> Maybe.map .succeeded |> Maybe.withDefault False) && not alreadyPresent then
                 0
 
             else
@@ -1779,7 +1801,7 @@ requestNavigationFocus force workspaceId entityType entityId model =
                     False
 
         alreadyCompleted =
-            currentRequest |> Maybe.map .succeeded |> Maybe.withDefault False
+            alreadyPresent && (currentRequest |> Maybe.map .succeeded |> Maybe.withDefault False)
 
         retiredRequest =
             previousRequest /= Nothing && currentRequest == Nothing

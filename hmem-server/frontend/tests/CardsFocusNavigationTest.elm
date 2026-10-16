@@ -27,7 +27,24 @@ import Url
 suite : Test
 suite =
     describe "bounded Cards and Focus loading"
-        [ test "effective task ranks preserve canonical statuses and use direct running counts only for blocked" <| \_ ->
+        [ test "cached raw targets and incomplete, cyclic or foreign ancestry request bounded focus summaries" <| \_ ->
+            let
+                root = project "root"
+                child = let base = project "child" in { base | parentId = Just root.id }
+                missing = DataLoading.mergeNavigationSummaries [ child ] [] model
+                rawOnly = { model | projects = Dict.singleton root.id (Api.projectFromCardSummary root) }
+                cyclicRoot = { root | parentId = Just child.id }
+                cycle = DataLoading.mergeNavigationSummaries [ cyclicRoot, child ] [] model
+                foreign = { root | workspaceId = "other-workspace" }
+                crossed = DataLoading.mergeNavigationSummaries [ foreign, child ] [] model
+                focus id source = Focus.update (FocusEntity "project" id) source |> Tuple.first
+                demanded source = source.dataLoading.activeNavigationFocus |> Maybe.map .ancestorOffset
+                crumbs source = Focus.buildProjectBreadcrumb source (Api.projectFromCardSummary child) [] |> List.map (\( id, _, _ ) -> id)
+            in
+            Expect.equal { requests = List.repeat 4 (Just 0), cycle = [ "root", "child" ], foreign = [ "child" ] }
+                { requests = [ demanded (focus child.id missing), demanded (focus root.id rawOnly), demanded (focus child.id cycle), demanded (focus child.id crossed) ]
+                , cycle = crumbs cycle, foreign = crumbs crossed }
+        , test "effective task ranks preserve canonical statuses and use direct running counts only for blocked" <| \_ ->
             let
                 base = task "parent" Nothing
                 rollup = base.readinessRollup

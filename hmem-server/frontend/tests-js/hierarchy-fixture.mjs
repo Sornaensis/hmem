@@ -173,6 +173,8 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           open_tasks: fixture.tasks.filter(row => row.workspace_id === fixture.workspace.id && !row.deleted_at && ['todo','in_progress','blocked'].includes(row.status)).length,
         }
         else if (path === '/api/v1/workspaces/' + fixture.workspace.id + '/memberships') value = { items: [], has_more: false }
+        else if (path === '/api/v1/workspaces/' + fixture.workspace.id + '/timeline') value = { items: fixture.timelineEvents, has_more: false }
+        else if (path === '/api/v1/workspaces/' + fixture.workspace.id + '/timeline/buckets') value = { workspace_id: fixture.workspace.id, since: url.searchParams.get('since') || '', until: url.searchParams.get('until'), bucket: url.searchParams.get('bucket'), buckets: [], next_since: null }
         else if (navigation) {
           assert.equal(path, '/api/v1/workspaces/' + fixture.workspace.id + '/navigation')
           assert.equal(url.searchParams.get('project_limit'), '50'); assert.equal(url.searchParams.get('task_limit'), '50')

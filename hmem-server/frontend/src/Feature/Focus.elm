@@ -258,30 +258,14 @@ update msg model =
 
 
 {-| Focus links can target an entity outside the bounded root/branch cache.
-Only an absent project or task uses the direct-focus route; an already loaded
-card must not issue an unnecessary duplicate request.
+The loader distinguishes a complete cached path from a cached target whose
+ancestry still needs bounded summary hydration.
 -}
 requestMissingFocus : String -> String -> Model -> ( Model, Cmd Msg )
 requestMissingFocus entityType entityId model =
-    let
-        missing =
-            case entityType of
-                "project" ->
-                    not (Dict.member entityId model.projects)
-
-                "task" ->
-                    not (Dict.member entityId model.tasks)
-
-                _ ->
-                    False
-    in
     case model.selectedWorkspaceId of
         Just workspaceId ->
-            if missing then
-                Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId model
-
-            else
-                ( model, Cmd.none )
+            Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId model
 
         Nothing ->
             ( model, Cmd.none )
@@ -545,30 +529,20 @@ buildTaskBreadcrumb model task acc =
         currentCrumb =
             ( task.id, task.title, "task" )
 
-        withParentTask =
-            case task.parentId of
-                Just pid ->
-                    case Dict.get pid model.tasks of
-                        Just parentTask ->
-                            buildTaskBreadcrumb model parentTask (currentCrumb :: acc)
-
-                        Nothing ->
-                            currentCrumb :: acc
-
-                Nothing ->
-                    currentCrumb :: acc
+        withCurrent = currentCrumb :: acc
     in
-    case task.projectId of
-        Just projId ->
-            case Dict.get projId model.projects of
-                Just proj ->
-                    buildProjectBreadcrumb model proj withParentTask
+    if List.any (\( id, _, kind ) -> id == task.id && kind == "task") acc then
+        acc
 
-                Nothing ->
-                    withParentTask
+    else
+        case task.parentId |> Maybe.andThen (\id -> Dict.get id model.tasks) |> Maybe.andThen (\parent -> if parent.workspaceId == task.workspaceId then Just parent else Nothing) of
+            Just parent ->
+                buildTaskBreadcrumb model parent withCurrent
 
-        Nothing ->
-            withParentTask
+            Nothing ->
+                case task.projectId |> Maybe.andThen (\id -> Dict.get id model.projects) |> Maybe.andThen (\project -> if project.workspaceId == task.workspaceId then Just project else Nothing) of
+                    Just project -> buildProjectBreadcrumb model project withCurrent
+                    Nothing -> withCurrent
 
 
 buildProjectBreadcrumb : Model -> Api.Project -> List ( String, String, String ) -> List ( String, String, String )
@@ -577,14 +551,13 @@ buildProjectBreadcrumb model project acc =
         currentCrumb =
             ( project.id, project.name, "project" )
     in
-    case project.parentId of
-        Just pid ->
-            case Dict.get pid model.projects of
-                Just parentProj ->
-                    buildProjectBreadcrumb model parentProj (currentCrumb :: acc)
+    if List.any (\( id, _, kind ) -> id == project.id && kind == "project") acc then
+        acc
 
-                Nothing ->
-                    currentCrumb :: acc
+    else
+        case project.parentId |> Maybe.andThen (\id -> Dict.get id model.projects) |> Maybe.andThen (\parent -> if parent.workspaceId == project.workspaceId then Just parent else Nothing) of
+            Just parent ->
+                buildProjectBreadcrumb model parent (currentCrumb :: acc)
 
-        Nothing ->
-            currentCrumb :: acc
+            Nothing ->
+                currentCrumb :: acc

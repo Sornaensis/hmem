@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 module HMem.Server.Embedding.ManagedTeiSpec (spec) where
 
-import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay, tryPutMVar)
+import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay, tryPutMVar, tryReadMVar)
 import Control.Concurrent.Async (async, asyncWithUnmask, cancel, waitCatch)
 import Control.Exception (MaskingState(..), SomeAsyncException, SomeException, bracket, finally, fromException, getMaskingState, mask, onException, throwIO, try)
 import Control.Monad (void, when)
@@ -456,7 +456,13 @@ spec = describe "managed TEI supervisor" $ do
     launches <- newIORef ([] :: [[String]])
     activated <- newIORef False
     joined <- newEmptyMVar
+    joinEntered <- newEmptyMVar
+    releaseJoin <- newEmptyMVar
     reapedAt <- newEmptyMVar
+    reapEntered <- newEmptyMVar
+    releaseReap <- newEmptyMVar
+    childExited <- newEmptyMVar
+    retired <- newEmptyMVar
     phases <- newIORef ([] :: [(String, Word64)])
     let mark label = do
           stamp <- getMonotonicTimeNSec
@@ -465,16 +471,23 @@ spec = describe "managed TEI supervisor" $ do
           (mark "probe-start" >> threadDelay 70000 >> mark "probe-end" >> pure (Right expectedIdentity)) neverExit
         deps = baseDeps
           { selectLoopbackPort = mark "owner-start" >> baseDeps.selectLoopbackPort
+          , emit = \event -> do
+              mark ("event-" <> show event)
+              when (event == ManagedTeiDegradedEvent) (void (tryPutMVar retired ()))
           , prepareLaunch = \_ launch -> mark "preflight-start" >> threadDelay 70000 >> mark "preflight-end" >> pure (Right launch)
           , spawnChild = \_ launch register -> do
               modifyIORef' launches (<> [launch.arguments])
               registerChild register ManagedTeiChild
-                { waitForChildExit = neverExit
-                , terminateAndReap = do
-                    mark "reap-start"
-                    threadDelay 30000
-                    mark "reap-end"
-                    getMonotonicTimeNSec >>= void . tryPutMVar reapedAt
+                { waitForChildExit = readMVar childExited
+                , terminateAndReap = tryReadMVar childExited >>= \case
+                    Just _ -> mark "reap-already-acknowledged"
+                    Nothing -> do
+                      mark "reap-start"
+                      void (tryPutMVar reapEntered ())
+                      readMVar releaseReap
+                      mark "reap-end"
+                      void (tryPutMVar childExited ExitSuccess)
+                      getMonotonicTimeNSec >>= void . tryPutMVar reapedAt
                 , childProcessId = Nothing
                 , childProcessGroupId = Nothing }
           }
@@ -484,28 +497,71 @@ spec = describe "managed TEI supervisor" $ do
               mark "activate-start"
               writeIORef activated True
               let active = ManagedTeiActive
-                    { activeInvalidate = pure ()
-                    , activeStopAndJoin = mark "join-start" >> threadDelay 20000 >> mark "join-end" >> void (tryPutMVar joined ())
-                    , activeDisableTarget = pure ()
+                    { activeInvalidate = mark "invalidate"
+                    , activeStopAndJoin = tryReadMVar joined >>= \case
+                        Just () -> mark "join-already-acknowledged"
+                        Nothing -> do
+                          mark "join-start"
+                          void (tryPutMVar joinEntered ())
+                          readMVar releaseJoin
+                          mark "join-end"
+                          void (tryPutMVar joined ())
+                    , activeDisableTarget = mark "disable"
                     , activeWorkerOutcome = neverExit >> pure ()
                     , activeAvailable = pure True }
               register active
               threadDelay 1000000 `finally` mark "activate-end"
               pure (Right active) }
     startedAt <- getMonotonicTimeNSec
-    runtime <- startManagedTeiWith config { readinessTimeoutMicros = 400000, restartBudget = 0 } deps hooks
-    joinedOutcome <- timeout 1000000 (takeMVar joined)
-    joinedOutcome `shouldBe` Just ()
-    completed <- timeout 1000000 (takeMVar reapedAt)
-    completed `shouldSatisfy` isJust
-    let elapsedMicros = maybe maxBound (\finished -> (finished - startedAt) `div` 1000) completed
-    observedPhases <- readIORef phases
-    when (elapsedMicros >= 420000) $ putStrLn ("[managed-launch-phases] constructor-relative-us=" <> show
-      [(label, (stamp - startedAt) `div` 1000) | (label, stamp) <- observedPhases])
-    elapsedMicros `shouldSatisfy` (< 420000)
-    readIORef activated `shouldReturn` True
-    managedTeiState runtime `shouldReturn` ManagedTeiDegraded
-    stopManagedTei runtime
+    let reportPhases = do
+          observedPhases <- readIORef phases
+          putStrLn ("[managed-launch-phases] constructor-relative-us=" <> show
+            [(label, (stamp - startedAt) `div` 1000) | (label, stamp) <- observedPhases])
+    (do
+      runtime <- startManagedTeiWith config { readinessTimeoutMicros = 400000, restartBudget = 0 } deps hooks
+      let releaseAndStop = do
+            void (tryPutMVar releaseJoin ())
+            void (tryPutMVar releaseReap ())
+            void (try @SomeException (stopManagedTei runtime))
+      (do
+        -- Exercise ordered, acknowledged cleanup without pretending that two
+        -- scheduler-rounded sleeps fit inside the 66.7ms cleanup reserve.
+        timeout 1000000 (readMVar joinEntered) `shouldReturn` Just ()
+        tryReadMVar joined `shouldReturn` Nothing
+        tryReadMVar childExited `shouldReturn` Nothing
+        void (tryPutMVar releaseJoin ())
+        timeout 1000000 (readMVar reapEntered) `shouldReturn` Just ()
+        readMVar joined `shouldReturn` ()
+        tryReadMVar childExited `shouldReturn` Nothing
+        tryReadMVar retired `shouldReturn` Nothing
+        void (tryPutMVar releaseReap ())
+        completed <- timeout 1000000 (readMVar reapedAt)
+        mark "test-observed-reap"
+        completed `shouldSatisfy` isJust
+        let elapsedMicros = maybe maxBound (\finished -> (finished - startedAt) `div` 1000) completed
+        elapsedMicros `shouldSatisfy` (< 420000)
+        readIORef activated `shouldReturn` True
+        timeout 1000000 (readMVar retired) `shouldReturn` Just ()
+        mark "test-observed-retirement"
+        acknowledgedAt <- getMonotonicTimeNSec
+        (acknowledgedAt - startedAt) `div` 1000 `shouldSatisfy` (< 420000)
+        readMVar childExited `shouldReturn` ExitSuccess
+        managedTeiState runtime `shouldReturn` ManagedTeiDegraded
+        mark "stop-start"
+        timeout 1000000 (stopManagedTei runtime) `shouldReturn` Just ()
+        mark "stop-end"
+        managedTeiState runtime `shouldReturn` ManagedTeiStopped
+        length <$> readIORef launches `shouldReturn` 1
+        observed <- map fst <$> readIORef phases
+        [ "preflight-start", "preflight-end", "probe-start", "probe-end"
+          , "activate-start", "activate-end", "invalidate", "join-start"
+          , "join-end", "disable", "reap-start", "reap-end"
+          , "event-ManagedTeiDegradedEvent", "stop-start", "event-ManagedTeiStoppedEvent", "stop-end" ]
+          `isSubsequenceOf` observed `shouldBe` True
+        length (filter (== "join-start") observed) `shouldBe` 1
+        length (filter (== "reap-start") observed) `shouldBe` 1
+        ) `onException` releaseAndStop
+      ) `onException` reportPhases
 
   it "continues owned cleanup after the startup clock expires and reports the overrun" $ do
     launches <- newIORef []

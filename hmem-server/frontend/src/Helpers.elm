@@ -12,6 +12,7 @@ import Html.Events exposing (stopPropagationOn)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Ports exposing (saveToLocalStorage)
+import Permissions
 import Process
 import Set
 import String
@@ -1758,13 +1759,122 @@ finishProjectOperation guard model =
     { model | mutations = { mutations | projectOperations = remaining } }
 
 
+mutationScope : Model -> MutationScope
+mutationScope model =
+    { workspaceId = Maybe.withDefault "" model.selectedWorkspaceId
+    , sessionEpoch = model.sessionRequestEpoch
+    , audienceId = model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault ""
+    }
+
+
+mutationScopeIsCurrent : MutationScope -> Model -> Bool
+mutationScopeIsCurrent scope model =
+    model.auth.status == AuthReady && model.sessionContext /= Nothing
+        && model.selectedWorkspaceId == Just scope.workspaceId
+        && mutationScope model == scope
+        && Permissions.canReadCurrentWorkspace model
+
+
+registerTaskMutation : String -> String -> Model -> ( Model, TaskMutationOperation )
+registerTaskMutation requestId taskId model =
+    let
+        ( revision, issued ) = allocatePlanningRead model
+        operation = { request = { scope = mutationScope model, requestId = requestId, revision = revision }, taskId = taskId }
+        mutations = issued.mutations
+    in
+    ( { issued | mutations = { mutations | taskOperations = Dict.insert taskId revision mutations.taskOperations, taskAcknowledgements = Dict.insert revision operation mutations.taskAcknowledgements } }, operation )
+
+
+taskUpdateCmd : Model -> String -> String -> List ( String, Encode.Value ) -> Cmd Msg
+taskUpdateCmd model requestId taskId fields =
+    ElmTask.perform identity (ElmTask.succeed (RequestTaskUpdate (mutationScope model) taskId requestId fields))
+
+
+beginTaskUpdate : MutationScope -> String -> String -> List ( String, Encode.Value ) -> Model -> ( Model, Cmd Msg )
+beginTaskUpdate scope taskId requestId fields model =
+    if not (mutationScopeIsCurrent scope model) || not (Permissions.canEditCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> task.workspaceId == scope.workspaceId) |> Maybe.withDefault False) then ( model, Cmd.none )
+    else
+        let ( registered, operation ) = registerTaskMutation requestId taskId model
+        in ( registered, Api.updateTask model.flags.apiUrl taskId fields (TaskUpdated operation) )
+
+
+taskOperationIsLatest : TaskMutationOperation -> Model -> Bool
+taskOperationIsLatest operation model =
+    Dict.get operation.taskId model.mutations.taskOperations == Just operation.request.revision
+
+
+finishTaskAcknowledgement : TaskMutationOperation -> Model -> Model
+finishTaskAcknowledgement operation model =
+    let mutations = model.mutations
+    in
+    if Dict.get operation.request.revision mutations.taskAcknowledgements == Just operation then
+        { model | mutations = { mutations | taskAcknowledgements = Dict.remove operation.request.revision mutations.taskAcknowledgements } }
+    else model
+
+
+taskPayloadIsCurrent : PlanningMutationRequest -> Api.Task -> Model -> Bool
+taskPayloadIsCurrent request task model =
+    task.workspaceId == request.scope.workspaceId
+        && planningReadIsCurrent request.revision ("task:" ++ task.id) model
+        && (Dict.get task.id model.mutations.taskOperations |> Maybe.map (\latest -> latest <= request.revision) |> Maybe.withDefault True)
+
+
+acceptTaskMutationPayload : PlanningMutationRequest -> Api.Task -> Model -> Model
+acceptTaskMutationPayload request task model =
+    let
+        loading = model.dataLoading
+        update previous = { previous | title = task.title, status = task.status, priority = task.priority, projectId = task.projectId, parentId = task.parentId, dependencyCount = task.dependencyCount, completedAt = task.completedAt, updatedAt = task.updatedAt }
+        summaries = Dict.update task.id (Maybe.map update) loading.taskCardSummaries
+        summary = Dict.get task.id summaries |> Maybe.map Api.NavigationTaskSummary
+        readiness = Dict.get task.id model.dependencies.taskReadinessRollups |> Maybe.map TaskReadiness
+    in
+    recordPlanningAuthority request.revision ("task:" ++ task.id) summary readiness
+        { model | tasks = Dict.insert task.id task model.tasks, dataLoading = { loading | taskCardSummaries = summaries } }
+
+
+beginCreationMutation : CreationSlot -> Model -> ( Model, CreationOperation, Cmd Msg )
+beginCreationMutation slot model =
+    let
+        ( tracked, requestId, command ) = beginTrackedMutation [] model
+        ( revision, issued ) = allocatePlanningRead tracked
+        operation = { request = { scope = mutationScope model, requestId = requestId, revision = revision }, slot = slot, formRevision = if slot == ModalCreation then model.editing.createFormRevision else model.editing.inlineCreateRevision }
+        mutations = issued.mutations
+    in
+    ( { issued | mutations = { mutations | creationOperations = Dict.insert revision operation mutations.creationOperations, creationSlots = Dict.insert (creationSlotKey slot) revision mutations.creationSlots } }, operation, command )
+
+
+creationSlotKey : CreationSlot -> String
+creationSlotKey slot = if slot == ModalCreation then "modal" else "inline"
+
+
+creationOwnsForm : CreationOperation -> Model -> Bool
+creationOwnsForm operation model =
+    Dict.get (creationSlotKey operation.slot) model.mutations.creationSlots == Just operation.request.revision
+        && (if operation.slot == ModalCreation then model.editing.createForm /= Nothing && model.editing.createFormRevision == operation.formRevision
+            else model.editing.inlineCreate /= Nothing && model.editing.inlineCreateRevision == operation.formRevision)
+
+
+finishCreationForm : CreationOperation -> Model -> Model
+finishCreationForm operation model =
+    let editing = model.editing
+    in
+    if not (creationOwnsForm operation model) then model
+    else if operation.slot == ModalCreation then
+        { model | editing = { editing | createForm = Nothing, createFormRevision = editing.createFormRevision + 1 } }
+    else
+        { model | editing = { editing | inlineCreate = Nothing, inlineCreateRevision = editing.inlineCreateRevision + 1 } }
+
+
 retireProjectOperations : Model -> Model
 retireProjectOperations model =
     let
         mutations = model.mutations
         current = Dict.filter (\_ operation -> projectRequestIsCurrent operation.guard model) mutations.projectOperations
     in
-    { model | mutations = { mutations | projectOperations = current } }
+    { model | mutations = { mutations | projectOperations = current
+        , taskAcknowledgements = Dict.filter (\_ operation -> mutationScopeIsCurrent operation.request.scope model) mutations.taskAcknowledgements
+        , creationOperations = Dict.filter (\_ operation -> mutationScopeIsCurrent operation.request.scope model) mutations.creationOperations
+        } }
 
 
 projectUpdateCmd : Model -> String -> List ( String, Encode.Value ) -> Cmd Msg

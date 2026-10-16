@@ -1,5 +1,6 @@
 module Feature.WebSocket exposing
     ( refreshProjectCascade
+    , refreshMutationEntities
     , refreshTaskPlacement
     , connectCmd
     , init
@@ -2204,9 +2205,39 @@ invalidateCascadeRequests scope targets model =
         model targets
 
 
-{-| Reconcile loaded task descendants, old parent and both project scopes after
+{- Reconcile loaded task descendants, old parent and both project scopes after
 placement acknowledgement, including no-project placements.
 -}
+{-| Client read admission is not server commit order. Refresh unsafe mutation
+payloads through the existing bounded summary, membership and detail paths.
+-}
+refreshMutationEntities : List ( String, String ) -> List ( String, String ) -> Model -> ( Model, Cmd Msg )
+refreshMutationEntities targets rejected model =
+    case model.selectedWorkspaceId of
+        Nothing -> ( model, Cmd.none )
+        Just workspaceId ->
+            let
+                loading = model.dataLoading
+                invalidated = { model | dataLoading = { loading
+                    | taskCardDetailRequests = List.foldl (\( kind, id ) requests -> if kind == "task" then Dict.remove id requests else requests) loading.taskCardDetailRequests rejected
+                    , projectCardDetailRequests = List.foldl (\( kind, id ) requests -> if kind == "project" then Dict.remove id requests else requests) loading.projectCardDetailRequests rejected
+                    } }
+                ( navigation, navigationCmd ) = deferMoveNavigation Feature.DataLoading.revalidateNavigationForFilters invalidated
+                owners = targets |> List.concatMap (\( kind, id ) -> if kind == "task" then
+                    (Dict.get id model.tasks |> Maybe.map (\task -> List.filterMap identity [ Maybe.map (Tuple.pair "task") task.parentId, Maybe.map (Tuple.pair "project") task.projectId ]) |> Maybe.withDefault [])
+                    else [])
+                ( refreshed, summaryCmd ) = requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) (Set.fromList (targets ++ owners) |> Set.toList) navigation
+                refreshedLoading = refreshed.dataLoading
+                retain kind id request = request.succeeded && not request.inFlight && request.workspaceId == workspaceId && request.sessionEpoch == model.sessionRequestEpoch && not (List.member ( kind, id ) rejected)
+                rebase _ request = { request | navigationGeneration = refreshedLoading.navigationGeneration }
+                current = { refreshed | dataLoading = { refreshedLoading
+                    | projectCardDetailRequests = Dict.union refreshedLoading.projectCardDetailRequests (Dict.filter (retain "project") loading.projectCardDetailRequests |> Dict.map rebase)
+                    , taskCardDetailRequests = Dict.union refreshedLoading.taskCardDetailRequests (Dict.filter (retain "task") loading.taskCardDetailRequests |> Dict.map rebase)
+                    } }
+            in
+            ( current, Cmd.batch [ navigationCmd, summaryCmd, refreshProjectNextTaskCaches current ] )
+
+
 refreshTaskPlacement : String -> Maybe String -> Maybe String -> Maybe String -> Model -> ( Model, Cmd Msg )
 refreshTaskPlacement taskId oldParent source destination model =
     case model.selectedWorkspaceId of

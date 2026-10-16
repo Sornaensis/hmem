@@ -176,15 +176,13 @@ handleUrlChangeWithoutProtectedExit url model =
 
                     updatedEditing =
                         { currentEditing
-                            | createForm = Nothing
-                            , editState =
+                            | editState =
                                 if Feature.Editing.hasProtectedWorkspaceRename model then
                                     currentEditing.editState
 
                                 else
                                     Nothing
-                            , inlineCreate = Nothing
-                        }
+                        } |> Feature.Editing.retireForms
 
                     currentMemory =
                         model.memory
@@ -352,9 +350,7 @@ handleUrlChangeWithoutProtectedExit url model =
                     updatedEditing =
                         { currentEditing
                             | editState = Nothing
-                            , createForm = Nothing
-                            , inlineCreate = Nothing
-                        }
+                        } |> Feature.Editing.retireForms
 
                     currentMemory =
                         model.memory
@@ -672,9 +668,7 @@ clearRouteConfirmations preserveProtectedWorkspaceRename model =
 
                     else
                         Nothing
-                , createForm = Nothing
-                , inlineCreate = Nothing
-            }
+            } |> Feature.Editing.retireForms
         , memory = { currentMemory | linkingMemoryFor = Nothing, linkingEntityFor = Nothing }
         , dependencies = { currentDependencies | addingDependencyFor = Nothing }
         , cards = { currentCards | deleteConfirmation = Nothing, lastFocusClick = Nothing }

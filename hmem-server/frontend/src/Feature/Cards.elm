@@ -3393,8 +3393,8 @@ refreshViewportFor msg previous ( model, command ) =
             case msg of
                 CanonicalTaskFetched _ taskId _ -> [ taskId ]
                 GotTaskCardDetail _ taskId _ -> [ taskId ]
-                TaskCreated (Ok task) -> [ task.id ]
-                TaskUpdated (Ok mutation) -> mutation.task.id :: List.map (.task >> .id) mutation.dependencyEffects
+                TaskCreated _ (Ok task) -> [ task.id ]
+                TaskUpdated _ (Ok mutation) -> mutation.task.id :: List.map (.task >> .id) mutation.dependencyEffects
                 DependencyMutationDone _ _ (Ok mutation) -> List.map (.task >> .id) mutation.affectedTasks
                 GotTasks _ _ _ (Ok page) -> List.map .id page.items
                 _ -> []

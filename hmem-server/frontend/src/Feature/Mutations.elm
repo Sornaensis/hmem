@@ -15,6 +15,10 @@ init =
     { pendingMutationIds = Dict.empty
     , pendingRequestIds = Dict.empty
     , projectOperations = Dict.empty
+    , taskOperations = Dict.empty
+    , taskAcknowledgements = Dict.empty
+    , creationOperations = Dict.empty
+    , creationSlots = Dict.empty
     , nextRequestId = 1
     }
 
@@ -30,60 +34,46 @@ update msg model =
                 Err _ ->
                     addToast Error ("Failed to update " ++ entityType) model
 
-        ProjectCreated result ->
-            case result of
-                Ok proj ->
-                    let
-                        currentEditing =
-                            model.editing
+        ProjectCreated operation result ->
+            if not (creationAcknowledgementIsCurrent operation model) then ( model, Cmd.none )
+            else
+                let
+                    completed = completeCreation operation model
+                in
+                case result of
+                    Ok project ->
+                        if project.workspaceId /= operation.request.scope.workspaceId then ( completed, Cmd.none )
+                        else
+                            let
+                                accepted = Helpers.planningReadIsCurrent operation.request.revision ("project:" ++ project.id) model
+                                canonical = (if accepted then acceptCreatedProject operation project completed else completed) |> Helpers.finishCreationForm operation
+                                ( refreshed, refreshCmd ) = Feature.WebSocket.refreshMutationEntities [ ( "project", project.id ) ] (if accepted then [] else [ ( "project", project.id ) ]) canonical
+                                ( toasted, toastCmd ) = addToast Success ("Created project: " ++ project.name) refreshed
+                            in
+                            ( toasted, Cmd.batch [ refreshCmd, toastCmd ] )
+                    Err error ->
+                        if Helpers.creationOwnsForm operation model then handleApiMutationError "Failed to create project" error completed else ( completed, Cmd.none )
 
-                        updatedEditing =
-                            { currentEditing | createForm = Nothing, inlineCreate = Nothing }
-
-                        updatedModel =
-                            { model
-                                | projects = Dict.insert proj.id proj model.projects
-                                , editing = updatedEditing
-                            }
-
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation proj.id updatedModel
-
-                        ( toastedModel, toastCmd ) =
-                            addToast Success ("Created project: " ++ proj.name) trackedModel
-                    in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, refreshReadinessCaches toastedModel ] )
-
-                Err err ->
-                    handleApiMutationError "Failed to create project" err model
-
-        TaskCreated result ->
-            case result of
-                Ok task ->
-                    let
-                        currentEditing =
-                            model.editing
-
-                        updatedEditing =
-                            { currentEditing | createForm = Nothing, inlineCreate = Nothing }
-
-                        updatedModel =
-                            { model
-                                | tasks = Dict.insert task.id task model.tasks
-                                , editing = updatedEditing
-                            }
-
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation task.id updatedModel
-
-                        ( toastedModel, toastCmd ) =
-                            addToast Success ("Created task: " ++ task.title) trackedModel
-                    in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, refreshReadinessCaches toastedModel ] )
-
-                Err err ->
-                    handleApiMutationError "Failed to create task" err model
-
+        TaskCreated operation result ->
+            if not (creationAcknowledgementIsCurrent operation model) then ( model, Cmd.none )
+            else
+                let
+                    completed = completeCreation operation model
+                in
+                case result of
+                    Ok task ->
+                        if task.workspaceId /= operation.request.scope.workspaceId then ( completed, Cmd.none )
+                        else
+                            let
+                                accepted = Helpers.taskPayloadIsCurrent operation.request task model
+                                canonical = (if accepted then Helpers.acceptTaskMutationPayload operation.request task completed else completed) |> Helpers.finishCreationForm operation
+                                ( refreshed, refreshCmd ) = Feature.WebSocket.refreshMutationEntities [ ( "task", task.id ) ] (if accepted then [] else [ ( "task", task.id ) ]) canonical
+                                current = if accepted then markTaskDetailsCurrent [ task ] refreshed else refreshed
+                                ( toasted, toastCmd ) = addToast Success ("Created task: " ++ task.title) current
+                            in
+                            ( toasted, Cmd.batch [ refreshCmd, toastCmd ] )
+                    Err error ->
+                        if Helpers.creationOwnsForm operation model then handleApiMutationError "Failed to create task" error completed else ( completed, Cmd.none )
         MemoryCreated result ->
             case result of
                 Ok mem ->
@@ -178,22 +168,21 @@ update msg model =
                     Err err ->
                         handleApiMutationError "Failed to update project" err model
 
-        TaskUpdated result ->
-            case result of
-                Ok mutationResult ->
-                    let
-                        updatedModel =
-                            applyTaskMutationResult mutationResult model
-                                |> markTaskDetailsCurrent (mutationResult.task :: List.map .task mutationResult.dependencyEffects)
-
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutations (taskMutationResultIds mutationResult) updatedModel
-                    in
-                    ( trackedModel, Cmd.batch [ trackCmd, refreshReadinessCaches trackedModel ] )
-
-                Err err ->
-                    handleApiMutationError "Failed to update task" err model
-
+        TaskUpdated operation result ->
+            if not (Helpers.mutationScopeIsCurrent operation.request.scope model) || Dict.get operation.request.revision model.mutations.taskAcknowledgements /= Just operation then
+                ( model, Cmd.none )
+            else
+                let
+                    mutations = model.mutations
+                    completed = { model | mutations = { mutations | taskAcknowledgements = Dict.remove operation.request.revision mutations.taskAcknowledgements } }
+                in
+                case result of
+                    Ok mutation ->
+                        if mutation.task.id /= operation.taskId || mutation.task.workspaceId /= operation.request.scope.workspaceId then ( completed, Cmd.none )
+                        else acceptTaskAcknowledgement operation mutation completed
+                    Err error ->
+                        if Helpers.taskOperationIsLatest operation model then handleApiMutationError "Failed to update task" error completed
+                        else ( completed, Cmd.none )
         MemoryUpdated result ->
             case result of
                 Ok mem ->
@@ -305,6 +294,48 @@ markProjectDetailCurrent project model =
                 , nextCardDetailRequestId = request.requestId + 1
             }
     }
+
+
+creationAcknowledgementIsCurrent : CreationOperation -> Model -> Bool
+creationAcknowledgementIsCurrent operation model =
+    Helpers.mutationScopeIsCurrent operation.request.scope model
+        && Dict.get operation.request.revision model.mutations.creationOperations == Just operation
+
+
+completeCreation : CreationOperation -> Model -> Model
+completeCreation operation model =
+    let mutations = model.mutations
+    in
+    { model | mutations = { mutations | creationOperations = Dict.remove operation.request.revision mutations.creationOperations } }
+
+
+acceptCreatedProject : CreationOperation -> Api.Project -> Model -> Model
+acceptCreatedProject operation project model =
+    let
+        loading = model.dataLoading
+        summaries = Dict.update project.id (Maybe.map (\previous -> { previous | name = project.name, status = project.status, priority = project.priority, parentId = project.parentId, updatedAt = project.updatedAt })) loading.projectCardSummaries
+        summary = Dict.get project.id summaries |> Maybe.map Api.NavigationProjectSummary
+        readiness = Dict.get project.id model.dependencies.projectReadinessRollups |> Maybe.map ProjectReadiness
+    in
+    Helpers.recordPlanningAuthority operation.request.revision ("project:" ++ project.id) summary readiness
+        { model | projects = Dict.insert project.id project model.projects, dataLoading = { loading | projectCardSummaries = summaries } }
+
+
+{-| Acknowledgement completion belongs to the issuing operation. Each returned
+entity separately competes with accepted reads and newer entity operations.
+-}
+acceptTaskAcknowledgement : TaskMutationOperation -> Api.TaskMutationResult -> Model -> ( Model, Cmd Msg )
+acceptTaskAcknowledgement operation result model =
+    let
+        returned = result.task :: List.map .task result.dependencyEffects
+        accepted = List.filter (\task -> Helpers.taskPayloadIsCurrent operation.request task model) returned
+        rejected = List.filter (\task -> task.workspaceId == operation.request.scope.workspaceId && not (Helpers.taskPayloadIsCurrent operation.request task model)) returned
+        canonical = List.foldl (Helpers.acceptTaskMutationPayload operation.request) model accepted
+        ( refreshed, refreshCmd ) = Feature.WebSocket.refreshMutationEntities (List.map (\task -> ( "task", task.id )) returned) (List.map (\task -> ( "task", task.id )) rejected) canonical
+        current = markTaskDetailsCurrent accepted refreshed
+        ( tracked, trackCmd ) = trackLocalMutations (List.map .id accepted) current
+    in
+    ( tracked, Cmd.batch [ refreshCmd, trackCmd ] )
 
 
 markTaskDetailsCurrent : List Api.Task -> Model -> Model

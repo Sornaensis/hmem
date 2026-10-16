@@ -410,6 +410,8 @@ type alias EditingModel =
     { editState : Maybe EditState
     , createForm : Maybe CreateForm
     , inlineCreate : Maybe InlineCreate
+    , createFormRevision : Int
+    , inlineCreateRevision : Int
     }
 
 
@@ -843,10 +845,33 @@ type alias ProjectMutationOperation =
     }
 
 
+type alias MutationScope =
+    { workspaceId : String, sessionEpoch : Int, audienceId : String }
+
+
+type alias PlanningMutationRequest =
+    { scope : MutationScope, requestId : String, revision : Int }
+
+
+type alias TaskMutationOperation =
+    { request : PlanningMutationRequest, taskId : String }
+
+
+type CreationSlot = ModalCreation | InlineCreation
+
+
+type alias CreationOperation =
+    { request : PlanningMutationRequest, slot : CreationSlot, formRevision : Int }
+
+
 type alias MutationsModel =
     { pendingMutationIds : Dict String Bool
     , pendingRequestIds : Dict String Bool
     , projectOperations : Dict String ProjectMutationOperation
+    , taskOperations : Dict String Int
+    , taskAcknowledgements : Dict Int TaskMutationOperation
+    , creationOperations : Dict Int CreationOperation
+    , creationSlots : Dict String Int
     , nextRequestId : Int
     }
 
@@ -1245,14 +1270,15 @@ type Msg
     | RetryTimelineRefresh
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
-    | ProjectCreated (Result Api.ApiError Api.Project)
-    | TaskCreated (Result Api.ApiError Api.Task)
+    | ProjectCreated CreationOperation (Result Api.ApiError Api.Project)
+    | TaskCreated CreationOperation (Result Api.ApiError Api.Task)
     | MemoryCreated (Result Api.ApiError Api.Memory)
     | RequestProjectUpdate (Maybe String) Int String (List ( String, Encode.Value ))
     | RequestProjectOverview (Maybe String) Int String
     | RequestProjectNextTasks (Maybe String) Int String Bool
     | ProjectUpdated CanonicalRequestGuard (Result Api.ApiError Api.ProjectMutationResult)
-    | TaskUpdated (Result Api.ApiError Api.TaskMutationResult)
+    | TaskUpdated TaskMutationOperation (Result Api.ApiError Api.TaskMutationResult)
+    | RequestTaskUpdate MutationScope String String (List ( String, Encode.Value ))
     | OpenMove String String
     | CloseMove
     | MoveQueryChanged String
@@ -1269,7 +1295,7 @@ type Msg
     | MoveFocusFetched Int (Result Http.Error Api.NavigationFocusResponse)
     | MoveMatchFetched Int (Result Http.Error Api.Project)
     | MoveProjectSaved Int CanonicalRequestGuard (Result Api.ApiError Api.ProjectMutationResult)
-    | MoveTaskSaved Int CanonicalRequestGuard (Result Api.ApiError Api.TaskMutationResult)
+    | MoveTaskSaved Int CanonicalRequestGuard TaskMutationOperation (Result Api.ApiError Api.TaskMutationResult)
     | MemoryUpdated (Result Http.Error Api.Memory)
     | WorkspaceUpdated String (Result Api.ApiError Api.Workspace)
     | WorkspaceCreated (Result Http.Error Api.Workspace)

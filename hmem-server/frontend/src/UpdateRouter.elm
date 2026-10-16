@@ -157,7 +157,7 @@ route msg model =
         MoveFocusFetched _ _ -> Ok (Feature.Move.update msg model)
         MoveMatchFetched _ _ -> Ok (Feature.Move.update msg model)
         MoveProjectSaved _ _ _ -> Ok (Feature.Move.update msg model)
-        MoveTaskSaved _ _ _ -> Ok (Feature.Move.update msg model)
+        MoveTaskSaved _ _ _ _ -> Ok (Feature.Move.update msg model)
 
         -- HTTP responses
         GotWorkspaces _ _ ->
@@ -287,10 +287,10 @@ route msg model =
         MutationDone _ _ ->
             Ok (Feature.Mutations.update msg model)
 
-        ProjectCreated _ ->
+        ProjectCreated _ _ ->
             Ok (Feature.Mutations.update msg model)
 
-        TaskCreated _ ->
+        TaskCreated _ _ ->
             Ok (Feature.Mutations.update msg model)
 
         MemoryCreated _ ->
@@ -323,7 +323,10 @@ route msg model =
             else
                 Ok ( completed, Cmd.none )
 
-        TaskUpdated _ ->
+        RequestTaskUpdate scope taskId requestId fields ->
+            Ok (Helpers.beginTaskUpdate scope taskId requestId fields model)
+
+        TaskUpdated _ _ ->
             Ok (Feature.Mutations.update msg model)
 
         MemoryUpdated _ ->

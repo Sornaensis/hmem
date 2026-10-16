@@ -1009,7 +1009,7 @@ suite =
                         guarded
                             |> Mutations.update (ProjectUpdated guard (Ok { project = mutatedProject, pauseEffects = Nothing }))
                             |> Tuple.first
-                            |> Mutations.update (TaskUpdated (Ok { task = mutatedTask, dependencyEffects = [] }))
+                            |> (\current -> let ( issued, operation ) = Helpers.registerTaskMutation "detail-mutation" mutatedTask.id current in Mutations.update (TaskUpdated operation (Ok { task = mutatedTask, dependencyEffects = [] })) issued)
                             |> Tuple.first
 
                     afterLateDetails =

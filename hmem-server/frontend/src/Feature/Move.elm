@@ -134,7 +134,7 @@ update msg model =
                         failed (failureMessage error) (Helpers.finishProjectOperation guard model)
             else ( Helpers.finishProjectOperation guard model, Cmd.none )
 
-        MoveTaskSaved token guard result ->
+        MoveTaskSaved token guard operation result ->
             if mutationCurrent token guard model then
                 case result of
                     Ok mutation ->
@@ -143,13 +143,13 @@ update msg model =
                             let
                                 old = model.move.dialog |> Maybe.andThen .currentProject
                                 destination = mutation.task.projectId
-                                ( canonical, command ) = Feature.Mutations.update (TaskUpdated result) (close model)
+                                ( canonical, command ) = Feature.Mutations.update (TaskUpdated operation result) (close model)
                                 ( refreshed, refreshCmd ) = Feature.WebSocket.refreshTaskPlacement mutation.task.id (model.move.dialog |> Maybe.andThen .taskParent) old destination canonical
                             in
                             ( refreshed, Cmd.batch [ command, refreshCmd ] )
-                        else failed "The move response did not match this task. Reopen the chooser to refresh." model
-                    Err error -> failed (failureMessage error) model
-            else ( model, Cmd.none )
+                        else failed "The move response did not match this task. Reopen the chooser to refresh." (Helpers.finishTaskAcknowledgement operation model)
+                    Err error -> failed (failureMessage error) (Helpers.finishTaskAcknowledgement operation model)
+            else ( Helpers.finishTaskAcknowledgement operation model, Cmd.none )
 
         _ ->
             case model.move.dialog of
@@ -725,9 +725,11 @@ confirm dialog model =
                             saving = setDialog { dialog | guard = guard, saving = Just requestId, error = Nothing } guarded
                             fields = moveFields dialog destination ++ [ ( "request_id", Encode.string requestId ) ]
                             mutations = saving.mutations
-                            registered = if dialog.entityType == "project" then { saving | mutations = { mutations | projectOperations = Dict.insert dialog.entityId { requestId = Just requestId, guard = guard } mutations.projectOperations } } else saving
+                            projectRegistered = if dialog.entityType == "project" then { saving | mutations = { mutations | projectOperations = Dict.insert dialog.entityId { requestId = Just requestId, guard = guard } mutations.projectOperations } } else saving
+                            taskOperation = if dialog.entityType == "task" then Just (Helpers.registerTaskMutation requestId dialog.entityId projectRegistered) else Nothing
+                            registered = taskOperation |> Maybe.map Tuple.first |> Maybe.withDefault projectRegistered
                             command = if dialog.entityType == "project" then Api.updateProject model.flags.apiUrl dialog.entityId fields (MoveProjectSaved dialog.token guard)
-                                else Api.updateTask model.flags.apiUrl dialog.entityId fields (MoveTaskSaved dialog.token guard)
+                                else taskOperation |> Maybe.map (\( _, operation ) -> Api.updateTask model.flags.apiUrl dialog.entityId fields (MoveTaskSaved dialog.token guard operation)) |> Maybe.withDefault Cmd.none
                         in
                         ( registered, Cmd.batch [ trackCmd, command ] )
 

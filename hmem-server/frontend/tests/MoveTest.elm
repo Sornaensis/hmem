@@ -99,7 +99,7 @@ suite =
                 saving = step MoveConfirm (step (MoveSelect (Just "destination")) ready)
                 duplicate = step MoveConfirm saving
                 dialog = saving.move.dialog
-                failed = dialog |> Maybe.map (\d -> step (MoveTaskSaved d.token d.guard (Err (Api.decodeApiErrorBody 409 "{\"error\":\"lifecycle_conflict\",\"message\":\"Blocked\"}"))) saving) |> Maybe.withDefault saving
+                failed = dialog |> Maybe.andThen (\d -> Dict.values saving.mutations.taskAcknowledgements |> List.head |> Maybe.map (\operation -> step (MoveTaskSaved d.token d.guard operation (Err (Api.decodeApiErrorBody 409 "{\"error\":\"lifecycle_conflict\",\"message\":\"Blocked\"}"))) saving)) |> Maybe.withDefault saving
             in
             Expect.equal ( saving.mutations.nextRequestId, Just (Just "destination"), ( Nothing, True ) )
                 ( duplicate.mutations.nextRequestId, failed.move.dialog |> Maybe.andThen .selected, ( failed.move.dialog |> Maybe.andThen .saving, failed.move.dialog |> Maybe.andThen .error |> (/=) Nothing ) )
@@ -107,7 +107,7 @@ suite =
             let
                 saving = step MoveConfirm (step (MoveSelect (Just "destination")) ready)
                 moved = { child | projectId = Just "destination", parentId = Nothing }
-                apply source = saving.move.dialog |> Maybe.map (\d -> step (MoveTaskSaved d.token d.guard (Ok { task = moved, dependencyEffects = [] })) source) |> Maybe.withDefault source
+                apply source = saving.move.dialog |> Maybe.andThen (\d -> Dict.values saving.mutations.taskAcknowledgements |> List.head |> Maybe.map (\operation -> step (MoveTaskSaved d.token d.guard operation (Ok { task = moved, dependencyEffects = [] })) source)) |> Maybe.withDefault source
                 accepted = apply saving
                 retired = apply (step CloseMove saving)
             in

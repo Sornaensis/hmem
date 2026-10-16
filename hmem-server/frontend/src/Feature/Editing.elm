@@ -3,6 +3,7 @@ module Feature.Editing exposing
     , hasProtectedWorkspaceRename
     , handleEscape
     , init
+    , retireForms
     , MemoryTargetOption
     , memoryContextTargetHint
     , memoryContextTargetValue
@@ -47,6 +48,8 @@ init =
     { editState = Nothing
     , createForm = Nothing
     , inlineCreate = Nothing
+    , createFormRevision = 0
+    , inlineCreateRevision = 0
     }
 
 
@@ -245,7 +248,7 @@ clearForTabSwitch model =
                 , inlineCreate = Nothing
             }
         )
-        model
+        model |> (\current -> { current | editing = retireForms current.editing })
 
 
 handleEscape : Model -> Maybe Model
@@ -254,7 +257,7 @@ handleEscape model =
         Nothing
 
     else if model.editing.inlineCreate /= Nothing then
-        Just (updateEditingModel (\ed -> { ed | inlineCreate = Nothing }) model)
+        Just (updateEditingModel (\ed -> { ed | inlineCreate = Nothing, inlineCreateRevision = ed.inlineCreateRevision + 1 }) model)
 
     else if model.editing.editState /= Nothing then
         Just (updateEditingModel (\ed -> { ed | editState = Nothing }) model)
@@ -410,10 +413,9 @@ update msg model =
             ( trackedModel
             , Cmd.batch
                 [ clearCmd
-                , Api.updateTask model.flags.apiUrl
+                , Helpers.taskUpdateCmd model requestId
                     taskId
                     [ ( "status", Encode.string (Api.taskStatusToString newStatus) ), ( "request_id", Encode.string requestId ) ]
-                    TaskUpdated
                 ]
             )
 
@@ -439,10 +441,9 @@ update msg model =
             ( trackedModel
             , Cmd.batch
                 [ clearCmd
-                , Api.updateTask model.flags.apiUrl
+                , Helpers.taskUpdateCmd model requestId
                     taskId
                     [ ( "priority", Encode.int newPri ), ( "request_id", Encode.string requestId ) ]
-                    TaskUpdated
                 ]
             )
 
@@ -464,10 +465,10 @@ update msg model =
 
         -- Create forms
         ShowCreateForm form ->
-            ( updateEditingModel (\ed -> { ed | createForm = Just form }) model, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | createForm = Just form, createFormRevision = ed.createFormRevision + 1 }) model, Cmd.none )
 
         UpdateCreateForm form ->
-            ( updateEditingModel (\ed -> { ed | createForm = Just form }) model, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | createForm = Just form, createFormRevision = ed.createFormRevision + 1 }) model, Cmd.none )
 
         SubmitCreateForm ->
             case model.editing.createForm of
@@ -533,10 +534,11 @@ update msg model =
 
                             else
                                 let
-                                    ( trackedModel, requestId, clearCmd ) =
-                                        beginTrackedMutation [] model
+                                    ( trackedModel, operation, clearCmd ) =
+                                        Helpers.beginCreationMutation ModalCreation model
+                                    requestId = operation.request.requestId
                                 in
-                                ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId f.name requestId ProjectCreated ] )
+                                ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId f.name requestId (ProjectCreated operation) ] )
 
                         ( Just (CreateMemoryForm _), Just _ ) ->
                             ( model, Cmd.none )
@@ -545,14 +547,14 @@ update msg model =
                             ( model, Cmd.none )
 
         CancelCreateForm ->
-            ( updateEditingModel (\ed -> { ed | createForm = Nothing }) model, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | createForm = Nothing, createFormRevision = ed.createFormRevision + 1 }) model, Cmd.none )
 
         -- Inline create
         ShowInlineCreate ic ->
-            ( updateEditingModel (\ed -> { ed | inlineCreate = Just ic }) model, focusElement "inline-create-input" )
+            ( updateEditingModel (\ed -> { ed | inlineCreate = Just ic, inlineCreateRevision = ed.inlineCreateRevision + 1 }) model, focusElement "inline-create-input" )
 
         UpdateInlineCreate ic ->
-            ( updateEditingModel (\ed -> { ed | inlineCreate = Just ic }) model, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | inlineCreate = Just ic, inlineCreateRevision = ed.inlineCreateRevision + 1 }) model, Cmd.none )
 
         SubmitInlineCreate ->
             if not (Permissions.canEditCurrentWorkspace model) then
@@ -568,17 +570,19 @@ update msg model =
                             case parentId of
                                 Just pid ->
                                     let
-                                        ( trackedModel, requestId, clearCmd ) =
-                                            beginTrackedMutation [] model
+                                        ( trackedModel, operation, clearCmd ) =
+                                            Helpers.beginCreationMutation InlineCreation model
+                                        requestId = operation.request.requestId
                                     in
-                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createProjectWithParent model.flags.apiUrl wsId pid name requestId ProjectCreated ] )
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createProjectWithParent model.flags.apiUrl wsId pid name requestId (ProjectCreated operation) ] )
 
                                 Nothing ->
                                     let
-                                        ( trackedModel, requestId, clearCmd ) =
-                                            beginTrackedMutation [] model
+                                        ( trackedModel, operation, clearCmd ) =
+                                            Helpers.beginCreationMutation InlineCreation model
+                                        requestId = operation.request.requestId
                                     in
-                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId name requestId ProjectCreated ] )
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId name requestId (ProjectCreated operation) ] )
 
                     ( Just (InlineCreateTask { projectId, parentId, title }), Just wsId ) ->
                         if String.isEmpty (String.trim title) then
@@ -588,17 +592,19 @@ update msg model =
                             case parentId of
                                 Just pid ->
                                     let
-                                        ( trackedModel, requestId, clearCmd ) =
-                                            beginTrackedMutation [] model
+                                        ( trackedModel, operation, clearCmd ) =
+                                            Helpers.beginCreationMutation InlineCreation model
+                                        requestId = operation.request.requestId
                                     in
-                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createTaskWithParent model.flags.apiUrl wsId projectId pid title requestId TaskCreated ] )
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createTaskWithParent model.flags.apiUrl wsId projectId pid title requestId (TaskCreated operation) ] )
 
                                 Nothing ->
                                     let
-                                        ( trackedModel, requestId, clearCmd ) =
-                                            beginTrackedMutation [] model
+                                        ( trackedModel, operation, clearCmd ) =
+                                            Helpers.beginCreationMutation InlineCreation model
+                                        requestId = operation.request.requestId
                                     in
-                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId TaskCreated ] )
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId (TaskCreated operation) ] )
 
                     ( Just (InlineCreateMemory _), Just _ ) ->
                         ( model, Cmd.none )
@@ -607,7 +613,7 @@ update msg model =
                         ( model, Cmd.none )
 
         CancelInlineCreate ->
-            ( updateEditingModel (\ed -> { ed | inlineCreate = Nothing }) model, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | inlineCreate = Nothing, inlineCreateRevision = ed.inlineCreateRevision + 1 }) model, Cmd.none )
 
         -- Expand and edit (composite)
         ExpandAndEdit cardId entityType entityId field currentValue ->
@@ -690,6 +696,11 @@ updateEditingModel fn model =
     { model | editing = fn model.editing }
 
 
+retireForms : EditingModel -> EditingModel
+retireForms editing =
+    { editing | createForm = Nothing, inlineCreate = Nothing, createFormRevision = editing.createFormRevision + 1, inlineCreateRevision = editing.inlineCreateRevision + 1 }
+
+
 hasProtectedWorkspaceRename : Model -> Bool
 hasProtectedWorkspaceRename model =
     case model.editing.editState of
@@ -765,10 +776,7 @@ saveEditCmd model maybeRequestId state =
             Helpers.projectUpdateCmd model state.entityId fields
 
         "task" ->
-            Api.updateTask apiUrl
-                state.entityId
-                fields
-                TaskUpdated
+            maybeRequestId |> Maybe.map (\requestId -> Helpers.taskUpdateCmd model requestId state.entityId fields) |> Maybe.withDefault Cmd.none
 
         "memory" ->
             Cmd.none

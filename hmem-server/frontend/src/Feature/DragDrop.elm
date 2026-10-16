@@ -179,7 +179,7 @@ update msg model =
                                 ( trackedModel
                                 , Cmd.batch
                                     [ clearCmd
-                                    , Api.updateTask model.flags.apiUrl modal.dragTaskId
+                                    , taskUpdateCmd model requestId modal.dragTaskId
                                         [ ( "parent_id", Encode.string modal.targetTaskId )
                                         , ( "project_id"
                                           , case targetTask.projectId of
@@ -191,7 +191,6 @@ update msg model =
                                           )
                                         , ( "request_id", Encode.string requestId )
                                         ]
-                                        TaskUpdated
                                     ]
                                 )
 
@@ -269,7 +268,7 @@ trackedTaskMutation trackedIds taskId fields model =
     ( trackedModel
     , Cmd.batch
         [ clearCmd
-        , Api.updateTask model.flags.apiUrl taskId (fields ++ [ ( "request_id", Encode.string requestId ) ]) TaskUpdated
+        , taskUpdateCmd model requestId taskId (fields ++ [ ( "request_id", Encode.string requestId ) ])
         ]
     )
 
@@ -345,8 +344,8 @@ swapPriorities apiUrl requestId drag targetType targetId model =
                     Dict.get targetId model.tasks |> Maybe.map .priority |> Maybe.withDefault 5
             in
             Cmd.batch
-                [ Api.updateTask apiUrl drag.entityId [ ( "priority", Encode.int targetPri ), ( "request_id", Encode.string requestId ) ] TaskUpdated
-                , Api.updateTask apiUrl targetId [ ( "priority", Encode.int dragPri ), ( "request_id", Encode.string requestId ) ] TaskUpdated
+                [ taskUpdateCmd model requestId drag.entityId [ ( "priority", Encode.int targetPri ), ( "request_id", Encode.string requestId ) ]
+                , taskUpdateCmd model requestId targetId [ ( "priority", Encode.int dragPri ), ( "request_id", Encode.string requestId ) ]
                 ]
 
         "memory" ->

@@ -911,6 +911,7 @@ stopAllLoading dataLoading =
         | nextWorkspaceListLoadToken = dataLoading.nextWorkspaceListLoadToken
         , nextWorkspaceLoadToken = dataLoading.nextWorkspaceLoadToken
         , nextCardDetailRequestId = dataLoading.nextCardDetailRequestId
+        , nextNavigationSummaryRevision = dataLoading.nextNavigationSummaryRevision
         , navigationGeneration = dataLoading.navigationGeneration + 1
         , navigationAdmissions = dataLoading.navigationAdmissions
         , cardDetailAdmissions = dataLoading.cardDetailAdmissions
@@ -938,7 +939,7 @@ clearSessionScopedState model =
         , observations = Feature.Observation.retireSessionState model.observations
         , dataLoading = stopAllLoading model.dataLoading
         , search = Feature.Search.init
-        , editing = Feature.Editing.init
+        , editing = let editing = Feature.Editing.retireForms model.editing in { editing | editState = Nothing }
         , memory = emptyMemoryModel
         , dependencies = Feature.Dependencies.resetCache model.dependencies
         , cards = Feature.Cards.init

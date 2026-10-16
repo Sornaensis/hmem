@@ -27,7 +27,114 @@ import Url
 suite : Test
 suite =
     describe "bounded Cards and Focus loading"
-        [ test "project activity accents follow authoritative descendant rollups with no cached tasks" <| \_ ->
+        [ test "effective task ranks preserve canonical statuses and use direct running counts only for blocked" <| \_ ->
+            let
+                base = task "parent" Nothing
+                rollup = base.readinessRollup
+                statuses = [ Api.InProgress, Api.Todo, Api.Blocked, Api.Done, Api.Cancelled ]
+                ranks count = List.map (\status -> Helpers.taskPresentationStatus status (Just { rollup | inProgressSubtaskCount = count }) |> Api.taskStatusOrder) statuses
+            in
+            Expect.equal [ [ 0, 1, 2, 3, 4 ], [ 0, 1, 0, 3, 4 ] ] [ ranks 0, ranks 1 ]
+        , test "collapsed unloaded parents share running rank with stable priority title and ID ties and authoritative zero wins" <| \_ ->
+            let
+                summary id status priority title running =
+                    let base = task id Nothing
+                        rollup = base.readinessRollup
+                    in { base | status = status, priority = priority, title = title, readinessRollup = { rollup | inProgressSubtaskCount = running } }
+                values =
+                    [ summary "todo" Api.Todo 10 "A todo" 0
+                    , summary "z" Api.Blocked 1 "same" 1
+                    , summary "a" Api.InProgress 1 "SAME" 0
+                    , summary "priority" Api.Blocked 2 "Z" 1
+                    , summary "title" Api.InProgress 1 "Earlier" 0
+                    , summary "idle" Api.Blocked 10 "Idle" 0
+                    ]
+                seeded = DataLoading.mergeNavigationSummaries [] values model
+                dependencies = seeded.dependencies
+                -- Summary fallback applies even when the child is not cached.
+                fallback = { seeded | dependencies = { dependencies | taskReadinessRollups = Dict.empty } }
+                zero = task "z" Nothing |> .readinessRollup
+                stopped = { fallback | dependencies = { dependencies | taskReadinessRollups = Dict.singleton "z" zero } }
+                ids source = Cards.cardTreeProjection workspaceId source |> .tasks |> List.map .id
+            in
+            Expect.all
+                [ \_ -> ids fallback |> Expect.equal [ "priority", "title", "a", "z", "todo", "idle" ]
+                , \_ -> ids stopped |> Expect.equal [ "priority", "title", "a", "todo", "idle", "z" ]
+                , \_ -> Dict.get "z" stopped.tasks |> Maybe.map .status |> Expect.equal (Just Api.Blocked)
+                ] ()
+        , test "bounded summary branch demand uses effective rank and authoritative zero before taking its window" <| \_ ->
+            let
+                base = task "a-parent" Nothing
+                rollup = base.readinessRollup
+                parent = { base | status = Api.Blocked, hasChildren = True, directSubtaskCount = 1, readinessRollup = { rollup | inProgressSubtaskCount = 1 } }
+                todos = List.range 1 30 |> List.map (\n -> let value = task ("todo-" ++ String.fromInt n) Nothing in { value | priority = 10 })
+                seeded = DataLoading.mergeNavigationSummaries [] (parent :: todos) model |> normalOperation
+                dependencies = seeded.dependencies
+                fallback = { seeded | dependencies = { dependencies | taskReadinessRollups = Dict.empty } }
+                stopped = { fallback | dependencies = { dependencies | taskReadinessRollups = Dict.singleton parent.id rollup } }
+                requested source = DataLoading.ensureNavigationPresentation "workspace_root" Nothing source |> Tuple.first |> .dataLoading |> .loadedNavigationBranches |> Dict.member ("task:" ++ parent.id)
+            in
+            Expect.equal [ True, False ] [ requested fallback, requested stopped ]
+        , test "readiness-only callbacks reorder logical rows in both directions and reject stale replies" <| \_ ->
+            let
+                parentBase = task "parent" Nothing
+                emptyRollup = parentBase.readinessRollup
+                parent = { parentBase | status = Api.Blocked, directSubtaskCount = 1, hasChildren = True }
+                todoBase = task "todo" Nothing
+                todo = { todoBase | priority = 10 }
+                seeded = DataLoading.mergeNavigationSummaries [] [ todo, parent ] model
+                cards = seeded.cards
+                websocket = seeded.webSocket
+                source = rootPaint { seeded | cards = { cards | collapsedNodes = Dict.singleton "task-parent" True }, webSocket = { websocket | targetGenerations = Dict.singleton ("workspace:" ++ workspaceId ++ "|task:parent") 0 } }
+                guard =
+                    { scopeKey = "workspace:" ++ workspaceId, targetKey = "task:parent", targetGeneration = 0
+                    , sessionEpoch = source.sessionRequestEpoch, routeWorkspace = Just workspaceId
+                    , audienceId = source.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault ""
+                    }
+                apply request count current =
+                    routed (CanonicalTaskReadinessFetched request parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = { emptyRollup | inProgressSubtaskCount = count } })) current
+                running = apply guard 1 source
+                stillRunning = apply guard 2 running
+                stopped = apply guard 0 stillRunning
+                stale = apply { guard | sessionEpoch = guard.sessionEpoch - 1 } 1 stopped
+                rows current = Array.toList current.cards.viewport.index.keys |> List.filter (String.startsWith "task:")
+            in
+            Expect.all
+                [ \_ -> rows source |> Expect.equal [ "task:todo", "task:parent" ]
+                , \_ -> rows running |> Expect.equal [ "task:parent", "task:todo" ]
+                , \_ -> rows stopped |> Expect.equal [ "task:todo", "task:parent" ]
+                , \_ -> stillRunning.cards.viewport.revision |> Expect.equal running.cards.viewport.revision
+                , \_ -> stale.cards.viewport.revision |> Expect.equal stopped.cards.viewport.revision
+                , \_ -> rows stale |> Expect.equal (rows stopped)
+                , \_ -> Dict.size running.tasks |> Expect.equal 2
+                ] ()
+        , test "readiness and overview callbacks promote a parent absent from the cached first page" <| \_ ->
+            let
+                todos = List.range 1 50 |> List.map (\n -> let value = task ("todo-" ++ String.fromInt n) Nothing in { value | priority = 10 })
+                base = task "unloaded-parent" Nothing
+                rollup = base.readinessRollup
+                parent = { base | status = Api.Blocked, readinessRollup = { rollup | inProgressSubtaskCount = 1 } }
+                seeded = DataLoading.mergeNavigationSummaries [] todos model |> rootPaint
+                loading = seeded.dataLoading
+                socket = seeded.webSocket
+                source = { seeded | dataLoading = { loading | rootNavigationRequest = Maybe.map (\request -> { request | taskHasMore = True }) loading.rootNavigationRequest }, webSocket = { socket | targetGenerations = Dict.singleton ("workspace:" ++ workspaceId ++ "|task:unloaded-parent") 1 } }
+                guard = { scopeKey = "workspace:" ++ workspaceId, targetKey = "task:unloaded-parent", targetGeneration = 1, sessionEpoch = source.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = source.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "" }
+                overview = { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = parent.readinessRollup }
+                check msg =
+                    let
+                        restarted = routed msg source
+                        accepted = case restarted.dataLoading.rootNavigationRequest of
+                            Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch restarted.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = parent :: List.take 49 todos, hasMore = True } })) restarted |> Tuple.first
+                            Nothing -> restarted
+                    in
+                    { restarted = restarted.dataLoading.navigationGeneration > source.dataLoading.navigationGeneration
+                    , offset = restarted.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset
+                    , admitted = Set.member parent.id accepted.dataLoading.navigationVisibleTaskIds
+                    }
+            in
+            Expect.equal (List.repeat 2 { restarted = True, offset = Just 0, admitted = True })
+                (List.map check [ CanonicalTaskReadinessFetched guard parent.id (Ok overview), CanonicalTaskOverviewFetched guard parent.id (Ok overview) ])
+        , test "project activity accents follow authoritative descendant rollups with no cached tasks" <| \_ ->
             let
                 base = project "activity"
                 rollup = base.readinessRollup
@@ -443,7 +550,7 @@ suite =
                         , \_ -> Expect.equal ready.cards.viewport.index updated.cards.viewport.index
                         , \_ -> Expect.equal ready.cards.viewport.revision updated.cards.viewport.revision
                         ] ()
-        , test "canonical prerequisite status changes refresh Done eligibility with unchanged links and geometry" <| \_ ->
+        , test "canonical prerequisite status changes refresh Done eligibility and task order with unchanged links" <| \_ ->
             let
                 seeded = DataLoading.mergeNavigationSummaries [] [ task "dependent" Nothing, task "prerequisite" Nothing ] model
                 websocket = seeded.webSocket
@@ -464,7 +571,7 @@ suite =
                 , \_ -> done reopened |> Query.count (Expect.equal 0)
                 , \_ -> done removed |> Query.count (Expect.equal 1)
                 , \_ -> done restored |> Query.count (Expect.equal 0)
-                , \_ -> Expect.equal ready.cards.viewport.revision restored.cards.viewport.revision
+                , \_ -> Expect.greaterThan ready.cards.viewport.revision restored.cards.viewport.revision
                 , \_ -> Expect.equal ready.cards.viewport.index reopened.cards.viewport.index
                 ] ()
         , test "canonical overview link changes refresh rendered Done eligibility without rebuilding viewport geometry" <| \_ ->

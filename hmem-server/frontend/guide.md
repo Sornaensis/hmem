@@ -69,6 +69,10 @@ Uncheck **Show empty projects** to require a matching task in the subtree;
 ancestors stay visible.
 Workspace group disclosure is saved globally.
 
+Tasks with **In Progress** status and **Blocked** parents with a running subtask
+appear first, followed by Todo, other Blocked, Done and Cancelled tasks. Within
+each group, higher priority comes first, then title; the parent's status stays Blocked.
+
 Stop or finish running descendants before pausing a project. Reopen a completed
 or archived project first. Resume clears that project's pause; independent child
 pauses, manual blocks, dependencies and incomplete subtasks still apply. Next-task

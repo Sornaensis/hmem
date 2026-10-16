@@ -1,10 +1,10 @@
-module Feature.DataLoading exposing (ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
 import Feature.ChangeStream
-import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity)
+import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity, taskPresentationOrder)
 import Json.Encode as Encode
 import Permissions
 import Set
@@ -1380,9 +1380,7 @@ revalidateNavigationForChangedSummaries before summaries model =
         filtered = not before.search.filterShowEmptyProjects || before.search.filterShowOnly /= ShowAll || before.search.filterProjectStatuses /= [] || before.search.filterTaskStatuses /= [] || before.search.filterPriority /= AnyPriority || String.trim before.search.query /= ""
         queried = String.trim before.search.query /= ""
         projectOwner summary = summary.parentId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
-        taskOwner summary = case summary.parentId of
-            Just id -> ( "task", id )
-            Nothing -> summary.projectId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
+        taskOwner = taskNavigationOwner
         ownerPath source visited owner =
             if Set.member owner visited then []
             else
@@ -1412,7 +1410,7 @@ revalidateNavigationForChangedSummaries before summaries model =
                 Nothing -> ownerPath model Set.empty (taskOwner summary)
                 Just previous ->
                     let
-                        placement = previous.parentId /= summary.parentId || previous.projectId /= summary.projectId || previous.status /= summary.status || previous.priority /= summary.priority || String.toLower previous.title /= String.toLower summary.title || queried
+                        placement = previous.parentId /= summary.parentId || previous.projectId /= summary.projectId || previous.status /= summary.status || previous.priority /= summary.priority || String.toLower previous.title /= String.toLower summary.title || taskPresentationOrder before previous /= taskPresentationOrder model summary || queried
                         children = previous.directSubtaskCount /= summary.directSubtaskCount || previous.hasChildren /= summary.hasChildren
                     in
                     (if placement then ownerPath before Set.empty (taskOwner previous) ++ ownerPath model Set.empty (taskOwner summary) else [])
@@ -1420,6 +1418,31 @@ revalidateNavigationForChangedSummaries before summaries model =
         missingProjects = List.concatMap (\id -> Dict.get id before.dataLoading.projectCardSummaries |> Maybe.map (projectOwner >> ownerPath before Set.empty) |> Maybe.withDefault []) summaries.missingProjectIds
         missingTasks = List.concatMap (\id -> Dict.get id before.dataLoading.taskCardSummaries |> Maybe.map (taskOwner >> ownerPath before Set.empty) |> Maybe.withDefault []) summaries.missingTaskIds
         owners = Set.fromList (List.concatMap projectsChanged summaries.projects ++ List.concatMap tasksChanged summaries.tasks ++ missingProjects ++ missingTasks) |> Set.toList
+    in
+    revalidateNavigationOwners owners model
+
+
+taskNavigationOwner : { a | parentId : Maybe String, projectId : Maybe String } -> ( String, String )
+taskNavigationOwner task =
+    case task.parentId of
+        Just id -> ( "task", id )
+        Nothing -> task.projectId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
+
+
+{-| Readiness responses carry placement even for a parent outside the cached page.
+Retire its owner's cursor when the server ordering changes, before accepting more offsets.
+-}
+revalidateNavigationForTaskReadiness : Model -> Api.Task -> Model -> ( Model, Cmd Msg )
+revalidateNavigationForTaskReadiness before task model =
+    if taskPresentationOrder before task /= taskPresentationOrder model task then
+        revalidateNavigationOwners [ taskNavigationOwner task ] model
+    else
+        ( model, Cmd.none )
+
+
+revalidateNavigationOwners : List ( String, String ) -> Model -> ( Model, Cmd Msg )
+revalidateNavigationOwners owners model =
+    let
         replay owner ( current, commands ) =
             let
                 loading = current.dataLoading
@@ -2092,7 +2115,7 @@ presentedNavigationSummaries parentKind maybeParentId model =
             model.dataLoading.taskCardSummaries
                 |> Dict.values
                 |> List.filter (taskSummaryBelongsTo parentKind maybeParentId)
-                |> List.sortBy (\task -> ( Api.taskStatusOrder task.status, negate task.priority, ( String.toLower task.title, task.id ) ))
+                |> List.sortBy (\task -> ( taskPresentationOrder model task, negate task.priority, ( String.toLower task.title, task.id ) ))
                 |> navigationPresentationWindow .id (localPresentationPinnedIds parent "task" model) taskOffset
     in
     ( projects, tasks )

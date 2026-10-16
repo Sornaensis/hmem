@@ -1068,9 +1068,9 @@ orderedProjects =
     List.sortBy (\project -> ( Api.projectStatusOrder project.status, negate project.priority, String.toLower project.name ))
 
 
-orderedTasks : List Api.Task -> List Api.Task
-orderedTasks =
-    List.sortBy (\task -> ( Api.taskStatusOrder task.status, negate task.priority, String.toLower task.title ))
+orderedTasks : Model -> List Api.Task -> List Api.Task
+orderedTasks model =
+    List.sortBy (\task -> ( taskPresentationOrder model task, negate task.priority, ( String.toLower task.title, task.id ) ))
 
 
 cardTreeProjection : String -> Model -> CardTreeProjection
@@ -1115,7 +1115,7 @@ cardTreeProjection workspaceId model =
                 |> Set.toList
                 |> List.filterMap (\taskId -> Dict.get taskId model.tasks)
                 |> List.filter (\task -> task.workspaceId == workspaceId)
-                |> orderedTasks
+                |> orderedTasks model
 
         addProject project index =
             case project.parentId of
@@ -1455,7 +1455,7 @@ viewProjectsTreeLegacy wsId model =
                                 rootTasks =
                                     wsTasks
                                         |> List.filter (\t -> t.parentId == Nothing)
-                                        |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
+                                        |> orderedTasks model
 
                                 visibleRootTasks =
                                      rootTasks
@@ -1488,7 +1488,7 @@ viewProjectsTreeLegacy wsId model =
                                 orphanTasks =
                                     wsTasks
                                         |> List.filter (\t -> t.projectId == Nothing && t.parentId == Nothing)
-                                        |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
+                                        |> orderedTasks model
 
                                 visibleOrphans =
                                      orphanTasks
@@ -2457,7 +2457,7 @@ viewTaskCardBody descendants projection showProject model task =
                             else
                                 identity
                            )
-                        |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
+                        |> orderedTasks model
                         |> branchPresentationWindow "task" task.id "task" .id (pinnedTaskIds model) model
             in
             Keyed.node "div" [ class "tree-children" ]
@@ -3387,7 +3387,7 @@ refreshViewport previous result =
 
 
 refreshViewportFor : Msg -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
-refreshViewportFor msg previous (( model, _ ) as result) =
+refreshViewportFor msg previous ( model, command ) =
     let
         affectedIds =
             case msg of
@@ -3401,19 +3401,46 @@ refreshViewportFor msg previous (( model, _ ) as result) =
 
         statusChanged =
             List.any (\taskId -> (Dict.get taskId previous.tasks |> Maybe.map .status) /= (Dict.get taskId model.tasks |> Maybe.map .status)) affectedIds
+
+        readinessTask =
+            case msg of
+                CanonicalTaskReadinessFetched _ _ (Ok overview) -> Just overview.task
+                CanonicalTaskOverviewFetched _ _ (Ok overview) -> Just overview.task
+                GotTaskDependencies _ _ _ _ (Ok overview) -> Just overview.task
+                GotInitialTaskOverview _ _ _ (Ok overview) -> Just overview.task
+                _ -> Nothing
+
+        ( reordered, membershipCommand ) =
+            readinessTask
+                |> Maybe.map (\task -> Feature.DataLoading.revalidateNavigationForTaskReadiness previous task model)
+                |> Maybe.withDefault ( model, Cmd.none )
     in
-    refreshViewportWithStatusChange statusChanged previous result
+    refreshViewportWithStatusChange statusChanged previous ( reordered, Cmd.batch [ command, membershipCommand ] )
 
 
 refreshViewportWithStatusChange : Bool -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
 refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) =
     let
         old = model.cards.viewport
+        presentationOrderChanged =
+            (taskStatusesChanged || previous.dependencies.taskReadinessRollups /= model.dependencies.taskReadinessRollups)
+                && (old.projection
+                    |> Maybe.map
+                        (\projection ->
+                            let
+                                rank source task =
+                                    Dict.get task.id source.tasks |> Maybe.withDefault task |> taskPresentationOrder source
+                            in
+                            List.any (\task -> rank previous task /= rank model task) projection.tasks
+                        )
+                    |> Maybe.withDefault False
+                   )
         changed =
             old.workspaceId /= model.selectedWorkspaceId || old.sessionEpoch /= model.sessionRequestEpoch
                 || old.generation /= model.dataLoading.navigationGeneration || old.projection == Nothing
                 || previous.dataLoading.projectCardSummaries /= model.dataLoading.projectCardSummaries
                 || previous.dataLoading.taskCardSummaries /= model.dataLoading.taskCardSummaries
+                || presentationOrderChanged
                 || previous.dataLoading.navigationVisibleProjectIds /= model.dataLoading.navigationVisibleProjectIds
                 || previous.dataLoading.navigationVisibleTaskIds /= model.dataLoading.navigationVisibleTaskIds
                 || previous.cards.collapsedNodes /= model.cards.collapsedNodes

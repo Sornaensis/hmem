@@ -1289,11 +1289,33 @@ taskPopoverStatusClass status =
 
 taskCardAppearanceClass : Api.TaskStatus -> Maybe Api.TaskReadinessRollup -> String
 taskCardAppearanceClass status maybeRollup =
+    taskCardStatusClass (taskPresentationStatus status maybeRollup)
+
+
+taskPresentationStatus : Api.TaskStatus -> Maybe Api.TaskReadinessRollup -> Api.TaskStatus
+taskPresentationStatus status maybeRollup =
     if status == Api.Blocked && (maybeRollup |> Maybe.map .inProgressSubtaskCount |> Maybe.withDefault 0) > 0 then
-        taskCardStatusClass Api.InProgress
+        Api.InProgress
 
     else
-        taskCardStatusClass status
+        status
+
+
+taskPresentationOrder : Model -> { a | id : String, status : Api.TaskStatus } -> Int
+taskPresentationOrder model task =
+    taskReadinessForPresentation model task.id
+        |> taskPresentationStatus task.status
+        |> Api.taskStatusOrder
+
+
+taskReadinessForPresentation : Model -> String -> Maybe Api.TaskReadinessRollup
+taskReadinessForPresentation model taskId =
+    case Dict.get taskId model.dependencies.taskReadinessRollups of
+        Just rollup ->
+            Just rollup
+
+        Nothing ->
+            Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map .readinessRollup
 
 
 taskCardStatusClass : Api.TaskStatus -> String

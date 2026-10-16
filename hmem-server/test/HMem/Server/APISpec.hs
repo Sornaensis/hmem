@@ -799,6 +799,37 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         Project.listProjects ctx.deployedEnv.pool otherWorkspace.id Nothing Nothing Nothing `shouldReturn` []
 
   describe "bounded workspace navigation HTTP contract" $ do
+    it "puts active blocked parents on the first page before more than fifty higher-priority todos" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "navigation-running-parent-page"
+      let navigationPath suffix = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "/navigation?parent_kind=workspace_root&task_limit=50" <> suffix
+          create title parent priority = do
+            response <- postJson app "/api/v1/tasks" (object
+              [ "workspace_id" .= workspace.id, "title" .= (title :: T.Text)
+              , "parent_id" .= (parent :: Maybe UUID), "priority" .= (priority :: Int) ])
+            responseStatus response `shouldBe` status200
+            maybe (fail "expected created task") pure (decode (responseBody response) :: Maybe Task)
+      _ <- mapM (\n -> create (T.pack ("Todo " <> show n)) Nothing 10) [1..55 :: Int]
+      parent <- create "Z active parent" Nothing 1
+      child <- create "Child" (Just parent.id) 1
+      childResponse <- putJson app ("/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show child.id))) (object ["status" .= ("in_progress" :: T.Text)])
+      responseStatus childResponse `shouldBe` status200
+      firstResponse <- request app methodGet (navigationPath "") ""
+      responseStatus firstResponse `shouldBe` status200
+      let Just firstPage = decode (responseBody firstResponse) :: Maybe NavigationBranchResponse
+      length firstPage.tasks.items `shouldBe` 50
+      firstPage.tasks.hasMore `shouldBe` True
+      map (.id) (take 1 firstPage.tasks.items) `shouldBe` [parent.id]
+      map (.status) (take 1 firstPage.tasks.items) `shouldBe` [Blocked]
+      map (\row -> row.readinessRollup.inProgressSubtaskCount) (take 1 firstPage.tasks.items) `shouldBe` [1]
+      secondResponse <- request app methodGet (navigationPath "&task_offset=50") ""
+      let Just secondPage = decode (responseBody secondResponse) :: Maybe NavigationBranchResponse
+      length secondPage.tasks.items `shouldBe` 6
+      secondPage.tasks.hasMore `shouldBe` False
+      map (.id) secondPage.tasks.items `shouldNotContain` [parent.id]
+      filteredResponse <- request app methodGet (navigationPath "&task_status=blocked") ""
+      let Just filtered = decode (responseBody filteredResponse) :: Maybe NavigationBranchResponse
+      map (.id) filtered.tasks.items `shouldBe` [parent.id]
+
     it "retains matching ancestors, bounds pages, preserves batch order, and focuses an unloaded target" $ \(env, app) -> do
       workspace <- createTestWorkspace env "navigation-contract"
       let workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))

@@ -28,6 +28,52 @@ import HMem.Types
 
 spec :: Spec
 spec = do
+  around withTestEnv $ describe "Navigation task presentation ordering" $ do
+    it "shares running rank and stable ties while excluding stopped and deleted direct children" $ \env -> do
+      workspace <- createTestWorkspace env "navigation-task-order"
+      project <- createProjectFor env workspace.id "project"
+      parent <- createTaskFor env workspace.id (Just project.id) Nothing "Same"
+      child <- createTaskFor env workspace.id (Just project.id) (Just parent.id) "child"
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      running <- createTaskFor env workspace.id (Just project.id) Nothing "same"
+      _ <- updateTask env.pool running.id (cancelStatusUpdate InProgress)
+      todo <- createTaskFor env workspace.id (Just project.id) Nothing "A high priority todo"
+      _ <- updateTask env.pool todo.id ((cancelStatusUpdate Todo) { priority = Just 10 })
+      idle <- createTaskFor env workspace.id (Just project.id) Nothing "idle"
+      _ <- updateTask env.pool idle.id (cancelStatusUpdate Blocked)
+      let selector = NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing
+          load filters = listFilteredTaskChildren env.pool workspace.id (Just project.id) Nothing filters 50 0
+      ordered <- load selector
+      map (.id) ordered `shouldBe` sort [parent.id,running.id] <> [todo.id,idle.id]
+      blocked <- load (selector { taskStatuses = [Blocked] })
+      map (.id) blocked `shouldBe` [parent.id,idle.id]
+      -- A remaining todo child keeps the parent canonically blocked at zero running children.
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Todo)
+      stopped <- load selector
+      map (.id) stopped `shouldBe` [running.id,todo.id,idle.id,parent.id]
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      deleteTask env.pool child.id >>= (`shouldBe` True)
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Blocked)
+      deleted <- load selector
+      map (.id) deleted `shouldBe` [running.id,todo.id,idle.id,parent.id]
+
+    it "follows direct-child reparenting and ignores done and cancelled children" $ \env -> do
+      workspace <- createTestWorkspace env "navigation-child-placement"
+      left <- createTaskFor env workspace.id Nothing Nothing "Left"
+      right <- createTaskFor env workspace.id Nothing Nothing "Right"
+      child <- createTaskFor env workspace.id Nothing (Just left.id) "child"
+      _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
+      let selector = NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing
+          ids = map (.id) <$> listFilteredTaskChildren env.pool workspace.id Nothing Nothing selector 50 0
+      ids `shouldReturn` [left.id,right.id]
+      _ <- updateTask env.pool child.id ((cancelStatusUpdate InProgress) { parentId = SetTo right.id })
+      ids `shouldReturn` [right.id,left.id]
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Done)
+      _ <- updateTask env.pool right.id (cancelStatusUpdate Blocked)
+      ids `shouldReturn` [left.id,right.id]
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Cancelled)
+      ids `shouldReturn` [left.id,right.id]
+
   around withTestEnv $ describe "Due-free task projections" $ do
     it "reads task, subtask, filtered and next-task rows and card summaries after column removal" $ \env -> do
       workspace <- createTestWorkspace env "due-free-projections"

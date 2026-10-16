@@ -30,7 +30,57 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "ordinary background waits for a usable viewport paint" <|
+        [ test "running-parent rank changes restart root project and legacy task owners and retire staged offsets" <|
+            \_ ->
+                List.map readinessOwnerRestart [ "root", "project", "task" ]
+                    |> Expect.equal (List.repeat 3 { promoted = True, stable = True, staged = True, demoted = True, cleared = True, stale = True })
+        , test "demotion restarts partial root membership so offset fifty cannot skip the shifted todo" <|
+            \_ ->
+                let
+                    base = task "parent-active" Nothing
+                    rollup = base.readinessRollup
+                    active = { base | projectId = Nothing, status = Api.Blocked, readinessRollup = { rollup | inProgressSubtaskCount = 1 } }
+                    stopped = { active | readinessRollup = rollup }
+                    todo n = let value = task ("todo-" ++ String.fromInt n) Nothing in { value | projectId = Nothing, priority = 10 }
+                    pending = DataLoading.reloadNavigationForFilters (unfilteredSyncModel []) |> Tuple.first |> replyRootSpan [] (active :: List.map todo (List.range 1 49)) False True |> DataLoading.beginRootNavigationPage "task" |> Tuple.first
+                    refreshed = DataLoading.mergeNavigationSummaries [] [ stopped ] pending |> DataLoading.revalidateNavigationForChangedSummaries pending { projects = [], tasks = [ stopped ], missingProjectIds = [], missingTaskIds = [] } |> Tuple.first
+                    first = replyRootSpan [] (List.map todo (List.range 1 50)) False True refreshed
+                    complete = replyRootSpan [] (List.map todo (List.range 51 55) ++ [ stopped ]) False False first
+                in
+                Expect.all
+                    [ \_ -> refreshed.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset |> Expect.equal (Just 0)
+                    , \_ -> Dict.keys complete.dataLoading.taskCardSummaries |> Set.fromList |> Expect.equal (Set.fromList (active.id :: List.map (todo >> .id) (List.range 1 55)))
+                    , \_ -> complete.dataLoading.rootNavigationRequest |> Maybe.map .taskHasMore |> Expect.equal (Just False)
+                    ] ()
+        , test "readiness events for uncached parents promote through authoritative root and project membership" <|
+            \_ ->
+                let
+                    check owner =
+                        let
+                            base = task "uncached-parent" Nothing
+                            rollup = base.readinessRollup
+                            parent = { base | projectId = if owner == "project" then Just "parent" else Nothing, status = Api.Blocked, readinessRollup = { rollup | inProgressSubtaskCount = 1 } }
+                            todos = List.range 1 50 |> List.map (\n -> { parent | id = "todo-" ++ String.fromInt n, status = Api.Todo, priority = 10, readinessRollup = rollup })
+                            before =
+                                if owner == "root" then DataLoading.reloadNavigationForFilters (unfilteredSyncModel []) |> Tuple.first |> replyRootSpan [] todos False True
+                                else unfilteredSyncModel [ (let value = project "parent" Nothing in { value | hasChildren = True }) ] |> branchReply "project:parent" [] todos False True
+                            invalidated = requestSummaries ("uncached-" ++ owner) [ ( "task", parent.id ) ] before
+                            refreshed = summaryReply invalidated (batchGuard [ ( "task", parent.id ) ] invalidated) [] [ parent.id ] { projects = [], tasks = [ parent ], missingProjectIds = [], missingTaskIds = [] } invalidated
+                            request = if owner == "root" then refreshed.dataLoading.rootNavigationRequest else Dict.get "project:parent" refreshed.dataLoading.loadedNavigationBranches
+                            admitted = if owner == "root" then refreshed else retireBranchReply "project:parent" before refreshed
+                            firstPage =
+                                if owner == "root" then replyRootSpan [] (parent :: List.take 49 todos) False True refreshed
+                                else branchReply "project:parent" [] (parent :: List.take 49 todos) False True admitted
+                            complete = if owner == "root" then firstPage else branchReply "project:parent" [] (List.drop 49 todos) False False firstPage
+                        in
+                        { absent = not (Dict.member parent.id before.tasks)
+                        , restarted = refreshed.dataLoading.navigationGeneration > before.dataLoading.navigationGeneration && (request |> Maybe.map .taskOffset) == Just 0
+                        , metadataOnly = not (Set.member parent.id refreshed.dataLoading.navigationVisibleTaskIds)
+                        , admitted = Set.member parent.id complete.dataLoading.navigationVisibleTaskIds
+                        }
+                in
+                List.map check [ "root", "project" ] |> Expect.equal (List.repeat 2 { absent = True, restarted = True, metadataOnly = True, admitted = True })
+        , test "ordinary background waits for a usable viewport paint" <|
             \_ ->
                 let
                     seeded = loadRootUnpainted workspaceId [ (let parent = project "paint-parent" Nothing in { parent | hasChildren = True }) ] [] model
@@ -3180,6 +3230,62 @@ project id parentId =
     , hasChildren = False
     , readinessRollup = { openProjectCount = 0, inProgressTaskCount = 0, closedProjectCount = 0, openTaskCount = 0, doneTaskCount = 0, cancelledTaskCount = 0, blockedTaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True }
     }
+
+
+readinessOwnerRestart : String -> { promoted : Bool, stable : Bool, staged : Bool, demoted : Bool, cleared : Bool, stale : Bool }
+readinessOwnerRestart owner =
+    let
+        base = task "rank-parent" (if owner == "task" then Just "container" else Nothing)
+        rollup = base.readinessRollup
+        summary count = { base | projectId = if owner == "project" then Just "parent" else Nothing, status = Api.Blocked, readinessRollup = { rollup | inProgressSubtaskCount = count } }
+        containerBase = task "container" Nothing
+        container = { containerBase | projectId = Nothing, hasChildren = True }
+        key = if owner == "project" then "project:parent" else "task:container"
+        initial =
+            if owner == "root" then DataLoading.reloadNavigationForFilters (unfilteredSyncModel []) |> Tuple.first
+            else if owner == "project" then unfilteredSyncModel [ (let value = project "parent" Nothing in { value | hasChildren = True }) ]
+            else let search = model.search in loadRoot workspaceId [] [ container ] { model | search = { search | filterProjectStatuses = [], filterTaskStatuses = [] } }
+        reply items current =
+            if owner == "root" then replyRootSpan [] items False True current
+            else branchReply key [] items False True current
+        request current = if owner == "root" then current.dataLoading.rootNavigationRequest else Dict.get key current.dataLoading.loadedNavigationBranches
+        values count = summary count :: (List.range 1 49 |> List.map (\n -> let value = summary 0 in { value | id = "todo-" ++ String.fromInt n, status = Api.Todo }))
+        first = reply (values 0) initial
+        before = if owner == "root" then DataLoading.beginRootNavigationPage "task" first |> Tuple.first else first
+        refresh count current =
+            let next = summary count
+            in DataLoading.mergeNavigationSummaries [] [ next ] current |> DataLoading.revalidateNavigationForChangedSummaries current { projects = [], tasks = [ next ], missingProjectIds = [], missingTaskIds = [] } |> Tuple.first
+        promoted = refresh 1 before
+        stable = refresh 2 promoted
+        admitted = if owner == "root" then stable else retireBranchReply key before stable
+        staged = reply (values 2) admitted
+        old = request staged
+        demoted = refresh 0 staged
+        stale = case old of
+            Just retired ->
+                let response = Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ (let value = summary 2 in { value | id = "stale-page" }) ], hasMore = False } }
+                    msg = if owner == "root" then GotRootNavigation workspaceId retired.sessionEpoch staged.dataLoading.activeWorkspaceLoadToken retired.generation retired.filterFingerprint retired.projectOffset retired.taskOffset response else GotNavigationBranch workspaceId retired.sessionEpoch retired.generation key retired.filterFingerprint retired.projectOffset retired.taskOffset response
+                in DataLoading.update msg demoted |> Tuple.first
+            Nothing -> demoted
+        generation current = request current |> Maybe.map .generation |> Maybe.withDefault -1
+        offset current = request current |> Maybe.map .taskOffset
+        passKey = if owner == "root" then "workspace_root:root" else key
+    in
+    { promoted = generation promoted > generation before && offset promoted == Just 0
+    , stable = generation stable == generation promoted
+    , staged = (Dict.get passKey staged.dataLoading.navigationPasses |> Maybe.map (.tasks >> Dict.size)) == Just 50 && offset staged == Just 50
+    , demoted = generation demoted > generation staged && offset demoted == Just 0
+    , cleared = Dict.get passKey demoted.dataLoading.navigationPasses |> Maybe.map (.tasks >> Dict.isEmpty) |> Maybe.withDefault False
+    , stale = not (Dict.member "stale-page" stale.dataLoading.taskCardSummaries) && generation stale == generation demoted
+    }
+
+
+retireBranchReply : String -> Model -> Model -> Model
+retireBranchReply key captured current =
+    case Dict.get key captured.dataLoading.loadedNavigationBranches of
+        Just old ->
+            DataLoading.update (GotNavigationBranch workspaceId old.sessionEpoch old.generation key old.filterFingerprint old.projectOffset old.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) current |> Tuple.first |> painted
+        Nothing -> current
 
 
 task : String -> Maybe String -> Api.TaskCardSummary

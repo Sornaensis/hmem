@@ -6,13 +6,17 @@ import Control.Exception (bracket, try)
 import Control.Monad (when)
 import Data.Aeson (Value)
 import Data.ByteString.Char8 qualified as B8
+import Data.List (isInfixOf, sort)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import Data.Pool (destroyAllResources)
 import Data.UUID (UUID)
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+import System.Directory (copyFile, createDirectoryIfMissing, listDirectory)
+import System.FilePath ((</>))
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -28,7 +32,12 @@ import HMem.Types
 -- Uses the existing suite sandbox and a real ten-connection pool, without the
 -- single-connection outer transaction used by the ordinary CRUD examples.
 spec :: Spec
-spec = around withTestEnv $ describe "Observation content versions" $ do
+spec = describe "Observation content versions" $ do
+  around withTestEnv currentSchemaSpec
+  it "backfills populated V029 rows without data effects and records V030 atomically" historicalVersionMigration
+
+currentSchemaSpec :: SpecWith TestEnv
+currentSchemaSpec = do
   it "allows exactly one competing writer, then a conscious rebase" $ \env -> do
     workspace <- createTestWorkspace env "observation-content-race"
     original <- create env workspace.id "original"
@@ -112,28 +121,97 @@ spec = around withTestEnv $ describe "Observation content versions" $ do
     deleteObservation env.pool workspace.id original.id `shouldReturn` True
     updateObservationReviewed env.pool workspace.id original.id original.contentVersion (reviewed "deleted") `shouldReturn` ObservationNotFound
 
-  it "backfills populated V029 rows without data effects and records V030 atomically" $ \env -> do
-    workspace <- createTestWorkspace env "observation-version-migration"
-    first <- create env workspace.id "first existing"
-    second <- create env workspace.id "second existing"
-    auditBefore <- getAuditLogRows env.pool "observation" (T.pack (show first.id))
-    outboxBefore <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
-    -- Recreate the exact pre-V030 table shape in this contained test database.
-    runSession env.pool $ Session.sql "DROP TRIGGER trg_observations_revision_prepare ON observations; DROP TRIGGER trg_observations_revision_append ON observations; DROP TRIGGER trg_observations_00_guard_provenance ON observations; DROP TABLE observation_revision_events; DROP FUNCTION hmem_observation_provenance(bigint,text,text,uuid,text); DROP FUNCTION hmem_guard_observation_provenance(); DROP FUNCTION hmem_prepare_observation_provenance(); DROP FUNCTION hmem_guard_observation_revision_event(); DROP FUNCTION hmem_append_observation_revision_event(); ALTER TABLE observations DROP COLUMN latest_sequence, DROP COLUMN current_provenance; DELETE FROM schema_migrations WHERE version = 32; DROP TRIGGER trg_observations_content_version ON observations; ALTER TABLE observations DROP COLUMN content_version CASCADE; DROP FUNCTION hmem_advance_observation_content_version(); DROP FUNCTION hmem_guard_observation_content_version(); DELETE FROM schema_migrations WHERE version = 30"
-    upgraded <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
-    upgraded.failed `shouldBe` Nothing
-    upgraded.applied `shouldBe` ["V030__observation_content_versions.sql", "V032__observation_revision_events.sql"]
-    Just migratedFirst <- getObservation env.pool workspace.id first.id
-    Just migratedSecond <- getObservation env.pool workspace.id second.id
-    map (.content) [migratedFirst, migratedSecond] `shouldBe` [first.content, second.content]
-    migratedFirst.contentVersion `shouldNotBe` migratedSecond.contentVersion
-    migratedFirst.subjects `shouldBe` first.subjects
-    getAuditLogRows env.pool "observation" (T.pack (show first.id)) `shouldReturn` auditBefore
-    listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` outboxBefore
-    queryBool env "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 30 AND name = 'V030__observation_content_versions.sql')" `shouldReturn` True
-    repeated <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
-    repeated.failed `shouldBe` Nothing
-    repeated.applied `shouldBe` []
+-- Historical schemas need their own database, not a downgrade of the current
+-- suite database: later migrations may legitimately depend on the new objects.
+historicalVersionMigration :: Expectation
+historicalVersionMigration = withTestSandbox $ \sandbox ->
+  withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+    bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+      let env = TestEnv pool sandbox db
+          migrationName = "V030__observation_content_versions.sql"
+      beforeDir <- copyVersionMigrations sandbox "through-v029" (< "V030")
+      upgradeDir <- copyVersionMigrations sandbox "v030-only" (== migrationName)
+      failureDir <- copyVersionMigrations sandbox "v030-failure" (== migrationName)
+      preVersion <- Migration.runMigrations pool beforeDir
+      preVersion.failed `shouldBe` Nothing
+      queryBool env "SELECT count(*) = 29 AND max(version) = 29 FROM schema_migrations" `shouldReturn` True
+      let assertPreVersion = queryBool env "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'observations' AND column_name IN ('content_version', 'latest_sequence', 'current_provenance')) AND to_regclass('public.observation_revision_events') IS NULL AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version >= 30) AND to_regprocedure('public.hmem_advance_observation_content_version()') IS NULL AND to_regprocedure('public.hmem_guard_observation_content_version()') IS NULL" `shouldReturn` True
+      assertPreVersion
+      -- Seed only columns present at V029, including ordered subject sets.
+      runSession pool $ Session.sql "INSERT INTO workspaces (id, name) VALUES ('00000000-0000-0000-0000-000000000010', 'observation-version-migration'); WITH inserted AS (INSERT INTO observations (id, workspace_id, git_sha, content, subject_set_open) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000010', repeat('a',40), 'first existing', TRUE), ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000010', repeat('b',40), 'second existing', TRUE) RETURNING id) INSERT INTO observation_subjects (observation_id, ordinal, subject_kind, subject) SELECT i.id, s.ordinal, s.kind::observation_subject_kind, s.subject FROM inserted i JOIN (VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 0, 'file', 'src/Version.hs'), ('00000000-0000-0000-0000-000000000002'::uuid, 0, 'glob', 'src/**/*.hs'), ('00000000-0000-0000-0000-000000000002'::uuid, 1, 'file', 'README.md')) s(id, ordinal, kind, subject) ON s.id = i.id"
+      [workspace] <- queryUUIDs env "SELECT id FROM workspaces"
+      [firstId, secondId] <- queryUUIDs env "SELECT id FROM observations ORDER BY id"
+      rowsBefore <- queryValues env "SELECT to_jsonb(o) FROM observations o ORDER BY id"
+      subjectsBefore <- queryValues env "SELECT to_jsonb(s) FROM observation_subjects s ORDER BY observation_id, ordinal"
+      auditBefore <- queryValues env "SELECT to_jsonb(a) FROM audit_log a ORDER BY id"
+      outboxBefore <- listOutboxAfter pool (WorkspaceScope workspace) 0 100
+      queryBool env "SELECT count(*) = 2 FROM audit_log WHERE entity_type = 'observation' AND action = 'create'" `shouldReturn` True
+      length outboxBefore `shouldSatisfy` (>= 2)
+      let assertEffects = do
+            queryValues env "SELECT to_jsonb(s) FROM observation_subjects s ORDER BY observation_id, ordinal" `shouldReturn` subjectsBefore
+            queryValues env "SELECT to_jsonb(a) FROM audit_log a ORDER BY id" `shouldReturn` auditBefore
+            listOutboxAfter pool (WorkspaceScope workspace) 0 100 `shouldReturn` outboxBefore
+      -- Fail after V030's DDL, backfill and ledger INSERT, but before COMMIT.
+      -- Only the sandbox copy is modified; retry uses the canonical SQL bytes.
+      canonicalSql <- TIO.readFile (upgradeDir </> migrationName)
+      T.count "COMMIT;" canonicalSql `shouldBe` 1
+      TIO.writeFile (failureDir </> migrationName) (T.replace "COMMIT;" "SELECT 1 / 0;\nCOMMIT;" canonicalSql)
+      failed <- Migration.runMigrations pool failureDir
+      failed.applied `shouldBe` []
+      failed.failed `shouldSatisfy` \case
+        Just (name, message) -> name == migrationName && "division by zero" `isInfixOf` message
+        _ -> False
+      assertPreVersion
+      queryValues env "SELECT to_jsonb(o) FROM observations o ORDER BY id" `shouldReturn` rowsBefore
+      assertEffects
+      upgraded <- Migration.runMigrations pool upgradeDir
+      upgraded.failed `shouldBe` Nothing
+      upgraded.applied `shouldBe` [migrationName]
+      queryValues env "SELECT to_jsonb(o) - 'content_version' FROM observations o ORDER BY id" `shouldReturn` rowsBefore
+      versions <- queryUUIDs env "SELECT content_version FROM observations ORDER BY id"
+      case versions of
+        [firstVersion, secondVersion] -> firstVersion `shouldNotBe` secondVersion
+        _ -> expectationFailure "expected exactly two non-null Observation versions"
+      assertEffects
+      queryBool env "SELECT count(*) = 1 FROM schema_migrations WHERE version = 30 AND name = 'V030__observation_content_versions.sql'" `shouldReturn` True
+      repeated <- Migration.runMigrations pool upgradeDir
+      repeated.failed `shouldBe` Nothing
+      repeated.applied `shouldBe` []
+      queryUUIDs env "SELECT content_version FROM observations ORDER BY id" `shouldReturn` versions
+      assertEffects
+      current <- Migration.runMigrations pool sandbox.sandboxMigrationsDir
+      current.failed `shouldBe` Nothing
+      current.applied `shouldSatisfy` elem "V039__declared_bot_identity.sql"
+      Just migratedFirst <- getObservation pool workspace firstId
+      Just migratedSecond <- getObservation pool workspace secondId
+      map (.content) [migratedFirst, migratedSecond] `shouldBe` ["first existing", "second existing"]
+      map (.contentVersion) [migratedFirst, migratedSecond] `shouldBe` versions
+      migratedFirst.subjects `shouldBe` [ObservationSubject SubjectFile "src/Version.hs"]
+      migratedSecond.subjects `shouldBe` [ObservationSubject SubjectGlob "src/**/*.hs", ObservationSubject SubjectFile "README.md"]
+      queryBool env "SELECT count(*) = 2 FROM observation_revision_events WHERE event_kind = 'legacy_creation' AND content_version IS NULL AND content_digest IS NULL AND bot_identity IS NULL" `shouldReturn` True
+      Just revised <- writeObservation pool workspace firstId (reviewed "reviewed after upgrade")
+      revised.contentVersion `shouldNotBe` migratedFirst.contentVersion
+      revised.latestSequence `shouldBe` 2
+      queryBool env "SELECT o.current_provenance = hmem_observation_event_projection(e) AND e.event_kind = 'update' AND e.content_version = o.content_version AND NOT (o.current_provenance ? 'bot_identity') FROM observations o JOIN observation_revision_events e ON e.observation_id = o.id AND e.sequence = o.latest_sequence WHERE o.id = '00000000-0000-0000-0000-000000000001'" `shouldReturn` True
+      finalRepeat <- Migration.runMigrations pool sandbox.sandboxMigrationsDir
+      finalRepeat.failed `shouldBe` Nothing
+      finalRepeat.applied `shouldBe` []
+
+copyVersionMigrations :: TestSandbox -> FilePath -> (FilePath -> Bool) -> IO FilePath
+copyVersionMigrations sandbox name keep = do
+  let target = sandbox.sandboxTmpDir </> name
+  createDirectoryIfMissing True target
+  files <- sort . filter keep <$> listDirectory sandbox.sandboxMigrationsDir
+  mapM_ (\file -> copyFile (sandbox.sandboxMigrationsDir </> file) (target </> file)) files
+  pure target
+
+queryValues :: TestEnv -> B8.ByteString -> IO [Value]
+queryValues env sql = runSession env.pool $ Session.statement () $
+  Statement.Statement sql Enc.noParams (Dec.rowList (Dec.column (Dec.nonNullable Dec.jsonb))) False
+
+queryUUIDs :: TestEnv -> B8.ByteString -> IO [UUID]
+queryUUIDs env sql = runSession env.pool $ Session.statement () $
+  Statement.Statement sql Enc.noParams (Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))) False
 
 checkConflictEffects :: TestEnv -> IO ()
 checkConflictEffects env = do

@@ -1828,6 +1828,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       bucketResponse.timelineBucketsWorkspaceId `shouldBe` workspace.id
       bucketResponse.timelineBucketsBucket `shouldBe` "day"
       bucketResponse.timelineBucketsBuckets `shouldSatisfy` (not . null)
+      map (.timelineBucketOpenCounts) bucketResponse.timelineBucketsBuckets `shouldBe` [Just (TimelineOpenCounts 0 0)]
+      map (.timelineBucketOpenAsOf) bucketResponse.timelineBucketsBuckets `shouldBe` [Just (read "2020-01-02 00:00:00 UTC")]
+      map (.timelineBucketOpenStatus) bucketResponse.timelineBucketsBuckets `shouldBe` ["available"]
       request app methodGet (workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day") "" >>= (\response -> responseStatus response `shouldBe` status400)
       paged <- request app methodGet (workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day&paged=true") ""
       responseStatus paged `shouldBe` status200
@@ -1839,6 +1842,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       let Just finalBuckets = decode (responseBody next) :: Maybe WorkspaceTimelineBucketsResponse
       length finalBuckets.timelineBucketsBuckets `shouldBe` 1
       finalBuckets.timelineBucketsNextSince `shouldBe` Nothing
+      map (.timelineBucketOpenCounts) (firstBuckets.timelineBucketsBuckets <> finalBuckets.timelineBucketsBuckets)
+        `shouldBe` replicate 367 (Just (TimelineOpenCounts 0 0))
       mapM_ (\size -> do
         firstResponse <- request app methodGet (workspacePath <> "/timeline/buckets?since=2000-02-15T12:00:00Z&until=2025-01-01T00:00:00Z&paged=true&bucket=" <> size) ""
         responseStatus firstResponse `shouldBe` status200
@@ -1987,6 +1992,14 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       totals (\bucket -> bucket.timelineBucketSeries.seriesObservation.completed) `shouldBe` 0
       totals (\bucket -> bucket.timelineBucketSeriesTotals.created) `shouldBe` 6
       totals (\bucket -> bucket.timelineBucketSeriesTotals.completed) `shouldBe` 2
+      (last buckets.timelineBucketsBuckets).timelineBucketOpenCounts `shouldBe` Just (TimelineOpenCounts 1 1)
+      (last buckets.timelineBucketsBuckets).timelineBucketOpenStatus `shouldBe` "available"
+      planningResponse <- request app methodGet (workspacePath <> "/planning-counts") ""
+      responseStatus planningResponse `shouldBe` status200
+      let Just planning = decode (responseBody planningResponse) :: Maybe WorkspacePlanningCounts
+      planning `shouldBe` WorkspacePlanningCounts 1 1
+      (last buckets.timelineBucketsBuckets).timelineBucketOpenCounts
+        `shouldBe` Just (TimelineOpenCounts planning.openProjects planning.openTasks)
       mapM_ (\entity -> hasActions entity `shouldBe` True) ["project", "task", "subtask", "observation"]
       (firstJsonArrayValue (jsonField "buckets" rawBuckets) >>= jsonField "counts") `shouldSatisfy` isJust
       (firstJsonArrayValue (jsonField "buckets" rawBuckets) >>= jsonField "totals") `shouldSatisfy` isJust
@@ -2985,6 +2998,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       schema "WorkspaceTimelineBucketsResponse" `shouldSatisfy` isJust
       hasSchemaProperty "WorkspaceTimelineBucket" "series" `shouldBe` True
       hasSchemaProperty "WorkspaceTimelineBucket" "series_totals" `shouldBe` True
+      hasSchemaProperty "WorkspaceTimelineBucket" "open_counts" `shouldBe` True
+      hasSchemaProperty "WorkspaceTimelineBucket" "open_as_of" `shouldBe` True
+      hasSchemaProperty "WorkspaceTimelineBucket" "open_status" `shouldBe` True
+      hasSchemaProperty "TimelineOpenCounts" "projects" `shouldBe` True
+      hasSchemaProperty "TimelineOpenCounts" "tasks" `shouldBe` True
       deprecatedProperty "WorkspaceTimelineBucket" "counts" `shouldBe` Just (Bool True)
       deprecatedProperty "WorkspaceTimelineBucket" "totals" `shouldBe` Just (Bool True)
       -- Change-stream requests are intentionally a disjoint start versus

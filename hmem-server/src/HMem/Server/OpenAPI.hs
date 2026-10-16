@@ -305,6 +305,7 @@ instance ToSchema TimelineBucketCounts where declareNamedSchema = genericDeclare
 instance ToSchema TimelineBucketEntityCounts where declareNamedSchema = genericDeclareNamedSchema timelineBucketEntityCountsOpts
 instance ToSchema TimelineBucketSeriesCounts where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TimelineBucketSeries where declareNamedSchema = genericDeclareNamedSchema timelineBucketSeriesOpts
+instance ToSchema TimelineOpenCounts where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceTimelineBucket where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema timelineBucketOpts (Proxy @WorkspaceTimelineBucket)
@@ -727,7 +728,7 @@ timelineBucketEntityCountsOpts = opts { fieldLabelModifier = \case
 
 timelineBucketOpts :: SchemaOptions
 timelineBucketOpts = opts { fieldLabelModifier = \case
-  "timelineBucketStart" -> "bucket_start"; "timelineBucketEnd" -> "bucket_end"; "timelineBucketLabel" -> "label"; "timelineBucketCounts" -> "counts"; "timelineBucketTotals" -> "totals"; "timelineBucketSeries" -> "series"; "timelineBucketSeriesTotals" -> "series_totals"; other -> camelToSnake other }
+  "timelineBucketStart" -> "bucket_start"; "timelineBucketEnd" -> "bucket_end"; "timelineBucketLabel" -> "label"; "timelineBucketCounts" -> "counts"; "timelineBucketTotals" -> "totals"; "timelineBucketSeries" -> "series"; "timelineBucketSeriesTotals" -> "series_totals"; "timelineBucketOpenCounts" -> "open_counts"; "timelineBucketOpenAsOf" -> "open_as_of"; "timelineBucketOpenStatus" -> "open_status"; other -> camelToSnake other }
 
 timelineBucketSeriesOpts :: SchemaOptions
 timelineBucketSeriesOpts = opts { fieldLabelModifier = \case

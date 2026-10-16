@@ -82,6 +82,21 @@ spec = do
       eitherDecode (encode mutation) `shouldBe` Right mutation
 
   describe "Timeline lifecycle JSON compatibility" $ do
+    it "round-trips open inventory and treats older payloads as unavailable" $ do
+      let zero = TimelineBucketCounts 0 0 0
+          seriesZero = TimelineBucketSeriesCounts 0 0 0 0 0
+          bucket = WorkspaceTimelineBucket
+            (read "2020-01-01 00:00:00 UTC") (read "2020-01-02 00:00:00 UTC") "2020-01-01"
+            (TimelineBucketEntityCounts zero zero zero zero) zero
+            (TimelineBucketSeries seriesZero seriesZero seriesZero seriesZero) seriesZero
+            (Just (TimelineOpenCounts 2 5)) (Just (read "2020-01-02 00:00:00 UTC")) "available"
+      eitherDecode (encode bucket) `shouldBe` Right bucket
+      case toJSON bucket of
+        Object fields -> do
+          let legacy = Object (foldr KM.delete fields ["open_counts", "open_as_of", "open_status"])
+          eitherDecode (encode legacy) `shouldBe` Right bucket
+            { timelineBucketOpenCounts = Nothing, timelineBucketOpenAsOf = Nothing, timelineBucketOpenStatus = "history_unavailable" }
+        _ -> expectationFailure "timeline buckets must encode as objects"
     it "defaults additive action fields for older payloads and preserves distinct counts" $ do
       (eitherDecode "{\"created\":1,\"completed\":2,\"deleted\":3}" :: Either String TimelineBucketSeriesCounts)
         `shouldBe` Right (TimelineBucketSeriesCounts 1 2 3 0 0)

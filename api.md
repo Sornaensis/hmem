@@ -68,6 +68,25 @@ metadata remain valid and are not retroactively attributed.
 and `totals` retain their existing meaning. Observation archive and cancel counts
 are zero because Observations do not support those lifecycle actions.
 
+Each bucket also returns nullable `open_counts: {projects, tasks}`, nullable
+`open_as_of` (UTC), and `open_status`. Available inventory counts every live
+active/paused project and todo/in_progress/blocked task once, including nested
+projects, parents, subtasks and unassigned tasks. It is independent of lifecycle
+line filters. The exclusive sample cutoff is the earliest of bucket end,
+requested `until`, and the server statement snapshot time. Events exactly at
+that cutoff belong to the next sample. A partial current bucket uses current
+base rows; wholly future buckets return null counts/time and `future`.
+
+Historical inventory includes the pre-range baseline and carries through buckets
+without events. It reverses full old/new audit snapshots from current inventory,
+including deletion, restoration and reopening; no present-day hierarchy joins
+or lifecycle-event subtraction determine inventory. Retained legacy audits with
+null workspace columns use their snapshot workspace IDs. Missing initial
+history, unusable snapshots or failed per-entity reconciliation return null
+counts and `history_unavailable` for affected history, retaining its cutoff.
+Available samples use `available`. Retained audit history is assumed intact:
+arbitrary manual purges that leave consistent snapshots cannot always be detected.
+
 The optional `paged=true` query supports long graph ranges while each response
 keeps the existing ten-year and 366-bucket bounds. Follow `next_since`, keeping
 `until` and `bucket` unchanged, until it is null. With `paged=true`, omitting

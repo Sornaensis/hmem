@@ -16,7 +16,7 @@ module HMem.Types
   , NavigationParent(..), NavigationFilter(..), NavigationBranchRequest(..), NavigationPage(..), NavigationBranchResponse(..), NavigationEntityType(..), NavigationSummary(..), NavigationFocusResponse(..), NavigationSummariesRequest(..), NavigationSummariesResponse(..)
   , maxNavigationPageSize, maxNavigationOffset, maxNavigationBatchIds, maxFocusAncestors, validateNavigationPage, validateNavigationSummariesRequest
   , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), maxUnifiedSearchOffset, capUnifiedSearchOverfetch, validateUnifiedSearchOffset, validateUnifiedSearchQuery
-  , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), TimelineBucketSeriesCounts(..), TimelineBucketSeries(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
+  , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), TimelineBucketSeriesCounts(..), TimelineBucketSeries(..), TimelineOpenCounts(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
   , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
   , AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), RevertResult(..), auditActionToText, auditActionFromText
   , WebSocketTicketRequest(..), WebSocketTicketResponse(..), ChangeStreamScopeRequest(..), SnapshotProfile(..), snapshotProfileToText, ChangeStreamResyncRequest(..), ChangeStreamSnapshotItem(..), ChangeStreamResyncResponse(..), CanonicalWebSocketTicketRequest(..), SessionContext(..), SessionPrincipal(..), SessionActor(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
@@ -1776,6 +1776,14 @@ instance FromJSON TimelineBucketSeries where
       <*> o .: "subtask"
       <*> o .: "observation"
 
+-- | Inventory counts each base entity once, independently of hierarchy.
+data TimelineOpenCounts = TimelineOpenCounts
+  { projects :: Int64
+  , tasks :: Int64
+  } deriving (Show, Eq, Generic)
+instance ToJSON TimelineOpenCounts where toJSON = genericToJSON jsonOptions
+instance FromJSON TimelineOpenCounts where parseJSON = genericParseJSON jsonOptions
+
 -- | One horizontal histogram bucket for the workspace Timeline.
 data WorkspaceTimelineBucket = WorkspaceTimelineBucket
   { timelineBucketStart  :: UTCTime
@@ -1785,6 +1793,9 @@ data WorkspaceTimelineBucket = WorkspaceTimelineBucket
   , timelineBucketTotals :: TimelineBucketCounts
   , timelineBucketSeries :: TimelineBucketSeries
   , timelineBucketSeriesTotals :: TimelineBucketSeriesCounts
+  , timelineBucketOpenCounts :: Maybe TimelineOpenCounts
+  , timelineBucketOpenAsOf :: Maybe UTCTime
+  , timelineBucketOpenStatus :: Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON WorkspaceTimelineBucket where
@@ -1796,6 +1807,9 @@ instance ToJSON WorkspaceTimelineBucket where
     , "totals" .= timelineBucketTotals
     , "series" .= timelineBucketSeries
     , "series_totals" .= timelineBucketSeriesTotals
+    , "open_counts" .= timelineBucketOpenCounts
+    , "open_as_of" .= timelineBucketOpenAsOf
+    , "open_status" .= timelineBucketOpenStatus
     ]
 instance FromJSON WorkspaceTimelineBucket where
   parseJSON = withObject "WorkspaceTimelineBucket" $ \o ->
@@ -1807,6 +1821,9 @@ instance FromJSON WorkspaceTimelineBucket where
       <*> o .: "totals"
       <*> o .: "series"
       <*> o .: "series_totals"
+      <*> o .:? "open_counts"
+      <*> o .:? "open_as_of"
+      <*> o .:? "open_status" .!= "history_unavailable"
 
 -- | Capped bucket response for the workspace Timeline histogram.
 data WorkspaceTimelineBucketsResponse = WorkspaceTimelineBucketsResponse

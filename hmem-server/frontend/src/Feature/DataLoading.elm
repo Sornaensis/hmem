@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (markMissingNavigationSummaries, ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -43,6 +43,8 @@ init =
     , navigationPresentations = Dict.empty
     , projectCardSummaries = Dict.empty
     , taskCardSummaries = Dict.empty
+    , navigationSummaryAuthority = Dict.empty
+    , nextNavigationSummaryRevision = 0
     , projectCardDetailRequests = Dict.empty
     , taskCardDetailRequests = Dict.empty
     , nextCardDetailRequestId = 1
@@ -1318,6 +1320,24 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
                 Nothing ->
                     loading.navigationPasses
 
+        -- A live tree refresh owns root/branch membership, not the independent
+        -- direct-focus read. Keep its exact page identity while that demand is
+        -- still current, including an in-flight ancestor continuation.
+        retainedFocus =
+            preserved.activeNavigationFocus
+                |> Maybe.andThen
+                    (\request ->
+                        if request.inFlight
+                            && model.selectedWorkspaceId == Just request.workspaceId
+                            && model.sessionRequestEpoch == request.sessionEpoch
+                            && navigationFilterFingerprint model == request.filterFingerprint
+                            && model.focus.focusedEntity == Just ( request.entityType, request.entityId ) then
+                            Just request
+
+                        else
+                            Nothing
+                    )
+
         preservedModel =
             { reloaded
                 | dataLoading =
@@ -1328,6 +1348,8 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
                         , navigationVisibleTaskIds = preserved.navigationVisibleTaskIds
                         , rootNavigationRequest = retainedRoot |> Maybe.map (Tuple.first >> Just) |> Maybe.withDefault loading.rootNavigationRequest
                         , navigationPasses = refreshedPasses
+                        , activeNavigationFocus = retainedFocus
+                        , navigationFocuses = retainedFocus |> Maybe.map (\request -> Dict.singleton (request.entityType ++ ":" ++ request.entityId) request) |> Maybe.withDefault Dict.empty
                     }
             }
 
@@ -1739,6 +1761,7 @@ requestNavigationFocus force workspaceId entityType entityId model =
             , entityType = entityType
             , entityId = entityId
             , ancestorOffset = requestedAncestorOffset
+            , summaryRevision = model.dataLoading.nextNavigationSummaryRevision
             , inFlight = True
             , succeeded = False
             }
@@ -2048,6 +2071,39 @@ mergeNavigationSummaries projectSummaries taskSummaries model =
                 , taskReadinessRollups = taskReadinessRollups
             }
     }
+        |> recordNavigationSummaryAuthority
+            (List.map (\summary -> ( "project:" ++ summary.id, Just (Api.NavigationProjectSummary summary) )) projectSummaries
+                ++ List.map (\summary -> ( "task:" ++ summary.id, Just (Api.NavigationTaskSummary summary) )) taskSummaries
+            )
+
+
+{-| Keep a changed-payload fence separate from transport generations. Identical
+root/branch replay must not starve a pending focus read; deletion is authority too.
+-}
+recordNavigationSummaryAuthority : List ( String, Maybe Api.NavigationSummary ) -> Model -> Model
+recordNavigationSummaryAuthority entries model =
+    let
+        record ( key, summary ) loading =
+            if (Dict.get key loading.navigationSummaryAuthority |> Maybe.map .summary) == Just summary then
+                loading
+
+            else
+                let revision = loading.nextNavigationSummaryRevision + 1
+                in
+                { loading
+                    | nextNavigationSummaryRevision = revision
+                    , navigationSummaryAuthority = Dict.insert key { revision = revision, summary = summary } loading.navigationSummaryAuthority
+                }
+    in
+    { model | dataLoading = List.foldl record model.dataLoading entries }
+
+
+markMissingNavigationSummaries : List String -> List String -> Model -> Model
+markMissingNavigationSummaries projectIds taskIds =
+    recordNavigationSummaryAuthority
+        (List.map (\id -> ( "project:" ++ id, Nothing )) projectIds
+            ++ List.map (\id -> ( "task:" ++ id, Nothing )) taskIds
+        )
 
 
 projectSummaryBelongsTo : String -> Maybe String -> Api.ProjectCardSummary -> Bool
@@ -3141,9 +3197,12 @@ updateResponse msg model =
                                 && request.sessionEpoch == sessionEpoch
                                 && request.generation == generation
                                 && request.filterFingerprint == fingerprint
-                                 && request.entityType == entityType
-                                 && request.entityId == entityId
-                                 && request.ancestorOffset == ancestorOffset
+                                && navigationFilterFingerprint model == fingerprint
+                                && model.focus.focusedEntity == Just ( entityType, entityId )
+                                && request.entityType == entityType
+                                && request.entityId == entityId
+                                && request.ancestorOffset == ancestorOffset
+                                && request.inFlight
 
                         Nothing ->
                             False
@@ -3167,6 +3226,26 @@ updateResponse msg model =
 
                         else if focus.ancestorsTruncated /= (focus.nextAncestorOffset /= Nothing) then
                             ( model, Cmd.none )
+
+                        else if model.dataLoading.activeNavigationFocus
+                            |> Maybe.map
+                                (\request ->
+                                    List.any
+                                        (\summary ->
+                                            let key = case summary of
+                                                    Api.NavigationProjectSummary project -> "project:" ++ project.id
+                                                    Api.NavigationTaskSummary task -> "task:" ++ task.id
+                                            in
+                                            Dict.get key model.dataLoading.navigationSummaryAuthority
+                                                |> Maybe.map (\authority -> authority.revision > request.summaryRevision)
+                                                |> Maybe.withDefault False
+                                        )
+                                        (focus.target :: focus.ancestors)
+                                )
+                            |> Maybe.withDefault False then
+                            -- A newer target/ancestor was accepted while this page
+                            -- was in flight. Keep demand, but read under that authority.
+                            revalidateNavigationFocus wsId entityType entityId model
 
                         else
                             let
@@ -3203,6 +3282,7 @@ updateResponse msg model =
                                                 , entityType = entityType
                                                 , entityId = entityId
                                                 , ancestorOffset = nextAncestorOffset
+                                                , summaryRevision = mergedLoading.nextNavigationSummaryRevision
                                                 , inFlight = True
                                                 , succeeded = False
                                                 }

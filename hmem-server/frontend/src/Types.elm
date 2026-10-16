@@ -232,6 +232,8 @@ type alias DataLoadingModel =
     , navigationPresentations : Dict String NavigationPresentationState
     , projectCardSummaries : Dict String Api.ProjectCardSummary
     , taskCardSummaries : Dict String Api.TaskCardSummary
+    , navigationSummaryAuthority : Dict String { revision : Int, summary : Maybe Api.NavigationSummary }
+    , nextNavigationSummaryRevision : Int
     , projectCardDetailRequests : Dict String CardDetailRequest
     , taskCardDetailRequests : Dict String CardDetailRequest
     , nextCardDetailRequestId : Int
@@ -345,6 +347,7 @@ type alias NavigationFocusRequest =
     , entityType : String
     , entityId : String
     , ancestorOffset : Int
+    , summaryRevision : Int
     , inFlight : Bool
     , succeeded : Bool
     }

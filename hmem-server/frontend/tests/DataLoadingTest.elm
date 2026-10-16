@@ -16,6 +16,7 @@ import Http
 import HierarchyViewport as Viewport
 import Html.Attributes as Attributes
 import Json.Encode as Encode
+import Main
 import Route
 import Set
 import String
@@ -30,7 +31,62 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "running-parent rank changes restart root project and legacy task owners and retire staged offsets" <|
+        [ test "Timeline focus survives unrelated live tree refresh at first and ancestor pages" <| \_ ->
+            List.concatMap (\kind -> List.concatMap (\continuation -> List.map (timelineFocusDuringRefresh kind continuation) [ False, True ]) [ False, True ]) [ "project", "task", "subtask" ]
+                |> Expect.equal (List.repeat 12 { retained = True, mounted = True, complete = True, bounded = True })
+        , test "a late focus page cannot overwrite newer canonical target or previously unknown ancestor summaries" <| \_ ->
+            List.map focusAuthorityRace [ "timeline-target", "unloaded-project" ]
+                |> Expect.equal (List.repeat 2 { fresh = True, restarted = True, completed = True })
+        , test "identical root and targeted replay cannot starve an ancestor continuation" <| \_ ->
+            let
+                requested = timelineFocusRequest "project"
+                continued = timelineFocusReply "project" (Just 64) requested requested
+                target = project "timeline-target" (Just "unloaded-project")
+                ancestor = project "unloaded-project" Nothing
+                replay n source =
+                    let refreshed = requestSummariesWithInvalidations ("repeat-" ++ String.fromInt n) [ ( "project", target.id ), ( "project", ancestor.id ) ]
+                            [ Encode.object [ ( "kind", Encode.string "tree" ), ( "target", Encode.string ("workspace:" ++ workspaceId) ) ] ] source
+                        rooted = rootHydrationPage [ ancestor ] [] False refreshed
+                    in summaryReply rooted (batchGuard [ ( "project", target.id ), ( "project", ancestor.id ) ] rooted) [ target.id, ancestor.id ] [] { projects = [ target, ancestor ], tasks = [], missingProjectIds = [], missingTaskIds = [] } rooted
+                replayed = List.foldl replay continued (List.range 1 5)
+                completed = timelineFocusReply "project" Nothing continued replayed
+            in
+            Expect.equal { focus = continued.dataLoading.activeNavigationFocus, revision = continued.dataLoading.nextNavigationSummaryRevision, completed = Nothing, succeeded = Just True }
+                { focus = replayed.dataLoading.activeNavigationFocus, revision = replayed.dataLoading.nextNavigationSummaryRevision, completed = completed.dataLoading.activeNavigationFocus, succeeded = Dict.get "project:timeline-target" completed.dataLoading.navigationFocuses |> Maybe.map .succeeded }
+        , test "a canonical missing focused target cannot be resurrected by a preserved page" <| \_ ->
+            let
+                pending = timelineFocusRequest "project"
+                invalidated = requestSummaries "focus-deleted" [ ( "project", "timeline-target" ) ] pending
+                deleted = summaryReply invalidated (batchGuard [ ( "project", "timeline-target" ) ] invalidated) [ "timeline-target" ] [] { projects = [], tasks = [], missingProjectIds = [ "timeline-target" ], missingTaskIds = [] } invalidated
+                late = timelineFocusReply "project" Nothing pending deleted
+                settled = case late.dataLoading.activeNavigationFocus of
+                    Just request -> Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "project" "timeline-target" 0 (Err (Http.BadStatus 404))) late |> Tuple.first
+                    Nothing -> late
+            in
+            Expect.equal { late = False, restarted = True, settled = False, focus = Nothing }
+                { late = Dict.member "timeline-target" late.projects, restarted = late.dataLoading.activeNavigationFocus /= Nothing, settled = Dict.member "timeline-target" settled.projects, focus = settled.dataLoading.activeNavigationFocus }
+        , test "accepted canonical DELETE tombstones target and ancestor authority before summary HTTP completes" <| \_ ->
+            List.concatMap (\kind -> List.map (focusDeleteRace kind) [ False, True ]) [ "project", "task", "subtask" ]
+                |> Expect.equal (List.repeat 6 { absent = True, restarted = True, settled = True, bounded = True })
+        , test "live tree refresh does not retain focus retired by context or target changes" <| \_ ->
+            let
+                requested = timelineFocusRequest "project"
+                focus = requested.focus
+                search = requested.search
+                retired =
+                    [ { requested | selectedWorkspaceId = Just "other-workspace" }
+                    , { requested | sessionRequestEpoch = requested.sessionRequestEpoch + 1 }
+                    , { requested | search = { search | query = "changed" } }
+                    , { requested | focus = { focus | focusedEntity = Nothing } }
+                    , { requested | focus = { focus | focusedEntity = Just ( "project", "different" ) } }
+                    ]
+                stale refresh source =
+                    let refreshed = if refresh then liveTreeRefresh source else source
+                        completed = timelineFocusReply "project" Nothing requested refreshed
+                    in Dict.member "timeline-target" completed.projects || (Dict.get "project:timeline-target" completed.dataLoading.navigationFocuses |> Maybe.map .succeeded) == Just True
+            in
+            Expect.equal (List.repeat 10 False) (List.concatMap (\refresh -> List.map (stale refresh) retired) [ False, True ])
+        , test "running-parent rank changes restart root project and legacy task owners and retire staged offsets" <|
             \_ ->
                 List.map readinessOwnerRestart [ "root", "project", "task" ]
                     |> Expect.equal (List.repeat 3 { promoted = True, stable = True, staged = True, demoted = True, cleared = True, stale = True })
@@ -1986,8 +2042,10 @@ suite =
         , test "focus continuation accepts only the expected page and merges target plus ancestors" <|
             \_ ->
                 let
+                    focus = model.focus
+
                     ( requested, _ ) =
-                        DataLoading.beginNavigationFocus workspaceId "project" "target" model
+                        DataLoading.beginNavigationFocus workspaceId "project" "target" { model | focus = { focus | focusedEntity = Just ( "project", "target" ) } }
 
                     ( continued, _ ) =
                         paintUpdate
@@ -3040,6 +3098,109 @@ rootLoadModel =
     { model | dataLoading = { loading | activeWorkspaceLoadToken = Just 1, pendingWorkspaceLoads = 1, loadingWorkspaceData = True } }
 
 
+focusDeleteRace : String -> Bool -> { absent : Bool, restarted : Bool, settled : Bool, bounded : Bool }
+focusDeleteRace kind deleteAncestor =
+    let
+        pending = timelineFocusRequest kind
+        targetKind = if kind == "project" then "project" else "task"
+        ancestorKind = if kind == "subtask" then "task" else "project"
+        ancestorId = if kind == "subtask" then "unloaded-task" else "unloaded-project"
+        deletedKind = if deleteAncestor then ancestorKind else targetKind
+        deletedId = if deleteAncestor then ancestorId else "timeline-target"
+        deleted = Main.update (WsMessageReceived (summariesChangeWire "deleted" "live-focus-delete" [ ( deletedKind, deletedId ) ]
+            [ Encode.object [ ( "kind", Encode.string "tree" ), ( "target", Encode.string ("workspace:" ++ workspaceId) ) ] ])) pending |> Tuple.first
+        late = case pending.dataLoading.activeNavigationFocus of
+            Nothing -> deleted
+            Just request ->
+                let target = if targetKind == "project" then Api.NavigationProjectSummary (project "timeline-target" (Just ancestorId)) else Api.NavigationTaskSummary (task "timeline-target" (if kind == "subtask" then Just ancestorId else Nothing))
+                    ancestor = if ancestorKind == "project" then Api.NavigationProjectSummary (project ancestorId Nothing) else Api.NavigationTaskSummary (task ancestorId Nothing)
+                in Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint targetKind "timeline-target" 0
+                    (Ok { workspaceId = workspaceId, target = target, ancestors = [ ancestor ], ancestorsTruncated = False, nextAncestorOffset = Nothing })) deleted |> Tuple.first
+        settled = case late.dataLoading.activeNavigationFocus of
+            Nothing -> late
+            Just request -> Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint targetKind "timeline-target" 0 (Err (Http.BadStatus 404))) late |> Tuple.first
+        absent source = if deletedKind == "project" then not (Dict.member deletedId source.projects) else not (Dict.member deletedId source.tasks)
+    in
+    { absent = absent late
+    , restarted = late.dataLoading.activeNavigationFocus /= Nothing && late.dataLoading.activeNavigationFocus /= pending.dataLoading.activeNavigationFocus
+    , settled = absent settled && settled.dataLoading.activeNavigationFocus == Nothing
+    , bounded = Set.size late.dataLoading.cardDetailAdmissions <= 6 && Dict.size late.dataLoading.navigationAdmissions <= 4 && List.length (Cards.mountedViewportKeys late) <= 25
+    }
+
+
+focusAuthorityRace : String -> { fresh : Bool, restarted : Bool, completed : Bool }
+focusAuthorityRace changedId =
+    let
+        pending = timelineFocusRequest "project"
+        invalidated = requestSummaries "focused-authority" [ ( "project", changedId ) ] pending
+        fresh =
+            project changedId (if changedId == "timeline-target" then Just "unloaded-project" else Nothing)
+                |> (\summary -> { summary | name = "canonical-newer", updatedAt = "2026-10-16T01:00:00Z" })
+        summarized = summaryReply invalidated (batchGuard [ ( "project", changedId ) ] invalidated) [ changedId ] [] { projects = [ fresh ], tasks = [], missingProjectIds = [], missingTaskIds = [] } invalidated
+        late = timelineFocusReply "project" Nothing pending summarized
+        completed = case late.dataLoading.activeNavigationFocus of
+            Nothing -> late
+            Just request ->
+                let target = if changedId == "timeline-target" then fresh else project "timeline-target" (Just "unloaded-project")
+                    ancestor = if changedId == "unloaded-project" then fresh else project "unloaded-project" Nothing
+                in Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "project" "timeline-target" request.ancestorOffset
+                    (Ok { workspaceId = workspaceId, target = Api.NavigationProjectSummary target, ancestors = [ Api.NavigationProjectSummary ancestor ], ancestorsTruncated = False, nextAncestorOffset = Nothing })) late |> Tuple.first
+    in
+    { fresh = (Dict.get changedId late.dataLoading.projectCardSummaries |> Maybe.map .name) == Just "canonical-newer"
+    , restarted = late.dataLoading.activeNavigationFocus /= Nothing && late.dataLoading.activeNavigationFocus /= pending.dataLoading.activeNavigationFocus
+    , completed = completed.dataLoading.activeNavigationFocus == Nothing && (Dict.get changedId completed.dataLoading.projectCardSummaries |> Maybe.map .name) == Just "canonical-newer" && List.member "project:timeline-target" (Cards.mountedViewportKeys completed)
+    }
+
+
+timelineFocusRequest : String -> Model
+timelineFocusRequest kind =
+    let
+        entityType = if kind == "project" then "project" else "task"
+        event =
+            { id = "timeline-entry", workspaceId = workspaceId, eventType = "created", entityType = entityType, entityId = "timeline-target", title = "Target", occurredAt = "2026-10-16T00:00:00Z"
+            , actor = Nothing, project = Nothing, parentTask = Nothing, statusTransition = Nothing, navigation = { entityType = entityType, entityId = "timeline-target" }, sourceAuditId = Nothing }
+        timeline = { model | activeTab = TimelineTab }
+        navigated = Main.update (NavigateToTimelineEntity event) timeline |> Tuple.first
+    in
+    Main.update (UrlChanged { url | fragment = Just ("tab=projects&focus=" ++ entityType ++ ":timeline-target") }) navigated |> Tuple.first
+
+
+liveTreeRefresh : Model -> Model
+liveTreeRefresh source =
+    requestSummariesWithInvalidations "unrelated-tree-change" [ ( "task", "unrelated" ) ]
+        [ Encode.object [ ( "kind", Encode.string "tree" ), ( "target", Encode.string ("workspace:" ++ workspaceId) ) ] ] source
+
+
+timelineFocusReply : String -> Maybe Int -> Model -> Model -> Model
+timelineFocusReply kind next captured current =
+    case captured.dataLoading.activeNavigationFocus of
+        Nothing -> current
+        Just request ->
+            let
+                target = if kind == "project" then Api.NavigationProjectSummary (project "timeline-target" (Just "unloaded-project")) else Api.NavigationTaskSummary (task "timeline-target" (if kind == "subtask" then Just "unloaded-task" else Nothing))
+            in
+            Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint request.entityType request.entityId request.ancestorOffset
+                (Ok { workspaceId = workspaceId, target = target, ancestors = [ Api.NavigationProjectSummary (project "unloaded-project" Nothing) ], ancestorsTruncated = next /= Nothing, nextAncestorOffset = next })) current |> Tuple.first
+
+
+timelineFocusDuringRefresh : String -> Bool -> Bool -> { retained : Bool, mounted : Bool, complete : Bool, bounded : Bool }
+timelineFocusDuringRefresh kind continuation rootFirst =
+    let
+        requested = timelineFocusRequest kind
+        pending = if continuation then timelineFocusReply kind (Just 64) requested requested else requested
+        refreshed = liveTreeRefresh pending
+        rootReply = rootHydrationPage [ project "unrelated-root" Nothing ] [] False
+        focusReply = timelineFocusReply kind Nothing pending
+        completed = if rootFirst then refreshed |> rootReply |> focusReply else refreshed |> focusReply |> rootReply
+        entityType = if kind == "project" then "project" else "task"
+    in
+    { retained = refreshed.dataLoading.activeNavigationFocus == pending.dataLoading.activeNavigationFocus && pending.dataLoading.activeNavigationFocus /= Nothing
+    , mounted = List.member (entityType ++ ":timeline-target") (Cards.mountedViewportKeys completed)
+    , complete = completed.dataLoading.activeNavigationFocus == Nothing && (Dict.get (entityType ++ ":timeline-target") completed.dataLoading.navigationFocuses |> Maybe.map .succeeded) == Just True
+    , bounded = Set.size completed.dataLoading.cardDetailAdmissions <= 6 && Dict.size completed.dataLoading.navigationAdmissions <= 4 && List.length (Cards.mountedViewportKeys completed) <= 25
+    }
+
+
 focusHydrationModel : Model
 focusHydrationModel =
     let
@@ -3365,17 +3526,22 @@ requestSummaries eventId targets source =
 
 requestSummariesWithInvalidations : String -> List ( String, String ) -> List Encode.Value -> Model -> Model
 requestSummariesWithInvalidations eventId targets extraInvalidations source =
+    WebSocket.update (WsMessageReceived (summariesChangeWire "updated" eventId targets extraInvalidations)) source |> Tuple.first
+
+
+summariesChangeWire : String -> String -> List ( String, String ) -> List Encode.Value -> String
+summariesChangeWire action eventId targets extraInvalidations =
     let
         first = List.head targets |> Maybe.withDefault ( "project", "unused" )
         scope = Encode.object [ ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId ) ]
         envelope = Encode.object
             [ ( "schema_version", Encode.int 1 ), ( "event_id", Encode.string eventId ), ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId )
-            , ( "entity", Encode.object [ ( "type", Encode.string (Tuple.first first) ), ( "id", Encode.string (Tuple.second first) ), ( "action", Encode.string "updated" ) ] )
+            , ( "entity", Encode.object [ ( "type", Encode.string (Tuple.first first) ), ( "id", Encode.string (Tuple.second first) ), ( "action", Encode.string action ) ] )
             , ( "invalidations", Encode.list identity (List.map (\( kind, entityId ) -> Encode.object [ ( "kind", Encode.string "entity" ), ( "target", Encode.string (kind ++ ":" ++ entityId) ) ]) targets ++ extraInvalidations) )
             , ( "occurred_at", Encode.string "2026-10-02T00:00:00Z" ), ( "transaction", Encode.object [ ( "id", Encode.string eventId ), ( "cause", Encode.string "mcp" ), ( "request_id", Encode.null ) ] ), ( "actor", Encode.object [ ( "type", Encode.string "user" ), ( "id", Encode.string "foreign" ) ] )
             ]
     in
-    WebSocket.update (WsMessageReceived (scopedFrame (Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "change" ), ( "event", envelope ) ]))) source |> Tuple.first
+    scopedFrame (Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "change" ), ( "event", envelope ) ])
 
 
 branchReply : String -> List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Bool -> Bool -> Model -> Model

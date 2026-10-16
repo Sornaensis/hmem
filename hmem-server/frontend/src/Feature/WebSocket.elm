@@ -404,7 +404,8 @@ updateRaw msg model =
                                             }
                                     }
                             in
-                            deferMoveNavigation (Feature.DataLoading.revalidateNavigationForChangedSummaries model currentSummaries) updated
+                            deferMoveNavigation (Feature.DataLoading.revalidateNavigationForChangedSummaries model currentSummaries)
+                                (Feature.DataLoading.markMissingNavigationSummaries currentSummaries.missingProjectIds currentSummaries.missingTaskIds updated)
 
                         else
                             canonicalHttpFailure guard.request (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model
@@ -1270,8 +1271,20 @@ removeEntity scope entity identity accumulated model =
         target =
             "entity:" ++ entity ++ ":" ++ identity
 
-        withGeneration =
+        canonical =
             advanceCanonicalTarget scope target model
+
+        withGeneration =
+            if scopeMatchesSelectedWorkspace scope canonical then
+                -- The accepted event is already deletion authority; a delayed
+                -- focus page must not wait for a summary HTTP result to see it.
+                case entity of
+                    "project" -> Feature.DataLoading.markMissingNavigationSummaries [ identity ] [] canonical
+                    "task" -> Feature.DataLoading.markMissingNavigationSummaries [] [ identity ] canonical
+                    _ -> canonical
+
+            else
+                canonical
 
         observations =
             withGeneration.observations

@@ -61,8 +61,12 @@ Loading, updating and unavailable totals are labeled; failures offer **Retry**.
 Scroll to reach loaded hierarchy and Observation results. Root **Load more** is
 explicit; expanded branches continue automatically. Incomplete or failed branches
 show feedback and Retry. Filters preserve scroll position where the new content
-allows it. **Show empty projects** defaults on and is saved per workspace.
-Uncheck it to require a matching task in the subtree; ancestors stay visible.
+allows it. Without saved workspace filters, **Show** defaults to **All**,
+**Show empty projects** is checked, project filters select **Active** and
+**Paused**, task filters select **Todo**, **In Progress** and **Blocked**, and
+**Priority** is **Any**. Filter changes are saved per workspace.
+Uncheck **Show empty projects** to require a matching task in the subtree;
+ancestors stay visible.
 Workspace group disclosure is saved globally.
 
 Stop or finish running descendants before pausing a project. Reopen a completed

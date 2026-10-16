@@ -2335,7 +2335,7 @@ suite =
         , test "unknown cards outside loaded direct owners cannot start an unrelated root crawl after summary acceptance" <|
             \_ ->
                 let
-                    before = syncModel [ project "parent" Nothing ]
+                    before = unfilteredSyncModel [ project "parent" Nothing ]
                     invalidated = requestSummaries "unknown-summary" [ ( "project", "outside" ) ] before
                     outside = project "outside" (Just "unloaded-parent")
                     refreshed = summaryReply invalidated (batchGuard [ ( "project", "outside" ) ] invalidated) [ "outside" ] [] { projects = [ outside ], tasks = [], missingProjectIds = [], missingTaskIds = [] } invalidated
@@ -2480,7 +2480,7 @@ suite =
         , test "live mixed-kind moves and deletion replay only old and new owners with authoritative counts" <|
             \_ ->
                 let
-                    base = syncModel [ project "p" Nothing, project "q" Nothing, project "unrelated" Nothing ]
+                    base = unfilteredSyncModel [ project "p" Nothing, project "q" Nothing, project "unrelated" Nothing ]
                     child = project "child" (Just "p")
                     originalTask = task "moving-task" Nothing
                     childTask = { originalTask | projectId = Just "p" }
@@ -2951,7 +2951,7 @@ workspaceId =
 
 filterFingerprint : String
 filterFingerprint =
-    "all|empty|any|||"
+    DataLoading.navigationFilterFingerprint initialModel
 
 
 model : Model
@@ -3216,6 +3216,14 @@ syncModel projects =
         base = loadRoot workspaceId projects [] model
     in
     { base | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession }
+
+
+unfilteredSyncModel : List Api.ProjectCardSummary -> Model
+unfilteredSyncModel projects =
+    let
+        search = model.search
+    in
+    loadRoot workspaceId projects [] { model | search = { search | filterProjectStatuses = [], filterTaskStatuses = [] } }
 
 
 acceptRoot : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> Model

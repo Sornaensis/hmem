@@ -115,7 +115,8 @@ suite =
             let
                 tasks = List.range 1 70 |> List.map (String.fromInt >> task)
                 outside = task "outside"
-                loaded = { base | tasks = Dict.fromList (List.map (\value -> ( value.id, value )) (tasks ++ [ { outside | createdAt = "offscreen-only" } ])) }
+                search = base.search
+                loaded = { base | search = { search | filterTaskStatuses = [ "done" ] }, tasks = Dict.fromList (List.map (\value -> ( value.id, value )) (tasks ++ [ { outside | createdAt = "offscreen-only" } ])) }
                 model = Cards.refreshViewport loaded ( loaded, Cmd.none ) |> Tuple.first
                 demanded = Cards.timestampSources model
             in

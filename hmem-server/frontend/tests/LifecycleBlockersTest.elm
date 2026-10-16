@@ -1474,9 +1474,13 @@ lifecycleModel =
 
         dependencies =
             base.dependencies
+
+        search =
+            base.search
     in
     { base
         | auth = { status = Types.AuthReady, mode = Just "local" }
+        , search = { search | filterProjectStatuses = [], filterTaskStatuses = [] }
         , sessionContext = Just (sessionContext "local" "user" "local_superadmin" True True (Just "admin"))
         , projects = Dict.singleton "project-a" (project "project-a" Nothing)
         , dependencies = { dependencies | projectReadinessRollups = Dict.singleton "project-a" { openProjectCount = 0, inProgressTaskCount = 0, closedProjectCount = 0, openTaskCount = 1, doneTaskCount = 1, cancelledTaskCount = 2, blockedTaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False } }

@@ -6,6 +6,7 @@ import Dict
 import Expect
 import Feature.DataLoading as DataLoading
 import Feature.Groups as Groups
+import Feature.Search as Search
 import Feature.WorkspaceAdmin as Admin
 import Feature.WebSocket as WebSocket
 import Route
@@ -97,15 +98,43 @@ suite =
                     stale = WebSocket.update response cleared |> Tuple.first
                 in
                 Expect.equal ( [ "c" ], [], True ) ( Dict.keys received.workspaces, Dict.keys stale.workspaces, cleared.groups.catalogueEpoch > pending.groups.catalogueEpoch )
-        , test "a workspace without saved preferences resets empty project visibility" <|
+        , test "an initial workspace without saved preferences uses default filters" <|
+            \_ ->
+                expectDefaultFilters base.search
+        , test "a workspace without saved preferences resets all project filters" <|
             \_ ->
                 let
                     search = base.search
-                    prior = { base | search = { search | filterShowEmptyProjects = False } }
+                    prior = { base | search = { search | filterShowOnly = ShowTasksOnly, filterShowEmptyProjects = False, filterPriority = ExactPriority 3, filterProjectStatuses = [ "completed" ], filterTaskStatuses = [ "done" ] } }
                     destination = { protocol = Url.Http, host = "fixture", port_ = Nothing, path = "/workspace/b", query = Nothing, fragment = Nothing }
                     routed = Route.handleUrlChange destination prior |> Tuple.first
                 in
-                Expect.equal True routed.search.filterShowEmptyProjects
+                expectDefaultFilters routed.search
+        , test "saved workspace filters override defaults and later changes remain serializable" <|
+            \_ ->
+                let
+                    search = base.search
+                    saved = { base | search = { search | filterShowOnly = ShowTasksOnly, filterShowEmptyProjects = False, filterPriority = ExactPriority 3, filterProjectStatuses = [ "archived" ], filterTaskStatuses = [ "done" ] } }
+                    loaded = AppShell.handleOwned (LocalStorageLoadedMsg (Helpers.encodeFilterState saved)) base |> Tuple.first
+                    changed = Search.update (ToggleFilterProjectStatus "completed") loaded |> Tuple.first
+                    restored = Helpers.applyStoredFilters (Helpers.encodeFilterState changed) base
+                in
+                Expect.equal
+                    ( ( ShowTasksOnly, False, ExactPriority 3 ), ( [ "completed", "archived" ], [ "done" ] ) )
+                    ( ( restored.search.filterShowOnly, restored.search.filterShowEmptyProjects, restored.search.filterPriority ), ( restored.search.filterProjectStatuses, restored.search.filterTaskStatuses ) )
+        , test "saved empty status selections override defaults after a workspace switch" <|
+            \_ ->
+                let
+                    destination = { protocol = Url.Http, host = "fixture", port_ = Nothing, path = "/workspace/b", query = Nothing, fragment = Nothing }
+                    routed = Route.handleUrlChange destination base |> Tuple.first
+                    saved = Encode.object
+                        [ ( "workspaceId", Encode.string "b" )
+                        , ( "filterProjectStatuses", Encode.list Encode.string [] )
+                        , ( "filterTaskStatuses", Encode.list Encode.string [] )
+                        ]
+                    loaded = AppShell.handleOwned (LocalStorageLoadedMsg saved) routed |> Tuple.first
+                in
+                Expect.equal ( [], [] ) ( loaded.search.filterProjectStatuses, loaded.search.filterTaskStatuses )
         , test "changed principal rejects a stale deletion completion" <|
             \_ ->
                 let
@@ -118,6 +147,13 @@ suite =
                 in
                 Expect.equal changed.workspaces ignored.workspaces
         ]
+
+
+expectDefaultFilters : SearchModel -> Expect.Expectation
+expectDefaultFilters search =
+    Expect.equal
+        ( ( ShowAll, True, AnyPriority ), ( [ "active", "paused" ], [ "todo", "in_progress", "blocked" ] ) )
+        ( ( search.filterShowOnly, search.filterShowEmptyProjects, search.filterPriority ), ( search.filterProjectStatuses, search.filterTaskStatuses ) )
 
 
 deletionPending : Model -> Model

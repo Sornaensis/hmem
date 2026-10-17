@@ -135,6 +135,14 @@ allow up to 100. Observation limits are 1–200 and offsets 0–100000. Check Op
 for route-specific pagination, especially unified search and similarity, whose
 response shapes differ.
 
+Workspace navigation accepts independent `include_projects` and `include_tasks`
+booleans, both defaulting to `true`. A `false` kind skips database selection and
+readiness decoration and returns `{"items":[],"has_more":false}`. That skipped
+page has no membership or completion authority: retain that stream's cache,
+offset, errors and `has_more`. Parent/workspace authorization and parameter
+validation apply even when both kinds are skipped. Requested pages retain their
+existing limits, ordering and filters.
+
 ## Removed due fields
 
 Current task and subtask JSON omits due fields in detail, lists, navigation

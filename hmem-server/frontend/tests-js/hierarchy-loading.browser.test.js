@@ -489,3 +489,29 @@ test('native drag keeps its original card connected while virtual scrolling and 
     await h.page.keyboard.press('Escape');await h.page.mouse.up()
   }finally{await h.page.mouse.up().catch(()=>{});await h.close()}
 })
+
+
+test('asymmetric continuation requests one project page and ten task pages', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture()
+  fixture.projects = fixture.projects.slice(0, 2)
+  fixture.tasks = Array.from({ length: 500 }, (_, i) => ({ ...fixture.tasks[0], id: 'asymmetric-' + String(i).padStart(3, '0'), title: 'asymmetric-' + String(i).padStart(3, '0') }))
+  const h = await openHierarchy(fixture)
+  try {
+    const first = h.gate(r => r.kind === 'project' && r.parent === 'root-project', { hold: true })
+    await h.start()
+    await h.bounded(first.arrived, 10000, 'First asymmetric branch')
+    first.release(); await h.idle()
+    const pages = h.requests.filter(r => r.kind === 'project' && r.parent === 'root-project')
+    assert.equal(pages.length, 10)
+    assert.equal(pages[0].includeProjects, true)
+    assert.equal(pages[0].projectItems, 1)
+    assert.ok(pages.every(r => r.includeTasks && r.taskItems === 50))
+    assert.ok(pages.slice(1).every(r => !r.includeProjects && r.projectItems === 0 && r.projectOffset === 0))
+    assert.deepEqual(pages.map(r => r.taskOffset), Array.from({ length: 10 }, (_, i) => i * 50))
+    const keys = [...await h.logicalKeys()]
+    assert.equal(keys.filter(key => key.startsWith('task:asymmetric-')).length, 500)
+    assert.ok(keys.includes('project:' + fixture.projects[1].id))
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})

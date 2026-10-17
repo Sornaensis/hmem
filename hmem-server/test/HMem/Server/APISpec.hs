@@ -44,7 +44,7 @@ import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace, getAuditLogRows)
 import HMem.Server.AccessTracker (newAccessTracker)
-import HMem.Server.API (HMemAPI, server)
+import HMem.Server.API (HMemAPI, navigationPageWhenRequested, server)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..), entityTypeToText)
 import HMem.Server.App (mkApp)
@@ -799,6 +799,17 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         Project.listProjects ctx.deployedEnv.pool otherWorkspace.id Nothing Nothing Nothing `shouldReturn` []
 
   describe "bounded workspace navigation HTTP contract" $ do
+    it "never executes selection or decoration for skipped navigation pages" $ \_ -> do
+      phases <- newIORef ([] :: [T.Text])
+      let selectRows = modifyIORef' phases (<> ["select"]) >> pure [1, 2, 3 :: Int]
+          decorate rows = modifyIORef' phases (<> ["decorate"]) >> pure (map show rows)
+      skipped <- navigationPageWhenRequested False 2 selectRows decorate
+      skipped `shouldBe` NavigationPage [] False
+      readIORef phases `shouldReturn` []
+      requested <- navigationPageWhenRequested True 2 selectRows decorate
+      requested `shouldBe` NavigationPage ["1", "2"] True
+      readIORef phases `shouldReturn` ["select", "decorate"]
+
     it "puts active blocked parents on the first page before more than fifty higher-priority todos" $ \(env, app) -> do
       workspace <- createTestWorkspace env "navigation-running-parent-page"
       let navigationPath suffix = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "/navigation?parent_kind=workspace_root&task_limit=50" <> suffix
@@ -860,11 +871,32 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           Just taskBranchPage = decode (responseBody taskBranch) :: Maybe NavigationBranchResponse
       map (.id) projectBranchPage.projects.items `shouldBe` [child.id]
       map (.id) taskBranchPage.tasks.items `shouldBe` [childTask.id]
+      explicitBoth <- request app methodGet (navigationPath ("?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show root.id)) <> "&include_projects=true&include_tasks=true")) ""
+      responseBody explicitBoth `shouldBe` responseBody projectBranch
+
+      forM_ [ ("&include_projects=false", False, True), ("&include_tasks=false", True, False), ("&include_projects=false&include_tasks=false", False, False) ] $ \(demand, projectsRequested, tasksRequested) -> do
+        response <- request app methodGet (navigationPath ("?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show child.id)) <> demand)) ""
+        responseStatus response `shouldBe` status200
+        let Just page = decode (responseBody response) :: Maybe NavigationBranchResponse
+        page.projects.items `shouldBe` []
+        map (.id) page.tasks.items `shouldBe` (if tasksRequested then [rootTask.id] else [])
+        page.projects.hasMore `shouldBe` False
+        page.tasks.hasMore `shouldBe` False
+        rootPageResponse <- request app methodGet (navigationPath ("?parent_kind=workspace_root" <> demand)) ""
+        let Just rootPage = decode (responseBody rootPageResponse) :: Maybe NavigationBranchResponse
+        map (.id) rootPage.projects.items `shouldBe` (if projectsRequested then [root.id] else [])
+      missingParent <- request app methodGet (navigationPath "?parent_kind=project&parent_id=00000000-0000-0000-0000-000000000001&include_projects=false&include_tasks=false") ""
+      responseStatus missingParent `shouldBe` status404
+
 
       invalidCap <- request app methodGet (navigationPath "?parent_kind=workspace_root&project_limit=101") ""
       responseStatus invalidCap `shouldBe` status400
       mapM_ (\suffix -> request app methodGet (navigationPath suffix) "" >>= (\response -> responseStatus response `shouldBe` status400))
-        [ "?parent_kind=project"
+        [ "?parent_kind=workspace_root&include_projects=invalid"
+        , "?parent_kind=workspace_root&include_tasks=invalid"
+        , "?parent_kind=workspace_root&include_projects=false&include_tasks=false&project_limit=0"
+        , "?parent_kind=workspace_root&include_projects=false&include_tasks=false&task_offset=-1"
+        , "?parent_kind=project"
         , "?parent_kind=workspace_root&project_offset=-1"
         , "?parent_kind=workspace_root&task_offset=100001"
         , "?parent_kind=workspace_root&project_limit=0"
@@ -884,6 +916,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       foreignWorkspace <- createTestWorkspace env "navigation-contract-foreign"
       foreignResponse <- postJson app "/api/v1/projects" (object ["workspace_id" .= foreignWorkspace.id, "name" .= ("foreign" :: T.Text)])
       let Just foreignProject = decode (responseBody foreignResponse) :: Maybe Project
+      foreignParent <- request app methodGet (navigationPath ("?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show foreignProject.id)) <> "&include_projects=false&include_tasks=false")) ""
+      responseStatus foreignParent `shouldBe` status404
       foreignBatch <- postJson app (navigationPath "/summaries")
         (toJSON (NavigationSummariesRequest { projectIds = [foreignProject.id], taskIds = [] }))
       responseStatus foreignBatch `shouldBe` status200
@@ -961,6 +995,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         responseStatus foreignCreated `shouldBe` status200
         let Just foreignProject = decode (responseBody foreignCreated) :: Maybe Project
             foreignPath = workspacePath <> "/navigation/focus/project/" <> Text.encodeUtf8 (T.pack (show foreignProject.id))
+        let skippedNavigationPath = navigationPath <> "&include_projects=false&include_tasks=false"
+        request ctx.deployedApplication methodGet skippedNavigationPath "" >>= (\response -> responseStatus response `shouldBe` status401)
+        requestWithHeaders ctx.deployedApplication methodGet skippedNavigationPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet skippedNavigationPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
         request ctx.deployedApplication methodGet navigationPath "" >>= (\response -> responseStatus response `shouldBe` status401)
         requestWithHeaders ctx.deployedApplication methodGet navigationPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
         requestWithHeaders ctx.deployedApplication methodGet navigationPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
@@ -3088,6 +3126,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       requiredSchemaFields "NavigationSummariesRequest" `shouldBe` Just ["project_ids", "task_ids"]
       (navigationBatchProjects >>= jsonField "maxItems") `shouldBe` Just (Number 100)
       (navigationBatchTasks >>= jsonField "maxItems") `shouldBe` Just (Number 100)
+      forM_ ["include_projects", "include_tasks"] $ \name -> do
+        let demandSchema = pathParameter "/api/v1/workspaces/{workspaceId}/navigation" "get" name >>= jsonField "schema"
+        (demandSchema >>= jsonField "type") `shouldBe` Just (String "boolean")
+        (demandSchema >>= jsonField "default") `shouldBe` Just (Bool True)
       navigationLimitMaximum "project_limit" `shouldBe` Just (Number 100)
       navigationLimitMaximum "task_limit" `shouldBe` Just (Number 100)
       navigationLimitMinimum "project_limit" `shouldBe` Just (Number 1)

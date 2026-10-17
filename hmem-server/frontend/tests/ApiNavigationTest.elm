@@ -10,7 +10,15 @@ import Test exposing (Test, describe, test)
 suite : Test
 suite =
     describe "bounded navigation API transport"
-        [ test "due-free task decoding retains completion and hierarchy fields" <|
+        [ test "encodes independent project and task demand without changing offsets or limits" <|
+            \_ ->
+                Expect.equal
+                    [ "&include_projects=false&include_tasks=true", "&include_projects=true&include_tasks=false", "&include_projects=false&include_tasks=false" ]
+                    (List.map (\( projects, tasks ) ->
+                        Api.navigationBranchUrlWithDemand "" "workspace" "project" (Just "parent") 0 450 projects tasks ""
+                            |> String.dropLeft (String.length (Api.navigationBranchUrl "" "workspace" "project" (Just "parent") 0 450 "")))
+                        [ ( False, True ), ( True, False ), ( False, False ) ])
+        , test "due-free task decoding retains completion and hierarchy fields" <|
             \_ ->
                 Decode.decodeString Api.taskDecoder """{"id":"subtask","workspace_id":"workspace","project_id":"project","parent_id":"parent","title":"Subtask","description":null,"status":"done","priority":7,"completed_at":"2026-10-14T12:00:00Z","dependency_count":2,"created_at":"created","updated_at":"updated"}"""
                     |> Result.map (\task -> ( task.parentId, task.completedAt, task.dependencyCount ))

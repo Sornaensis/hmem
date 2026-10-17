@@ -153,7 +153,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       const request = route.request(), url = new URL(request.url()), path = url.pathname
       const navigation = path.endsWith('/navigation')
       const detail = /^\/api\/v1\/(projects|tasks)\/[^/]+$/.test(path)
-      const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), includeBlocked: url.searchParams.get('include_blocked') === 'true', arrived: performance.now(), done: false }
+      const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), includeProjects: url.searchParams.get('include_projects') !== 'false', includeTasks: url.searchParams.get('include_tasks') !== 'false', projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), includeBlocked: url.searchParams.get('include_blocked') === 'true', arrived: performance.now(), done: false }
       requests.push(receipt)
       if (navigation) { activeBranches++; maxBranches = Math.max(maxBranches, activeBranches) }
       if (detail) { activeDetails++; maxDetails = Math.max(maxDetails, activeDetails) }
@@ -180,6 +180,10 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           assert.equal(url.searchParams.get('project_limit'), '50'); assert.equal(url.searchParams.get('task_limit'), '50')
           assert.ok(['workspace_root', 'project', 'task'].includes(receipt.kind)); assert.ok(receipt.projectOffset % 50 === 0 && receipt.taskOffset % 50 === 0)
           value = navigationBranchResponse(fixture, { parentKind: receipt.kind, parentId: receipt.parent, projectLimit: 50, taskLimit: 50, projectOffset: receipt.projectOffset, taskOffset: receipt.taskOffset, query: receipt.query, showOnly: url.searchParams.get('show_only'), showEmptyProjects: url.searchParams.get('show_empty_projects') !== 'false', projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'), priorityMode: url.searchParams.get('priority_mode'), priorityValue: url.searchParams.get('priority_value') })
+          // Mirror the API's skipped-page contract; default omitted demand to both.
+          if (!receipt.includeProjects) value.projects = { items: [], has_more: false }
+          if (!receipt.includeTasks) value.tasks = { items: [], has_more: false }
+          receipt.projectItems = value.projects.items.length; receipt.taskItems = value.tasks.items.length
           receipt.projectHasMore = value.projects.has_more; receipt.taskHasMore = value.tasks.has_more
         }
         else if (path.endsWith('/navigation/summaries')) { const body = request.postDataJSON(); value = navigationSummariesResponse(fixture, body.project_ids, body.task_ids) }

@@ -138,6 +138,7 @@ module Api exposing
     , fetchProjectsPage
     , fetchRootNavigation
     , fetchNavigationBranch
+    , fetchNavigationBranchWithDemand
     , fetchNavigationFocus
     , fetchNavigationSummaries
     , fetchSessionContext
@@ -168,6 +169,7 @@ module Api exposing
     , nextTaskCandidateDecoder
     , navigationBranchDecoder
     , navigationBranchUrl
+    , navigationBranchUrlWithDemand
     , navigationFocusDecoder
     , navigationFocusUrl
     , navigationSummariesBody
@@ -2930,10 +2932,15 @@ fetchRootNavigation apiUrl wsId filterQuery toMsg =
 
 fetchNavigationBranch : String -> String -> String -> Maybe String -> Int -> Int -> String -> (Result Http.Error NavigationBranchResponse -> msg) -> Cmd msg
 fetchNavigationBranch apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery toMsg =
+    fetchNavigationBranchWithDemand apiUrl wsId parentKind maybeParentId projectOffset taskOffset True True filterQuery toMsg
+
+
+fetchNavigationBranchWithDemand : String -> String -> String -> Maybe String -> Int -> Int -> Bool -> Bool -> String -> (Result Http.Error NavigationBranchResponse -> msg) -> Cmd msg
+fetchNavigationBranchWithDemand apiUrl wsId parentKind maybeParentId projectOffset taskOffset includeProjects includeTasks filterQuery toMsg =
     Http.request
         { method = "GET"
         , headers = []
-        , url = navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery
+        , url = navigationBranchUrlWithDemand apiUrl wsId parentKind maybeParentId projectOffset taskOffset includeProjects includeTasks filterQuery
         , body = Http.emptyBody
         , expect = Http.expectJson toMsg navigationBranchDecoder
         , timeout = Just 20000
@@ -2944,6 +2951,13 @@ fetchNavigationBranch apiUrl wsId parentKind maybeParentId projectOffset taskOff
 navigationBranchUrl : String -> String -> String -> Maybe String -> Int -> Int -> String -> String
 navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery =
     apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/navigation?parent_kind=" ++ parentKind ++ (maybeParentId |> Maybe.map (\parentId -> "&parent_id=" ++ parentId) |> Maybe.withDefault "") ++ "&project_limit=50&project_offset=" ++ String.fromInt projectOffset ++ "&task_limit=50&task_offset=" ++ String.fromInt taskOffset ++ filterQuery
+
+
+navigationBranchUrlWithDemand : String -> String -> String -> Maybe String -> Int -> Int -> Bool -> Bool -> String -> String
+navigationBranchUrlWithDemand apiUrl wsId parentKind maybeParentId projectOffset taskOffset includeProjects includeTasks filterQuery =
+    navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery
+        ++ "&include_projects=" ++ (if includeProjects then "true" else "false")
+        ++ "&include_tasks=" ++ (if includeTasks then "true" else "false")
 
 
 fetchNavigationFocus : String -> String -> String -> String -> Int -> (Result Http.Error NavigationFocusResponse -> msg) -> Cmd msg

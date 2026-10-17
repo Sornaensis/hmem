@@ -579,7 +579,7 @@ pumpNavigationQueue budget model =
                                 Nothing -> ( model, Cmd.none )
                                 Just accepted ->
                                     let ( next, commands ) = pumpNavigationQueue (budget - 1) accepted in
-                                    ( next, Cmd.batch [ commands, Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId kind (Just id) request.projectOffset request.taskOffset (navigationFilterQuery model) (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset) ] )
+                                    ( next, Cmd.batch [ commands, Api.fetchNavigationBranchWithDemand model.flags.apiUrl request.workspaceId kind (Just id) request.projectOffset request.taskOffset request.projectRequestPending request.taskRequestPending (navigationFilterQuery model) (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset) ] )
                     _ -> pumpNavigationQueue (budget - 1) popped
 
 
@@ -1125,7 +1125,7 @@ beginRootNavigationPage entityKind model =
 
             else if canLoad then
                 ( recordRootRecovery request { model | dataLoading = { loading | navigationGeneration = if retrying then generation else loading.navigationGeneration, rootNavigationRequest = Just request, rootNavigationPresentation = Just { nextPresentation | generation = generation }, navigationPasses = if refreshing && not retrying then Dict.update (navigationBranchKey "workspace_root" Nothing) (Maybe.map extendDemand) loading.navigationPasses else loading.navigationPasses } }
-                , Api.fetchNavigationBranch model.flags.apiUrl workspaceId "workspace_root" Nothing projectOffset taskOffset (navigationFilterQuery model)
+                , Api.fetchNavigationBranchWithDemand model.flags.apiUrl workspaceId "workspace_root" Nothing projectOffset taskOffset request.projectRequestPending request.taskRequestPending (navigationFilterQuery model)
                     (GotRootNavigation workspaceId model.sessionRequestEpoch Nothing request.generation request.filterFingerprint projectOffset taskOffset)
                 )
 
@@ -1976,10 +1976,16 @@ replaceNavigationBranchMembershipForKey branchKey navigation model =
 replaceNavigationBranchMembership : String -> Maybe String -> Api.NavigationBranchResponse -> Model -> Model
 replaceNavigationBranchMembership parentKind maybeParentId navigation model =
     let
+        request =
+            if parentKind == "workspace_root" then model.dataLoading.rootNavigationRequest else Dict.get (navigationBranchKey parentKind maybeParentId) model.dataLoading.loadedNavigationBranches
+
         revision =
             (if parentKind == "workspace_root" then model.dataLoading.rootNavigationRequest else Dict.get (navigationBranchKey parentKind maybeParentId) model.dataLoading.loadedNavigationBranches)
                 |> Maybe.map .readRevision |> Maybe.withDefault 0
         matchesProject summary =
+            (request |> Maybe.map .projectRequestPending |> Maybe.withDefault True) && projectInScope summary
+
+        projectInScope summary =
             case ( parentKind, maybeParentId ) of
                 ( "workspace_root", Nothing ) ->
                     summary.parentId == Nothing
@@ -1991,6 +1997,9 @@ replaceNavigationBranchMembership parentKind maybeParentId navigation model =
                     False
 
         matchesTask summary =
+            (request |> Maybe.map .taskRequestPending |> Maybe.withDefault True) && taskInScope summary
+
+        taskInScope summary =
             case ( parentKind, maybeParentId ) of
                 ( "workspace_root", Nothing ) ->
                     summary.projectId == Nothing && summary.parentId == Nothing
@@ -2604,7 +2613,7 @@ restoreNavigationPresentation parentKind maybeParentId model =
                 in
                 if request.inFlight then
                     ( if rootBranch then recordRootRecovery request updated else stampNavigationRead key request updated
-                    , Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId parentKind maybeParentId request.projectOffset request.taskOffset (navigationFilterQuery model)
+                    , Api.fetchNavigationBranchWithDemand model.flags.apiUrl request.workspaceId parentKind maybeParentId request.projectOffset request.taskOffset request.projectRequestPending request.taskRequestPending (navigationFilterQuery model)
                         (if rootBranch then
                             GotRootNavigation request.workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset
                          else
@@ -2848,7 +2857,7 @@ acceptRootRefresh maybeToken navigation model =
                 ( presented, presentationCommand ) = ensureNavigationPresentation "workspace_root" Nothing settled
                 command =
                     if dispatch then
-                        Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId "workspace_root" Nothing nextRequest.projectOffset nextRequest.taskOffset (navigationFilterQuery model)
+                        Api.fetchNavigationBranchWithDemand model.flags.apiUrl request.workspaceId "workspace_root" Nothing nextRequest.projectOffset nextRequest.taskOffset nextRequest.projectRequestPending nextRequest.taskRequestPending (navigationFilterQuery model)
                             (GotRootNavigation request.workspaceId request.sessionEpoch maybeToken request.generation request.filterFingerprint nextRequest.projectOffset nextRequest.taskOffset)
                     else Cmd.none
                 ( notified, errorCommand ) =
@@ -3094,7 +3103,17 @@ updateResponse msg model =
 
             else
                 case result of
-                    Ok navigation ->
+                    Ok received ->
+                        let
+                            currentRequest = model.dataLoading.rootNavigationRequest
+                            projectPending = currentRequest |> Maybe.map .projectRequestPending |> Maybe.withDefault False
+                            taskPending = currentRequest |> Maybe.map .taskRequestPending |> Maybe.withDefault False
+                            navigation =
+                                { received
+                                    | projects = if projectPending then received.projects else { items = [], hasMore = currentRequest |> Maybe.map .projectHasMore |> Maybe.withDefault False }
+                                    , tasks = if taskPending then received.tasks else { items = [], hasMore = currentRequest |> Maybe.map .taskHasMore |> Maybe.withDefault False }
+                                }
+                        in
                         if navigation.workspaceId /= wsId then
                             ( model, Cmd.none )
 
@@ -3131,7 +3150,7 @@ updateResponse msg model =
                                                                     , projectHasMore = navigation.projects.hasMore
                                                                     , taskHasMore = navigation.tasks.hasMore
                                                                     , projectCardCount =
-                                                                        if projectOffset == 0 && taskOffset == 0 then
+                                                                        if projectOffset == 0 && taskOffset == 0 && projectPending then
                                                                             List.length navigation.projects.items
 
                                                                         else
@@ -3146,7 +3165,7 @@ updateResponse msg model =
                                                                                     )
                                                                                 |> Maybe.withDefault 0
                                                                     , taskCardCount =
-                                                                        if projectOffset == 0 && taskOffset == 0 then
+                                                                        if projectOffset == 0 && taskOffset == 0 && taskPending then
                                                                             List.length navigation.tasks.items
 
                                                                         else
@@ -3174,7 +3193,7 @@ updateResponse msg model =
                                                                                 , projectHasMore = navigation.projects.hasMore
                                                                                 , taskHasMore = navigation.tasks.hasMore
                                                                                 , projectCardCount =
-                                                                                    if projectOffset == 0 && taskOffset == 0 then
+                                                                                    if projectOffset == 0 && taskOffset == 0 && projectPending then
                                                                                         List.length navigation.projects.items
 
                                                                                     else
@@ -3184,7 +3203,7 @@ updateResponse msg model =
                                                                                         else
                                                                                             request.projectCardCount
                                                                                 , taskCardCount =
-                                                                                    if projectOffset == 0 && taskOffset == 0 then
+                                                                                    if projectOffset == 0 && taskOffset == 0 && taskPending then
                                                                                         List.length navigation.tasks.items
 
                                                                                     else

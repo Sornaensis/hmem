@@ -153,6 +153,9 @@ botIdentityHeader = mempty
 
 capNavigationParameter parameterRef = case parameterRef of
   Inline parameter
+    | parameter ^. name `elem` ["include_projects", "include_tasks"] ->
+        Inline (parameter & description ?~ "Defaults to true. False skips selection and decoration; its empty page carries no membership or completion authority."
+          & schema %~ fmap (\case Inline value -> Inline (value & default_ ?~ Bool True); value -> value))
     | parameter ^. name `elem` ["project_limit", "task_limit", "limit"] ->
         Inline (parameter & schema %~ fmap capNavigationLimitSchema)
     | parameter ^. name `elem` ["project_offset", "task_offset", "ancestor_offset", "offset"] ->

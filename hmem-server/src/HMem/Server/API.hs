@@ -15,6 +15,7 @@ module HMem.Server.API
   , ObservationCountRequest(..)
   , LinkDependencyRequest(..)
   , UpdateWorkspaceRequest(..)
+  , navigationPageWhenRequested
   , server
   , serverWithChangeStream
   ) where
@@ -94,9 +95,10 @@ type WorkspaceAPI =
          :> QueryParam "parent_kind" Text :> QueryParam "parent_id" UUID
          :> QueryParam "project_limit" Int :> QueryParam "project_offset" Int
          :> QueryParam "task_limit" Int :> QueryParam "task_offset" Int
+         :> QueryParam "include_projects" Bool :> QueryParam "include_tasks" Bool
          :> QueryParam "show_only" Text :> QueryParams "project_status" ProjectStatus :> QueryParams "task_status" TaskStatus
           :> QueryParam "show_empty_projects" Bool :> QueryParam "priority_mode" Text :> QueryParam "priority_value" Int :> QueryParam "query" Text
-          :> Description "Returns separately paged direct child Project and Task card summaries. parent_kind is workspace_root, project, or task; project/task require parent_id. The full tree filter DTO includes show_only, project_status, task_status, priority_mode (any/exact/above/below), priority_value, case-insensitive query, and show_empty_projects (default true); false requires a matching task in the project subtree even in projects-only mode; matching descendants retain ancestors. Each page defaults to 50, is capped at 100, and uses deterministic lifecycle-rank, priority DESC, title/name, id ordering."
+          :> Description "Returns separately paged direct child Project and Task card summaries. parent_kind is workspace_root, project, or task; project/task require parent_id. The full tree filter DTO includes show_only, project_status, task_status, priority_mode (any/exact/above/below), priority_value, case-insensitive query, and show_empty_projects (default true); false requires a matching task in the project subtree even in projects-only mode; matching descendants retain ancestors. include_projects and include_tasks default to true; false skips that kind's selection and decoration and returns an empty page with has_more=false, which carries no membership/completion authority. Authorization, parent checks and all validation still apply. Each requested page defaults to 50, is capped at 100, and uses deterministic lifecycle-rank, priority DESC, title/name, id ordering."
          :> Get '[JSON] NavigationBranchResponse
   :<|> Capture "workspaceId" UUID :> "navigation" :> "focus" :> Capture "entityType" NavigationEntityType :> Capture "entityId" UUID :> QueryParam "ancestor_offset" Int
          :> Description "Fetches a target card plus a root-to-parent ancestor window for direct links outside the loaded branch. Missing or foreign targets return 404. Ancestors are capped at 64; use next_ancestor_offset as ancestor_offset to continue a truncated chain."
@@ -460,6 +462,16 @@ health pool tracker = do
                 , "access_tracker" .= object ["buffered_count" .= buffered]
                 , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
 
+-- | Demand guards both database selection and summary decoration. A skipped
+-- page has no membership authority for clients that did not request it.
+navigationPageWhenRequested :: Monad m => Bool -> Int -> m [a] -> ([a] -> m [b]) -> m (NavigationPage b)
+navigationPageWhenRequested requested pageSize selectRows decorate
+  | not requested = pure NavigationPage { items = [], hasMore = False }
+  | otherwise = do
+      rows <- selectRows
+      summaries <- decorate (take pageSize rows)
+      pure NavigationPage { items = summaries, hasMore = length rows > pageSize }
+
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
 workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
   listH limit offset = do
@@ -500,7 +512,7 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
   planningCountsH workspaceId = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     handleDBErrors (Workspace.getWorkspacePlanningCounts pool workspaceId) >>= maybe (throwError err404) pure
-  navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset maybeShowOnly projectStatuses taskStatuses maybeShowEmptyProjects maybePriorityMode maybePriorityValue maybeQuery = do
+  navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset includeProjects includeTasks maybeShowOnly projectStatuses taskStatuses maybeShowEmptyProjects maybePriorityMode maybePriorityValue maybeQuery = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     parent <- navigationParent maybeKind maybeParent
     reject (validateNavigationPage projectLimit projectOffset <> validateNavigationPage taskLimit taskOffset)
@@ -510,26 +522,24 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
         projectSkip = navigationOffset projectOffset
         taskTake = navigationTake taskLimit
         taskSkip = navigationOffset taskOffset
-    (projectRows, taskRows) <- case parent of
-      NavigationWorkspaceRoot -> do
-        projects <- handleDBErrors $ Project.listFilteredProjectChildren pool workspaceId Nothing filters (projectTake + 1) projectSkip
-        tasks <- if maybeShowOnly == Just "projects" then pure [] else handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId Nothing Nothing filters (taskTake + 1) taskSkip
-        pure (projects, tasks)
+    -- Resolve the parent even when neither stream was requested.
+    (projectParent, taskProject, taskParent) <- case parent of
+      NavigationWorkspaceRoot -> pure (Nothing, Nothing, Nothing)
       NavigationProjectBranch projectId -> do
         project <- projectInWorkspace workspaceId projectId
-        projects <- handleDBErrors $ Project.listFilteredProjectChildren pool workspaceId (Just project.id) filters (projectTake + 1) projectSkip
-        tasks <- if maybeShowOnly == Just "projects" then pure [] else handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId (Just project.id) Nothing filters (taskTake + 1) taskSkip
-        pure (projects, tasks)
+        pure (Just project.id, Just project.id, Nothing)
       NavigationTaskBranch taskId -> do
         task <- taskInWorkspace workspaceId taskId
-        tasks <- if maybeShowOnly == Just "projects" then pure [] else handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId task.projectId (Just task.id) filters (taskTake + 1) taskSkip
-        pure ([], tasks)
-    projectSummaries <- liftIO $ Overview.projectCardSummaries pool (take projectTake projectRows)
-    taskSummaries <- liftIO $ Overview.taskCardSummaries pool (take taskTake taskRows)
+        pure (Nothing, task.projectId, Just task.id)
+    projectPage <- navigationPageWhenRequested (fromMaybe True includeProjects && taskParent == Nothing) projectTake
+      (handleDBErrors $ Project.listFilteredProjectChildren pool workspaceId projectParent filters (projectTake + 1) projectSkip)
+      (liftIO . Overview.projectCardSummaries pool)
+    taskPage <- navigationPageWhenRequested (fromMaybe True includeTasks && maybeShowOnly /= Just "projects") taskTake
+      (handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId taskProject taskParent filters (taskTake + 1) taskSkip)
+      (liftIO . Overview.taskCardSummaries pool)
     pure NavigationBranchResponse
-      { workspaceId = workspaceId, parent = parent
-      , projects = NavigationPage { items = projectSummaries, hasMore = length projectRows > projectTake }
-      , tasks = NavigationPage { items = taskSummaries, hasMore = length taskRows > taskTake } }
+      { workspaceId = workspaceId, parent = parent, projects = projectPage, tasks = taskPage }
+
   focusH workspaceId entityType entityId maybeAncestorOffset = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     reject (validateNavigationPage (Just maxFocusAncestors) maybeAncestorOffset)

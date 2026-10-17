@@ -1443,7 +1443,8 @@ instance FromJSON NavigationFilter where parseJSON = genericParseJSON jsonOption
 
 data NavigationBranchRequest = NavigationBranchRequest
   { parent :: NavigationParent, projectLimit :: Maybe Int, projectOffset :: Maybe Int
-  , taskLimit :: Maybe Int, taskOffset :: Maybe Int, filters :: Maybe NavigationFilter
+  , taskLimit :: Maybe Int, taskOffset :: Maybe Int
+  , includeProjects :: Maybe Bool, includeTasks :: Maybe Bool, filters :: Maybe NavigationFilter
   } deriving (Show, Eq, Generic)
 instance ToJSON NavigationBranchRequest where toJSON = genericToJSON jsonOptions
 instance FromJSON NavigationBranchRequest where parseJSON = genericParseJSON jsonOptions

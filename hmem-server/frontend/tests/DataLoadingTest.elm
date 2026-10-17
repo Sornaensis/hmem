@@ -3001,6 +3001,36 @@ suite =
                     , Dict.get "project:a" other.dataLoading.navigationPasses |> Maybe.andThen .projectError |> (/=) Nothing
                     , Dict.get "project:a" retried.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
                     )
+        , test "one project page and ten task pages retain completed projects without re-requesting them" <|
+            \_ ->
+                let
+                    initial = paintBranch "project" workspaceId (Just "parent") (DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model) |> Tuple.first
+                    page number source =
+                        branchReply "project:parent"
+                            (if number == 0 then [ project "only-child" (Just "parent") ] else [])
+                            (List.range (number * 50 + 1) (number * 50 + 50) |> List.map (\n -> task ("child-" ++ String.fromInt n) Nothing))
+                            False (number < 9) source
+                    first = page 0 initial
+                    continuing = List.foldl page first (List.range 1 8)
+                    final = page 9 continuing
+                    state source = Dict.get "project:parent" source.dataLoading.loadedNavigationBranches |> Maybe.map (\r -> (r.projectOffset, r.taskOffset, (r.projectRequestPending, r.taskRequestPending)))
+                in
+                Expect.equal
+                    { first = Just (0,50,(False,True)), continuing = Just (0,450,(False,True)), final = Just (0,450,(False,False)), projects = True, tasks = 500 }
+                    { first = state first, continuing = state continuing, final = state final
+                    , projects = Dict.member "only-child" final.dataLoading.projectCardSummaries
+                    , tasks = Dict.size final.dataLoading.taskCardSummaries
+                    }
+        , test "task-only root continuation preserves project hasMore and cached membership" <|
+            \_ ->
+                let
+                    initial = DataLoading.reloadNavigationForFilters (syncModel []) |> Tuple.first
+                    loaded = replyRootSpan [ project "root" Nothing ] [ task "first" Nothing ] True True initial
+                    pending = paintUpdate (LoadRootNavigationPage "task") loaded |> Tuple.first
+                    accepted = replyRootSpan [] [ task "next" Nothing ] False False pending
+                in
+                Expect.equal (Just (True,False),True)
+                    (accepted.dataLoading.rootNavigationRequest |> Maybe.map (\r -> (r.projectHasMore,r.taskHasMore)), Dict.member "root" accepted.dataLoading.projectCardSummaries)
         , test "same-filter refresh stages each kind to exhaustion without page-one truncation" <|
             \_ ->
                 let

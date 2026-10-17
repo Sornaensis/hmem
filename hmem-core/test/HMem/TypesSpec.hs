@@ -113,6 +113,12 @@ spec = do
       validateCreateSavedViewInput savedView { entityType = "observation_search" } `shouldBe` []
       validateCreateSavedViewInput savedView { entityType = "memory_search" } `shouldSatisfy` (not . null)
   describe "Bounded navigation validation" $ do
+    it "decodes omitted demand compatibly and preserves explicit demand" $ do
+      let legacy = eitherDecode "{\"parent\":{\"kind\":\"workspace_root\"}}" :: Either String NavigationBranchRequest
+          demanded = eitherDecode "{\"parent\":{\"kind\":\"workspace_root\"},\"include_projects\":false,\"include_tasks\":true}" :: Either String NavigationBranchRequest
+      fmap (\value -> (value.includeProjects, value.includeTasks)) legacy `shouldBe` Right (Nothing, Nothing)
+      fmap (\value -> (value.includeProjects, value.includeTasks)) demanded `shouldBe` Right (Just False, Just True)
+
     it "enforces limit, offset, and combined unique summary-batch caps" $ do
       validateNavigationPage (Just 1) (Just 0) `shouldBe` []
       validateNavigationPage (Just 0) Nothing `shouldSatisfy` (not . null)

@@ -87,7 +87,9 @@ independently accounted by the browser request receipts. The healthy startup
 qualification budget is not a universal ceiling on offline recovery traffic.
 
 The hierarchy and Observation views use scrolling viewports; cached results
-remain reachable even when their rows are not mounted. Root **Load more** is
+remain reachable even when their rows are not mounted. Navigation sends independent project/task demand; completed or paused streams
+are skipped by the server. A skipped empty page leaves that stream's cached
+membership and continuation state intact. Root **Load more** is
 explicit; expanded hierarchy branches continue automatically. Failed or
 incomplete branches retain Retry and do not claim completion. Interactive
 viewport loading is separate from canonical snapshot/replay, which can still

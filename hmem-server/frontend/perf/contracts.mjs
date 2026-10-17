@@ -539,7 +539,8 @@ export function currentRootNavigationPass(pages) {
   return coverage
 }
 
-export function createNavigationCompletionIndex({ children, rootProjects, rootTasks, context }) {
+export function createNavigationCompletionIndex({ children, rootProjects, rootTasks, context, advertisedOwners = [] }) {
+  const advertised = new Set(advertisedOwners)
   let epoch = 0, authorized = false, activeContext = null, rootEpoch = 0, revision = 0, checkedRevision = -1, cachedReady = false
   let owners = new Map(), rootCoverage = { project: new Map(), task: new Map() }, demand = { project: new Set(), task: new Set() }
   let rootAccepted = false, authoritativeRootRefresh = false
@@ -590,7 +591,7 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
     if (subtree.has(key)) return subtree.get(key)
     const expected = children[key]
     if (!expected || visiting.has(key)) return false
-    if (!expected.projects.length && !expected.tasks.length) { subtree.set(key, true); return true }
+    if (!expected.projects.length && !expected.tasks.length && !advertised.has(key)) { subtree.set(key, true); return true }
     if (!ownerComplete(key)) { subtree.set(key, false); return false }
     visiting.add(key)
     const complete = [...expected.projects.map(id => 'project:' + id), ...expected.tasks.map(id => 'task:' + id)].every(child => nodeComplete(child, visiting))
@@ -752,6 +753,17 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
       if ([...new Set([...collapsed, ...next])].some(key => collapsed.has(key) !== next.has(key))) { retryIntents.clear(); intentEpoch++ }
       for (const key of new Set([...collapsed, ...next])) if (collapsed.has(key) !== next.has(key)) dirty(key)
       collapsed = next
+    },
+    invalidateOwners(keys) {
+      for (const key of new Set(keys)) {
+        owners.delete(key); retryIntents.delete(key)
+        if (key === 'workspace_root') {
+          rootCoverage = { project: new Map(), task: new Map() }; rootResult = null
+          rootEpoch++; authoritativeRootRefresh = true
+        }
+        dirty(key)
+      }
+      intentEpoch++
     },
     replaceChildren(key, value) {
       // Dirty the old ancestry before relinking, then the new ancestry.

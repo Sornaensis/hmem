@@ -288,6 +288,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         projects: { ids: value.projects.items.map(item => item.id), hasMore: value.projects.has_more },
         tasks: { ids: value.tasks.items.map(item => item.id), hasMore: value.tasks.has_more }
       } : null, status)
+      if (fulfilled && status < 400) rememberNavigationMetadata(tracker, receipt, value)
       receipt.done = true
       tracker.active -= 1
       if (key === 'navigation:branch') {
@@ -312,10 +313,10 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     const receipt = { requestId: tracker.requests.length + 1, requestIndex: tracker.requests.length, runId: tracker.paintRunId,
       workspaceId: pathname.match(/^\/api\/v1\/workspaces\/([^/]+)(?:\/|$)/)?.[1] || url.searchParams.get('workspace_id')
         || (key === 'observations:count' ? request.postDataJSON()?.workspace_id : null),
-      key, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
+      key, metadataEpoch: tracker.metadataEpoch, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
     if (tracker.navigationProof) {
       if (key === 'session' || key === 'change-stream:resync') receipt.paintReceiptId = tracker.paintRunId + '-' + tracker.requests.length
-      if (key === 'session') { receipt.proofSession = tracker.navigationProof.beginSession(); receipt.paintSession = tracker.paintReadiness.beginSession(receipt.at, receipt.paintReceiptId, request.url()) }
+      if (key === 'session') { tracker.metadataEpoch++; tracker.navigationMetadata.clear(); receipt.metadataEpoch = tracker.metadataEpoch; receipt.proofSession = tracker.navigationProof.beginSession(); receipt.paintSession = tracker.paintReadiness.beginSession(receipt.at, receipt.paintReceiptId, request.url()) }
       if (key === 'change-stream:resync') { receipt.proofSnapshot = tracker.navigationProof.admitSnapshot(!request.postDataJSON().page_token); receipt.paintSnapshot = tracker.paintReadiness.admitSnapshot(!request.postDataJSON().page_token, receipt.at, receipt.paintReceiptId, request.url()) }
       if (key === 'navigation:branch' && pathname === '/api/v1/workspaces/' + tracker.workspaceId + '/navigation') {
         const kind = url.searchParams.get('parent_kind')
@@ -640,6 +641,113 @@ export async function navigateToFirstUsefulViewport(page, origin, tracker, fixtu
   await waitForFirstUsefulViewport(page, tracker, fixture, anchorId)
 }
 
+function advertisedNavigationOwners(fixture) {
+  return [...new Set([
+    ...fixture.projects.filter(item => item.parent_id != null).map(item => 'project:' + item.parent_id),
+    ...fixture.tasks.map(item => item.parent_id ? 'task:' + item.parent_id : item.project_id ? 'project:' + item.project_id : null).filter(Boolean)
+  ])]
+}
+
+// Only this benchmark's updated-entity frames are supported. Expected next
+// placement/count/rank metadata comes from fixture fields, never response IDs.
+export function liveNavigationInvalidatedOwners(fixture, ledger, frames, url) {
+  if (!(ledger instanceof Map) || !(url instanceof URL) || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation`
+    || !['', 'all', 'projects', 'tasks'].includes(url.searchParams.get('show_only') || '')
+    || !['', 'true'].includes(url.searchParams.get('show_empty_projects') || '')
+    || !['', 'any', 'exact', 'above', 'below'].includes(url.searchParams.get('priority_mode') || '')
+    || url.searchParams.getAll('project_status').some(value => !['active', 'paused', 'completed', 'archived'].includes(value))
+    || url.searchParams.getAll('task_status').some(value => !['todo', 'in_progress', 'blocked', 'done', 'cancelled'].includes(value))) throw new Error('Unsupported live navigation context')
+  const targets = new Set(), previous = new Map(ledger)
+  const key = (kind, id) => kind + ':' + id
+  for (const frame of frames) {
+    const event = frame?.event, entity = event?.entity
+    if (frame?.schema_version !== 1 || frame.type !== 'change' || event?.schema_version !== 1 || event.scope !== 'workspace' || event.workspace_id !== fixture.workspace.id
+      || !['project', 'task', 'observation'].includes(entity?.type) || entity.action !== 'updated'
+      || JSON.stringify(event.invalidations) !== JSON.stringify([{ kind: 'entity', target: key(entity.type, entity.id) }])) throw new Error('Unsupported live navigation mutation')
+    const values = fixture[entity.type === 'project' ? 'projects' : entity.type === 'task' ? 'tasks' : 'observations']
+    if (!values.some(item => item.id === entity.id)) throw new Error('Unknown live navigation fixture entity')
+    if (entity.type !== 'observation') targets.add(key(entity.type, entity.id))
+  }
+  const owner = (kind, item) => item.parent_id ? key(kind, item.parent_id) : kind === 'task' && item.project_id ? key('project', item.project_id) : 'workspace_root'
+  const projectRoots = [...targets].filter(value => value.startsWith('project:')).map(value => value.slice(8))
+  const within = (id, root, seen = new Set()) => {
+    if (id === root) return true
+    if (seen.has(id)) throw new Error('Cyclic live navigation metadata')
+    seen.add(id)
+    const item = previous.get(key('project', id))
+    return item?.parent_id ? within(item.parent_id, root, seen) : false
+  }
+  for (const [target, item] of previous) if (projectRoots.some(root => within(target.startsWith('project:') ? item.id : item.project_id, root))) targets.add(target)
+  const next = new Map(previous)
+  for (const target of targets) {
+    const [kind, id] = target.split(':'), item = fixture[kind + 's'].find(item => item.id === id)
+    if (!item) throw new Error('Unsupported live navigation deletion')
+    const directProjects = kind === 'project' ? fixture.projects.filter(child => child.parent_id === id).length : 0
+    const directTasks = fixture.tasks.filter(child => kind === 'task' ? child.parent_id === id : child.project_id === id && child.parent_id == null)
+    next.set(target, { ...item, direct_project_count: directProjects, direct_task_count: directTasks.length, direct_subtask_count: directTasks.length,
+      has_children: directProjects + directTasks.length > 0, readiness_rollup: { in_progress_subtask_count: directTasks.filter(child => child.status === 'in_progress').length } })
+  }
+  const filtered = url.searchParams.get('show_empty_projects') === 'false' || !['', 'all'].includes(url.searchParams.get('show_only') || '')
+    || url.searchParams.getAll('project_status').length > 0 || url.searchParams.getAll('task_status').length > 0
+    || !['', 'any'].includes(url.searchParams.get('priority_mode') || '') || !!url.searchParams.get('query')?.trim()
+  const queried = !!url.searchParams.get('query')?.trim(), owners = new Set()
+  const path = (source, target, seen = new Set()) => {
+    if (seen.has(target)) throw new Error('Cyclic live navigation owner path')
+    seen.add(target); owners.add(target)
+    if (!filtered || target === 'workspace_root') return
+    const [kind] = target.split(':'), item = source.get(target)
+    path(source, item ? owner(kind, item) : 'workspace_root', seen)
+  }
+  const rank = item => item.status === 'blocked' && (item.readiness_rollup?.in_progress_subtask_count || 0) > 0 ? 'in_progress' : item.status
+  for (const target of targets) {
+    const [kind] = target.split(':'), old = previous.get(target), item = next.get(target)
+    if (!old) path(next, owner(kind, item))
+    else {
+      const placement = old.parent_id !== item.parent_id || old.status !== item.status || old.priority !== item.priority
+        || String(kind === 'project' ? old.name : old.title).toLowerCase() !== String(kind === 'project' ? item.name : item.title).toLowerCase()
+        || (kind === 'task' && (old.project_id !== item.project_id || rank(old) !== rank(item))) || queried
+      const children = old.has_children !== item.has_children || (kind === 'project'
+        ? old.direct_project_count !== item.direct_project_count || old.direct_task_count !== item.direct_task_count
+        : old.direct_subtask_count !== item.direct_subtask_count)
+      if (placement) { path(previous, owner(kind, old)); path(next, owner(kind, item)) }
+      if (children) path(next, target)
+    }
+  }
+  return [...owners].sort()
+}
+
+function rememberNavigationMetadata(tracker, receipt, value) {
+  if (!tracker.navigationMetadata || receipt.metadataEpoch !== tracker.metadataEpoch) return
+  const remember = (kind, items) => { for (const item of items) if (item.workspace_id === tracker.workspaceId) tracker.navigationMetadata.set(kind + ':' + item.id, item) }
+  if (receipt.key === 'navigation:branch') {
+    const stamp = receipt.proofNavigation
+    if (!stamp || stamp.retired || !stamp.done || stamp.error || stamp.state?.latest !== stamp) return
+    remember('project', value.projects.items); remember('task', value.tasks.items)
+  } else if (receipt.key === 'navigation:summaries') {
+    remember('project', value.projects); remember('task', value.tasks)
+  } else if (receipt.key === 'navigation:focus') {
+    for (const item of [value.target, ...value.ancestors]) remember(item.entity_type, [item.summary])
+  }
+}
+
+export function prepareLiveNavigationProof(tracker, fixture, frames) {
+  // The supported scenario has one delivery and no earlier canonical summary or
+  // focus read in this tracker. Separate focus scenarios use separate trackers.
+  // Enforce that prefix rather than approximating Elm's per-target read guards.
+  if (tracker.liveNavigationPrepared) throw new Error('Live navigation proof delivery is one-shot')
+  const root = tracker.requests.findLast(request => request.key === 'navigation:branch' && new URL(request.url).searchParams.get('parent_kind') === 'workspace_root')
+  if (!root || !root.done || !root.navigationFulfilled || root.navigationStatus !== 200 || tracker.active !== 0 || !tracker.navigationProof?.ready()) throw new Error('Live navigation context is not settled')
+  if ((tracker.counts['navigation:summaries'] || 0) !== 0 || (tracker.counts['navigation:focus'] || 0) !== 0
+    || tracker.requests.some(request => request.method !== 'GET' && !(request.method === 'POST'
+      && ['change-stream:resync', 'change-stream:ticket', 'observations:count', 'observations:match'].includes(request.key)))) throw new Error('Unsupported live navigation read/mutation prefix')
+  assertNoUnhandledApiRoutes(tracker)
+  const owners = liveNavigationInvalidatedOwners(fixture, tracker.navigationMetadata, frames, new URL(root.url))
+  tracker.liveNavigationPrepared = true
+  tracker.metadataEpoch++
+  tracker.navigationProof.invalidateOwners(owners)
+  return owners
+}
+
 // This oracle reads fixture fields independently of the response producer. Task
 // ancestors are retained by matching descendants; projects retain the existing
 // outer lifecycle/priority gate when empty projects are shown.
@@ -687,6 +795,7 @@ function filteredNavigationMembers(fixture, url) {
 
 export function completedExpandedMembership(tracker, fixture) {
   const navigation = tracker.requests.filter(request => request.key === 'navigation:branch' && request.navigation)
+  const advertised = new Set(advertisedNavigationOwners(fixture))
   const textOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0
   const ordered = (kind, values) => [...values].sort((a, b) => {
     const rank = kind === 'project' ? { active: 0, paused: 1, completed: 2, archived: 3 } : { todo: 0, in_progress: 1, blocked: 2, done: 3, cancelled: 4 }
@@ -745,7 +854,7 @@ export function completedExpandedMembership(tracker, fixture) {
     seen.add(key)
     const expectedProjects = ordered('project', kind === 'project' ? members.projects.filter(item => item.parent_id === id) : [])
     const expectedTasks = ordered('task', members.tasks.filter(item => kind === 'task' ? item.parent_id === id : item.parent_id == null && item.project_id === id))
-    if (expectedProjects.length === 0 && expectedTasks.length === 0) continue
+    if (expectedProjects.length === 0 && expectedTasks.length === 0 && !advertised.has(key)) continue
     expandedBranches += 1
     const pages = navigation.filter(request => { const url = new URL(request.url); return url.searchParams.get('parent_kind') === kind && url.searchParams.get('parent_id') === id })
     for (const [childKind, expected, collected] of [['project', expectedProjects, projectIds], ['task', expectedTasks, taskIds]]) {
@@ -1198,7 +1307,7 @@ function contextualNavigationProof(fixture) {
       }
       if (navigationFilterContext(url) !== context) throw new Error('Invalid navigation filter context')
       const members = filteredNavigationMembers(fixture, url), children = expectedNavigationChildren({ ...fixture, ...members })
-      const proof = createNavigationCompletionIndex({ children, rootProjects: children.workspace_root.projects, rootTasks: children.workspace_root.tasks, context })
+      const proof = createNavigationCompletionIndex({ children, rootProjects: children.workspace_root.projects, rootTasks: children.workspace_root.tasks, context, advertisedOwners: advertisedNavigationOwners(fixture) })
       for (const [method, args] of lifecycle) proof[method](...args)
       proofs.set(context, proof)
     }
@@ -1223,7 +1332,8 @@ function contextualNavigationProof(fixture) {
     complete(stamp, ...args) { for (const [proof, counterpart] of admissions.get(stamp) || []) proof.complete(counterpart, ...args) },
     ...Object.fromEntries(['retrySelection', 'retryOwnerQuiet', 'armRetry', 'cancelRetry', 'ready'].map(method => [method, (...args) => active[method](...args)])),
     setCollapsed(keys) { for (const proof of proofs.values()) proof.setCollapsed(keys) },
-    replaceChildren(...args) { for (const proof of proofs.values()) proof.replaceChildren(...args) }
+    replaceChildren(...args) { for (const proof of proofs.values()) proof.replaceChildren(...args) },
+    invalidateOwners(keys) { for (const proof of proofs.values()) proof.invalidateOwners(keys) }
   }
 }
 
@@ -1231,7 +1341,7 @@ export function createTracker(fixture = null) {
   let paintDecision = null
   const coldDiagnostics = createColdDiagnostics()
   const navigationProof = fixture && contextualNavigationProof(fixture)
-  return { navigationProof, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
+  return { navigationProof, navigationMetadata: fixture && new Map(), metadataEpoch: 0, liveNavigationPrepared: false, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
     requests: [], arrivals: new WeakMap(), counts: {}, bytes: {}, active: 0, activeBranches: 0, activeExpandedBranches: 0, activeRootBranches: 0, activeDetails: 0, maxBranches: 0, maxExpandedBranches: 0, maxRootBranches: 0, maxDetails: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
     model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
   }
@@ -1722,6 +1832,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   stage('live batch')
   const liveStart = performance.now()
   if (liveDiagnostics) { tracker.liveDiagnostics = liveDiagnostics; liveDiagnostics.start(liveStart) }
+  const requiredNavigationOwners = prepareLiveNavigationProof(tracker, fixture, fixture.liveFrames)
   const pushedSockets = await page.evaluate(frames => window.__perfPushFrames(frames), fixture.liveFrames)
   liveDiagnostics?.dispatched(performance.now())
   if (pushedSockets !== 1) throw new Error(`live fixture expected one open socket, observed ${pushedSockets}`)
@@ -1754,7 +1865,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
     reset: resetProof, intervening: tracker.requests.slice(resetProof.requestIndex + 1, liveBefore.index), requests: tracker.requests.slice(liveBefore.index),
     liveStartIndex: liveBefore.index, delta: liveDelta, active: tracker.active, unknownRoutes: tracker.unhandledApiRoutes, snapshotGeneration: tracker.model.snapshotGeneration })
   const liveBatch = {
-    frames: fixture.liveFrames.length, sockets: pushedSockets, ms: liveTiming.settleMs, stabilityMs: liveTiming.stabilityMs, stabilityRequests: stability.requests,
+    requiredNavigationOwners, frames: fixture.liveFrames.length, sockets: pushedSockets, ms: liveTiming.settleMs, stabilityMs: liveTiming.stabilityMs, stabilityRequests: stability.requests,
     ...liveDelta, requests: liveDelta.count, duplicateRequests,
     wholeWorkspaceReload: liveWholeWorkspaceReload(liveDelta.routes), hydration
   }

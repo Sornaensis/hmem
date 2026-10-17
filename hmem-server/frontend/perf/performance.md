@@ -7,6 +7,23 @@ fixtures, without a backend, database, or external network.
 
 ## Commands and result policy
 
+For focused filtering verification, set PowerShell
+`$env:HMEM_EVIDENCE_BASE_COMMIT = '30e428e65f5f6b34ae24fe6e5a32ab3aa1efb547'`,
+then run `npm run perf:self-check`, `npm run perf:record-after`, and
+`npm run perf:check` sequentially against stable sources and assets, without
+overlapping browser workloads. Both fresh evaluations and trace retirement must
+pass. The historical baseline, budgets and fixtures remain the qualification inputs.
+
+Final task `a70d06e3-8993-4af2-a328-914e0dc35c37`, project
+`a606c62b-9675-44bc-9013-75d1624551b2`, owns the `focused-filtering.v1`
+after, trace-manifest, validation-record, evidence-manifest and complete-diff
+receipts in the verified OS temporary directory's
+`hmem-focused-filtering-a70d06e3-8993-4af2-a328-914e0dc35c37` child.
+Retain these five files through project closure plus 30 days, then dispose.
+Each receipt/archive is bounded to 64 MiB; verify/hash and retire the sole
+`temporary/large-focused-filtering-trace.zip` before success. Unresolved
+diagnostics expire on resolution or task closure.
+
 ```sh
 npm run perf:self-check
 npm run perf:record

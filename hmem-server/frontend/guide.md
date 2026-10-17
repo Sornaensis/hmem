@@ -2,6 +2,14 @@
 
 ## Timeline and history
 
+Opening a focused project or task temporarily shows all statuses and priorities,
+including empty projects, and clears the hierarchy search. The filter bar shows
+these focused filters; you can adjust them while exploring or switch focus.
+Choosing a focus link again resets these temporary filters and closes any previous
+search results, including when the link points to the same entity.
+Closing focus or returning to its Timeline or Audit source restores your normal
+workspace filters. Focused filter changes do not replace saved workspace filters.
+
 The workspace Timeline shows Create, Complete, Delete, Archive and Cancel events.
 Choose an entity, time window and bucket size; these choices persist per workspace.
 The default window is the last 30 days with weekly buckets. **All time** starts

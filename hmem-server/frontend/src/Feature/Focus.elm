@@ -3,6 +3,7 @@ module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, build
 import Api
 import Dict
 import Feature.DataLoading
+import Feature.FocusedFilters
 import Helpers exposing (buildFragment, pushUrl, replaceFragment, scrollToElement)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -148,18 +149,6 @@ update msg model =
                 newIndex =
                     List.length newHistory - 1
 
-                currentSearch =
-                    model.search
-
-                updatedSearch =
-                    { currentSearch
-                        | unifiedResults = Nothing
-                        , isSearching = False
-                        , searchError = Nothing
-                        , activeRequestQuery = Nothing
-                        , activeRequest = Nothing
-                    }
-
                 newModel =
                     { model
                         | focus =
@@ -170,8 +159,8 @@ update msg model =
                                 , historyIndex = newIndex
                                 , returnContext = Nothing
                             }
-                        , search = updatedSearch
                     }
+                        |> Feature.FocusedFilters.enter
                         |> Feature.DataLoading.resetNavigationPresentations
 
                 ( requestedModel, requestCmd ) =
@@ -187,24 +176,12 @@ update msg model =
                 focusModel =
                     model.focus
 
-                currentSearch =
-                    model.search
-
-                updatedSearch =
-                    { currentSearch
-                        | unifiedResults = Nothing
-                        , isSearching = False
-                        , searchError = Nothing
-                        , activeRequestQuery = Nothing
-                        , activeRequest = Nothing
-                    }
-
                 -- Only change what's focused, don't modify history
                 newModel =
                     { model
                         | focus = { focusModel | focusedEntity = Just entry, returnContext = Nothing }
-                        , search = updatedSearch
                     }
+                        |> Feature.FocusedFilters.enter
                         |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, replaceFragment newModel )
@@ -229,6 +206,7 @@ update msg model =
                                 , returnContext = Nothing
                             }
                     }
+                        |> Feature.FocusedFilters.enter
                         |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, replaceFragment newModel )

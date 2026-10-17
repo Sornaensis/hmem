@@ -1,9 +1,10 @@
-module Feature.DataLoading exposing (mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, revalidateNavigationForTasksReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, ensureExpandedBranches, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, revalidateNavigationForTasksReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
 import Feature.ChangeStream
+import Feature.FocusedFilters
 import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity, taskPresentationOrder)
 import Http
 import Json.Encode as Encode
@@ -240,7 +241,7 @@ reconcileStartup model =
         prepared = { model | dataLoading = { loading | startupAdmission = owned } }
         settled = startupSettled prepared
         fingerprint = startupFingerprint prepared
-        hasHierarchy = loading.rootNavigationRequest |> Maybe.map (\request -> request.projectCardCount > 0 || request.taskCardCount > 0) |> Maybe.withDefault (model.focus.focusedEntity /= Nothing)
+        hasHierarchy = model.focus.focusedEntity /= Nothing || (loading.rootNavigationRequest |> Maybe.map (\request -> request.projectCardCount > 0 || request.taskCardCount > 0) |> Maybe.withDefault False)
         next =
             if settled && (model.activeTab /= ProjectsTab || not hasHierarchy) then
                 StartupAdmission.headerOnly owned
@@ -1214,7 +1215,8 @@ model transition happens in the session reducer; keeping them paired prevents a
 valid first response from being mistaken for a stale one.
 -}
 prepareRootNavigationRequest : Maybe String -> Model -> Model
-prepareRootNavigationRequest expectedWorkspace model =
+prepareRootNavigationRequest expectedWorkspace original =
+    let model = Feature.FocusedFilters.initialize original in
     case ( expectedWorkspace, model.selectedWorkspaceId, model.dataLoading.activeWorkspaceLoadToken ) of
         ( Just workspaceId, Just selectedWorkspaceId, Just _ ) ->
             if workspaceId == selectedWorkspaceId then
@@ -1268,6 +1270,20 @@ rootNavigationContextMatches workspaceId model =
 
 reloadNavigationForFilters : Model -> ( Model, Cmd Msg )
 reloadNavigationForFilters model =
+    let
+        ( reset, command ) = resetNavigationForFilters model
+        ( focused, focusCommand ) = case ( reset.selectedWorkspaceId, reset.focus.focusedEntity ) of
+            ( Just workspaceId, Just ( kind, id ) ) -> beginNavigationFocus workspaceId kind id reset
+            _ -> ( reset, Cmd.none )
+    in
+    ( focused, Cmd.batch [ command, focusCommand ] )
+
+
+{-| Live same-filter refresh owns membership separately from an exact active
+focus request. Only explicit filter resets recreate direct focus demand.
+-}
+resetNavigationForFilters : Model -> ( Model, Cmd Msg )
+resetNavigationForFilters model =
     case model.selectedWorkspaceId of
         Nothing ->
             ( model, Cmd.none )
@@ -1360,7 +1376,7 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
             model.dataLoading
 
         ( reloaded, command ) =
-            reloadNavigationForFilters model
+            resetNavigationForFilters model
 
         loading =
             reloaded.dataLoading
@@ -1791,12 +1807,12 @@ replayBranch workspaceId generation fingerprint parentKind parentId previous mod
 
 beginNavigationFocus : String -> String -> String -> Model -> ( Model, Cmd Msg )
 beginNavigationFocus workspaceId entityType entityId model =
-    requestNavigationFocus False workspaceId entityType entityId model
+    requestNavigationFocus False workspaceId entityType entityId (Feature.FocusedFilters.initialize model)
 
 
 revalidateNavigationFocus : String -> String -> String -> Model -> ( Model, Cmd Msg )
 revalidateNavigationFocus workspaceId entityType entityId model =
-    requestNavigationFocus True workspaceId entityType entityId model
+    requestNavigationFocus True workspaceId entityType entityId (Feature.FocusedFilters.initialize model)
 
 
 requestNavigationFocus : Bool -> String -> String -> String -> Model -> ( Model, Cmd Msg )

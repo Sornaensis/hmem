@@ -2,6 +2,228 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 
+function focusEvent(fixture, kind, id) {
+  return { id: 'filtered-focus', workspace_id: fixture.workspace.id, event_type: 'updated', entity_type: kind, entity_id: id, title: 'Open filtered target', occurred_at: '2026-10-16T00:00:00Z', actor: null, project: null, parent_task: null, status_transition: null, navigation: { entity_type: kind, entity_id: id }, source_audit_id: null }
+}
+
+for (const kind of ['task', 'project']) test('Timeline excluded ' + kind + ' focus admits heterogeneous descendants and restores filters', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture(), root = fixture.projects[0], task = fixture.tasks[0]
+  const target = kind === 'task'
+    ? { ...task, id: 'filtered-target', project_id: root.id, parent_id: null, status: 'done', priority: 2 }
+    : { ...root, id: 'filtered-target', parent_id: root.id, status: 'completed', priority: 2 }
+  const children = ['done', 'cancelled'].map((status, index) => ({ ...task, id: 'filtered-child-' + index, project_id: kind === 'project' ? target.id : root.id, parent_id: kind === 'task' ? target.id : null, status, priority: index + 3 }))
+  fixture.projects = kind === 'project' ? [root, target, { ...root, id: 'archived-child', parent_id: target.id, status: 'archived', priority: 8 }] : [root]
+  fixture.tasks = kind === 'task' ? [target, ...children] : children
+  fixture.timelineEvents = [focusEvent(fixture, kind, target.id)]
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    await h.page.locator('.filter-bar').getByRole('button', { name: kind === 'task' ? 'Projects' : 'Tasks', exact: true }).click(); await h.idle()
+    await h.page.locator('.filter-select').first().selectOption('exact'); await h.idle()
+    await h.page.locator('.filter-priority-input').fill('10'); await h.idle()
+    await h.page.getByLabel('Show empty projects').uncheck(); await h.idle()
+    await h.page.getByPlaceholder('Search all entities... (Enter to search)').fill('unrelated'); await h.idle()
+    await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
+    await h.page.locator('#timeline-event-filtered-focus').click(); await h.idle()
+    assert.equal(await h.page.getByPlaceholder('Search all entities... (Enter to search)').inputValue(), '', 'Focused hierarchy must clear the inherited query')
+    assert.equal(await h.page.locator('.filter-select').first().inputValue(), 'any')
+    assert.equal(await h.page.getByLabel('Show empty projects').isChecked(), true)
+    for (const child of children) await h.page.locator('#entity-' + child.id).waitFor({ state: 'visible', timeout: 10000 })
+    if (kind === 'project') await h.page.locator('#entity-archived-child').waitFor({ state: 'visible', timeout: 10000 })
+    const branch = h.requests.findLast(r => r.parent === target.id && r.kind === kind)
+    assert.ok(branch && branch.query === '' && (branch.showOnly ?? 'all') === 'all', JSON.stringify(branch))
+    assert.equal(await h.page.locator('.filter-bar .filter-pill-active').count(), 10, 'All entity/status controls represent unrestricted focused requests')
+    await h.page.locator('.filter-bar').getByRole('button', { name: 'Todo', exact: true }).click(); await h.idle()
+    const normalSaved = await h.page.evaluate(id => JSON.parse(localStorage.getItem('hmem-ws-' + id)), fixture.workspace.id)
+    assert.equal(normalSaved.searchQuery, 'unrelated')
+    assert.deepEqual(normalSaved.filterPriority, { exact: 10 })
+    assert.equal(normalSaved.filterShowOnly, kind === 'task' ? 'projects' : 'tasks')
+    await h.page.locator('.focus-clear-btn').click(); await h.idle()
+    assert.equal(await h.page.getByPlaceholder('Search all entities... (Enter to search)').inputValue(), 'unrelated')
+    assert.equal(await h.page.locator('.filter-select').first().inputValue(), 'exact')
+    assert.equal(await h.page.getByLabel('Show empty projects').isChecked(), false)
+    for (const child of children) assert.equal(await h.page.locator('#entity-' + child.id).count(), 0)
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+  } finally { await h.close() }
+})
+
+test('uncached external focus normalizes filters before issuing one target request', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture(), root = fixture.projects[0], template = fixture.tasks[0]
+  fixture.projects = [root]
+  fixture.tasks = ['first-target', 'second-target'].flatMap((id, index) => [
+    { ...template, id, project_id: root.id, parent_id: null, status: 'done', priority: index + 2 },
+    { ...template, id: id + '-child', project_id: root.id, parent_id: id, status: 'cancelled', priority: 7 }
+  ])
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    await h.page.locator('.filter-bar').getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
+    for (const id of ['first-target', 'second-target']) {
+      await h.page.locator('.filter-select').first().selectOption('exact'); await h.idle()
+      const before = h.requests.length
+      await h.page.evaluate(id => { window.location.hash = 'tab=projects&focus=task:' + id }, id)
+      await h.page.locator('#entity-' + id + '-child').waitFor({ state: 'visible', timeout: 10000 }); await h.idle()
+      assert.equal(h.requests.slice(before).filter(r => r.path.endsWith('/navigation/focus/task/' + id)).length, 1, 'Only the current focused context may issue target transport')
+      assert.equal(await h.page.locator('.filter-select').first().inputValue(), 'any')
+      const branch = h.requests.slice(before).find(r => r.kind === 'task' && r.parent === id)
+      assert.ok(branch && branch.viewport.paintFilter === 'all|empty|any|||', JSON.stringify(branch))
+    }
+    const historyBefore = await h.page.evaluate(() => ({ length: history.length, url: location.href, state: history.state }))
+    const backRequests = h.requests.length
+    await h.page.goBack()
+    try { await h.page.locator('#entity-first-target-child').waitFor({ state: 'visible', timeout: 10000 }) }
+    catch (error) { throw new Error(error.message + '\n' + JSON.stringify({ historyBefore, current: await h.page.evaluate(() => ({ length: history.length, url: location.href, state: history.state })), requests: h.requests.slice(backRequests), text: (await h.page.locator('body').innerText()).slice(-1500) })) }
+    await h.idle()
+    assert.equal(h.requests.slice(backRequests).filter(r => r.path.endsWith('/navigation/focus/task/first-target')).length, 0, 'A cached complete focus path needs no redundant metadata read')
+    assert.ok(h.requests.slice(backRequests).some(r => r.kind === 'task' && r.parent === 'first-target'), 'Cached history return restages its expanded branch automatically')
+    await h.page.goForward()
+    await h.page.locator('#entity-second-target-child').waitFor({ state: 'visible', timeout: 10000 }); await h.idle()
+    await h.page.locator('.focus-clear-btn').click(); await h.idle()
+    assert.equal(await h.page.locator('.filter-bar').getByRole('button', { name: 'Projects', exact: true }).getAttribute('class'), 'filter-pill filter-pill-active')
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+  } finally { await h.close() }
+})
+
+test('search Audit card and breadcrumb focus share inclusive filters and restore their source context', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture(), root = fixture.projects[0], template = fixture.tasks[0]
+  const parent = { ...template, id: 'shared-target', title: 'Needle parent', project_id: root.id, parent_id: null, status: 'done', priority: 3 }
+  fixture.projects = [root]
+  fixture.tasks = [parent, ...['done', 'cancelled'].map((status, index) => ({ ...template, id: 'shared-child-' + index, project_id: root.id, parent_id: parent.id, status, priority: index + 6 }))]
+  fixture.timelineEvents = [focusEvent(fixture, 'task', parent.id)]
+  const h = await openHierarchy(fixture)
+  let searchReads = 0
+  await h.page.route('**/api/v1/search', route => { searchReads++; return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ projects: [], tasks: [parent], observations: [] }) }) })
+  await h.page.route('**/api/v1/audit?*', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [{ id: 'shared-audit', workspace_id: fixture.workspace.id, entity_type: 'task', entity_id: parent.id, action: 'update', old_values: { title: 'Historical title' }, new_values: { title: parent.title }, changed_at: '2026-10-15T10:00:00Z', request_id: null, actor_type: 'user', actor_id: 'fixture-user', actor_label: 'Fixture User' }], has_more: false }) }))
+  try {
+    await h.start(); await h.idle()
+    await h.page.locator('.filter-bar').getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
+    await h.page.locator('.filter-select').first().selectOption('exact'); await h.idle()
+    const query = h.page.getByPlaceholder('Search all entities... (Enter to search)')
+    await query.fill('needle'); await query.press('Enter')
+    await h.page.getByRole('button', { name: 'Focus task', exact: true }).waitFor({ state: 'visible' })
+    await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
+    await h.page.locator('#timeline-event-filtered-focus').click()
+    await h.page.locator('#entity-shared-child-1').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), { schema_version: 1, type: 'change', event: {
+      schema_version: 1, event_id: 'focused-search-refresh', scope: 'workspace', workspace_id: fixture.workspace.id, occurred_at: '2026-10-16T00:00:00Z',
+      transaction: { id: 'focused-search-refresh', cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
+      entity: { type: 'task', id: parent.id, action: 'updated' }, invalidations: [{ kind: 'search', target: 'workspace:' + fixture.workspace.id }]
+    } })
+    await h.idle()
+    assert.equal(searchReads, 1, 'Live invalidation must not revive the retired normal search over focus')
+    assert.equal(await h.page.locator('#entity-shared-child-1').count(), 1)
+    await h.page.locator('.filter-bar').getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
+    assert.equal(await h.page.locator('#entity-shared-child-1').count(), 0)
+    await query.fill('needle'); await query.press('Enter')
+    await h.page.getByRole('button', { name: 'Focus task', exact: true }).waitFor({ state: 'visible' })
+    await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
+    const sameTargetStart = h.requests.length
+    await h.page.locator('#timeline-event-filtered-focus').click()
+    await h.page.locator('#entity-shared-child-1').waitFor({ state: 'visible' }); await h.idle()
+    const sameTargetRequests = h.requests.slice(sameTargetStart)
+    const sameTargetBranch = sameTargetRequests.filter(r => r.kind === 'task' && r.parent === parent.id)
+    assert.equal(sameTargetBranch.length, 1, 'Explicit same-target entry replaces completed restrictive branch authority once')
+    assert.equal(sameTargetBranch[0].query, '')
+    assert.equal(sameTargetBranch[0].showOnly ?? 'all', 'all')
+    assert.equal(sameTargetRequests.filter(r => r.kind === 'workspace_root').length, 1)
+    assert.ok(sameTargetRequests.filter(r => r.path.endsWith('/navigation/focus/task/' + parent.id)).length <= 1)
+    assert.equal(searchReads, 2)
+    assert.equal(await query.inputValue(), '')
+    await h.page.locator('.focus-clear-btn').click(); await h.idle()
+    await query.press('Enter')
+    await h.page.getByRole('button', { name: 'Focus task', exact: true }).click()
+    await h.page.locator('#entity-shared-child-1').waitFor({ state: 'visible', timeout: 10000 }); await h.idle()
+    await h.page.locator('.focus-crumb-link').getByText(root.name, { exact: true }).click()
+    await h.page.locator('#entity-' + root.id).waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('.focus-crumb-link').getByText(parent.title, { exact: true }).click()
+    await h.page.locator('#entity-shared-child-0').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('.focus-clear-btn').click(); await h.idle()
+    assert.equal(await query.inputValue(), 'needle'); assert.equal(await h.page.locator('.filter-select').first().inputValue(), 'exact')
+    await h.page.getByRole('button', { name: 'Audit', exact: true }).click()
+    await h.page.locator('.audit-entity-summary').first().click()
+    await h.page.locator('#entity-shared-child-1').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.getByRole('button', { name: 'Back to workspace Audit entry', exact: true }).click()
+    await h.page.locator('.audit-entity-summary').first().waitFor({ state: 'visible' })
+    await h.page.locator('.workspace-tabs').getByRole('button', { name: 'Projects', exact: true }).click()
+    assert.equal(await query.inputValue(), 'needle')
+    await h.page.locator('.filter-bar').getByRole('button', { name: 'All', exact: true }).click()
+    await h.page.locator('.filter-select').first().selectOption('any'); await query.fill(''); await h.idle()
+    await h.page.locator('#entity-' + root.id + ' .entity-type-project').first().dblclick()
+    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('#entity-shared-target .entity-type-label').first().dblclick()
+    await h.page.locator('#entity-shared-child-1').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('.focus-clear-btn').click(); await h.idle()
+    assert.equal(await h.page.locator('#entity-shared-target').count(), 0)
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+  } finally { await h.close() }
+})
+
+test('focused deep task filter refresh rehydrates and reloads children absent from root page one', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture(), root = fixture.projects[0], template = fixture.tasks[0]
+  const parent = { ...template, id: 'deep-target', project_id: 'external-project', parent_id: null, status: 'todo', priority: 8 }
+  const child = { ...template, id: 'deep-child', project_id: parent.project_id, parent_id: parent.id, status: 'todo', priority: 7 }
+  fixture.projects = [root, { ...root, id: parent.project_id, parent_id: root.id }]
+  fixture.tasks = [parent, child]
+  fixture.timelineEvents = [focusEvent(fixture, 'task', parent.id)]
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
+    await h.page.locator('#timeline-event-filtered-focus').click()
+    await h.page.locator('#entity-deep-child').waitFor({ state: 'visible', timeout: 10000 }); await h.idle()
+    const before = h.requests.length
+    await h.page.locator('.filter-select').first().selectOption('above'); await h.idle()
+    assert.ok(h.requests.slice(before).some(r => r.path.includes('/navigation/focus/task/deep-target')), 'Filter reset must explicitly rehydrate the focused target')
+    try { await h.page.locator('#entity-deep-child').waitFor({ state: 'visible', timeout: 10000 }) }
+    catch (error) { throw new Error(error.message + '\n' + JSON.stringify({ requests: h.requests.slice(before), caps: h.caps(), text: (await h.page.locator('body').innerText()).slice(-1800) })) }
+    const refreshed = h.requests.slice(before)
+    assert.ok(refreshed.some(r => r.kind === 'task' && r.parent === parent.id), 'Focused branch must reload independently of root pagination')
+    assert.ok(refreshed.filter(r => r.kind === 'workspace_root').every(r => !r.taskIds?.includes(parent.id)))
+    await h.page.locator('#entity-deep-child').waitFor({ state: 'visible', timeout: 10000 })
+    const tasksOnlyStart = h.requests.length
+    const tasksOnlyBranch = h.gate(r => r.kind === 'task' && r.parent === parent.id)
+    await h.page.locator('.filter-bar').getByRole('button', { name: 'Tasks', exact: true }).click()
+    await h.bounded(tasksOnlyBranch.arrived, 10000, 'Tasks-only focused branch with an empty workspace root'); await h.idle()
+    const tasksOnlyRoot = h.requests.slice(tasksOnlyStart).find(r => r.kind === 'workspace_root')
+    assert.equal(tasksOnlyRoot.showOnly, 'tasks'); assert.equal(tasksOnlyRoot.projectItems, 0); assert.equal(tasksOnlyRoot.taskItems, 0)
+    await h.page.locator('#entity-deep-child').waitFor({ state: 'visible', timeout: 10000 })
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+  } finally { await h.close() }
+})
+
+test('focused filter reset retains old physical ownership and recovers after its callback', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture(), root = fixture.projects[0], template = fixture.tasks[0]
+  const parent = { ...template, id: 'held-focus', project_id: root.id, parent_id: null, status: 'todo', priority: 8 }
+  const child = { ...template, id: 'retired-child', project_id: root.id, parent_id: parent.id, status: 'todo', priority: 7 }
+  fixture.projects = [root]; fixture.tasks = [parent, child]
+  fixture.timelineEvents = [focusEvent(fixture, 'task', parent.id)]
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    // A completed cache is retired by the first focused filter edit.
+    await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
+    await h.page.locator('#timeline-event-filtered-focus').click(); await h.idle()
+    const old = h.gate(r => r.kind === 'task' && r.parent === parent.id, { hold: true })
+    await h.page.locator('.filter-select').first().selectOption('above')
+    try { await h.bounded(old.arrived, 10000, 'Held old focused branch') }
+    catch (error) { throw new Error(error.message + '\n' + JSON.stringify({ requests: h.requests.slice(-12), caps: h.caps(), text: (await h.page.locator('body').innerText()).slice(-1800) })) }
+    fixture.tasks = [parent, { ...child, id: 'current-child' }]
+    const before = h.requests.length
+    const currentFocus = h.gate(r => r.path.endsWith('/navigation/focus/task/' + parent.id))
+    await h.page.locator('.filter-select').first().selectOption('any')
+    await h.bounded(currentFocus.arrived, 10000, 'Replacement focused target hydration')
+    assert.equal(old.receipt.done, false, 'Logical retirement must retain physical ownership')
+    assert.ok(h.caps().activeBranches >= 1)
+    assert.equal(h.requests.slice(before).filter(r => r.path.endsWith('/navigation/focus/task/' + parent.id)).length, 1)
+    assert.equal(await h.page.locator('#entity-current-child').count(), 0, 'Replacement owner waits for the exact old physical callback')
+    old.release()
+    await h.page.locator('#entity-current-child').waitFor({ state: 'visible', timeout: 10000 }); await h.idle()
+    assert.equal(await h.page.locator('#entity-retired-child').count(), 0, 'Old filtered response must not revive retired children')
+    assert.equal(await h.page.locator('#entity-current-child').count(), 1)
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+  } finally { await h.close() }
+})
+
 test('shared navigation POST holds every owner until completion and retries only the failed sibling', { timeout: 60000 }, async () => {
   const fixture = hierarchyFixture(), template = fixture.projects[0]
   fixture.projects = ['a', 'b'].flatMap(id => [

@@ -5,6 +5,7 @@ import Api
 import Char
 import Dict
 import Feature.Focus as Focus
+import Feature.FocusedFilters
 import Helpers exposing (buildFragment, focusElement, pushUrl, saveFiltersCmd)
 import Html exposing (..)
 import Html.Attributes exposing (attribute, class, disabled, selected, title, type_, value)
@@ -457,19 +458,8 @@ update msg model =
                                 , returnContext = Just (Focus.timelineReturnContext wsId model.timeline event)
                             }
 
-                        currentSearch =
-                            model.search
-
-                        updatedSearch =
-                            { currentSearch
-                                | unifiedResults = Nothing
-                                , isSearching = False
-                                , searchError = Nothing
-                                , activeRequestQuery = Nothing
-                                , activeRequest = Nothing
-                            }
                     in
-                    ( { model | activeTab = targetTab, focus = updatedFocus, search = updatedSearch }
+                    ( Feature.FocusedFilters.enter { model | activeTab = targetTab, focus = updatedFocus }
                     , pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry) Nothing)
                     )
 

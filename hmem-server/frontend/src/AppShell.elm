@@ -15,6 +15,7 @@ import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
+import Feature.FocusedFilters
 import Feature.Groups
 import Feature.Mutations
 import Feature.Observation
@@ -94,6 +95,7 @@ initModel key url page flags storedFilters legacyFrag =
             , webSocket = Feature.WebSocket.init
             , dataLoading = Feature.DataLoading.init
             , search = Feature.Search.init
+            , focusedFilters = Nothing
             , editing = Feature.Editing.init
             , memory = emptyMemoryModel
             , dependencies = Feature.Dependencies.init
@@ -131,6 +133,7 @@ finalizeInit page model =
         , dataLoading = Feature.DataLoading.prepareForPageLoad page model.dataLoading
     }
         |> Helpers.retireProjectOperations
+        |> Feature.FocusedFilters.initialize
 
 
 handleOwned : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
@@ -944,6 +947,7 @@ clearSessionScopedState model =
         , observations = Feature.Observation.retireSessionState model.observations
         , dataLoading = stopAllLoading model.dataLoading
         , search = Feature.Search.init
+        , focusedFilters = Nothing
         , editing = let editing = Feature.Editing.retireForms model.editing in { editing | editState = Nothing }
         , memory = emptyMemoryModel
         , dependencies = Feature.Dependencies.resetCache model.dependencies

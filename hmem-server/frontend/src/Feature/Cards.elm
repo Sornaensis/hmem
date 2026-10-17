@@ -3490,7 +3490,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                 && previous.cards.collapsedNodes == model.cards.collapsedNodes
                 && previous.focus.focusedEntity == model.focus.focusedEntity))
         awaitingFilteredRoots =
-            preserveScroll && (model.dataLoading.rootNavigationRequest
+            model.focus.focusedEntity == Nothing && previous.focus.focusedEntity == model.focus.focusedEntity && preserveScroll && (model.dataLoading.rootNavigationRequest
                 |> Maybe.map (\request -> request.inFlight && not request.succeeded)
                 |> Maybe.withDefault False)
         active = model.auth.status == AuthReady && model.activeTab == ProjectsTab

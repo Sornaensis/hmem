@@ -6,6 +6,7 @@ import Browser.Navigation as Nav
 import Char
 import Dict exposing (Dict)
 import Feature.ChangeStream
+import Feature.FocusedFilters
 import Html exposing (Html, button, text)
 import Html.Attributes exposing (attribute, class, title, type_)
 import Html.Events exposing (stopPropagationOn)
@@ -430,7 +431,10 @@ localStorageKey wsId =
 
 
 encodeFilterState : Model -> Encode.Value
-encodeFilterState model =
+encodeFilterState original =
+    let
+        model = { original | search = Feature.FocusedFilters.normalSearch original }
+    in
     Encode.object
         [ ( "workspaceId"
           , case model.selectedWorkspaceId of
@@ -548,7 +552,7 @@ applyStoredFilters json model =
                 |> Decode.map (\ids -> Dict.fromList (List.map (\id -> ( id, True )) (List.filter (not << String.startsWith "group-") ids)))
 
         currentSearch =
-            model.search
+            Feature.FocusedFilters.normalSearch model
 
         updatedSearch =
             { currentSearch
@@ -574,10 +578,10 @@ applyStoredFilters json model =
             }
     in
     { model
-        | search = updatedSearch
-        , cards = updatedCards
+        | cards = updatedCards
         , timeline = restoreTimelinePreferences json model.timeline
     }
+        |> Feature.FocusedFilters.stored updatedSearch
 
 
 restoreTimelinePreferences : Encode.Value -> TimelineModel -> TimelineModel

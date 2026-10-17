@@ -1,4 +1,4 @@
-module UpdateRouter exposing (MainOwnedMsg(..), update)
+module UpdateRouter exposing (MainOwnedMsg(..), reconcileFocusedFilters, update)
 
 import Dict
 import Api
@@ -13,6 +13,7 @@ import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
+import Feature.FocusedFilters as FocusedFilters
 import Feature.Groups
 import Feature.Mutations
 import Feature.Observation
@@ -47,12 +48,40 @@ update msg model =
         _ ->
             route msg model
                 |> Result.map
-                    (Feature.Cards.prepareViewportFor msg model
+                    (reconcileFocusedFilters model
+                        >> Feature.Cards.prepareViewportFor msg model
                         >> Feature.Observation.refreshHistory
                         >> Feature.Observation.refreshViewport model
                         >> Feature.DataLoading.syncPlanningCountsResult
                         >> Feature.Cards.refreshViewportFor msg model
                     )
+
+
+reconcileFocusedFilters : Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+reconcileFocusedFilters previous ( updated, command ) =
+    let
+        reconciled = FocusedFilters.reconcile previous updated
+        transitioned = ((previous.focusedFilters == Nothing) /= (reconciled.focusedFilters == Nothing)
+                || previous.focus.focusedEntity /= reconciled.focus.focusedEntity
+                || Maybe.map .entryRevision previous.focusedFilters /= Maybe.map .entryRevision reconciled.focusedFilters)
+            && previous.selectedWorkspaceId == reconciled.selectedWorkspaceId
+            && previous.sessionRequestEpoch == reconciled.sessionRequestEpoch
+    in
+    if transitioned then
+        let
+            filtersChanged = FocusedFilters.capture previous.search /= FocusedFilters.capture reconciled.search
+            exiting = reconciled.focusedFilters == Nothing && previous.focusedFilters /= Nothing
+            ( reloaded, reloadCommand ) = if filtersChanged || exiting then Feature.DataLoading.revalidateNavigationForFilters reconciled else ( reconciled, Cmd.none )
+            ( focused, focusCommand ) = case ( reloaded.selectedWorkspaceId, reloaded.focus.focusedEntity ) of
+                ( Just workspaceId, Just ( kind, id ) ) -> Feature.DataLoading.beginNavigationFocus workspaceId kind id reloaded
+                _ -> ( reloaded, Cmd.none )
+            ( expanded, branchCommand ) =
+                if focused.focus.focusedEntity /= Nothing then Feature.DataLoading.ensureExpandedBranches focused else ( focused, Cmd.none )
+            ( admitted, admissionCommand ) = Feature.DataLoading.pumpNavigation expanded
+        in
+        ( admitted, Cmd.batch [ command, reloadCommand, focusCommand, branchCommand, admissionCommand ] )
+    else
+        ( reconciled, command )
 
 
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )

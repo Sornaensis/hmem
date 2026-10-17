@@ -60,6 +60,7 @@ type alias Model =
     , webSocket : WebSocketModel
     , dataLoading : DataLoadingModel
     , search : SearchModel
+    , focusedFilters : Maybe FocusedFilterContext
     , editing : EditingModel
     , memory : MemoryModel
     , dependencies : DependenciesModel
@@ -410,6 +411,27 @@ type alias SearchModel =
     , filterMemoryPinned : Maybe Bool
     , filterMemoryActiveLinked : Bool
     , filterTags : List String
+    }
+
+
+type alias HierarchyFilters =
+    { query : String
+    , showOnly : FilterShowOnly
+    , showEmptyProjects : Bool
+    , priority : FilterPriority
+    , projectStatuses : List String
+    , taskStatuses : List String
+    }
+
+
+type alias FocusedFilterContext =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , target : Maybe ( String, String )
+    , entryRevision : Int
+    , base : HierarchyFilters
+    , projectIds : Set String
+    , taskIds : Set String
     }
 
 

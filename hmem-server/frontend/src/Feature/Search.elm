@@ -18,6 +18,7 @@ module Feature.Search exposing
 
 import Api
 import Feature.DataLoading
+import Feature.FocusedFilters
 import Feature.Observation
 import Dict
 import Permissions
@@ -239,7 +240,9 @@ update msg model =
                     model.search
 
                 newStatuses =
-                    if List.member status searchModel.filterProjectStatuses then
+                    if List.isEmpty searchModel.filterProjectStatuses then
+                        List.filter ((/=) status) [ "active", "paused", "completed", "archived" ]
+                    else if List.member status searchModel.filterProjectStatuses then
                         List.filter (\s -> s /= status) searchModel.filterProjectStatuses
 
                     else
@@ -256,7 +259,9 @@ update msg model =
                     model.search
 
                 newStatuses =
-                    if List.member status searchModel.filterTaskStatuses then
+                    if List.isEmpty searchModel.filterTaskStatuses then
+                        List.filter ((/=) status) [ "todo", "in_progress", "blocked", "done", "cancelled" ]
+                    else if List.member status searchModel.filterTaskStatuses then
                         List.filter (\s -> s /= status) searchModel.filterTaskStatuses
 
                     else
@@ -359,16 +364,8 @@ unifiedSearchEntityTypes workspaceType =
 
 
 clearTransientSearchState : SearchModel -> SearchModel
-clearTransientSearchState searchModel =
-    { searchModel
-        | unifiedResults = Nothing
-        , isSearching = False
-        , searchError = Nothing
-        , activeRequestQuery = Nothing
-        , activeRequest = Nothing
-        , submittedQuery = Nothing
-        , refreshPending = False
-    }
+clearTransientSearchState =
+    Feature.FocusedFilters.clearTransientSearchState
 
 
 clearUnifiedSearchState : SearchModel -> SearchModel
@@ -440,6 +437,7 @@ navigateToSearchResult entityType entityId model =
                 , search = clearedSearch
                 , focus = updatedFocus
             }
+                |> (if isFocusableEntity then Feature.FocusedFilters.enter else identity)
     in
     if entityType == "observation" then
         let
@@ -515,7 +513,11 @@ viewSearchBar model =
 viewFilterBar : Model -> Html Msg
 viewFilterBar model =
     div [ class "filter-bar" ]
-        [ div [ class "filter-group" ]
+        [ if model.focusedFilters /= Nothing then
+            span [ class "filter-group" ] [ text "Focused view filters · workspace filters return when focus closes" ]
+          else
+            text ""
+        , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Show:" ]
             , viewFilterPill "All" (model.search.filterShowOnly == ShowAll) (SetFilterShowOnly ShowAll)
             , viewFilterPill "Projects" (model.search.filterShowOnly == ShowProjectsOnly) (SetFilterShowOnly ShowProjectsOnly)
@@ -527,18 +529,18 @@ viewFilterBar model =
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Project:" ]
-            , viewFilterPill "Active" (List.member "active" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "active")
-            , viewFilterPill "Paused" (List.member "paused" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "paused")
-            , viewFilterPill "Completed" (List.member "completed" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "completed")
-            , viewFilterPill "Archived" (List.member "archived" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "archived")
+            , viewFilterPill "Active" (List.isEmpty model.search.filterProjectStatuses || List.member "active" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "active")
+            , viewFilterPill "Paused" (List.isEmpty model.search.filterProjectStatuses || List.member "paused" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "paused")
+            , viewFilterPill "Completed" (List.isEmpty model.search.filterProjectStatuses || List.member "completed" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "completed")
+            , viewFilterPill "Archived" (List.isEmpty model.search.filterProjectStatuses || List.member "archived" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "archived")
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Task:" ]
-            , viewFilterPill "Todo" (List.member "todo" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "todo")
-            , viewFilterPill "In Progress" (List.member "in_progress" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "in_progress")
-            , viewFilterPill "Blocked" (List.member "blocked" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "blocked")
-            , viewFilterPill "Done" (List.member "done" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "done")
-            , viewFilterPill "Cancelled" (List.member "cancelled" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "cancelled")
+            , viewFilterPill "Todo" (List.isEmpty model.search.filterTaskStatuses || List.member "todo" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "todo")
+            , viewFilterPill "In Progress" (List.isEmpty model.search.filterTaskStatuses || List.member "in_progress" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "in_progress")
+            , viewFilterPill "Blocked" (List.isEmpty model.search.filterTaskStatuses || List.member "blocked" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "blocked")
+            , viewFilterPill "Done" (List.isEmpty model.search.filterTaskStatuses || List.member "done" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "done")
+            , viewFilterPill "Cancelled" (List.isEmpty model.search.filterTaskStatuses || List.member "cancelled" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "cancelled")
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Priority:" ]

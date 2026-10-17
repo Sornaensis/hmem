@@ -140,7 +140,7 @@ updateCore msg model =
 
                 UpdateRouter.HandleInAppShell ownedMsg ->
                     AppShell.prepareOwned ownedMsg model
-            ) |> Feature.Observation.refreshViewport model |> Feature.DataLoading.syncPlanningCountsResult |> Cards.refreshViewport model |> Feature.Move.reconcile
+            ) |> UpdateRouter.reconcileFocusedFilters model |> Feature.Observation.refreshViewport model |> Feature.DataLoading.syncPlanningCountsResult |> Cards.refreshViewport model |> Feature.Move.reconcile
 
 
 

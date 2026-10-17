@@ -4,6 +4,7 @@ import ActorAttribution
 import Api
 import Dict
 import Feature.Focus as Focus
+import Feature.FocusedFilters
 import Feature.AuditDiff
 import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, pushUrl)
 import Html exposing (..)
@@ -95,18 +96,6 @@ update msg model =
                                 focusModel =
                                     model.focus
 
-                                currentSearch =
-                                    model.search
-
-                                updatedSearch =
-                                    { currentSearch
-                                        | unifiedResults = Nothing
-                                        , isSearching = False
-                                        , searchError = Nothing
-                                        , activeRequestQuery = Nothing
-                                        , activeRequest = Nothing
-                                    }
-
                                 newHistory =
                                     List.take (focusModel.historyIndex + 1) focusModel.history ++ [ focusEntry ]
 
@@ -123,7 +112,8 @@ update msg model =
                                         , returnContext = Just (Focus.auditReturnContext returnSource wsId returnFilters entryExpanded auditEntry focusEntry)
                                     }
                                 )
-                                { model | selectedWorkspaceId = Just wsId, activeTab = targetTab, search = updatedSearch }
+                                { model | selectedWorkspaceId = Just wsId, activeTab = targetTab, search = Feature.FocusedFilters.clearTransientSearchState model.search }
+                                |> Feature.FocusedFilters.enter
                             , pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry) Nothing)
                             )
 

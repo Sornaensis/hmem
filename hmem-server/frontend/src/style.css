@@ -3674,7 +3674,9 @@ textarea.observation-edit-content {
 .timeline-line-hitarea { stroke: transparent; stroke-width: 14; pointer-events: stroke; }
 .timeline-line.timeline-line-active { stroke-width: 5; filter: brightness(1.3); }
 .timeline-chart-tooltip-layer { position: absolute; inset: 28px 0 auto; pointer-events: none; }
-.timeline-chart-tooltip { position: sticky; left: 8px; right: 8px; width: min(280px, calc(100vw - 100px)); box-sizing: border-box; padding: 0.5rem 0.65rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); box-shadow: 0 3px 12px #0006; font-size: 0.75rem; line-height: 1.4; }
+.timeline-tooltip-group + .timeline-tooltip-group { margin-top: 0.35rem; }
+.timeline-tooltip-heading { font-weight: 600; }
+.timeline-chart-tooltip { position: sticky; left: 8px; right: 8px; width: min(280px, calc(100vw - 100px)); box-sizing: border-box; padding: 0.5rem 0.65rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); box-shadow: 0 3px 12px #0006; font-size: 0.75rem; line-height: 1.25; }
 .timeline-chart-grid { stroke: rgba(148, 163, 184, 0.28); stroke-width: 1; }
 .timeline-chart-axis { fill: var(--text-muted); font-size: 12px; text-anchor: end; }
 .timeline-chart-x-axis { fill: var(--text-muted); font-size: 11px; text-anchor: middle; }

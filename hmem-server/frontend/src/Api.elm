@@ -902,6 +902,9 @@ type alias WorkspaceTimelineBucket =
     , openCounts : Maybe TimelineOpenCounts
     , openAsOf : Maybe String
     , openStatus : String
+    , observationTotal : Maybe Int
+    , observationAsOf : Maybe String
+    , observationStatus : String
     }
 
 
@@ -2209,6 +2212,9 @@ workspaceTimelineBucketDecoder =
         |> optional "open_counts" (D.nullable timelineOpenCountsDecoder) Nothing
         |> optional "open_as_of" (D.nullable D.string) Nothing
         |> optional "open_status" D.string "history_unavailable"
+        |> optional "observation_total" (D.nullable (D.int |> D.andThen (\count -> if count >= 0 then D.succeed count else D.fail "Observation inventory must be nonnegative"))) Nothing
+        |> optional "observation_as_of" (D.nullable D.string) Nothing
+        |> optional "observation_status" D.string "history_unavailable"
 
 
 timelineOpenCountsDecoder : Decoder TimelineOpenCounts

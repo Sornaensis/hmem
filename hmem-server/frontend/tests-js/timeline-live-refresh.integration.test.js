@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs';
 import {
   api,
   json,
@@ -19,6 +20,71 @@ const request = (path, method, body) => json(path, {
 
 const sumSeries = (buckets, entity, action) =>
   buckets.reduce((total, bucket) => total + bucket.series[entity][action], 0);
+
+test('actual historical observation carry-in reaches the production tooltip unchanged', { timeout: 60000 }, async () => {
+  const workspace = await request('/api/v1/workspaces', 'POST', {
+    name: `timeline-carry-in-${Date.now()}`, workspace_type: 'repository',
+  });
+  const observation = await request('/api/v1/observations', 'POST', {
+    workspace_id: workspace.id,
+    subjects: [{ subject_kind: 'file', subject: 'src/Timeline.hs' }, { subject_kind: 'glob', subject: 'src/**/*.hs' }],
+    git_sha: '0123456789abcdef0123456789abcdef01234567', content: 'Historical carry-in',
+  });
+  const count = () => request('/api/v1/observations/count', 'POST', { workspace_id: workspace.id });
+  assert.equal((await count()).total_count, 1);
+  const snapshot = async () => {
+    const now = Date.now();
+    const query = new URLSearchParams({ since: new Date(now - 86400000).toISOString(), until: new Date(now + 86400000).toISOString(), bucket: 'day' });
+    const response = await json(`/api/v1/workspaces/${workspace.id}/timeline/buckets?${query}`);
+    const current = response.buckets.find(bucket => bucket.observation_status === 'available' && bucket.observation_total === 1 && Date.parse(bucket.observation_as_of) >= now);
+    assert.ok(current, 'current sample counts the multi-subject observation once');
+    return current.observation_as_of;
+  };
+  const since = await snapshot();
+  let until = await snapshot();
+  for (let attempt = 0; until === since && attempt < 3; attempt++) until = await snapshot();
+  assert.notEqual(until, since, 'sequential statement snapshots establish a nonempty historical interval');
+  await request(`/api/v1/observations/${observation.id}`, 'DELETE');
+  assert.equal((await count()).total_count, 0);
+  const historical = await json(`/api/v1/workspaces/${workspace.id}/timeline/buckets?${new URLSearchParams({ since, until, bucket: 'day' })}`);
+  const sample = historical.buckets.at(-1);
+  assert.equal(sample.observation_total, 1);
+  assert.equal(sample.observation_status, 'available');
+  assert.equal(sample.observation_as_of, until);
+  assert.equal(sumSeries(historical.buckets, 'observation', 'created'), 0);
+  assert.equal(sumSeries(historical.buckets, 'observation', 'deleted'), 0);
+
+  // Replay the complete actual response through production Main. Only the
+  // surrounding empty shell and transport are controlled browser fixtures.
+  const unchanged = JSON.stringify(historical);
+  const fixture = hierarchyFixture();
+  fixture.workspace = workspace;
+  fixture.projects = []; fixture.tasks = []; fixture.observations = [];
+  const h = await openHierarchy(fixture);
+  try {
+    await h.page.route('**/api/v1/**', async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/timeline/buckets')) await route.fulfill({ status: 200, contentType: 'application/json', body: unchanged });
+      else if (path.endsWith('/timeline')) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], has_more: false }) });
+      else await route.fallback();
+    });
+    await h.page.goto(h.origin + '/workspace/' + workspace.id + '#tab=timeline');
+    const point = h.page.locator('#timeline-point-lifecycle-observations-' + (historical.buckets.length - 1));
+    await point.waitFor();
+    await h.idle();
+    await point.focus();
+    const tooltip = h.page.locator('.timeline-chart-tooltip');
+    await tooltip.waitFor();
+    assert.equal(await tooltip.getAttribute('data-tooltip-context'), 'line');
+    assert.equal(await tooltip.textContent(), 'ObservationsTotal: 1');
+    assert.match(await point.getAttribute('aria-label'), /Observations Total: 1/);
+    assert.doesNotMatch(await point.getAttribute('aria-label'), /Created: 0|Deleted: 0|Total: 0/);
+    assert.deepEqual(await h.page.locator('.timeline-tooltip-heading').allTextContents(), ['Observations']);
+    assert.equal(await point.locator('.timeline-point').getAttribute('cy'), '236', 'the plotted observation-created value stays zero');
+    assert.equal(JSON.stringify(historical), unchanged);
+    assert.deepEqual(h.errors, []);
+  } finally { await h.close(); }
+});
 
 async function assertOpenInventory(workspace, expected) {
   const canonical = await json(`/api/v1/workspaces/${workspace}/planning-counts`);

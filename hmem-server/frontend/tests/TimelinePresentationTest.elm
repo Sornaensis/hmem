@@ -49,7 +49,7 @@ bucket =
     { bucketStart = since, bucketEnd = until, label = "server-bucket-identity"
     , counts = { project = legacy, subproject = legacy, task = legacy, subtask = legacy }, totals = legacy
     , series = { project = zero, task = count, subtask = zero, observation = zero }, seriesTotals = count
-    , openCounts = Just { projects = 2, tasks = 5 }, openAsOf = Just until, openStatus = "available" }
+    , openCounts = Just { projects = 2, tasks = 5 }, openAsOf = Just until, openStatus = "available", observationTotal = Just 0, observationAsOf = Just until, observationStatus = "available" }
 
 model : TimelineModel -> Model
 model timeline =
@@ -88,7 +88,7 @@ suite =
             in
             Expect.all
                 [ \_ -> view |> Query.find [ Selector.class "timeline-chart-x-axis" ] |> Query.has [ Selector.text "2026-03-29 01:00", Selector.attribute (Attributes.attribute "aria-label" "[2026-03-29 01:00, 2026-03-30 02:00)") ]
-                , \_ -> point |> Query.has [ Selector.attribute (Attributes.attribute "aria-label" "0 Observations; 0 Projects Created; 5 Tasks/Subtasks Created; 0 Projects Completed; 0 Tasks/Subtasks Completed; 0 Projects Deleted; 0 Tasks/Subtasks Deleted; 0 Tasks/Subtasks Cancelled; 0 Projects Archived. Lifecycle activity, Create, 2026-03-29 01:00 to 2026-03-30 02:00 exclusive, 5, not selected") ]
+                , \_ -> point |> Query.has [ Selector.attribute (Attributes.attribute "aria-label" "Tasks/Subtasks Created: 5. Lifecycle activity, Create, 2026-03-29 01:00 to 2026-03-30 02:00 exclusive, not selected") ]
                 , \_ -> point |> Query.findAll [ Selector.tag "title" ] |> Query.count (Expect.equal 0)
                 , \_ -> point |> Event.simulate Event.click |> Event.expect (SelectTimelineHistogramBucket bucket.label since until)
                 , \_ -> view |> Query.hasNot [ Selector.text bucket.label ]

@@ -7,6 +7,7 @@ import Expect
 import Feature.Timeline
 import Helpers
 import Http
+import Html.Attributes as Attributes
 import Json.Decode as Decode
 import TimestampDisplay
 import Test exposing (..)
@@ -20,7 +21,58 @@ import Url
 suite : Test
 suite =
     describe "lifecycle line graph helpers"
-        [ test "open inventory decoder distinguishes available, unknown, future and older payloads" <| \_ ->
+        [ test "observation inventory decoder preserves zero, unknown, future and legacy absence" <| \_ ->
+            Expect.all
+                [ \_ -> decodeObservationFields "" |> Expect.equal (Ok [ ( Nothing, Nothing, "history_unavailable" ) ])
+                , \_ -> decodeObservationFields ",\"observation_total\":0,\"observation_as_of\":\"2026-01-02T00:00:00Z\",\"observation_status\":\"available\"" |> Expect.equal (Ok [ ( Just 0, Just "2026-01-02T00:00:00Z", "available" ) ])
+                , \_ -> decodeObservationFields ",\"observation_total\":4294967296,\"observation_status\":\"available\"" |> Expect.equal (Ok [ ( Just 4294967296, Nothing, "available" ) ])
+                , \_ -> decodeObservationFields ",\"observation_total\":null,\"observation_status\":\"future\"" |> Expect.equal (Ok [ ( Nothing, Nothing, "future" ) ])
+                , \_ -> decodeObservationFields ",\"observation_total\":-1" |> Expect.err
+                ] ()
+        , test "tooltip context explicitly resolves pointer before keyboard and falls back on leave" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                base = { initial | histogramBuckets = [ stockBucket ], chartBarFocus = Just 0 }
+                line = { series = "created", index = 0 }
+                focused = { base | chartLineFocus = Just line }
+                barHovered = { focused | chartBarHover = Just 0 }
+                lineHovered = { barHovered | chartLineHover = Just line }
+            in
+            [ base, focused, barHovered, lineHovered, { lineHovered | chartLineHover = Nothing }, { focused | chartLineFocus = Just { series = "hidden", index = 0 } } ]
+                |> List.map Feature.Timeline.activeTooltipContext
+                |> Expect.equal [ Just (Feature.Timeline.BarTooltip 0), Just (Feature.Timeline.LineTooltip line), Just (Feature.Timeline.BarTooltip 0), Just (Feature.Timeline.LineTooltip line), Just (Feature.Timeline.BarTooltip 0), Just (Feature.Timeline.BarTooltip 0) ]
+        , test "observation totals survive empty interval activity independently of action toggles" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                timeline = { initial | chartActions = Dict.map (\_ _ -> False) initial.chartActions }
+                activity = stockBucket.series
+                observations = activity.observation
+                changed = { stockBucket | series = { activity | observation = { observations | created = 2, deleted = 3 } } }
+                summary = Feature.Timeline.selectedBucketSummary timeline
+            in
+            Expect.all
+                [ \_ -> summary { stockBucket | observationTotal = Just 7 } |> Expect.equal [ "Observations Total: 7" ]
+                , \_ -> summary changed |> Expect.equal [ "Observations Created: 2", "Observations Deleted: 3" ]
+                , \_ -> summary { stockBucket | observationTotal = Nothing, observationStatus = "history_unavailable" } |> Expect.equal [ "Observations Total: history unavailable" ]
+                , \_ -> summary { stockBucket | observationTotal = Nothing, observationStatus = "future" } |> Expect.equal [ "Observations Total: future" ]
+                , \_ -> Feature.Timeline.tooltipSummary (Feature.Timeline.barTooltipGroups changed) |> Expect.equal [ "Open projects: 2", "Open tasks + subtasks: 6" ]
+                ] ()
+        , test "all-zero rows stay empty for every target/action combination while hit targets remain" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                choices = [ False, True ]
+                targets = List.concatMap (\p -> List.concatMap (\t -> List.concatMap (\s -> List.map (\o -> { projects = p, tasks = t, subtasks = s, observations = o }) choices) choices) choices) choices
+                actions = List.concatMap (\a -> List.concatMap (\b -> List.concatMap (\c -> List.concatMap (\d -> List.map (\e -> Dict.fromList [ ( "created", a ), ( "completed", b ), ( "deleted", c ), ( "cancelled", d ), ( "archived", e ) ]) choices) choices) choices) choices) choices
+                all = List.concatMap (\target -> List.map (\action -> Feature.Timeline.selectedBucketSummary { initial | chartSeries = target, chartActions = action } stockBucket) actions) targets
+                rendered = Feature.Timeline.viewTimelineHistogram TimestampDisplay.empty { initial | histogramBuckets = [ stockBucket ], chartLineFocus = Just { series = "created", index = 0 } } |> Query.fromHtml
+            in
+            Expect.all
+                [ \_ -> all |> List.all List.isEmpty |> Expect.equal True
+                , \_ -> rendered |> Query.findAll [ Selector.class "timeline-chart-tooltip" ] |> Query.count (Expect.equal 0)
+                , \_ -> rendered |> Query.findAll [ Selector.class "timeline-point-control" ] |> Query.count (Expect.equal 6)
+                , \_ -> rendered |> Query.findAll [ Selector.attribute (Attributes.attribute "aria-describedby" "") ] |> Query.count (Expect.equal 0)
+                ] ()
+        , test "open inventory decoder distinguishes available, unknown, future and older payloads" <| \_ ->
             Expect.all
                 [ \_ -> decodeOpenFields "" |> Expect.equal (Ok [ ( Nothing, Nothing, "history_unavailable" ) ])
                 , \_ -> decodeOpenFields ",\"open_counts\":{\"projects\":2,\"tasks\":6},\"open_as_of\":\"2026-01-01T12:00:00Z\",\"open_status\":\"available\"" |> Expect.equal (Ok [ ( Just { projects = 2, tasks = 6 }, Just "2026-01-01T12:00:00Z", "available" ) ])
@@ -92,10 +144,10 @@ suite =
                 , \_ -> values observationOnly |> Expect.equal [ ( "observations", [ 101 ] ) ]
                 , \_ -> values noObservations |> List.map Tuple.second |> Expect.equal [ [ 28 ], [ 37 ], [ 46 ], [ 5 ], [ 48 ] ]
                 , \_ -> Feature.Timeline.selectedBucketSummary timeline mixed |> Expect.equal
-                    [ "101 Observations", "2 Projects Created", "26 Tasks/Subtasks Created", "3 Projects Completed", "34 Tasks/Subtasks Completed", "4 Projects Deleted", "42 Tasks/Subtasks Deleted", "48 Tasks/Subtasks Cancelled", "5 Projects Archived" ]
-                , \_ -> Feature.Timeline.selectedBucketSummary { observationOnly | chartSeries = { projects = False, tasks = False, subtasks = False, observations = False } } mixed |> Expect.equal [ "No activity selected." ]
-                , \_ -> Feature.Timeline.selectedBucketSummary { timeline | chartSeries = { projects = False, tasks = False, subtasks = True, observations = False }, chartActions = Dict.fromList [ ( "completed", True ), ( "archived", True ) ] } mixed |> Expect.equal [ "23 Subtasks Completed" ]
-                , \_ -> Feature.Timeline.selectedBucketSummary { timeline | chartSeries = { projects = False, tasks = True, subtasks = False, observations = False }, chartActions = Dict.fromList [ ( "created", True ) ] } stockBucket |> Expect.equal [ "0 Tasks Created" ]
+                    [ "Projects Created: 2", "Projects Completed: 3", "Projects Deleted: 4", "Projects Archived: 5", "Tasks/Subtasks Created: 26", "Tasks/Subtasks Completed: 34", "Tasks/Subtasks Deleted: 42", "Tasks/Subtasks Cancelled: 48", "Observations Created: 101", "Observations Deleted: 103" ]
+                , \_ -> Feature.Timeline.selectedBucketSummary { observationOnly | chartSeries = { projects = False, tasks = False, subtasks = False, observations = False } } mixed |> Expect.equal []
+                , \_ -> Feature.Timeline.selectedBucketSummary { timeline | chartSeries = { projects = False, tasks = False, subtasks = True, observations = False }, chartActions = Dict.fromList [ ( "completed", True ), ( "archived", True ) ] } mixed |> Expect.equal [ "Subtasks Completed: 23" ]
+                , \_ -> Feature.Timeline.selectedBucketSummary { timeline | chartSeries = { projects = False, tasks = True, subtasks = False, observations = False }, chartActions = Dict.fromList [ ( "created", True ) ] } stockBucket |> Expect.equal []
                 ] ()
         , test "line hover and focus retire on hidden lines range and accepted data but stale replies leave them unchanged" <| \_ ->
             let
@@ -112,11 +164,11 @@ suite =
         , test "in-chart summary shares selected filters for a hovered line and removes lower disclosures and native hints" <| \_ ->
             let
                 initial = Feature.Timeline.init
-                timeline = { initial | histogramBuckets = [ stockBucket ], chartLineHover = Just { series = "created", index = 0 } }
+                timeline = { initial | histogramBuckets = [ { stockBucket | observationTotal = Just 3 } ], chartLineHover = Just { series = "created", index = 0 } }
                 rendered = Feature.Timeline.viewTimelineHistogram TimestampDisplay.empty timeline |> Query.fromHtml
             in
             Expect.all
-                [ \_ -> rendered |> Query.find [ Selector.class "timeline-chart-tooltip" ] |> Query.has [ Selector.text "0 Observations", Selector.text "0 Projects Created", Selector.text "0 Tasks/Subtasks Completed" ]
+                [ \_ -> rendered |> Query.find [ Selector.class "timeline-chart-tooltip" ] |> Query.has [ Selector.text "Observations", Selector.text "Total: 3" ]
                 , \_ -> rendered |> Query.find [ Selector.class "timeline-chart-tooltip" ] |> Query.hasNot [ Selector.text stockBucket.label, Selector.text "open items", Selector.text "exclusive", Selector.text "2026" ]
                 , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-details" ] |> Query.count (Expect.equal 0)
                 , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-tooltip" ] |> Query.count (Expect.equal 0)
@@ -406,13 +458,12 @@ stockBucket =
     { bucketStart = "2026-01-01T00:00:00Z", bucketEnd = "2026-01-02T00:00:00Z", label = "A"
     , counts = { project = legacy, subproject = legacy, task = legacy, subtask = legacy }, totals = legacy
     , series = { project = zero, task = zero, subtask = zero, observation = zero }, seriesTotals = zero
-    , openCounts = Just { projects = 2, tasks = 6 }, openAsOf = Just "2026-01-02T00:00:00Z", openStatus = "available" }
+    , openCounts = Just { projects = 2, tasks = 6 }, openAsOf = Just "2026-01-02T00:00:00Z", openStatus = "available", observationTotal = Just 0, observationAsOf = Just "2026-01-02T00:00:00Z", observationStatus = "available" }
 
 
 decodeOpenFields : String -> Result Decode.Error (List ( Maybe Api.TimelineOpenCounts, Maybe String, String ))
 decodeOpenFields fields =
-    Decode.decodeString Api.workspaceTimelineBucketsResponseDecoder
-        ("""{"workspace_id":"workspace-1","since":"2026-01-01T00:00:00Z","until":"2026-01-02T00:00:00Z","bucket":"day","buckets":[{"bucket_start":"2026-01-01T00:00:00Z","bucket_end":"2026-01-02T00:00:00Z","label":"A","counts":{"project":{"created":0,"completed":0,"cancelled":0},"subproject":{"created":0,"completed":0,"cancelled":0},"task":{"created":0,"completed":0,"cancelled":0},"subtask":{"created":0,"completed":0,"cancelled":0}},"totals":{"created":0,"completed":0,"cancelled":0},"series":{"project":{"created":0,"completed":0,"deleted":0},"task":{"created":0,"completed":0,"deleted":0},"subtask":{"created":0,"completed":0,"deleted":0},"observation":{"created":0,"completed":0,"deleted":0}},"series_totals":{"created":0,"completed":0,"deleted":0}""" ++ fields ++ "}]}")
+    decodeBucketFields fields
         |> Result.map (\response -> List.map (\bucket -> ( bucket.openCounts, bucket.openAsOf, bucket.openStatus )) response.buckets)
 
 
@@ -474,3 +525,16 @@ timelineEvent title =
     , navigation = { entityType = "task", entityId = "task-1" }
     , sourceAuditId = Nothing
     }
+
+
+decodeObservationFields : String -> Result Decode.Error (List ( Maybe Int, Maybe String, String ))
+decodeObservationFields fields =
+    decodeBucketFields fields
+        |> Result.map (\response -> List.map (\bucket -> ( bucket.observationTotal, bucket.observationAsOf, bucket.observationStatus )) response.buckets)
+
+
+decodeBucketFields : String -> Result Decode.Error Api.WorkspaceTimelineBucketsResponse
+decodeBucketFields fields =
+    Decode.decodeString Api.workspaceTimelineBucketsResponseDecoder
+        ("""{"workspace_id":"workspace-1","since":"2026-01-01T00:00:00Z","until":"2026-01-02T00:00:00Z","bucket":"day","buckets":[{"bucket_start":"2026-01-01T00:00:00Z","bucket_end":"2026-01-02T00:00:00Z","label":"A","counts":{"project":{"created":0,"completed":0,"cancelled":0},"subproject":{"created":0,"completed":0,"cancelled":0},"task":{"created":0,"completed":0,"cancelled":0},"subtask":{"created":0,"completed":0,"cancelled":0}},"totals":{"created":0,"completed":0,"cancelled":0},"series":{"project":{"created":0,"completed":0,"deleted":0},"task":{"created":0,"completed":0,"deleted":0},"subtask":{"created":0,"completed":0,"deleted":0},"observation":{"created":0,"completed":0,"deleted":0}},"series_totals":{"created":0,"completed":0,"deleted":0}""" ++ fields ++ "}]}")
+

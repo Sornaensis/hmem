@@ -1,4 +1,4 @@
-module Feature.Timeline exposing (selectedBucketSummary, selectedLifecycleCount, lifecycleChartSeries, activeOpenBar, openBarGeometry, openChartMaximum, chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, timestampSources, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel, visibleTimelineEvents)
+module Feature.Timeline exposing (TimelineTooltipContext(..), activeTooltipContext, barTooltipGroups, tooltipSummary, selectedBucketSummary, selectedLifecycleCount, lifecycleChartSeries, activeOpenBar, openBarGeometry, openChartMaximum, chartCanvasWidth, chartPercentX, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, timestampSources, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel, visibleTimelineEvents)
 
 import ActorAttribution
 import Api
@@ -1005,29 +1005,71 @@ selectedLifecycleCount visibility action bucket =
         |> List.sum
 
 
-selectedBucketSummary : TimelineModel -> Api.WorkspaceTimelineBucket -> List String
-selectedBucketSummary timeline bucket =
+type alias TimelineTooltipGroup =
+    { label : String, rows : List String }
+
+
+nonzeroRow : String -> Int -> List String
+nonzeroRow label count =
+    if count == 0 then [] else [ label ++ ": " ++ String.fromInt count ]
+
+
+lineTooltipGroups : TimelineModel -> Api.WorkspaceTimelineBucket -> List TimelineTooltipGroup
+lineTooltipGroups timeline bucket =
     let
         selected = timeline.chartSeries
         taskLabel =
             if selected.tasks && selected.subtasks then "Tasks/Subtasks"
             else if selected.tasks then "Tasks"
             else "Subtasks"
-        actionSummary ( key, labelText ) =
-            if Dict.get key timeline.chartActions /= Just True then []
-            else
-                (if selected.projects && key /= "cancelled" then
-                    [ String.fromInt (timelineActionValue key bucket.series.project) ++ " Projects " ++ labelText ]
-                 else [])
-                ++ (if (selected.tasks || selected.subtasks) && key /= "archived" then
-                    [ String.fromInt (selectedLifecycleCount { selected | projects = False } key bucket) ++ " " ++ taskLabel ++ " " ++ labelText ]
-                    else [])
-        entries =
-            (if selected.observations then [ String.fromInt bucket.series.observation.created ++ " Observations" ] else [])
-                ++ List.concatMap actionSummary
-                    [ ( "created", "Created" ), ( "completed", "Completed" ), ( "deleted", "Deleted" ), ( "cancelled", "Cancelled" ), ( "archived", "Archived" ) ]
+        actions = [ ( "created", "Created" ), ( "completed", "Completed" ), ( "deleted", "Deleted" ), ( "cancelled", "Cancelled" ), ( "archived", "Archived" ) ]
+        rows supported count = actions |> List.concatMap (\( key, label ) ->
+            if supported key && Dict.get key timeline.chartActions == Just True then nonzeroRow label (count key) else [])
+        total =
+            if bucket.observationStatus == "available" then
+                bucket.observationTotal |> Maybe.map (nonzeroRow "Total") |> Maybe.withDefault [ "Total: history unavailable" ]
+            else if bucket.observationStatus == "future" then [ "Total: future" ]
+            else [ "Total: history unavailable" ]
     in
-    if List.isEmpty entries then [ "No activity selected." ] else entries
+    [ { label = "Projects", rows = if selected.projects then rows ((/=) "cancelled") (\key -> timelineActionValue key bucket.series.project) else [] }
+    , { label = taskLabel, rows = if selected.tasks || selected.subtasks then rows ((/=) "archived") (\key -> selectedLifecycleCount { selected | projects = False } key bucket) else [] }
+    , { label = "Observations", rows = if selected.observations then nonzeroRow "Created" bucket.series.observation.created ++ nonzeroRow "Deleted" bucket.series.observation.deleted ++ total else [] }
+    ] |> List.filter (\group -> not (List.isEmpty group.rows))
+
+
+barTooltipGroups : Api.WorkspaceTimelineBucket -> List TimelineTooltipGroup
+barTooltipGroups bucket =
+    [ { label = "", rows = case availableOpenCounts bucket of
+            Just counts -> nonzeroRow "Open projects" counts.projects ++ nonzeroRow "Open tasks + subtasks" counts.tasks
+            Nothing -> [ if bucket.openStatus == "future" then "Open work: future" else "Open work: history unavailable" ]
+      } ] |> List.filter (\group -> not (List.isEmpty group.rows))
+
+
+tooltipSummary : List TimelineTooltipGroup -> List String
+tooltipSummary groups =
+    List.concatMap (\group -> List.map (\row -> (if group.label == "" then "" else group.label ++ " ") ++ row) group.rows) groups
+
+
+selectedBucketSummary : TimelineModel -> Api.WorkspaceTimelineBucket -> List String
+selectedBucketSummary timeline bucket =
+    tooltipSummary (lineTooltipGroups timeline bucket)
+
+
+type TimelineTooltipContext
+    = LineTooltip TimelineLineInteraction
+    | BarTooltip Int
+
+
+activeTooltipContext : TimelineModel -> Maybe TimelineTooltipContext
+activeTooltipContext timeline =
+    let
+        validIndex index = index >= 0 && index < List.length timeline.histogramBuckets
+        line interaction = interaction |> Maybe.andThen (\value ->
+            if validIndex value.index && List.any (\series -> series.key == value.series) (lifecycleChartSeries timeline) then Just (LineTooltip value) else Nothing)
+        bar index = index |> Maybe.andThen (\value -> if validIndex value then Just (BarTooltip value) else Nothing)
+    in
+    [ line timeline.chartLineHover, bar timeline.chartBarHover, line timeline.chartLineFocus, bar timeline.chartBarFocus ]
+        |> List.filterMap identity |> List.head
 
 
 lifecycleChartSeries : TimelineModel -> List TimelineSeriesDefinition
@@ -1114,16 +1156,7 @@ viewTimelineLineChart display timeline actionLabel action =
         active =
             activeOpenBar timeline
         activeLine = activeTimelineLine timeline
-        activeBucket =
-            case timeline.chartLineHover of
-                Just interaction -> Just interaction.index
-                Nothing ->
-                    case timeline.chartBarHover of
-                        Just index -> Just index
-                        Nothing ->
-                            case activeLine of
-                                Just interaction -> Just interaction.index
-                                Nothing -> timeline.chartBarFocus
+        tooltipContext = activeTooltipContext timeline
         foregroundLine =
             activeLine |> Maybe.map (\interaction -> List.filter (\series -> series.key == interaction.series) visibleSeries) |> Maybe.withDefault []
     in
@@ -1155,7 +1188,7 @@ viewTimelineLineChart display timeline actionLabel action =
                         ++ (active |> Maybe.andThen (\index -> List.drop index timeline.histogramBuckets |> List.head |> Maybe.map (viewTimelineOpenPaint True openDomain canvasWidth bucketCount index)) |> Maybe.withDefault [])
                         ++ List.map (viewTimelineSeriesPath True renderDomain canvasWidth bucketCount) foregroundLine
                     )
-                , activeBucket |> Maybe.andThen (\index -> List.drop index timeline.histogramBuckets |> List.head |> Maybe.map (viewTimelineActivityTooltip timeline canvasWidth bucketCount index)) |> Maybe.withDefault (text "")
+                , tooltipContext |> Maybe.map (viewTimelineActivityTooltip timeline canvasWidth bucketCount) |> Maybe.withDefault (text "")
                 ]
             ]
         ]
@@ -1170,12 +1203,21 @@ activeTimelineLine timeline =
         if interaction.index >= 0 && interaction.index < List.length timeline.histogramBuckets && List.any (\series -> series.key == interaction.series) (lifecycleChartSeries timeline) then Just interaction else Nothing)
 
 
-viewTimelineActivityTooltip : TimelineModel -> Int -> Int -> Int -> Api.WorkspaceTimelineBucket -> Html Msg
-viewTimelineActivityTooltip timeline canvasWidth bucketCount index bucket =
-    div [ class "timeline-chart-tooltip-layer", attribute "aria-hidden" "true" ]
-        [ div [ class "timeline-chart-tooltip", Html.Attributes.style "margin-left" ("clamp(8px, calc(" ++ chartPercentX canvasWidth (chartXWithWidth canvasWidth bucketCount index) ++ " - 140px), calc(100% - 288px))"), attribute "data-bucket-index" (String.fromInt index) ]
-            (List.map (\entry -> div [] [ text entry ]) (selectedBucketSummary timeline bucket))
-        ]
+viewTimelineActivityTooltip : TimelineModel -> Int -> Int -> TimelineTooltipContext -> Html Msg
+viewTimelineActivityTooltip timeline canvasWidth bucketCount context =
+    let
+        ( index, kind, groupsFor ) = case context of
+            LineTooltip interaction -> ( interaction.index, "line", lineTooltipGroups timeline )
+            BarTooltip value -> ( value, "bar", barTooltipGroups )
+        groups = List.drop index timeline.histogramBuckets |> List.head |> Maybe.map groupsFor |> Maybe.withDefault []
+    in
+    if List.isEmpty groups then text "" else
+        div [ class "timeline-chart-tooltip-layer", attribute "aria-hidden" "true" ]
+            [ div [ class "timeline-chart-tooltip", Html.Attributes.style "margin-left" ("clamp(8px, calc(" ++ chartPercentX canvasWidth (chartXWithWidth canvasWidth bucketCount index) ++ " - 140px), calc(100% - 288px))"), attribute "data-bucket-index" (String.fromInt index), attribute "data-tooltip-context" kind ]
+                (List.map (\group -> div [ class "timeline-tooltip-group" ]
+                    ((if group.label == "" then [] else [ div [ class "timeline-tooltip-heading" ] [ text group.label ] ])
+                        ++ List.map (\row -> div [ class "timeline-tooltip-row" ] [ text row ]) group.rows)) groups)
+            ]
 
 
 viewTimelineSegmentHits : Int -> Int -> Int -> TimelineSeriesDefinition -> List (Svg.Svg Msg)
@@ -1251,13 +1293,8 @@ openBucketSummary : TimestampDisplay.State -> Api.WorkspaceTimelineBucket -> Str
 openBucketSummary display bucket =
     let
         range = timelineRangeLabel display bucket.bucketStart bucket.bucketEnd
-        sample = bucket.openAsOf |> Maybe.map (\asOf -> " As of " ++ TimestampDisplay.lookup display asOf ++ " (exclusive cutoff).") |> Maybe.withDefault ""
     in
-    case availableOpenCounts bucket of
-        Just counts ->
-            range ++ ": " ++ String.fromInt counts.projects ++ " open projects; " ++ String.fromInt counts.tasks ++ " open tasks + subtasks; " ++ String.fromInt (counts.projects + counts.tasks) ++ " open items total." ++ sample
-        Nothing ->
-            range ++ ": " ++ (if bucket.openStatus == "future" then "Future bucket; open work is not projected." else "Open-work history unavailable: retained audit snapshots cannot establish inventory.") ++ sample
+    String.join "; " (tooltipSummary (barTooltipGroups bucket)) ++ ". " ++ range
 
 
 viewTimelineOpenPaint : Bool -> Int -> Int -> Int -> Int -> Api.WorkspaceTimelineBucket -> List (Svg.Svg Msg)
@@ -1291,7 +1328,7 @@ viewTimelineBucketControls display timeline openDomain canvasWidth index bucket 
         [ SA.class "timeline-open-control", SA.id (timelinePointId "open" "items" index)
         , attribute "role" "button", attribute "tabindex" (if roving == index then "0" else "-1")
         , attribute "aria-pressed" (if isSelected then "true" else "false")
-        , attribute "aria-label" (String.join "; " (selectedBucketSummary timeline bucket) ++ ". " ++ openBucketSummary display bucket ++ (if isSelected then " Selected." else " Not selected."))
+        , attribute "aria-label" (openBucketSummary display bucket ++ (if isSelected then " Selected." else " Not selected."))
         , onMouseEnter (HoverTimelineOpenBar (Just index)), onMouseLeave (HoverTimelineOpenBar Nothing)
         , onFocus (FocusTimelineOpenBar (Just index)), onBlur (FocusTimelineOpenBar Nothing)
         , onClick activate, onTimelinePointKey "open" "items" index count activate
@@ -1461,7 +1498,7 @@ viewTimelinePoint display timeline actionLabel action series canvasWidth pointCo
         , attribute "role" "button"
         , attribute "tabindex" (if isRovingTarget then "0" else "-1")
         , attribute "aria-pressed" (if matchingBucket then "true" else "false")
-        , attribute "aria-label" ((List.drop index timeline.histogramBuckets |> List.head |> Maybe.map (selectedBucketSummary timeline >> String.join "; ") |> Maybe.withDefault "") ++ ". " ++ actionLabel ++ ", " ++ series.label ++ ", " ++ TimestampDisplay.lookup display point.since ++ " to " ++ TimestampDisplay.lookup display point.until ++ " exclusive, " ++ String.fromInt point.count ++ ", " ++ if matchingBucket then "selected" else "not selected")
+        , attribute "aria-label" ((List.drop index timeline.histogramBuckets |> List.head |> Maybe.map (selectedBucketSummary timeline >> String.join "; ") |> Maybe.withDefault "") ++ ". " ++ actionLabel ++ ", " ++ series.label ++ ", " ++ TimestampDisplay.lookup display point.since ++ " to " ++ TimestampDisplay.lookup display point.until ++ " exclusive, " ++ if matchingBucket then "selected" else "not selected")
         , onMouseEnter (HoverTimelineLine (Just { series = series.key, index = index })), onMouseLeave (HoverTimelineLine Nothing)
         , onFocus (FocusTimelineLine (Just { series = series.key, index = index })), onBlur (FocusTimelineLine Nothing)
         , onClick (SelectTimelineHistogramBucket point.label point.since point.until)

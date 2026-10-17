@@ -209,7 +209,7 @@ fixtureTimeline fixture =
                     let missing = bucket 1 2
                         future = bucket 1 3
                     in
-                    [ bucket 1 1, { missing | openCounts = Nothing, openStatus = "history_unavailable" }, { future | openCounts = Nothing, openAsOf = Nothing, openStatus = "future" } ]
+                    [ bucket 1 1, { missing | openCounts = Nothing, openStatus = "history_unavailable", observationTotal = Nothing, observationStatus = "history_unavailable" }, { future | openCounts = Nothing, openAsOf = Nothing, openStatus = "future", observationTotal = Nothing, observationAsOf = Nothing, observationStatus = "future" } ]
 
                 StockSpike ->
                     let baseBucket = bucket 1 1 in
@@ -285,7 +285,7 @@ bucketForDates count start ending label =
     , seriesTotals = { created = project.created + task.created + subtask.created + observation.created, completed = 0, deleted = project.deleted + task.deleted + subtask.deleted + observation.deleted, archived = 0, cancelled = 0 }
     , openCounts = Just { projects = count * 10, tasks = count * 30 }
     , openAsOf = Just ending
-    , openStatus = "available"
+    , openStatus = "available", observationTotal = Just (count * 4), observationAsOf = Just ending, observationStatus = "available"
     }
 
 

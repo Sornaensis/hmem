@@ -18,8 +18,12 @@ after changing it. Missing dates show **—**, pending dates **…**, and invali
 dates **Invalid timestamp** or **Unknown date**.
 
 Observations have their own line counting additions in each interval, independent
-of the lifecycle action filters. Hover or focus a line to highlight it and show
-the selected activity counts by target; open-work bars keep their own right axis.
+of the lifecycle action filters. Hover or focus a line to see selected lifecycle
+activity and Observation Created, Deleted and historical Total counts. Total
+counts surviving Observations, including those created before the visible range.
+Hover or focus a bar to see Open projects and Open tasks + subtasks for the whole
+workspace; bars keep their own right axis. Zero rows and empty hints are hidden.
+Unavailable history and future totals are labeled instead of shown as zero.
 
 Observation cards show the current reviewed revision, or the creation revision
 for legacy observations. Expand **History** for recorded assertions, copyable

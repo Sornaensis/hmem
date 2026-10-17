@@ -111,7 +111,7 @@ suite =
                     , audienceId = source.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault ""
                     }
                 apply request count current =
-                    routed (ReadinessTestSupport.taskFetched request parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = { emptyRollup | inProgressSubtaskCount = count, openSubtaskCount = count } })) current
+                    Main.update (ReadinessTestSupport.taskFetched request parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = { emptyRollup | inProgressSubtaskCount = count, openSubtaskCount = count } })) current |> Tuple.first
                 running = apply guard 1 source
                 stillRunning = apply guard 2 running
                 dependencies = stillRunning.dependencies
@@ -573,6 +573,46 @@ suite =
                 , \_ -> Expect.equal 15 (collapsed.cards.viewport.top - Viewport.offset newPosition collapsed.cards.viewport.index)
                 , \_ -> Expect.equal True (Dict.member "child" collapsed.dataLoading.projectCardSummaries)
                 ] ()
+        , test "ordinary Main no-op preserves rows geometry pins and physical detail admissions" <| \_ ->
+            let
+                ready = rootSeed [ project "steady" ] |> viewportReady
+                pinned = Cards.updateViewport (viewportEvent ready 15 [] Nothing [ "project:steady" ]) ready |> Tuple.first
+                updated = Main.update NoOp pinned |> Tuple.first
+            in
+            Expect.all
+                [ \_ -> Expect.equal pinned.cards.viewport updated.cards.viewport
+                , \_ -> Expect.equal pinned.dataLoading.cardDetailAdmissions updated.dataLoading.cardDetailAdmissions
+                , \_ -> Expect.equal pinned.dataLoading.visibleDetailDemand updated.dataLoading.visibleDetailDemand
+                ] ()
+        , test "inactive routed and viewport events retire the hierarchy once per update" <| \_ ->
+            let
+                ready = rootSeed [ project "retired" ] |> viewportReady
+                inactive = Main.update (SwitchTab TimelineTab) ready |> Tuple.first
+                noOp = Main.update NoOp inactive |> Tuple.first
+                hierarchy = Main.update (HierarchyViewportChanged (viewportEvent ready 15 [] Nothing [])) noOp |> Tuple.first
+                observation = Main.update (ObservationViewportChanged Encode.null) hierarchy |> Tuple.first
+            in
+            Expect.all
+                [ \_ -> Expect.equal (List.range (ready.cards.viewport.revision + 1) (ready.cards.viewport.revision + 4))
+                    (List.map (.cards >> .viewport >> .revision) [ inactive, noOp, hierarchy, observation ])
+                , \_ -> Expect.equal True (List.all (.cards >> .viewport >> .rows >> Dict.isEmpty) [ inactive, noOp, hierarchy, observation ])
+                , \_ -> Expect.equal ready.dataLoading.cardDetailAdmissions observation.dataLoading.cardDetailAdmissions
+                ] ()
+        , test "Main authorization retirement clears hierarchy once and keeps outstanding physical details" <| \_ ->
+            let
+                ready = rootSeed [ project "authorized" ] |> viewportReady
+                prepared = AppShell.prepareOwned AppShell.AuthUnauthorizedMsg ready |> Tuple.first
+                retired = Main.update AuthUnauthorized ready |> Tuple.first
+                stale = Main.update (HierarchyViewportChanged (viewportEvent ready 15 [] Nothing [ "project:authorized" ])) retired |> Tuple.first
+            in
+            Expect.all
+                [ \_ -> Expect.equal (prepared.cards.viewport.revision + 1) retired.cards.viewport.revision
+                , \_ -> Expect.equal Nothing retired.cards.viewport.projection
+                , \_ -> Expect.equal True (Dict.isEmpty retired.cards.viewport.rows)
+                , \_ -> Expect.equal Set.empty retired.cards.viewport.nativePins
+                , \_ -> Expect.equal retired.sessionRequestEpoch stale.cards.viewport.sessionEpoch
+                , \_ -> Expect.equal ready.dataLoading.cardDetailAdmissions stale.dataLoading.cardDetailAdmissions
+                ] ()
         , test "Main count completion updates authoritative totals without rebuilding viewport geometry" <| \_ ->
             let
                 summary = let base = project "counted" in { base | hasChildren = False }
@@ -659,8 +699,8 @@ suite =
                 cleared = Main.update (UrlChanged { url | fragment = Just "tab=projects" }) focused |> Tuple.first
                 ids source = source.cards.viewport.rows |> Dict.values |> List.filter (\row -> row.kind == "project") |> List.map .entityId |> List.sort
             in
-            Expect.equal { focused = [ "a" ], cleared = [ "a", "b" ], revisionChanged = True }
-                { focused = ids focused, cleared = ids cleared, revisionChanged = focused.cards.viewport.revision > seeded.cards.viewport.revision }
+            Expect.equal { focused = [ "a" ], cleared = [ "a", "b" ], revisions = [ seeded.cards.viewport.revision + 1, seeded.cards.viewport.revision + 2 ] }
+                { focused = ids focused, cleared = ids cleared, revisions = [ focused.cards.viewport.revision, cleared.cards.viewport.revision ] }
         , test "each project owns a distinct terminal task drop boundary even for empty task lists" <| \_ ->
             let
                 check populated =

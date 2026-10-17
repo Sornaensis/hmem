@@ -21,6 +21,7 @@ module Feature.Cards exposing
     , taskStatusOptionsForTask
     , update
     , refreshViewport
+    , prepareViewportFor
     , refreshViewportFor
     , updateViewport
     , logicalRows
@@ -3402,6 +3403,15 @@ refreshViewportFor msg previous ( model, command ) =
         statusChanged =
             List.any (\taskId -> (Dict.get taskId previous.tasks |> Maybe.map .status) /= (Dict.get taskId model.tasks |> Maybe.map .status)) affectedIds
 
+    in
+    refreshViewportWithStatusChange statusChanged previous ( model, command )
+
+
+{-| Apply readiness-driven membership changes before counts and the final layout.
+-}
+prepareViewportFor : Msg -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+prepareViewportFor msg previous ( model, command ) =
+    let
         readinessTasks =
             case msg of
                 CanonicalReadinessSummariesFetched _ _ (Ok summaries) -> List.map Api.taskFromCardSummary summaries.tasks
@@ -3413,7 +3423,7 @@ refreshViewportFor msg previous ( model, command ) =
         ( reordered, membershipCommand ) =
             Feature.DataLoading.revalidateNavigationForTasksReadiness previous readinessTasks model
     in
-    refreshViewportWithStatusChange statusChanged previous ( reordered, Cmd.batch [ command, membershipCommand ] )
+    ( reordered, Cmd.batch [ command, membershipCommand ] )
 
 
 {-| Readiness renders from the current model and only changes geometry when its
@@ -3626,11 +3636,13 @@ updateViewport payload model =
         updated = { model | cards = { cards | viewport = next } }
         ( demanded, details ) = viewportDetailDemand updated
     in
-    if not valid || model.auth.status /= AuthReady then ( model, Cmd.none ) else
+    if not valid || model.auth.status /= AuthReady then
+        refreshViewport model (Feature.DataLoading.syncPlanningCountsResult ( model, Cmd.none ))
+    else
         let
             ( admitted, waveCommand ) = Feature.DataLoading.acceptBackgroundPaint (if get "paintFilter" Decode.string "" == Feature.DataLoading.navigationFilterFingerprint demanded then get "paintNonce" Decode.int -1 else -1) demanded
         in
-        refreshViewport demanded ( admitted, Cmd.batch [ details, waveCommand, if not (List.isEmpty measured) || target /= Nothing then Ports.syncHierarchyViewport (viewportConfiguration admitted anchorKey anchorDelta) else Cmd.none ] )
+        refreshViewport demanded (Feature.DataLoading.syncPlanningCountsResult ( admitted, Cmd.batch [ details, waveCommand, if not (List.isEmpty measured) || target /= Nothing then Ports.syncHierarchyViewport (viewportConfiguration admitted anchorKey anchorDelta) else Cmd.none ] ))
 
 
 viewHierarchyViewport : String -> Model -> Html Msg

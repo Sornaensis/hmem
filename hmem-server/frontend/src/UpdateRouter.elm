@@ -39,13 +39,20 @@ update : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 update msg model =
     case msg of
         ObservationViewportChanged payload ->
-            Ok (Feature.Observation.updateViewport payload model)
+            Ok (Feature.Observation.updateViewport payload model |> Feature.DataLoading.syncPlanningCountsResult |> Feature.Cards.refreshViewport model)
 
         HierarchyViewportChanged payload ->
             Ok (Feature.Cards.updateViewport payload model)
 
         _ ->
-            route msg model |> Result.map (Feature.Cards.refreshViewportFor msg model >> Feature.Observation.refreshHistory >> Feature.Observation.refreshViewport model)
+            route msg model
+                |> Result.map
+                    (Feature.Cards.prepareViewportFor msg model
+                        >> Feature.Observation.refreshHistory
+                        >> Feature.Observation.refreshViewport model
+                        >> Feature.DataLoading.syncPlanningCountsResult
+                        >> Feature.Cards.refreshViewportFor msg model
+                    )
 
 
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )

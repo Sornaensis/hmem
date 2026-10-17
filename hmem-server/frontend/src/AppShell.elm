@@ -1,4 +1,4 @@
-module AppShell exposing (AppShellOwnedMsg(..), finalizeInit, handleOwned, initModel, sessionEpochMatches, subscriptions, viewDocument)
+module AppShell exposing (AppShellOwnedMsg(..), finalizeInit, handleOwned, prepareOwned, initModel, sessionEpochMatches, subscriptions, viewDocument)
 
 import Api
 import Browser
@@ -135,10 +135,15 @@ finalizeInit page model =
 
 handleOwned : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
 handleOwned ownedMsg model =
+    prepareOwned ownedMsg model |> Feature.Cards.refreshViewport model
+
+
+prepareOwned : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
+prepareOwned ownedMsg model =
     let
         ( next, command ) = handleOwnedRaw ownedMsg model
     in
-    Feature.Cards.refreshViewport model ( Helpers.retireProjectOperations next, command )
+    ( Helpers.retireProjectOperations next, command )
 
 
 handleOwnedRaw : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )

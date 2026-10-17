@@ -128,7 +128,7 @@ updateCore : Msg -> Model -> ( Model, Cmd Msg )
 updateCore msg model =
     case UpdateRouter.update msg model of
         Ok result ->
-            Feature.DataLoading.syncPlanningCountsResult result |> Cards.refreshViewport (Tuple.first result) |> Feature.Move.reconcile
+            Feature.Move.reconcile result
 
         Err mainOwnedMsg ->
             (case mainOwnedMsg of
@@ -136,10 +136,10 @@ updateCore msg model =
                     handleUrlRequest urlRequest model
 
                 UpdateRouter.HandleUrlChange url ->
-                    handleUrlChange url model |> Cards.refreshViewport model
+                    handleUrlChange url model
 
                 UpdateRouter.HandleInAppShell ownedMsg ->
-                    AppShell.handleOwned ownedMsg model
+                    AppShell.prepareOwned ownedMsg model
             ) |> Feature.Observation.refreshViewport model |> Feature.DataLoading.syncPlanningCountsResult |> Cards.refreshViewport model |> Feature.Move.reconcile
 
 

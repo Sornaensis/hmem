@@ -2,6 +2,40 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 
+test('closing Timeline focus restores filtered membership below expanded active ancestry', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture()
+  const root = fixture.projects[0]
+  const completed = { ...fixture.projects[1], id: 'completed-project', status: 'completed' }
+  const matching = fixture.tasks[1]
+  const done = { ...fixture.tasks[0], id: 'done-target', project_id: completed.id, status: 'done', completed_at: '2026-10-16T00:00:00Z' }
+  fixture.projects = [root, completed]
+  fixture.tasks = [matching, done]
+  fixture.timelineEvents = [{ id: 'completed-target', workspace_id: fixture.workspace.id, event_type: 'task_completed', entity_type: 'task', entity_id: done.id, title: 'Open completed task', occurred_at: '2026-10-16T00:00:00Z', actor: null, project: { id: completed.id, name: completed.name }, parent_task: null, status_transition: null, navigation: { entity_type: 'task', entity_id: done.id }, source_audit_id: null }]
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    await h.page.locator('#entity-' + matching.id).waitFor({ state: 'visible' })
+    assert.equal(await h.page.locator('#entity-' + completed.id).count(), 0)
+    assert.equal(await h.page.locator('#entity-' + done.id).count(), 0)
+    for (let visit = 0; visit < 2; visit++) {
+      await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
+      await h.page.locator('#timeline-event-completed-target').click()
+      await h.page.locator('#entity-' + done.id).waitFor({ state: 'visible' })
+      await h.idle()
+      await h.page.locator('.focus-clear-btn').click()
+      await h.page.locator('#entity-' + root.id).waitFor({ state: 'visible' })
+      assert.equal(await h.page.locator('#entity-' + completed.id).count(), 0, 'Focus-only ancestor must not enter the expanded filtered tree')
+      assert.equal(await h.page.locator('#entity-' + done.id).count(), 0, 'Completed focus target must leave the filtered tree immediately')
+      await h.page.locator('#entity-' + matching.id).waitFor({ state: 'visible' })
+      await h.idle()
+      assert.deepEqual([...await h.logicalKeys()].sort(), ['project:' + root.id, 'task:' + matching.id].sort())
+    }
+    assert.ok(h.requests.some(r => r.path.includes('/navigation/focus/task/' + done.id)))
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 test('Timeline focus loads a previously hidden task subtree without reopening its collapsed project', { timeout: 60000 }, async () => {
   const fixture = hierarchyFixture()
   fixture.projects = [fixture.projects[0]]

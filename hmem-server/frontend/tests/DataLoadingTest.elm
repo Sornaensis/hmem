@@ -91,6 +91,25 @@ suite =
                 late = WebSocket.update (CanonicalTaskReadinessFetched guard parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = rollup })) summarized |> Tuple.first
             in
             Expect.equal (Just 1) (Dict.get parent.id late.dependencies.taskReadinessRollups |> Maybe.map .inProgressSubtaskCount)
+        , test "paginated focus hydration preserves filtered membership across exits and repeated visits" <| \_ ->
+            List.concatMap (\kind -> List.concatMap (\admitted -> List.map (focusMembership kind admitted) [ ClearFocus, UrlChanged { url | fragment = Just "tab=projects" }, ReturnToFocusSource ]) [ False, True ]) [ "project", "task", "subtask" ]
+                |> Expect.equal (List.repeat 18 { unchanged = True, cached = True, focused = True, breadcrumbs = True, exited = True, repeated = True, bounded = True })
+        , test "retired ancestor continuations cannot admit excluded members after exit or filter changes" <| \_ ->
+            let
+                check exit =
+                    let
+                        pending = timelineFocusRequest "project"
+                        continued = timelineFocusReply "project" (Just 64) pending pending
+                        retired = Main.update exit continued |> Tuple.first
+                        late = timelineFocusReply "project" Nothing continued retired
+                    in
+                    ( not (Set.member "timeline-target" late.dataLoading.navigationVisibleProjectIds)
+                        && not (Set.member "unloaded-project" late.dataLoading.navigationVisibleProjectIds)
+                    , late.dataLoading.projectCardSummaries == retired.dataLoading.projectCardSummaries
+                    )
+            in
+            List.map check [ ClearFocus, UrlChanged { url | fragment = Just "tab=projects" }, ReturnToFocusSource, ToggleFilterTaskStatus "blocked" ]
+                |> Expect.equal (List.repeat 4 ( True, True ))
         , test "cached subtask focus completes summary ancestry once and retires stale pages after clearing focus" <| \_ ->
             let
                 subtask = let base = task "subtask" (Just "parent-task") in { base | projectId = Just "external" }
@@ -3382,6 +3401,44 @@ focusAuthorityRace changedId =
     { fresh = (Dict.get changedId late.dataLoading.projectCardSummaries |> Maybe.map .name) == Just "canonical-newer"
     , restarted = late.dataLoading.activeNavigationFocus /= Nothing && late.dataLoading.activeNavigationFocus /= pending.dataLoading.activeNavigationFocus
     , completed = completed.dataLoading.activeNavigationFocus == Nothing && (Dict.get changedId completed.dataLoading.projectCardSummaries |> Maybe.map .name) == Just "canonical-newer" && List.member "project:timeline-target" (Cards.mountedViewportKeys completed)
+    }
+
+
+focusMembership : String -> Bool -> Msg -> { unchanged : Bool, cached : Bool, focused : Bool, breadcrumbs : Bool, exited : Bool, repeated : Bool, bounded : Bool }
+focusMembership kind admitted exit =
+    let
+        root = let value = project "visible-root" Nothing in { value | hasChildren = True }
+        external = let value = project "excluded-project" (Just root.id) in { value | status = if admitted then Api.ProjActive else Api.ProjCompleted, hasChildren = True }
+        parent = let value = task "excluded-parent" Nothing in { value | projectId = Just external.id, status = if admitted then Api.Todo else Api.Done, hasChildren = True }
+        targetProject = let value = project "timeline-target" (Just external.id) in { value | status = if admitted then Api.ProjActive else Api.ProjCompleted }
+        targetTask = let value = task "timeline-target" (if kind == "subtask" then Just parent.id else Nothing) in { value | projectId = Just external.id, status = if admitted then Api.Todo else Api.Done }
+        matching = let value = task "matching-task" Nothing in { value | projectId = Just root.id }
+        seed = loadRoot workspaceId [ root ] [] model |> branchReply ("project:" ++ root.id) [] [ matching ] False False
+        before = if admitted then DataLoading.mergeNavigationSummaries (external :: (if kind == "project" then [ targetProject ] else [])) (if kind == "project" then [] else targetTask :: (if kind == "subtask" then [ parent ] else [])) seed else seed
+        requested = timelineFocusFrom kind before |> DataLoading.revalidateNavigationFocus workspaceId (if kind == "project" then "project" else "task") "timeline-target" |> Tuple.first
+        reply ancestors next captured current =
+            case captured.dataLoading.activeNavigationFocus of
+                Nothing -> current
+                Just request -> Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint request.entityType request.entityId request.ancestorOffset
+                    (Ok { workspaceId = workspaceId, target = if kind == "project" then Api.NavigationProjectSummary targetProject else Api.NavigationTaskSummary targetTask, ancestors = ancestors, ancestorsTruncated = next /= Nothing, nextAncestorOffset = next })) current |> Tuple.first
+        first = reply (Api.NavigationProjectSummary external :: (if kind == "subtask" then [ Api.NavigationTaskSummary parent ] else [])) (Just 64) requested requested
+        completed = reply [ Api.NavigationProjectSummary root ] Nothing first first
+        exited = Main.update exit completed |> Tuple.first
+        returned = Main.update (UrlChanged { url | fragment = Just "tab=projects" }) exited |> Tuple.first
+        revisited = timelineFocusFrom kind exited
+        repeated = reply [ Api.NavigationProjectSummary external, Api.NavigationProjectSummary root ] Nothing revisited revisited |> Main.update ClearFocus |> Tuple.first
+        membership value = ( value.dataLoading.navigationVisibleProjectIds, value.dataLoading.navigationVisibleTaskIds )
+        ordinary value = Set.member root.id value.dataLoading.navigationVisibleProjectIds && List.member ("task:" ++ matching.id) (Cards.mountedViewportKeys value)
+        hidden value = admitted || not (List.member ((if kind == "project" then "project" else "task") ++ ":timeline-target") (Cards.mountedViewportKeys value) || List.member ("project:" ++ external.id) (Cards.mountedViewportKeys value) || List.member ("task:" ++ parent.id) (Cards.mountedViewportKeys value))
+        crumbs = if kind == "project" then Focus.buildProjectBreadcrumb completed (Api.projectFromCardSummary targetProject) [] else Focus.buildTaskBreadcrumb completed (Api.taskFromCardSummary targetTask) []
+    in
+    { unchanged = List.all (\value -> membership value == membership before) [ first, completed, exited, repeated ]
+    , cached = Dict.member external.id completed.projects && (if kind == "project" then Dict.member targetProject.id completed.projects else Dict.member targetTask.id completed.tasks) && (kind /= "subtask" || Dict.member parent.id completed.tasks)
+    , focused = List.member ((if kind == "project" then "project" else "task") ++ ":timeline-target") (Cards.mountedViewportKeys completed)
+    , breadcrumbs = List.map (\( id, _, _ ) -> id) crumbs == [ root.id, external.id ] ++ (if kind == "subtask" then [ parent.id ] else []) ++ [ "timeline-target" ]
+    , exited = exited.focus.focusedEntity == Nothing && hidden returned && ordinary returned
+    , repeated = hidden repeated && ordinary repeated
+    , bounded = Dict.size completed.dataLoading.navigationAdmissions <= 4 && Set.size completed.dataLoading.cardDetailAdmissions <= 6 && List.length (Cards.mountedViewportKeys completed) <= 25
     }
 
 

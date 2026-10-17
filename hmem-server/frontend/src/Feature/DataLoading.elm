@@ -3326,7 +3326,17 @@ updateResponse msg model =
                                     List.foldl mergeSummary (mergeSummary focus.target model) focus.ancestors
 
                                 mergedLoading =
-                                    merged.dataLoading
+                                    let
+                                        loading =
+                                            merged.dataLoading
+                                    in
+                                    -- Focus summaries are unfiltered metadata for the
+                                    -- target and breadcrumbs. Only filtered navigation
+                                    -- pages may admit ordinary hierarchy members.
+                                    { loading
+                                        | navigationVisibleProjectIds = model.dataLoading.navigationVisibleProjectIds
+                                        , navigationVisibleTaskIds = model.dataLoading.navigationVisibleTaskIds
+                                    }
 
                                 requestKey =
                                     entityType ++ ":" ++ entityId

@@ -1256,6 +1256,7 @@ type Msg
     | RetryWorkspacePlanningCounts
     | GotRootNavigation String Int (Maybe Int) Int String Int Int (Result Http.Error Api.NavigationBranchResponse)
     | GotNavigationBranch String Int Int String String Int Int (Result Http.Error Api.NavigationBranchResponse)
+    | GotNavigationBatch (List ( String, NavigationBranchState )) (Result Http.Error Api.NavigationBatchResponse)
     | LoadNavigationBranchPage String String String
     | ShowPreviousNavigationBranchPage String String String
     | LoadRootNavigationPage String

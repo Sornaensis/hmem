@@ -16,6 +16,7 @@ module HMem.Server.API
   , LinkDependencyRequest(..)
   , UpdateWorkspaceRequest(..)
   , navigationPageWhenRequested
+  , navigationOwnerOutcomes
   , server
   , serverWithChangeStream
   ) where
@@ -100,6 +101,8 @@ type WorkspaceAPI =
           :> QueryParam "show_empty_projects" Bool :> QueryParam "priority_mode" Text :> QueryParam "priority_value" Int :> QueryParam "query" Text
           :> Description "Returns separately paged direct child Project and Task card summaries. parent_kind is workspace_root, project, or task; project/task require parent_id. The full tree filter DTO includes show_only, project_status, task_status, priority_mode (any/exact/above/below), priority_value, case-insensitive query, and show_empty_projects (default true); false requires a matching task in the project subtree even in projects-only mode; matching descendants retain ancestors. include_projects and include_tasks default to true; false skips that kind's selection and decoration and returns an empty page with has_more=false, which carries no membership/completion authority. Authorization, parent checks and all validation still apply. Each requested page defaults to 50, is capped at 100, and uses deterministic lifecycle-rank, priority DESC, title/name, id ordering."
          :> Get '[JSON] NavigationBranchResponse
+  :<|> Capture "workspaceId" UUID :> "navigation" :> "batch"
+         :> ReqBody '[JSON] NavigationBatchRequest :> Post '[JSON] NavigationBatchResponse
   :<|> Capture "workspaceId" UUID :> "navigation" :> "focus" :> Capture "entityType" NavigationEntityType :> Capture "entityId" UUID :> QueryParam "ancestor_offset" Int
          :> Description "Fetches a target card plus a root-to-parent ancestor window for direct links outside the loaded branch. Missing or foreign targets return 404. Ancestors are capped at 64; use next_ancestor_offset as ancestor_offset to continue a truncated chain."
          :> Get '[JSON] NavigationFocusResponse
@@ -472,8 +475,16 @@ navigationPageWhenRequested requested pageSize selectRows decorate
       summaries <- decorate (take pageSize rows)
       pure NavigationPage { items = summaries, hasMore = length rows > pageSize }
 
+navigationOwnerOutcomes :: [NavigationBatchItem] -> (NavigationBatchItem -> Handler NavigationBranchResponse) -> Handler [NavigationBatchOutcome]
+navigationOwnerOutcomes requests readOwner = forM requests $ \item -> do
+  outcome <- liftIO $ runHandler (readOwner item)
+  pure $ case outcome of
+    Right result -> NavigationBatchOutcome { requestId = item.requestId, parent = item.parent, status = 200, response = Just result, error = Nothing }
+    Left failure -> NavigationBatchOutcome { requestId = item.requestId, parent = item.parent, status = errHTTPCode failure, response = Nothing
+      , error = Just (if errHTTPCode failure == 404 then "Navigation owner was not found" else "Navigation owner read failed") }
+
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
+workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> navigationBatchH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.
@@ -518,6 +529,18 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
     reject (validateNavigationPage projectLimit projectOffset <> validateNavigationPage taskLimit taskOffset)
     reject (validateNavigationFilter maybeShowOnly maybePriorityMode maybePriorityValue maybeQuery)
     let filters = NavigationFilter { showOnly = maybeShowOnly, projectStatuses = projectStatuses, taskStatuses = taskStatuses, priorityMode = maybePriorityMode, priorityValue = maybePriorityValue, query = maybeQuery, showEmptyProjects = maybeShowEmptyProjects }
+    navigationPageH workspaceId parent projectLimit projectOffset taskLimit taskOffset includeProjects includeTasks filters
+
+  navigationBatchH workspaceId (batch :: NavigationBatchRequest) = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    reject (validateNavigationBatchRequest batch)
+    let filters = fromMaybe (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing) batch.filters
+    reject (validateNavigationFilter filters.showOnly filters.priorityMode filters.priorityValue filters.query)
+    outcomes <- navigationOwnerOutcomes batch.requests $ \item ->
+      navigationPageH workspaceId item.parent item.projectLimit item.projectOffset item.taskLimit item.taskOffset item.includeProjects item.includeTasks filters
+    pure NavigationBatchResponse { workspaceId = workspaceId, outcomes = outcomes }
+
+  navigationPageH workspaceId parent projectLimit projectOffset taskLimit taskOffset includeProjects includeTasks (filters :: NavigationFilter) = do
     let projectTake = navigationTake projectLimit
         projectSkip = navigationOffset projectOffset
         taskTake = navigationTake taskLimit
@@ -533,10 +556,10 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
         pure (Nothing, task.projectId, Just task.id)
     projectPage <- navigationPageWhenRequested (fromMaybe True includeProjects && taskParent == Nothing) projectTake
       (handleDBErrors $ Project.listFilteredProjectSummaryRows pool workspaceId projectParent filters (projectTake + 1) projectSkip)
-      (liftIO . Overview.projectCardSummariesFromRows pool)
-    taskPage <- navigationPageWhenRequested (fromMaybe True includeTasks && maybeShowOnly /= Just "projects") taskTake
+      (handleDBErrors . Overview.projectCardSummariesFromRows pool)
+    taskPage <- navigationPageWhenRequested (fromMaybe True includeTasks && filters.showOnly /= Just "projects") taskTake
       (handleDBErrors $ Task.listFilteredTaskSummaryRows pool workspaceId taskProject taskParent filters (taskTake + 1) taskSkip)
-      (liftIO . Overview.taskCardSummariesFromRows pool)
+      (handleDBErrors . Overview.taskCardSummariesFromRows pool)
     pure NavigationBranchResponse
       { workspaceId = workspaceId, parent = parent, projects = projectPage, tasks = taskPage }
 

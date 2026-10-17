@@ -5,6 +5,7 @@ import Dict
 import Feature.Observation
 import Feature.ChangeStream
 import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity, taskPresentationOrder)
+import Http
 import Json.Encode as Encode
 import Permissions
 import Set
@@ -318,6 +319,11 @@ navigationBranchKey parentKind maybeParentId =
 
 beginNavigationBranch : String -> String -> Maybe String -> Model -> ( Model, Cmd Msg )
 beginNavigationBranch parentKind workspaceId maybeParentId model =
+    pumpNavigation (stageNavigationBranch parentKind workspaceId maybeParentId model)
+
+
+stageNavigationBranch : String -> String -> Maybe String -> Model -> Model
+stageNavigationBranch parentKind workspaceId maybeParentId model =
     let
         key = navigationBranchKey parentKind maybeParentId
         loading = model.dataLoading
@@ -363,7 +369,7 @@ beginNavigationBranch parentKind workspaceId maybeParentId model =
                 , navigationPasses = Dict.insert key pass loading.navigationPasses
             } }
     in
-    pumpNavigation (enqueueNavigation key updated)
+    enqueueNavigation key updated
 
 
 {-| Admissions outlive logical requests. Retiring a generation cannot free an
@@ -544,19 +550,56 @@ ordinaryDetailsPending model =
 
 pumpNavigation : Model -> ( Model, Cmd Msg )
 pumpNavigation model =
-    pumpNavigationQueue (List.length model.dataLoading.navigationQueue) (prepareBackgroundAdmission model)
+    let
+        ( admitted, requests ) = pumpNavigationQueue (List.length model.dataLoading.navigationQueue) (prepareBackgroundAdmission model)
+        command =
+            case List.head requests of
+                Nothing -> Cmd.none
+                Just ( _, first ) -> Api.fetchNavigationBatch model.flags.apiUrl first.workspaceId (navigationBatchFilters model) (List.map navigationBatchItem requests) (GotNavigationBatch requests)
+    in
+    ( admitted, command )
 
 
-pumpNavigationQueue : Int -> Model -> ( Model, Cmd Msg )
+navigationBatchItem : ( String, NavigationBranchState ) -> Api.NavigationBatchItem
+navigationBatchItem ( key, request ) =
+    { requestId = String.fromInt request.readRevision
+    , parentKind = String.split ":" key |> List.head |> Maybe.withDefault ""
+    , parentId = String.split ":" key |> List.drop 1 |> List.head |> Maybe.withDefault ""
+    , projectOffset = request.projectOffset, taskOffset = request.taskOffset
+    , includeProjects = request.projectRequestPending, includeTasks = request.taskRequestPending
+    }
+
+
+navigationBatchFilters : Model -> Encode.Value
+navigationBatchFilters model =
+    let
+        showOnly = case model.search.filterShowOnly of
+            ShowAll -> []
+            ShowProjectsOnly -> [ ( "show_only", Encode.string "projects" ) ]
+            ShowTasksOnly -> [ ( "show_only", Encode.string "tasks" ) ]
+        priority = case model.search.filterPriority of
+            AnyPriority -> [ ( "priority_mode", Encode.string "any" ) ]
+            ExactPriority value -> [ ( "priority_mode", Encode.string "exact" ), ( "priority_value", Encode.int value ) ]
+            AbovePriority value -> [ ( "priority_mode", Encode.string "above" ), ( "priority_value", Encode.int value ) ]
+            BelowPriority value -> [ ( "priority_mode", Encode.string "below" ), ( "priority_value", Encode.int value ) ]
+        query = if String.trim model.search.query == "" then [] else [ ( "query", Encode.string (String.trim model.search.query) ) ]
+    in
+    Encode.object (showOnly ++ priority ++ query ++
+        [ ( "project_statuses", Encode.list Encode.string model.search.filterProjectStatuses )
+        , ( "task_statuses", Encode.list Encode.string model.search.filterTaskStatuses )
+        , ( "show_empty_projects", Encode.bool model.search.filterShowEmptyProjects ) ])
+
+
+pumpNavigationQueue : Int -> Model -> ( Model, List ( String, NavigationBranchState ) )
 pumpNavigationQueue budget model =
     let
         loading = model.dataLoading
     in
     if budget <= 0 || model.move.dialog /= Nothing || Dict.size loading.navigationAdmissions + Dict.size model.move.admissions >= navigationConcurrency || model.activeTab /= ProjectsTab || loading.backgroundAdmission.remaining <= 0 || not (StartupAdmission.canOrdinary loading.startupAdmission) || (loading.backgroundAdmission.branches >= 2 && ordinaryDetailsPending model) then
-        ( model, Cmd.none )
+        ( model, [] )
     else
         case loading.navigationQueue of
-            [] -> ( model, Cmd.none )
+            [] -> ( model, [] )
             key :: remaining ->
                 let
                     popped = { model | dataLoading = { loading | navigationQueue = remaining } }
@@ -576,10 +619,10 @@ pumpNavigationQueue budget model =
                                 admitted = consumeBackground (Just (navigationAdmissionKey key request)) { popped | dataLoading = { poppedLoading | nextNavigationSummaryRevision = request.readRevision, loadedNavigationBranches = Dict.insert key request poppedLoading.loadedNavigationBranches, navigationAdmissions = Dict.insert (navigationAdmissionKey key request) request poppedLoading.navigationAdmissions } }
                             in
                             case admitted of
-                                Nothing -> ( model, Cmd.none )
+                                Nothing -> ( model, [] )
                                 Just accepted ->
-                                    let ( next, commands ) = pumpNavigationQueue (budget - 1) accepted in
-                                    ( next, Cmd.batch [ commands, Api.fetchNavigationBranchWithDemand model.flags.apiUrl request.workspaceId kind (Just id) request.projectOffset request.taskOffset request.projectRequestPending request.taskRequestPending (navigationFilterQuery model) (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset) ] )
+                                    let ( next, requests ) = pumpNavigationQueue (budget - 1) accepted in
+                                    ( next, ( key, request ) :: requests )
                     _ -> pumpNavigationQueue (budget - 1) popped
 
 
@@ -594,6 +637,16 @@ releaseNavigationAdmission msg model =
         GotNavigationBranch ws epoch generation key fingerprint projectOffset taskOffset _ ->
             let identity = String.join "|" [ key, ws, String.fromInt epoch, String.fromInt generation, String.fromInt projectOffset, String.fromInt taskOffset, fingerprint ] in
             { model | dataLoading = { loading | startupAdmission = StartupAdmission.complete ("branch|" ++ identity) loading.startupAdmission, navigationAdmissions = Dict.remove identity loading.navigationAdmissions } }
+        GotNavigationBatch requests _ ->
+            List.foldl (\( key, request ) current ->
+                let
+                    currentLoading = current.dataLoading
+                    identity = navigationAdmissionKey key request
+                in
+                if Dict.get identity currentLoading.navigationAdmissions /= Just request then current
+                else { current | dataLoading = { currentLoading
+                    | startupAdmission = StartupAdmission.complete ("branch|" ++ identity) currentLoading.startupAdmission
+                    , navigationAdmissions = Dict.remove identity currentLoading.navigationAdmissions } }) model requests
         GotProjectCardDetail request id _ ->
             { model | dataLoading = { loading | startupAdmission = StartupAdmission.complete ("detail|" ++ String.fromInt request.requestId) loading.startupAdmission, cardDetailAdmissions = Set.remove request.requestId loading.cardDetailAdmissions, cardDetailRetries = if Dict.get id loading.projectCardDetailRequests == Just request then Set.remove ( "project", id ) loading.cardDetailRetries else loading.cardDetailRetries } }
         GotTaskCardDetail request id _ ->
@@ -1398,7 +1451,8 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
                     }
             }
     in
-    ( withPresentations, Cmd.batch (command :: replayCommands ++ affectedCommands) )
+    let ( admitted, batchCommand ) = pumpNavigation withPresentations in
+    ( admitted, Cmd.batch (batchCommand :: command :: replayCommands ++ affectedCommands) )
 
 
 rootRefreshDemand : DataLoadingModel -> NavigationBranchState -> ( Int, Int )
@@ -1731,10 +1785,8 @@ replayBranch workspaceId generation fingerprint parentKind parentId previous mod
                     }
             }
 
-        ( admitted, command ) =
-            pumpNavigation (enqueueNavigation branchKey replayed)
     in
-    ( admitted, command :: commands )
+    ( enqueueNavigation branchKey replayed, commands )
 
 
 beginNavigationFocus : String -> String -> String -> Model -> ( Model, Cmd Msg )
@@ -2446,10 +2498,10 @@ resumeNavigationBranch kind workspaceId id model =
         key = navigationBranchKey kind (Just id)
     in
     case Dict.get key model.dataLoading.loadedNavigationBranches of
-        Nothing -> beginNavigationBranch kind workspaceId (Just id) model
+        Nothing -> ( stageNavigationBranch kind workspaceId (Just id) model, Cmd.none )
         Just request ->
             if request.projectRequestPending || request.taskRequestPending then
-                pumpNavigation (enqueueNavigation key model)
+                ( enqueueNavigation key model, Cmd.none )
             else
                 ( model, Cmd.none )
 
@@ -2694,8 +2746,11 @@ ensureNavigationPresentationWith projection hydrate parentKind maybeParentId mod
         ( expanded, branchCmd ) =
             ensureSummaries projects tasks restored
 
+        ( admitted, admissionCmd ) =
+            pumpNavigation expanded
+
         ( hydrated, detailCmd ) =
-            hydrate expanded
+            hydrate admitted
 
         key = navigationBranchKey parentKind maybeParentId
         ready =
@@ -2705,7 +2760,7 @@ ensureNavigationPresentationWith projection hydrate parentKind maybeParentId mod
         ( resumed, resumeCommand ) =
             pumpNavigation (if ready then enqueueNavigation key hydrated else hydrated)
     in
-    ( resumed, Cmd.batch [ transportCmd, branchCmd, detailCmd, resumeCommand ] )
+    ( resumed, Cmd.batch [ transportCmd, branchCmd, admissionCmd, detailCmd, resumeCommand ] )
 
 
 ensureAllNavigationPresentations : Model -> ( Model, Cmd Msg )
@@ -2948,6 +3003,28 @@ update msg model =
 updateResponse : Msg -> Model -> ( Model, Cmd Msg )
 updateResponse msg model =
     case msg of
+        GotNavigationBatch requests result ->
+            let
+                checked =
+                    case List.head requests of
+                        Nothing -> Err (Http.BadBody "Navigation batch has no captured owners")
+                        Just ( _, first ) -> result |> Result.andThen (Api.validateNavigationBatchResponse first.workspaceId (List.map navigationBatchItem requests))
+                ownerResults =
+                    case checked of
+                        Ok response -> List.map2 (\owner outcome -> ( owner, outcome.result )) requests response.outcomes
+                        Err error -> List.map (\owner -> ( owner, Err error )) requests
+                apply ( ( key, request ), outcome ) ( current, accumulated ) =
+                    if (Dict.get key current.dataLoading.loadedNavigationBranches |> Maybe.map .readRevision) /= Just request.readRevision then
+                        ( current, accumulated )
+                    else
+                        let
+                            ( next, command ) = updateResponse (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset outcome) current
+                        in
+                        ( next, command :: accumulated )
+                ( reduced, commands ) = List.foldl apply ( model, [] ) ownerResults
+            in
+            ( reduced, Cmd.batch commands )
+
         GotWorkspacePlanningCounts guard result ->
             acceptPlanningCounts guard result model
 

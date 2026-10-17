@@ -10,7 +10,31 @@ import Test exposing (Test, describe, test)
 suite : Test
 suite =
     describe "bounded navigation API transport"
-        [ test "encodes independent project and task demand without changing offsets or limits" <|
+        [ test "batch IDs stay bounded while complete long filters and asymmetric cursors stay in the body" <| \_ ->
+            let
+                query = "description needle " ++ String.repeat 1024 "é"
+                item = { requestId = "17", parentKind = "project", parentId = "owner", projectOffset = 0, taskOffset = 450, includeProjects = False, includeTasks = True }
+                body = Api.encodeNavigationBatchRequest (Encode.object [ ( "query", Encode.string query ), ( "task_statuses", Encode.list Encode.string [] ) ]) [ item ]
+            in
+            Expect.equal { id = Ok "17", query = Ok query, offset = Ok 450, included = Ok False }
+                { id = Decode.decodeValue (Decode.at [ "requests" ] (Decode.index 0 (Decode.field "request_id" Decode.string))) body
+                , query = Decode.decodeValue (Decode.at [ "filters", "query" ] Decode.string) body
+                , offset = Decode.decodeValue (Decode.at [ "requests" ] (Decode.index 0 (Decode.field "task_offset" Decode.int))) body
+                , included = Decode.decodeValue (Decode.at [ "requests" ] (Decode.index 0 (Decode.field "include_projects" Decode.bool))) body }
+        , test "batch validates complete ordered identities and rejects mixed success/error or foreign owner payloads" <| \_ ->
+            let
+                page = "{\"workspace_id\":\"workspace\",\"parent\":{\"kind\":\"project\",\"parent_id\":\"owner\"},\"projects\":{\"items\":[],\"has_more\":false},\"tasks\":{\"items\":[],\"has_more\":false}}"
+                value suffix = "{\"workspace_id\":\"workspace\",\"outcomes\":[{\"request_id\":\"17\",\"parent\":{\"kind\":\"project\",\"parent_id\":\"owner\"},\"status\":200,\"response\":" ++ page ++ suffix ++ "}]}"
+                item = { requestId = "17", parentKind = "project", parentId = "owner", projectOffset = 0, taskOffset = 0, includeProjects = True, includeTasks = True }
+                decoded = Decode.decodeString Api.navigationBatchDecoder (value "") |> Result.toMaybe
+                accepted = decoded |> Maybe.map (Api.validateNavigationBatchResponse "workspace" [ item ] >> Result.toMaybe >> (/=) Nothing) |> Maybe.withDefault False
+                missing = decoded |> Maybe.map (\response -> Api.validateNavigationBatchResponse "workspace" [ item, { item | requestId = "18" } ] response |> Result.toMaybe |> (==) Nothing) |> Maybe.withDefault False
+            in
+            Expect.equal (List.repeat 4 True)
+                [ accepted, missing
+                , Decode.decodeString Api.navigationBatchDecoder (value ",\"error\":\"mixed\"") |> Result.toMaybe |> (==) Nothing
+                , Decode.decodeString Api.navigationBatchDecoder (String.replace "\"parent_id\":\"owner\"},\"projects\"" "\"parent_id\":\"foreign\"},\"projects\"" (value "")) |> Result.toMaybe |> (==) Nothing ]
+        , test "encodes independent project and task demand without changing offsets or limits" <|
             \_ ->
                 Expect.equal
                     [ "&include_projects=false&include_tasks=true", "&include_projects=true&include_tasks=false", "&include_projects=false&include_tasks=false" ]

@@ -94,8 +94,18 @@ explicit; expanded hierarchy branches continue automatically. Failed or
 incomplete branches retain Retry and do not claim completion. Interactive
 viewport loading is separate from canonical snapshot/replay, which can still
 traverse a full workspace in pages. The
-[navigation decision](../../architecture/adrai/decisions/R01M/R01M48140QPDRRS113KC3AERB1H--keep-interactive-workspace-navigation-bounded-and-stale-response.decision.md)
+[navigation decision](../../architecture/adrai/decisions/R01M/R01M54TJAY4K07ZQ2SYFHBMCPRP--keep-interactive-workspace-navigation-bounded-and-stale-response.decision.md)
 defines the transport and rendering limits.
+
+Expanded owners selected in one scheduling wave share a navigation batch POST
+(up to four owners). Every owner keeps its independent cursor, filter and read
+guards, admission credit and conservative slot until the shared callback, even
+after collapse or session retirement. Complete response identities are validated
+before applying any outcome; owner errors retain successful siblings and retry
+independently. Root GET remains independent. Capacity accounting preserves the
+existing asymmetry: ordinary branch admission counts branch and Move slots;
+Move admission additionally counts an in-flight root request. Batching does not
+add a new admission lane or change the startup paint permits.
 
 Project filters preserve the current scroll position while replacement rows load;
 the final content can clamp the position at its bottom. Subtasks share their
@@ -129,7 +139,7 @@ affected navigation owner once.
 The project-pause browser regression uses two independent production Elm pages
 with intercepted canonical authority. See [test scope](tests-js/testing.md).
 
-The chooser automatically loads matching roots and expanded children through existing 50-project navigation pages, with a 10,000 offset ceiling and explicit incomplete/retry states. All loaded projects are reachable in one continuous scrolling tree: at most 25 ordinary rows mount, plus root placement and one native-focus pin, with spacers for omitted rows. The current location is revealed automatically; arrow keys and Home/End reach offscreen rows. Live changes stage complete membership passes while preserving valid selection, expansion and the scroll row's intrarow position. Selected destinations are verified directly with their canonical ancestry, including collapsed parents. Independent picker requests share the four physical navigation and six physical detail limits; ordinary membership revalidation waits until the chooser retires and its transport completes. Retired requests retain occupancy until exact completion. Native modal focus stays inside the chooser, starts in search, and returns to the originating Move action or the main content fallback on close. `tests/MoveTest.elm` and `tests-js/move.browser.test.js` cover these local contracts against production Main with intercepted HTTP/WebSocket fixtures; they do not qualify a deployed backend or new performance result.
+The chooser automatically loads matching roots and expanded children through existing 50-project navigation pages, with a 10,000 offset ceiling and explicit incomplete/retry states. All loaded projects are reachable in one continuous scrolling tree: at most 25 ordinary rows mount, plus root placement and one native-focus pin, with spacers for omitted rows. The current location is revealed automatically; arrow keys and Home/End reach offscreen rows. Live changes stage complete membership passes while preserving valid selection, expansion and the scroll row's intrarow position. Selected destinations are verified directly with their canonical ancestry, including collapsed parents. Independent picker requests share the four conservative navigation admissions and six physical detail slots; ordinary membership revalidation waits until the chooser retires and its transport completes. Retired requests retain occupancy until exact completion. Native modal focus stays inside the chooser, starts in search, and returns to the originating Move action or the main content fallback on close. `tests/MoveTest.elm` and `tests-js/move.browser.test.js` cover these local contracts against production Main with intercepted HTTP/WebSocket fixtures; they do not qualify a deployed backend or new performance result.
 
 ## Product behavior
 

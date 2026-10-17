@@ -10,6 +10,7 @@ import Feature.DataLoading as DataLoading
 import Feature.WebSocket as WebSocket
 import Http
 import Json.Encode as Encode
+import Main
 import Set
 import StartupAdmission
 import Test exposing (Test, describe, test)
@@ -157,6 +158,28 @@ suite =
                             , released = Dict.get "project:replacement" released.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
                             , finalCap = Dict.size released.dataLoading.navigationAdmissions
                             }
+               , test "shared stale callback releases every retained owner exactly once after session retirement" <| \_ ->
+                    let
+                        before = List.foldl (\id current -> DataLoading.beginNavigationBranch "project" "a" (Just id) current |> Tuple.first) (populated (WorkspacePage "a")) [ "one", "two", "three", "four" ] |> paintEmptyRoot
+                        owners = Dict.toList before.dataLoading.navigationAdmissions |> List.map (\( identity, request ) -> ( String.split "|" identity |> List.head |> Maybe.withDefault "", request ))
+                        denied = Main.update AuthUnauthorized before |> Tuple.first
+                        retired = { denied | page = WorkspacePage "b", selectedWorkspaceId = Just "b" }
+                        poison = { id = "old-workspace-poison", workspaceId = "a", parentId = Nothing, name = "Poison", status = Api.ProjActive, priority = 1, createdAt = "old", updatedAt = "old", directProjectCount = 0, directTaskCount = 0, hasChildren = False
+                            , readinessRollup = { openProjectCount = 0, inProgressTaskCount = 0, closedProjectCount = 0, openTaskCount = 0, doneTaskCount = 0, cancelledTaskCount = 0, blockedTaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True } }
+                        success = Ok { workspaceId = "a", outcomes = List.map (\( key, request ) -> { requestId = String.fromInt request.readRevision, parentKind = "project", parentId = String.dropLeft 8 key
+                            , result = Ok { workspaceId = "a", projects = { items = [ poison ], hasMore = False }, tasks = { items = [], hasMore = False } } }) owners }
+                        check result =
+                            let
+                                message = GotNavigationBatch owners result
+                                released = Main.update message retired |> Tuple.first
+                                duplicate = Main.update message released |> Tuple.first
+                            in
+                            { held = Dict.size retired.dataLoading.navigationAdmissions, released = Dict.size released.dataLoading.navigationAdmissions
+                            , duplicate = Dict.size duplicate.dataLoading.navigationAdmissions, empty = Dict.isEmpty released.dataLoading.projectCardSummaries && Dict.isEmpty released.dataLoading.loadedNavigationBranches
+                            , identities = released.dataLoading.nextNavigationSummaryRevision == retired.dataLoading.nextNavigationSummaryRevision && released.dataLoading.nextCardDetailRequestId == retired.dataLoading.nextCardDetailRequestId }
+                    in
+                    Expect.equal (List.repeat 2 { held = 4, released = 0, duplicate = 0, empty = True, identities = True })
+                        (List.map check [ success, Err Http.Timeout ])
                , test "stale epoch and wrong workspace session responses are inert" <|
                     \_ ->
                         let

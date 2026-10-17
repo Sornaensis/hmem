@@ -30,7 +30,7 @@ import Network.HTTP.Types qualified
 import Network.Wai (Application, defaultRequest)
 import Network.Wai qualified as Wai
 import Network.Wai.Test (SRequest(..), SResponse(..), runSession, srequest)
-import Servant (Proxy(..), serve)
+import Servant (Proxy(..), serve, runHandler, throwError, err404, err500, ServerError(..))
 import Test.Hspec
 
 import HMem.Config qualified as Config
@@ -44,7 +44,7 @@ import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace, getAuditLogRows)
 import HMem.Server.AccessTracker (newAccessTracker)
-import HMem.Server.API (HMemAPI, navigationPageWhenRequested, server)
+import HMem.Server.API (HMemAPI, navigationPageWhenRequested, navigationOwnerOutcomes, server)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..), entityTypeToText)
 import HMem.Server.App (mkApp)
@@ -799,6 +799,59 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         Project.listProjects ctx.deployedEnv.pool otherWorkspace.id Nothing Nothing Nothing `shouldReturn` []
 
   describe "bounded workspace navigation HTTP contract" $ do
+    it "isolates navigation owner errors without disclosing their internal bodies" $ \_ -> do
+      let workspace = read "10000000-0000-4000-8000-000000000001" :: UUID
+          owner = NavigationProjectBranch (read "20000000-0000-4000-8000-000000000001")
+          item identity = NavigationBatchItem identity owner Nothing Nothing Nothing Nothing Nothing Nothing
+          readOwner request
+            | request.requestId == "missing" = throwError err404
+            | request.requestId == "failure" = throwError err500 { errBody = "private database error" }
+            | otherwise = pure NavigationBranchResponse { workspaceId = workspace, parent = owner, projects = NavigationPage [] False, tasks = NavigationPage [] False }
+      result <- runHandler (navigationOwnerOutcomes (map item ["first","missing","failure","last"]) readOwner)
+      outcomes <- either (fail . show) pure result
+      map (\(outcome :: NavigationBatchOutcome) -> outcome.status) outcomes `shouldBe` [200,404,500,200]
+      map (\(outcome :: NavigationBatchOutcome) -> outcome.error) outcomes `shouldBe` [Nothing,Just "Navigation owner was not found",Just "Navigation owner read failed",Nothing]
+
+    it "shares navigation transport with exact GET filter/page parity and independent foreign/missing outcomes" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "navigation-owner-batch"
+      foreignWorkspace <- createTestWorkspace env "navigation-owner-foreign"
+      rootResponse <- postJson app "/api/v1/projects" (object ["workspace_id" .= workspace.id, "name" .= ("root" :: T.Text)])
+      foreignResponse <- postJson app "/api/v1/projects" (object ["workspace_id" .= foreignWorkspace.id, "name" .= ("foreign" :: T.Text)])
+      let Just root = decode (responseBody rootResponse) :: Maybe Project
+          Just foreignOwner = decode (responseBody foreignResponse) :: Maybe Project
+          workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+          batchPath = workspacePath <> "/navigation/batch"
+          item :: T.Text -> NavigationParent -> NavigationBatchItem
+          item identity owner = NavigationBatchItem identity owner Nothing Nothing Nothing Nothing Nothing Nothing
+          valid :: NavigationBatchItem
+          valid = item "root" (NavigationProjectBranch root.id)
+          missing = item "missing" (NavigationTaskBranch (read "ffffffff-ffff-4fff-8fff-ffffffffffff"))
+          outside = item "foreign" (NavigationProjectBranch foreignOwner.id)
+      _ <- postJson app "/api/v1/projects" (object ["workspace_id" .= workspace.id, "parent_id" .= root.id, "name" .= ("child" :: T.Text), "description" .= ("description-only needle" :: T.Text)])
+      _ <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= root.id, "title" .= ("task" :: T.Text), "description" .= ("description-only needle" :: T.Text)])
+      let filters = NavigationFilter Nothing [ProjActive,ProjPaused] [Todo,Blocked] Nothing Nothing (Just "needle") (Just True)
+          requestBody = NavigationBatchRequest (Just filters) [valid,outside,missing]
+      response <- postJson app batchPath (toJSON requestBody)
+      responseStatus response `shouldBe` status200
+      let Just batch = decode (responseBody response) :: Maybe NavigationBatchResponse
+      map (\(outcome :: NavigationBatchOutcome) -> outcome.requestId) batch.outcomes `shouldBe` ["root","foreign","missing"]
+      map (\(outcome :: NavigationBatchOutcome) -> outcome.status) batch.outcomes `shouldBe` [200,404,404]
+      expected <- request app methodGet (workspacePath <> "/navigation?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show root.id)) <> "&query=needle&project_status=active&project_status=paused&task_status=todo&task_status=blocked") ""
+      (head batch.outcomes).response `shouldBe` (decode (responseBody expected) :: Maybe NavigationBranchResponse)
+      forM_ [Nothing, Just (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing)] $ \common -> do
+        defaults <- postJson app batchPath (toJSON (NavigationBatchRequest common [valid]))
+        legacy <- request app methodGet (workspacePath <> "/navigation?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show root.id))) ""
+        let Just result = decode (responseBody defaults) :: Maybe NavigationBatchResponse
+        (head result.outcomes).response `shouldBe` (decode (responseBody legacy) :: Maybe NavigationBranchResponse)
+      skipped <- postJson app batchPath (toJSON (NavigationBatchRequest Nothing [valid { includeProjects = Just False, includeTasks = Just False, projectOffset = Just 50, taskOffset = Just 100 }]))
+      let Just skipBatch = decode (responseBody skipped) :: Maybe NavigationBatchResponse
+          Just page = (head skipBatch.outcomes).response
+      page.projects.items `shouldBe` []; page.tasks.items `shouldBe` []
+      forM_ [[],[valid,valid],replicate 5 valid,[item "root" NavigationWorkspaceRoot]
+        ,[NavigationBatchItem "root" (NavigationProjectBranch root.id) Nothing Nothing Nothing (Just (-1)) Nothing Nothing]
+        ,[NavigationBatchItem "root" (NavigationProjectBranch root.id) (Just 101) Nothing Nothing Nothing Nothing Nothing]] $ \items ->
+        postJson app batchPath (toJSON (NavigationBatchRequest Nothing items)) >>= (\bad -> responseStatus bad `shouldBe` status400)
+
     it "never executes selection or decoration for skipped navigation pages" $ \_ -> do
       phases <- newIORef ([] :: [T.Text])
       let selectRows = modifyIORef' phases (<> ["select"]) >> pure [1, 2, 3 :: Int]
@@ -1018,6 +1071,16 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         requestWithHeaders ctx.deployedApplication methodGet focusPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
         requestWithHeaders ctx.deployedApplication methodGet missingPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status404)
         requestWithHeaders ctx.deployedApplication methodGet foreignPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status404)
+        let batchPath = workspacePath <> "/navigation/batch"
+            batchBody = encode (NavigationBatchRequest Nothing [NavigationBatchItem "reader" (NavigationProjectBranch project.id) Nothing Nothing Nothing Nothing (Just False) (Just False)])
+        request ctx.deployedApplication methodPost batchPath batchBody >>= (\response -> responseStatus response `shouldBe` status401)
+        requestWithHeaders ctx.deployedApplication methodPost batchPath (authHeader readerToken) batchBody >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodPost batchPath (authHeader outsiderToken) batchBody >>= (\response -> responseStatus response `shouldBe` status403)
+        _ <- createDeployedSandboxAuthSession ctx.deployedEnv readerId "navigation-session" "navigation-csrf"
+        let cookie = ("Cookie", "hmem_session=navigation-session; hmem_csrf=navigation-csrf")
+        forM_ [[cookie], [cookie,("X-CSRF-Token","wrong")]] $ \headers ->
+          requestWithHeaders ctx.deployedApplication methodPost batchPath headers batchBody >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodPost batchPath [cookie,("X-CSRF-Token","navigation-csrf")] batchBody >>= (\response -> responseStatus response `shouldBe` status200)
 
   describe "Task dependency HTTP contract" $ do
     it "adds and removes same-workspace dependencies with the frontend paths and payloads" $ \(env, app) -> do
@@ -3122,7 +3185,18 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       (schema "EmbeddingSpaceFingerprint" >>= jsonField "maxLength") `shouldBe` Just (Number 128)
       (schema "EmbeddingSpaceFingerprint" >>= jsonField "pattern") `shouldBe` Just (String "^[^\\s\\x7f]+$")
       mapM_ (\name -> schema name `shouldSatisfy` isJust)
-         ["NavigationBranchResponse", "NavigationFocusResponse", "NavigationSummariesRequest", "NavigationSummary"]
+         ["NavigationBranchResponse", "NavigationFocusResponse", "NavigationSummariesRequest", "NavigationSummary", "NavigationBatchItem", "NavigationBatchRequest", "NavigationBatchOutcome", "NavigationBatchResponse"]
+      hasPath "/api/v1/workspaces/{workspaceId}/navigation/batch" `shouldBe` True
+      jsonPath ["paths", "/api/v1/workspaces/{workspaceId}/navigation/batch", "post", "requestBody", "content", "application/json;charset=utf-8", "schema", "$ref"] document
+        `shouldBe` Just (String "#/components/schemas/NavigationBatchRequest")
+      requiredSchemaFields "NavigationBatchRequest" `shouldBe` Just ["requests"]
+      (schema "NavigationBatchRequest" >>= jsonField "properties" >>= jsonField "requests" >>= jsonField "minItems") `shouldBe` Just (Number 1)
+      (schema "NavigationBatchRequest" >>= jsonField "properties" >>= jsonField "requests" >>= jsonField "maxItems") `shouldBe` Just (Number 4)
+      (schema "NavigationBatchItem" >>= jsonField "properties" >>= jsonField "request_id" >>= jsonField "maxLength") `shouldBe` Just (Number 256)
+      jsonStrings (schema "NavigationBatchItem" >>= jsonField "properties" >>= jsonField "parent" >>= jsonField "properties" >>= jsonField "kind" >>= jsonField "enum") `shouldBe` Just ["project", "task"]
+      case schema "NavigationBatchOutcome" >>= jsonField "oneOf" of
+        Just (Array variants) -> length variants `shouldBe` 2
+        _ -> expectationFailure "Navigation batch outcomes must distinguish success and bounded owner error"
       navigationBranchItemRef "projects" `shouldBe` Just (String "#/components/schemas/ProjectCardSummary")
       navigationBranchItemRef "tasks" `shouldBe` Just (String "#/components/schemas/TaskCardSummary")
       navigationBranchItemMaximum "projects" `shouldBe` Just (Number 100)

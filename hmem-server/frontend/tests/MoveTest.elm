@@ -49,6 +49,16 @@ suite =
                 opened = step (OpenMove "task" "child") { base | dataLoading = { loading | navigationAdmissions = Dict.fromList (List.range 1 4 |> List.map (\n -> ( String.fromInt n, sample ))) } }
             in
             Expect.equal 0 (Dict.size opened.move.admissions)
+        , test "picker counts an in-flight root in addition to three ordinary owner slots" <| \_ ->
+            let
+                sample = { workspaceId = "ws", readRevision = 0, sessionEpoch = 0, generation = 0, filterFingerprint = "", projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False, projectHasMore = False, taskHasMore = False, projectCardCount = 0, taskCardCount = 0, projectRequestPending = True, taskRequestPending = False }
+                loading = base.dataLoading
+                occupied = { base | dataLoading = { loading | navigationAdmissions = Dict.fromList (List.range 1 3 |> List.map (\n -> ( String.fromInt n, sample ))) } }
+                rooted = { occupied | dataLoading = { loading | navigationAdmissions = occupied.dataLoading.navigationAdmissions, rootNavigationRequest = Just sample } }
+                ordinary = step (OpenMove "task" "child") occupied
+                blocked = step (OpenMove "task" "child") rooted
+            in
+            Expect.equal ( 1, 0 ) ( Dict.size ordinary.move.admissions, Dict.size blocked.move.admissions )
         , test "retry gets a fresh read identity and reports malformed nonprogress as incomplete" <| \_ ->
             let
                 opened = step (OpenMove "task" "child") base

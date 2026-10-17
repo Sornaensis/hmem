@@ -14,6 +14,7 @@ module HMem.Types
   , TaskDependencySummary(..), TaskDependencyPage(..), TaskOverview(..), TaskReadinessRollup(..), TaskCardSummary(..)
   , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), LinkDependency(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
   , NavigationParent(..), NavigationFilter(..), NavigationBranchRequest(..), NavigationPage(..), NavigationBranchResponse(..), NavigationEntityType(..), NavigationSummary(..), NavigationFocusResponse(..), NavigationSummariesRequest(..), NavigationSummariesResponse(..)
+  , NavigationBatchItem(..), NavigationBatchRequest(..), NavigationBatchOutcome(..), NavigationBatchResponse(..), validateNavigationBatchRequest
   , maxNavigationPageSize, maxNavigationOffset, maxNavigationBatchIds, maxFocusAncestors, validateNavigationPage, validateNavigationSummariesRequest
   , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), maxUnifiedSearchOffset, capUnifiedSearchOverfetch, validateUnifiedSearchOffset, validateUnifiedSearchQuery
   , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), TimelineBucketSeriesCounts(..), TimelineBucketSeries(..), TimelineOpenCounts(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
@@ -1439,7 +1440,10 @@ data NavigationFilter = NavigationFilter
   , showEmptyProjects :: Maybe Bool
   } deriving (Show, Eq, Generic)
 instance ToJSON NavigationFilter where toJSON = genericToJSON jsonOptions
-instance FromJSON NavigationFilter where parseJSON = genericParseJSON jsonOptions
+instance FromJSON NavigationFilter where
+  parseJSON = withObject "NavigationFilter" $ \o -> NavigationFilter
+    <$> o .:? "show_only" <*> o .:? "project_statuses" .!= [] <*> o .:? "task_statuses" .!= []
+    <*> o .:? "priority_mode" <*> o .:? "priority_value" <*> o .:? "query" <*> o .:? "show_empty_projects"
 
 data NavigationBranchRequest = NavigationBranchRequest
   { parent :: NavigationParent, projectLimit :: Maybe Int, projectOffset :: Maybe Int
@@ -1460,6 +1464,45 @@ data NavigationBranchResponse = NavigationBranchResponse
   } deriving (Show, Eq, Generic)
 instance ToJSON NavigationBranchResponse where toJSON = genericToJSON jsonOptions
 instance FromJSON NavigationBranchResponse where parseJSON = genericParseJSON jsonOptions
+
+-- Shared transport does not combine owner membership or completion authority.
+data NavigationBatchItem = NavigationBatchItem
+  { requestId :: Text, parent :: NavigationParent
+  , projectLimit :: Maybe Int, projectOffset :: Maybe Int, taskLimit :: Maybe Int, taskOffset :: Maybe Int
+  , includeProjects :: Maybe Bool, includeTasks :: Maybe Bool
+  } deriving (Show, Eq, Generic)
+instance ToJSON NavigationBatchItem where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationBatchItem where parseJSON = genericParseJSON jsonOptions
+
+data NavigationBatchRequest = NavigationBatchRequest
+  { filters :: Maybe NavigationFilter, requests :: [NavigationBatchItem] }
+  deriving (Show, Eq, Generic)
+instance ToJSON NavigationBatchRequest where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationBatchRequest where parseJSON = genericParseJSON jsonOptions
+
+data NavigationBatchOutcome = NavigationBatchOutcome
+  { requestId :: Text, parent :: NavigationParent, status :: Int
+  , response :: Maybe NavigationBranchResponse, error :: Maybe Text
+  } deriving (Show, Eq, Generic)
+instance ToJSON NavigationBatchOutcome where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationBatchOutcome where parseJSON = genericParseJSON jsonOptions
+
+data NavigationBatchResponse = NavigationBatchResponse
+  { workspaceId :: UUID, outcomes :: [NavigationBatchOutcome] }
+  deriving (Show, Eq, Generic)
+instance ToJSON NavigationBatchResponse where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationBatchResponse where parseJSON = genericParseJSON jsonOptions
+
+validateNavigationBatchRequest :: NavigationBatchRequest -> [Text]
+validateNavigationBatchRequest batch =
+  let ids = map (\(item :: NavigationBatchItem) -> item.requestId) batch.requests
+      parents = map (\(item :: NavigationBatchItem) -> item.parent) batch.requests
+  in [ "navigation batch must contain between 1 and 4 owners" | null ids || length ids > 4 ]
+    ++ [ "navigation request IDs must be nonblank, at most 256 characters, and unique"
+       | any (\value -> T.null (T.strip value) || T.length value > 256) ids || length (nub ids) /= length ids ]
+    ++ [ "navigation owners must be distinct nonroot project/task parents"
+       | NavigationWorkspaceRoot `elem` parents || length (nub parents) /= length parents ]
+    ++ concatMap (\(item :: NavigationBatchItem) -> validateNavigationPage item.projectLimit item.projectOffset ++ validateNavigationPage item.taskLimit item.taskOffset) batch.requests
 
 data NavigationEntityType = NavigationProject | NavigationTask deriving (Show, Eq, Generic)
 instance ToJSON NavigationEntityType where

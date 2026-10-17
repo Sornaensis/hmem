@@ -216,6 +216,12 @@ must finish before live settlement's two paints. The separate 500 ms stability
 window is excluded from the settle timer and rejects in-flight or late traffic.
 Collapsed branches stay lazy; partial or paused streams cannot prove completion.
 
+Navigation batches count one actual HTTP request and its complete encoded body
+once. Linked logical owner receipts retain independent page authority, cursors,
+filters and terminal coverage; they contribute no additional HTTP or byte counts.
+Malformed complete outcome sets cannot establish any owner authority. The live
+followup ceiling and 500 ms post-settle guard apply without adjustment.
+
 Settled expanded-navigation qualification rejects branch feedback rows. Root lists
 remain driven by explicit demand: an enabled project/task root Load-more control is
 valid when its current admitted, fulfilled 50-item wire pages prove the exact ordered

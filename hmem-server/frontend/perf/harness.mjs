@@ -9,8 +9,8 @@ import { chromium } from '@playwright/test'
 import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
 import { evidenceProfile, evidenceOwnerFields, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
-import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, LIVE_OBSERVATION_REFRESH_CONTRACT, classifyLiveObservationHydration, aggregateLiveHydration, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
-import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
+import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, LIVE_OBSERVATION_REFRESH_CONTRACT, classifyLiveObservationHydration, aggregateLiveHydration, assertNavigationBatchOutcomes, navigationBatchTransportProof, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationBatchDescriptors, navigationBatchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.dirname(here)
@@ -225,6 +225,23 @@ export async function retryNavigationKind(page, tracker, owner, kind) {
   finally { tracker.navigationProof.cancelRetry(selection) }
 }
 
+export function navigationPageReceipts(tracker, fromIndex = 0) {
+  return [...tracker.requests.filter(request => request.key === 'navigation:branch'), ...(tracker.navigationOwnerPages || [])]
+    .filter(request => (request.requestIndex ?? 0) >= fromIndex)
+    .sort((left, right) => (left.requestIndex ?? 0) - (right.requestIndex ?? 0) || (left.ownerIndex ?? 0) - (right.ownerIndex ?? 0))
+}
+
+export function assertLinkedNavigationPage(tracker, page) {
+  if (!page.logical) return
+  const transport = tracker.requests[page.requestIndex]
+  if (!transport || transport.requestId !== page.transportRequestId || page.method !== 'POST' || page.counted !== false || page.bytes !== 0) throw new Error('Unlinked logical navigation page')
+  navigationBatchTransportProof(transport, page.workspaceId)
+  const descriptors = navigationBatchDescriptors(transport.batchBody, transport.url), descriptor = descriptors[page.ownerIndex]
+  const outcome = transport.batchResponse.outcomes[page.ownerIndex]
+  if (!descriptor || descriptor.requestId !== page.ownerRequestId || descriptor.logicalUrl !== page.url || hashJson(outcome.response || null) !== hashJson(page.navigation)
+    || outcome.status !== page.navigationStatus || !transport.ownerPages.includes(page)) throw new Error('Foreign logical navigation page')
+}
+
 export function fixtureResponder(fixture, tracker, options = {}) {
   const snapshots = options.snapshots || snapshotItems(fixture)
   const resyncGate = options.resyncGate || null
@@ -242,6 +259,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     receipt.status = status
     receipt.workspaceId ||= value?.workspace_id || null
     receipt.bytes = Buffer.byteLength(body)
+    if (key === 'navigation:batch') receipt.batchResponse = value
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
     if (key === 'navigation:branch') { receipt.navigation = value; receipt.navigationStatus = status }
     if (key === 'observations:list') receipt.observationPage = observationPageReceipt(request.url(), request.method(), value, status)
@@ -289,6 +307,25 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         tasks: { ids: value.tasks.items.map(item => item.id), hasMore: value.tasks.has_more }
       } : null, status)
       if (fulfilled && status < 400) rememberNavigationMetadata(tracker, receipt, value)
+      if (receipt.ownerPages) {
+        let outcomes = null
+        if (fulfilled && status === 200) {
+          try { outcomes = assertNavigationBatchOutcomes(fixture.workspace.id, receipt.batchBody.requests, value) } catch (error) { receipt.batchFailure = error.message }
+        }
+        for (const [index, owner] of receipt.ownerPages.entries()) {
+          const outcome = outcomes?.[index]
+          owner.navigation = outcome?.response || null; owner.navigationStatus = outcome?.status || (status >= 400 ? status : 502)
+          owner.navigationFulfilled = fulfilled; owner.fulfilled = fulfilled; owner.done = true; owner.status = owner.navigationStatus
+          if (owner.proofNavigation) tracker.navigationProof.complete(owner.proofNavigation, owner.navigation ? {
+            projects: { ids: owner.navigation.projects.items.map(item => item.id), hasMore: owner.navigation.projects.has_more },
+            tasks: { ids: owner.navigation.tasks.items.map(item => item.id), hasMore: owner.navigation.tasks.has_more }
+          } : null, owner.navigationStatus)
+          if (fulfilled && owner.navigationStatus === 200) rememberNavigationMetadata(tracker, owner, owner.navigation)
+          tracker.activeBranches--; tracker.activeExpandedBranches--
+          const remaining = tracker.activeBranchOwners.get(owner.branchOwner) - 1
+          if (remaining === 0) tracker.activeBranchOwners.delete(owner.branchOwner); else tracker.activeBranchOwners.set(owner.branchOwner, remaining)
+        }
+      }
       receipt.done = true
       tracker.active -= 1
       if (key === 'navigation:branch') {
@@ -332,6 +369,30 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     tracker.liveDiagnostics?.arrival(receipt.requestId, key, receipt.at)
     tracker.active += 1; tracker.lastActivityAt = receipt.at
     tracker.counts[key] = (tracker.counts[key] || 0) + 1
+    if (key === 'navigation:batch') {
+      try {
+        receipt.batchBody = request.postDataJSON()
+        const descriptors = navigationBatchDescriptors(receipt.batchBody, request.url())
+        receipt.ownerPages = descriptors.map((descriptor, ownerIndex) => {
+          const logicalUrl = new URL(descriptor.logicalUrl)
+          const owner = { key: 'navigation:branch', logical: true, counted: false, method: 'POST', url: descriptor.logicalUrl,
+            transportRequestId: receipt.requestId, transportUrl: receipt.url, ownerRequestId: descriptor.requestId, ownerIndex,
+            requestId: receipt.requestId + ':' + descriptor.requestId, requestIndex: receipt.requestIndex, runId: receipt.runId,
+            workspaceId: receipt.workspaceId, metadataEpoch: receipt.metadataEpoch, at: receipt.at, bytes: 0, done: false,
+            branchOwner: descriptor.owner, branchClass: 'Expanded', batchBody: receipt.batchBody }
+          if (tracker.navigationProof) owner.proofNavigation = tracker.navigationProof.admit({ workspaceId: receipt.workspaceId,
+            owner: descriptor.owner, parentKind: descriptor.parent.kind, parentId: descriptor.parent.parent_id, context: navigationFilterContext(logicalUrl),
+            projectIncluded: descriptor.options.includeProjects, taskIncluded: descriptor.options.includeTasks,
+            projectOffset: descriptor.options.projectOffset, taskOffset: descriptor.options.taskOffset, projectLimit: descriptor.options.projectLimit, taskLimit: descriptor.options.taskLimit })
+          tracker.activeBranchOwners.set(owner.branchOwner, (tracker.activeBranchOwners.get(owner.branchOwner) || 0) + 1)
+          tracker.activeBranches++; tracker.activeExpandedBranches++
+          tracker.maxBranches = Math.max(tracker.maxBranches, tracker.activeBranches)
+          tracker.maxExpandedBranches = Math.max(tracker.maxExpandedBranches, tracker.activeExpandedBranches)
+          return owner
+        })
+        ;(tracker.navigationOwnerPages ||= []).push(...receipt.ownerPages)
+      } catch (error) { receipt.batchFailure = error.message; return reply(route, request, { error: 'Invalid navigation batch' }, 400) }
+    }
     if (key === 'change-stream:resync') tracker.activeSnapshots += 1
     if (key === 'navigation:branch') {
       const kind = url.searchParams.get('parent_kind')
@@ -388,6 +449,15 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       const body = request.postDataJSON()
       const value = navigationSummariesResponse(fixture, body.project_ids || [], body.task_ids || [])
       return reply(route, request, value || { error: 'invalid summary batch' }, value ? 200 : 400)
+    }
+    if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation/batch`) {
+      const value = navigationBatchResponse(fixture, receipt.batchBody, request.url())
+      for (const [index, outcome] of value.outcomes.entries()) {
+        const logicalUrl = new URL(receipt.ownerPages[index].url)
+        if (options.navigationResponseTransform && outcome.status === 200) outcome.response = options.navigationResponseTransform(outcome.response, logicalUrl)
+        if (options.navigationResponseStatus) { const status = options.navigationResponseStatus(logicalUrl); if (status >= 400) { delete outcome.response; outcome.status = status; outcome.error = 'Controlled navigation failure' } }
+      }
+      return reply(route, request, value)
     }
     const navigationFocus = pathname.match(new RegExp(`^/api/v1/workspaces/${fixture.workspace.id}/navigation/focus/(project|task)/([^/]+)$`))
     if (navigationFocus) {
@@ -739,7 +809,7 @@ export function prepareLiveNavigationProof(tracker, fixture, frames) {
   if (!root || !root.done || !root.navigationFulfilled || root.navigationStatus !== 200 || tracker.active !== 0 || !tracker.navigationProof?.ready()) throw new Error('Live navigation context is not settled')
   if ((tracker.counts['navigation:summaries'] || 0) !== 0 || (tracker.counts['navigation:focus'] || 0) !== 0
     || tracker.requests.some(request => request.method !== 'GET' && !(request.method === 'POST'
-      && ['change-stream:resync', 'change-stream:ticket', 'observations:count', 'observations:match'].includes(request.key)))) throw new Error('Unsupported live navigation read/mutation prefix')
+      && ['change-stream:resync', 'change-stream:ticket', 'observations:count', 'observations:match', 'navigation:batch'].includes(request.key)))) throw new Error('Unsupported live navigation read/mutation prefix')
   assertNoUnhandledApiRoutes(tracker)
   const owners = liveNavigationInvalidatedOwners(fixture, tracker.navigationMetadata, frames, new URL(root.url))
   tracker.liveNavigationPrepared = true
@@ -794,7 +864,7 @@ function filteredNavigationMembers(fixture, url) {
 }
 
 export function completedExpandedMembership(tracker, fixture) {
-  const navigation = tracker.requests.filter(request => request.key === 'navigation:branch' && request.navigation)
+  const navigation = navigationPageReceipts(tracker).filter(request => request.navigation)
   const advertised = new Set(advertisedNavigationOwners(fixture))
   const textOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0
   const ordered = (kind, values) => [...values].sort((a, b) => {
@@ -808,10 +878,11 @@ export function completedExpandedMembership(tracker, fixture) {
   const context = url => navigationFilterContext(url) + '|' + (url.searchParams.get('show_empty_projects') || 'true')
   const expectedContext = context(first), members = filteredNavigationMembers(fixture, first)
   const pagesFor = (requests, kind) => requests.flatMap(request => {
+    assertLinkedNavigationPage(tracker, request)
     const url = new URL(request.url), flag = 'include_' + kind + 's', values = url.searchParams.getAll(flag)
     if (context(url) !== expectedContext) throw new Error('Mixed navigation filter lifetimes')
     if (request.done !== true || request.navigationFulfilled !== true || request.navigationStatus !== 200) throw new Error('Unfulfilled navigation membership page')
-    if (request.method !== 'GET' || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation` || request.navigation.workspace_id !== fixture.workspace.id
+    if ((request.method !== 'GET' && !(request.logical === true && request.method === 'POST' && request.counted === false && request.transportRequestId != null)) || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation` || request.navigation.workspace_id !== fixture.workspace.id
       || request.navigation.parent?.kind !== url.searchParams.get('parent_kind')
       || (url.searchParams.get('parent_kind') !== 'workspace_root' && request.navigation.parent?.parent_id !== url.searchParams.get('parent_id'))) throw new Error('Foreign navigation membership page')
     if (values.length > 1 || (values.length && !['true', 'false'].includes(values[0]))) throw new Error('Invalid navigation demand boolean')
@@ -919,7 +990,7 @@ export function assertSettledHierarchyFeedback(rows, tracker, fixture) {
       const parameters = [...url.searchParams.keys()]
       const required = ['parent_kind', 'project_limit', 'project_offset', 'task_limit', 'task_offset', 'show_empty_projects', 'priority_mode']
       const demand = ['include_projects', 'include_tasks'], statuses = ['project_status', 'task_status'], allowed = [...required, ...demand, ...statuses]
-      if (request.method !== 'GET' || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation`
+      if ((request.method !== 'GET' && !(request.logical === true && request.method === 'POST' && request.counted === false && request.transportRequestId != null)) || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation`
         || required.some(name => !url.searchParams.has(name)) || parameters.filter(name => !statuses.includes(name)).some(name => url.searchParams.getAll(name).length !== 1)
         || statuses.some(name => new Set(url.searchParams.getAll(name)).size !== url.searchParams.getAll(name).length) || parameters.some(name => !allowed.includes(name))
         || demand.some(name => url.searchParams.has(name) && !['true', 'false'].includes(url.searchParams.get(name)))
@@ -1197,7 +1268,7 @@ export async function waitTimeline(page, tracker, before, fixture) {
 }
 
 function assertSingleCappedBranchRequest(tracker, before, workspaceId, parentId, label) {
-  const requests = tracker.requests.slice(before.index).filter(request => request.key === 'navigation:branch')
+  const requests = navigationPageReceipts(tracker, before.index)
   if (requests.length !== 1) throw new Error(`${label} expected exactly one bounded navigation-branch request, observed ${requests.length}`)
   const url = new URL(requests[0].url)
   const expectedPath = `/api/v1/workspaces/${workspaceId}/navigation`
@@ -1241,7 +1312,7 @@ async function measureLargeBranchExpandCollapse(page, tracker, fixture, anchorId
   const expandMs = await requiredDoubleFrame(page, toggleSelector)
   await page.waitForFunction(id => Boolean(document.querySelector(`#entity-${id}`)), descendantId, { timeout: 30000 })
   await waitForTransportQuiescence(page, tracker, 'large branch expansion')
-  for (const request of tracker.requests.slice(expandBefore.index).filter(request => request.key === 'navigation:branch')) { const url = new URL(request.url); if (url.searchParams.get('project_limit') !== '50' || url.searchParams.get('task_limit') !== '50') throw new Error('Expansion abandoned capped transport') }
+  for (const request of navigationPageReceipts(tracker, expandBefore.index)) { const url = new URL(request.url); if (url.searchParams.get('project_limit') !== '50' || url.searchParams.get('task_limit') !== '50') throw new Error('Expansion abandoned capped transport') }
   const expandedDom = await domMetrics(page)
   if (!await page.locator('#entity-' + descendantId).count()) throw new Error('Expansion did not mount the authoritative first child')
   const expand = {

@@ -143,6 +143,20 @@ offset, errors and `has_more`. Parent/workspace authorization and parameter
 validation apply even when both kinds are skipped. Requested pages retain their
 existing limits, ordering and filters.
 
+`POST /api/v1/workspaces/:workspaceId/navigation/batch` shares one transport for
+1–4 distinct nonroot owners. Its body is `{"filters":{...},"requests":[...]}`;
+each request has a unique nonblank `request_id` (at most 256 characters), a
+`parent` (`{"kind":"project"|"task","parent_id":"..."}`), and the GET route's
+optional independent limits, offsets and demand booleans. Filters use
+`project_statuses`/`task_statuses` arrays and the existing `show_only`,
+`show_empty_projects`, `priority_mode`, `priority_value` and `query` semantics.
+Omitted filters and empty status arrays retain GET defaults. Workspace read
+authorization and normal cookie CSRF checks apply to the whole POST. Invalid
+request sets fail before reading owners. Ordered `outcomes` echo each request ID
+and parent with either `status:200,response` or a bounded `status,error`; missing,
+deleted and foreign owners independently return 404 without losing good siblings.
+Root navigation continues through GET. See OpenAPI for the complete schemas.
+
 ## Removed due fields
 
 Current task and subtask JSON omits due fields in detail, lists, navigation

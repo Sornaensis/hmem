@@ -473,12 +473,69 @@ instance ToSchema NavigationFilter where
     & description ?~ "Server-owned tree filter; matching descendants retain their ancestors. priority_mode is any, exact, above, or below; priority_value is required except for any."
     & properties . at "show_empty_projects" ?~ Inline (mempty & type_ ?~ OpenApiBoolean & description ?~ "Defaults true; false requires matching tasks anywhere in the project subtree.")
     & properties . at "show_only" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["projects", "tasks"])
-    & properties . at "project_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray)
-    & properties . at "task_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray)
+    & properties . at "project_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject (Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["active", "paused", "completed", "archived"])))
+    & properties . at "task_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject (Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["todo", "in_progress", "blocked", "done", "cancelled"])))
     & properties . at "priority_mode" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["any", "exact", "above", "below"])
     & properties . at "priority_value" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 10)
     & properties . at "query" ?~ Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 1)
 instance ToSchema NavigationBranchRequest where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema NavigationBatchItem where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @NavigationBatchItem)
+    pure $ NamedSchema name $ schema
+      & properties . at "request_id" ?~ Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 1 & maxLength ?~ 256)
+      & properties . at "parent" ?~ Inline navigationBatchParentSchema
+      & properties . at "project_limit" ?~ Inline navigationLimitSchema
+      & properties . at "task_limit" ?~ Inline navigationLimitSchema
+      & properties . at "project_offset" ?~ Inline navigationOffsetSchema
+      & properties . at "task_offset" ?~ Inline navigationOffsetSchema
+      & properties . at "include_projects" ?~ Inline (mempty & type_ ?~ OpenApiBoolean & default_ ?~ Bool True)
+      & properties . at "include_tasks" ?~ Inline (mempty & type_ ?~ OpenApiBoolean & default_ ?~ Bool True)
+      & description ?~ "One independent owner page. Include flags default true; false returns an empty nonauthoritative companion page. Request IDs and owners must each be unique within the batch."
+instance ToSchema NavigationBatchRequest where
+  declareNamedSchema _ = do
+    owner <- declareSchemaRef (Proxy @NavigationBatchItem)
+    filters <- declareSchemaRef (Proxy @NavigationFilter)
+    pure $ NamedSchema (Just "NavigationBatchRequest") $ mempty
+      & type_ ?~ OpenApiObject
+      & properties . at "filters" ?~ filters
+      & properties . at "requests" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject owner & minItems ?~ 1 & maxItems ?~ 4)
+      & required .~ ["requests"]
+      & description ?~ "A common filter context and 1-4 distinct nonroot owners. Absent filters use GET defaults; absent/empty status arrays are unrestricted. Every owner is validated before any selection. Workspace authorization rejects the whole request; owner failures are independent outcomes."
+instance ToSchema NavigationBatchOutcome where
+  declareNamedSchema _ = do
+    response <- declareSchemaRef (Proxy @NavigationBranchResponse)
+    let common = mempty & type_ ?~ OpenApiObject
+          & properties . at "request_id" ?~ Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 1 & maxLength ?~ 256)
+          & properties . at "parent" ?~ Inline navigationBatchParentSchema
+          & additionalProperties ?~ AdditionalPropertiesAllowed False
+        success = common & properties . at "status" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 200 & maximum_ ?~ 200)
+          & properties . at "response" ?~ response & required .~ ["request_id", "parent", "status", "response"]
+        failure = common & properties . at "status" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 400 & maximum_ ?~ 599)
+          & properties . at "error" ?~ Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 1 & maxLength ?~ 256)
+          & required .~ ["request_id", "parent", "status", "error"]
+    pure $ NamedSchema (Just "NavigationBatchOutcome") $ mempty & oneOf ?~ [Inline success, Inline failure]
+instance ToSchema NavigationBatchResponse where
+  declareNamedSchema _ = do
+    outcome <- declareSchemaRef (Proxy @NavigationBatchOutcome)
+    pure $ NamedSchema (Just "NavigationBatchResponse") $ mempty & type_ ?~ OpenApiObject
+      & properties . at "workspace_id" ?~ Inline uuidSchema
+      & properties . at "outcomes" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject outcome & minItems ?~ 1 & maxItems ?~ 4)
+      & required .~ ["workspace_id", "outcomes"]
+      & description ?~ "Exactly one ordered identified outcome per requested owner; successful siblings survive owner-local failures."
+
+navigationBatchParentSchema :: Schema
+navigationBatchParentSchema = mempty & type_ ?~ OpenApiObject
+  & properties . at "kind" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["project", "task"])
+  & properties . at "parent_id" ?~ Inline uuidSchema
+  & required .~ ["kind", "parent_id"]
+
+navigationLimitSchema :: Schema
+navigationLimitSchema = mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ fromIntegral maxNavigationPageSize
+
+navigationOffsetSchema :: Schema
+navigationOffsetSchema = mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 0 & maximum_ ?~ fromIntegral maxNavigationOffset
+
 instance ToSchema a => ToSchema (NavigationPage a) where
   declareNamedSchema _ = do
     item <- declareSchemaRef (Proxy @a)

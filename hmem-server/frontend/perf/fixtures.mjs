@@ -723,6 +723,62 @@ function taskCardSummary(fixture, task) {
   }
 }
 
+export function navigationBatchDescriptors(body, physicalUrl, { allowSyntheticIds = false } = {}) {
+  const fail = () => { throw new Error('Invalid navigation batch') }
+  const object = value => value && typeof value === 'object' && !Array.isArray(value)
+  if (!object(body) || !Array.isArray(body.requests) || body.requests.length < 1 || body.requests.length > 4) fail()
+  const filters = body.filters ?? {}
+  if (!object(filters)) fail()
+  const optional = (key, predicate) => { if (filters[key] != null && !predicate(filters[key])) fail() }
+  optional('show_only', value => ['projects', 'tasks'].includes(value))
+  optional('show_empty_projects', value => typeof value === 'boolean')
+  optional('priority_mode', value => ['any', 'exact', 'above', 'below'].includes(value))
+  optional('priority_value', value => Number.isSafeInteger(value) && value >= 1 && value <= 10)
+  optional('query', value => typeof value === 'string' && value.trim().length > 0)
+  optional('project_statuses', value => Array.isArray(value) && value.every(status => ['active', 'paused', 'completed', 'archived'].includes(status)))
+  optional('task_statuses', value => Array.isArray(value) && value.every(status => ['todo', 'in_progress', 'blocked', 'done', 'cancelled'].includes(status)))
+  if (filters.priority_mode != null && filters.priority_mode !== 'any' && filters.priority_value == null) fail()
+  const ids = new Set(), owners = new Set(), base = new URL(physicalUrl)
+  if (!/^\/api\/v1\/workspaces\/[^/]+\/navigation\/batch$/.test(base.pathname) || base.search) fail()
+  return body.requests.map(item => {
+    if (!object(item) || typeof item.request_id !== 'string' || !item.request_id.trim() || [...item.request_id].length > 256 || ids.has(item.request_id)
+      || !object(item.parent) || !['project', 'task'].includes(item.parent.kind)
+      || typeof item.parent.parent_id !== 'string' || !item.parent.parent_id || (!allowSyntheticIds && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.parent.parent_id))) fail()
+    const parent = { kind: item.parent.kind, parent_id: item.parent.parent_id.toLowerCase() }, owner = parent.kind + ':' + parent.parent_id
+    if (owners.has(owner)) fail()
+    ids.add(item.request_id); owners.add(owner)
+    const integer = (key, fallback, min, max) => { const value = item[key] ?? fallback; if (!Number.isSafeInteger(value) || value < min || value > max) fail(); return value }
+    const boolean = key => { const value = item[key] ?? true; if (typeof value !== 'boolean') fail(); return value }
+    const options = { parentKind: parent.kind, parentId: parent.parent_id,
+      projectLimit: integer('project_limit', 50, 1, 100), taskLimit: integer('task_limit', 50, 1, 100),
+      projectOffset: integer('project_offset', 0, 0, 100000), taskOffset: integer('task_offset', 0, 0, 100000),
+      includeProjects: boolean('include_projects'), includeTasks: boolean('include_tasks'),
+      showOnly: filters.show_only, showEmptyProjects: filters.show_empty_projects ?? true,
+      projectStatuses: filters.project_statuses ?? [], taskStatuses: filters.task_statuses ?? [],
+      priorityMode: filters.priority_mode, priorityValue: filters.priority_value, query: filters.query }
+    // A derived logical selector for the existing owner proof, never a counted GET.
+    const logicalUrl = new URL(base.href); logicalUrl.pathname = logicalUrl.pathname.slice(0, -6)
+    const query = logicalUrl.searchParams
+    for (const [key, value] of Object.entries({ parent_kind: parent.kind, parent_id: parent.parent_id,
+      project_limit: options.projectLimit, project_offset: options.projectOffset, task_limit: options.taskLimit, task_offset: options.taskOffset,
+      include_projects: options.includeProjects, include_tasks: options.includeTasks, show_empty_projects: options.showEmptyProjects,
+      show_only: options.showOnly, priority_mode: options.priorityMode, priority_value: options.priorityValue, query: options.query })) if (value != null) query.set(key, value)
+    for (const value of options.projectStatuses) query.append('project_status', value)
+    for (const value of options.taskStatuses) query.append('task_status', value)
+    return { requestId: item.request_id, parent, owner, options, logicalUrl: logicalUrl.href }
+  })
+}
+
+export function navigationBatchResponse(fixture, body, physicalUrl = `http://perf.local/api/v1/workspaces/${fixture.workspace.id}/navigation/batch`, options = {}) {
+  const descriptors = navigationBatchDescriptors(body, physicalUrl, options)
+  return { workspace_id: fixture.workspace.id, outcomes: descriptors.map(item => {
+    const exists = fixture[item.parent.kind + 's'].some(value => value.id === item.parent.parent_id && value.workspace_id === fixture.workspace.id)
+    return { request_id: item.requestId, parent: item.parent, ...(exists
+      ? { status: 200, response: navigationBranchResponse(fixture, item.options) }
+      : { status: 404, error: 'Navigation owner was not found' }) }
+  }) }
+}
+
 export function navigationBranchResponse(fixture, options = {}) {
   const requested = value => {
     if (value == null || value === true || value === 'true') return true

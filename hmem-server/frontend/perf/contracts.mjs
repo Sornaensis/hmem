@@ -161,6 +161,55 @@ export function liveWholeWorkspaceReload(routes) {
   return ['change-stream:resync', 'projects:list', 'tasks:list', 'observations:list'].some(key => (routes[key] || 0) > 0)
 }
 
+export function assertNavigationBatchOutcomes(workspaceId, requests, response) {
+  if (!Array.isArray(requests) || requests.length < 1 || requests.length > 4 || response?.workspace_id !== workspaceId
+    || !Array.isArray(response.outcomes) || response.outcomes.length !== requests.length) throw new Error('Navigation batch identity set mismatch')
+  const ids = new Set(), owners = new Set()
+  return requests.map((request, index) => {
+    const outcome = response.outcomes[index], parent = request.parent, owner = parent?.kind + ':' + parent?.parent_id
+    if (typeof request.request_id !== 'string' || !request.request_id.trim() || [...request.request_id].length > 256 || ids.has(request.request_id)
+      || !['project', 'task'].includes(parent?.kind) || typeof parent?.parent_id !== 'string' || owners.has(owner)
+      || outcome?.request_id !== request.request_id || outcome.parent?.kind !== parent.kind || outcome.parent?.parent_id !== parent.parent_id) throw new Error('Navigation batch owner identity mismatch')
+    ids.add(request.request_id); owners.add(owner)
+    if (outcome.status === 200) {
+      const page = outcome.response
+      if (Object.hasOwn(outcome, 'error') || page?.workspace_id !== workspaceId || page.parent?.kind !== parent.kind || page.parent?.parent_id !== parent.parent_id) throw new Error('Foreign successful navigation batch outcome')
+      for (const kind of ['project', 'task']) {
+        const stream = page[kind + 's'], limit = request[kind + '_limit'] ?? 50, included = request['include_' + kind + 's'] ?? true
+        if (typeof included !== 'boolean' || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Array.isArray(stream?.items) || typeof stream.has_more !== 'boolean'
+          || stream.items.length > limit || (!included && (stream.items.length !== 0 || stream.has_more))
+          || (included && stream.has_more && stream.items.length !== limit)) throw new Error('Malformed navigation batch stream')
+      }
+    } else if (!Number.isSafeInteger(outcome.status) || outcome.status < 400 || outcome.status > 599 || Object.hasOwn(outcome, 'response')
+      || typeof outcome.error !== 'string' || !outcome.error.trim() || outcome.error.length > 256) throw new Error('Malformed navigation batch error outcome')
+    return outcome
+  })
+}
+
+export function navigationBatchTransportProof(request, workspaceId) {
+  const url = new URL(request.url), body = request.batchBody, filters = body?.filters ?? {}
+  if (request.key !== 'navigation:batch' || request.method !== 'POST' || url.pathname !== `/api/v1/workspaces/${workspaceId}/navigation/batch` || url.search
+    || request.workspaceId !== workspaceId || request.status !== 200 || request.done !== true || request.fulfilled !== true
+    || !filters || typeof filters !== 'object' || Array.isArray(filters)) throw new Error('Invalid navigation batch transport authority')
+  for (const [field, allowed] of [['project_statuses', ['active','paused','completed','archived']], ['task_statuses', ['todo','in_progress','blocked','done','cancelled']]]) {
+    if (filters[field] != null && (!Array.isArray(filters[field]) || filters[field].some(value => !allowed.includes(value)))) throw new Error('Invalid navigation batch filter')
+  }
+  if ((filters.show_only != null && !['projects','tasks'].includes(filters.show_only)) || (filters.show_empty_projects != null && typeof filters.show_empty_projects !== 'boolean')
+    || (filters.priority_mode != null && !['any','exact','above','below'].includes(filters.priority_mode))
+    || (filters.priority_value != null && (!Number.isSafeInteger(filters.priority_value) || filters.priority_value < 1 || filters.priority_value > 10))
+    || (filters.priority_mode != null && filters.priority_mode !== 'any' && filters.priority_value == null)
+    || (filters.query != null && (typeof filters.query !== 'string' || !filters.query.trim()))) throw new Error('Invalid navigation batch filter')
+  const outcomes = assertNavigationBatchOutcomes(workspaceId, body?.requests, request.batchResponse)
+  for (const item of body.requests) for (const kind of ['project','task']) {
+    const offset = item[kind + '_offset'] ?? 0
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000) throw new Error('Invalid navigation batch offset')
+  }
+  if (request.bytes !== Buffer.byteLength(JSON.stringify(request.batchResponse))) throw new Error('Navigation batch response byte mismatch')
+  return { key: request.key, method: request.method, url: request.url, requestId: request.requestId, requestIndex: request.requestIndex,
+    runId: request.runId, workspaceId, bytes: request.bytes, status: request.status, done: true, fulfilled: true,
+    batchBody: body, batchResponse: request.batchResponse, ownerCount: outcomes.length }
+}
+
 export const LIVE_OBSERVATION_REFRESH_CONTRACT = Object.freeze({
   revision: 'live-observation-retained-prefix.v1', pageSize: 200, maximumRefreshPages: 1,
   retainedContextProof: 'Inferred from the same-run fulfilled unfiltered reset, executed logical membership guard, source and unchanged intervening recipe; offscreen cache state is not directly observed.',
@@ -171,9 +220,11 @@ export const LIVE_OBSERVATION_REFRESH_CONTRACT = Object.freeze({
 export function classifyLiveObservationHydration(input) {
   const { runId, workspaceId, total, expectedPrefix, reset, intervening, requests, delta, active, unknownRoutes, snapshotGeneration, liveStartIndex, updatedObservationIds, expectedObservationEntities } = input
   const legacy = liveWholeWorkspaceReload(delta?.routes || {})
+  const batchProofs = []
   const result = (classification, reason, proof = null) => ({ revision: LIVE_OBSERVATION_REFRESH_CONTRACT.revision, classification,
     passed: classification === 'bounded-cache-refresh' || classification === 'no-enumeration', wholeWorkspaceReload: classification === 'whole-hydration' || classification === 'unproven',
-    legacyWholeWorkspaceReload: legacy, proofBasis: LIVE_OBSERVATION_REFRESH_CONTRACT.retainedContextProof, reason, proof })
+    legacyWholeWorkspaceReload: legacy, proofBasis: LIVE_OBSERVATION_REFRESH_CONTRACT.retainedContextProof, reason, proof,
+    ...((delta?.routes?.['navigation:batch'] || 0) > 0 ? { navigationBatchCount: delta.routes['navigation:batch'], navigationBatches: batchProofs } : {}) })
   const sameMap = (left, right) => JSON.stringify(Object.entries(left || {}).sort()) === JSON.stringify(Object.entries(right || {}).sort())
   const routeKey = request => { try { return perfApiRouteKey(request.url, request.method) } catch { return null } }
   if (!runId || !workspaceId || !Array.isArray(requests) || !Array.isArray(unknownRoutes) || unknownRoutes.length || active !== 0 || !delta || !Number.isInteger(liveStartIndex) || liveStartIndex < 0) return result('unproven', 'Missing or incomplete live capture')
@@ -183,26 +234,33 @@ export function classifyLiveObservationHydration(input) {
       || request.requestIndex !== liveStartIndex + index || request.requestId !== request.requestIndex + 1
       || !Number.isSafeInteger(request.bytes) || request.bytes < 0 || typeof request.key !== 'string' || routeKey(request) !== request.key) return result('unproven', 'Unsuccessful, unknown, foreign or malformed live receipt')
     accounted.bytes += request.bytes
+    if (request.key === 'navigation:batch') {
+      try { batchProofs.push(navigationBatchTransportProof(request, workspaceId)) } catch (error) { return result('unproven', error.message) }
+    }
     accounted.routes[request.key] = (accounted.routes[request.key] || 0) + 1
     accounted.routeBytes[request.key] = (accounted.routeBytes[request.key] || 0) + request.bytes
   }
   if (!Number.isSafeInteger(accounted.bytes) || delta.count !== accounted.count || delta.bytes !== accounted.bytes || !sameMap(delta.routes, accounted.routes) || !sameMap(delta.routeBytes, accounted.routeBytes)) return result('unproven', 'Live request/byte accounting mismatch')
   if (['change-stream:resync', 'projects:list', 'tasks:list', 'workspaces:list'].some(key => (accounted.routes[key] || 0) > 0)) return result('whole-hydration', 'Workspace or entity-list enumeration')
   if (requests.some(request => ['session', 'change-stream:ticket', 'workspaces:entity'].includes(request.key))) return result('unproven', 'Live workspace/session context admission or retirement')
-  if (requests.some(request => request.workspaceId !== workspaceId || (!['workspaces:planning-counts', 'observations:count', 'observations:list', 'navigation:summaries', 'navigation:branch'].includes(request.key)
+    if (requests.some(request => request.workspaceId !== workspaceId || (!['workspaces:planning-counts', 'observations:count', 'observations:list', 'navigation:summaries', 'navigation:branch', 'navigation:batch'].includes(request.key)
     && !/^(projects|tasks|observations):entity:/.test(request.key)))) return result('unproven', 'Foreign workspace or uncorroborated live context traffic')
   const lists = requests.filter(request => request.key === 'observations:list')
   const entities = requests.filter(request => request.key.startsWith('observations:entity:'))
-  const requestAllowedBetween = request => request.runId === runId && request.workspaceId === workspaceId && request.done === true && request.fulfilled === true && request.status === 200 && request.method === 'GET'
-    && routeKey(request) === request.key
-    && (['timeline:events', 'timeline:buckets', 'navigation:branch', 'navigation:focus'].includes(request.key) || /^(projects|tasks):entity:/.test(request.key))
+  const requestAllowedBetween = request => {
+    if (request.runId !== runId || request.workspaceId !== workspaceId || request.done !== true || request.fulfilled !== true || request.status !== 200 || routeKey(request) !== request.key) return false
+    if (request.key === 'navigation:batch') {
+      try { navigationBatchTransportProof(request, workspaceId); return true } catch { return false }
+    }
+    return request.method === 'GET' && (['timeline:events', 'timeline:buckets', 'navigation:branch', 'navigation:focus'].includes(request.key) || /^(projects|tasks):entity:/.test(request.key))
+  }
   const resetContext = expectedCount => reset && reset.runId === runId && reset.workspaceId === workspaceId && Number.isInteger(reset.requestIndex) && Number.isInteger(reset.requestId)
     && Number.isInteger(snapshotGeneration) && snapshotGeneration >= 1 && reset.snapshotGeneration === snapshotGeneration && reset.membership?.executed === true && reset.membership.expected === expectedCount
     && reset.recipe === 'reset-timeline-projects-separate-focus-projects-live.v1' && Array.isArray(intervening) && reset.recipeCompleted === true
     && reset.requestIndex < liveStartIndex && intervening.length === liveStartIndex - reset.requestIndex - 1
     && reset.receipt?.requestId === reset.requestId && reset.receipt.requestIndex === reset.requestIndex
     && !intervening.some((request, index) => !requestAllowedBetween(request) || request.requestIndex !== reset.requestIndex + index + 1 || request.requestId !== request.requestIndex + 1
-      || (['timeline:events', 'timeline:buckets', 'navigation:branch', 'navigation:focus'].includes(request.key) && !new URL(request.url).pathname.startsWith(`/api/v1/workspaces/${workspaceId}/`)))
+      || (['timeline:events', 'timeline:buckets', 'navigation:branch', 'navigation:focus', 'navigation:batch'].includes(request.key) && !new URL(request.url).pathname.startsWith(`/api/v1/workspaces/${workspaceId}/`)))
   const exactPage = (request, hasMore = true) => {
     const url = new URL(request.url)
     const keys = [...url.searchParams.keys()]
@@ -262,6 +320,19 @@ export function liveHydrationAccepted(value) {
     || !integer(proof.accountedBytes) || !integer(proof.liveStartIndex) || !integer(proof.liveEndIndex)
     || proof.liveEndIndex !== proof.liveStartIndex + proof.accountedRequests || proof.requestsSucceeded !== true
     || (proof.accountedRequests > 0 && proof.accountedBytes <= 0) || (proof.accountedRequests === 0 && proof.accountedBytes !== 0)) return false
+  if (value.navigationBatchCount !== undefined || value.navigationBatches !== undefined) {
+    if (!integer(value.navigationBatchCount) || value.navigationBatchCount < 1 || value.navigationBatchCount > proof.accountedRequests
+      || !Array.isArray(value.navigationBatches) || value.navigationBatches.length !== value.navigationBatchCount
+      || new Set(value.navigationBatches.map(batch => batch.requestId)).size !== value.navigationBatchCount) return false
+    let bytes = 0
+    for (const batch of value.navigationBatches) {
+      if (batch.runId !== proof.runId || batch.workspaceId !== proof.workspaceId || batch.requestId !== batch.requestIndex + 1
+        || batch.requestIndex < proof.liveStartIndex || batch.requestIndex >= proof.liveEndIndex) return false
+      try { navigationBatchTransportProof(batch, proof.workspaceId) } catch { return false }
+      bytes += batch.bytes
+    }
+    if (bytes > proof.accountedBytes) return false
+  }
   const page = (receipt, count = 200, hasMore = true) => {
     if (!receipt || receipt.runId !== proof.runId || receipt.workspaceId !== proof.workspaceId || !integer(receipt.requestIndex)
       || receipt.requestId !== receipt.requestIndex + 1 || receipt.method !== 'GET' || receipt.status !== 200 || receipt.fulfilled !== true
@@ -314,6 +385,7 @@ export function aggregateLiveHydration(values) {
 export function perfApiRouteKey(input, method = 'GET') {
   const pathname = input instanceof URL ? input.pathname : new URL(input, 'http://perf.local').pathname
   const verb = method.toUpperCase()
+  if (verb === 'POST' && /^\/api\/v1\/workspaces\/[^/]+\/navigation\/batch$/.test(pathname)) return 'navigation:batch'
   const is = (allowed, pattern) => allowed.includes(verb) && pattern.test(pathname)
   if (is(['GET'], /^\/api\/v1\/session$/)) return 'session'
   if (is(['POST'], /^\/api\/v1\/change-stream\/resync$/)) return 'change-stream:resync'

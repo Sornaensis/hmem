@@ -14,6 +14,34 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 
 spec :: Spec
 spec = do
+  describe "navigation owner batches" $ do
+    let owner = read "20000000-0000-4000-8000-000000000001" :: UUID
+        other = read "20000000-0000-4000-8000-000000000002" :: UUID
+        item = NavigationBatchItem "one" (NavigationProjectBranch owner) Nothing Nothing Nothing Nothing Nothing Nothing
+        batch = NavigationBatchRequest Nothing [item, item { requestId = "two", parent = NavigationTaskBranch other, includeProjects = Just False, taskOffset = Just 50 }]
+    it "keeps optional GET defaults and independent demand/cursors" $ do
+      eitherDecode (encode batch) `shouldBe` Right batch
+      validateNavigationBatchRequest batch `shouldBe` []
+      eitherDecode "{}" `shouldBe` Right (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing)
+      eitherDecode "{\"project_statuses\":[],\"task_statuses\":[]}" `shouldBe` Right (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing)
+    it "rejects empty oversized repeated identities/owners roots and invalid page bounds" $ do
+      mapM_ (\value -> validateNavigationBatchRequest value `shouldSatisfy` (not . null))
+        [ NavigationBatchRequest Nothing []
+        , NavigationBatchRequest Nothing (replicate 5 item)
+        , NavigationBatchRequest Nothing [item, item { parent = NavigationTaskBranch other }]
+        , NavigationBatchRequest Nothing [item, item { requestId = "two" }]
+        , NavigationBatchRequest Nothing [item { parent = NavigationWorkspaceRoot }]
+        , NavigationBatchRequest Nothing [item { requestId = " " }]
+        , NavigationBatchRequest Nothing [item { requestId = T.replicate 257 "x" }]
+        , NavigationBatchRequest Nothing [item { projectLimit = Just 101 }]
+        , NavigationBatchRequest Nothing [item { taskOffset = Just (-1) }] ]
+    it "requires exact boolean types and keeps bounded IDs independent of long filters" $ do
+      let bad = object ["requests" .= [object ["request_id" .= ("one" :: T.Text), "parent" .= NavigationProjectBranch owner, "include_tasks" .= ("false" :: T.Text)]]]
+          filters = NavigationFilter Nothing [] [] Nothing Nothing (Just (T.replicate 2048 "description needle")) Nothing
+          long = NavigationBatchRequest (Just filters) [item]
+      eitherDecode (encode bad) `shouldSatisfy` (isLeft :: Either String NavigationBatchRequest -> Bool)
+      eitherDecode (encode long) `shouldBe` Right long
+      validateNavigationBatchRequest long `shouldBe` []
   describe "Session attribution compatibility" $ do
     it "accepts historical session JSON without guessing effective attribution" $ do
       let legacy = object

@@ -16,6 +16,13 @@ module Api exposing
     , Memory
     , MemoryLink
     , NavigationBranchResponse
+    , NavigationBatchItem
+    , NavigationBatchOutcome
+    , NavigationBatchResponse
+    , fetchNavigationBatch
+    , encodeNavigationBatchRequest
+    , navigationBatchDecoder
+    , validateNavigationBatchResponse
     , NavigationFocusResponse
     , NavigationSummariesResponse
     , NavigationSummary(..)
@@ -360,6 +367,20 @@ type alias NavigationBranchResponse =
     , projects : PaginatedResult ProjectCardSummary
     , tasks : PaginatedResult TaskCardSummary
     }
+
+
+type alias NavigationBatchItem =
+    { requestId : String, parentKind : String, parentId : String
+    , projectOffset : Int, taskOffset : Int, includeProjects : Bool, includeTasks : Bool
+    }
+
+
+type alias NavigationBatchOutcome =
+    { requestId : String, parentKind : String, parentId : String, result : Result Http.Error NavigationBranchResponse }
+
+
+type alias NavigationBatchResponse =
+    { workspaceId : String, outcomes : List NavigationBatchOutcome }
 
 
 type NavigationSummary
@@ -1480,6 +1501,58 @@ navigationBranchDecoder =
         |> required "workspace_id" D.string
         |> required "projects" (boundedPaginatedDecoder 100 projectCardSummaryDecoder)
         |> required "tasks" (boundedPaginatedDecoder 100 taskCardSummaryDecoder)
+
+
+navigationBatchDecoder : Decoder NavigationBatchResponse
+navigationBatchDecoder =
+    let
+        parent =
+            D.map2 Tuple.pair (D.field "kind" D.string) (D.field "parent_id" D.string)
+                |> D.andThen (\value -> if List.member (Tuple.first value) [ "project", "task" ] && Tuple.second value /= "" then D.succeed value else D.fail "Invalid batch owner")
+
+        outcome =
+            D.map3 (\id owner status -> ( id, owner, status )) (D.field "request_id" D.string) (D.field "parent" parent) (D.field "status" D.int)
+                |> D.andThen (\( id, owner, status ) ->
+                    let
+                        make result = NavigationBatchOutcome id (Tuple.first owner) (Tuple.second owner) result
+                    in
+                    if status == 200 then
+                        D.map2 Tuple.pair (D.field "response" navigationBranchDecoder) (D.field "response" (D.field "parent" parent))
+                            |> D.andThen (\( response, responseOwner ) ->
+                                D.keyValuePairs D.value |> D.andThen (\fields ->
+                                    if responseOwner /= owner || List.any (Tuple.first >> (==) "error") fields then D.fail "Invalid successful batch outcome"
+                                    else D.succeed (make (Ok response))))
+                    else if status >= 400 && status <= 599 then
+                        D.map2 Tuple.pair (D.field "error" D.string) (D.keyValuePairs D.value)
+                            |> D.andThen (\( error, fields ) ->
+                                if String.trim error == "" || String.length error > 256 || List.any (Tuple.first >> (==) "response") fields then D.fail "Invalid failed batch outcome"
+                                else D.succeed (make (Err (Http.BadStatus status))))
+                    else D.fail "Invalid batch status")
+    in
+    D.map2 NavigationBatchResponse (D.field "workspace_id" D.string) (D.field "outcomes" (D.list outcome))
+
+
+validateNavigationBatchResponse : String -> List NavigationBatchItem -> NavigationBatchResponse -> Result Http.Error NavigationBatchResponse
+validateNavigationBatchResponse workspace requests response =
+    let
+        identity value = ( value.requestId, value.parentKind, value.parentId )
+        validOwner item result =
+            identity item == identity result && (case result.result of
+                Ok page -> page.workspaceId == workspace && validStream item.includeProjects page.projects && validStream item.includeTasks page.tasks
+                Err _ -> True)
+        validStream included page =
+            if included then True
+            else List.isEmpty page.items && not page.hasMore
+        ids = List.map .requestId requests
+        owners = List.map (\item -> ( item.parentKind, item.parentId )) requests
+        distinct values = List.length values == List.length (List.foldl (\value unique -> if List.member value unique then unique else value :: unique) [] values)
+    in
+    if List.isEmpty requests || List.length requests > 4 || not (distinct ids && distinct owners)
+        || List.any (\item -> String.isEmpty (String.trim item.requestId) || String.length item.requestId > 256 || not (List.member item.parentKind [ "project", "task" ]) || String.isEmpty item.parentId) requests
+        || response.workspaceId /= workspace || List.length response.outcomes /= List.length requests
+        || not (List.all ((==) True) (List.map2 validOwner requests response.outcomes)) then
+        Err (Http.BadBody "Navigation batch outcomes did not match their complete owner identity set")
+    else Ok response
 
 
 navigationSummaryDecoder : Decoder NavigationSummary
@@ -2945,6 +3018,31 @@ fetchNavigationBranchWithDemand apiUrl wsId parentKind maybeParentId projectOffs
         , expect = Http.expectJson toMsg navigationBranchDecoder
         , timeout = Just 20000
         , tracker = Nothing
+        }
+
+
+encodeNavigationBatchRequest : E.Value -> List NavigationBatchItem -> E.Value
+encodeNavigationBatchRequest filters requests =
+    let
+        item request = E.object
+            [ ( "request_id", E.string request.requestId )
+            , ( "parent", E.object [ ( "kind", E.string request.parentKind ), ( "parent_id", E.string request.parentId ) ] )
+            , ( "project_limit", E.int 50 ), ( "project_offset", E.int request.projectOffset )
+            , ( "task_limit", E.int 50 ), ( "task_offset", E.int request.taskOffset )
+            , ( "include_projects", E.bool request.includeProjects ), ( "include_tasks", E.bool request.includeTasks )
+            ]
+    in
+    E.object [ ( "filters", filters ), ( "requests", E.list item requests ) ]
+
+
+fetchNavigationBatch : String -> String -> E.Value -> List NavigationBatchItem -> (Result Http.Error NavigationBatchResponse -> msg) -> Cmd msg
+fetchNavigationBatch apiUrl workspace filters requests toMsg =
+    Http.request
+        { method = "POST", headers = []
+        , url = apiUrl ++ "/api/v1/workspaces/" ++ workspace ++ "/navigation/batch"
+        , body = Http.jsonBody (encodeNavigationBatchRequest filters requests)
+        , expect = Http.expectJson (Result.andThen (validateNavigationBatchResponse workspace requests) >> toMsg) navigationBatchDecoder
+        , timeout = Just 20000, tracker = Nothing
         }
 
 

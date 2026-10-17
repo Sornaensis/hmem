@@ -33,7 +33,92 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "task and project readiness follows read admission order across families in both response orders" <| \_ ->
+        [ test "shared callback keeps successful owners independent from failed siblings and permits owner retry" <| \_ ->
+            let
+                seed = batchNavigationSeed
+                owners = capturedNavigationOwners seed
+                outcomes = List.indexedMap (\index owner -> batchNavigationOutcome owner (if index == 0 then Ok (batchNavigationPage owner "fresh") else Err (Http.BadStatus 500))) owners
+                complete = DataLoading.update (GotNavigationBatch owners (Ok { workspaceId = workspaceId, outcomes = outcomes })) seed |> Tuple.first
+                failed = List.drop 1 owners |> List.head |> Maybe.map Tuple.first |> Maybe.withDefault ""
+                retried = case String.split ":" failed of
+                    [ kind, id ] -> paintBranch kind workspaceId (Just id) complete |> Tuple.first
+                    _ -> complete
+            in
+            Expect.equal { two = True, fresh = True, released = 0, retry = Just True }
+                { two = List.length owners == 2, fresh = Dict.member "fresh" complete.dataLoading.projectCardSummaries
+                , released = Dict.size complete.dataLoading.navigationAdmissions
+                , retry = Dict.get failed retried.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight }
+        , test "valid batch identity preserves per-kind nonprogress and accepts good kinds and sibling owners" <| \_ ->
+            let
+                seed = batchNavigationSeed
+                owners = capturedNavigationOwners seed
+                firstKey = List.head owners |> Maybe.map Tuple.first |> Maybe.withDefault ""
+                child = let value = task "healthy-task" Nothing in { value | projectId = Just (String.dropLeft 8 firstKey) }
+                outcomes = List.indexedMap (\index owner -> batchNavigationOutcome owner (Ok
+                    (if index == 0 then { workspaceId = workspaceId, projects = { items = [], hasMore = True }, tasks = { items = [ child ], hasMore = False } }
+                     else batchNavigationPage owner "healthy-sibling"))) owners
+                complete = DataLoading.update (GotNavigationBatch owners (Ok { workspaceId = workspaceId, outcomes = outcomes })) seed |> Tuple.first
+            in
+            Expect.equal { projectPaused = True, taskHealthy = True, siblingHealthy = True, released = 0 }
+                { projectPaused = Dict.get firstKey complete.dataLoading.navigationPasses |> Maybe.andThen .projectError |> (/=) Nothing
+                , taskHealthy = Dict.member child.id complete.dataLoading.taskCardSummaries && (Dict.get firstKey complete.dataLoading.navigationPasses |> Maybe.andThen .taskError) == Nothing
+                , siblingHealthy = Dict.member "healthy-sibling" complete.dataLoading.projectCardSummaries
+                , released = Dict.size complete.dataLoading.navigationAdmissions }
+        , test "malformed complete batch identity set applies none and settles every owner" <| \_ ->
+            let
+                seed = batchNavigationSeed
+                owners = capturedNavigationOwners seed
+                outcomes = owners |> List.take 1 |> List.map (\owner -> batchNavigationOutcome owner (Ok (batchNavigationPage owner "must-not-apply")))
+                complete = DataLoading.update (GotNavigationBatch owners (Ok { workspaceId = workspaceId, outcomes = outcomes })) seed |> Tuple.first
+            in
+            Expect.equal ( False, 0, List.repeat 2 False )
+                ( Dict.member "must-not-apply" complete.dataLoading.projectCardSummaries, Dict.size complete.dataLoading.navigationAdmissions
+                , List.map (\( key, _ ) -> Dict.get key complete.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault True) owners )
+        , test "collapsed shared sibling holds its slot until exact callback and cannot revive retired membership" <| \_ ->
+            let
+                seed = batchNavigationSeed
+                owners = capturedNavigationOwners seed
+                cards = seed.cards
+                firstId = owners |> List.head |> Maybe.map (Tuple.first >> String.dropLeft 8) |> Maybe.withDefault ""
+                hidden = DataLoading.update NoOp { seed | cards = { cards | collapsedNodes = Dict.insert ("proj-" ++ firstId) True cards.collapsedNodes } } |> Tuple.first
+                outcomes = List.indexedMap (\index owner -> batchNavigationOutcome owner (Ok (batchNavigationPage owner (if index == 0 then "retired-child" else "current-child")))) owners
+                message = GotNavigationBatch owners (Ok { workspaceId = workspaceId, outcomes = outcomes })
+                complete = DataLoading.update message hidden |> Tuple.first
+                duplicate = DataLoading.update message complete |> Tuple.first
+            in
+            Expect.equal { held = 2, released = 0, retired = False, current = True, duplicate = True }
+                { held = Dict.size hidden.dataLoading.navigationAdmissions, released = Dict.size complete.dataLoading.navigationAdmissions
+                , retired = Dict.member "retired-child" complete.dataLoading.projectCardSummaries, current = Dict.member "current-child" complete.dataLoading.projectCardSummaries
+                , duplicate = duplicate.dataLoading.projectCardSummaries == complete.dataLoading.projectCardSummaries }
+        , test "standalone filtered revalidation stages all owners and admits after its existing paint without waiting for root HTTP" <| \_ ->
+            let
+                seed = batchNavigationSeed
+                owners = capturedNavigationOwners seed
+                outcomes = List.map (\owner -> batchNavigationOutcome owner (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) owners
+                settled = DataLoading.update (GotNavigationBatch owners (Ok { workspaceId = workspaceId, outcomes = outcomes })) seed |> Tuple.first |> settleOrdinaryDetails |> painted
+                refreshed = DataLoading.revalidateNavigationForFilters settled |> Tuple.first
+                admitted = painted refreshed
+            in
+            Expect.equal { rootBusy = True, beforePaint = 0, queued = 2, afterPaint = 2, admitted = True }
+                { rootBusy = admitted.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False
+                , beforePaint = Dict.size refreshed.dataLoading.navigationAdmissions, queued = List.length refreshed.dataLoading.navigationQueue
+                , afterPaint = Dict.size admitted.dataLoading.navigationAdmissions
+                , admitted = List.all (\( key, _ ) -> Dict.get key admitted.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False) owners }
+        , test "ordinary owner batch retains its four slots even with independent root HTTP in flight" <| \_ ->
+            let
+                parents = List.range 1 4 |> List.map (\n -> let p = project ("four-" ++ String.fromInt n) Nothing in { p | hasChildren = True })
+                waiting = loadRootUnpainted workspaceId parents [] model
+                loading = waiting.dataLoading
+                rooted = { waiting | dataLoading = { loading | rootNavigationRequest = Maybe.map (\request -> { request | inFlight = True }) loading.rootNavigationRequest, visibleDetailDemand = Just ( Set.empty, Set.empty ) } }
+                admitted = DataLoading.acceptBackgroundPaint (DataLoading.backgroundPaintNonce rooted) rooted |> Tuple.first
+                owners = capturedNavigationOwners admitted
+                result = DataLoading.update (GotNavigationBatch owners (Err Http.Timeout)) admitted |> Tuple.first
+            in
+            Expect.equal { count = 4, root = Just True, released = 0, yielded = True }
+                { count = List.length owners, root = admitted.dataLoading.rootNavigationRequest |> Maybe.map .inFlight
+                , released = Dict.size result.dataLoading.navigationAdmissions
+                , yielded = result.dataLoading.backgroundAdmission.remaining == 0 && not result.dataLoading.backgroundAdmission.acknowledged && result.dataLoading.backgroundAdmission.nonce > admitted.dataLoading.backgroundAdmission.nonce }
+        , test "task and project readiness follows read admission order across families in both response orders" <| \_ ->
             List.concatMap (\( kind, family ) -> List.concatMap (\summaryOlder -> List.map (planningReadinessRace kind family summaryOlder) [ False, True ]) [ False, True ])
                 [ ( "task", "dependency" ), ( "task", "plain" ), ( "task", "canonical" ), ( "project", "dependency" ), ( "project", "plain" ) ]
                 |> Expect.equal (List.repeat 20 { rollup = Just 1, summary = Just 1, dataSettled = True })
@@ -3283,6 +3368,27 @@ suite =
 workspaceId : String
 workspaceId =
     "workspace-1"
+
+
+batchNavigationSeed : Model
+batchNavigationSeed =
+    loadRootUnpainted workspaceId (List.map (\id -> let summary = project id Nothing in { summary | hasChildren = True }) [ "batch-a", "batch-b" ]) [] model |> painted
+
+
+capturedNavigationOwners : Model -> List ( String, Types.NavigationBranchState )
+capturedNavigationOwners source =
+    Dict.toList source.dataLoading.navigationAdmissions
+        |> List.map (\( identity, request ) -> ( String.split "|" identity |> List.head |> Maybe.withDefault "", request ))
+
+
+batchNavigationOutcome : ( String, Types.NavigationBranchState ) -> Result Http.Error Api.NavigationBranchResponse -> Api.NavigationBatchOutcome
+batchNavigationOutcome ( key, request ) result =
+    { requestId = String.fromInt request.readRevision, parentKind = "project", parentId = String.dropLeft 8 key, result = result }
+
+
+batchNavigationPage : ( String, Types.NavigationBranchState ) -> String -> Api.NavigationBranchResponse
+batchNavigationPage ( key, _ ) child =
+    { workspaceId = workspaceId, projects = { items = [ project child (Just (String.dropLeft 8 key)) ], hasMore = False }, tasks = { items = [], hasMore = False } }
 
 
 filterFingerprint : String

@@ -182,6 +182,9 @@ route msg model =
         GotNavigationBranch _ _ _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotNavigationBatch _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
         GotNavigationFocus _ _ _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 

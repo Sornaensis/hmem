@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { resolve, sep } from 'node:path'
 import { chromium } from '@playwright/test'
-import { generateFixture, queryObservations, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, projectOverviewResponse, taskOverviewResponse, taskReadinessRollup, workspaceShellSnapshotItems } from '../perf/fixtures.mjs'
+import { generateFixture, queryObservations, navigationBranchResponse, navigationBatchDescriptors, navigationBatchResponse, navigationFocusResponse, navigationSummariesResponse, projectOverviewResponse, taskOverviewResponse, taskReadinessRollup, workspaceShellSnapshotItems } from '../perf/fixtures.mjs'
 
 // Controlled HTTP-fixture equivalent; backend predicate equivalence is tested
 // separately against PostgreSQL. Never count a paginated fixture prefix.
@@ -152,6 +152,8 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
     await page.route('**/api/v1/**', async route => {
       const request = route.request(), url = new URL(request.url()), path = url.pathname
       const navigation = path.endsWith('/navigation')
+      const navigationBatch = path.endsWith('/navigation/batch')
+      const logicalPages = [], ownerControls = []
       const detail = /^\/api\/v1\/(projects|tasks)\/[^/]+$/.test(path)
       const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), includeProjects: url.searchParams.get('include_projects') !== 'false', includeTasks: url.searchParams.get('include_tasks') !== 'false', projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), includeBlocked: url.searchParams.get('include_blocked') === 'true', arrived: performance.now(), done: false }
       requests.push(receipt)
@@ -187,6 +189,31 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           receipt.projectHasMore = value.projects.has_more; receipt.taskHasMore = value.tasks.has_more
         }
         else if (path.endsWith('/navigation/summaries')) { const body = request.postDataJSON(); receipt.projectIds = body.project_ids; receipt.taskIds = body.task_ids; value = navigationSummariesResponse(fixture, body.project_ids, body.task_ids) }
+        else if (navigationBatch) {
+          assert.equal(request.method(), 'POST')
+          const body = request.postDataJSON(), descriptors = navigationBatchDescriptors(body, request.url(), { allowSyntheticIds: true })
+          value = navigationBatchResponse(fixture, body, request.url(), { allowSyntheticIds: true })
+          receipt.body = body; receipt.ownerPages = logicalPages
+          activeBranches += descriptors.length; maxBranches = Math.max(maxBranches, activeBranches)
+          const viewport = await page.evaluate(() => { try { return JSON.parse(document.getElementById('hierarchy-viewport')?.dataset.hierarchyContext || 'null') } catch { return null } })
+          for (const [index, descriptor] of descriptors.entries()) {
+            const options = descriptor.options, outcome = value.outcomes[index]
+            const logical = { method: 'POST', path: path.slice(0, -6), logical: true, counted: false, transportIndex: requests.indexOf(receipt), requestId: descriptor.requestId,
+              parent: options.parentId, kind: options.parentKind, includeProjects: options.includeProjects, includeTasks: options.includeTasks,
+              projectOffset: options.projectOffset, taskOffset: options.taskOffset, query: options.query || '', showOnly: options.showOnly,
+              projectStatuses: options.projectStatuses, viewport, arrived: receipt.arrived, done: false }
+            const control = controls.find(candidate => !candidate.used && candidate.match(logical))
+            if (control) { control.used = true; control.receipt = logical; ownerControls.push(control)
+              if (control.error) { outcome.status = control.error; delete outcome.response; outcome.error = 'Controlled failure' }
+              else if (control.transform && outcome.response) outcome.response = control.transform(outcome.response)
+            }
+            logical.status = outcome.status
+            if (outcome.response) { logical.projectItems = outcome.response.projects.items.length; logical.taskItems = outcome.response.tasks.items.length
+              logical.projectIds = outcome.response.projects.items.map(item => item.id); logical.taskIds = outcome.response.tasks.items.map(item => item.id)
+              logical.projectHasMore = outcome.response.projects.has_more; logical.taskHasMore = outcome.response.tasks.has_more }
+            logicalPages.push(logical); requests.push(logical)
+          }
+        }
         else if (path.includes('/navigation/focus/')) { const parts = path.split('/'); value = navigationFocusResponse(fixture, parts.at(-2), parts.at(-1), Number(url.searchParams.get('ancestor_offset') || 0)) }
         else if (/^\/api\/v1\/projects\/[^/]+\/overview$/.test(path)) value = projectOverviewResponse(fixture, path.split('/')[4])
         else if (/^\/api\/v1\/projects\/[^/]+\/next-task-page$/.test(path)) {
@@ -222,11 +249,13 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         receipt.status = status
         const responseBody = JSON.stringify(value)
         receipt.bytes = Buffer.byteLength(responseBody)
+        for (const ownerControl of ownerControls) { ownerControl.arrivedResolve(ownerControl.receipt); if (ownerControl.hold) held.add(ownerControl.release) }
+        await Promise.all(ownerControls.filter(ownerControl => ownerControl.hold).map(ownerControl => ownerControl.wait.finally(() => held.delete(ownerControl.release))))
         if (control) { control.arrivedResolve(receipt); if (control.hold) { held.add(control.release); await control.wait; held.delete(control.release) } }
         await route.fulfill({ status, contentType: 'application/json', body: responseBody })
         if (authority && request.method() === 'PUT' && path.includes('/projects/')) await authority.broadcast()
       } catch (error) { errors.push(error.message); await route.abort().catch(() => {}) }
-      finally { receipt.done = true; if (navigation) activeBranches--; if (detail) activeDetails-- }
+      finally { receipt.done = true; for (const logical of logicalPages) logical.done = true; activeBranches -= logicalPages.length; if (navigation) activeBranches--; if (detail) activeDetails-- }
     })
     const settleScroll = () => page.evaluate(async () => { const scroll = document.getElementById('main-content-scroll'); let previous = null, stable = 0; const deadline = performance.now() + 1000; while (performance.now() < deadline && stable < 3) { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); const geometry = [scroll.scrollTop, scroll.scrollHeight].join(':'); stable = geometry === previous ? stable + 1 : 0; previous = geometry }; if (stable < 3) throw new Error('Scroll geometry did not settle before complete logical scan');  })
     const origin = 'http://127.0.0.1:' + server.address().port

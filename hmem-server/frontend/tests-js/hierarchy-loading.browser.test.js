@@ -2,6 +2,42 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 
+test('shared navigation POST holds every owner until completion and retries only the failed sibling', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture(), template = fixture.projects[0]
+  fixture.projects = ['a', 'b'].flatMap(id => [
+    { ...template, id, name: id, parent_id: null },
+    { ...template, id: id + '-child', name: id + '-child', parent_id: id }
+  ])
+  fixture.tasks = []
+  const h = await openHierarchy(fixture)
+  try {
+    const a = h.gate(r => r.parent === 'a', { hold: true })
+    const b = h.gate(r => r.parent === 'b', { hold: true, error: 500 })
+    await h.start('tab=projects', 'a')
+    await h.bounded(Promise.all([a.arrived, b.arrived]), 10000, 'Shared owner admissions')
+    assert.equal(a.receipt.transportIndex, b.receipt.transportIndex)
+    const transport = h.requests[a.receipt.transportIndex]
+    assert.equal(transport.method, 'POST'); assert.ok(transport.path.endsWith('/navigation/batch'))
+    assert.equal(transport.body.requests.length, 2)
+    assert.equal(h.caps().activeBranches, 2)
+    await h.page.locator('#entity-a .tree-toggle').click()
+    a.release()
+    await h.page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)))
+    assert.equal(transport.done, false); assert.equal(h.caps().activeBranches, 2)
+    b.release(); await h.idle()
+    assert.equal(transport.done, true); assert.equal(h.caps().activeBranches, 0)
+    assert.equal(await h.page.locator('#entity-a-child').count(), 0, 'Collapsed sibling rejects its shared response')
+    const before = h.requests.length
+    const row = await h.scrollTo('status:project:b')
+    await row.getByRole('button', { name: /Retry/ }).first().click(); await h.idle()
+    const retries = h.requests.slice(before).filter(r => r.logical)
+    assert.ok(retries.length > 0); assert.ok(retries.every(r => r.parent === 'b'))
+    assert.ok((await h.logicalKeys()).has('project:b-child'))
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 test('closing Timeline focus restores filtered membership below expanded active ancestry', { timeout: 60000 }, async () => {
   const fixture = hierarchyFixture()
   const root = fixture.projects[0]
@@ -256,7 +292,9 @@ test('duplicate continuation pauses only its nonprogressing stream and explicit 
     const terminalTask = h.requests.filter(r => r.parent === 'root-project' && r.taskOffset === 100).at(-1)
     assert.equal(terminalTask.taskHasMore, false); assert.equal(terminalTask.taskIds.length, 21)
     const before = h.requests.length
-    await status.getByRole('button', {name:'Retry', exact:true}).click(); await h.idle()
+    try { await status.getByRole('button', {name:'Retry', exact:true}).click() }
+    catch (error) { throw new Error(error.message + '\n' + JSON.stringify({ navigation: h.requests.filter(r => r.kind).slice(-6), geometry: await h.page.evaluate(() => ({ top: document.getElementById('main-content-scroll').scrollTop, context: document.getElementById('hierarchy-viewport')?.dataset.hierarchyContext, status: [...document.querySelectorAll('[data-hierarchy-key^="status:"]')].map(row => ({ key: row.dataset.hierarchyKey, box: row.getBoundingClientRect().toJSON(), text: row.innerText })) })) })) }
+    await h.idle()
     const retried = h.requests.slice(before).find(r => r.parent === 'root-project' && r.path.endsWith('/navigation'))
     assert.equal(retried.projectOffset, 50); assert.equal(retried.projectHasMore, false); assert.equal(retried.projectIds.length, 13)
     await h.scrollTo('project:project-062'); await h.scrollTo('task:task-120')

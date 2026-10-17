@@ -999,11 +999,14 @@ export function timelineSource() {
   const source = fs.readFileSync(path.join(frontendRoot, 'src/Feature/Timeline.elm'), 'utf8')
   if (!/histogramWindow = "30"/.test(source) || !/histogramBucket = "week"/.test(source)
     || !source.includes('Maybe.withDefault 30 (String.toInt window) - 1') || !source.includes('nowMillis + millisPerDay')
-    || !source.includes('timeline-point-control') || !source.includes('Lifecycle activity')) throw new Error('Timeline current source contract changed')
+    || !source.includes('timeline-point-control') || !source.includes('Lifecycle activity')
+    || !source.includes('Lifecycle line actions') || !source.includes('Lifecycle line entities')
+    || !source.includes('Svg.text (actionLabel ++ " by interval")') || !source.includes(TIMELINE_CURRENT_CONTRACT.description)
+    || !source.includes('key = "observations", label = "Observations"')) throw new Error('Timeline current source contract changed')
   return { window: '30', bucket: 'week', sources }
 }
 
-export function assertTimelineTransport(tracker, before, fixture) {
+export function assertTimelineTransport(tracker, before, fixture, options) {
   const requests = tracker.requests.slice(before.index)
   const expectedEvents = queryTimelineEvents(fixture, { limit: 50 })
   const expectedBuckets = queryTimelineBuckets(fixture, TIMELINE_CURRENT_CONTRACT.query)
@@ -1015,7 +1018,7 @@ export function assertTimelineTransport(tracker, before, fixture) {
   }
   if (tracker.model.timelineEvents !== expectedEvents.items.length || tracker.model.timelineBuckets !== expectedBuckets.buckets.length
     || JSON.stringify(tracker.model.timelineBucketRequest) !== JSON.stringify(TIMELINE_CURRENT_CONTRACT.query)) throw new Error('Timeline intercepted model does not match the current fulfilled DTOs')
-  return { receipts, chart: timelineChartExpectation(expectedEvents, expectedBuckets) }
+  return { receipts, chart: timelineChartExpectation(expectedEvents, expectedBuckets, options) }
 }
 
 export function timelineDomReady(expected) {
@@ -1026,17 +1029,17 @@ export function timelineDomReady(expected) {
   const charts = [...document.querySelectorAll('svg.timeline-line-chart')]
   if (charts.length !== 1 || charts[0].namespaceURI !== 'http://www.w3.org/2000/svg'
     || charts[0].getAttribute('aria-labelledby') !== 'timeline-chart-lifecycle-title timeline-chart-lifecycle-description'
-    || document.getElementById('timeline-chart-lifecycle-title')?.textContent !== 'Lifecycle activity lifecycle counts by UTC bucket'
-    || document.getElementById('timeline-chart-lifecycle-description')?.textContent !== 'Each interactive point selects its half-open UTC bucket for the event cards.') return false
+    || document.getElementById('timeline-chart-lifecycle-title')?.textContent !== expected.title
+    || document.getElementById('timeline-chart-lifecycle-description')?.textContent !== expected.description) return false
   const controls = [...document.querySelectorAll('.timeline-graph-controls select')]
   if (controls.length !== 2 || controls[0].value !== expected.window || controls[1].value !== expected.bucket) return false
   const paths = [...document.querySelectorAll('svg.timeline-line-chart path.timeline-line')]
-  if (paths.length !== expected.actions.length || !expected.actions.every((action, index) => paths[index].classList.contains('timeline-series-' + action)
+  if (paths.length !== expected.series.length || !expected.series.every((action, index) => paths[index].classList.contains('timeline-series-' + action)
     && paths[index].namespaceURI === 'http://www.w3.org/2000/svg' && paths[index].getAttribute('d')?.trim())) return false
-  const toggles = [...document.querySelectorAll('[aria-label="Visible lifecycle events"] .timeline-series-toggle')]
+  const toggles = [...document.querySelectorAll('[aria-label="Lifecycle line actions"] .timeline-series-toggle')]
   if (toggles.length !== expected.actions.length || !expected.actions.every((action, index) => toggles[index].classList.contains('timeline-series-' + action) && toggles[index].getAttribute('aria-pressed') === 'true')) return false
   const entities = ['projects', 'tasks', 'subtasks', 'observations']
-  const entityToggles = [...document.querySelectorAll('[aria-label="Visible entity series"] .timeline-series-toggle')]
+  const entityToggles = [...document.querySelectorAll('[aria-label="Lifecycle line entities"] .timeline-series-toggle')]
   if (entityToggles.length !== entities.length || !entities.every((entity, index) => entityToggles[index].classList.contains('timeline-series-' + entity) && entityToggles[index].getAttribute('aria-pressed') === 'true')) return false
   const points = [...document.querySelectorAll('.timeline-point-control')]
   return points.length === expected.points.length && expected.points.every((point, index) => {
@@ -1044,7 +1047,6 @@ export function timelineDomReady(expected) {
     return node.id === point.id && node.namespaceURI === 'http://www.w3.org/2000/svg'
       && node.getAttribute('role') === point.role && node.getAttribute('tabindex') === point.tabindex
       && node.getAttribute('aria-pressed') === point.pressed && node.getAttribute('aria-label') === point.label
-      && node.querySelector('title')?.textContent === point.title
       && node.querySelectorAll('circle.timeline-point-hitarea').length === 1 && node.querySelectorAll('circle.timeline-point').length === 1
   })
 }
@@ -1059,17 +1061,21 @@ export function timelineDomSnapshot() {
     controls: [...document.querySelectorAll('.timeline-graph-controls select')].slice(0, 2).map(node => node.value.slice(0, 32)),
     loading: !!document.querySelector('.timeline-panel .loading-indicator') || [...document.querySelectorAll('.timeline-graph-state')].some(node => node.textContent.includes('Loading')),
     error: text('.timeline-graph-error,.timeline-stale-notice,.timeline-state .btn-secondary'),
-    lifecycleToggles: toggles('Visible lifecycle events', 5), entityToggles: toggles('Visible entity series', 4),
+    lifecycleToggles: toggles('Lifecycle line actions', 5), entityToggles: toggles('Lifecycle line entities', 4),
     pointLabels: [...document.querySelectorAll('.timeline-point-control')].slice(0, 25).map(node => node.getAttribute('aria-label')?.slice(0, 256) || null) }
 }
+
+export function timelineBrowserTimeZone() { return Intl.DateTimeFormat().resolvedOptions().timeZone }
 
 export async function waitTimeline(page, tracker, before, fixture) {
   let timer
   try {
-    const chart = timelineChartExpectation(queryTimelineEvents(fixture, { limit: 50 }), queryTimelineBuckets(fixture, TIMELINE_CURRENT_CONTRACT.query))
+    const timeZone = await page.evaluate(timelineBrowserTimeZone)
+    if (typeof timeZone !== 'string' || !timeZone) throw new Error('Timeline browser timezone is missing')
+    const chart = timelineChartExpectation(queryTimelineEvents(fixture, { limit: 50 }), queryTimelineBuckets(fixture, TIMELINE_CURRENT_CONTRACT.query), { timeZone })
     await page.waitForFunction(timelineDomReady, chart, { timeout: 30000 })
     await waitForTransportQuiescence(page, tracker, 'Timeline')
-    return assertTimelineTransport(tracker, before, fixture)
+    return assertTimelineTransport(tracker, before, fixture, { timeZone })
   } catch (error) {
     let dom
     try { dom = await Promise.race([page.evaluate(timelineDomSnapshot), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Timeline diagnostic capture exceeded 1000ms')), 1000) })]) }

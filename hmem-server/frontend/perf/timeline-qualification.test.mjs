@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import { createHash } from 'node:crypto'
 import { TIMELINE_CURRENT_CONTRACT, HARNESS_CONFIGURATION, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, renderBudgetEvaluation, renderMaximum } from './contracts.mjs'
 import { TIMELINE_DEFAULT_UI_QUERY, generateFixture, queryTimelineEvents, queryTimelineBuckets, fixtureHash } from './fixtures.mjs'
-import { timelineSource, timelineDomReady, timelineDomSnapshot, waitTimeline, assertTimelineTransport, fixtureResponder, createTracker, measureRun, staticServer } from './harness.mjs'
+import { timelineSource, timelineDomReady, timelineDomSnapshot, timelineBrowserTimeZone, waitTimeline, assertTimelineTransport, fixtureResponder, createTracker, measureRun, staticServer } from './harness.mjs'
 
 function expectedFor(fixture) {
   const events = queryTimelineEvents(fixture, { limit: 50 }), buckets = queryTimelineBuckets(fixture, TIMELINE_CURRENT_CONTRACT.query)
@@ -28,11 +28,11 @@ function trackerFor(fixture) {
 function documentFor(expected) {
   const node = (id, attributes = {}, textContent = '') => ({ id, namespaceURI: 'http://www.w3.org/2000/svg', textContent,
     getAttribute: name => attributes[name] ?? null, classList: { contains: name => attributes.class === name } })
-  const paths = expected.actions.map(action => node('', { class: 'timeline-series-' + action, d: 'M 44 100 L 172 100' }))
+  const paths = expected.series.map(action => node('', { class: 'timeline-series-' + action, d: 'M 44 100 L 172 100' }))
   const toggles = expected.actions.map(action => node('', { class: 'timeline-series-' + action, 'aria-pressed': 'true' }))
   const entityToggles = ['projects', 'tasks', 'subtasks', 'observations'].map(entity => node('', { class: 'timeline-series-' + entity, 'aria-pressed': 'true' }))
   const points = expected.points.map(point => ({ ...node(point.id, { role: point.role, tabindex: point.tabindex, 'aria-pressed': point.pressed, 'aria-label': point.label }),
-    querySelector: selector => selector === 'title' ? { textContent: point.title } : null,
+    querySelector: selector => selector === 'title' ? { textContent: point.label } : null,
     querySelectorAll: () => [{}] }))
   const lists = {
     '.timeline-event-card': expected.eventIds.map(id => node(id)),
@@ -41,12 +41,12 @@ function documentFor(expected) {
     'svg.timeline-line-chart path.timeline-line': paths,
     'path.timeline-line': paths,
     '.timeline-series-toggle': [...entityToggles, ...toggles],
-    '[aria-label="Visible lifecycle events"] .timeline-series-toggle': toggles,
-    '[aria-label="Visible entity series"] .timeline-series-toggle': entityToggles,
+    '[aria-label="Lifecycle line actions"] .timeline-series-toggle': toggles,
+    '[aria-label="Lifecycle line entities"] .timeline-series-toggle': entityToggles,
     '.timeline-point-control': points
   }
-  const ids = { 'timeline-chart-lifecycle-title': { textContent: 'Lifecycle activity lifecycle counts by UTC bucket' },
-    'timeline-chart-lifecycle-description': { textContent: 'Each interactive point selects its half-open UTC bucket for the event cards.' } }
+  const ids = { 'timeline-chart-lifecycle-title': { textContent: expected.title },
+    'timeline-chart-lifecycle-description': { textContent: expected.description } }
   let blocked = false
   return { lists, ids, points, paths, toggles, entityToggles, block: () => { blocked = true },
     getElementById: id => ids[id] || null,
@@ -71,7 +71,7 @@ test('current Timeline contract source anchors 30-day weekly SVG separately from
     const fixture = generateFixture(scale)
     assert.equal(queryTimelineBuckets(fixture, TIMELINE_DEFAULT_UI_QUERY).buckets.length, 13)
     assert.equal(expectedFor(fixture).buckets.buckets.length, 5)
-    assert.equal(expectedFor(fixture).chart.points.length, 25)
+    assert.equal(expectedFor(fixture).chart.points.length, 30)
     assert.equal(fixtureHash(fixture), scale === 'small' ? '0c425c77e5069b8d4cf26dbdebcf94037a22ee977e61d63ab3cceb1a7f090bc4' : 'b98d53a1a1ca28641dc90cbb598f3026949edf702f0ae4696614520b5140dd63')
   }
   assert.equal(typeof measureRun, 'function'); assert.equal(typeof staticServer, 'function')
@@ -111,16 +111,22 @@ test('canonical enabled lifecycle points accept zero activity and enforce count/
   })
   for (const mutate of [
     doc => { doc.lists['svg.timeline-line-chart'] = [] },
+    doc => { doc.paths.pop() },
+    doc => { doc.paths.push(doc.paths[0]) },
+    doc => { doc.points.push(doc.points[0]) },
+    doc => { doc.ids['timeline-chart-lifecycle-title'].textContent = 'old chart title' },
+    doc => { doc.ids['timeline-chart-lifecycle-description'].textContent = 'old chart description' },
     doc => { doc.paths[0].namespaceURI = 'http://www.w3.org/1999/xhtml' },
     doc => { doc.paths[0].getAttribute = () => '' },
     doc => { doc.points.pop() },
+    doc => { doc.points[0].namespaceURI = 'http://www.w3.org/1999/xhtml' },
     doc => { doc.points.reverse() },
     doc => { doc.points[0].getAttribute = () => 'wrong' },
-    doc => { doc.points[0].querySelector = () => ({ textContent: 'wrong count/range' }) },
+    doc => { doc.points[0].getAttribute = name => name === 'aria-label' ? 'wrong count/range' : null },
     doc => { doc.points[0].querySelectorAll = () => [] },
     doc => { doc.toggles[0].getAttribute = () => 'false' },
     doc => { doc.toggles[0].classList.contains = () => false },
-    doc => { doc.lists['[aria-label="Visible lifecycle events"] .timeline-series-toggle'] = doc.entityToggles },
+    doc => { doc.lists['[aria-label="Lifecycle line actions"] .timeline-series-toggle'] = doc.entityToggles },
     doc => { doc.entityToggles[0].getAttribute = () => 'false' },
     doc => { doc.entityToggles.pop() },
     doc => { doc.lists['.timeline-graph-controls select'][0].value = '6months' },
@@ -144,7 +150,7 @@ test('real Timeline fixture responder retains exact wire DTO accounting and fulf
     assert.equal(tracker.requests.at(-1).timeline.response.fulfilled, true)
     assert.equal(tracker.bytes[expected.key], Buffer.byteLength(result.body))
   }
-  assert.equal(assertTimelineTransport(tracker, { index: 0 }, fixture).chart.points.length, 25)
+  assert.equal(assertTimelineTransport(tracker, { index: 0 }, fixture).chart.points.length, 30)
 })
 
 test('Timeline wait retains deadline, exact success proof and bounded original-cause failure diagnostics', async () => {
@@ -153,19 +159,19 @@ test('Timeline wait retains deadline, exact success proof and bounded original-c
   await withDocument(documentFor(expected.chart), async () => {
     const result = await waitTimeline({
       waitForFunction: async (predicate, input, options) => { assert.equal(predicate, timelineDomReady); assert.equal(predicate(input), true); assert.deepEqual(options, { timeout: 30000 }) },
-      evaluate: async capture => { assert.notEqual(capture, timelineDomSnapshot); captures += 1 }
+      evaluate: async capture => { if (capture === timelineBrowserTimeZone) return 'UTC'; assert.notEqual(capture, timelineDomSnapshot); captures += 1 }
     }, tracker, { index: 0 }, fixture)
-    assert.equal(result.chart.points.length, 25); assert.equal(captures, 1)
+    assert.equal(result.chart.points.length, 30); assert.equal(captures, 1)
     const timeout = Object.assign(new Error('Timeout 30000ms exceeded'), { name: 'TimeoutError' })
     const doc = documentFor(expected.chart); doc.block()
     await withDocument(doc, () => assert.rejects(waitTimeline({ waitForFunction: async () => { throw timeout }, evaluate: async capture => capture() }, tracker, { index: 0 }, fixture), error => {
-      assert.equal(error.cause, timeout); assert.equal(error.timelineQualification.dom.points, 25)
+      assert.equal(error.cause, timeout); assert.equal(error.timelineQualification.dom.points, 30)
       assert.equal(error.timelineQualification.dom.error.length, 256)
       assert.equal(error.timelineQualification.requests.length, 2)
       assert.equal(error.timelineQualification.model.buckets, 5)
       return true
     }))
-    await assert.rejects(waitTimeline({ waitForFunction: async () => { throw timeout }, evaluate: async () => new Promise(() => {}) }, tracker, { index: 0 }, fixture), error => {
+    await assert.rejects(waitTimeline({ waitForFunction: async () => { throw timeout }, evaluate: async capture => capture === timelineBrowserTimeZone ? 'UTC' : new Promise(() => {}) }, tracker, { index: 0 }, fixture), error => {
       assert.equal(error.cause, timeout); assert.match(error.timelineQualification.dom.captureError, /1000ms/); return true
     })
   })
@@ -187,4 +193,36 @@ test('physical metrics count SVG controls alongside legacy rows without changing
   const budget = JSON.parse(fs.readFileSync('perf/budgets.v1.json')).large.render
   assert.equal(renderBudgetEvaluation(renderMaximum([{ nodes: budget.maxDomNodes, rows: budget.maxCollectionRows }]), budget).passed, true)
   assert.equal(renderBudgetEvaluation({ nodes: budget.maxDomNodes, rows: budget.maxCollectionRows + 25 }, budget).passed, false)
+})
+
+
+test('current six-series counts and summary labels are independent and follow captured browser timezone', () => {
+  const fixture = generateFixture('small'), expected = expectedFor(fixture), histogram = structuredClone(expected.buckets)
+  const bucket = histogram.buckets[0]
+  Object.assign(bucket.series.project, { created: 1, completed: 2, deleted: 3, archived: 4, cancelled: 999 })
+  Object.assign(bucket.series.task, { created: 5, completed: 6, deleted: 7, archived: 999, cancelled: 8 })
+  Object.assign(bucket.series.subtask, { created: 9, completed: 10, deleted: 11, archived: 999, cancelled: 12 })
+  Object.assign(bucket.series.observation, { created: 13, completed: 999, deleted: 999, archived: 999, cancelled: 999 })
+  const chart = timelineChartExpectation(expected.events, histogram, { timeZone: 'Europe/Copenhagen' })
+  assert.deepEqual(chart.series, ['created', 'completed', 'deleted', 'archived', 'cancelled', 'observations'])
+  const first = chart.points.filter(point => point.id.endsWith('-0'))
+  assert.deepEqual(first.map(point => Number(point.label.match(/exclusive, (\d+),/)[1])), [15, 18, 21, 4, 20, 13])
+  assert.ok(first.every(point => point.label.startsWith('13 Observations; 1 Projects Created; 14 Tasks/Subtasks Created; 2 Projects Completed; 16 Tasks/Subtasks Completed; 3 Projects Deleted; 18 Tasks/Subtasks Deleted; 20 Tasks/Subtasks Cancelled; 4 Projects Archived. ')))
+  assert.match(first[0].label, /Lifecycle activity, Create, 2026-07-27 02:00 to 2026-08-03 02:00 exclusive, 15, not selected$/)
+  assert.notEqual(first[0].label, timelineChartExpectation(expected.events, histogram, { timeZone: 'UTC' }).points[0].label)
+  assert.throws(() => timelineChartExpectation(expected.events, histogram, { timeZone: '' }), /timezone is missing/)
+  assert.throws(() => timelineChartExpectation(expected.events, histogram, { timeZone: 'invalid' }), /Invalid time zone/)
+  const observations = chart.points.find(point => point.id.includes('-observations-'))
+  assert.match(observations.label, /Observations, .*exclusive, 13, not selected$/)
+  assert.equal(chart.title, 'Lifecycle activity by interval')
+})
+
+
+test('Timeline capture rejects missing browser timezone before any readiness success', async () => {
+  const fixture = generateFixture('small'), { tracker } = trackerFor(fixture)
+  let readinessCalls = 0
+  const page = { evaluate: async capture => capture === timelineBrowserTimeZone ? undefined : { missingZone: true },
+    waitForFunction: async () => { readinessCalls++ } }
+  await assert.rejects(waitTimeline(page, tracker, { index: 0 }, fixture), /browser timezone is missing/)
+  assert.equal(readinessCalls, 0)
 })

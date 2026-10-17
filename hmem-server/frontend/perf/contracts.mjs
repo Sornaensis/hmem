@@ -88,9 +88,12 @@ export function observationPaginationMetrics(small, large, budget, comparableEnv
 }
 
 export const TIMELINE_CURRENT_CONTRACT = Object.freeze({
-  revision: 'timeline-window-svg.v1', clockUtc: '2026-08-30T12:00:00Z', window: '30',
+  revision: 'timeline-window-svg.v2', clockUtc: '2026-08-30T12:00:00Z', window: '30',
   query: Object.freeze({ since: '2026-08-01T00:00:00Z', until: '2026-08-31T00:00:00Z', bucket: 'week' }),
   eventLimit: 50, actions: Object.freeze(['created', 'completed', 'deleted', 'archived', 'cancelled']),
+  series: Object.freeze(['created', 'completed', 'deleted', 'archived', 'cancelled', 'observations']),
+  title: 'Lifecycle activity by interval',
+  description: 'Lines show lifecycle activity and observations on the left axis. Stacked bars show open projects and tasks plus subtasks on the right axis. Hover or focus a line to highlight it and show selected activity counts. Bars and points select their interval for event cards. Arrow keys move between intervals. Axis dates use your browser timezone.',
   source: 'hmem-server/frontend/src/Feature/Timeline.elm',
   legacyTimingComparability: Object.freeze({ comparable: false, reason: 'Current 30-day SVG qualification differs from the retained three-month table workload.' })
 })
@@ -112,17 +115,34 @@ export function assertTimelineReceipt(receipt, workspaceId, kind, expected) {
   return receipt
 }
 
-export function timelineChartExpectation(events, histogram) {
-  const labels = { created: 'Create', completed: 'Complete', deleted: 'Delete', archived: 'Archive', cancelled: 'Cancel' }
-  const format = value => value.replace('T', ' ').slice(0, 16)
-  const points = TIMELINE_CURRENT_CONTRACT.actions.flatMap(action => histogram.buckets.map((bucket, index) => {
-    const count = ['project', 'task', 'subtask', 'observation'].reduce((sum, kind) => sum + (bucket.series[kind][action] ?? 0), 0)
-    if (!Number.isSafeInteger(count) || count < 0) throw new Error('Timeline canonical count is invalid')
-    return { id: `timeline-point-lifecycle-${action}-${index}`, role: 'button', tabindex: index === 0 ? '0' : '-1', pressed: 'false',
-      label: `Lifecycle activity, ${labels[action]}, ${bucket.label}, ${format(bucket.bucket_start)} to ${format(bucket.bucket_end)} exclusive, ${count}, not selected`,
-      title: `Lifecycle activity — ${labels[action]} — ${bucket.label} [${format(bucket.bucket_start)}, ${format(bucket.bucket_end)}): ${count}` }
-  }))
-  return { eventIds: events.items.map(event => 'timeline-event-' + event.id), points, actions: TIMELINE_CURRENT_CONTRACT.actions, window: '30', bucket: 'week' }
+export function timelineChartExpectation(events, histogram, { timeZone = 'UTC' } = {}) {
+  if (typeof timeZone !== 'string' || !timeZone) throw new Error('Timeline browser timezone is missing')
+  const formatter = new Intl.DateTimeFormat('en-GB', { timeZone, calendar: 'gregory', numberingSystem: 'latn', hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const format = value => {
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(value)).map(part => [part.type, part.value]))
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`
+  }
+  const labels = { created: 'Create', completed: 'Complete', deleted: 'Delete', archived: 'Archive', cancelled: 'Cancel', observations: 'Observations' }
+  const count = (bucket, kind, action) => {
+    const value = bucket.series[kind][action] ?? 0
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error('Timeline canonical count is invalid')
+    return value
+  }
+  const total = (bucket, action) => action === 'observations' ? count(bucket, 'observation', 'created')
+    : (action === 'cancelled' ? 0 : count(bucket, 'project', action))
+      + (action === 'archived' ? 0 : count(bucket, 'task', action) + count(bucket, 'subtask', action))
+  const summary = bucket => [count(bucket, 'observation', 'created') + ' Observations',
+    ...[['created', 'Created'], ['completed', 'Completed'], ['deleted', 'Deleted'], ['cancelled', 'Cancelled'], ['archived', 'Archived']].flatMap(([action, label]) => [
+      ...(action === 'cancelled' ? [] : [count(bucket, 'project', action) + ' Projects ' + label]),
+      ...(action === 'archived' ? [] : [count(bucket, 'task', action) + count(bucket, 'subtask', action) + ' Tasks/Subtasks ' + label])
+    ])].join('; ')
+  const points = TIMELINE_CURRENT_CONTRACT.series.flatMap(action => histogram.buckets.map((bucket, index) => ({
+    id: `timeline-point-lifecycle-${action}-${index}`, role: 'button', tabindex: index === 0 ? '0' : '-1', pressed: 'false',
+    label: `${summary(bucket)}. Lifecycle activity, ${labels[action]}, ${format(bucket.bucket_start)} to ${format(bucket.bucket_end)} exclusive, ${total(bucket, action)}, not selected`
+  })))
+  return { eventIds: events.items.map(event => 'timeline-event-' + event.id), points, actions: TIMELINE_CURRENT_CONTRACT.actions,
+    series: TIMELINE_CURRENT_CONTRACT.series, title: TIMELINE_CURRENT_CONTRACT.title, description: TIMELINE_CURRENT_CONTRACT.description, timeZone, window: '30', bucket: 'week' }
 }
 
 export function nearestRankP95(values) {

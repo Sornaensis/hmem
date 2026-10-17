@@ -116,12 +116,12 @@ export function inputQualification({ plan = evidencePlan, io = fs, capture = cre
   }).sort()
   const source = [...collect(path.join(frontendRoot, 'src')),
     ...io.readdirSync(here).filter(name => name.endsWith('.mjs')).sort().map(name => path.join(here, name)),
-    ...(plan.rendering || plan.dueRemoval ? [path.join(frontendRoot, 'tests-js/observation-viewport-fixture.mjs')] : []),
+    ...(plan.rendering || plan.strictSourceIdentity ? [path.join(frontendRoot, 'tests-js/observation-viewport-fixture.mjs')] : []),
     ...['package.json', 'package-lock.json', 'README.md'].map(name => path.join(frontendRoot, name))]
     .map(file => ({ path: normalizedRepositoryPath(file), sha256: createHash('sha256').update(io.readFileSync(file)).digest('hex') }))
   const productionAssets = collect(staticRoot).map(file => ({ path: normalizedRepositoryPath(file), sha256: createHash('sha256').update(io.readFileSync(file)).digest('hex') }))
   return { evidenceBaseCommit: plan.baseCommit, source, productionAssets,
-    ...(plan.dueRemoval ? { implementationCommit: capture.read(['rev-parse', 'HEAD'], { label: 'qualified implementation revision' }).toString('utf8').trim() } : {}) }
+    ...(plan.strictSourceIdentity ? { implementationCommit: capture.read(['rev-parse', 'HEAD'], { label: 'qualified implementation revision' }).toString('utf8').trim() } : {}) }
 }
 
 export function assertQualifiedInputs(expected, actual, message) {
@@ -193,12 +193,12 @@ export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write =
     retention: plan.retention,
     completeDiff: { path: evidenceArtifactPath(evidenceDiffPath), sha256: sha256File(evidenceDiffPath), sizeBytes: io.statSync(evidenceDiffPath).size }
   }
-  if (plan.dueRemoval) {
+  if (plan.strictSourceIdentity) {
     manifest.traceArchive = { path: plan.trace, available: io.existsSync(plan.trace) }
-    if (manifest.qualificationPassed && manifest.traceArchive.available) throw new Error('Due-removal qualification cannot retain the temporary trace archive')
+    if (manifest.qualificationPassed && manifest.traceArchive.available) throw new Error('Task qualification cannot retain the temporary trace archive')
     const validation = JSON.parse(io.readFileSync(validationRecordPath, 'utf8'))
     assertEvidenceIdentity(plan, validation)
-    if (validation.inputQualification?.implementationCommit !== manifest.sourceProvenance.headCommit) throw new Error('Due-removal implementation revision changed before evidence finalization')
+    if (validation.inputQualification?.implementationCommit !== manifest.sourceProvenance.headCommit) throw new Error('Task implementation revision changed before evidence finalization')
     assertEvidenceIdentity(plan, manifest)
   }
   if (!manifest.equality.byteForByteEqual) throw new Error('immutable baseline differs from evidence base')
@@ -321,6 +321,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         const kind = url.searchParams.get('parent_kind')
         receipt.proofNavigation = tracker.navigationProof.admit({
           owner: kind === 'workspace_root' ? kind : kind + ':' + url.searchParams.get('parent_id'), context: navigationFilterContext(url),
+          projectIncluded: url.searchParams.get('include_projects') !== 'false', taskIncluded: url.searchParams.get('include_tasks') !== 'false',
           ...Object.fromEntries(['project', 'task'].flatMap(kind => [['Offset', 'offset'], ['Limit', 'limit']].map(([field, parameter]) => [kind + field, Number(url.searchParams.get(kind + '_' + parameter))])))
         })
       }
@@ -374,6 +375,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation`) {
       const value = navigationBranchResponse(fixture, {
       parentKind: url.searchParams.get('parent_kind'), parentId: url.searchParams.get('parent_id'),
+      includeProjects: url.searchParams.get('include_projects'), includeTasks: url.searchParams.get('include_tasks'),
       projectLimit: url.searchParams.get('project_limit'), projectOffset: url.searchParams.get('project_offset'),
       taskLimit: url.searchParams.get('task_limit'), taskOffset: url.searchParams.get('task_offset'),
       showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'),
@@ -735,9 +737,12 @@ export function assertSettledHierarchyFeedback(rows, tracker, fixture) {
       const url = new URL(request.url), stamp = request.proofNavigation, slot = stamp.slots[kind], page = request.navigation?.[kind + 's']
       const ids = page?.items?.map(item => item.id)
       const parameters = [...url.searchParams.keys()]
-      const allowed = ['parent_kind', 'project_limit', 'project_offset', 'task_limit', 'task_offset', 'show_empty_projects', 'priority_mode']
+      const required = ['parent_kind', 'project_limit', 'project_offset', 'task_limit', 'task_offset', 'show_empty_projects', 'priority_mode']
+      const demand = ['include_projects', 'include_tasks'], allowed = [...required, ...demand]
       if (request.method !== 'GET' || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation`
-        || parameters.length !== allowed.length || new Set(parameters).size !== allowed.length || parameters.some(name => !allowed.includes(name))
+        || required.some(name => !url.searchParams.has(name)) || new Set(parameters).size !== parameters.length || parameters.some(name => !allowed.includes(name))
+        || demand.some(name => url.searchParams.has(name) && !['true', 'false'].includes(url.searchParams.get(name)))
+        || url.searchParams.get('include_' + kind + 's') === 'false'
         || url.searchParams.get('parent_kind') !== 'workspace_root' || url.searchParams.get('show_empty_projects') !== 'true'
         || ['project', 'task'].some(kind => url.searchParams.get(kind + '_limit') !== '50' || url.searchParams.get(kind + '_offset') !== String(stamp[kind + 'Offset']))
         || navigationFilterContext(url) !== navigationFilterContext(new URL('http://fixture?priority_mode=any'))
@@ -1787,8 +1792,8 @@ export function retireTaskTrace(plan, operations, io = fs) {
 function persistQualification(result, prerequisite, qualifiedInputs, command, retirement) {
   if (!retirement.passed) throw new Error('Cannot finalize qualification before every owned resource retires')
   assertQualifiedInputs(qualifiedInputs, inputQualification(), 'qualification inputs changed before finalization')
-  if (evidencePlan.dueRemoval) {
-    if (fs.existsSync(tracePath)) throw new Error('Due-removal qualification cannot retain the temporary trace archive')
+  if (evidencePlan.strictSourceIdentity) {
+    if (fs.existsSync(tracePath)) throw new Error('Task qualification cannot retain the temporary trace archive')
     result.trace = { ...result.trace, archiveAvailable: false }
     assertEvidenceIdentity(evidencePlan, result)
   }
@@ -1826,7 +1831,7 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
     verify: evidenceOperations.verify,
     manifestPath: evidenceManifestPath, validationPath: validationRecordPath,
     failureValidation: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId,
-      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.dueRemoval ? { sourceProvenance: attemptState.sourceProvenance } : {}),
+      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.strictSourceIdentity ? { sourceProvenance: attemptState.sourceProvenance } : {}),
       evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
       commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
@@ -1834,7 +1839,7 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
       ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
     failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
-      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.dueRemoval ? { sourceProvenance: attemptState.sourceProvenance } : {}),
+      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.strictSourceIdentity ? { sourceProvenance: attemptState.sourceProvenance } : {}),
       qualificationPassed: false, failure: error.message, retirement,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
@@ -1966,10 +1971,10 @@ async function main() {
         console.log('TRACE_ARCHIVE_ADMISSION=' + JSON.stringify(admission))
         if (!admission.withinLimit) throw Object.assign(new Error('Task temporary trace exceeds its 64 MiB bound: ' + traceSizeBytes + ' bytes'), { traceAdmission: admission })
       }
-      const verified = evidencePlan.dueRemoval
+      const verified = evidencePlan.strictSourceIdentity
         ? verifyTaskTrace({ onAdmission: () => {} })
         : { sha256: sha256File(tracePath) }
-      if (!evidencePlan.dueRemoval && verified.sha256 !== sha256File(tracePath)) throw new Error('record trace hash was not reproducible during verification')
+      if (!evidencePlan.strictSourceIdentity && verified.sha256 !== sha256File(tracePath)) throw new Error('record trace hash was not reproducible during verification')
       attemptState.traceVerified = true
       trace = {
         logicalName: 'large measured sample 5/5 Playwright trace',
@@ -2032,7 +2037,7 @@ async function main() {
       } },
       { resource: 'task trace', close: async () => {
         if (!evidencePlan.qualifiedRetirement) return
-        if (evidencePlan.dueRemoval) { retireTaskTrace(evidencePlan, evidenceOperations); return }
+        if (evidencePlan.strictSourceIdentity) { retireTaskTrace(evidencePlan, evidenceOperations); return }
         if (evidencePlan.isolatedEvidence) evidenceOperations.verify()
         try { evidenceOperations.remove(tracePath) } catch (error) { if (error.code !== 'ENOENT') throw error }
         if (evidencePlan.isolatedEvidence) {

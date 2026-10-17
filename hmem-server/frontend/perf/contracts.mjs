@@ -625,6 +625,7 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
     completeSession(stamp, canRead) { if (stamp !== epoch) return; authorized = canRead === true; revision++ },
     admit(request) {
       const stamp = { ...request, epoch, done: false, error: false, projects: null, tasks: null }
+      const requested = kind => request[kind + 'Included'] !== false
       if (request.owner === 'workspace_root' && request.context !== activeContext) resetContext(request.context)
       if (request.context !== activeContext) { stamp.retired = true; return stamp }
       if (request.owner === 'workspace_root') {
@@ -645,7 +646,7 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
         const automatic = ['project', 'task'].filter(kind => state.kinds[kind].pending && state.kinds[kind].offset === request[kind + 'Offset'])
         const manual = !selected && !automatic.length ? ['project', 'task'].filter(kind => !state.kinds[kind].paused && request[kind + 'Offset'] > state.kinds[kind].offset) : []
         const retryMask = selected && state.wholeErrorMask && !Object.values(state.kinds).some(kind => kind.pauseReason === 'stream') ? state.wholeErrorMask : null
-        const eligible = selected ? retryMask || [selected] : automatic.length ? automatic : manual
+        const eligible = (selected ? retryMask || [selected] : automatic.length ? automatic : manual).filter(requested)
         if (eligible.length) state.wholeErrorMask = null
         state.unknown = eligible.length === 0
         for (const kind of eligible) if (request[kind + 'Limit'] > 0) {
@@ -665,7 +666,7 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
         }
         stamp.state = state; state.latest = stamp; stamp.slots = {}
         const automatic = ['project', 'task'].filter(kind => state.kinds[kind].pending && state.kinds[kind].offset === request[kind + 'Offset'])
-        const eligible = selected ? [...new Set([selected, ...automatic])] : automatic
+        const eligible = (selected ? [...new Set([selected, ...automatic])] : automatic).filter(requested)
         state.unknown = eligible.length === 0
         for (const kind of eligible) {
           const slot = { offset: stamp[kind + 'Offset'], limit: stamp[kind + 'Limit'], done: false, error: false, stream: null }

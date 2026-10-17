@@ -50,6 +50,7 @@ measurement. These recipes select distinct task-owned outputs:
 | Observation rendering | `ed3aca53afe346f928dc00f2e2a7b0a8e07aaecb` | `cbb38fd2-fc89-449c-a308-168374f23f82` |
 | Expanded hierarchy | `d9ff753763f086fa4faef078b451f2e48ca1a7a4` | `555ebf6e-8442-43f4-a75d-c33fcffc76f4` |
 | Planning counts | `f546cafd26adae37772d2383262e87596ea7151b` | `b401c358-1a68-404e-bd18-86f40bb3b771` |
+| Loading efficiency | `dc44350bcb8360a7979d82f33271ad8dcdcb9b83` | `0a677d44-065a-4205-af9b-6e1d9b36a833` |
 | Due removal | `33abd80dd13dbc6c850397eeb13f79047d0f7c91` | `1e420484-81b9-4251-b485-82abca34c800` |
 
 For example:
@@ -114,6 +115,40 @@ admitted, with a 64 MiB limit per file. The task owner retains the five artifact
 through project closure plus 30 days, then disposes of them. Targeted unresolved
 failure diagnostics expire on resolution or task closure. No planning-count
 qualification writes historical evidence in this directory.
+
+### Loading-efficiency qualification
+
+Use the ordinary fixtures, interactions, measurement phases and unchanged budgets:
+
+```powershell
+$env:HMEM_EVIDENCE_BASE_COMMIT = 'dc44350bcb8360a7979d82f33271ad8dcdcb9b83'
+npm run perf:self-check
+npm run perf:record-after
+npm run perf:check
+```
+
+The storage-only `loading-efficiency.v1` profile belongs to final task
+`0a677d44-065a-4205-af9b-6e1d9b36a833`, project
+`d2ba5afb-4f51-4328-aa1a-fcb95510f495`. It enables no Observation scaling,
+rendering, planning-counts or due-removal scenarios. The review base remains
+separate from the committed implementation revision recorded with exact input
+and production-asset hashes. Historical baselines and mappings remain unchanged.
+
+Its five declared artifacts live outside the repository under the verified OS
+temporary directory `hmem-loading-efficiency-0a677d44-065a-4205-af9b-6e1d9b36a833`.
+The final-verification owner retains them through project closure plus 30 days,
+then disposes of them. Each file is limited to 64 MiB. Targeted unresolved failure
+diagnostics expire at resolution or task closure. The sole temporary archive,
+`temporary/large-loading-efficiency-trace.zip`, uses the existing bounded capture,
+double-hash verification and resource retirement before successful qualification.
+Redirected roots, output paths and foreign task/project/base/source identities fail.
+
+Navigation fixtures accept the optional `include_projects` and `include_tasks`
+booleans with legacy default `true`. A skipped kind returns an empty page without
+selecting or decorating its rows; receipt proofs leave that kind's existing state
+untouched. Request and response-byte accounting retain these actual wire payloads.
+Readiness batches reuse the existing bounded summaries route. These browser
+measurements establish frontend/transport behavior, not database or network latency.
 
 ## Measurement boundaries and evidence
 

@@ -724,6 +724,12 @@ function taskCardSummary(fixture, task) {
 }
 
 export function navigationBranchResponse(fixture, options = {}) {
+  const requested = value => {
+    if (value == null || value === true || value === 'true') return true
+    if (value === false || value === 'false') return false
+    throw new Error('Invalid navigation demand boolean')
+  }
+  const includeProjects = requested(options.includeProjects), includeTasks = requested(options.includeTasks)
   const parentKind = options.parentKind || 'workspace_root'
   const parentId = options.parentId || null
   const projectLimit = Math.min(100, Math.max(1, Number(options.projectLimit) || 50))
@@ -739,9 +745,9 @@ export function navigationBranchResponse(fixture, options = {}) {
     priorityValue: options.priorityValue,
     query: options.query || null
   }
-  const projectChildren = parentKind === 'task' || filters.showOnly === 'tasks' ? [] : fixture.projects
+  const projectChildren = !includeProjects || parentKind === 'task' || filters.showOnly === 'tasks' ? [] : fixture.projects
     .filter(project => project.parent_id === parentId && projectBranchMatches(fixture, project, filters))
-  const taskChildren = filters.showOnly === 'projects' ? [] : parentKind === 'project'
+  const taskChildren = !includeTasks || filters.showOnly === 'projects' ? [] : parentKind === 'project'
     ? fixture.tasks.filter(task => task.project_id === parentId && task.parent_id == null)
     : parentKind === 'task'
       ? fixture.tasks.filter(task => task.parent_id === parentId)

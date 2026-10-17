@@ -2228,30 +2228,58 @@ presentationOffsets parentKind maybeParentId model =
         |> Maybe.withDefault ( 0, 0 )
 
 
-presentedNavigationSummaries : String -> Maybe String -> Model -> ( List Api.ProjectCardSummary, List Api.TaskCardSummary )
-presentedNavigationSummaries parentKind maybeParentId model =
+{-| A transition-local lookup over committed summaries. Queue discovery keeps
+its separate project-then-task Dict order; these buckets serve presentation only.
+-}
+type alias NavigationSummaryProjection =
+    { projects : Dict.Dict String (List Api.ProjectCardSummary)
+    , tasks : Dict.Dict String (List Api.TaskCardSummary)
+    }
+
+
+navigationSummaryProjection : Model -> NavigationSummaryProjection
+navigationSummaryProjection model =
+    navigationSummaryProjectionFor (always True) model
+
+
+navigationSummaryProjectionFor : (String -> Bool) -> Model -> NavigationSummaryProjection
+navigationSummaryProjectionFor includes model =
     let
-        ( projectOffset, taskOffset ) =
-            presentationOffsets parentKind maybeParentId model
-
-        parent =
-            Maybe.map (\parentId -> ( parentKind, parentId )) maybeParentId
-
-        projects =
-            model.dataLoading.projectCardSummaries
-                |> Dict.values
-                |> List.filter (projectSummaryBelongsTo parentKind maybeParentId)
-                |> List.sortBy (\project -> ( Api.projectStatusOrder project.status, negate project.priority, ( String.toLower project.name, project.id ) ))
-                |> navigationPresentationWindow .id (localPresentationPinnedIds parent "project" model) projectOffset
-
-        tasks =
-            model.dataLoading.taskCardSummaries
-                |> Dict.values
-                |> List.filter (taskSummaryBelongsTo parentKind maybeParentId)
-                |> List.sortBy (\task -> ( taskPresentationOrder model task, negate task.priority, ( String.toLower task.title, task.id ) ))
-                |> navigationPresentationWindow .id (localPresentationPinnedIds parent "task" model) taskOffset
+        insert key summary groups =
+            if includes key then Dict.update key (Maybe.withDefault [] >> (::) summary >> Just) groups else groups
+        projectParent summary =
+            navigationBranchKey (if summary.parentId == Nothing then "workspace_root" else "project") summary.parentId
+        taskParent summary =
+            case summary.parentId of
+                Just parent -> navigationBranchKey "task" (Just parent)
+                Nothing -> navigationBranchKey (if summary.projectId == Nothing then "workspace_root" else "project") summary.projectId
     in
-    ( projects, tasks )
+    { projects =
+        Dict.foldl (\_ summary -> insert (projectParent summary) summary) Dict.empty model.dataLoading.projectCardSummaries
+            |> Dict.map (\_ -> List.sortBy (\project -> ( Api.projectStatusOrder project.status, negate project.priority, ( String.toLower project.name, project.id ) )))
+    , tasks =
+        Dict.foldl (\_ summary -> insert (taskParent summary) summary) Dict.empty model.dataLoading.taskCardSummaries
+            |> Dict.map (\_ -> List.sortBy (\task -> ( taskPresentationOrder model task, negate task.priority, ( String.toLower task.title, task.id ) )))
+    }
+
+
+presentedNavigationSummaries : NavigationSummaryProjection -> String -> Maybe String -> Model -> ( List Api.ProjectCardSummary, List Api.TaskCardSummary )
+presentedNavigationSummaries projection parentKind maybeParentId model =
+    let
+        ( projectOffset, taskOffset ) = presentationOffsets parentKind maybeParentId model
+        parent = Maybe.map (\parentId -> ( parentKind, parentId )) maybeParentId
+        valid =
+            case ( parentKind, maybeParentId ) of
+                ( "workspace_root", Nothing ) -> True
+                ( "project", Just _ ) -> True
+                ( "task", Just _ ) -> True
+                _ -> False
+        key = navigationBranchKey parentKind maybeParentId
+        members groups = if valid then Dict.get key groups |> Maybe.withDefault [] else []
+    in
+    ( members projection.projects |> navigationPresentationWindow .id (localPresentationPinnedIds parent "project" model) projectOffset
+    , members projection.tasks |> navigationPresentationWindow .id (localPresentationPinnedIds parent "task" model) taskOffset
+    )
 
 
 beginProjectCardDetail : Api.ProjectCardSummary -> ( Model, List (Cmd Msg) ) -> ( Model, List (Cmd Msg) )
@@ -2493,6 +2521,17 @@ detailPinnedIds kind model =
 
 ensurePresentedCardDetails : Model -> ( Model, Cmd Msg )
 ensurePresentedCardDetails source =
+    ensurePresentedCardDetailsWith
+        (if source.dataLoading.visibleDetailDemand == Nothing then
+            let
+                owners = navigationBranchKey "workspace_root" Nothing :: (Dict.keys source.dataLoading.loadedNavigationBranches |> List.filter (\key -> navigationBranchExpanded key source)) |> Set.fromList
+            in
+            navigationSummaryProjectionFor (\key -> Set.member key owners) source
+         else { projects = Dict.empty, tasks = Dict.empty }) source
+
+
+ensurePresentedCardDetailsWith : NavigationSummaryProjection -> Model -> ( Model, Cmd Msg )
+ensurePresentedCardDetailsWith projection source =
     let
         model = prepareBackgroundAdmission source
         ( projectIds, taskIds ) =
@@ -2511,7 +2550,7 @@ ensurePresentedCardDetails source =
                         presented =
                             List.concatMap (\( kind, parent ) ->
                                 let
-                                    ( presentedProjects, presentedTasks ) = presentedNavigationSummaries kind parent model
+                                    ( presentedProjects, presentedTasks ) = presentedNavigationSummaries projection kind parent model
                                 in
                                 List.map (\item -> ( "project", item.id )) presentedProjects ++ List.map (\item -> ( "task", item.id )) presentedTasks
                                 ) branches
@@ -2638,18 +2677,25 @@ restoreNavigationPresentation parentKind maybeParentId model =
 
 ensureNavigationPresentation : String -> Maybe String -> Model -> ( Model, Cmd Msg )
 ensureNavigationPresentation parentKind maybeParentId model =
+    ensureNavigationPresentationWith
+        (navigationSummaryProjectionFor ((==) (navigationBranchKey parentKind maybeParentId)) model)
+        ensurePresentedCardDetails parentKind maybeParentId model
+
+
+ensureNavigationPresentationWith : NavigationSummaryProjection -> (Model -> ( Model, Cmd Msg )) -> String -> Maybe String -> Model -> ( Model, Cmd Msg )
+ensureNavigationPresentationWith projection hydrate parentKind maybeParentId model =
     let
         ( restored, transportCmd ) =
             restoreNavigationPresentation parentKind maybeParentId model
 
         ( projects, tasks ) =
-            presentedNavigationSummaries parentKind maybeParentId restored
+            presentedNavigationSummaries projection parentKind maybeParentId restored
 
         ( expanded, branchCmd ) =
             ensureSummaries projects tasks restored
 
         ( hydrated, detailCmd ) =
-            ensurePresentedCardDetails expanded
+            hydrate expanded
 
         key = navigationBranchKey parentKind maybeParentId
         ready =
@@ -2665,12 +2711,13 @@ ensureNavigationPresentation parentKind maybeParentId model =
 ensureAllNavigationPresentations : Model -> ( Model, Cmd Msg )
 ensureAllNavigationPresentations model =
     let
+        projection = navigationSummaryProjection model
         ensureBranch key ( current, accumulatedCommands ) =
             case String.split ":" key of
                 parentKind :: parentId :: [] ->
                     let
                         ( updated, command ) =
-                            ensureNavigationPresentation parentKind (Just parentId) current
+                            ensureNavigationPresentationWith projection (ensurePresentedCardDetailsWith projection) parentKind (Just parentId) current
                     in
                     ( updated, command :: accumulatedCommands )
 
@@ -2678,7 +2725,7 @@ ensureAllNavigationPresentations model =
                     ( current, accumulatedCommands )
 
         ( rootModel, rootCommand ) =
-            ensureNavigationPresentation "workspace_root" Nothing model
+            ensureNavigationPresentationWith projection (ensurePresentedCardDetailsWith projection) "workspace_root" Nothing model
 
         ( finalModel, commands ) =
             model.dataLoading.loadedNavigationBranches
@@ -2789,14 +2836,10 @@ acceptNavigationPage key navigation model =
                 accepted =
                     { withTasks | dataLoading = { nextLoading | loadedNavigationBranches = Dict.insert key nextRequest nextLoading.loadedNavigationBranches, navigationPasses = Dict.insert key { pass | projects = projects, tasks = tasks, projectError = projectError, taskError = taskError } nextLoading.navigationPasses } }
                 queued = if projectPending || taskPending then enqueueNavigation key accepted else accepted
-                ( expanded, branchCommand ) = ensureExpandedBranches queued
-                ( presented, presentationCommand ) = ensureNavigationPresentation kind (Just id) expanded
-                ( notified, errorCommand ) =
-                    case List.head (List.filterMap identity [ projectError, taskError ]) of
-                        Just error -> addToast Error error presented
-                        Nothing -> ( presented, Cmd.none )
             in
-            ( notified, Cmd.batch [ branchCommand, presentationCommand, errorCommand ] )
+            case List.head (List.filterMap identity [ projectError, taskError ]) of
+                Just error -> addToast Error error queued
+                Nothing -> ( queued, Cmd.none )
         _ -> ( model, Cmd.none )
 
 

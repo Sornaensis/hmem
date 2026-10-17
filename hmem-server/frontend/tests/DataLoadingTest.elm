@@ -2945,6 +2945,72 @@ suite =
                 Expect.equal ( True, True, [ 1, 100 ] )
                     ( Dict.member "a" stale.projects, Dict.member "b" stale.projects, List.map (String.split "," >> List.length) batchKeys |> List.sort )
 
+        , test "one accepted branch page discovers returned grandchildren and queues parent continuation once" <| \_ ->
+            let
+                parent = project "parent" Nothing
+                sibling = project "sibling" Nothing
+                seeded = loadRoot workspaceId [ { parent | hasChildren = True }, { sibling | hasChildren = True } ] [] model
+                    |> settleOrdinaryDetails |> painted
+                child = project "child" (Just "parent")
+                children = { child | hasChildren = True } :: (List.range 2 50 |> List.map (\n -> project ("leaf-" ++ String.fromInt n) (Just "parent")))
+            in
+            case Dict.get "project:parent" seeded.dataLoading.loadedNavigationBranches of
+                Nothing -> Expect.fail "Expected admitted parent"
+                Just request ->
+                    let
+                        accepted = DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset
+                            (Ok { workspaceId = workspaceId, projects = { items = children, hasMore = True }, tasks = { items = [], hasMore = False } })) seeded |> Tuple.first
+                        continuation = Dict.get "project:parent" accepted.dataLoading.loadedNavigationBranches
+                    in
+                    Expect.all
+                        [ \_ -> Expect.equal (seeded.dataLoading.navigationGeneration + 1) accepted.dataLoading.navigationGeneration
+                        , \_ -> Expect.equal True (Dict.member "project:child" accepted.dataLoading.loadedNavigationBranches)
+                        , \_ -> Expect.equal (Just ( request.generation, 50, True )) (Maybe.map (\current -> ( current.generation, current.projectOffset, current.projectRequestPending )) continuation)
+                        , \_ -> Expect.equal True (Dict.size accepted.dataLoading.navigationAdmissions <= 4 && Set.size accepted.dataLoading.cardDetailAdmissions <= 6)
+                        , \_ -> Expect.equal True (Dict.get "project:sibling" accepted.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False)
+                        ] ()
+        , test "staged-only expanded children enter discovery and details only after membership commits" <| \_ ->
+            let
+                parent = project "parent" Nothing
+                seeded = loadRoot workspaceId [ { parent | hasChildren = True } ] [] model
+                    |> branchReply "project:parent" [ project "old" (Just "parent") ] [] False False
+                refreshed = DataLoading.revalidateNavigationForFilters seeded |> Tuple.first
+                    |> replyRootSpan [ { parent | hasChildren = True } ] [] False False
+                child = project "staged-child" (Just "parent")
+                staged = branchReply "project:parent" [ { child | hasChildren = True } ] [] True False refreshed
+                committed = branchReply "project:parent" [] [] False False staged
+            in
+            Expect.all
+                [ \_ -> Expect.equal False (Dict.member child.id staged.dataLoading.projectCardSummaries)
+                , \_ -> Expect.equal False (Dict.member "project:staged-child" staged.dataLoading.loadedNavigationBranches)
+                , \_ -> Expect.equal False (Dict.member child.id staged.dataLoading.projectCardDetailRequests)
+                , \_ -> Expect.equal True (Dict.member child.id committed.dataLoading.projectCardSummaries)
+                , \_ -> Expect.equal True (Dict.member "project:staged-child" committed.dataLoading.loadedNavigationBranches)
+                ] ()
+        , test "shared parent projection matches standalone presentations with current cursors pins and readiness ties" <| \_ ->
+            let
+                owner = project "owner" Nothing
+                parentTask = task "task-owner" Nothing
+                seeded = loadRoot workspaceId [ { owner | hasChildren = True } ] [] model
+                    |> branchReply "project:owner" [] [ { parentTask | projectId = Just owner.id, hasChildren = True } ] False False
+                    |> branchReply "task:task-owner" [] [] False False
+                projects = List.range 1 35 |> List.map (\n -> let value = project ("project-" ++ String.fromInt n) (Just owner.id) in { value | name = if modBy 2 n == 0 then "TIE" else "tie", priority = modBy 3 n })
+                tasks = List.range 1 35 |> List.concatMap (\n ->
+                    let value = task ("task-" ++ String.fromInt n) Nothing
+                        rollup = value.readinessRollup
+                    in [ { value | projectId = Just owner.id, title = "tie", status = Api.Blocked, readinessRollup = { rollup | inProgressSubtaskCount = modBy 2 n } }
+                       , { value | id = "subtask-" ++ String.fromInt n, parentId = Just parentTask.id, projectId = Just owner.id, title = "TIE", priority = modBy 3 n } ])
+                merged = DataLoading.mergeNavigationSummaries projects tasks seeded
+                loading = merged.dataLoading
+                focus = merged.focus
+                prepared = { merged | focus = { focus | focusedEntity = Just ( "task", "subtask-35" ) }, dataLoading = { loading | visibleDetailDemand = Nothing, navigationPresentations = Dict.map (\_ cursor -> { cursor | projectOffset = 24, taskOffset = 24 }) loading.navigationPresentations } }
+                shared = DataLoading.ensureAllNavigationPresentations prepared |> Tuple.first
+                standalone = ( "workspace_root", Nothing ) :: (Dict.keys prepared.dataLoading.loadedNavigationBranches |> List.filter ((/=) "workspace_root:root") |> List.filterMap (\key -> case String.split ":" key of
+                    [ kind, id ] -> Just ( kind, Just id )
+                    _ -> Nothing))
+                    |> List.foldl (\( kind, parent ) current -> DataLoading.ensureNavigationPresentation kind parent current |> Tuple.first) prepared
+            in
+            Expect.equal standalone.dataLoading shared.dataLoading
         , test "fair branch admissions stay at four and continuation yields to queued siblings" <|
             \_ ->
                 let

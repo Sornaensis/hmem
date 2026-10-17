@@ -969,6 +969,8 @@ type alias TimelineModel =
     , chartPointFocus : Dict String Int
     , chartBarHover : Maybe Int
     , chartBarFocus : Maybe Int
+    , chartLineHover : Maybe TimelineLineInteraction
+    , chartLineFocus : Maybe TimelineLineInteraction
     , refreshGeneration : Int
     , refreshTimerGeneration : Maybe Int
     , refreshDirty : Bool
@@ -1012,6 +1014,10 @@ type alias TimelineChartSeries =
     , subtasks : Bool
     , observations : Bool
     }
+
+
+type alias TimelineLineInteraction =
+    { series : String, index : Int }
 
 
 type TimelineEntityFilter
@@ -1527,6 +1533,8 @@ type Msg
     | FocusTimelineChartPoint String String Int
     | HoverTimelineOpenBar (Maybe Int)
     | FocusTimelineOpenBar (Maybe Int)
+    | HoverTimelineLine (Maybe TimelineLineInteraction)
+    | FocusTimelineLine (Maybe TimelineLineInteraction)
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String

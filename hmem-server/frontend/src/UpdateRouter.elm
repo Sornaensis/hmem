@@ -283,6 +283,12 @@ route msg model =
         FocusTimelineOpenBar _ ->
             Ok (Feature.Timeline.update msg model)
 
+        HoverTimelineLine _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        FocusTimelineLine _ ->
+            Ok (Feature.Timeline.update msg model)
+
         -- Mutation responses
         MutationDone _ _ ->
             Ok (Feature.Mutations.update msg model)

@@ -79,7 +79,7 @@ suite =
                 , \_ -> view |> Query.find [ Selector.id "timeline-event-second" ] |> Query.has [ Selector.text "2025-12-31 16:15", Selector.text second.title ]
                 , \_ -> Timeline.visibleTimelineEvents timeline |> List.map .occurredAt |> Expect.equal [ first.occurredAt, second.occurredAt ]
                 ] ()
-        , test "DST endpoints localize graph axis tooltips and accessible names without changing selection identity or counts" <| \_ ->
+        , test "DST endpoints localize graph axes and accessible names without changing selection identity or counts" <| \_ ->
             let
                 initial = Timeline.init
                 timeline = { initial | histogramBuckets = [ bucket ] }
@@ -88,8 +88,8 @@ suite =
             in
             Expect.all
                 [ \_ -> view |> Query.find [ Selector.class "timeline-chart-x-axis" ] |> Query.has [ Selector.text "2026-03-29 01:00", Selector.attribute (Attributes.attribute "aria-label" "[2026-03-29 01:00, 2026-03-30 02:00)") ]
-                , \_ -> point |> Query.has [ Selector.attribute (Attributes.attribute "aria-label" "Lifecycle activity, Create, 2026-03-29 01:00 to 2026-03-30 02:00 exclusive, 5, not selected") ]
-                , \_ -> point |> Query.find [ Selector.tag "title" ] |> Query.has [ Selector.text "[2026-03-29 01:00, 2026-03-30 02:00): 5" ]
+                , \_ -> point |> Query.has [ Selector.attribute (Attributes.attribute "aria-label" "0 Observations; 0 Projects Created; 5 Tasks/Subtasks Created; 0 Projects Completed; 0 Tasks/Subtasks Completed; 0 Projects Deleted; 0 Tasks/Subtasks Deleted; 0 Tasks/Subtasks Cancelled; 0 Projects Archived. Lifecycle activity, Create, 2026-03-29 01:00 to 2026-03-30 02:00 exclusive, 5, not selected") ]
+                , \_ -> point |> Query.findAll [ Selector.tag "title" ] |> Query.count (Expect.equal 0)
                 , \_ -> point |> Event.simulate Event.click |> Event.expect (SelectTimelineHistogramBucket bucket.label since until)
                 , \_ -> view |> Query.hasNot [ Selector.text bucket.label ]
                 , \_ -> timeline.histogramBuckets |> Expect.equal [ bucket ]

@@ -82,10 +82,10 @@ updateTimeline msg model =
         TimelineMessage timelineMsg ->
             case timelineMsg of
                 Types.ToggleTimelineChartAction key ->
-                    ( { model | chartActions = Dict.update key (Maybe.map not) model.chartActions }, Cmd.none )
+                    ( { model | chartActions = Dict.update key (Maybe.map not) model.chartActions, chartLineHover = Nothing, chartLineFocus = Nothing }, Cmd.none )
 
                 Types.ToggleTimelineChartSeries key ->
-                    ( { model | chartSeries = Feature.Timeline.toggleTimelineChartSeries key model.chartSeries }, Cmd.none )
+                    ( { model | chartSeries = Feature.Timeline.toggleTimelineChartSeries key model.chartSeries, chartLineHover = Nothing, chartLineFocus = Nothing }, Cmd.none )
 
                 Types.SelectTimelineHistogramBucket label since until ->
                     let
@@ -116,6 +116,12 @@ updateTimeline msg model =
 
                 Types.FocusTimelineOpenBar index ->
                     ( { model | chartBarFocus = index }, Cmd.none )
+
+                Types.HoverTimelineLine interaction ->
+                    ( { model | chartLineHover = interaction }, Cmd.none )
+
+                Types.FocusTimelineLine interaction ->
+                    ( { model | chartLineFocus = interaction }, Cmd.none )
 
                 _ ->
                     ( model, Cmd.none )

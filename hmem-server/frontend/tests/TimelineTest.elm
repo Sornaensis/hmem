@@ -74,8 +74,54 @@ suite =
                 [ \_ -> rendered |> Query.findAll [ Selector.class "timeline-line" ] |> Query.count (Expect.equal 0)
                 , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-idle" ] |> Query.count (Expect.equal 1)
                 , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-segment" ] |> Query.count (Expect.equal 2)
-                , \_ -> rendered |> Query.has [ Selector.text "Open items", Selector.text "Open work by bucket", Selector.text "Open tasks + subtasks" ]
+                , \_ -> rendered |> Query.has [ Selector.text "Open items", Selector.text "Open tasks + subtasks" ]
                 , \_ -> Feature.Timeline.timestampSources { initial | histogramBuckets = [ partial ] } |> List.member "2026-01-01T12:00:00Z" |> Expect.equal True
+                ] ()
+        , test "observation activity is independent and never inflates supported lifecycle totals" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                counts c co d a ca = { created = c, completed = co, deleted = d, archived = a, cancelled = ca }
+                mixed = { stockBucket | series = { project = counts 2 3 4 5 99, task = counts 7 11 13 99 17, subtask = counts 19 23 29 99 31, observation = counts 101 99 103 99 99 } }
+                timeline = { initial | histogramBuckets = [ mixed ] }
+                values t = Feature.Timeline.lifecycleChartSeries t |> List.map (\series -> ( series.key, List.map .count series.values ))
+                observationOnly = { timeline | chartActions = Dict.map (\_ _ -> False) timeline.chartActions }
+                noObservations = { timeline | chartSeries = { projects = True, tasks = True, subtasks = True, observations = False } }
+            in
+            Expect.all
+                [ \_ -> values timeline |> Expect.equal [ ( "created", [ 28 ] ), ( "completed", [ 37 ] ), ( "deleted", [ 46 ] ), ( "archived", [ 5 ] ), ( "cancelled", [ 48 ] ), ( "observations", [ 101 ] ) ]
+                , \_ -> values observationOnly |> Expect.equal [ ( "observations", [ 101 ] ) ]
+                , \_ -> values noObservations |> List.map Tuple.second |> Expect.equal [ [ 28 ], [ 37 ], [ 46 ], [ 5 ], [ 48 ] ]
+                , \_ -> Feature.Timeline.selectedBucketSummary timeline mixed |> Expect.equal
+                    [ "101 Observations", "2 Projects Created", "26 Tasks/Subtasks Created", "3 Projects Completed", "34 Tasks/Subtasks Completed", "4 Projects Deleted", "42 Tasks/Subtasks Deleted", "48 Tasks/Subtasks Cancelled", "5 Projects Archived" ]
+                , \_ -> Feature.Timeline.selectedBucketSummary { observationOnly | chartSeries = { projects = False, tasks = False, subtasks = False, observations = False } } mixed |> Expect.equal [ "No activity selected." ]
+                , \_ -> Feature.Timeline.selectedBucketSummary { timeline | chartSeries = { projects = False, tasks = False, subtasks = True, observations = False }, chartActions = Dict.fromList [ ( "completed", True ), ( "archived", True ) ] } mixed |> Expect.equal [ "23 Subtasks Completed" ]
+                , \_ -> Feature.Timeline.selectedBucketSummary { timeline | chartSeries = { projects = False, tasks = True, subtasks = False, observations = False }, chartActions = Dict.fromList [ ( "created", True ) ] } stockBucket |> Expect.equal [ "0 Tasks Created" ]
+                ] ()
+        , test "line hover and focus retire on hidden lines range and accepted data but stale replies leave them unchanged" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                interaction = Just { series = "created", index = 0 }
+                request = { workspaceId = "workspace-1", since = stockBucket.bucketStart, until = stockBucket.bucketEnd, bucket = "day" }
+                identity = { requestId = 1, refreshGeneration = 0, refreshEpoch = 0 }
+                base = timelineModel { initial | histogramBuckets = [ stockBucket ], histogramActiveRequest = Just request, histogramActiveIdentity = Just identity, chartLineHover = interaction, chartLineFocus = interaction }
+                response = { workspaceId = "workspace-1", since = request.since, until = request.until, bucket = "day", buckets = [ stockBucket ], nextSince = Nothing }
+                next msg = Feature.Timeline.update msg base |> Tuple.first |> .timeline |> (\t -> ( t.chartLineHover, t.chartLineFocus ))
+            in
+            Expect.equal [ ( Nothing, Nothing ), ( Nothing, Nothing ), ( Nothing, Nothing ), ( Nothing, Nothing ), ( interaction, interaction ) ]
+                [ next (ToggleTimelineChartAction "created"), next (ToggleTimelineChartSeries "tasks"), next (SetTimelineHistogramWindow "7"), next (GotWorkspaceTimelineBuckets identity request (Ok response)), next (GotWorkspaceTimelineBuckets { identity | requestId = 99 } request (Ok response)) ]
+        , test "in-chart summary shares selected filters for a hovered line and removes lower disclosures and native hints" <| \_ ->
+            let
+                initial = Feature.Timeline.init
+                timeline = { initial | histogramBuckets = [ stockBucket ], chartLineHover = Just { series = "created", index = 0 } }
+                rendered = Feature.Timeline.viewTimelineHistogram TimestampDisplay.empty timeline |> Query.fromHtml
+            in
+            Expect.all
+                [ \_ -> rendered |> Query.find [ Selector.class "timeline-chart-tooltip" ] |> Query.has [ Selector.text "0 Observations", Selector.text "0 Projects Created", Selector.text "0 Tasks/Subtasks Completed" ]
+                , \_ -> rendered |> Query.find [ Selector.class "timeline-chart-tooltip" ] |> Query.hasNot [ Selector.text stockBucket.label, Selector.text "open items", Selector.text "exclusive", Selector.text "2026" ]
+                , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-details" ] |> Query.count (Expect.equal 0)
+                , \_ -> rendered |> Query.findAll [ Selector.class "timeline-open-tooltip" ] |> Query.count (Expect.equal 0)
+                , \_ -> rendered |> Query.find [ Selector.id "timeline-point-lifecycle-created-0" ] |> Query.findAll [ Selector.tag "title" ] |> Query.count (Expect.equal 0)
+                , \_ -> rendered |> Query.findAll [ Selector.class "timeline-line-active" ] |> Query.count (Expect.equal 1)
                 ] ()
         , test "single buckets are centered and multi-bucket coordinates remain in bounds" <|
             \_ ->

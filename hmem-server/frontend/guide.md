@@ -9,6 +9,10 @@ at the earliest event. Dates use the browser timezone from page load; reload
 after changing it. Missing dates show **—**, pending dates **…**, and invalid
 dates **Invalid timestamp** or **Unknown date**.
 
+Observations have their own line counting additions in each interval, independent
+of the lifecycle action filters. Hover or focus a line to highlight it and show
+the selected activity counts by target; open-work bars keep their own right axis.
+
 Observation cards show the current reviewed revision, or the creation revision
 for legacy observations. Expand **History** for recorded assertions, copyable
 SHAs and dates. Collapse to stop loading; use **Retry** after a failed page.

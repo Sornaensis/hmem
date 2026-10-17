@@ -3402,18 +3402,16 @@ refreshViewportFor msg previous ( model, command ) =
         statusChanged =
             List.any (\taskId -> (Dict.get taskId previous.tasks |> Maybe.map .status) /= (Dict.get taskId model.tasks |> Maybe.map .status)) affectedIds
 
-        readinessTask =
+        readinessTasks =
             case msg of
-                CanonicalTaskReadinessFetched _ _ (Ok overview) -> Just overview.task
-                CanonicalTaskOverviewFetched _ _ (Ok overview) -> Just overview.task
-                GotTaskDependencies _ _ _ _ (Ok overview) -> Just overview.task
-                GotInitialTaskOverview _ _ _ (Ok overview) -> Just overview.task
-                _ -> Nothing
+                CanonicalReadinessSummariesFetched _ _ (Ok summaries) -> List.map Api.taskFromCardSummary summaries.tasks
+                CanonicalTaskOverviewFetched _ _ (Ok overview) -> [ overview.task ]
+                GotTaskDependencies _ _ _ _ (Ok overview) -> [ overview.task ]
+                GotInitialTaskOverview _ _ _ (Ok overview) -> [ overview.task ]
+                _ -> []
 
         ( reordered, membershipCommand ) =
-            readinessTask
-                |> Maybe.map (\task -> Feature.DataLoading.revalidateNavigationForTaskReadiness previous task model)
-                |> Maybe.withDefault ( model, Cmd.none )
+            Feature.DataLoading.revalidateNavigationForTasksReadiness previous readinessTasks model
     in
     refreshViewportWithStatusChange statusChanged previous ( reordered, Cmd.batch [ command, membershipCommand ] )
 

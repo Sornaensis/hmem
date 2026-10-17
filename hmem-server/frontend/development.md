@@ -119,6 +119,13 @@ canonical summary batches and the existing guarded membership loader. They do no
 infer descendant states from a truncated response sample. Project mutations,
 readiness and next-task callbacks use workspace, session and target generations,
 so delayed responses cannot revive a retired workspace or overwrite newer state.
+Dependency events refresh ancestor readiness through deduplicated summaries
+batches of at most 100 unique raw IDs. Each target keeps its own canonical
+generation and planning-read revision; a stale target does not discard current
+siblings in the same batch. These reads update readiness only. Dependency panels
+retain their richer paginated reads, and readiness-driven ordering reconciles each
+affected navigation owner once.
+
 The project-pause browser regression uses two independent production Elm pages
 with intercepted canonical authority. See [test scope](tests-js/testing.md).
 

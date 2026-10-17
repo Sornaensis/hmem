@@ -1,6 +1,7 @@
 module CardsFocusNavigationTest exposing (suite)
 
 import Api
+import ReadinessTestSupport
 import Main
 import Html.Attributes
 import Array
@@ -110,7 +111,7 @@ suite =
                     , audienceId = source.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault ""
                     }
                 apply request count current =
-                    routed (CanonicalTaskReadinessFetched request parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = { emptyRollup | inProgressSubtaskCount = count, openSubtaskCount = count } })) current
+                    routed (ReadinessTestSupport.taskFetched request parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = { emptyRollup | inProgressSubtaskCount = count, openSubtaskCount = count } })) current
                 running = apply guard 1 source
                 stillRunning = apply guard 2 running
                 dependencies = stillRunning.dependencies
@@ -158,7 +159,41 @@ suite =
                     }
             in
             Expect.equal (List.repeat 2 { restarted = True, offset = Just 0, admitted = True })
-                (List.map check [ CanonicalTaskReadinessFetched guard parent.id (Ok overview), CanonicalTaskOverviewFetched guard parent.id (Ok overview) ])
+                (List.map check [ ReadinessTestSupport.taskFetched guard parent.id (Ok overview), CanonicalTaskOverviewFetched guard parent.id (Ok overview) ])
+        , test "empty or unchanged readiness does not schedule expanded membership" <| \_ ->
+            let
+                parent = project "idle-owner"
+                child = task "unchanged-child" Nothing
+                source = DataLoading.mergeNavigationSummaries [parent] [child] model
+                run tasks = DataLoading.revalidateNavigationForTasksReadiness source tasks source |> Tuple.first
+            in
+            Expect.equal [source,source] [run [],run [Api.taskFromCardSummary child]]
+        , test "a readiness batch reconciles same-owner rank changes once" <| \_ ->
+            let
+                firstBase = task "first-blocked" Nothing
+                secondBase = task "second-blocked" Nothing
+                first = {firstBase | status = Api.Blocked}
+                second = {secondBase | status = Api.Blocked}
+                seeded = DataLoading.mergeNavigationSummaries [] [first,second] model |> rootPaint
+                ( prepared, guards ) = ReadinessTestSupport.prepare [("task",first.id),("task",second.id)] seeded
+                run value = let rollup = value.readinessRollup in {value | readinessRollup = {rollup | inProgressSubtaskCount = 1}}
+                completed = routed (CanonicalReadinessSummariesFetched workspaceId guards (Ok {projects = [], tasks = List.map run [first,second], missingProjectIds = [], missingTaskIds = []})) prepared
+            in
+            Expect.equal (1,Just True)
+                (completed.dataLoading.navigationGeneration - prepared.dataLoading.navigationGeneration,completed.dataLoading.rootNavigationRequest |> Maybe.map .inFlight)
+        , test "a readiness batch reconciles different task owners independently" <| \_ ->
+            let
+                owner = project "owner"
+                rootBase = task "root-blocked" Nothing
+                branchBase = task "branch-blocked" Nothing
+                root = {rootBase | status = Api.Blocked}
+                branch = {branchBase | status = Api.Blocked, projectId = Just owner.id}
+                seeded = DataLoading.mergeNavigationSummaries [owner] [root,branch] model |> rootPaint
+                ( prepared, guards ) = ReadinessTestSupport.prepare [("task",root.id),("task",branch.id)] seeded
+                run value = let rollup = value.readinessRollup in {value | readinessRollup = {rollup | inProgressSubtaskCount = 1}}
+                completed = routed (CanonicalReadinessSummariesFetched workspaceId guards (Ok {projects = [], tasks = List.map run [root,branch], missingProjectIds = [], missingTaskIds = []})) prepared
+            in
+            Expect.equal 2 (completed.dataLoading.navigationGeneration - prepared.dataLoading.navigationGeneration)
         , test "project activity accents follow authoritative descendant rollups with no cached tasks" <| \_ ->
             let
                 base = project "activity"

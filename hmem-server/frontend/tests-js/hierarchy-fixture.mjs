@@ -186,7 +186,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           receipt.projectItems = value.projects.items.length; receipt.taskItems = value.tasks.items.length
           receipt.projectHasMore = value.projects.has_more; receipt.taskHasMore = value.tasks.has_more
         }
-        else if (path.endsWith('/navigation/summaries')) { const body = request.postDataJSON(); value = navigationSummariesResponse(fixture, body.project_ids, body.task_ids) }
+        else if (path.endsWith('/navigation/summaries')) { const body = request.postDataJSON(); receipt.projectIds = body.project_ids; receipt.taskIds = body.task_ids; value = navigationSummariesResponse(fixture, body.project_ids, body.task_ids) }
         else if (path.includes('/navigation/focus/')) { const parts = path.split('/'); value = navigationFocusResponse(fixture, parts.at(-2), parts.at(-1), Number(url.searchParams.get('ancestor_offset') || 0)) }
         else if (/^\/api\/v1\/projects\/[^/]+\/overview$/.test(path)) value = projectOverviewResponse(fixture, path.split('/')[4])
         else if (/^\/api\/v1\/projects\/[^/]+\/next-task-page$/.test(path)) {

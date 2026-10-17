@@ -102,10 +102,7 @@ route msg model =
         CanonicalTaskOverviewFetched _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
-        CanonicalTaskReadinessFetched _ _ _ ->
-            Ok (Feature.WebSocket.update msg model)
-
-        CanonicalProjectOverviewFetched _ _ _ ->
+        CanonicalReadinessSummariesFetched _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
         CanonicalNavigationSummariesFetched _ _ _ _ _ ->

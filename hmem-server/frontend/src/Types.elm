@@ -197,6 +197,13 @@ type alias CanonicalRequestGuard =
     }
 
 
+type alias CanonicalReadinessTarget =
+    { kind : String
+    , id : String
+    , guard : CanonicalRequestGuard
+    }
+
+
 type alias CanonicalNavigationRequestGuard =
     { request : CanonicalRequestGuard
     , entityGenerations : Dict String Int
@@ -1230,8 +1237,7 @@ type Msg
     | CanonicalTaskFetched CanonicalRequestGuard String (Result Http.Error Api.Task)
     | CanonicalObservationFetched CanonicalRequestGuard String String (Result Http.Error Api.Observation)
     | CanonicalTaskOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
-    | CanonicalTaskReadinessFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
-    | CanonicalProjectOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
+    | CanonicalReadinessSummariesFetched String (List CanonicalReadinessTarget) (Result Http.Error Api.NavigationSummariesResponse)
     | CanonicalNavigationSummariesFetched CanonicalNavigationRequestGuard String (List String) (List String) (Result Http.Error Api.NavigationSummariesResponse)
     | CanonicalCatalogueFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.Workspace))
     | CanonicalGroupsFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))

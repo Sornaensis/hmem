@@ -1,5 +1,6 @@
 module Feature.WebSocket exposing
-    ( refreshProjectCascade
+    ( readinessTargetBatches
+    , refreshProjectCascade
     , refreshMutationEntities
     , refreshTaskPlacement
     , connectCmd
@@ -266,55 +267,45 @@ updateRaw msg model =
             else
                 ( model, Cmd.none )
 
-        CanonicalTaskReadinessFetched guard taskId result ->
-            if canonicalGuardIsCurrent guard model then
+        CanonicalReadinessSummariesFetched workspaceId targets result ->
+            let
+                currentTargets = List.filter (\target -> canonicalGuardIsCurrent target.guard model) targets
+                projectIds = targets |> List.filter (\target -> target.kind == "project") |> List.map .id
+                taskIds = targets |> List.filter (\target -> target.kind == "task") |> List.map .id
+                failure error =
+                    case List.head currentTargets of
+                        Just target -> canonicalHttpFailure target.guard error model
+                        Nothing -> ( model, Cmd.none )
+            in
+            if model.selectedWorkspaceId /= Just workspaceId || List.isEmpty currentTargets then
+                ( model, Cmd.none )
+            else
                 case result of
-                    Ok overview ->
-                        if overview.task.id == taskId && Just overview.task.workspaceId == model.selectedWorkspaceId then
-                            let
-                                dependencies =
-                                    model.dependencies
-                            in
-                            ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyTaskReadiness revision taskId overview.readinessRollup model) |> Maybe.withDefault model, Cmd.none )
-
+                    Ok summaries ->
+                        if List.sort (List.map .id summaries.projects ++ summaries.missingProjectIds) /= List.sort projectIds
+                            || List.sort (List.map .id summaries.tasks ++ summaries.missingTaskIds) /= List.sort taskIds
+                            || not (List.all (\value -> value.workspaceId == workspaceId) summaries.projects)
+                            || not (List.all (\value -> value.workspaceId == workspaceId) summaries.tasks) then
+                            failure (Http.BadBody "Readiness summaries did not match their targeted request")
                         else
-                            canonicalHttpFailure guard (Http.BadBody "Task overview identity did not match the readiness request") model
-
-                    Err (Http.BadStatus 404) ->
-                        let
-                            dependencies =
-                                model.dependencies
-                        in
-                        ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyMissingPlanningEntity revision "task" taskId model) |> Maybe.withDefault model, Cmd.none )
-
-                    Err error ->
-                        canonicalHttpFailure guard error model
-
-            else
-                ( model, Cmd.none )
-
-        CanonicalProjectOverviewFetched guard projectId result ->
-            if canonicalGuardIsCurrent guard model then
-                case result of
-                    Ok overview ->
-                        let
-                            dependencies =
-                                model.dependencies
-                        in
-                        ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyProjectReadiness revision projectId overview.readinessRollup model) |> Maybe.withDefault model, Cmd.none )
-
-                    Err (Http.BadStatus 404) ->
-                        let
-                            dependencies =
-                                model.dependencies
-                        in
-                        ( Helpers.planningReadRevision guard model |> Maybe.map (\revision -> Helpers.applyMissingPlanningEntity revision "project" projectId model) |> Maybe.withDefault model, Cmd.none )
-
-                    Err error ->
-                        canonicalHttpFailure guard error model
-
-            else
-                ( model, Cmd.none )
+                            let
+                                projects = Dict.fromList (List.map (\value -> ( value.id, value.readinessRollup )) summaries.projects)
+                                tasks = Dict.fromList (List.map (\value -> ( value.id, value.readinessRollup )) summaries.tasks)
+                                apply target current =
+                                    case Helpers.planningReadRevision target.guard model of
+                                        Nothing -> current
+                                        Just revision ->
+                                            if target.kind == "task" then
+                                                case Dict.get target.id tasks of
+                                                    Just rollup -> Helpers.applyTaskReadiness revision target.id rollup current
+                                                    Nothing -> Helpers.applyMissingPlanningEntity revision "task" target.id current
+                                            else
+                                                case Dict.get target.id projects of
+                                                    Just rollup -> Helpers.applyProjectReadiness revision target.id rollup current
+                                                    Nothing -> Helpers.applyMissingPlanningEntity revision "project" target.id current
+                            in
+                            ( List.foldl apply model currentTargets, Cmd.none )
+                    Err error -> failure error
 
         CanonicalNavigationSummariesFetched guard workspaceId projectIds taskIds result ->
             if model.selectedWorkspaceId == Just workspaceId && canonicalGuardIsCurrent guard.request model && guard.filterFingerprint == Feature.DataLoading.navigationFilterFingerprint model then
@@ -1073,7 +1064,15 @@ applyActions scope actions model =
             else
                 ( model, Cmd.none )
     in
-    List.foldl (applyAction scope) ( revalidationModel, Cmd.batch [ navigationCmd, revalidationCmd ] ) otherActions
+    let
+        readinessTargets = List.concatMap (\action -> case action of
+            ChangeStream.RefreshTaskDependencies taskId _ _ _ -> dependencyReadinessTargets taskId model
+            _ -> []) actions
+        ( acted, actionCmd ) = List.foldl (applyAction scope) ( revalidationModel, Cmd.batch [ navigationCmd, revalidationCmd ] ) otherActions
+        ( refreshed, readinessCmd ) =
+            if scopeMatchesSelectedWorkspace scope acted then requestReadinessSummaryBatches scope readinessTargets acted
+            else ( acted, Cmd.none )
+    in ( refreshed, Cmd.batch [ actionCmd, readinessCmd ] )
 
 
 applyAction : ChangeStream.Scope -> ChangeStream.Action -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
@@ -1398,38 +1397,34 @@ advanceCanonicalTarget scope targetKey model =
     updateWebSocket (\webSocket -> { webSocket | targetGenerations = Dict.insert target generation webSocket.targetGenerations }) model
 
 
+prepareCanonicalRequest : ChangeStream.Scope -> String -> Model -> Maybe ( CanonicalRequestGuard, Model )
+prepareCanonicalRequest scope targetKey model =
+    scopeAuthority scope model |> Maybe.map (\session ->
+        let
+            target = ChangeStream.scopeKey scope ++ "|" ++ targetKey
+            generation = Dict.get target model.webSocket.targetGenerations |> Maybe.withDefault 0 |> (+) 1
+            guard =
+                { scopeKey = ChangeStream.scopeKey scope, targetKey = targetKey, targetGeneration = generation
+                , sessionEpoch = if scope == ChangeStream.Global then model.groups.catalogueEpoch else model.sessionRequestEpoch
+                , routeWorkspace = if scope == ChangeStream.Global then Nothing else model.selectedWorkspaceId
+                , audienceId = session.principal.actorId
+                }
+            updated = updateWebSocket (\webSocket -> { webSocket | targetGenerations = Dict.insert target generation webSocket.targetGenerations }) model
+            captured =
+                if List.any (\prefix -> String.startsWith prefix targetKey) [ "task-overview:", "dependency-readiness:task:", "project-overview:" ] then
+                    Helpers.capturePlanningRead target generation updated
+                else updated
+        in ( guard, captured ))
+
+
 requestCanonical : ChangeStream.Scope -> String -> (CanonicalRequestGuard -> Cmd Msg) -> Cmd Msg -> Model -> ( Model, Cmd Msg )
 requestCanonical scope targetKey makeCommand accumulated model =
-    case scopeAuthority scope model of
+    case prepareCanonicalRequest scope targetKey model of
         Nothing ->
-            let
-                ( next, command ) =
-                    beginScopedResync scope model
-            in
-            ( next, Cmd.batch [ accumulated, command ] )
-
-        Just session ->
-            let
-                target =
-                    ChangeStream.scopeKey scope ++ "|" ++ targetKey
-
-                generation =
-                    Dict.get target model.webSocket.targetGenerations |> Maybe.withDefault 0 |> (+) 1
-
-                guard =
-                    { scopeKey = ChangeStream.scopeKey scope
-                    , targetKey = targetKey
-                    , targetGeneration = generation
-                    , sessionEpoch = if scope == ChangeStream.Global then model.groups.catalogueEpoch else model.sessionRequestEpoch
-                    , routeWorkspace = if scope == ChangeStream.Global then Nothing else model.selectedWorkspaceId
-                    , audienceId = session.principal.actorId
-                    }
-
-                updated =
-                    updateWebSocket (\webSocket -> { webSocket | targetGenerations = Dict.insert target generation webSocket.targetGenerations }) model
-            in
-            ( if List.any (\prefix -> String.startsWith prefix targetKey) [ "task-overview:", "dependency-readiness:task:", "project-overview:" ] then Helpers.capturePlanningRead target generation updated else updated
-            , Cmd.batch [ accumulated, makeCommand guard ] )
+            let ( next, command ) = beginScopedResync scope model
+            in ( next, Cmd.batch [ accumulated, command ] )
+        Just ( guard, updated ) ->
+            ( updated, Cmd.batch [ accumulated, makeCommand guard ] )
 
 
 requestEntity : ChangeStream.Scope -> String -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
@@ -1592,13 +1587,8 @@ navigationSummaryReadRevision guard kind id model =
     Helpers.planningReadRevision { request | targetKey = target, targetGeneration = Dict.get (request.scopeKey ++ "|" ++ target) guard.entityGenerations |> Maybe.withDefault -1 } model
 
 
-requestTaskReadiness : ChangeStream.Scope -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
-requestTaskReadiness scope taskId accumulated model =
-    requestCanonical scope ("dependency-readiness:task:" ++ taskId) (\guard -> Api.fetchTaskOverview model.flags.apiUrl taskId (CanonicalTaskReadinessFetched guard taskId)) accumulated model
-
-
-revalidateDependencyReadiness : ChangeStream.Scope -> String -> String -> Bool -> Model -> ( Model, Cmd Msg )
-revalidateDependencyReadiness scope taskId dependsOnId present model =
+dependencyReadinessTargets : String -> Model -> List ( String, String )
+dependencyReadinessTargets taskId model =
     let
         collectAncestors getParent maybeId seen =
             case maybeId of
@@ -1622,43 +1612,65 @@ revalidateDependencyReadiness scope taskId dependsOnId present model =
                 |> Maybe.andThen .projectId
                 |> (\projectId -> collectAncestors (\identity -> Dict.get identity model.projects |> Maybe.andThen .parentId) projectId [])
 
-        dependencies =
-            model.dependencies
-
-        invalidatedModel =
-            { model
-                | dependencies =
-                    { dependencies
-                        | taskReadinessRollups = List.foldl Dict.remove dependencies.taskReadinessRollups (taskId :: taskAncestors)
-                        , projectReadinessRollups = List.foldl Dict.remove dependencies.projectReadinessRollups projectAncestors
-                    }
-            }
-
-        ( prerequisiteModel, prerequisiteCmd ) =
-            if present && not (Dict.member dependsOnId invalidatedModel.tasks) then
-                requestEntity scope "task" dependsOnId Cmd.none invalidatedModel
-
-            else
-                ( invalidatedModel, Cmd.none )
-
-        ( taskModel, taskCmd ) =
-            List.foldl
-                (\ancestorId ( current, accumulated ) -> requestTaskReadiness scope ancestorId accumulated current)
-                ( prerequisiteModel, Cmd.none )
-                taskAncestors
-
-        ( projectModel, projectCmd ) =
-            List.foldl
-                (\projectId ( current, accumulated ) -> requestProjectOverview scope ("dependency-readiness:project:" ++ projectId) projectId accumulated current)
-                ( taskModel, Cmd.none )
-                projectAncestors
     in
-    ( projectModel, Cmd.batch [ prerequisiteCmd, taskCmd, projectCmd ] )
+    List.map (Tuple.pair "task") taskAncestors ++ List.map (Tuple.pair "project") projectAncestors
 
 
-requestProjectOverview : ChangeStream.Scope -> String -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
-requestProjectOverview scope target projectId accumulated model =
-    requestCanonical scope ("project-overview:" ++ projectId) (\guard -> Api.fetchProjectOverview model.flags.apiUrl projectId (CanonicalProjectOverviewFetched guard projectId)) accumulated model
+{-| Raw IDs must be unique across both kinds within each at-most-100 ID batch.
+A coincident project/task UUID therefore starts another batch, rather than
+silently losing one target or violating the summaries API contract.
+-}
+readinessTargetBatches : List ( String, String ) -> List (List ( String, String ))
+readinessTargetBatches targets =
+    let
+        unique = List.foldl (\target ( seen, values ) -> if Set.member target seen then ( seen, values ) else ( Set.insert target seen, target :: values )) ( Set.empty, [] ) targets |> Tuple.second |> List.reverse
+        collect target ( completed, current, ids ) =
+            if List.length current == 100 || Set.member (Tuple.second target) ids then
+                ( List.reverse current :: completed, [ target ], Set.singleton (Tuple.second target) )
+            else ( completed, target :: current, Set.insert (Tuple.second target) ids )
+        ( batches, final, _ ) = List.foldl collect ( [], [], Set.empty ) unique
+    in
+    List.reverse (if List.isEmpty final then batches else List.reverse final :: batches)
+
+
+requestReadinessSummaryBatches : ChangeStream.Scope -> List ( String, String ) -> Model -> ( Model, Cmd Msg )
+requestReadinessSummaryBatches scope targets model =
+    let
+        prepare ( kind, id ) ( current, prepared ) =
+            let targetKey = (if kind == "task" then "dependency-readiness:task:" else "project-overview:") ++ id
+            in case prepareCanonicalRequest scope targetKey current of
+                Just ( guard, updated ) -> ( updated, { kind = kind, id = id, guard = guard } :: prepared )
+                Nothing -> ( current, prepared )
+        dispatch workspaceId batch ( current, commands ) =
+            let
+                ( prepared, reversed ) = List.foldl prepare ( current, [] ) batch
+                guarded = List.reverse reversed
+                ids kind = guarded |> List.filter (\target -> target.kind == kind) |> List.map .id
+            in
+            ( prepared, Cmd.batch [ commands, Api.fetchNavigationSummaries model.flags.apiUrl workspaceId (ids "project") (ids "task") (CanonicalReadinessSummariesFetched workspaceId guarded) ] )
+    in
+    if List.isEmpty targets then ( model, Cmd.none )
+    else case ( scope, scopeAuthority scope model ) of
+        ( ChangeStream.Workspace workspaceId, Just _ ) ->
+            List.foldl (dispatch workspaceId) ( model, Cmd.none ) (readinessTargetBatches targets)
+        _ -> beginScopedResync scope model
+
+
+revalidateDependencyReadiness : ChangeStream.Scope -> String -> String -> Bool -> Model -> ( Model, Cmd Msg )
+revalidateDependencyReadiness scope taskId dependsOnId present model =
+    let
+        targets = ( "task", taskId ) :: dependencyReadinessTargets taskId model
+        dependencies = model.dependencies
+        invalidated =
+            { model | dependencies =
+                { dependencies
+                    | taskReadinessRollups = List.foldl (\( kind, id ) rollups -> if kind == "task" then Dict.remove id rollups else rollups) dependencies.taskReadinessRollups targets
+                    , projectReadinessRollups = List.foldl (\( kind, id ) rollups -> if kind == "project" then Dict.remove id rollups else rollups) dependencies.projectReadinessRollups targets
+                }
+            }
+    in
+    if present && not (Dict.member dependsOnId invalidated.tasks) then requestEntity scope "task" dependsOnId Cmd.none invalidated
+    else ( invalidated, Cmd.none )
 
 
 requestGroupMembers : ChangeStream.Scope -> List String -> Model -> ( Model, Cmd Msg )

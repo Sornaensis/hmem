@@ -1,6 +1,7 @@
 module DataLoadingTest exposing (suite)
 
 import Api
+import ReadinessTestSupport
 import AppShell
 import Dict
 import Helpers
@@ -88,7 +89,7 @@ suite =
                 rollup = parent.readinessRollup
                 fresh = { parent | readinessRollup = { rollup | inProgressSubtaskCount = 1 } }
                 summarized = summaryReply requested (batchGuard [ ( "task", parent.id ) ] requested) [] [ parent.id ] { projects = [], tasks = [ fresh ], missingProjectIds = [], missingTaskIds = [] } requested
-                late = WebSocket.update (CanonicalTaskReadinessFetched guard parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = rollup })) summarized |> Tuple.first
+                late = WebSocket.update (ReadinessTestSupport.taskFetched guard parent.id (Ok { task = Api.taskFromCardSummary parent, dependencies = [], readinessRollup = rollup })) summarized |> Tuple.first
             in
             Expect.equal (Just 1) (Dict.get parent.id late.dependencies.taskReadinessRollups |> Maybe.map .inProgressSubtaskCount)
         , test "paginated focus hydration preserves filtered membership across exits and repeated visits" <| \_ ->
@@ -3298,10 +3299,10 @@ planningReadinessRace kind family summaryOlder newerFirst =
         replyOverview captured value current =
             if kind == "project" then
                 let result = Ok { project = Api.projectFromCardSummary parentProject, tasks = [], subprojects = [], readinessRollup = projectRollup value }
-                in Main.update (if family == "dependency" then CanonicalProjectOverviewFetched (guard captured) id result else GotProjectOverview (guard captured) id result) current |> Tuple.first
+                in Main.update (if family == "dependency" then ReadinessTestSupport.projectFetched (guard captured) id result else GotProjectOverview (guard captured) id result) current |> Tuple.first
             else
                 let result = Ok { task = Api.taskFromCardSummary parent, dependencies = [ { id = "dependency-row", name = "Current dependency data", status = Api.Todo } ], readinessRollup = taskRollup value }
-                    message = if family == "dependency" then CanonicalTaskReadinessFetched (guard captured) id result else if family == "canonical" then CanonicalTaskOverviewFetched (guard captured) id result else
+                    message = if family == "dependency" then ReadinessTestSupport.taskFetched (guard captured) id result else if family == "canonical" then CanonicalTaskOverviewFetched (guard captured) id result else
                         GotTaskDependencies id captured.selectedWorkspaceId captured.sessionRequestEpoch (Dict.get id captured.dependencies.taskOverviewRequests |> Maybe.withDefault { dependencyGeneration = -1, readRevision = -1 }) result
                 in Main.update message current |> Tuple.first
         oldReply = if summaryOlder then replySummary older 0 else replyOverview older 0
@@ -3330,7 +3331,7 @@ stalePlanningMissing family =
                 taskRollup = parent.readinessRollup
                 projectRollup = container.readinessRollup
                 newer = DataLoading.mergeNavigationSummaries [ { container | readinessRollup = { projectRollup | inProgressTaskCount = 1 } } ] [ { parent | readinessRollup = { taskRollup | inProgressSubtaskCount = 1 } } ] pending
-                message = if family == "project-overview" then CanonicalProjectOverviewFetched guard id (Err (Http.BadStatus 404)) else if family == "task-readiness" then CanonicalTaskReadinessFetched guard id (Err (Http.BadStatus 404)) else CanonicalTaskOverviewFetched guard id (Err (Http.BadStatus 404))
+                message = if family == "project-overview" then ReadinessTestSupport.projectFetched guard id (Err (Http.BadStatus 404)) else if family == "task-readiness" then ReadinessTestSupport.taskFetched guard id (Err (Http.BadStatus 404)) else CanonicalTaskOverviewFetched guard id (Err (Http.BadStatus 404))
                 completed = Main.update message newer |> Tuple.first
             in
             if kind == "project" then ( Dict.member id completed.projects, Dict.get id completed.dependencies.projectReadinessRollups |> Maybe.map .inProgressTaskCount )

@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, revalidateNavigationForTasksReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -1480,10 +1480,19 @@ Retire its owner's cursor when the server ordering changes, before accepting mor
 -}
 revalidateNavigationForTaskReadiness : Model -> Api.Task -> Model -> ( Model, Cmd Msg )
 revalidateNavigationForTaskReadiness before task model =
-    if taskPresentationOrder before task /= taskPresentationOrder model task then
-        revalidateNavigationOwners [ taskNavigationOwner task ] model
-    else
-        ( model, Cmd.none )
+    revalidateNavigationForTasksReadiness before [ task ] model
+
+
+revalidateNavigationForTasksReadiness : Model -> List Api.Task -> Model -> ( Model, Cmd Msg )
+revalidateNavigationForTasksReadiness before tasks model =
+    let
+        owners = tasks
+            |> List.filter (\task -> taskPresentationOrder before task /= taskPresentationOrder model task)
+            |> List.map taskNavigationOwner
+            |> Set.fromList |> Set.toList
+    in
+    if List.isEmpty owners then ( model, Cmd.none )
+    else revalidateNavigationOwners owners model
 
 
 revalidateNavigationOwners : List ( String, String ) -> Model -> ( Model, Cmd Msg )

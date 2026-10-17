@@ -1,6 +1,7 @@
 module DependenciesTest exposing (suite)
 
 import Api
+import ReadinessTestSupport
 import AppShell
 import Dict
 import Expect
@@ -1046,7 +1047,7 @@ suite =
 
                     afterAddReadiness =
                         WebSocket.update
-                            (CanonicalProjectOverviewFetched
+                            (ReadinessTestSupport.projectFetched
                                 (canonicalGuardFor ("project-overview:" ++ projectId) afterPrerequisite)
                                 projectId
                                 (Ok { project = project projectId, tasks = [ dependentTask ], subprojects = [], readinessRollup = addProjectRollup })
@@ -1060,7 +1061,7 @@ suite =
 
                     afterRemoveReadiness =
                         WebSocket.update
-                            (CanonicalProjectOverviewFetched
+                            (ReadinessTestSupport.projectFetched
                                 (canonicalGuardFor ("project-overview:" ++ projectId) afterRemoveEvent)
                                 projectId
                                 (Ok { project = project projectId, tasks = [ dependentTask ], subprojects = [], readinessRollup = staleProjectRollup })
@@ -1248,12 +1249,12 @@ suite =
                         }
 
                     afterOldTaskReadiness =
-                        WebSocket.update (CanonicalTaskReadinessFetched oldTaskGuard ancestorTaskId (Ok staleOverview)) afterEventB
+                        WebSocket.update (ReadinessTestSupport.taskFetched oldTaskGuard ancestorTaskId (Ok staleOverview)) afterEventB
                             |> Tuple.first
 
                     afterOldProjectReadiness =
                         WebSocket.update
-                            (CanonicalProjectOverviewFetched
+                            (ReadinessTestSupport.projectFetched
                                 oldProjectGuard
                                 projectId
                                 (Ok { project = project projectId, tasks = [], subprojects = [], readinessRollup = { staleProjectRollup | openDependencyCount = 99 } })
@@ -1286,7 +1287,7 @@ suite =
 
                     afterNewTaskReadiness =
                         WebSocket.update
-                            (CanonicalTaskReadinessFetched newTaskGuard
+                            (ReadinessTestSupport.taskFetched newTaskGuard
                                 ancestorTaskId
                                 (Ok { staleOverview | readinessRollup = acceptedTaskRollup })
                             )
@@ -1295,7 +1296,7 @@ suite =
 
                     afterNewProjectReadiness =
                         WebSocket.update
-                            (CanonicalProjectOverviewFetched
+                            (ReadinessTestSupport.projectFetched
                                 newProjectGuard
                                 projectId
                                 (Ok { project = project projectId, tasks = [], subprojects = [], readinessRollup = acceptedProjectRollup })
@@ -1330,6 +1331,67 @@ suite =
                     , taskRollup = Dict.get ancestorTaskId afterNewProjectReadiness.dependencies.taskReadinessRollups |> Maybe.map .openDependencyCount
                     , projectRollup = Dict.get projectId afterNewProjectReadiness.dependencies.projectReadinessRollups |> Maybe.map (\rollup -> ( rollup.openDependencyCount, rollup.dependencyBlockedTaskCount ))
                     }
+        , test "readiness batches enforce raw-ID uniqueness and 100-ID caps without losing typed targets" <| \_ ->
+            let targets = List.range 1 205 |> List.map (\n -> ( "task", String.fromInt n ))
+                batches = WebSocket.readinessTargetBatches (targets ++ targets)
+            in
+            Expect.equal ([100,100,5],targets,[[ ("task","same") ],[ ("project","same") ]])
+                (List.map List.length batches,List.concat batches,WebSocket.readinessTargetBatches [("task","same"),("project","same"),("task","same")])
+        , test "readiness-only batches apply current targets without replacing metadata or dependency pages" <| \_ ->
+            let
+                original = remoteModel False
+                card id = { dependentTaskCardSummary | id = id, title = "Retained " ++ id }
+                summaries = List.map card ["a","b","c"]
+                loading = original.dataLoading
+                seed = { original | tasks = List.map (\value -> (value.id,Api.taskFromCardSummary value)) summaries |> Dict.fromList, dataLoading = { loading | taskCardSummaries = List.map (\value -> (value.id,value)) summaries |> Dict.fromList } }
+                ( prepared, guards ) = ReadinessTestSupport.prepare [("task","a"),("task","b"),("task","c")] seed
+                ( superseded, _ ) = ReadinessTestSupport.prepare [("task","a")] prepared
+                rollup = dependentTaskCardSummary.readinessRollup
+                newer = Helpers.applyTaskReadiness (superseded.dataLoading.nextNavigationSummaryRevision + 1) "b" { rollup | openDependencyCount = 99 } superseded
+                received = List.map (\value -> { value | title = "Unrelated response metadata", status = Api.Done, readinessRollup = { rollup | openDependencyCount = 7 } }) summaries
+                completed = WebSocket.update (CanonicalReadinessSummariesFetched workspaceId guards (Ok { projects = [], tasks = received, missingProjectIds = [], missingTaskIds = [] })) newer |> Tuple.first
+            in
+            Expect.equal { rollups = [Nothing,Just 99,Just 7], details = True, metadata = True, dependencies = True }
+                { rollups = List.map (\id -> Dict.get id completed.dependencies.taskReadinessRollups |> Maybe.map .openDependencyCount) ["a","b","c"]
+                , details = completed.tasks == newer.tasks
+                , metadata = List.map (\id -> Dict.get id completed.dataLoading.taskCardSummaries |> Maybe.map (\value -> (value.title,value.status))) ["a","b","c"] == List.map (\value -> Just (value.title,value.status)) summaries
+                , dependencies = completed.dependencies.taskDependencies == newer.dependencies.taskDependencies && completed.dependencies.taskDependencyLinks == newer.dependencies.taskDependencyLinks }
+        , test "partial missing readiness respects target and planning-read fences" <| \_ ->
+            let
+                base = remoteModel False
+                seed = { base | tasks = [task "a" "A" Api.Todo, task "b" "B" Api.Todo, task "c" "C" Api.Todo] |> List.map (\value -> (value.id,value)) |> Dict.fromList }
+                ( prepared, guards ) = ReadinessTestSupport.prepare [("task","a"),("task","b"),("task","c")] seed
+                ( superseded, _ ) = ReadinessTestSupport.prepare [("task","a")] prepared
+                newer = Helpers.applyTaskReadiness (superseded.dataLoading.nextNavigationSummaryRevision + 1) "b" dependentTaskCardSummary.readinessRollup superseded
+                completed = WebSocket.update (CanonicalReadinessSummariesFetched workspaceId guards (Ok { projects = [], tasks = [], missingProjectIds = [], missingTaskIds = ["a","b","c"] })) newer |> Tuple.first
+            in
+            Expect.equal [True,True,False] (List.map (\id -> Dict.member id completed.tasks) ["a","b","c"])
+        , test "foreign malformed or retired readiness batches cannot change current authority" <| \_ ->
+            let
+                base = remoteModel False
+                ( prepared, guards ) = ReadinessTestSupport.prepare [("task",dependentId)] base
+                foreign = { dependentTaskCardSummary | workspaceId = "foreign" }
+                malformed = Ok { projects = [], tasks = [foreign], missingProjectIds = [], missingTaskIds = [] }
+                duplicate = Ok { projects = [], tasks = [dependentTaskCardSummary,dependentTaskCardSummary], missingProjectIds = [], missingTaskIds = [] }
+                valid = Ok { projects = [], tasks = [dependentTaskCardSummary], missingProjectIds = [], missingTaskIds = [] }
+                otherSession = { editorSession | principal = (let principal = editorSession.principal in { principal | actorId = "other" }) }
+                retired = [{prepared | sessionRequestEpoch = prepared.sessionRequestEpoch + 1},{prepared | selectedWorkspaceId = Just "other"},{prepared | sessionContext = Just otherSession},{prepared | auth = {status = AuthRequired,mode = Just "test"}}]
+                unchanged current result = WebSocket.update (CanonicalReadinessSummariesFetched workspaceId guards result) current |> Tuple.first |> (==) current
+            in
+            Expect.equal (True,True,True) (unchanged prepared malformed,unchanged prepared duplicate,List.all (\current -> unchanged current valid && unchanged current (Err (Http.BadStatus 403)) && unchanged current (Err (Http.BadStatus 401))) retired)
+        , test "a correlated dependency echo still refreshes ancestor readiness after HTTP success" <| \_ ->
+            let
+                base = remoteModel True
+                dependent = task dependentId "Dependent" Api.Todo
+                parent = task "ancestor" "Ancestor" Api.Todo
+                seed = {base | tasks = Dict.insert dependentId {dependent | parentId = Just parent.id} (Dict.insert parent.id parent base.tasks)}
+                tracked = Dependencies.trackDependencyMutationRequest dependentId prerequisiteId "add" "correlated" seed
+                dependencies = tracked.dependencies
+                succeeded = {tracked | dependencies = { dependencies | taskDependencyMutations = List.map (\value -> {value | httpSucceeded = True}) dependencies.taskDependencyMutations }}
+                completed = WebSocket.update (WsMessageReceived (dependencyWireWithRequestId workspaceId "correlated-echo" "created" "correlated")) succeeded |> Tuple.first
+            in
+            Expect.equal (Just 1,True)
+                (Dict.get ("workspace:" ++ workspaceId ++ "|dependency-readiness:task:" ++ parent.id) completed.webSocket.targetGenerations, completed.dependencies.nextTaskDependencyRequestGeneration == succeeded.dependencies.nextTaskDependencyRequestGeneration)
         , test "local HTTP results and canonical echoes share one dependency refresh in either order" <|
             \_ ->
                 let

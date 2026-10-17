@@ -1840,6 +1840,9 @@ data WorkspaceTimelineBucket = WorkspaceTimelineBucket
   , timelineBucketOpenCounts :: Maybe TimelineOpenCounts
   , timelineBucketOpenAsOf :: Maybe UTCTime
   , timelineBucketOpenStatus :: Text
+  , timelineBucketObservationTotal :: Maybe Int64
+  , timelineBucketObservationAsOf :: Maybe UTCTime
+  , timelineBucketObservationStatus :: Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON WorkspaceTimelineBucket where
@@ -1854,6 +1857,9 @@ instance ToJSON WorkspaceTimelineBucket where
     , "open_counts" .= timelineBucketOpenCounts
     , "open_as_of" .= timelineBucketOpenAsOf
     , "open_status" .= timelineBucketOpenStatus
+    , "observation_total" .= timelineBucketObservationTotal
+    , "observation_as_of" .= timelineBucketObservationAsOf
+    , "observation_status" .= timelineBucketObservationStatus
     ]
 instance FromJSON WorkspaceTimelineBucket where
   parseJSON = withObject "WorkspaceTimelineBucket" $ \o ->
@@ -1868,6 +1874,9 @@ instance FromJSON WorkspaceTimelineBucket where
       <*> o .:? "open_counts"
       <*> o .:? "open_as_of"
       <*> o .:? "open_status" .!= "history_unavailable"
+      <*> o .:? "observation_total"
+      <*> o .:? "observation_as_of"
+      <*> o .:? "observation_status" .!= "history_unavailable"
 
 -- | Capped bucket response for the workspace Timeline histogram.
 data WorkspaceTimelineBucketsResponse = WorkspaceTimelineBucketsResponse

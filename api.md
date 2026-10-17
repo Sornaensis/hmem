@@ -87,6 +87,14 @@ counts and `history_unavailable` for affected history, retaining its cutoff.
 Available samples use `available`. Retained audit history is assumed intact:
 arbitrary manual purges that leave consistent snapshots cannot always be detected.
 
+`observation_total` (nullable int64), `observation_as_of` (nullable UTC), and
+`observation_status` use the same cutoff and status conventions with independent
+history coverage. Total counts surviving Observation entities once, including
+pre-range creations and deletions after the displayed range; subjects, content
+revisions and embeddings do not multiply it. `series.observation.created` and
+`deleted` remain interval activity. Absent inventory fields mean unknown, never
+zero. Legacy memories were removed rather than converted into Observations.
+
 The optional `paged=true` query supports long graph ranges while each response
 keeps the existing ten-year and 366-bucket bounds. Follow `next_since`, keeping
 `until` and `bucket` unchanged, until it is null. With `paged=true`, omitting

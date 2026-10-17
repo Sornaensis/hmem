@@ -311,7 +311,9 @@ listWorkspaceTimelineBucketsStatement = Statement.Statement sql encoder decoder 
       , "SELECT l.*,"
       , "  CASE WHEN s.open_status = 'available' THEN s.projects END,"
       , "  CASE WHEN s.open_status = 'available' THEN s.tasks END,"
-      , "  CASE WHEN s.open_status <> 'future' THEN s.cutoff END, s.open_status"
+      , "  CASE WHEN s.open_status <> 'future' THEN s.cutoff END, s.open_status,"
+      , "  CASE WHEN s.observation_status = 'available' THEN s.observations END,"
+      , "  CASE WHEN s.observation_status <> 'future' THEN s.cutoff END, s.observation_status"
       , "FROM lifecycle_buckets l JOIN inventory_samples s ON s.bucket_start_utc AT TIME ZONE 'UTC' = l.bucket_start"
       , "ORDER BY l.bucket_start ASC"
       ]
@@ -335,9 +337,10 @@ timelineOpenInventoryCtes =
   [ ", inventory_clock AS (SELECT statement_timestamp() AS as_of), inventory_current AS ("
   , "  SELECT 'project'::text AS kind, id::text AS entity_id, (deleted_at IS NULL AND status IN ('active', 'paused'))::int AS open FROM projects WHERE workspace_id = $1"
   , "  UNION ALL SELECT 'task', id::text, (deleted_at IS NULL AND status IN ('todo', 'in_progress', 'blocked'))::int FROM tasks WHERE workspace_id = $1"
+  , "  UNION ALL SELECT 'observation', id::text, 1 FROM observations WHERE workspace_id = $1"
   , "), inventory_audit AS MATERIALIZED ("
   , "  SELECT a.*, a.action::text AS action_text FROM audit_log a"
-  , "  WHERE a.entity_type IN ('project', 'task') AND (a.workspace_id = $1 OR (a.workspace_id IS NULL AND"
+  , "  WHERE a.entity_type IN ('project', 'task', 'observation') AND (a.workspace_id = $1 OR (a.workspace_id IS NULL AND"
   , "    (a.new_values ->> 'workspace_id' = $1::text OR a.old_values ->> 'workspace_id' = $1::text)))"
   , "), inventory_states AS ("
   , "  SELECT a.entity_type AS kind, a.entity_id, a.changed_at, a.action_text,"
@@ -347,15 +350,16 @@ timelineOpenInventoryCtes =
   , "), inventory_state_values AS MATERIALIZED ("
   , "  SELECT s.*, CASE WHEN absent THEN 0 ELSE 1 END AS existence,"
   , "    CASE WHEN NOT absent AND value ->> 'deleted_at' IS NULL AND"
-  , "      ((kind = 'project' AND value ->> 'status' IN ('active', 'paused')) OR (kind = 'task' AND value ->> 'status' IN ('todo', 'in_progress', 'blocked'))) THEN 1 ELSE 0 END AS open"
+  , "      ((kind = 'project' AND value ->> 'status' IN ('active', 'paused')) OR (kind = 'task' AND value ->> 'status' IN ('todo', 'in_progress', 'blocked')) OR kind = 'observation') THEN 1 ELSE 0 END AS open"
   , "  FROM inventory_states s"
   , "), inventory_deltas AS MATERIALIZED ("
   , "  SELECT kind, entity_id, changed_at, bool_or(action_text = 'create') AS has_create,"
   , "    sum(open * sign) AS delta, sum(existence * sign) AS existence_delta,"
   , "    bool_and(CASE WHEN absent THEN value IS NULL OR value = 'null'::jsonb ELSE"
-  , "      COALESCE(value ?& ARRAY['id','workspace_id','status','deleted_at'] AND value ->> 'id' = entity_id AND value ->> 'workspace_id' = $1::text AND"
-  , "      ((kind = 'project' AND value ->> 'status' IN ('active','paused','completed','archived')) OR"
-  , "       (kind = 'task' AND value ->> 'status' IN ('todo','in_progress','blocked','done','cancelled'))), false) END"
+  , "      COALESCE(value ?& ARRAY['id','workspace_id'] AND value ->> 'id' = entity_id AND value ->> 'workspace_id' = $1::text AND"
+  , "      (kind = 'observation' OR (value ?& ARRAY['status','deleted_at'] AND"
+  , "       ((kind = 'project' AND value ->> 'status' IN ('active','paused','completed','archived')) OR"
+  , "        (kind = 'task' AND value ->> 'status' IN ('todo','in_progress','blocked','done','cancelled'))))), false) END"
   , "      AND action_text IN ('create','update','delete')) AS valid"
   , "  FROM inventory_state_values GROUP BY kind, entity_id, changed_at"
   , "), inventory_history AS ("
@@ -379,13 +383,17 @@ timelineOpenInventoryCtes =
   , "), inventory_reconciliation AS ("
   , "  SELECT kind, entity_id, bool_and(agrees) AS agrees FROM inventory_group_checks GROUP BY kind, entity_id"
   , "), inventory_coverage AS ("
-  , "  SELECT max(CASE WHEN h.entity_id IS NULL THEN clock.as_of"
+  , "  SELECT max(unknown_through) FILTER (WHERE kind <> 'observation') AS open_unknown_through,"
+  , "    max(unknown_through) FILTER (WHERE kind = 'observation') AS observation_unknown_through FROM ("
+  , "  SELECT kind, CASE WHEN h.entity_id IS NULL THEN clock.as_of"
   , "    WHEN NOT reconciliation.agrees THEN clock.as_of"
-  , "    ELSE greatest(h.invalid_at, CASE WHEN NOT h.has_create THEN h.first_at END) END) AS unknown_through"
+  , "    ELSE greatest(h.invalid_at, CASE WHEN NOT h.has_create THEN h.first_at END) END AS unknown_through"
   , "  FROM inventory_current c FULL JOIN inventory_history h USING (kind, entity_id)"
   , "  LEFT JOIN inventory_reconciliation reconciliation USING (kind, entity_id) CROSS JOIN inventory_clock clock"
+  , "  ) coverage"
   , "), inventory_anchor AS ("
-  , "  SELECT COALESCE(sum(open) FILTER (WHERE kind = 'project'), 0) AS projects, COALESCE(sum(open) FILTER (WHERE kind = 'task'), 0) AS tasks FROM inventory_current"
+  , "  SELECT COALESCE(sum(open) FILTER (WHERE kind = 'project'), 0) AS projects, COALESCE(sum(open) FILTER (WHERE kind = 'task'), 0) AS tasks,"
+  , "    count(*) FILTER (WHERE kind = 'observation') AS observations FROM inventory_current"
   , "), inventory_cutoffs AS ("
   , "  SELECT b.*, clock.as_of, least(b.bucket_end_utc AT TIME ZONE 'UTC', $3, clock.as_of) AS cutoff"
   , "  FROM buckets b CROSS JOIN inventory_clock clock"
@@ -393,11 +401,14 @@ timelineOpenInventoryCtes =
   , "  SELECT b.bucket_start_utc, b.cutoff,"
   , "    (a.projects - COALESCE(sum(d.delta) FILTER (WHERE d.kind = 'project'), 0))::bigint AS projects,"
   , "    (a.tasks - COALESCE(sum(d.delta) FILTER (WHERE d.kind = 'task'), 0))::bigint AS tasks,"
+  , "    (a.observations - COALESCE(sum(d.existence_delta) FILTER (WHERE d.kind = 'observation'), 0))::bigint AS observations,"
   , "    CASE WHEN b.bucket_start_utc AT TIME ZONE 'UTC' >= b.as_of THEN 'future'"
-  , "      WHEN b.cutoff < b.as_of AND b.cutoff <= coverage.unknown_through THEN 'history_unavailable' ELSE 'available' END AS open_status"
+  , "      WHEN b.cutoff < b.as_of AND b.cutoff <= coverage.open_unknown_through THEN 'history_unavailable' ELSE 'available' END AS open_status,"
+  , "    CASE WHEN b.bucket_start_utc AT TIME ZONE 'UTC' >= b.as_of THEN 'future'"
+  , "      WHEN b.cutoff < b.as_of AND b.cutoff <= coverage.observation_unknown_through THEN 'history_unavailable' ELSE 'available' END AS observation_status"
   , "  FROM inventory_cutoffs b CROSS JOIN inventory_anchor a CROSS JOIN inventory_coverage coverage"
   , "  LEFT JOIN inventory_deltas d ON d.changed_at >= b.cutoff AND b.cutoff < b.as_of"
-  , "  GROUP BY b.bucket_start_utc, b.cutoff, b.as_of, a.projects, a.tasks, coverage.unknown_through"
+  , "  GROUP BY b.bucket_start_utc, b.cutoff, b.as_of, a.projects, a.tasks, a.observations, coverage.open_unknown_through, coverage.observation_unknown_through"
   , ")"
   ]
 
@@ -508,6 +519,9 @@ timelineBucketRowDecoder = do
   openTasks <- Dec.column (Dec.nullable Dec.int8)
   openAsOf <- Dec.column (Dec.nullable Dec.timestamptz)
   openStatus <- Dec.column (Dec.nonNullable Dec.text)
+  observationTotal <- Dec.column (Dec.nullable Dec.int8)
+  observationAsOf <- Dec.column (Dec.nullable Dec.timestamptz)
+  observationStatus <- Dec.column (Dec.nonNullable Dec.text)
   let projectCounts = TimelineBucketCounts projectCreated projectCompleted projectCancelled
       subprojectCounts = TimelineBucketCounts subprojectCreated subprojectCompleted subprojectCancelled
       taskCounts = TimelineBucketCounts taskCreated taskCompleted taskCancelled
@@ -549,6 +563,9 @@ timelineBucketRowDecoder = do
     , timelineBucketOpenCounts = TimelineOpenCounts <$> openProjects <*> openTasks
     , timelineBucketOpenAsOf = openAsOf
     , timelineBucketOpenStatus = openStatus
+    , timelineBucketObservationTotal = observationTotal
+    , timelineBucketObservationAsOf = observationAsOf
+    , timelineBucketObservationStatus = observationStatus
     }
   where
     intColumn = fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4)

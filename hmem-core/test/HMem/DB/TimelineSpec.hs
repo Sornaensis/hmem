@@ -14,6 +14,7 @@ import Hasql.Statement qualified as Statement
 import Test.Hspec
 
 import HMem.DB.Observation
+import HMem.DB.ObservationFixture (reviewed, writeObservation)
 import HMem.DB.Pool (runSession)
 import HMem.DB.Project
 import HMem.DB.Task qualified as Task
@@ -25,6 +26,136 @@ import HMem.Types
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Timeline buckets" $ do
+    it "reconstructs observation carry-in and visible/out-of-range hard deletes at exclusive cutoffs" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-observation-carry"
+      first <- stockObservation env workspace.id
+      laterDeleted <- stockObservation env workspace.id
+      retimePending env workspace.id (utc "2020-01-01 00:00:00 UTC")
+      _ <- stockObservation env workspace.id
+      retimePending env workspace.id (utc "2020-01-03 00:00:00 UTC")
+      deleteObservation env.pool workspace.id first.id `shouldReturn` True
+      retimePending env workspace.id (utc "2020-01-04 00:00:00 UTC")
+      deleteObservation env.pool workspace.id laterDeleted.id `shouldReturn` True
+      retimePending env workspace.id (utc "2020-01-06 00:00:00 UTC")
+      buckets <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-02 00:00:00 UTC") (utc "2020-01-05 00:00:00 UTC") "day"
+      map (.timelineBucketObservationTotal) buckets `shouldBe` map Just [2,3,2]
+      map (.timelineBucketObservationStatus) buckets `shouldBe` replicate 3 "available"
+      map (.timelineBucketObservationAsOf) buckets `shouldBe` map (.timelineBucketOpenAsOf) buckets
+      map (\b -> b.timelineBucketSeries.seriesObservation.created) buckets `shouldBe` [0,1,0]
+      map (\b -> b.timelineBucketSeries.seriesObservation.deleted) buckets `shouldBe` [0,0,1]
+
+    it "counts multi-subject observations once and ignores edits and re-audit versions" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-observation-versions"
+      other <- createTestWorkspace env "timeline-observation-other"
+      observation <- stockObservation env workspace.id
+      _ <- stockObservation env other.id
+      retimePending env workspace.id (utc "2020-01-01 00:00:00 UTC")
+      _ <- writeObservation env.pool workspace.id observation.id (reviewed "corrected")
+      retimePending env workspace.id (utc "2020-01-03 00:00:00 UTC")
+      _ <- writeObservation env.pool workspace.id observation.id (ReviewedObservationUpdate "corrected" "cccccccccccccccccccccccccccccccccccccccc")
+      retimePending env workspace.id (utc "2020-01-04 00:00:00 UTC")
+      mapM_ (\size -> do
+        buckets <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-02 00:00:00 UTC") (utc "2020-01-04 12:00:00 UTC") size
+        map (.timelineBucketObservationTotal) buckets `shouldSatisfy` all (== Just 1)
+        map (.timelineBucketObservationStatus) buckets `shouldSatisfy` all (== "available")
+        (last buckets).timelineBucketObservationAsOf `shouldBe` Just (utc "2020-01-04 12:00:00 UTC")) ["day", "week", "month", "quarter"]
+
+    it "reconciles tied observation creation/deletion without imposing an audit UUID order" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-observation-ties"
+      observation <- stockObservation env workspace.id
+      _ <- writeObservation env.pool workspace.id observation.id (reviewed "changed at the same instant")
+      deleteObservation env.pool workspace.id observation.id `shouldReturn` True
+      retimePending env workspace.id (utc "2020-01-02 00:00:00 UTC")
+      buckets <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-01 00:00:00 UTC") (utc "2020-01-04 00:00:00 UTC") "day"
+      map (.timelineBucketObservationTotal) buckets `shouldBe` replicate 3 (Just 0)
+      map (.timelineBucketObservationStatus) buckets `shouldBe` replicate 3 "available"
+      mutateAudit env workspace.id "DELETE FROM audit_log WHERE workspace_id = $1 AND entity_type = 'observation' AND action = 'create'"
+      noCreate <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-01 00:00:00 UTC") (utc "2020-01-04 00:00:00 UTC") "day"
+      map (.timelineBucketObservationTotal) noCreate `shouldBe` [Nothing, Just 0, Just 0]
+      map (.timelineBucketObservationStatus) noCreate `shouldBe` ["history_unavailable", "available", "available"]
+
+    it "keeps missing and malformed observation history independent of valid open inventory" $ \env -> do
+      mapM_ (\damage -> do
+        workspace <- createTestWorkspace env "timeline-observation-gap"
+        _ <- stockTask env workspace.id Nothing Nothing
+        observation <- stockObservation env workspace.id
+        retimePending env workspace.id (utc "2020-01-01 00:00:00 UTC")
+        _ <- writeObservation env.pool workspace.id observation.id (reviewed "edited")
+        retimePending env workspace.id (utc "2020-01-03 00:00:00 UTC")
+        mutateAudit env workspace.id damage
+        buckets <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-01 00:00:00 UTC") (utc "2020-01-04 00:00:00 UTC") "day"
+        map (.timelineBucketObservationTotal) buckets `shouldBe` [Nothing, Nothing, Just 1]
+        map (.timelineBucketObservationStatus) buckets `shouldBe` ["history_unavailable", "history_unavailable", "available"]
+        map (.timelineBucketOpenCounts) buckets `shouldBe` replicate 3 (Just (TimelineOpenCounts 0 1)))
+        [ "DELETE FROM audit_log WHERE workspace_id = $1 AND entity_type = 'observation' AND action = 'create'"
+        , "UPDATE audit_log SET old_values = NULL WHERE workspace_id = $1 AND entity_type = 'observation' AND action = 'update'"
+        , "UPDATE audit_log SET new_values = new_values - 'workspace_id' WHERE workspace_id = $1 AND entity_type = 'observation' AND action = 'update'"
+        ]
+
+    it "rejects contradictory observation anchors and missing complete history without clamping" $ \env -> do
+      mapM_ (\damage -> do
+        workspace <- createTestWorkspace env "timeline-observation-anchor"
+        _ <- stockObservation env workspace.id
+        retimePending env workspace.id (utc "2020-01-01 00:00:00 UTC")
+        mutateAudit env workspace.id damage
+        historical <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-02 00:00:00 UTC") (utc "2020-01-03 00:00:00 UTC") "day"
+        map (.timelineBucketObservationTotal) historical `shouldBe` [Nothing]
+        map (.timelineBucketObservationStatus) historical `shouldBe` ["history_unavailable"]
+        now <- getCurrentTime
+        current <- listWorkspaceTimelineBuckets env.pool workspace.id (addUTCTime (-1) now) (addUTCTime 1 now) "day"
+        (last current).timelineBucketObservationTotal `shouldBe` Just 1
+        (last current).timelineBucketObservationStatus `shouldBe` "available")
+        [ "DELETE FROM audit_log WHERE workspace_id = $1 AND entity_type = 'observation'"
+        , "INSERT INTO audit_log (workspace_id, entity_type, entity_id, action, old_values, new_values, changed_at) SELECT workspace_id, entity_type, entity_id, action, old_values, new_values, changed_at FROM audit_log WHERE workspace_id = $1 AND entity_type = 'observation'"
+        ]
+
+    it "rejects internal net-cancelling existence gaps even without retained creates" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-observation-internal-gap"
+      let entity = "00000000-0000-0000-0000-000000000381"
+          snapshot = Just (Aeson.object ["id" Aeson..= entity, "workspace_id" Aeson..= workspace.id])
+      -- Missing create/delete transitions around the retained metadata cancel
+      -- in total, but its reconstructed absent boundary contradicts the row.
+      insertAudit env workspace.id "observation" entity "create" Nothing snapshot (utc "2020-01-01 00:00:00 UTC")
+      insertAudit env workspace.id "observation" entity "delete" snapshot Nothing (utc "2020-01-02 00:00:00 UTC")
+      insertAudit env workspace.id "observation" entity "update" snapshot snapshot (utc "2020-01-04 00:00:00 UTC")
+      insertAudit env workspace.id "observation" entity "create" Nothing snapshot (utc "2020-01-06 00:00:00 UTC")
+      insertAudit env workspace.id "observation" entity "delete" snapshot Nothing (utc "2020-01-07 00:00:00 UTC")
+      let assertGap = do
+            historical <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-04 00:00:00 UTC") (utc "2020-01-04 12:00:00 UTC") "day"
+            map (.timelineBucketObservationTotal) historical `shouldBe` [Nothing]
+            map (.timelineBucketObservationStatus) historical `shouldBe` ["history_unavailable"]
+            map (.timelineBucketOpenCounts) historical `shouldBe` [Just (TimelineOpenCounts 0 0)]
+      assertGap
+      mutateAudit env workspace.id "DELETE FROM audit_log WHERE workspace_id = $1 AND changed_at = '2020-01-01 00:00:00+00'::timestamptz AND entity_type = 'observation'"
+      assertGap
+
+    it "supports legacy snapshot attribution and isolates observation coverage from project gaps" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-observation-legacy"
+      other <- createTestWorkspace env "timeline-observation-legacy-other"
+      _ <- stockObservation env workspace.id
+      _ <- stockObservation env other.id
+      retimePending env workspace.id (utc "2020-01-01 00:00:00 UTC")
+      retimePending env other.id (utc "2020-01-01 00:00:00 UTC")
+      mutateAudit env workspace.id "UPDATE audit_log SET workspace_id = NULL WHERE workspace_id = $1 AND entity_type = 'observation'"
+      _ <- stockTask env workspace.id Nothing Nothing
+      mutateAudit env workspace.id "DELETE FROM audit_log WHERE workspace_id = $1 AND entity_type = 'task'"
+      historical <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-02 00:00:00 UTC") (utc "2020-01-03 00:00:00 UTC") "day"
+      map (.timelineBucketObservationTotal) historical `shouldBe` [Just 1]
+      map (.timelineBucketOpenCounts) historical `shouldBe` [Nothing]
+      isolated <- listWorkspaceTimelineBuckets env.pool other.id (utc "2020-01-02 00:00:00 UTC") (utc "2020-01-03 00:00:00 UTC") "day"
+      map (.timelineBucketObservationTotal) isolated `shouldBe` [Just 1]
+
+    it "returns exact empty observation stock and no future forecast" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-observation-empty"
+      historical <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2020-01-02 00:00:00 UTC") (utc "2020-01-03 00:00:00 UTC") "day"
+      map (.timelineBucketObservationTotal) historical `shouldBe` [Just 0]
+      map (.timelineBucketObservationStatus) historical `shouldBe` ["available"]
+      now <- getCurrentTime
+      future <- listWorkspaceTimelineBuckets env.pool workspace.id (addUTCTime 172800 now) (addUTCTime 259200 now) "day"
+      map (.timelineBucketObservationTotal) future `shouldSatisfy` all (== Nothing)
+      map (.timelineBucketObservationAsOf) future `shouldSatisfy` all (== Nothing)
+      map (.timelineBucketObservationStatus) future `shouldSatisfy` all (== "future")
+
     it "carries pre-range inventory through empty buckets and reverses exact-boundary transitions" $ \env -> do
       workspace <- createTestWorkspace env "timeline-stock"
       root <- stockProject env workspace.id Nothing
@@ -382,6 +513,11 @@ utc = read
 stockProject :: TestEnv -> UUID -> Maybe UUID -> IO Project
 stockProject env workspace parent = createProject env.pool CreateProject
   { workspaceId = workspace, parentId = parent, name = "stock project", description = Nothing, priority = Nothing, metadata = Nothing }
+
+stockObservation :: TestEnv -> UUID -> IO Observation
+stockObservation env workspace = createObservation env.pool (CreateObservation workspace
+  [ObservationSubject SubjectFile "src/Timeline.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "timeline inventory")
 
 stockTask :: TestEnv -> UUID -> Maybe UUID -> Maybe UUID -> IO Task
 stockTask env workspace project parent = Task.createTask env.pool CreateTask

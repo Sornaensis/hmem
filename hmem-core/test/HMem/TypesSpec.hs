@@ -118,12 +118,17 @@ spec = do
             (TimelineBucketEntityCounts zero zero zero zero) zero
             (TimelineBucketSeries seriesZero seriesZero seriesZero seriesZero) seriesZero
             (Just (TimelineOpenCounts 2 5)) (Just (read "2020-01-02 00:00:00 UTC")) "available"
+            (Just 4294967296) (Just (read "2020-01-02 00:00:00 UTC")) "available"
       eitherDecode (encode bucket) `shouldBe` Right bucket
       case toJSON bucket of
         Object fields -> do
-          let legacy = Object (foldr KM.delete fields ["open_counts", "open_as_of", "open_status"])
+          let legacy = Object (foldr KM.delete fields ["open_counts", "open_as_of", "open_status", "observation_total", "observation_as_of", "observation_status"])
           eitherDecode (encode legacy) `shouldBe` Right bucket
-            { timelineBucketOpenCounts = Nothing, timelineBucketOpenAsOf = Nothing, timelineBucketOpenStatus = "history_unavailable" }
+            { timelineBucketOpenCounts = Nothing, timelineBucketOpenAsOf = Nothing, timelineBucketOpenStatus = "history_unavailable"
+            , timelineBucketObservationTotal = Nothing, timelineBucketObservationAsOf = Nothing, timelineBucketObservationStatus = "history_unavailable" }
+          mapM_ (\state -> do
+            let unknown = bucket { timelineBucketObservationTotal = Nothing, timelineBucketObservationAsOf = Nothing, timelineBucketObservationStatus = state }
+            eitherDecode (encode unknown) `shouldBe` Right unknown) ["history_unavailable", "future"]
         _ -> expectationFailure "timeline buckets must encode as objects"
     it "defaults additive action fields for older payloads and preserves distinct counts" $ do
       (eitherDecode "{\"created\":1,\"completed\":2,\"deleted\":3}" :: Either String TimelineBucketSeriesCounts)

@@ -315,6 +315,9 @@ instance ToSchema WorkspaceTimelineBucket where
     pure $ NamedSchema name $ schema
       & properties . at "counts" ?~ deprecatedTimelineProjection "TimelineBucketEntityCounts"
       & properties . at "totals" ?~ deprecatedTimelineProjection "TimelineBucketCounts"
+      & properties . at "observation_total" ?~ Inline (mempty & type_ ?~ OpenApiInteger & format ?~ "int64" & nullable ?~ True)
+      & properties . at "observation_as_of" ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "date-time" & nullable ?~ True)
+      & properties . at "observation_status" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["available", "history_unavailable", "future"])
 instance ToSchema WorkspaceTimelineBucketsResponse where declareNamedSchema = genericDeclareNamedSchema timelineBucketsResponseOpts
 
 -- Both vector endpoints accept precisely the storage dimension.  Keep this
@@ -788,7 +791,7 @@ timelineBucketEntityCountsOpts = opts { fieldLabelModifier = \case
 
 timelineBucketOpts :: SchemaOptions
 timelineBucketOpts = opts { fieldLabelModifier = \case
-  "timelineBucketStart" -> "bucket_start"; "timelineBucketEnd" -> "bucket_end"; "timelineBucketLabel" -> "label"; "timelineBucketCounts" -> "counts"; "timelineBucketTotals" -> "totals"; "timelineBucketSeries" -> "series"; "timelineBucketSeriesTotals" -> "series_totals"; "timelineBucketOpenCounts" -> "open_counts"; "timelineBucketOpenAsOf" -> "open_as_of"; "timelineBucketOpenStatus" -> "open_status"; other -> camelToSnake other }
+  "timelineBucketStart" -> "bucket_start"; "timelineBucketEnd" -> "bucket_end"; "timelineBucketLabel" -> "label"; "timelineBucketCounts" -> "counts"; "timelineBucketTotals" -> "totals"; "timelineBucketSeries" -> "series"; "timelineBucketSeriesTotals" -> "series_totals"; "timelineBucketOpenCounts" -> "open_counts"; "timelineBucketOpenAsOf" -> "open_as_of"; "timelineBucketOpenStatus" -> "open_status"; "timelineBucketObservationTotal" -> "observation_total"; "timelineBucketObservationAsOf" -> "observation_as_of"; "timelineBucketObservationStatus" -> "observation_status"; other -> camelToSnake other }
 
 timelineBucketSeriesOpts :: SchemaOptions
 timelineBucketSeriesOpts = opts { fieldLabelModifier = \case

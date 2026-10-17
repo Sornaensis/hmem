@@ -1976,6 +1976,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       map (.timelineBucketOpenCounts) bucketResponse.timelineBucketsBuckets `shouldBe` [Just (TimelineOpenCounts 0 0)]
       map (.timelineBucketOpenAsOf) bucketResponse.timelineBucketsBuckets `shouldBe` [Just (read "2020-01-02 00:00:00 UTC")]
       map (.timelineBucketOpenStatus) bucketResponse.timelineBucketsBuckets `shouldBe` ["available"]
+      map (.timelineBucketObservationTotal) bucketResponse.timelineBucketsBuckets `shouldBe` [Just 0]
+      map (.timelineBucketObservationAsOf) bucketResponse.timelineBucketsBuckets `shouldBe` [Just (read "2020-01-02 00:00:00 UTC")]
+      map (.timelineBucketObservationStatus) bucketResponse.timelineBucketsBuckets `shouldBe` ["available"]
       request app methodGet (workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day") "" >>= (\response -> responseStatus response `shouldBe` status400)
       paged <- request app methodGet (workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day&paged=true") ""
       responseStatus paged `shouldBe` status200
@@ -2012,6 +2015,47 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       request app methodGet "/api/v1/workspaces/00000000-0000-0000-0000-000000000099/timeline" "" >>= (\response -> responseStatus response `shouldBe` status404)
       markWorkspaceDeleted env workspace.id
       request app methodGet (workspacePath <> "/timeline") "" >>= (\response -> responseStatus response `shouldBe` status404)
+
+    it "serves observation carry-in, later hard deletes and independent unknown/future totals" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "timeline-observation-api"
+      let path = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "/timeline/buckets"
+          historical = path <> "?since=2020-01-02T00:00:00Z&until=2020-01-03T00:00:00Z&bucket=day"
+          audit sql = DBPool.runSession env.pool $ Session.statement workspace.id $ Statement.Statement sql (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+          createInput = object ["workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectFile "src/Timeline.hs", ObservationSubject SubjectGlob "src/**/*.hs"], "git_sha" .= (T.replicate 40 "a"), "content" .= ("timeline" :: T.Text)]
+      firstResponse <- postJson app "/api/v1/observations" createInput
+      secondResponse <- postJson app "/api/v1/observations" createInput
+      responseStatus firstResponse `shouldBe` status200
+      responseStatus secondResponse `shouldBe` status200
+      let Just first = decode (responseBody firstResponse) :: Maybe Observation
+      audit "UPDATE audit_log SET changed_at = '2020-01-01 00:00:00+00' WHERE workspace_id = $1 AND entity_type = 'observation'"
+      deleted <- request app methodDelete ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show first.id))) ""
+      responseStatus deleted `shouldBe` status200
+      audit "UPDATE audit_log SET changed_at = '2020-01-06 00:00:00+00' WHERE workspace_id = $1 AND entity_type = 'observation' AND action = 'delete'"
+      response <- request app methodGet historical ""
+      responseStatus response `shouldBe` status200
+      let Just buckets = decode (responseBody response) :: Maybe WorkspaceTimelineBucketsResponse
+          Just raw = decode (responseBody response) :: Maybe Value
+          firstBucket = firstJsonArrayValue (jsonField "buckets" raw)
+      map (.timelineBucketObservationTotal) buckets.timelineBucketsBuckets `shouldBe` [Just 2]
+      map (.timelineBucketObservationStatus) buckets.timelineBucketsBuckets `shouldBe` ["available"]
+      (firstBucket >>= jsonField "observation_total") `shouldBe` Just (Number 2)
+      audit "UPDATE audit_log SET old_values = NULL WHERE workspace_id = $1 AND entity_type = 'observation' AND action = 'delete'"
+      unknownResponse <- request app methodGet historical ""
+      responseStatus unknownResponse `shouldBe` status200
+      let Just unknown = decode (responseBody unknownResponse) :: Maybe WorkspaceTimelineBucketsResponse
+      map (.timelineBucketObservationTotal) unknown.timelineBucketsBuckets `shouldBe` [Nothing]
+      map (.timelineBucketObservationStatus) unknown.timelineBucketsBuckets `shouldBe` ["history_unavailable"]
+      map (.timelineBucketOpenCounts) unknown.timelineBucketsBuckets `shouldBe` [Just (TimelineOpenCounts 0 0)]
+      now <- getCurrentTime
+      let timestamp = Text.encodeUtf8 . T.pack . iso8601Show
+      currentResponse <- request app methodGet (path <> "?since=" <> timestamp (addUTCTime (-1) now) <> "&until=" <> timestamp (addUTCTime 1 now) <> "&bucket=day") ""
+      let Just current = decode (responseBody currentResponse) :: Maybe WorkspaceTimelineBucketsResponse
+      (last current.timelineBucketsBuckets).timelineBucketObservationTotal `shouldBe` Just 1
+      futureResponse <- request app methodGet (path <> "?since=" <> timestamp (addUTCTime 172800 now) <> "&until=" <> timestamp (addUTCTime 259200 now) <> "&bucket=day") ""
+      let Just future = decode (responseBody futureResponse) :: Maybe WorkspaceTimelineBucketsResponse
+      map (.timelineBucketObservationTotal) future.timelineBucketsBuckets `shouldSatisfy` all (== Nothing)
+      map (.timelineBucketObservationAsOf) future.timelineBucketsBuckets `shouldSatisfy` all (== Nothing)
+      map (.timelineBucketObservationStatus) future.timelineBucketsBuckets `shouldSatisfy` all (== "future")
 
     it "preserves lifecycle filters, half-open ranges, ordering, pagination, and bucket totals" $ \(env, app) -> do
       workspace <- createTestWorkspace env "timeline-lifecycle"
@@ -3146,6 +3190,12 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       hasSchemaProperty "WorkspaceTimelineBucket" "open_counts" `shouldBe` True
       hasSchemaProperty "WorkspaceTimelineBucket" "open_as_of" `shouldBe` True
       hasSchemaProperty "WorkspaceTimelineBucket" "open_status" `shouldBe` True
+      hasSchemaProperty "WorkspaceTimelineBucket" "observation_total" `shouldBe` True
+      hasSchemaProperty "WorkspaceTimelineBucket" "observation_as_of" `shouldBe` True
+      hasSchemaProperty "WorkspaceTimelineBucket" "observation_status" `shouldBe` True
+      (schema "WorkspaceTimelineBucket" >>= jsonPath ["properties", "observation_total", "format"]) `shouldBe` Just (String "int64")
+      (schema "WorkspaceTimelineBucket" >>= jsonPath ["properties", "observation_total", "nullable"]) `shouldBe` Just (Bool True)
+      (schema "WorkspaceTimelineBucket" >>= jsonPath ["properties", "observation_as_of", "nullable"]) `shouldBe` Just (Bool True)
       hasSchemaProperty "TimelineOpenCounts" "projects" `shouldBe` True
       hasSchemaProperty "TimelineOpenCounts" "tasks" `shouldBe` True
       deprecatedProperty "WorkspaceTimelineBucket" "counts" `shouldBe` Just (Bool True)

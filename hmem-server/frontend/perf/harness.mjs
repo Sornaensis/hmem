@@ -640,7 +640,52 @@ export async function navigateToFirstUsefulViewport(page, origin, tracker, fixtu
   await waitForFirstUsefulViewport(page, tracker, fixture, anchorId)
 }
 
-function completedExpandedMembership(tracker, fixture) {
+// This oracle reads fixture fields independently of the response producer. Task
+// ancestors are retained by matching descendants; projects retain the existing
+// outer lifecycle/priority gate when empty projects are shown.
+function filteredNavigationMembers(fixture, url) {
+  const showOnly = url.searchParams.get('show_only') || 'all'
+  const statuses = kind => url.searchParams.getAll(kind + '_status')
+  const priority = item => {
+    const mode = url.searchParams.get('priority_mode') || 'any', value = Number(url.searchParams.get('priority_value'))
+    return mode === 'any' || (Number.isInteger(value) && ((mode === 'exact' && item.priority === value)
+      || (mode === 'above' && item.priority > value) || (mode === 'below' && item.priority < value)))
+  }
+  const lifecycle = (kind, item) => !statuses(kind).length || statuses(kind).includes(item.status)
+  const needle = (url.searchParams.get('query') || '').trim().toLowerCase()
+  const matches = (kind, item) => lifecycle(kind, item) && priority(item)
+    && [kind === 'project' ? item.name : item.title, item.description].some(value => String(value || '').toLowerCase().includes(needle))
+  const projectChildren = new Map(), taskChildren = new Map(), projectTasks = new Map()
+  const append = (groups, owner, item) => { if (!groups.has(owner)) groups.set(owner, []); groups.get(owner).push(item) }
+  for (const item of fixture.projects) append(projectChildren, item.parent_id, item)
+  for (const item of fixture.tasks) {
+    append(taskChildren, item.parent_id, item)
+    if (item.project_id != null) append(projectTasks, item.project_id, item)
+  }
+  const recursive = calculate => {
+    const memo = new Map(), visiting = new Set()
+    const read = item => {
+      if (memo.has(item.id)) return memo.get(item.id)
+      if (visiting.has(item.id)) throw new Error('Cyclic navigation fixture')
+      visiting.add(item.id)
+      const result = calculate(item, read)
+      visiting.delete(item.id); memo.set(item.id, result)
+      return result
+    }
+    return read
+  }
+  const taskMatch = recursive((item, read) => matches('task', item) || (taskChildren.get(item.id) || []).some(read))
+  const projectMatch = recursive((item, read) => matches('project', item) || (projectChildren.get(item.id) || []).some(read))
+  const projectTaskMatch = recursive((item, read) => (projectTasks.get(item.id) || []).some(taskMatch) || (projectChildren.get(item.id) || []).some(read))
+  return {
+    projects: fixture.projects.filter(item => showOnly !== 'tasks' && (url.searchParams.get('show_empty_projects') === 'false'
+      ? projectTaskMatch(item)
+      : lifecycle('project', item) && priority(item) && (projectMatch(item) || (showOnly !== 'projects' && projectTaskMatch(item))))),
+    tasks: fixture.tasks.filter(item => showOnly !== 'projects' && taskMatch(item))
+  }
+}
+
+export function completedExpandedMembership(tracker, fixture) {
   const navigation = tracker.requests.filter(request => request.key === 'navigation:branch' && request.navigation)
   const textOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0
   const ordered = (kind, values) => [...values].sort((a, b) => {
@@ -650,17 +695,46 @@ function completedExpandedMembership(tracker, fixture) {
   }).map(item => item.id)
   const rootRequests = navigation.filter(request => new URL(request.url).searchParams.get('parent_kind') === 'workspace_root')
   if (!rootRequests.length) throw new Error('Missing demand-driven root page')
-  const projectIds = new Set(), taskIds = new Set()
-  for (const request of rootRequests) {
-    const url = new URL(request.url)
-    for (const [kind, expected, collected] of [
-      ['project', ordered('project', fixture.projects.filter(item => item.parent_id == null)), projectIds],
-      ['task', ordered('task', fixture.tasks.filter(item => item.parent_id == null && item.project_id == null)), taskIds]
-    ]) {
-      const offset = Number(url.searchParams.get(kind + '_offset')), page = request.navigation[kind + 's']
-      if (!request.done || JSON.stringify(page.items.map(item => item.id)) !== JSON.stringify(expected.slice(offset, offset + 50))) throw new Error('Root membership/order mismatch: ' + kind)
-      for (const item of page.items) collected.add(item.id)
+  const first = new URL(rootRequests[0].url)
+  const context = url => navigationFilterContext(url) + '|' + (url.searchParams.get('show_empty_projects') || 'true')
+  const expectedContext = context(first), members = filteredNavigationMembers(fixture, first)
+  const pagesFor = (requests, kind) => requests.flatMap(request => {
+    const url = new URL(request.url), flag = 'include_' + kind + 's', values = url.searchParams.getAll(flag)
+    if (context(url) !== expectedContext) throw new Error('Mixed navigation filter lifetimes')
+    if (request.done !== true || request.navigationFulfilled !== true || request.navigationStatus !== 200) throw new Error('Unfulfilled navigation membership page')
+    if (request.method !== 'GET' || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation` || request.navigation.workspace_id !== fixture.workspace.id
+      || request.navigation.parent?.kind !== url.searchParams.get('parent_kind')
+      || (url.searchParams.get('parent_kind') !== 'workspace_root' && request.navigation.parent?.parent_id !== url.searchParams.get('parent_id'))) throw new Error('Foreign navigation membership page')
+    if (values.length > 1 || (values.length && !['true', 'false'].includes(values[0]))) throw new Error('Invalid navigation demand boolean')
+    const page = request.navigation[kind + 's']
+    if (!page || !Array.isArray(page.items) || typeof page.has_more !== 'boolean') throw new Error('Malformed navigation page')
+    if (values[0] === 'false') {
+      if (page.items.length || page.has_more || Object.keys(page).sort().join(',') !== 'has_more,items') throw new Error('Malformed skipped navigation page')
+      return []
     }
+    const offset = Number(url.searchParams.get(kind + '_offset')), limit = Number(url.searchParams.get(kind + '_limit'))
+    if (!Number.isInteger(offset) || offset < 0 || limit !== 50) throw new Error('Invalid requested navigation pagination')
+    return [{ offset, limit, ids: page.items.map(item => item.id), hasMore: page.has_more, done: request.done }]
+  })
+  // Validate skipped shapes and contexts even on pages outside the displayed tree.
+  for (const kind of ['project', 'task']) pagesFor(navigation, kind)
+  const projectIds = new Set(), taskIds = new Set()
+  for (const [kind, expected, collected] of [
+    ['project', ordered('project', members.projects.filter(item => item.parent_id == null)), projectIds],
+    ['task', ordered('task', members.tasks.filter(item => item.parent_id == null && item.project_id == null)), taskIds]
+  ]) {
+    const pages = pagesFor(rootRequests, kind), prefix = []
+    if (!pages.length) throw new Error('Missing requested root stream: ' + kind)
+    let terminalPage = null
+    for (const page of pages) {
+      if (terminalPage && page.offset === terminalPage.offset && !page.hasMore && JSON.stringify(page.ids) === JSON.stringify(terminalPage.ids)) continue
+      if (page.offset !== prefix.length || terminalPage || JSON.stringify(page.ids) !== JSON.stringify(expected.slice(page.offset, page.offset + 50))
+        || page.hasMore !== (page.offset + 50 < expected.length)) throw new Error('Root membership/order mismatch: ' + kind)
+      prefix.push(...page.ids)
+      if (!page.hasMore) terminalPage = page
+    }
+    // Root prefixes remain manual demand; do not infer unrequested later pages.
+    for (const id of prefix) collected.add(id)
   }
   const pending = [...projectIds].map(id => ['project', id]).concat([...taskIds].map(id => ['task', id]))
   const seen = new Set()
@@ -669,17 +743,13 @@ function completedExpandedMembership(tracker, fixture) {
     const [kind, id] = pending[index], key = kind + ':' + id
     if (seen.has(key)) continue
     seen.add(key)
-    const expectedProjects = ordered('project', kind === 'project' ? fixture.projects.filter(item => item.parent_id === id) : [])
-    const expectedTasks = ordered('task', fixture.tasks.filter(item => kind === 'task' ? item.parent_id === id : item.parent_id == null && item.project_id === id))
-    // Leaves are rendered members, not expanded branches requiring an empty fetch.
+    const expectedProjects = ordered('project', kind === 'project' ? members.projects.filter(item => item.parent_id === id) : [])
+    const expectedTasks = ordered('task', members.tasks.filter(item => kind === 'task' ? item.parent_id === id : item.parent_id == null && item.project_id === id))
     if (expectedProjects.length === 0 && expectedTasks.length === 0) continue
     expandedBranches += 1
     const pages = navigation.filter(request => { const url = new URL(request.url); return url.searchParams.get('parent_kind') === kind && url.searchParams.get('parent_id') === id })
     for (const [childKind, expected, collected] of [['project', expectedProjects, projectIds], ['task', expectedTasks, taskIds]]) {
-      const stream = assertCompleteNavigationStream(pages.map(request => {
-        const url = new URL(request.url), value = request.navigation[childKind + 's']
-        return { offset: Number(url.searchParams.get(childKind + '_offset')), limit: Number(url.searchParams.get(childKind + '_limit')), ids: value.items.map(item => item.id), hasMore: value.has_more, done: request.done }
-      }), expected, key + ':' + childKind)
+      const stream = assertCompleteNavigationStream(pagesFor(pages, childKind), expected, key + ':' + childKind)
       terminalStreams += 1
       for (const child of stream.ids) { collected.add(child); pending.push([childKind, child]) }
     }
@@ -722,7 +792,8 @@ export function assertSettledHierarchyFeedback(rows, tracker, fixture) {
   const roots = tracker.requests.filter(request => request.key === 'navigation:branch' && new URL(request.url).searchParams.get('parent_kind') === 'workspace_root')
   const latest = roots.at(-1)?.proofNavigation
   if (!latest || latest.owner !== 'workspace_root' || latest.retired || !latest.done || latest.error || latest.state?.latest !== latest || latest.state.unknown) failure('Missing current admitted root lifetime')
-  const expected = expectedNavigationChildren(fixture).workspace_root
+  const latestRequest = roots.findLast(request => request.proofNavigation === latest)
+  const expected = expectedNavigationChildren({ ...fixture, ...filteredNavigationMembers(fixture, new URL(latestRequest.url)) }).workspace_root
   const current = roots.filter(request => request.proofNavigation?.epoch === latest.epoch && request.proofNavigation?.rootEpoch === latest.rootEpoch && request.proofNavigation?.state === latest.state)
   const kinds = []
   for (const row of rows) {
@@ -738,14 +809,15 @@ export function assertSettledHierarchyFeedback(rows, tracker, fixture) {
       const ids = page?.items?.map(item => item.id)
       const parameters = [...url.searchParams.keys()]
       const required = ['parent_kind', 'project_limit', 'project_offset', 'task_limit', 'task_offset', 'show_empty_projects', 'priority_mode']
-      const demand = ['include_projects', 'include_tasks'], allowed = [...required, ...demand]
+      const demand = ['include_projects', 'include_tasks'], statuses = ['project_status', 'task_status'], allowed = [...required, ...demand, ...statuses]
       if (request.method !== 'GET' || url.pathname !== `/api/v1/workspaces/${fixture.workspace.id}/navigation`
-        || required.some(name => !url.searchParams.has(name)) || new Set(parameters).size !== parameters.length || parameters.some(name => !allowed.includes(name))
+        || required.some(name => !url.searchParams.has(name)) || parameters.filter(name => !statuses.includes(name)).some(name => url.searchParams.getAll(name).length !== 1)
+        || statuses.some(name => new Set(url.searchParams.getAll(name)).size !== url.searchParams.getAll(name).length) || parameters.some(name => !allowed.includes(name))
         || demand.some(name => url.searchParams.has(name) && !['true', 'false'].includes(url.searchParams.get(name)))
         || url.searchParams.get('include_' + kind + 's') === 'false'
         || url.searchParams.get('parent_kind') !== 'workspace_root' || url.searchParams.get('show_empty_projects') !== 'true'
         || ['project', 'task'].some(kind => url.searchParams.get(kind + '_limit') !== '50' || url.searchParams.get(kind + '_offset') !== String(stamp[kind + 'Offset']))
-        || navigationFilterContext(url) !== navigationFilterContext(new URL('http://fixture?priority_mode=any'))
+        || navigationFilterContext(url) !== latest.context
         || stamp.retired || stamp.context !== navigationFilterContext(url) || !stamp.done || stamp.error
         || request.done !== true || request.navigationFulfilled !== true || request.navigationStatus !== 200
         || !slot.done || slot.error || slot.limit !== 50 || slot.offset !== prefix.length
@@ -1104,14 +1176,55 @@ function validateRequestDelta(delta, label) {
   return delta
 }
 
+// Each index keeps the existing authority/lifetime state machine. Actual events
+// are mirrored so a filtered pass cannot borrow a neutral pass's coverage.
+function contextualNavigationProof(fixture) {
+  const proofs = new Map(), lifecycle = [], admissions = new WeakMap()
+  let active
+  const proofFor = context => {
+    if (!proofs.has(context)) {
+      const entries = JSON.parse(context)
+      const url = new URL('http://fixture')
+      if (!Array.isArray(entries) || entries.length !== 6) throw new Error('Invalid navigation filter context')
+      for (const [key, values] of entries) {
+        if (!['show_only', 'priority_mode', 'priority_value', 'query', 'project_status', 'task_status'].includes(key) || !Array.isArray(values)) throw new Error('Invalid navigation filter context')
+        for (const value of values) url.searchParams.append(key, value)
+      }
+      if (navigationFilterContext(url) !== context) throw new Error('Invalid navigation filter context')
+      const members = filteredNavigationMembers(fixture, url), children = expectedNavigationChildren({ ...fixture, ...members })
+      const proof = createNavigationCompletionIndex({ children, rootProjects: children.workspace_root.projects, rootTasks: children.workspace_root.tasks, context })
+      for (const [method, args] of lifecycle) proof[method](...args)
+      proofs.set(context, proof)
+    }
+    return proofs.get(context)
+  }
+  active = proofFor(navigationFilterContext(new URL('http://fixture?priority_mode=any')))
+  const broadcast = (method, args) => {
+    const results = [...proofs.values()].map(proof => proof[method](...args))
+    lifecycle.push([method, args])
+    return results[0]
+  }
+  return {
+    ...Object.fromEntries(['beginSession', 'completeSession', 'admitSnapshot', 'completeSnapshot'].map(method => [method, (...args) => broadcast(method, args)])),
+    admit(request) {
+      const selected = proofFor(request.context)
+      if (request.owner === 'workspace_root') active = selected
+      const stamps = [...proofs.values()].map(proof => [proof, proof.admit(request)])
+      const stamp = stamps.find(([proof]) => proof === active)[1]
+      admissions.set(stamp, stamps)
+      return stamp
+    },
+    complete(stamp, ...args) { for (const [proof, counterpart] of admissions.get(stamp) || []) proof.complete(counterpart, ...args) },
+    ...Object.fromEntries(['retrySelection', 'retryOwnerQuiet', 'armRetry', 'cancelRetry', 'ready'].map(method => [method, (...args) => active[method](...args)])),
+    setCollapsed(keys) { for (const proof of proofs.values()) proof.setCollapsed(keys) },
+    replaceChildren(...args) { for (const proof of proofs.values()) proof.replaceChildren(...args) }
+  }
+}
+
 export function createTracker(fixture = null) {
   let paintDecision = null
   const coldDiagnostics = createColdDiagnostics()
-  const children = fixture && expectedNavigationChildren(fixture)
-  const navigationProof = fixture && createNavigationCompletionIndex({
-    children, rootProjects: children.workspace_root.projects, rootTasks: children.workspace_root.tasks,
-    context: navigationFilterContext(new URL('http://fixture?priority_mode=any'))
-  })
+  const navigationProof = fixture && contextualNavigationProof(fixture)
   return { navigationProof, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
     requests: [], arrivals: new WeakMap(), counts: {}, bytes: {}, active: 0, activeBranches: 0, activeExpandedBranches: 0, activeRootBranches: 0, activeDetails: 0, maxBranches: 0, maxExpandedBranches: 0, maxRootBranches: 0, maxDetails: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
     model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }

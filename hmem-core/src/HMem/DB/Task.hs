@@ -1,6 +1,10 @@
 module HMem.DB.Task
   ( createTask
   , getTask
+  , TaskSummaryRow(..)
+  , taskSummaryRow
+  , getTaskSummaryRowsByIds
+  , listFilteredTaskSummaryRows
   , getTasksByIds
   , getTaskAncestorIds
   , updateTask
@@ -113,6 +117,66 @@ rawTaskRowDecoder = do
       , createdAt = taskCreatedAt
     , updatedAt = taskUpdatedAt
     }
+
+-- | The database payload for cards, without description or metadata columns.
+data TaskSummaryRow = TaskSummaryRow
+  { id :: UUID, workspaceId :: UUID, projectId :: Maybe UUID, parentId :: Maybe UUID, title :: Text
+  , status :: TaskStatus, priority :: Int, completedAt :: Maybe UTCTime, dependencyCount :: Int
+  , createdAt :: UTCTime, updatedAt :: UTCTime
+  } deriving (Show, Eq)
+
+taskSummaryRow :: Task -> TaskSummaryRow
+taskSummaryRow value = TaskSummaryRow
+  { id = value.id, workspaceId = value.workspaceId, projectId = value.projectId, parentId = value.parentId, title = value.title
+  , status = value.status, priority = value.priority, completedAt = value.completedAt, dependencyCount = value.dependencyCount
+  , createdAt = value.createdAt, updatedAt = value.updatedAt }
+
+taskSummaryColumns :: String
+taskSummaryColumns = "t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.status::text,t.priority,t.completed_at,t.created_at,t.updated_at"
+
+taskSummaryRowDecoder :: Dec.Row TaskSummaryRow
+taskSummaryRowDecoder = do
+  taskId <- Dec.column (Dec.nonNullable Dec.uuid)
+  taskWorkspaceId <- Dec.column (Dec.nonNullable Dec.uuid)
+  taskProjectId <- Dec.column (Dec.nullable Dec.uuid)
+  taskParentId <- Dec.column (Dec.nullable Dec.uuid)
+  taskTitle <- Dec.column (Dec.nonNullable Dec.text)
+  taskStatusText <- Dec.column (Dec.nonNullable Dec.text)
+  taskStatus <- case taskStatusFromText taskStatusText of
+    Just parsed -> pure parsed
+    Nothing -> fail $ "Unexpected task_status_enum value: " <> show taskStatusText
+  taskPriority <- Dec.column (Dec.nonNullable Dec.int2)
+  taskCompletedAt <- Dec.column (Dec.nullable Dec.timestamptz)
+  taskCreatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  taskUpdatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  pure TaskSummaryRow
+    { id = taskId
+    , workspaceId = taskWorkspaceId
+    , projectId = taskProjectId
+    , parentId = taskParentId
+    , title = taskTitle
+    , status = taskStatus
+    , priority = fromIntegral taskPriority
+    , completedAt = taskCompletedAt
+    , dependencyCount = 0
+    , createdAt = taskCreatedAt
+    , updatedAt = taskUpdatedAt
+    }
+
+getTaskSummaryRowsByIds :: Pool Hasql.Connection -> [UUID] -> IO [TaskSummaryRow]
+getTaskSummaryRowsByIds _ [] = pure []
+getTaskSummaryRowsByIds pool ids = do
+  rows <- runSession pool $ Session.statement ids $
+    Statement.Statement (BS8.pack ("SELECT " <> taskSummaryColumns <> " FROM tasks t WHERE t.id=ANY($1) AND t.deleted_at IS NULL"))
+      (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid))))
+      (Dec.rowList taskSummaryRowDecoder) True
+  enrichTaskSummaryCounts pool rows
+
+enrichTaskSummaryCounts :: Pool Hasql.Connection -> [TaskSummaryRow] -> IO [TaskSummaryRow]
+enrichTaskSummaryCounts _ [] = pure []
+enrichTaskSummaryCounts pool values = do
+  counts <- getCountMap pool depCountStatement (map (.id) values)
+  pure [ value { dependencyCount = Map.findWithDefault 0 value.id counts } | value <- values ]
 
 -- | Enrich a list of tasks with dependency counts.
 enrichTaskCounts :: Pool Hasql.Connection -> [Task] -> IO [Task]
@@ -1303,14 +1367,28 @@ listFilteredTaskChildren pool workspace maybeProject maybeParent selector lim of
     , fromIntegral lim :: Int32, fromIntegral off :: Int32 ) filteredTaskChildrenStatement
   enrichTaskCounts pool rows
 
+listFilteredTaskSummaryRows :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> NavigationFilter -> Int -> Int -> IO [TaskSummaryRow]
+listFilteredTaskSummaryRows pool workspace maybeProject maybeParent selector lim off = do
+  rows <- runSession pool $ Session.statement
+    ( workspace, maybeProject, maybeParent, map taskStatusToText selector.taskStatuses, selector.priorityMode, selector.priorityValue, selector.query
+    , fromIntegral lim :: Int32, fromIntegral off :: Int32 ) filteredTaskSummaryRowsStatement
+  enrichTaskSummaryCounts pool rows
+
 filteredTaskChildrenStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32) [Task]
-filteredTaskChildrenStatement = Statement.Statement sql encoder (Dec.rowList rawTaskRowDecoder) True
+filteredTaskChildrenStatement = filteredTaskChildrenStatementWith
+  "t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.description,t.status::text,t.priority,t.metadata,t.completed_at,t.created_at,t.updated_at" rawTaskRowDecoder
+
+filteredTaskSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32) [TaskSummaryRow]
+filteredTaskSummaryRowsStatement = filteredTaskChildrenStatementWith taskSummaryColumns taskSummaryRowDecoder
+
+filteredTaskChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32) [a]
+filteredTaskChildrenStatementWith projection decoder = Statement.Statement sql encoder (Dec.rowList decoder) True
   where
     sql = BS8.pack $ unlines
       [ "WITH RECURSIVE task_tree(root_id,id) AS ("
       , " SELECT t.id,t.id FROM tasks t WHERE t.workspace_id=$1 AND t.project_id IS NOT DISTINCT FROM $2 AND t.parent_id IS NOT DISTINCT FROM $3 AND t.deleted_at IS NULL"
       , " UNION SELECT tree.root_id,child.id FROM tasks child JOIN task_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL AND child.workspace_id=$1"
-      , ") SELECT t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.description,t.status::text,t.priority,t.metadata,t.completed_at,t.created_at,t.updated_at"
+      , ") SELECT " <> projection
       , " FROM tasks t WHERE t.id IN (SELECT DISTINCT root_id FROM task_tree) AND ("
       , " (cardinality($4::text[])=0 OR t.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND t.priority=$6) OR ($5='above' AND t.priority>$6) OR ($5='below' AND t.priority<$6)) AND ($7 IS NULL OR lower(t.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(t.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')"
       , " OR EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=t.id) AND descendant.deleted_at IS NULL AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')))"

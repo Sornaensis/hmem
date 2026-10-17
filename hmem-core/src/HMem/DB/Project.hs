@@ -2,6 +2,10 @@ module HMem.DB.Project
   ( createProject
   , createProjectSpec
   , getProject
+  , ProjectSummaryRow(..)
+  , projectSummaryRow
+  , getProjectSummaryRowsByIds
+  , listFilteredProjectSummaryRows
   , getProjectsByIds
   , getProjectAncestorIds
   , updateProject
@@ -81,6 +85,46 @@ projectCardRowDecoder = do
     , name = projectName, description = projectDescription, status = projectStatus
     , priority = fromIntegral projectPriority, metadata = projectMetadata
     , createdAt = projectCreatedAt, updatedAt = projectUpdatedAt }
+
+-- | Base navigation columns only; descriptions remain usable by SQL predicates.
+data ProjectSummaryRow = ProjectSummaryRow
+  { id :: UUID, workspaceId :: UUID, parentId :: Maybe UUID, name :: Text
+  , status :: ProjectStatus, priority :: Int, createdAt :: UTCTime, updatedAt :: UTCTime
+  } deriving (Show, Eq)
+
+projectSummaryRow :: Project -> ProjectSummaryRow
+projectSummaryRow value = ProjectSummaryRow
+  { id = value.id, workspaceId = value.workspaceId, parentId = value.parentId, name = value.name
+  , status = value.status, priority = value.priority, createdAt = value.createdAt, updatedAt = value.updatedAt }
+
+projectSummaryColumns :: String
+projectSummaryColumns = "p.id,p.workspace_id,p.parent_id,p.name,p.status::text,p.priority,p.created_at,p.updated_at"
+
+projectSummaryRowDecoder :: Dec.Row ProjectSummaryRow
+projectSummaryRowDecoder = do
+  projectId <- Dec.column (Dec.nonNullable Dec.uuid)
+  projectWorkspaceId <- Dec.column (Dec.nonNullable Dec.uuid)
+  projectParentId <- Dec.column (Dec.nullable Dec.uuid)
+  projectName <- Dec.column (Dec.nonNullable Dec.text)
+  statusText <- Dec.column (Dec.nonNullable Dec.text)
+  projectStatus <- maybe (fail $ "Unexpected project_status_enum value: " <> show statusText) pure (projectStatusFromText statusText)
+  projectPriority <- Dec.column (Dec.nonNullable Dec.int2)
+  projectCreatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  projectUpdatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  pure ProjectSummaryRow
+    { id = projectId, workspaceId = projectWorkspaceId, parentId = projectParentId
+    , name = projectName, status = projectStatus
+    , priority = fromIntegral projectPriority
+    , createdAt = projectCreatedAt, updatedAt = projectUpdatedAt }
+
+-- | Compact lookup for summary batches, focus targets and parent validation.
+getProjectSummaryRowsByIds :: Pool Hasql.Connection -> [UUID] -> IO [ProjectSummaryRow]
+getProjectSummaryRowsByIds _ [] = pure []
+getProjectSummaryRowsByIds pool ids = runSession pool $ Session.statement ids $
+  Statement.Statement (BS8.pack ("SELECT " <> projectSummaryColumns <> " FROM projects p WHERE p.id=ANY($1) AND p.deleted_at IS NULL"))
+    (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid))))
+    (Dec.rowList projectSummaryRowDecoder) True
+
 
 projectSubtreeIdsForUpdateStatement :: Statement.Statement UUID [UUID]
 projectSubtreeIdsForUpdateStatement = Statement.Statement sql encoder decoder True
@@ -809,8 +853,22 @@ listFilteredProjectChildren pool workspace parent selector lim off =
     , selector.priorityMode, selector.priorityValue, selector.query, fromMaybe "all" selector.showOnly, fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe True selector.showEmptyProjects )
     filteredProjectChildrenStatement
 
+listFilteredProjectSummaryRows :: Pool Hasql.Connection -> UUID -> Maybe UUID -> NavigationFilter -> Int -> Int -> IO [ProjectSummaryRow]
+listFilteredProjectSummaryRows pool workspace parent selector lim off =
+  runSession pool $ Session.statement
+    ( workspace, parent, map projectStatusToText selector.projectStatuses, map taskStatusToText selector.taskStatuses
+    , selector.priorityMode, selector.priorityValue, selector.query, fromMaybe "all" selector.showOnly, fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe True selector.showEmptyProjects )
+    filteredProjectSummaryRowsStatement
+
 filteredProjectChildrenStatement :: Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool) [Project]
-filteredProjectChildrenStatement = Statement.Statement sql encoder (Dec.rowList projectCardRowDecoder) True
+filteredProjectChildrenStatement = filteredProjectChildrenStatementWith
+  "p.id,p.workspace_id,p.parent_id,p.name,p.description,p.status::text,p.priority,p.metadata,p.created_at,p.updated_at" projectCardRowDecoder
+
+filteredProjectSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool) [ProjectSummaryRow]
+filteredProjectSummaryRowsStatement = filteredProjectChildrenStatementWith projectSummaryColumns projectSummaryRowDecoder
+
+filteredProjectChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool) [a]
+filteredProjectChildrenStatementWith projection decoder = Statement.Statement sql encoder (Dec.rowList decoder) True
   where
     sql = BS8.pack $ unlines
       [ "WITH RECURSIVE project_tree(root_id,id) AS ("
@@ -819,7 +877,7 @@ filteredProjectChildrenStatement = Statement.Statement sql encoder (Dec.rowList 
       , "), task_tree(root_id,id) AS ("
       , " SELECT tree.root_id,t.id FROM project_tree tree JOIN tasks t ON t.project_id=tree.id WHERE t.deleted_at IS NULL AND t.workspace_id=$1"
       , " UNION SELECT tree.root_id,child.id FROM tasks child JOIN task_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL"
-      , ") SELECT p.id,p.workspace_id,p.parent_id,p.name,p.description,p.status::text,p.priority,p.metadata,p.created_at,p.updated_at"
+      , ") SELECT " <> projection
       , " FROM projects p WHERE p.id IN (SELECT DISTINCT root_id FROM project_tree)"
       -- A branch ancestor remains visible when a descendant matches.  In
       -- particular, do not apply p's own status/priority before the matching

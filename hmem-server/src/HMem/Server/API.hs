@@ -526,17 +526,17 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
     (projectParent, taskProject, taskParent) <- case parent of
       NavigationWorkspaceRoot -> pure (Nothing, Nothing, Nothing)
       NavigationProjectBranch projectId -> do
-        project <- projectInWorkspace workspaceId projectId
+        project <- navigationProjectInWorkspace workspaceId projectId
         pure (Just project.id, Just project.id, Nothing)
       NavigationTaskBranch taskId -> do
-        task <- taskInWorkspace workspaceId taskId
+        task <- navigationTaskInWorkspace workspaceId taskId
         pure (Nothing, task.projectId, Just task.id)
     projectPage <- navigationPageWhenRequested (fromMaybe True includeProjects && taskParent == Nothing) projectTake
-      (handleDBErrors $ Project.listFilteredProjectChildren pool workspaceId projectParent filters (projectTake + 1) projectSkip)
-      (liftIO . Overview.projectCardSummaries pool)
+      (handleDBErrors $ Project.listFilteredProjectSummaryRows pool workspaceId projectParent filters (projectTake + 1) projectSkip)
+      (liftIO . Overview.projectCardSummariesFromRows pool)
     taskPage <- navigationPageWhenRequested (fromMaybe True includeTasks && maybeShowOnly /= Just "projects") taskTake
-      (handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId taskProject taskParent filters (taskTake + 1) taskSkip)
-      (liftIO . Overview.taskCardSummaries pool)
+      (handleDBErrors $ Task.listFilteredTaskSummaryRows pool workspaceId taskProject taskParent filters (taskTake + 1) taskSkip)
+      (liftIO . Overview.taskCardSummariesFromRows pool)
     pure NavigationBranchResponse
       { workspaceId = workspaceId, parent = parent, projects = projectPage, tasks = taskPage }
 
@@ -546,11 +546,11 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
     let ancestorOffset = fromMaybe 0 maybeAncestorOffset
     (targetSummary, rawAncestors) <- case entityType of
       NavigationProject -> do
-        project <- projectInWorkspace workspaceId entityId
+        project <- navigationProjectInWorkspace workspaceId entityId
         (summary, projectAncestors) <- projectFocusSummaries ancestorOffset workspaceId project
         pure (NavigationProjectSummary summary, map NavigationProjectSummary projectAncestors)
       NavigationTask -> do
-        task <- taskInWorkspace workspaceId entityId
+        task <- navigationTaskInWorkspace workspaceId entityId
         (summary, projectAncestors, taskAncestors) <- taskFocusSummaries ancestorOffset workspaceId task
         pure
           ( NavigationTaskSummary summary
@@ -566,14 +566,14 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
     reject (validateNavigationSummariesRequest request)
     -- Resolve the whole accepted batch before decorating it; this deliberately
     -- avoids one entity lookup per invalidation ID.
-    projectRows <- handleDBErrors $ Project.getProjectsByIds pool request.projectIds
-    taskRows <- handleDBErrors $ Task.getTasksByIds pool request.taskIds
+    projectRows <- handleDBErrors $ Project.getProjectSummaryRowsByIds pool request.projectIds
+    taskRows <- handleDBErrors $ Task.getTaskSummaryRowsByIds pool request.taskIds
     let projectsById = Map.fromList [ (value.id, value) | value <- projectRows, value.workspaceId == workspaceId ]
         tasksById = Map.fromList [ (value.id, value) | value <- taskRows, value.workspaceId == workspaceId ]
         projectsWithMissing = [ maybe (Left projectId) Right (Map.lookup projectId projectsById) | projectId <- request.projectIds ]
         tasksWithMissing = [ maybe (Left taskId) Right (Map.lookup taskId tasksById) | taskId <- request.taskIds ]
-    projectSummaries <- liftIO $ Overview.projectCardSummaries pool [ value | Right value <- projectsWithMissing ]
-    taskSummaries <- liftIO $ Overview.taskCardSummaries pool [ value | Right value <- tasksWithMissing ]
+    projectSummaries <- liftIO $ Overview.projectCardSummariesFromRows pool [ value | Right value <- projectsWithMissing ]
+    taskSummaries <- liftIO $ Overview.taskCardSummariesFromRows pool [ value | Right value <- tasksWithMissing ]
     pure NavigationSummariesResponse
       { -- Decoration is deliberately set-based, but its SQL is free to return
         -- rows in database order.  Reapply the accepted request order at the
@@ -598,42 +598,46 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
     ++ [ "priority_value is required for exact, above, or below priority_mode" | Just value <- [maybePriorityMode], value /= "any", maybePriorityValue == Nothing ]
     ++ [ "priority_value must be between 1 and 10" | Just value <- [maybePriorityValue], value < 1 || value > 10 ]
     ++ [ "query must not be blank" | Just value <- [maybeQuery], Text.null (Text.strip value) ]
-  projectInWorkspace workspace projectId = do
-    project <- handleDBErrors (Project.getProject pool projectId) >>= maybe (throwError err404) pure
-    if project.workspaceId == workspace then pure project else throwError err404
-  taskInWorkspace workspace taskId = do
-    task <- handleDBErrors (Task.getTask pool taskId) >>= maybe (throwError err404) pure
-    if task.workspaceId == workspace then pure task else throwError err404
+  navigationProjectInWorkspace workspace projectId = do
+    values <- handleDBErrors $ Project.getProjectSummaryRowsByIds pool [projectId]
+    case values of
+      value : _ | value.workspaceId == workspace -> pure value
+      _ -> throwError err404
+  navigationTaskInWorkspace workspace taskId = do
+    values <- handleDBErrors $ Task.getTaskSummaryRowsByIds pool [taskId]
+    case values of
+      value : _ | value.workspaceId == workspace -> pure value
+      _ -> throwError err404
   -- Focus ancestry is deliberately set-wise: the recursive ID walk is one
   -- query per entity class and all direct counts/readiness rollups are batched.
   -- This keeps a deep direct link bounded instead of recreating N+1 overview
   -- hydration for every breadcrumb segment.
   projectFocusSummaries ancestorOffset workspace project = do
     ancestorIds <- liftIO $ Project.getProjectAncestorIds pool workspace project.id (ancestorOffset + maxFocusAncestors + 1)
-    rows <- handleDBErrors $ Project.getProjectsByIds pool (project.id : ancestorIds)
+    rows <- handleDBErrors $ Project.getProjectSummaryRowsByIds pool (project.id : ancestorIds)
     let byId = Map.fromList [ (value.id, value) | value <- rows, value.workspaceId == workspace ]
         ordered = mapMaybe (`Map.lookup` byId) (project.id : ancestorIds)
-    summaries <- liftIO $ Overview.projectCardSummaries pool ordered
+    summaries <- liftIO $ Overview.projectCardSummariesFromRows pool ordered
     case summaries of
       targetSummary : ancestorSummaries -> pure (targetSummary, ancestorSummaries)
       [] -> throwError err404
   taskFocusSummaries ancestorOffset workspace task = do
     taskAncestorIds <- liftIO $ Task.getTaskAncestorIds pool workspace task.id (ancestorOffset + maxFocusAncestors + 1)
-    taskRows <- handleDBErrors $ Task.getTasksByIds pool (task.id : taskAncestorIds)
+    taskRows <- handleDBErrors $ Task.getTaskSummaryRowsByIds pool (task.id : taskAncestorIds)
     let taskById = Map.fromList [ (value.id, value) | value <- taskRows, value.workspaceId == workspace ]
         orderedTasks = mapMaybe (`Map.lookup` taskById) (task.id : taskAncestorIds)
-    taskSummaries <- liftIO $ Overview.taskCardSummaries pool orderedTasks
+    taskSummaries <- liftIO $ Overview.taskCardSummariesFromRows pool orderedTasks
     (targetSummary, taskAncestorSummaries) <- case taskSummaries of
       targetValue : ancestorValues -> pure (targetValue, ancestorValues)
       [] -> throwError err404
     projectAncestorSummaries <- case task.projectId of
       Nothing -> pure []
       Just projectId -> do
-        project <- projectInWorkspace workspace projectId
+        project <- navigationProjectInWorkspace workspace projectId
         ancestorIds <- liftIO $ Project.getProjectAncestorIds pool workspace project.id (ancestorOffset + maxFocusAncestors + 1)
-        projectRows <- handleDBErrors $ Project.getProjectsByIds pool (ancestorIds ++ [project.id])
+        projectRows <- handleDBErrors $ Project.getProjectSummaryRowsByIds pool (ancestorIds ++ [project.id])
         let projectById = Map.fromList [ (value.id, value) | value <- projectRows, value.workspaceId == workspace ]
-        liftIO $ Overview.projectCardSummaries pool (mapMaybe (`Map.lookup` projectById) (ancestorIds ++ [project.id]))
+        liftIO $ Overview.projectCardSummariesFromRows pool (mapMaybe (`Map.lookup` projectById) (ancestorIds ++ [project.id]))
     pure (targetSummary, projectAncestorSummaries, taskAncestorSummaries)
   timelineBucketsH workspaceId mSince mUntil mBucket mPaged = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead

@@ -5,6 +5,8 @@ module HMem.DB.Overview
   , taskCardSummary
   , projectCardSummaries
   , taskCardSummaries
+  , projectCardSummariesFromRows
+  , taskCardSummariesFromRows
   , listTaskDependencyPage
   ) where
 
@@ -76,8 +78,12 @@ taskCardSummary pool value = head <$> taskCardSummaries pool [value]
 -- contracts, while avoiding a direct-count and recursive-rollup round trip for
 -- every card in a page.
 projectCardSummaries :: Pool Hasql.Connection -> [Project] -> IO [ProjectCardSummary]
-projectCardSummaries _ [] = pure []
-projectCardSummaries pool values = do
+projectCardSummaries pool = projectCardSummariesFromRows pool . map Proj.projectSummaryRow
+
+-- | Decorate compact database projections with the same set-based authority.
+projectCardSummariesFromRows :: Pool Hasql.Connection -> [Proj.ProjectSummaryRow] -> IO [ProjectCardSummary]
+projectCardSummariesFromRows _ [] = pure []
+projectCardSummariesFromRows pool values = do
   let ids = map (.id) values
   counts <- Map.fromList <$> runSession pool (Session.statement ids directProjectCountsBatchStatement)
   rollups <- Map.fromList <$> runSession pool (Session.statement ids projectReadinessRollupsBatchStatement)
@@ -93,8 +99,11 @@ projectCardSummaries pool values = do
     ]
 
 taskCardSummaries :: Pool Hasql.Connection -> [Task] -> IO [TaskCardSummary]
-taskCardSummaries _ [] = pure []
-taskCardSummaries pool values = do
+taskCardSummaries pool = taskCardSummariesFromRows pool . map Task.taskSummaryRow
+
+taskCardSummariesFromRows :: Pool Hasql.Connection -> [Task.TaskSummaryRow] -> IO [TaskCardSummary]
+taskCardSummariesFromRows _ [] = pure []
+taskCardSummariesFromRows pool values = do
   let ids = map (.id) values
   counts <- Map.fromList <$> runSession pool (Session.statement ids directSubtaskCountsBatchStatement)
   rollups <- Map.fromList <$> runSession pool (Session.statement ids taskReadinessRollupsBatchStatement)

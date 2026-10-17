@@ -845,22 +845,33 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       workspace <- createTestWorkspace env "navigation-contract"
       let workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
           navigationPath suffix = workspacePath <> "/navigation" <> suffix
+          largeBody = T.replicate 8192 "payload_"
           projectBody name description = object
-            [ "workspace_id" .= workspace.id, "name" .= (name :: T.Text), "description" .= (description :: T.Text) ]
-      rootResponse <- postJson app "/api/v1/projects" (projectBody "root" "no match")
+            [ "workspace_id" .= workspace.id, "name" .= (name :: T.Text), "description" .= (description :: T.Text), "metadata" .= object ["large" .= largeBody] ]
+      rootResponse <- postJson app "/api/v1/projects" (projectBody "root" largeBody)
       let Just root = decode (responseBody rootResponse) :: Maybe Project
       childResponse <- postJson app "/api/v1/projects" (object
         [ "workspace_id" .= workspace.id, "parent_id" .= root.id
-        , "name" .= ("needle-child" :: T.Text), "description" .= ("needle" :: T.Text) ])
+        , "name" .= ("child" :: T.Text), "description" .= (largeBody <> "needle"), "metadata" .= object ["large" .= largeBody] ])
       let Just child = decode (responseBody childResponse) :: Maybe Project
-      rootTaskResponse <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= child.id, "title" .= ("root task" :: T.Text)])
+      rootTaskResponse <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= child.id, "title" .= ("root task" :: T.Text), "description" .= largeBody, "metadata" .= object ["large" .= largeBody]])
       let Just rootTask = decode (responseBody rootTaskResponse) :: Maybe Task
       childTaskResponse <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= child.id, "parent_id" .= rootTask.id, "title" .= ("child task" :: T.Text)])
       let Just childTask = decode (responseBody childTaskResponse) :: Maybe Task
+      fullProjectResponse <- request app methodGet ("/api/v1/projects/" <> Text.encodeUtf8 (T.pack (show root.id))) ""
+      fullTaskResponse <- request app methodGet ("/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show rootTask.id))) ""
+      let Just fullProject = decode (responseBody fullProjectResponse) :: Maybe Project
+          Just fullTask = decode (responseBody fullTaskResponse) :: Maybe Task
+      fullProject.description `shouldBe` Just largeBody
+      fullTask.description `shouldBe` Just largeBody
+      fullProject.metadata `shouldBe` object ["large" .= largeBody]
+      fullTask.metadata `shouldBe` object ["large" .= largeBody]
+
 
       retained <- request app methodGet (navigationPath "?parent_kind=workspace_root&query=needle&project_limit=1&task_limit=1") ""
       responseStatus retained `shouldBe` status200
       let Just retainedPage = decode (responseBody retained) :: Maybe NavigationBranchResponse
+      (decode (responseBody retained) :: Maybe Value) `shouldBe` Just (toJSON retainedPage)
       map (.id) retainedPage.projects.items `shouldBe` [root.id]
       retainedPage.projects.hasMore `shouldBe` False
       projectBranch <- request app methodGet (navigationPath ("?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show root.id)))) ""
@@ -906,6 +917,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         (toJSON (NavigationSummariesRequest { projectIds = [child.id, root.id], taskIds = [] }))
       responseStatus batch `shouldBe` status200
       let Just batchResponse = decode (responseBody batch) :: Maybe NavigationSummariesResponse
+      (decode (responseBody batch) :: Maybe Value) `shouldBe` Just (toJSON batchResponse)
       map (.id) batchResponse.projects `shouldBe` [child.id, root.id]
       duplicateBatch <- postJson app (navigationPath "/summaries")
         (toJSON (NavigationSummariesRequest { projectIds = [child.id, child.id], taskIds = [] }))
@@ -929,6 +941,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         (navigationPath ("/focus/project/" <> Text.encodeUtf8 (T.pack (show child.id)))) ""
       responseStatus focus `shouldBe` status200
       let Just focusResponse = decode (responseBody focus) :: Maybe NavigationFocusResponse
+      (decode (responseBody focus) :: Maybe Value) `shouldBe` Just (toJSON focusResponse)
       focusResponse.target `shouldBe` NavigationProjectSummary (head batchResponse.projects)
       focusResponse.ancestors `shouldBe` [NavigationProjectSummary (batchResponse.projects !! 1)]
       invalidFocusOffset <- request app methodGet

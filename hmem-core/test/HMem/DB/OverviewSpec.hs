@@ -1,6 +1,10 @@
 module HMem.DB.OverviewSpec (spec) where
 
+import Control.Monad (forM_)
+import Data.Aeson (object, (.=))
 import Data.List (sort)
+import Data.Map.Strict qualified as Map
+import Data.UUID qualified as UUID
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID (UUID)
@@ -68,6 +72,67 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       projectBatch `shouldBe` projectSingles
       taskBatch `shouldBe` taskSingles
 
+    it "keeps compact branches and by-ID cards equal with large descriptions and metadata" $ \env -> do
+      workspace <- createTestWorkspace env "overview-compact-projections"
+      let large = Text.replicate 8192 "payload_"
+          marker = "description_only_100%"
+          meta = object ["large" .= large]
+      root <- createProject env.pool (CreateProject workspace.id Nothing "root" (Just large) (Just 1) (Just meta))
+      child <- createProject env.pool (CreateProject workspace.id (Just root.id) "child" (Just (large <> marker)) (Just 7) (Just meta))
+      empty <- createProject env.pool (CreateProject workspace.id Nothing "root" (Just large) (Just 1) (Just meta))
+      parent <- createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "parent" (Just large) (Just 1) (Just meta))
+      subtask <- createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "subtask" (Just (large <> marker)) (Just 7) (Just meta))
+      prerequisite <- createTask env.pool (newTask workspace.id (Just child.id) "prerequisite")
+      addDependency env.pool parent.id prerequisite.id
+      _ <- updateTask env.pool prerequisite.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing)
+      let selectors :: [NavigationFilter]
+          selectors =
+            [ emptyNavigationFilter
+            , emptyNavigationFilter { query = Just marker }
+            , emptyNavigationFilter { showOnly = Just "tasks", showEmptyProjects = Just False }
+            , emptyNavigationFilter { showOnly = Just "projects", showEmptyProjects = Just False, query = Just marker }
+            , emptyNavigationFilter { projectStatuses = [ProjPaused], taskStatuses = [Todo], priorityMode = Just "exact", priorityValue = Just 7, query = Just marker }
+            , emptyNavigationFilter { priorityMode = Just "above", priorityValue = Just 1 }
+            , emptyNavigationFilter { priorityMode = Just "below", priorityValue = Just 7 }
+            ]
+      forM_ selectors $ \selector -> forM_ [(1,0),(1,1),(50,0)] $ \(lim,off) -> do
+        fullProjects <- listFilteredProjectChildren env.pool workspace.id Nothing selector lim off
+        compactProjects <- listFilteredProjectSummaryRows env.pool workspace.id Nothing selector lim off
+        compactProjects `shouldBe` map projectSummaryRow fullProjects
+        fullTasks <- listFilteredTaskChildren env.pool workspace.id (Just child.id) Nothing selector lim off
+        compactTasks <- listFilteredTaskSummaryRows env.pool workspace.id (Just child.id) Nothing selector lim off
+        compactTasks `shouldBe` map taskSummaryRow fullTasks
+      filteredProjects <- listFilteredProjectSummaryRows env.pool workspace.id Nothing (emptyNavigationFilter { query = Just marker }) 50 0
+      map (.id) filteredProjects `shouldBe` [root.id]
+      filteredTasks <- listFilteredTaskSummaryRows env.pool workspace.id (Just child.id) Nothing (emptyNavigationFilter { query = Just marker }) 50 0
+      map (.id) filteredTasks `shouldBe` [parent.id]
+      fullProjects <- getProjectsByIds env.pool [child.id, root.id, empty.id, UUID.nil]
+      compactProjects <- getProjectSummaryRowsByIds env.pool [child.id, root.id, empty.id, root.id, UUID.nil]
+      compactProjects `shouldMatchList` map projectSummaryRow fullProjects
+      fullTasks <- getTasksByIds env.pool [subtask.id, parent.id, prerequisite.id, UUID.nil]
+      compactTasks <- getTaskSummaryRowsByIds env.pool [subtask.id, parent.id, prerequisite.id, parent.id, UUID.nil]
+      compactTasks `shouldMatchList` map taskSummaryRow fullTasks
+      let projectsById = Map.fromList [(value.id,value) | value <- compactProjects]
+          tasksById = Map.fromList [(value.id,value) | value <- compactTasks]
+          orderedProjects = map (projectsById Map.!) [child.id,root.id,empty.id]
+          orderedTasks = map (tasksById Map.!) [subtask.id,parent.id,prerequisite.id]
+      projectCards <- projectCardSummariesFromRows env.pool orderedProjects
+      taskCards <- taskCardSummariesFromRows env.pool orderedTasks
+      map (.id) projectCards `shouldBe` [child.id,root.id,empty.id]
+      map (.id) taskCards `shouldBe` [subtask.id,parent.id,prerequisite.id]
+      forM_ projectCards $ \card -> do
+        overview <- getProjectOverview env.pool card.id
+        fmap (.readinessRollup) overview `shouldBe` Just card.readinessRollup
+      forM_ taskCards $ \card -> do
+        overview <- getTaskOverview env.pool card.id
+        fmap (.readinessRollup) overview `shouldBe` Just card.readinessRollup
+      fetchedProject <- getProject env.pool root.id
+      fmap (.description) fetchedProject `shouldBe` Just (Just large)
+      fmap (.metadata) fetchedProject `shouldBe` Just meta
+      fetchedTask <- getTask env.pool parent.id
+      fmap (.description) fetchedTask `shouldBe` Just (Just large)
+      fmap (.metadata) fetchedTask `shouldBe` Just meta
+
     it "retains a paused low-priority ancestor for an exact literal descendant filter" $ \env -> do
       workspace <- createTestWorkspace env "overview-filtered-project-ancestor"
       retainedRoot <- createProject env.pool CreateProject
@@ -85,7 +150,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
         { workspaceId = workspace.id, parentId = Just wildcardOnlyRoot.id, name = "literalA100Z", description = Nothing
         , priority = Just 10, metadata = Nothing }
 
-      roots <- listFilteredProjectChildren env.pool workspace.id Nothing NavigationFilter
+      roots <- listFilteredProjectSummaryRows env.pool workspace.id Nothing NavigationFilter
         { showOnly = Nothing, showEmptyProjects = Nothing, projectStatuses = [ProjPaused], taskStatuses = []
         , priorityMode = Just "exact", priorityValue = Just 10, query = Just "literal_100%" }
         50 0
@@ -102,11 +167,11 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       subtask <- createTask env.pool (CreateTask workspace.id (Just child.id) (Just parent.id) "needle_100%" Nothing (Just 7) Nothing)
       _ <- updateTask env.pool subtask.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just InProgress) Nothing Nothing)
       let selector = emptyNavigationFilter { showEmptyProjects = Just False, showOnly = Just "projects", projectStatuses = [ProjArchived], taskStatuses = [InProgress], priorityMode = Just "exact", priorityValue = Just 7, query = Just "needle_100%" }
-      filtered <- listFilteredProjectChildren env.pool workspace.id Nothing selector 50 0
+      filtered <- listFilteredProjectSummaryRows env.pool workspace.id Nothing selector 50 0
       map (.id) filtered `shouldBe` [root.id]
-      rejected <- listFilteredProjectChildren env.pool workspace.id Nothing (selector { priorityValue = Just 8 }) 50 0
+      rejected <- listFilteredProjectSummaryRows env.pool workspace.id Nothing (selector { priorityValue = Just 8 }) 50 0
       rejected `shouldBe` []
-      shown <- listFilteredProjectChildren env.pool workspace.id Nothing emptyNavigationFilter 50 0
+      shown <- listFilteredProjectSummaryRows env.pool workspace.id Nothing emptyNavigationFilter 50 0
       map (.id) shown `shouldMatchList` [empty.id, root.id]
       [summary] <- projectCardSummaries env.pool [root]
       summary.readinessRollup.inProgressTaskCount `shouldBe` 1
@@ -147,10 +212,10 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
         , priority = Nothing, metadata = Nothing }
       firstTask <- createTask env.pool (newTask workspace.id Nothing "same")
       secondTask <- createTask env.pool (newTask workspace.id Nothing "same")
-      projectFirstPage <- listFilteredProjectChildren env.pool workspace.id Nothing emptyNavigationFilter 1 0
-      projectSecondPage <- listFilteredProjectChildren env.pool workspace.id Nothing emptyNavigationFilter 1 1
-      taskFirstPage <- listFilteredTaskChildren env.pool workspace.id Nothing Nothing emptyNavigationFilter 1 0
-      taskSecondPage <- listFilteredTaskChildren env.pool workspace.id Nothing Nothing emptyNavigationFilter 1 1
+      projectFirstPage <- listFilteredProjectSummaryRows env.pool workspace.id Nothing emptyNavigationFilter 1 0
+      projectSecondPage <- listFilteredProjectSummaryRows env.pool workspace.id Nothing emptyNavigationFilter 1 1
+      taskFirstPage <- listFilteredTaskSummaryRows env.pool workspace.id Nothing Nothing emptyNavigationFilter 1 0
+      taskSecondPage <- listFilteredTaskSummaryRows env.pool workspace.id Nothing Nothing emptyNavigationFilter 1 1
       map (.id) (projectFirstPage <> projectSecondPage) `shouldBe` sort [firstProject.id, secondProject.id]
       map (.id) (taskFirstPage <> taskSecondPage) `shouldBe` sort [firstTask.id, secondTask.id]
 

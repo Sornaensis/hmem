@@ -463,7 +463,7 @@ viewFocusedSearchBar model =
     if model.activeTab == ProjectsTab && model.focusedFilters /= Nothing then
         div [ class "focused-search-filter-bar" ]
             [ div [ class "filter-label" ] [ text "Focused view filters" ]
-            , viewSearchControls "Search focused view... (Enter to search)" model
+            , viewSearchControls "Filter focused view... (Enter to search workspace)" model
             ]
     else
         text ""

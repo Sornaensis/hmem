@@ -384,7 +384,7 @@ suite =
             in
             Expect.all
                 [ \_ -> input "Search all entities... (Enter to search)" "workspace query" Feature.Search.viewSearchBar
-                , \_ -> input "Search focused view... (Enter to search)" "" Feature.Search.viewFocusedSearchBar
+                , \_ -> input "Filter focused view... (Enter to search workspace)" "" Feature.Search.viewFocusedSearchBar
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = TimelineTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = ObservationsTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
                 ] ()

@@ -345,6 +345,49 @@ suite =
                 , saved = Decode.decodeValue (Decode.field "searchQuery" Decode.string) persisted
                 , priority = Decode.decodeValue (Decode.at [ "filterPriority", "exact" ] Decode.int) persisted
                 , restored = cleared.search.query, show = cleared.search.filterShowOnly }
+        , test "workspace controls edit only the saved base while focused controls keep their request context" <| \_ ->
+            let
+                focused = timelineFocusFrom "task" model
+                edited = List.foldl (\message state -> Main.update (WorkspaceSearch message) state |> Tuple.first) focused
+                    [ SearchInput "workspace query", SetFilterShowOnly Types.ShowProjectsOnly, SetFilterPriority (Types.ExactPriority 9)
+                    , SetFilterShowEmptyProjects False, ToggleFilterProjectStatus "completed", ToggleFilterTaskStatus "done" ]
+                expected = List.foldl (\message search -> Feature.Search.update message { model | search = search } |> Tuple.first |> .search) model.search
+                    [ SearchInput "workspace query", SetFilterShowOnly Types.ShowProjectsOnly, SetFilterPriority (Types.ExactPriority 9)
+                    , SetFilterShowEmptyProjects False, ToggleFilterProjectStatus "completed", ToggleFilterTaskStatus "done" ]
+                switched = Main.update (FocusEntity "project" "other-target") edited |> Tuple.first
+                exited = Main.update ClearFocus switched |> Tuple.first
+            in
+            Expect.equal { focused = Feature.FocusedFilters.capture focused.search, base = Feature.FocusedFilters.capture expected, generation = focused.dataLoading.navigationGeneration, restored = Feature.FocusedFilters.capture expected }
+                { focused = Feature.FocusedFilters.capture edited.search
+                , base = Feature.FocusedFilters.capture (Feature.FocusedFilters.normalSearch switched)
+                , generation = edited.dataLoading.navigationGeneration
+                , restored = Feature.FocusedFilters.capture exited.search }
+        , test "workspace search submit exits focus with the workspace query and rejects late focused search results" <| \_ ->
+            let
+                search = model.search
+                focused = timelineFocusFrom "task" { model | search = { search | query = "workspace query" } }
+                focusedSearch = focused.search
+                pending = Main.update SubmitSearch { focused | search = { focusedSearch | query = "focused query" } } |> Tuple.first
+                submitted = Main.update (WorkspaceSearch SubmitSearch) pending |> Tuple.first
+                stale = case pending.search.activeRequest of
+                    Just request -> Main.update (GotUnifiedSearchResults workspaceId request.sessionEpoch request.token request.query (Ok { projects = [], tasks = [], observations = [] })) submitted |> Tuple.first
+                    Nothing -> submitted
+            in
+            Expect.equal { focus = Nothing, context = Nothing, query = "workspace query", request = Just "workspace query", results = Nothing, searching = True }
+                { focus = stale.focus.focusedEntity, context = stale.focusedFilters, query = stale.search.query
+                , request = stale.search.activeRequest |> Maybe.map .query, results = stale.search.unifiedResults, searching = stale.search.isSearching }
+        , test "workspace and contextual focused search inputs show their own values" <| \_ ->
+            let
+                search = model.search
+                focused = timelineFocusFrom "task" { model | search = { search | query = "workspace query" } }
+                input label value view = view focused |> Query.fromHtml |> Query.find [ Selector.attribute (Attributes.placeholder label) ] |> Query.has [ Selector.attribute (Attributes.value value) ]
+            in
+            Expect.all
+                [ \_ -> input "Search all entities... (Enter to search)" "workspace query" Feature.Search.viewSearchBar
+                , \_ -> input "Search focused view... (Enter to search)" "" Feature.Search.viewFocusedSearchBar
+                , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = TimelineTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
+                , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = ObservationsTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
+                ] ()
         , test "cold focus and late storage restore the base without replacing focused overrides" <| \_ ->
             let
                 focused = AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing (Helpers.parseFragment (Just "tab=projects&focus=task:cold-target")) |> AppShell.finalizeInit (WorkspacePage workspaceId)

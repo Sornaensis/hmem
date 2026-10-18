@@ -11,6 +11,7 @@ module Feature.Search exposing
     , update
     , refreshAcceptedSearch
     , viewSearchBar
+    , viewFocusedSearchBar
     , viewUnifiedSearchError
     , viewUnifiedSearchLoading
     , viewUnifiedSearchResults
@@ -19,6 +20,7 @@ module Feature.Search exposing
 import Api
 import Feature.DataLoading
 import Feature.FocusedFilters
+import Feature.Focus
 import Feature.Observation
 import Dict
 import Permissions
@@ -93,18 +95,60 @@ reloadNavigation model =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
+    case hierarchySearchChange msg model.search of
+        Just search ->
+            reloadNavigation { model | search = search }
+
+        Nothing ->
+            updateOther msg model
+
+
+hierarchySearchChange : Msg -> SearchModel -> Maybe SearchModel
+hierarchySearchChange msg search =
+    let
+        toggle all status selected =
+            if List.isEmpty selected then
+                List.filter ((/=) status) all
+            else if List.member status selected then
+                List.filter ((/=) status) selected
+            else
+                status :: selected
+    in
     case msg of
-        SearchInput query ->
-            let
-                searchModel =
-                    model.search
+        SearchInput query -> Just { search | query = query }
+        SetFilterShowOnly show -> Just { search | filterShowOnly = show }
+        SetFilterShowEmptyProjects show -> Just { search | filterShowEmptyProjects = show }
+        SetFilterPriority priority -> Just { search | filterPriority = priority }
+        ToggleFilterProjectStatus status ->
+            Just { search | filterProjectStatuses = toggle [ "active", "paused", "completed", "archived" ] status search.filterProjectStatuses }
+        ToggleFilterTaskStatus status ->
+            Just { search | filterTaskStatuses = toggle [ "todo", "in_progress", "blocked", "done", "cancelled" ] status search.filterTaskStatuses }
+        _ -> Nothing
 
-                updatedSearch = { searchModel | query = query }
 
-                newModel =
-                    { model | search = updatedSearch }
-            in
-            reloadNavigation newModel
+updateOther : Msg -> Model -> ( Model, Cmd Msg )
+updateOther msg model =
+    case msg of
+        WorkspaceSearch action ->
+            if model.focusedFilters == Nothing then
+                update action model
+            else
+                case action of
+                    SubmitSearch ->
+                        let
+                            ( cleared, clearCmd ) = Feature.Focus.update ClearFocus model
+                            restored = Feature.FocusedFilters.reconcile model cleared
+                            ( searched, searchCmd ) = update SubmitSearch restored
+                        in
+                        ( searched, Cmd.batch [ clearCmd, searchCmd ] )
+
+                    _ ->
+                        case hierarchySearchChange action (Feature.FocusedFilters.normalSearch model) of
+                            Just search ->
+                                let updated = Feature.FocusedFilters.stored search model in
+                                ( updated, saveFiltersCmd updated )
+                            Nothing ->
+                                ( model, Cmd.none )
 
         SubmitSearch ->
             let
@@ -207,70 +251,6 @@ update msg model =
 
         NavigateToSearchResult entityType entityId ->
             navigateToSearchResult entityType entityId model
-
-        SetFilterShowOnly show ->
-            let
-                searchModel =
-                    model.search
-
-                newModel =
-                    { model | search = { searchModel | filterShowOnly = show } }
-            in
-            reloadNavigation newModel
-
-        SetFilterShowEmptyProjects show ->
-            let
-                searchModel = model.search
-            in
-            reloadNavigation { model | search = { searchModel | filterShowEmptyProjects = show } }
-
-        SetFilterPriority pri ->
-            let
-                searchModel =
-                    model.search
-
-                newModel =
-                    { model | search = { searchModel | filterPriority = pri } }
-            in
-            reloadNavigation newModel
-
-        ToggleFilterProjectStatus status ->
-            let
-                searchModel =
-                    model.search
-
-                newStatuses =
-                    if List.isEmpty searchModel.filterProjectStatuses then
-                        List.filter ((/=) status) [ "active", "paused", "completed", "archived" ]
-                    else if List.member status searchModel.filterProjectStatuses then
-                        List.filter (\s -> s /= status) searchModel.filterProjectStatuses
-
-                    else
-                        status :: searchModel.filterProjectStatuses
-
-                newModel =
-                    { model | search = { searchModel | filterProjectStatuses = newStatuses } }
-            in
-            reloadNavigation newModel
-
-        ToggleFilterTaskStatus status ->
-            let
-                searchModel =
-                    model.search
-
-                newStatuses =
-                    if List.isEmpty searchModel.filterTaskStatuses then
-                        List.filter ((/=) status) [ "todo", "in_progress", "blocked", "done", "cancelled" ]
-                    else if List.member status searchModel.filterTaskStatuses then
-                        List.filter (\s -> s /= status) searchModel.filterTaskStatuses
-
-                    else
-                        status :: searchModel.filterTaskStatuses
-
-                newModel =
-                    { model | search = { searchModel | filterTaskStatuses = newStatuses } }
-            in
-            reloadNavigation newModel
 
         ToggleFilterMemoryType mtype ->
             let
@@ -468,13 +448,35 @@ navigateToSearchResult entityType entityId model =
 
 
 viewSearchBar : Model -> Html Msg
-viewSearchBar model =
+viewSearchBar original =
+    let
+        workspaceSearch = Feature.FocusedFilters.normalSearch original
+        model = { original | search = if original.focusedFilters == Nothing then workspaceSearch else clearTransientSearchState workspaceSearch }
+        wrap = if original.focusedFilters == Nothing then identity else WorkspaceSearch
+    in
+    div [ class "workspace-search-filter-bar" ]
+        [ viewSearchControls "Search all entities... (Enter to search)" model |> Html.map wrap ]
+
+
+viewFocusedSearchBar : Model -> Html Msg
+viewFocusedSearchBar model =
+    if model.activeTab == ProjectsTab && model.focusedFilters /= Nothing then
+        div [ class "focused-search-filter-bar" ]
+            [ div [ class "filter-label" ] [ text "Focused view filters" ]
+            , viewSearchControls "Search focused view... (Enter to search)" model
+            ]
+    else
+        text ""
+
+
+viewSearchControls : String -> Model -> Html Msg
+viewSearchControls searchPlaceholder model =
     div [ class "search-filter-bar" ]
         [ Html.form [ class "search-bar", onSubmit SubmitSearch ]
             [ input
                 [ class "search-input"
                 , type_ "text"
-                , placeholder "Search all entities... (Enter to search)"
+                , placeholder searchPlaceholder
                 , value model.search.query
                 , onInput SearchInput
                 ]
@@ -513,11 +515,7 @@ viewSearchBar model =
 viewFilterBar : Model -> Html Msg
 viewFilterBar model =
     div [ class "filter-bar" ]
-        [ if model.focusedFilters /= Nothing then
-            span [ class "filter-group" ] [ text "Focused view filters · workspace filters return when focus closes" ]
-          else
-            text ""
-        , div [ class "filter-group" ]
+        [ div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Show:" ]
             , viewFilterPill "All" (model.search.filterShowOnly == ShowAll) (SetFilterShowOnly ShowAll)
             , viewFilterPill "Projects" (model.search.filterShowOnly == ShowProjectsOnly) (SetFilterShowOnly ShowProjectsOnly)

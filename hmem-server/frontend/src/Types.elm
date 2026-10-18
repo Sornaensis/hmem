@@ -1343,6 +1343,7 @@ type Msg
     | DismissToast Int
     | AutoDismissToast Int
     | SearchInput String
+    | WorkspaceSearch Msg
     | SubmitSearch
     | GotUnifiedSearchResults String Int Int String (Result Http.Error Api.UnifiedSearchResults)
     | NavigateToSearchResult String String

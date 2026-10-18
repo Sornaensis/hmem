@@ -414,6 +414,9 @@ route msg model =
         SearchInput _ ->
             Ok (Feature.Search.update msg model)
 
+        WorkspaceSearch _ ->
+            Ok (Feature.Search.update msg model)
+
         SubmitSearch ->
             Ok (Feature.Search.update msg model)
 

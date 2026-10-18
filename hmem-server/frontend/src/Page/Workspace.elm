@@ -118,6 +118,7 @@ viewReadableWorkspacePage wsId model ws =
                   else
                     Feature.Search.viewSearchBar model
                 , viewTabs model
+                , Feature.Search.viewFocusedSearchBar model
                 , if model.activeTab == AdministrationTab then
                     viewTabContent wsId model
 

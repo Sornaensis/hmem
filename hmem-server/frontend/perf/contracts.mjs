@@ -341,7 +341,8 @@ export function classifyLiveObservationHydration(input) {
     liveStartIndex, liveEndIndex: liveStartIndex + accounted.count, requestsSucceeded: true })
 }
 
-export function liveHydrationAccepted(value) {
+export function liveHydrationAccepted(value, queryScope = null) {
+  if (queryScope != null && queryScope !== 'content') return false
   if (value?.revision !== LIVE_OBSERVATION_REFRESH_CONTRACT.revision || value.passed !== true || value.wholeWorkspaceReload !== false
     || value.proofBasis !== LIVE_OBSERVATION_REFRESH_CONTRACT.retainedContextProof || typeof value.reason !== 'string' || !value.reason.length || value.reason.length > 256) return false
   const proof = value.proof
@@ -372,8 +373,9 @@ export function liveHydrationAccepted(value) {
       || !uuid(receipt.firstId) || !uuid(receipt.lastId) || receipt.firstId === receipt.lastId) return false
     try {
       const url = new URL(receipt.url), keys = [...url.searchParams.keys()]
-      return url.pathname === '/api/v1/observations' && keys.length === 3 && new Set(keys).size === 3
-        && keys.every(key => ['workspace_id', 'limit', 'offset'].includes(key)) && url.searchParams.get('workspace_id') === proof.workspaceId
+      const expectedKeys = ['workspace_id', 'limit', 'offset', ...(queryScope === 'content' ? ['query_scope'] : [])]
+      return url.pathname === '/api/v1/observations' && keys.length === expectedKeys.length && new Set(keys).size === expectedKeys.length
+        && keys.every(key => expectedKeys.includes(key)) && (url.searchParams.get('query_scope') ?? null) === queryScope && url.searchParams.get('workspace_id') === proof.workspaceId
         && url.searchParams.get('limit') === '200' && url.searchParams.get('offset') === '0'
     } catch { return false }
   }
@@ -410,8 +412,8 @@ export function liveHydrationAccepted(value) {
     && proof.reset.firstId === proof.live.firstId && proof.reset.lastId === proof.live.lastId
 }
 
-export function aggregateLiveHydration(values) {
-  return { passed: Array.isArray(values) && values.length === 5 && values.every(liveHydrationAccepted) }
+export function aggregateLiveHydration(values, queryScope = null) {
+  return { passed: Array.isArray(values) && values.length === 5 && values.every(value => liveHydrationAccepted(value, queryScope)) }
 }
 
 export function perfApiRouteKey(input, method = 'GET') {

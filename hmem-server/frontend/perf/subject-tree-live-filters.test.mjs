@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import vm from 'node:vm'
 import { SUBJECT_TREE_LIVE_FILTERS_BASE as BASE, SUBJECT_TREE_LIVE_FILTERS_TASK as TASK, SUBJECT_TREE_LIVE_FILTERS_PROJECT as PROJECT, SUBJECT_TREE_LIVE_FILTERS_REVISION as REVISION,
   FOCUSED_FILTERING_BASE, FOCUSED_FILTERING_TASK, evidenceProfile, evidenceOwnerFields, assertEvidenceIdentity, assertEvidenceWrite, isolatedRecordOutputs, prepareEvidenceScratch, createEvidenceOperations, checkQualification } from './evidence-profile.mjs'
-import { SUBJECT_TREE_LIVE_FILTERS_CONTRACT, HARNESS_CONFIGURATION, assertObservationContentScopeUrl, observationPageReceipt, assertObservationPageReceipt, classifyLiveObservationHydration, representativeReadiness } from './contracts.mjs'
+import { SUBJECT_TREE_LIVE_FILTERS_CONTRACT, HARNESS_CONFIGURATION, assertObservationContentScopeUrl, observationPageReceipt, assertObservationPageReceipt, classifyLiveObservationHydration, liveHydrationAccepted, aggregateLiveHydration, hashJson, representativeReadiness } from './contracts.mjs'
 import { generateFixture, fixtureHash, queryObservations, queryObservationCounts } from './fixtures.mjs'
 import { createTracker, fixtureResponder, observationResetProof, requiredLiveInputDoubleFrame, workspaceReadinessSnapshot, scrollProjectsRoot, measureProjectsTabReturn } from './harness.mjs'
 
@@ -179,13 +179,66 @@ test('live cache proof requires four parameters only in the new explicit-content
   const requests = tracker.requests.slice(liveStartIndex), bytes = requests[0].bytes
   const input = {runId: tracker.paintRunId, workspaceId: fixture.workspace.id, total: 2000, expectedPrefix: queryObservations(fixture, {limit: 200}).items.map(row => row.id), reset, intervening: [], requests, liveStartIndex,
     delta: {count: 1, bytes, routes: {'observations:list': 1}, routeBytes: {'observations:list': bytes}}, active: 0, unknownRoutes: [], snapshotGeneration: tracker.model.snapshotGeneration, queryScope: 'content'}
-  assert.equal(classifyLiveObservationHydration(input).passed, true)
+  const proof = classifyLiveObservationHydration(input)
+  assert.equal(proof.passed, true)
+  assertScopedHydrationAggregate(proof)
   assert.equal(classifyLiveObservationHydration({...input, queryScope: null}).passed, false)
   for (const suffix of ['', '&query_scope=combined', '&query_scope=content&extra=x', '&query_scope=content&query_scope=content']) {
     const altered = structuredClone(input)
     altered.requests[0].url = altered.requests[0].url.replace('&query_scope=content', suffix)
     assert.equal(classifyLiveObservationHydration(altered).passed, false)
   }
+})
+
+function assertScopedHydrationAggregate(proof) {
+  assert.equal(liveHydrationAccepted(proof, 'content'), true)
+  assert.equal(aggregateLiveHydration(Array(5).fill(proof), 'content').passed, true)
+  assert.equal(aggregateLiveHydration(Array(5).fill(proof)).passed, false)
+  for (const scope of ['', 'combined', 'invalid']) assert.equal(aggregateLiveHydration(Array(5).fill(proof), scope).passed, false)
+  assert.equal(aggregateLiveHydration(Array(4).fill(proof), 'content').passed, false)
+  for (const name of ['reset', 'live'].filter(name => proof.proof[name])) {
+    for (const change of [url => url.searchParams.delete('query_scope'), url => url.searchParams.set('query_scope', 'combined'),
+      url => url.searchParams.set('query_scope', 'invalid'), url => url.searchParams.set('query_scope', ''),
+      url => url.searchParams.append('query_scope', 'content'), url => url.searchParams.set('extra', 'value'),
+      url => url.searchParams.append('offset', '0'), url => url.searchParams.set('offset', '200'),
+      url => url.searchParams.set('workspace_id', 'foreign')]) {
+      const bad = structuredClone(proof), url = new URL(bad.proof[name].url); change(url); bad.proof[name].url = url.href
+      assert.equal(liveHydrationAccepted(bad, 'content'), false)
+      assert.equal(aggregateLiveHydration([proof, proof, bad, proof, proof], 'content').passed, false)
+    }
+  }
+  const legacy = structuredClone(proof)
+  for (const name of ['reset', 'live'].filter(name => legacy.proof[name])) {
+    const url = new URL(legacy.proof[name].url); url.searchParams.delete('query_scope'); legacy.proof[name].url = url.href
+  }
+  assert.equal(liveHydrationAccepted(legacy), true)
+  assert.equal(aggregateLiveHydration(Array(5).fill(legacy)).passed, true)
+  assert.equal(aggregateLiveHydration(Array(5).fill(legacy), 'content').passed, false)
+}
+
+test('actual small60 detail-only live receipts reach strict content-scoped compact aggregate validation', async () => {
+  const fixture = generateFixture('small'), tracker = createTracker(fixture), respond = fixtureResponder(fixture, tracker, { contentOnly: true })
+  await send(respond, 'change-stream/resync', 'POST', { workspace_id: fixture.workspace.id, snapshot_profile: 'workspace_shell_v1' })
+  await send(respond, 'observations?workspace_id=' + fixture.workspace.id + '&limit=200&offset=0&query_scope=content')
+  const reset = observationResetProof(tracker, fixture, tracker.requests.at(-1).observationPage, 60)
+  reset.recipeCompleted = true
+  const liveStartIndex = tracker.requests.length
+  const updatedObservationIds = [...new Set(fixture.liveFrames.filter(frame => frame.event.entity.type === 'observation' && frame.event.entity.action === 'updated').map(frame => frame.event.entity.id))]
+  await send(respond, `workspaces/${fixture.workspace.id}/planning-counts`)
+  for (const id of updatedObservationIds) await send(respond, 'observations/' + id)
+  await send(respond, `workspaces/${fixture.workspace.id}/navigation/summaries`, 'POST', { project_ids: [fixture.projects[0].id], task_ids: [] })
+  const requests = tracker.requests.slice(liveStartIndex)
+  const delta = requests.reduce((sum, request) => ({ count: sum.count + 1, bytes: sum.bytes + request.bytes,
+    routes: { ...sum.routes, [request.key]: (sum.routes[request.key] || 0) + 1 },
+    routeBytes: { ...sum.routeBytes, [request.key]: (sum.routeBytes[request.key] || 0) + request.bytes } }), { count: 0, bytes: 0, routes: {}, routeBytes: {} })
+  const proof = classifyLiveObservationHydration({ queryScope: 'content', runId: tracker.paintRunId, workspaceId: fixture.workspace.id, total: 60,
+    expectedPrefix: queryObservations(fixture, { limit: 200 }).items.map(value => value.id), reset, intervening: [], requests, liveStartIndex, delta,
+    updatedObservationIds, expectedObservationEntities: Object.fromEntries(fixture.observations.filter(value => updatedObservationIds.includes(value.id)).map(value => [value.id, { hash: hashJson(value), bytes: Buffer.byteLength(JSON.stringify(value)) }])),
+    active: tracker.active, unknownRoutes: tracker.unhandledApiRoutes, snapshotGeneration: tracker.model.snapshotGeneration })
+  assert.equal(proof.classification, 'no-enumeration'); assert.equal(proof.proof.backingTotal, 60)
+  assert.equal(proof.proof.inferredRetainedCount, 60); assert.equal(proof.proof.observationEntityRequests, 16)
+  assert.equal(proof.proof.enumerationRequests, 0); assert.equal(proof.proof.requestsSucceeded, true)
+  assertScopedHydrationAggregate(proof)
 })
 
 test('live input records dispatch through exactly two paints independently of deferred debounce settlement', async () => {

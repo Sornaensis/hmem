@@ -193,7 +193,7 @@ test('source/integration anchors preserve raw legacy flag, executed reset orderi
   assert.equal(reset > source.indexOf("'Observation filter reset')"), true)
   assert.equal(source.indexOf('resetProof.recipeCompleted = true') > reset, true)
   assert.match(source, /wholeWorkspaceReload: liveWholeWorkspaceReload\(liveDelta.routes\), hydration/)
-  assert.match(source, /hydrationPassed: aggregateLiveHydration\(runs.map\(run => run.liveBatch.hydration\)\).passed/)
+  assert.match(source, /hydrationPassed: aggregateLiveHydration\(runs.map\(run => run.liveBatch.hydration\), evidencePlan.subjectTreeLiveFilters \? 'content' : null\).passed/)
   assert.match(source, /large.liveBatch.hydrationPassed === true/)
   assert.match(source, /small.liveBatch.hydrationPassed === true/)
   assert.match(source, /fixtureBytes: liveRequestDeltas.map\(delta => delta.bytes\)/)

@@ -2108,7 +2108,7 @@ function aggregates(runs) {
       requestCounts: liveRequestDeltas.map(delta => delta.count), fixtureBytes: liveRequestDeltas.map(delta => delta.bytes),
       routeCounts: liveRequestDeltas.map(delta => delta.routes), routeBytes: liveRequestDeltas.map(delta => delta.routeBytes),
       duplicateRequests: runs.map(run => run.liveBatch.duplicateRequests), wholeWorkspaceReload: runs.some(run => run.liveBatch.wholeWorkspaceReload),
-      hydration: runs.map(run => run.liveBatch.hydration), hydrationPassed: aggregateLiveHydration(runs.map(run => run.liveBatch.hydration)).passed
+      hydration: runs.map(run => run.liveBatch.hydration), hydrationPassed: aggregateLiveHydration(runs.map(run => run.liveBatch.hydration), evidencePlan.subjectTreeLiveFilters ? 'content' : null).passed
     },
     heap: { values: runs.map(run => run.attributableHeapBytes), maxAttributableBytes: Math.max(...runs.map(run => run.attributableHeapBytes)) },
     consoleErrors: runs.flatMap(run => run.consoleErrors)

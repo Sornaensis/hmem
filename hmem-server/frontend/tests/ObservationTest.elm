@@ -38,6 +38,55 @@ suite =
         , describe "cached complete viewport projection" observationProjectionTests
         , describe "receipt-owned Return lifecycle" observationReturnReceiptTests
         , describe "bounded applied URL context" observationUrlTests
+        , test "Subject Tree labels unique path counts and explains overlapping children in both tree modes" <|
+            \_ ->
+                let
+                    initial =
+                        Feature.Observation.init
+
+                    loadedTree =
+                        ObservationTree.retire "fixture" ObservationTree.init
+                            |> treeAccept ""
+                                [ { path = "MCP", segment = "MCP", hasChildren = True, observationCount = 4, terminals = [] }
+                                , { path = "single.elm", segment = "single.elm", hasChildren = False, observationCount = 1, terminals = [] }
+                                ]
+                            |> treeAccept "MCP"
+                                [ { path = "MCP/ServerSpec.hs", segment = "ServerSpec.hs", hasChildren = False, observationCount = 2, terminals = [] }
+                                , { path = "MCP/ToolsSpec.hs", segment = "ToolsSpec.hs", hasChildren = False, observationCount = 3, terminals = [] }
+                                ]
+
+                    view mode =
+                        Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository)
+                            { initial | requestMode = mode, tree = { loadedTree | expanded = Set.singleton "MCP" } }
+                            |> Query.fromHtml
+
+                    count path label rendered =
+                        rendered
+                            |> Query.find [ Selector.attribute (attribute "data-tree-path" path) ]
+                            |> Query.find [ Selector.class "observation-loaded-count" ]
+                            |> Query.has [ Selector.exactText label ]
+
+                    check mode _ =
+                        let
+                            rendered =
+                                view mode
+                        in
+                        Expect.all
+                            [ count "MCP" "4 unique observations"
+                            , count "MCP/ServerSpec.hs" "2 unique observations"
+                            , count "MCP/ToolsSpec.hs" "3 unique observations"
+                            , count "single.elm" "1 unique observation"
+                            , \result -> result |> Query.find [ Selector.class "observation-tree-count-help" ] |> Query.has [ Selector.exactText "Counts are unique within each path. An observation can appear under multiple paths, so child counts may overlap." ]
+                            ]
+                            rendered
+                in
+                Expect.all
+                    [ check ObservationFacetMode
+                    , check ObservationExactSubjectMode
+                    , \_ -> view ObservationFlatMode |> Query.hasNot [ Selector.class "observation-tree-count-help" ]
+                    , \_ -> view ObservationMatchMode |> Query.hasNot [ Selector.class "observation-tree-count-help" ]
+                    ]
+                    ()
         , test "decodes server-shaped file and glob observations" <|
             \_ ->
                 [ Decode.decodeString Api.observationDecoder fileFixture
@@ -3477,7 +3526,7 @@ suite =
                 in
                 Expect.all
                     [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text "Subject Tree" ]
-                    , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.attribute (attribute "role" "tree"), Selector.attribute (attribute "aria-expanded" "false") ]
+                    , \_ -> facetView |> Query.has [ Selector.text "123 unique observations", Selector.attribute (attribute "role" "tree"), Selector.attribute (attribute "aria-expanded" "false") ]
                     , \_ -> facetView |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-subject-group-toggle", Selector.attribute (attribute "aria-expanded" "false") ] |> Query.count (Expect.equal 2)

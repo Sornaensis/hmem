@@ -4391,7 +4391,7 @@ viewTreeNode state node =
             , attribute "aria-label" ((if expanded then "Collapse " else "Expand ") ++ node.path)] [text (if expanded then "▼" else "▶")]
         , span [class "observation-tree-label", onClick (SelectObservationTreePath node.path)] [text node.segment]
         , if List.any (\symbol -> String.contains symbol node.segment) ["*", "?", "["] then span [class "observation-tree-pattern"] [text "Literal pattern"] else text ""
-        , span [class "observation-loaded-count"] [text (String.fromInt node.observationCount ++ (if node.observationCount == 1 then " observation" else " observations"))]
+        , span [class "observation-loaded-count"] [text (String.fromInt node.observationCount ++ (if node.observationCount == 1 then " unique observation" else " unique observations"))]
         , Helpers.copyableValue "observation-tree-copy" "canonical subject path" node.path node.path ]
 
 
@@ -4414,6 +4414,7 @@ viewTree : TimestampDisplay.State -> Bool -> ObservationModel -> Html Msg
 viewTree display canEdit state =
     div [id "observation-results", class "entity-list observation-list observation-subject-tree", tabindex -1]
         [ viewStaleResultsNotice state
+        , p [class "form-help observation-tree-count-help"] [text "Counts are unique within each path. An observation can appear under multiple paths, so child counts may overlap."]
         , if state.tree.refreshing || state.refreshPending then p [class "form-help", attribute "role" "status"] [text "Refreshing Subject Tree. Showing the last completed paths."] else text ""
         , if state.tree.totals |> Maybe.map (Tuple.second >> (==) 0) |> Maybe.withDefault False then p [class "empty-state"] [text "No matching subjects."] else text ""
         , viewResultRows display canEdit state ]

@@ -21,12 +21,17 @@ export function installObservationPreferences(app, { storage, schedule = callbac
       schedule(() => { if (sameOwner(owner, captured)) app.ports.observationPreferencesReceived.send({ owner: captured, value, available }) })
     } else if (command.operation === 'write' && sameOwner(owner, command.owner)) {
       try {
-        const value = { ...command.value, subjects: [...(command.value?.subjects || [])], groups: [...(command.value?.groups || [])] }
+        const value = { ...command.value, subjects: [...(command.value?.subjects || [])], groups: [...(command.value?.groups || [])], paths: [...(command.value?.paths || [])], queries: { ...(command.value?.queries || {}) } }
         if (!value || value.version !== 1 || value.workspaceId !== owner.workspaceId || value.actorId !== owner.actorId || value.authority !== owner.authority) return
         let text = JSON.stringify(value)
         // Sorted Elm preferences have deterministic eviction; retain detail first.
-        while (bytes(text) > MAX_BYTES && (value.groups.length || value.subjects.length)) {
-          if (value.groups.length) value.groups.pop(); else value.subjects.pop()
+        while (bytes(text) > MAX_BYTES && (value.groups.length || value.subjects.length || value.paths.length || value.fileInput || Object.keys(value.queries).length || value.context)) {
+          if (value.groups.length) value.groups.pop()
+          else if (value.subjects.length) value.subjects.pop()
+          else if (value.paths.length) value.paths.pop()
+          else if (value.fileInput) value.fileInput = ''
+          else if (Object.keys(value.queries).length) delete value.queries[Object.keys(value.queries).sort().at(-1)]
+          else value.context = null
           text = JSON.stringify(value)
         }
         if (bytes(text) <= MAX_BYTES) (storage || globalThis.localStorage).setItem(keyFor(owner), text)

@@ -38,6 +38,15 @@ module Api exposing
     , observationCountsDecoder
     , fetchObservationCounts
     , ObservationListQuery
+    , ObservationSubjectTreeNode
+    , ObservationSubjectTreePage
+    , ObservationSubjectTreeQuery
+    , observationSubjectTreeUrl
+    , observationSubjectTreeDecoder
+    , fetchObservationSubjectTree
+    , fetchContentObservations
+    , observationContentListUrl
+    , fetchScopedObservationCounts
     , ObservationMatch
     , ObservationMatchQuery
     , ObservationPathMatch
@@ -582,6 +591,53 @@ type alias ObservationMatchQuery =
     , limit : Int
     , offset : Int
     }
+
+
+type alias ObservationSubjectTreeNode =
+    { path : String, segment : String, hasChildren : Bool, observationCount : Int
+    , terminals : List { subjectKind : SubjectKind, subject : String, observationCount : Int } }
+
+
+type alias ObservationSubjectTreePage =
+    { items : List ObservationSubjectTreeNode, hasMore : Bool, totalCount : Int, matchCount : Int }
+
+
+type alias ObservationSubjectTreeQuery =
+    { workspaceId : String, prefix : String, subjectQuery : Maybe String, subjectKind : Maybe SubjectKind
+    , gitSha : Maybe String, currentGitSha : Maybe String, historyGitSha : Maybe String, limit : Int, offset : Int }
+
+
+observationSubjectTreeDecoder : Decoder ObservationSubjectTreePage
+observationSubjectTreeDecoder =
+    let
+        count = D.int |> D.andThen (\n -> if n >= 0 && n <= 9007199254740991 then D.succeed n else D.fail "Invalid tree count")
+        terminal = D.map3 (\kind subject total -> { subjectKind = kind, subject = subject, observationCount = total })
+            (D.field "subject_kind" subjectKindDecoder) (D.field "subject" D.string) (D.field "observation_count" count)
+        node = D.map5 ObservationSubjectTreeNode (D.field "path" D.string) (D.field "segment" D.string)
+            (D.field "has_children" D.bool) (D.field "observation_count" count) (D.field "terminals" (D.list terminal))
+            |> D.andThen (\value -> case value.terminals of
+                [] -> D.succeed value
+                [ _ ] -> D.succeed value
+                [ first, second ] -> if first.subjectKind /= second.subjectKind then D.succeed value else D.fail "Duplicate typed tree terminal"
+                _ -> D.fail "Too many typed tree terminals")
+    in
+    D.map4 ObservationSubjectTreePage (D.field "items" (D.list node)) (D.field "has_more" D.bool)
+        (D.field "total_count" count) (D.field "match_count" count)
+        |> D.andThen (\page -> if page.matchCount <= page.totalCount && List.length page.items <= 200 then D.succeed page else D.fail "Invalid tree page")
+
+
+observationSubjectTreeUrl : String -> ObservationSubjectTreeQuery -> String
+observationSubjectTreeUrl apiUrl query =
+    apiUrl ++ "/api/v1/observations/subject-tree?" ++ (List.filterMap (\( key, value ) -> Maybe.map (\v -> key ++ "=" ++ Url.percentEncode v) value)
+        [ ( "workspace_id", Just query.workspaceId ), ( "prefix", Just query.prefix ), ( "subject_query", query.subjectQuery )
+        , ( "subject_kind", Maybe.map subjectKindToString query.subjectKind ), ( "git_sha", query.gitSha )
+        , ( "current_git_sha", query.currentGitSha ), ( "history_git_sha", query.historyGitSha )
+        , ( "limit", Just (String.fromInt query.limit) ), ( "offset", Just (String.fromInt query.offset) ) ] |> String.join "&")
+
+
+fetchObservationSubjectTree : String -> ObservationSubjectTreeQuery -> (Result Http.Error ObservationSubjectTreePage -> msg) -> Cmd msg
+fetchObservationSubjectTree apiUrl query toMsg =
+    Http.get { url = observationSubjectTreeUrl apiUrl query, expect = Http.expectJson toMsg observationSubjectTreeDecoder }
 
 
 type alias ObservationMatch =
@@ -3216,6 +3272,11 @@ observationCountsDecoder =
 
 fetchObservationCounts : String -> ObservationCountQuery -> (Result Http.Error ObservationCounts -> msg) -> Cmd msg
 fetchObservationCounts apiUrl value toMsg =
+    fetchScopedObservationCounts False apiUrl value toMsg
+
+
+fetchScopedObservationCounts : Bool -> String -> ObservationCountQuery -> (Result Http.Error ObservationCounts -> msg) -> Cmd msg
+fetchScopedObservationCounts contentOnly apiUrl value toMsg =
     let
         optional name encoder item = item |> Maybe.map (\v -> ( name, encoder v ))
         body = E.object (( "workspace_id", E.string value.workspaceId ) :: List.filterMap identity
@@ -3227,7 +3288,17 @@ fetchObservationCounts apiUrl value toMsg =
             , optional "query" E.string value.query
             , optional "paths" (E.list E.string) value.paths ])
     in
-    Http.post { url = apiUrl ++ "/api/v1/observations/count", body = Http.jsonBody body, expect = Http.expectJson toMsg observationCountsDecoder }
+    Http.post { url = apiUrl ++ "/api/v1/observations/count" ++ (if contentOnly then "?query_scope=content" else ""), body = Http.jsonBody body, expect = Http.expectJson toMsg observationCountsDecoder }
+
+
+observationContentListUrl : String -> ObservationListQuery -> String
+observationContentListUrl apiUrl query =
+    observationListUrl apiUrl query ++ "&query_scope=content"
+
+
+fetchContentObservations : String -> ObservationListQuery -> (Result Http.Error (PaginatedResult Observation) -> msg) -> Cmd msg
+fetchContentObservations apiUrl query toMsg =
+    Http.get { url = observationContentListUrl apiUrl query, expect = Http.expectJson toMsg (paginatedDecoder observationDecoder) }
 
 
 observationListUrl : String -> ObservationListQuery -> String

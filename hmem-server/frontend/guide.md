@@ -57,14 +57,18 @@ uses the latest version on the next save; **Use latest version** replaces your
 text. A pending version check may delay these choices; a failed check keeps the
 draft. Workspace, subjects, creation SHA and creation time cannot be edited.
 
-**Apply filters** submits filter inputs. **Match files** submits concrete paths
-and filters; wildcards are rejected and duplicate paths are removed. Refresh,
-save, delete and Retry reuse the applied query. Apply or Revert changed filters
-before paging. Unsubmitted paths leave previous matches active; a selected
-Subject remains locked while filtering its results.
+Observation text filters update after a short pause. Clearing text, selecting a
+kind, and completing or clearing a SHA filter update immediately. Enter a full
+lowercase Git SHA; incomplete values stay local while the last completed results
+remain visible. All, Subject Tree and Files remember separate search text.
+All searches content; exact subject results stay locked to their typed subject.
+**Match files** explicitly submits concrete paths; wildcards are rejected and
+duplicate paths are removed. Editing the path list leaves previous matches active.
 
-Back and shared links restore applied queries, paths and selection with fresh
-results. Drafts and open disclosures stay local. An oversized link keeps the
+Back and shared links restore queries, paths and selection with fresh
+results. Filter typing replaces the current history entry; explicit navigation
+creates a new entry. Workspace preferences retain supported queries and
+disclosures for the current actor. Content drafts stay local. An oversized link keeps the
 query active but uses a bounded marker; restoring that marker or a malformed
 link shows defaults with a notice. Failed reads retain available results and
 offer **Retry**. **Copy full content** preserves stored line endings; UUID,

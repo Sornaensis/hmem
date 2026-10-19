@@ -4,6 +4,7 @@ import Char
 import Json.Decode as D
 import Json.Encode as E
 import Set
+import Dict exposing (Dict)
 
 
 type alias Owner =
@@ -15,12 +16,13 @@ type alias Detail =
 
 
 type alias Preferences =
-    { detail : Maybe Detail, subjects : List String, groups : List String }
+    { detail : Maybe Detail, subjects : List String, groups : List String
+    , paths : List String, focusedPath : Maybe String, context : Maybe String, queries : Dict String String, scrolls : Dict String Float, fileInput : String }
 
 
 empty : Preferences
 empty =
-    { detail = Nothing, subjects = [], groups = [] }
+    { detail = Nothing, subjects = [], groups = [], paths = [], focusedPath = Nothing, context = Nothing, queries = Dict.empty, scrolls = Dict.empty, fileInput = "" }
 
 
 uuid : String -> Bool
@@ -49,7 +51,7 @@ detailDecoder =
 
 validDetail : Detail -> Bool
 validDetail detail =
-    uuid detail.id && List.member detail.mode [ "flat", "exact", "match", "facets" ]
+    uuid detail.id && List.member detail.mode [ "flat", "exact", "match", "facets", "tree" ]
         && (detail.occurrence |> Maybe.map (\value -> String.startsWith "observation-card-" value && String.length value <= 8192
             && String.endsWith ("-" ++ String.fromInt (String.length detail.id) ++ "-" ++ (String.toList detail.id |> List.map (Char.toCode >> String.fromInt) |> String.join "-")) value
             && (String.dropLeft 17 value |> String.all (\c -> Char.isDigit c || c == '-'))) |> Maybe.withDefault True)
@@ -80,20 +82,45 @@ decoder owner =
 
 scopedDecoder : Owner -> D.Decoder Preferences
 scopedDecoder owner =
-    D.map7 (\version workspace actor authority detail subjects groups -> ( version == 1 && workspace == owner.workspaceId && actor == owner.actorId && authority == owner.authority, { detail = detail, subjects = subjects, groups = groups } ))
+    D.map7 (\version workspace actor authority detail subjects groups -> ( version == 1 && workspace == owner.workspaceId && actor == owner.actorId && authority == owner.authority, { empty | detail = detail, subjects = subjects, groups = groups } ))
         (D.field "version" D.int) (D.field "workspaceId" D.string) (D.field "actorId" D.string) (D.field "authority" D.string)
         (D.field "detail" (D.nullable detailDecoder)) (D.field "subjects" (D.list D.string)) (D.field "groups" (D.list D.string))
+        |> D.andThen (\( scoped, base ) -> D.map5 (\paths focused context queries fileInput -> (scoped, { base | paths = paths, focusedPath = focused, context = context, queries = queries, fileInput = fileInput }))
+            (optional "paths" (D.list D.string) []) (optional "focusedPath" (D.nullable D.string) Nothing)
+            (optional "context" (D.nullable D.string) Nothing) (optional "queries" (D.dict D.string) Dict.empty) (optional "fileInput" D.string ""))
+        |> D.andThen (\( scoped, prefs ) -> D.map (\scrolls -> (scoped, { prefs | scrolls = scrolls })) (optional "scrolls" (D.dict D.float) Dict.empty))
         |> D.andThen (\( scoped, prefs ) ->
             if scoped
-                && List.length prefs.subjects <= 128 && List.length prefs.groups <= 128
-                && List.all uuid prefs.subjects && List.all validGroup prefs.groups then D.succeed (normalize prefs) else D.fail "Invalid preference scope or bounds")
+                && List.length prefs.subjects <= 128 && List.length prefs.groups <= 128 && List.length prefs.paths <= 128
+                && List.all uuid prefs.subjects && List.all validGroup prefs.groups && List.all validPath prefs.paths
+                && (Dict.keys prefs.queries |> List.all (\key -> List.member key [ "flat", "tree", "facets", "match" ])) then D.succeed (normalize prefs) else D.fail "Invalid preference scope or bounds")
+
+
+optional : String -> D.Decoder a -> a -> D.Decoder a
+optional name fieldDecoder fallback =
+    D.oneOf [ D.field name fieldDecoder, D.succeed fallback ]
+
+
+validPath : String -> Bool
+validPath value =
+    value /= "" && String.length value <= 4096 && not (String.startsWith "/" value)
+        && String.slice 1 2 value /= ":" && not (String.contains "\\" value)
+        && not (String.any (\c -> Char.toCode c < 32 || Char.toCode c == 127) value)
+        && List.all (\partValue -> not (List.member partValue [ "", ".", ".." ])) (String.split "/" value)
 
 
 normalize : Preferences -> Preferences
 normalize prefs =
     let bounded valid values = values |> List.filter valid |> Set.fromList |> Set.toList |> List.take 128 in
-    { detail = prefs.detail |> Maybe.andThen (\detail -> if validDetail detail then Just detail else Nothing)
-    , subjects = bounded uuid prefs.subjects, groups = bounded validGroup prefs.groups }
+    { detail = prefs.detail |> Maybe.andThen (\detail -> if validDetail detail then Just { detail | mode = if detail.mode == "facets" then "tree" else detail.mode } else Nothing)
+    , subjects = bounded uuid prefs.subjects, groups = bounded validGroup prefs.groups
+    , paths = bounded validPath prefs.paths, focusedPath = prefs.focusedPath |> Maybe.andThen (\path -> if validPath path then Just path else Nothing)
+    , context = prefs.context |> Maybe.andThen (\value -> if String.length value <= 16384 then Just value else Nothing)
+    , queries = (case Dict.get "facets" prefs.queries of
+            Just value -> Dict.insert "tree" (Dict.get "tree" prefs.queries |> Maybe.withDefault value) (Dict.remove "facets" prefs.queries)
+            Nothing -> prefs.queries) |> Dict.filter (\key value -> List.member key [ "flat", "tree", "match" ] && String.length value <= 4096)
+    , scrolls = prefs.scrolls |> Dict.filter (\key top -> List.member key [ "flat", "tree", "match" ] && not (isNaN top) && not (isInfinite top) && top >= 0 && top <= 1000000000)
+    , fileInput = if String.length prefs.fileInput <= 32768 then prefs.fileInput else "" }
 
 
 encode : Owner -> Preferences -> E.Value
@@ -101,4 +128,6 @@ encode owner raw =
     let prefs = normalize raw in
     E.object [ ( "version", E.int 1 ), ( "workspaceId", E.string owner.workspaceId ), ( "actorId", E.string owner.actorId ), ( "authority", E.string owner.authority )
         , ( "detail", prefs.detail |> Maybe.map (\detail -> E.object [ ( "id", E.string detail.id ), ( "occurrence", detail.occurrence |> Maybe.map E.string |> Maybe.withDefault E.null ), ( "mode", E.string detail.mode ) ]) |> Maybe.withDefault E.null )
-        , ( "subjects", E.list E.string prefs.subjects ), ( "groups", E.list E.string prefs.groups ) ]
+        , ( "subjects", E.list E.string prefs.subjects ), ( "groups", E.list E.string prefs.groups )
+        , ( "paths", E.list E.string prefs.paths ), ( "focusedPath", Maybe.map E.string prefs.focusedPath |> Maybe.withDefault E.null )
+        , ( "context", Maybe.map E.string prefs.context |> Maybe.withDefault E.null ), ( "queries", E.dict identity E.string prefs.queries ), ( "scrolls", E.dict identity E.float prefs.scrolls ), ( "fileInput", E.string prefs.fileInput ) ]

@@ -12,6 +12,8 @@ import Http
 import Json.Decode as D
 import Json.Encode as E
 import ObservationPreferences as P
+import ObservationTree
+import Route
 import TimestampDisplay
 import Test exposing (..)
 import Test.Html.Query as Query
@@ -19,6 +21,8 @@ import Test.Html.Selector as Selector
 import Types exposing (..)
 import Url
 
+
+preferenceDefaults = P.empty
 
 workspaceId = "00000000-0000-4000-8000-000000000001"
 workspaceFixture = { id = workspaceId, name = "Repository", workspaceType = Api.Repository, ghOwner = Nothing, ghRepo = Nothing, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z" }
@@ -53,9 +57,264 @@ page offset values more current =
 project previous current = O.refreshViewport previous ( current, Cmd.none ) |> Tuple.first
 
 
+settleFilters current =
+    current.observations.filterDebounce |> Maybe.map (\stamp -> O.update (ObservationFiltersReady stamp) current |> Tuple.first) |> Maybe.withDefault current
+
+
+liveFilterTests =
+    [ test "encoded explicit query keys outrank a different stored context during hydration" <| \_ ->
+        let
+            query = Helpers.observationAppliedQuery model.observations
+            active = { query | query = "explicit B" }
+            stored = { query | query = "stored A" }
+            oldUrl = model.url
+            initial = { model | url = { oldUrl | fragment = Just ("tab=observations&o%76=1&o%71=" ++ Helpers.encodeObservationQuery active) }, observations = Helpers.restoreObservationQuery active model.observations } |> (\current -> project current current)
+            owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
+            prefs = { preferenceDefaults | context = Just (Helpers.encodeObservationQuery stored), queries = Dict.singleton "flat" "stored A" }
+            hydrated = O.update (ObservationPreferencesReceived (E.object [ ("owner", P.ownerValue owner), ("value", P.encode owner prefs) ])) initial |> Tuple.first
+        in Expect.all
+            [ \_ -> (Helpers.observationUrlContext initial.url).notice |> Expect.equal Nothing
+            , \_ -> hydrated.observations.query |> Expect.equal "explicit B"
+            , \_ -> (O.listQuery workspaceId 0 hydrated.observations).query |> Expect.equal (Just "explicit B")
+            , \_ -> hydrated.observations.requestGeneration |> Expect.equal initial.observations.requestGeneration ] ()
+    , test "terminal selection retires a text timer without releasing physical tree occupancy" <| \_ ->
+        let
+            tree = O.update (SetObservationBrowseMode ObservationFacetMode) model |> Tuple.first
+            typed = O.update (SetObservationQuery "src") tree |> Tuple.first
+            stamp = typed.observations.filterDebounce
+            state = typed.observations
+            physical = ObservationTree.begin "" 0 state.tree |> Tuple.first
+            selected = O.update (SelectObservationFacet Api.SubjectFile "src/Main.elm") { typed | observations = { state | tree = physical } } |> Tuple.first
+            late = stamp |> Maybe.map (\guard -> O.update (ObservationFiltersReady guard) selected |> Tuple.first) |> Maybe.withDefault selected
+            completed = page 0 [ row observationId ] False late |> O.syncCounts |> Tuple.first
+        in Expect.all
+            [ \_ -> selected.observations.filterDebounce |> Expect.equal Nothing
+            , \_ -> selected.observations.nextFilterToken > typed.observations.nextFilterToken |> Expect.equal True
+            , \_ -> List.length selected.observations.tree.physical |> Expect.equal 1
+            , \_ -> late.observations |> Expect.equal selected.observations
+            , \_ -> completed.observations.counts.active |> Maybe.map .workspaceId |> Expect.equal (Just workspaceId)
+            , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture completed.observations |> Query.fromHtml |> Query.hasNot [ Selector.class "observation-filter-pending" ] ] ()
+    , test "invalid restored SHA reserves no bootstrap observation obligation and root completion settles loading" <| \_ ->
+        let
+            state = model.observations
+            loading = model.dataLoading
+            base = { model | observations = Helpers.restoreObservationQuery { query = "", requestMode = ObservationFlatMode, subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "abc", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] } state
+                , dataLoading = { loading | activeWorkspaceLoadToken = Just 1, loadingWorkspaceData = True, pendingWorkspaceLoads = 1 } }
+            prepared = Loading.prepareRootNavigationRequest (Just workspaceId) base
+            admitted = Loading.update (GotWorkspace workspaceId 1 (Ok workspaceFixture)) prepared |> Tuple.first
+            completed = admitted.dataLoading.rootNavigationRequest |> Maybe.map (\request -> Loading.update (GotRootNavigation workspaceId request.sessionEpoch (Just 1) request.generation request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = {items = [], hasMore = False}, tasks = {items = [], hasMore = False} })) admitted |> Tuple.first) |> Maybe.withDefault admitted
+        in Expect.all
+            [ \_ -> admitted.dataLoading.initialObservationLoad |> Expect.equal Nothing
+            , \_ -> admitted.dataLoading.pendingWorkspaceLoads |> Expect.equal 1
+            , \_ -> completed.dataLoading.pendingWorkspaceLoads |> Expect.equal 0
+            , \_ -> completed.dataLoading.loadingWorkspaceData |> Expect.equal False
+            , \_ -> completed.dataLoading.activeWorkspaceLoadToken |> Expect.equal Nothing ] ()
+    , test "accepted saved active scroll survives hydration and switching away and back while detail wins" <| \_ ->
+        let
+            initial = project model model
+            owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
+            prefs = { preferenceDefaults | scrolls = Dict.fromList [ ("flat", 900), ("tree", 400) ] }
+            payload = E.object [ ("owner", P.ownerValue owner), ("value", P.encode owner prefs) ]
+            hydrated = O.update (ObservationPreferencesReceived payload) initial |> Tuple.first |> project initial
+            waitingState = initial.observations
+            waiting = { initial | observations = { waitingState | loading = True, expectedOffset = Just 0 } }
+            deferred = O.update (ObservationPreferencesReceived payload) waiting |> Tuple.first |> project waiting
+            loaded = page 0 [ row observationId ] False deferred |> project deferred
+            tree = O.update (SetObservationBrowseMode ObservationFacetMode) hydrated |> Tuple.first |> project hydrated
+            returned = O.update (SetObservationBrowseMode ObservationFlatMode) tree |> Tuple.first |> project tree
+            state = initial.observations
+            viewport = state.viewport
+            oldUrl = initial.url
+            detail = { initial | url = { oldUrl | fragment = Just ("tab=observations&observation=" ++ observationId) }, observations = { state | selectedId = Just observationId, viewport = { viewport | top = 120 } } }
+            selected = O.update (ObservationPreferencesReceived payload) detail |> Tuple.first
+        in Expect.all
+            [ \_ -> hydrated.observations.viewport.top |> Expect.equal 900
+            , \_ -> hydrated.observations.preferenceScroll |> Expect.equal Nothing
+            , \_ -> deferred.observations.preferenceScroll |> Expect.equal (Just 900)
+            , \_ -> loaded.observations.viewport.top |> Expect.equal 900
+            , \_ -> loaded.observations.preferenceScroll |> Expect.equal Nothing
+            , \_ -> returned.observations.viewport.top |> Expect.equal 900
+            , \_ -> selected.observations.viewport.top |> Expect.equal 120
+            , \_ -> selected.observations.preferenceScroll |> Expect.equal Nothing ] ()
+    , test "workspace routes retain physical tree admissions while retiring private caches" <| \_ ->
+        let
+            state = model.observations
+            ( tree, request ) = ObservationTree.begin "" 0 (ObservationTree.retire "old-workspace" state.tree)
+            started = { model | observations = { state | tree = tree, modeQueries = Dict.fromList [ ("flat", "private"), ("tree", "old-subject") ] } }
+            oldUrl = model.url
+            next = Route.handleUrlChange { oldUrl | path = "/workspace/00000000-0000-4000-8000-000000000009", fragment = Just "tab=observations" } started |> Tuple.first
+            settled = request |> Maybe.map (\guard -> O.update (GotObservationTree guard (Ok { items = [], hasMore = False, totalCount = 0, matchCount = 0 })) next |> Tuple.first) |> Maybe.withDefault next
+        in Expect.all
+            [ \_ -> List.length next.observations.tree.physical |> Expect.equal 1
+            , \_ -> List.length settled.observations.tree.physical |> Expect.equal 0
+            , \_ -> settled.observations.tree.totals |> Expect.equal Nothing
+            , \_ -> next.observations.modeQueries |> Expect.equal (Dict.singleton "flat" "") ] ()
+    , test "mode scroll positions and bounded legacy Subject preferences migrate independently" <| \_ ->
+        let
+            original = model.observations
+            viewport = original.viewport
+            positioned = { model | observations = { original | viewport = { viewport | top = 400 } } }
+            tree = O.update (SetObservationBrowseMode ObservationFacetMode) positioned |> Tuple.first
+            treeState = tree.observations
+            treeViewport = treeState.viewport
+            moved = { tree | observations = { treeState | viewport = { treeViewport | top = 800 } } }
+            all = O.update (SetObservationBrowseMode ObservationFlatMode) moved |> Tuple.first
+            back = O.update (SetObservationBrowseMode ObservationFacetMode) all |> Tuple.first
+            legacy = { preferenceDefaults | detail = Just { id = observationId, occurrence = Nothing, mode = "facets" }, queries = Dict.singleton "facets" "src/auth", paths = [ "src", "src/**" ], focusedPath = Just "src/**", scrolls = Dict.singleton "tree" 800 }
+            owner = { workspaceId = workspaceId, actorId = "actor", authority = "local", runtimeId = "runtime", epoch = 3, requestId = 1, touch = 0 }
+            migrated = D.decodeValue (P.decoder owner) (P.encode owner legacy)
+        in Expect.all
+            [ \_ -> all.observations.viewport.top |> Expect.equal 400
+            , \_ -> back.observations.viewport.top |> Expect.equal 800
+            , \_ -> migrated |> Result.map (.queries >> Dict.get "tree") |> Expect.equal (Ok (Just "src/auth"))
+            , \_ -> migrated |> Result.map (.detail >> Maybe.map .mode) |> Expect.equal (Ok (Just "tree"))
+            , \_ -> migrated |> Result.map .focusedPath |> Expect.equal (Ok (Just "src/**")) ] ()
+    , test "tree URL carries literal subject search and all SHA predicates without FTS or offset wrap" <| \_ ->
+        let
+            original = model.observations
+            state = { original | query = "src/auth%_", gitSha = String.repeat 40 "a", currentGitSha = String.repeat 40 "b", historyGitSha = String.repeat 40 "c", appliedQuery = Nothing }
+            url = Api.observationSubjectTreeUrl "https://api.invalid" (O.treeQuery workspaceId "src/**" 2147483647 state)
+        in Expect.all
+            [ \_ -> String.contains "subject_query=src%2Fauth%25_" url |> Expect.equal True
+            , \_ -> String.contains "prefix=src%2F**" url |> Expect.equal True
+            , \_ -> String.contains "offset=2147483647" url |> Expect.equal True
+            , \_ -> String.contains "current_git_sha=" url && String.contains "history_git_sha=" url && String.contains "git_sha=" url |> Expect.equal True
+            , \_ -> String.contains "&query=" url |> Expect.equal False ] ()
+    , test "each invalid populated SHA stays local and clearing immediately restores a valid query" <| \_ ->
+        let
+            check setter value =
+                let invalid = O.update (setter value) model |> Tuple.first
+                    cleared = O.update (setter "") invalid |> Tuple.first
+                in invalid.observations.expectedOffset == Nothing && not invalid.observations.loading && O.filterValidationError invalid.observations /= Nothing && cleared.observations.expectedOffset == Just 0
+        in List.concatMap (\setter -> List.map (check setter) [ "abc", String.repeat 40 "A", " " ++ String.repeat 40 "a" ]) [ SetObservationGitSha, SetObservationCurrentGitSha, SetObservationHistoryGitSha ] |> List.all identity |> Expect.equal True
+    , test "incomplete SHA also blocks explicit Files submission and typed terminal reads" <| \_ ->
+        let
+            invalid = O.update OpenObservationFileComposer model |> Tuple.first
+                |> O.update (SetObservationMatchPaths "src/Main.elm") |> Tuple.first
+                |> O.update (SetObservationHistoryGitSha "abc") |> Tuple.first
+            submitted = O.update ApplyObservationMatch invalid |> Tuple.first
+            selected = O.update (SelectObservationFacet Api.SubjectFile "src/Main.elm") invalid |> Tuple.first
+        in Expect.all
+            [ \_ -> submitted.observations.requestGeneration |> Expect.equal invalid.observations.requestGeneration
+            , \_ -> selected.observations.requestGeneration |> Expect.equal invalid.observations.requestGeneration
+            , \_ -> submitted.observations.expectedOffset |> Expect.equal Nothing
+            , \_ -> selected.observations.expectedOffset |> Expect.equal Nothing ] ()
+    , test "typing coalesces under a stamped 250ms lifetime and a retired timer cannot submit" <| \_ ->
+        let
+            first = O.update (SetObservationQuery "old") model |> Tuple.first
+            old = first.observations.filterDebounce
+            latest = O.update (SetObservationQuery "latest") first |> Tuple.first
+            stale = old |> Maybe.map (\stamp -> O.update (ObservationFiltersReady stamp) latest |> Tuple.first) |> Maybe.withDefault latest
+            ready = settleFilters latest
+        in Expect.all
+            [ \_ -> first.observations.loading |> Expect.equal False
+            , \_ -> first.observations.expectedOffset |> Expect.equal Nothing
+            , \_ -> stale.observations |> Expect.equal latest.observations
+            , \_ -> ready.observations.refreshPass |> Maybe.map (.query >> .query) |> Expect.equal (Just "latest")
+            , \_ -> ready.observations.items |> Expect.equal model.observations.items ] ()
+    , test "clear and selects submit immediately and retire an outstanding text timer" <| \_ ->
+        let
+            typed = O.update (SetObservationQuery "latest") model |> Tuple.first
+            cleared = O.update (SetObservationQuery "") typed |> Tuple.first
+            selected = O.update (SetObservationSubjectKind "glob") typed |> Tuple.first
+        in Expect.all
+            [ \_ -> cleared.observations.filterDebounce |> Expect.equal Nothing
+            , \_ -> cleared.observations.expectedOffset |> Expect.equal (Just 0)
+            , \_ -> selected.observations.filterDebounce |> Expect.equal Nothing
+            , \_ -> O.listQuery workspaceId 0 selected.observations |> .subjectKind |> Expect.equal (Just Api.SubjectGlob)
+            , \_ -> O.listQuery workspaceId 0 selected.observations |> .query |> Expect.equal (Just "latest") ] ()
+    , test "incomplete SHA input remains local with last-good rows and canonical invalidation waits for completion" <| \_ ->
+        let
+            editing = O.update (SetObservationGitSha "abc") model |> Tuple.first
+            invalidated = O.refreshActiveResults editing |> Tuple.first |> O.syncCounts |> Tuple.first
+            completed = O.update (SetObservationGitSha (String.repeat 40 "a")) invalidated |> Tuple.first
+            current = O.update (SetObservationCurrentGitSha (String.repeat 40 "b")) completed |> Tuple.first
+            history = O.update (SetObservationHistoryGitSha (String.repeat 40 "c")) current |> Tuple.first
+            query = O.listQuery workspaceId 0 history.observations
+        in Expect.all
+            [ \_ -> (invalidated.observations.loading, invalidated.observations.expectedOffset, invalidated.observations.counts.active) |> Expect.equal (False, Nothing, Nothing)
+            , \_ -> invalidated.observations.orderedIds |> Expect.equal model.observations.orderedIds
+            , \_ -> O.filterValidationError invalidated.observations |> (/=) Nothing |> Expect.equal True
+            , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture invalidated.observations |> Query.fromHtml |> Query.has [ Selector.text "Enter a full lowercase 40-character Git SHA, or clear the field." ]
+            , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture invalidated.observations |> Query.fromHtml |> Query.hasNot [ Selector.text "Counting matching Observations…" ]
+            , \_ -> (query.gitSha, query.currentGitSha, query.historyGitSha) |> Expect.equal (Just (String.repeat 40 "a"), Just (String.repeat 40 "b"), Just (String.repeat 40 "c"))
+            , \_ -> history.observations.expectedOffset |> Expect.equal (Just 0) ] ()
+    , test "old timers fail after workspace mode and authority changes" <| \_ ->
+        let
+            typed = O.update (SetObservationQuery "old") model |> Tuple.first
+            stamp = typed.observations.filterDebounce
+            mode = O.update (SetObservationBrowseMode ObservationFacetMode) typed |> Tuple.first
+            workspace = { typed | selectedWorkspaceId = Just "other" }
+            authority = { typed | sessionRequestEpoch = 4 }
+            deliver current = stamp |> Maybe.map (\value -> O.update (ObservationFiltersReady value) current |> Tuple.first) |> Maybe.withDefault current
+        in Expect.all
+            [ \_ -> (deliver mode).observations |> Expect.equal mode.observations
+            , \_ -> (deliver workspace).observations |> Expect.equal workspace.observations
+            , \_ -> (deliver authority).observations |> Expect.equal authority.observations ] ()
+    , test "All Tree and Files retain independent text and manual exact subject never filters other modes" <| \_ ->
+        let
+            all = O.update (SetObservationQuery "content token") model |> Tuple.first |> settleFilters
+            exact = O.update (SetObservationSubject "src/Manual.elm") all |> Tuple.first |> settleFilters
+            tree = O.update (SetObservationBrowseMode ObservationFacetMode) exact |> Tuple.first
+                |> O.update (SetObservationQuery "src/auth") |> Tuple.first |> settleFilters
+            files = O.update OpenObservationFileComposer tree |> Tuple.first
+                |> O.update (SetObservationQuery "files token") |> Tuple.first |> settleFilters
+                |> O.update (SetObservationMatchPaths "src/One.elm\nsrc/Two.elm\nsrc/One.elm") |> Tuple.first
+            matched = O.update ApplyObservationMatch files |> Tuple.first
+            back = O.update (SetObservationBrowseMode ObservationFlatMode) matched |> Tuple.first
+            treeBack = O.update (SetObservationBrowseMode ObservationFacetMode) back |> Tuple.first
+            fileBack = O.update OpenObservationFileComposer treeBack |> Tuple.first
+        in Expect.all
+            [ \_ -> back.observations.query |> Expect.equal "content token"
+            , \_ -> treeBack.observations.query |> Expect.equal "src/auth"
+            , \_ -> fileBack.observations.query |> Expect.equal "files token"
+            , \_ -> fileBack.observations.matchPathsInput |> Expect.equal files.observations.matchPathsInput
+            , \_ -> (O.listQuery workspaceId 0 back.observations).subject |> Expect.equal (Just "src/Manual.elm")
+            , \_ -> (O.listQuery workspaceId 0 treeBack.observations).subject |> Expect.equal Nothing
+            , \_ -> (O.listQuery workspaceId 0 fileBack.observations).subject |> Expect.equal Nothing
+            , \_ -> matched.observations.matchAppliedPaths |> Expect.equal [ "src/One.elm", "src/Two.elm" ] ] ()
+    , test "retained Files paths never make All or Tree URL tuples invalid" <| \_ ->
+        let
+            files = O.update OpenObservationFileComposer model |> Tuple.first
+                |> O.update (SetObservationMatchPaths "src/Main.elm") |> Tuple.first
+                |> O.update ApplyObservationMatch |> Tuple.first
+            all = O.update (SetObservationBrowseMode ObservationFlatMode) files |> Tuple.first
+            tree = O.update (SetObservationBrowseMode ObservationFacetMode) files |> Tuple.first
+            roundtrip current = Helpers.encodeObservationQuery (Helpers.observationAppliedQuery current.observations)
+                |> Url.percentDecode |> Maybe.andThen (D.decodeString Helpers.observationQueryDecoder >> Result.toMaybe)
+        in Expect.all
+            [ \_ -> roundtrip all |> Maybe.map .matchAppliedPaths |> Expect.equal (Just [])
+            , \_ -> roundtrip tree |> Maybe.map .matchAppliedPaths |> Expect.equal (Just [])
+            , \_ -> all.observations.matchAppliedPaths |> Expect.equal [ "src/Main.elm" ] ] ()
+    , test "replacement failure preserves last completed rows and retry has a fresh identity" <| \_ ->
+        let
+            started = O.update (SetObservationQuery "new") model |> Tuple.first |> settleFilters
+            request = started.observations
+            failed = Loading.update (GotObservations workspaceId Nothing request.requestGeneration request.queryFingerprint 0 (Err Http.NetworkError)) started |> Tuple.first
+            retried = O.update RetryObservationResults failed |> Tuple.first
+        in Expect.all
+            [ \_ -> failed.observations.orderedIds |> Expect.equal model.observations.orderedIds
+            , \_ -> failed.observations.refreshError |> (/=) Nothing |> Expect.equal True
+            , \_ -> retried.observations.requestGeneration > request.requestGeneration |> Expect.equal True
+            , \_ -> (O.listQuery workspaceId 0 retried.observations).query |> Expect.equal (Just "new") ] ()
+    , test "content-only URL is additive and exact typed terminal loads omit text query" <| \_ ->
+        let
+            input = O.listQuery workspaceId 0 model.observations
+            exact = O.update (SelectObservationFacet Api.SubjectGlob "src/**/*.elm") model |> Tuple.first
+            state = exact.observations
+            filtered = { state | query = "subject-only text", appliedQuery = Nothing }
+        in Expect.all
+            [ \_ -> Api.observationContentListUrl "" input |> String.contains "query_scope=content" |> Expect.equal True
+            , \_ -> Api.observationListUrl "" input |> String.contains "query_scope" |> Expect.equal False
+            , \_ -> (O.listQuery workspaceId 0 filtered).query |> Expect.equal Nothing
+            , \_ -> (O.treeQuery workspaceId "src/**" 2147483647 filtered).subjectQuery |> Expect.equal (Just "subject-only text") ] ()
+    ]
+
+
 suite : Test
 suite = describe "automatic observation refresh and scoped preferences"
-    [ test "Observation pages share 200 while full aggregate query ignores offsets" <| \_ ->
+    [ describe "live discovery input lifetimes" liveFilterTests
+    , test "Observation pages share 200 while full aggregate query ignores offsets" <| \_ ->
         Expect.equal ( [ 200, 200, 200 ], [ False, False, False ] )
             ( [ (O.listQuery workspaceId 0 model.observations).limit, (O.facetQuery workspaceId 200 model.observations).limit, (O.matchQuery workspaceId [ "src/Main.elm" ] 400 model.observations).limit ]
             , [ O.validPage 0 True [ "one" ] [], O.validPage 200 True (List.repeat 200 "one") [ "one" ], O.hasAppliedCountFilter model.observations ] )
@@ -73,7 +332,7 @@ suite = describe "automatic observation refresh and scoped preferences"
         in
         Expect.all
             [ \_ -> Expect.equal Nothing draft.observations.counts.active
-            , \_ -> Expect.equal ( True, Just 300 ) ( applied.observations.counts.current, Maybe.map .totalCount applied.observations.counts.value )
+            , \_ -> Expect.equal ( False, Just 300 ) ( applied.observations.counts.current, Maybe.map .totalCount applied.observations.counts.value )
             , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture applied.observations |> Query.fromHtml |> Query.has [ Selector.text "Counting matching Observations…" ]
             ] ()
     , test "stale B cannot relabel A when C then B is applied while a successor is held" <| \_ ->
@@ -200,7 +459,7 @@ suite = describe "automatic observation refresh and scoped preferences"
         let
             initial = project model model
             owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
-            prefs = { detail = Just { id = observationId, occurrence = Just (O.observationCardDomId "flat" observationId), mode = "flat" }, subjects = [ observationId ], groups = [] }
+            prefs = { preferenceDefaults | detail = Just { id = observationId, occurrence = Just (O.observationCardDomId "flat" observationId), mode = "flat" }, subjects = [ observationId ], groups = [] }
             payload supplied = E.object [ ( "owner", P.ownerValue supplied ), ( "value", P.encode owner prefs ) ]
             restored = O.update (ObservationPreferencesReceived (payload owner)) initial |> Tuple.first
             foreign = O.update (ObservationPreferencesReceived (payload { owner | epoch = 99 })) initial |> Tuple.first
@@ -219,7 +478,7 @@ suite = describe "automatic observation refresh and scoped preferences"
             initial = project projects projects
             owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
             occurrence = O.observationCardDomId "flat" observationId
-            prefs = { detail = Just { id = observationId, occurrence = Just occurrence, mode = "flat" }, subjects = [ observationId ], groups = [] }
+            prefs = { preferenceDefaults | detail = Just { id = observationId, occurrence = Just occurrence, mode = "flat" }, subjects = [ observationId ], groups = [] }
             hydrated = O.update (ObservationPreferencesReceived (E.object [ ( "owner", P.ownerValue owner ), ( "value", P.encode owner prefs ) ])) initial |> Tuple.first |> project initial
             entered = AppShell.handleOwned (AppShell.SwitchTabMsg ObservationsTab) hydrated |> Tuple.first |> project hydrated
             collapsed = O.update ReturnObservationResults entered |> Tuple.first
@@ -238,7 +497,7 @@ suite = describe "automatic observation refresh and scoped preferences"
             projects = { model | activeTab = ProjectsTab, url = { url | fragment = Just "tab=projects" } }
             initial = project projects projects
             owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
-            prefs = { detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [], groups = [] }
+            prefs = { preferenceDefaults | detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [], groups = [] }
             payload = E.object [ ( "owner", P.ownerValue owner ), ( "value", P.encode owner prefs ) ]
             entered = AppShell.handleOwned (AppShell.SwitchTabMsg ObservationsTab) initial |> Tuple.first
             ownUrl = entered.observations.preferenceEntryHistory |> Maybe.andThen Url.fromString |> Maybe.withDefault url
@@ -264,7 +523,7 @@ suite = describe "automatic observation refresh and scoped preferences"
             projects = { model | activeTab = ProjectsTab, url = { url | fragment = Just "tab=projects" } }
             initial = project projects projects
             owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
-            prefs = { detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [], groups = [] }
+            prefs = { preferenceDefaults | detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [], groups = [] }
             hydrated = O.update (ObservationPreferencesReceived (E.object [ ( "owner", P.ownerValue owner ), ( "value", P.encode owner prefs ) ])) initial |> Tuple.first |> project initial
             explicit = { hydrated | activeTab = ObservationsTab, url = { url | fragment = Just "tab=observations&oq=invalid" } } |> O.restorePendingPreferences |> Tuple.first
             touched = O.update (ToggleObservationSubjects observationId) hydrated |> Tuple.first
@@ -281,9 +540,9 @@ suite = describe "automatic observation refresh and scoped preferences"
         let
             owner = { workspaceId = workspaceId, actorId = "actor", authority = "local", runtimeId = "runtime", epoch = 3, requestId = 1, touch = 0 }
             invalid = P.encode owner P.empty |> E.encode 0 |> String.replace workspaceId "foreign"
-            prefs = { detail = Just { id = "invalid", occurrence = Nothing, mode = "flat" }, subjects = [ observationId, observationId, "invalid" ], groups = [] }
+            prefs = { preferenceDefaults | detail = Just { id = "invalid", occurrence = Nothing, mode = "flat" }, subjects = [ observationId, observationId, "invalid" ], groups = [] }
         in Expect.all
-            [ \_ -> P.normalize prefs |> Expect.equal { detail = Nothing, subjects = [ observationId ], groups = [] }
+            [ \_ -> P.normalize prefs |> Expect.equal { preferenceDefaults | detail = Nothing, subjects = [ observationId ], groups = [] }
             , \_ -> D.decodeString (P.decoder owner) invalid |> Result.toMaybe |> Expect.equal Nothing
             , \_ -> P.uuid "00000000-0000-4000-8000-000000000002" |> Expect.equal True ] ()
     , test "facet demanded span survives pass invalidation and failure then fresh Retry" <| \_ ->
@@ -328,7 +587,7 @@ suite = describe "automatic observation refresh and scoped preferences"
                     url = model.url
                     initial = { model | url = { url | fragment = Just fragment } } |> (\current -> project current current)
                     owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
-                    prefs = { detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [ observationId ], groups = [] }
+                    prefs = { preferenceDefaults | detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [ observationId ], groups = [] }
                 in O.update (ObservationPreferencesReceived (E.object [ ( "owner", P.ownerValue owner ), ( "value", P.encode owner prefs ) ])) initial |> Tuple.first
             cases = [ "tab=observations&oq=invalid", "tab=observations&ox=excluded", "tab=observations&o%76=1&oq=invalid", "tab=observations&ov=1&oq=" ++ Url.percentEncode "[\"flat\",\"filter\",null,\"\",\"\",null,null,[]]" ]
         in List.map attempt cases |> List.all (\current -> current.observations.selectedId == Nothing && Dict.get observationId current.observations.expandedSubjects == Just True) |> Expect.equal True
@@ -356,7 +615,7 @@ suite = describe "automatic observation refresh and scoped preferences"
                     current = { model | url = { url | fragment = Just ("tab=observations&observation=" ++ selected) }, observations = { state | selectedId = Just selected, selectedDetail = Just (row selected) } }
                     initial = project current current
                     owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
-                    prefs = { detail = Just { id = observationId, occurrence = Just occurrence, mode = "flat" }, subjects = [], groups = [] }
+                    prefs = { preferenceDefaults | detail = Just { id = observationId, occurrence = Just occurrence, mode = "flat" }, subjects = [], groups = [] }
                 in O.update (ObservationPreferencesReceived (E.object [ ( "owner", P.ownerValue owner ), ( "value", P.encode owner prefs ) ])) initial |> Tuple.first
             same = attempt observationId
             other = attempt "00000000-0000-4000-8000-000000000099"

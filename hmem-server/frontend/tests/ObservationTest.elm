@@ -1928,7 +1928,7 @@ suite =
                     , \_ -> view |> Query.findAll [ Selector.class "observation-filters" ] |> Query.count (Expect.equal 3)
                     , \_ -> view |> Query.findAll [ Selector.class "observation-filter-input" ] |> Query.count (Expect.equal 4)
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
-                    , \_ -> view |> Query.find [ Selector.class "observation-filter-apply" ] |> Query.has [ Selector.tag "button", Selector.class "btn", Selector.class "btn-primary", Selector.text "Apply filters" ]
+                    , \_ -> view |> Query.hasNot [ Selector.class "observation-filter-apply" ]
                     , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "tree-toggle", Selector.class "observation-card", Selector.class "observation-card-selected" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-list-rows" ] |> Query.has [ Selector.class "observation-card" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.tag "article", Selector.class "card", Selector.class "observation-detail-content", Selector.class "observation-detail-meta", Selector.text fullSha ]
@@ -2600,7 +2600,7 @@ suite =
                                 ( ( ObservationExactSubjectMode, Just Api.SubjectFile, Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } )
                                 , ( "manual/flat.elm", "", [] )
                                 )
-                    , \_ -> ( shared.observations.requestMode, shared.observations.subject ) |> Expect.equal ( ObservationFacetMode, "" )
+                    , \_ -> ( shared.observations.requestMode, shared.observations.subject ) |> Expect.equal ( ObservationFacetMode, "manual/flat.elm" )
                     , \_ -> ( selectedFacet.observations.requestMode, selectedFacet.observations.subjectKind, selectedFacet.observations.selectedFacet ) |> Expect.equal ( ObservationExactSubjectMode, Just Api.SubjectFile, Just { subjectKind = Api.SubjectFile, subject = "src/Main.elm" } )
                     ]
                     ()
@@ -3052,8 +3052,8 @@ suite =
                 Expect.all
                     [ \_ -> [ more loaded, more drafted, more reverted, refused.observations == drafted.observations, reverted.observations.matchPathsInput == "src/Draft.elm" ] |> Expect.equal [ True, False, True, True, True ]
                     , \_ -> view drafted |> Query.find [ Selector.class pagingClass ] |> Query.has [ Selector.disabled True ]
-                    , \_ -> view drafted |> Query.has [ Selector.text "Filters have unapplied changes. Apply filters or revert them before loading more results." ]
-                    , \_ -> view drafted |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Revert filters" ] ] |> Event.simulate Event.click |> Event.expect RevertObservationFilters
+                    , \_ -> view drafted |> Query.has [ Selector.text "Editing filters. Showing the last completed results." ]
+                    , \_ -> view drafted |> Query.hasNot [ Selector.text "Revert filters" ]
                     , \_ -> view reverted |> Query.find [ Selector.class pagingClass ] |> Query.hasNot [ Selector.disabled True ]
                     ] ()
                 ) observationModes)
@@ -3092,7 +3092,7 @@ suite =
                             query =
                                 Feature.Observation.listQuery "workspace-1" 0 applied.observations
                         in
-                        query.query == Just "draft search"
+                        query.query == (if mode == ObservationExactSubjectMode then Nothing else Just "draft search")
                             && query.gitSha == Just (String.repeat 40 "a")
                             && query.subjectKind == Just Api.SubjectGlob
                             && query.subject == (if mode == ObservationFlatMode then Just "draft/**/*.elm" else if mode == ObservationExactSubjectMode then Just "src/**/*.elm" else Nothing)
@@ -3375,8 +3375,8 @@ suite =
                             ] ()
                 in
                 Expect.all (List.map (\scenario _ -> check scenario)
-                    [ ( ObservationFlatMode, False, "All" ), ( ObservationFlatMode, True, "All" ), ( ObservationFacetMode, False, "Subject" )
-                    , ( ObservationExactSubjectMode, True, "Subject" ), ( ObservationMatchMode, False, "Files" ), ( ObservationMatchMode, True, "Files" ) ]) ()
+                    [ ( ObservationFlatMode, False, "All" ), ( ObservationFlatMode, True, "All" ), ( ObservationFacetMode, False, "Subject Tree" )
+                    , ( ObservationExactSubjectMode, True, "Subject Tree" ), ( ObservationMatchMode, False, "Files" ), ( ObservationMatchMode, True, "Files" ) ]) ()
         , test "direct user selection chooses results fallback instead of inheriting an earlier card origin" <|
             \_ ->
                 let
@@ -3475,7 +3475,7 @@ suite =
                         Feature.Observation.observationCardDomId globGroup repeated.id
                 in
                 Expect.all
-                    [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text "Subject" ]
+                    [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text "Subject Tree" ]
                     , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more subjects" ]
                     , \_ -> facetView |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)
@@ -3569,9 +3569,10 @@ appliedModeModel mode =
 
 draftQueryInputs : Model -> Model
 draftQueryInputs model =
-    [ SetObservationQuery "draft search", SetObservationSubjectKind "glob", SetObservationSubject "draft/**/*.elm", SetObservationGitSha (String.repeat 40 "a"), SetObservationMatchPaths "src/Draft.elm" ]
-        |> List.foldl (\message current -> Feature.Observation.update message current |> Tuple.first) model
-
+    -- An edited snapshot exercises read helpers independently of input events.
+    -- Live event dispatch and timer retirement have separate causal tests.
+    let state = model.observations in
+    { model | observations = { state | query = "draft search", subjectKind = Just Api.SubjectGlob, subject = "draft/**/*.elm", gitSha = String.repeat 40 "a", matchPathsInput = "src/Draft.elm" } }
 
 observationWorkspace : Api.WorkspaceType -> Api.Workspace
 observationWorkspace workspaceType =
@@ -4372,7 +4373,7 @@ observationProjectionTests =
             explicitGroup = Feature.Observation.refreshViewport all ( { all | observations = { allState | expandedMatchGroups = Dict.singleton "another" True } }, Cmd.none ) |> Tuple.first
         in Expect.all
             [ \_ -> subject.observations.viewport.preserveScroll |> Expect.equal True
-            , \_ -> Dict.isEmpty subject.observations.expandedMatchGroups |> Expect.equal True
+            , \_ -> subject.observations.expandedMatchGroups |> Expect.equal positioned.observations.expandedMatchGroups
             , \_ -> all.observations.viewport |> (\viewport -> ( viewport.top, viewport.preserveExtent, viewport.preserveScroll )) |> Expect.equal ( 400, 1500, True )
             , \_ -> workspace.observations.viewport |> (\viewport -> ( viewport.preserveExtent, viewport.preserveScroll )) |> Expect.equal ( 0, False )
             , \_ -> explicitGroup.observations.viewport.preserveScroll |> Expect.equal False

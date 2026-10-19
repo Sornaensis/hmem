@@ -245,13 +245,18 @@ defaultObservationQuery =
 observationAppliedQuery : ObservationModel -> ObservationAppliedQuery
 observationAppliedQuery state =
     Maybe.withDefault
-        { requestMode = state.requestMode, query = state.query, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha, matchAppliedPaths = state.matchAppliedPaths }
+        { requestMode = state.requestMode, query = state.query, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha, matchAppliedPaths = if state.requestMode == ObservationMatchMode then state.matchAppliedPaths else [] }
         state.appliedQuery
 
 
 restoreObservationQuery : ObservationAppliedQuery -> ObservationModel -> ObservationModel
 restoreObservationQuery query state =
-    { state | requestMode = query.requestMode, query = query.query, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, currentGitSha = query.currentGitSha, historyGitSha = query.historyGitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = String.join "\n" query.matchAppliedPaths, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing }
+    { state | requestMode = query.requestMode, query = query.query, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, currentGitSha = query.currentGitSha, historyGitSha = query.historyGitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = if query.requestMode == ObservationMatchMode then String.join "\n" query.matchAppliedPaths else state.matchPathsInput, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing
+        , modeQueries = Dict.insert (case query.requestMode of
+            ObservationFlatMode -> "flat"
+            ObservationMatchMode -> "match"
+            _ -> "tree") query.query state.modeQueries
+        , filterDebounce = Nothing, nextFilterToken = state.nextFilterToken + 1, preferenceScroll = Nothing }
 
 
 type alias ObservationUrlContext =
@@ -346,6 +351,7 @@ observationQueryDecoder =
             Decode.string |> Decode.andThen (\name -> case name of
                 "flat" -> Decode.succeed ObservationFlatMode
                 "facets" -> Decode.succeed ObservationFacetMode
+                "tree" -> Decode.succeed ObservationFacetMode
                 "exact" -> Decode.succeed ObservationExactSubjectMode
                 "match" -> Decode.succeed ObservationMatchMode
                 _ -> Decode.fail "Invalid mode"
@@ -362,11 +368,11 @@ observationQueryDecoder =
             Decode.map3 (\( query, paired ) current history -> ( { query | currentGitSha = current, historyGitSha = history }, paired )) tuple (Decode.index 8 Decode.string) (Decode.index 9 Decode.string))
         |> Decode.andThen (\( query, pairedFacet ) ->
             if not pairedFacet || (query.requestMode == ObservationExactSubjectMode && query.selectedFacet == Nothing) then Decode.fail "Invalid exact facet" else
-            if query.requestMode == ObservationMatchMode then
+            if query.requestMode == ObservationMatchMode && not (List.isEmpty query.matchAppliedPaths) then
                 case normalizeObservationPaths (String.join "\n" query.matchAppliedPaths) of
                     Ok paths -> Decode.succeed { query | matchAppliedPaths = paths }
                     Err message -> Decode.fail message
-            else if not (List.isEmpty query.matchAppliedPaths) then Decode.fail "Paths require match mode" else Decode.succeed query
+            else if query.requestMode /= ObservationMatchMode && not (List.isEmpty query.matchAppliedPaths) then Decode.fail "Paths require match mode" else Decode.succeed query
             )
         )
 
@@ -380,7 +386,7 @@ encodeObservationQuery query =
         mode =
             case query.requestMode of
                 ObservationFlatMode -> "flat"
-                ObservationFacetMode -> "facets"
+                ObservationFacetMode -> "tree"
                 ObservationExactSubjectMode -> "exact"
                 ObservationMatchMode -> "match"
     in
@@ -685,7 +691,7 @@ beginWorkspaceDataReload showLoading model =
 
                 observationCmds =
                     if repositoryWorkspace then
-                        [ Api.fetchObservations model.flags.apiUrl (observationListQuery wsId 0 observations)
+                        [ Api.fetchContentObservations model.flags.apiUrl (observationListQuery wsId 0 observations)
                             (GotObservations wsId (Just token) observations.requestGeneration observations.queryFingerprint 0)
                         ]
 

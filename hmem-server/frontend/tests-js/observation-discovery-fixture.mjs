@@ -36,10 +36,13 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
     try {
       let body
       const options = { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'), currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'), offset: Number(url.searchParams.get('offset') || 0), limit: Number(url.searchParams.get('limit') || 50) }
+      const contentScope = (source, query) => url.searchParams.get('query_scope') !== 'content' || !query ? source
+        : { ...source, observations: source.observations.filter(value => query.toLowerCase().split(/\s+/).every(token => value.content.toLowerCase().includes(token))) }
       if (url.pathname.endsWith('/count')) {
         assert.equal(request.method(), 'POST')
         receipt.payload = request.postDataJSON()
-        body = fixtureObservationCounts(scopedFixture, receipt.payload)
+        body = fixtureObservationCounts(contentScope(scopedFixture, receipt.payload.query), receipt.payload)
+        body.total_count = scopedFixture.observations.filter(value => value.workspace_id === receipt.payload.workspace_id).length
       } else if (url.pathname.endsWith('/match')) {
         assert.equal(request.method(), 'POST')
         const query = request.postDataJSON(); receipt.payload = query; options.gitSha = query.git_sha; options.currentGitSha = query.current_git_sha; options.historyGitSha = query.history_git_sha
@@ -53,7 +56,7 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
         })
         body = { items: matched.slice(query.offset, query.offset + query.limit), has_more: query.offset + query.limit < matched.length }
       } else if (url.pathname.endsWith('/subject-facets')) body = queryObservationFacets(scopedFixture, options)
-      else if (url.pathname === '/api/v1/observations') body = queryObservations(scopedFixture, options)
+      else if (url.pathname === '/api/v1/observations') body = queryObservations(contentScope(scopedFixture, options.query), options)
       else {
         assert.equal(request.method(), 'GET')
         body = fixture.observations.find(value => value.id === decodeURIComponent(url.pathname.split('/').at(-1)))

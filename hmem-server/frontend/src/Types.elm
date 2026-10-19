@@ -11,6 +11,7 @@ import Array exposing (Array)
 import ObservationViewport
 import StartupAdmission
 import ObservationPreferences
+import ObservationTree
 import Http
 import Json.Encode as Encode
 import Set exposing (Set)
@@ -537,6 +538,13 @@ type alias ObservationModel =
     , fileComposerOpen : Bool
     , advancedFiltersOpen : Bool
     , appliedQuery : Maybe ObservationAppliedQuery
+    , completedQuery : Maybe ObservationAppliedQuery
+    , modeQueries : Dict String String
+    , modeScrolls : Dict String Float
+    , preferenceScroll : Maybe Float
+    , filterDebounce : Maybe ObservationFilterDebounce
+    , nextFilterToken : Int
+    , tree : ObservationTree.State
     , linkNotice : Maybe String
     , nextLinkToken : Int
     , pendingExcludedLink : Maybe ObservationLinkEcho
@@ -585,6 +593,10 @@ type alias ObservationModel =
 
 type alias ObservationCountGuard =
     { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, generation : Int, fingerprint : String }
+
+
+type alias ObservationFilterDebounce =
+    { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, mode : ObservationRequestMode }
 
 
 type alias ObservationCountState =
@@ -1363,6 +1375,8 @@ type Msg
     | ToggleFilterMemoryActiveLinked Bool
     | ToggleFilterTag String
     | SetObservationQuery String
+    | ObservationFiltersReady ObservationFilterDebounce
+    | GotObservationTree ObservationTree.Request (Result Http.Error Api.ObservationSubjectTreePage)
     | SetObservationSubjectKind String
     | SetObservationSubject String
     | SetObservationGitSha String

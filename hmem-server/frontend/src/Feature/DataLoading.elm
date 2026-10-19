@@ -3120,9 +3120,13 @@ updateResponse msg model =
                                         |> Maybe.map (\request -> request.inFlight && request.projectOffset == 0 && request.taskOffset == 0 && request.projectRequestPending && request.taskRequestPending)
                                         |> Maybe.withDefault False
 
+                                initialObservationPending =
+                                    isRepository && Feature.Observation.filterValidationError model.observations == Nothing
+                                        && List.member model.observations.requestMode [ ObservationFlatMode, ObservationExactSubjectMode ]
+
                                 pendingLoads =
                                     -- Demand pages are independent of the initial workspace load.
-                                    (if initialRootPending then 1 else 0) + (if isRepository && List.member model.observations.requestMode [ ObservationFlatMode, ObservationExactSubjectMode ] then 1 else 0)
+                                    (if initialRootPending then 1 else 0) + (if initialObservationPending then 1 else 0)
 
                                 dataLoading =
                                     { rootLoading
@@ -3173,7 +3177,7 @@ updateResponse msg model =
                                         state = startedObservationModel.observations
                                     in
                                     { startedObservationModel | dataLoading = { loading | initialObservationLoad =
-                                        if isRepository && List.member state.requestMode [ ObservationFlatMode, ObservationExactSubjectMode ] then
+                                        if initialObservationPending then
                                             Just { workspaceId = expectedWsId, sessionEpoch = model.sessionRequestEpoch, token = token, generation = state.requestGeneration, fingerprint = state.queryFingerprint }
                                         else
                                             Nothing
@@ -3904,6 +3908,7 @@ mergeObservationPage offset paginated observations =
     in
     { observations
         | items = items
+        , completedQuery = Just (Helpers.observationAppliedQuery observations)
         , orderedIds = orderedIds
         , hasMore = paginated.hasMore
         , loading = False

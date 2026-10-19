@@ -6,11 +6,169 @@ const resultReceipts = h => h.receipts.filter(value => !value.endpoint.endsWith(
 const tuple = (mode, query = '', kind = null, subject = '', sha = '', facetKind = null, facet = null, paths = []) => [mode, query, kind, subject, sha, facetKind, facet, paths, '', '']
 const fragment = (query, id = null) => '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + (id ? '&observation=' + encodeURIComponent(id) : '')
 const applied = page => page.locator('.observation-applied-filters').innerText()
+const queryRequest = (h, query) => h.page.waitForRequest(request => {
+  const url = new URL(request.url())
+  return url.pathname === '/api/v1/observations' && url.searchParams.get('query') === query
+})
 async function ready(h) { await h.page.locator('#observation-panel').waitFor(); await h.idle() }
 async function history(h, direction) { await h.page.evaluate(direction => window.history[direction](), direction); await ready(h) }
 async function navigate(h, query, id) { await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + fragment(query, id)); await ready(h) }
 
-test('production applied flat URI excludes drafts, has no Copy link, and reloads once after admission', { timeout: 60000 }, async () => {
+test('live debounce coalesces input, replaces one history entry, and All sends consistent content scope', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start()
+    const before = resultReceipts(h).length, length = await h.page.evaluate(() => history.length)
+    const dispatched = queryRequest(h, 'Cache evidence')
+    await h.page.locator('#observation-query').fill('C')
+    await h.page.locator('#observation-query').fill('Cache')
+    await h.page.locator('#observation-query').fill('Cache evidence')
+    assert.equal(resultReceipts(h).length, before)
+    await dispatched; await ready(h)
+    assert.equal(resultReceipts(h).length, before + 1)
+    assert.equal(resultReceipts(h).at(-1).params.query_scope, 'content')
+    assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/count')).at(-1).params.query_scope, 'content')
+    assert.equal(await h.page.evaluate(() => history.length), length)
+    assert.equal(JSON.parse(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('oq'))[1], 'Cache evidence')
+    const next = queryRequest(h, 'Documentation')
+    await h.page.locator('#observation-query').fill('Documentation'); await next; await ready(h)
+    assert.equal(await h.page.evaluate(() => history.length), length)
+    await h.page.locator('#observation-query').fill(''); await ready(h)
+    assert.equal(resultReceipts(h).at(-1).params.query, undefined)
+    assert.equal(await h.page.getByRole('button', { name: 'Apply filters', exact: true }).count(), 0)
+    assert.equal(await h.page.getByRole('button', { name: 'Revert filters', exact: true }).count(), 0)
+  } finally { await h.close() }
+})
+
+test('incomplete SHA fields keep completed rows locally and completing or clearing sends the latest three AND filters', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start(); await h.page.locator('#observation-advanced-toggle').click()
+    const before = h.receipts.length, rows = await h.page.locator('.observation-card').count()
+    for (const value of ['a', 'ab', 'abc', 'A'.repeat(40)]) await h.page.locator('#observation-git-sha').fill(value)
+    await h.page.waitForTimeout(350)
+    assert.equal(h.receipts.length, before)
+    assert.equal(await h.page.locator('.observation-card').count(), rows)
+    assert.match(await applied(h.page), /Enter a full lowercase 40-character Git SHA/)
+    assert.ok(!(await h.page.locator('.observation-mode-navigation').innerText()).includes('Counting'))
+    await h.page.getByRole('button', { name: 'Files', exact: true }).click(); await ready(h)
+    await h.page.locator('#observation-match-paths').fill('src/Main.elm')
+    await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await ready(h)
+    assert.equal(h.receipts.length, before)
+    await h.page.getByRole('button', { name: 'All', exact: true }).click(); await ready(h)
+    assert.equal(h.receipts.length, before)
+    await h.page.locator('#observation-git-sha').fill(h.sha); await ready(h)
+    await h.page.locator('#observation-current-git-sha').fill('b'.repeat(40)); await ready(h)
+    await h.page.locator('#observation-history-git-sha').fill('c'.repeat(40)); await ready(h)
+    const request = resultReceipts(h).at(-1)
+    assert.equal(request.params.git_sha, h.sha); assert.equal(request.params.current_git_sha, 'b'.repeat(40)); assert.equal(request.params.history_git_sha, 'c'.repeat(40))
+    await h.page.locator('#observation-current-git-sha').fill(''); await ready(h)
+    assert.equal(resultReceipts(h).at(-1).params.current_git_sha, undefined)
+    assert.equal(resultReceipts(h).at(-1).params.history_git_sha, 'c'.repeat(40))
+  } finally { await h.close() }
+})
+
+test('a token stored only in a subject cannot match All content search', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, values => values.map((value, index) => index ? value : { ...value, subjects: [{ subject_kind: 'file', subject: 'subjectonlytoken' }], subject_kind: 'file', subject: 'subjectonlytoken' }))
+  try {
+    await h.start()
+    const dispatched = queryRequest(h, 'subjectonlytoken')
+    await h.page.locator('#observation-query').fill('subjectonlytoken'); await dispatched; await ready(h)
+    assert.deepEqual(resultReceipts(h).at(-1).response.items, [])
+    assert.equal(resultReceipts(h).at(-1).params.query_scope, 'content')
+    const count = h.receipts.filter(value => value.endpoint.endsWith('/count')).at(-1)
+    assert.equal(count.params.query_scope, 'content'); assert.equal(count.response.match_count, 0)
+  } finally { await h.close() }
+})
+
+test('mode queries and Files input survive reload and legacy Subject URLs migrate to Tree', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start()
+    await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
+    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await ready(h)
+    await h.page.locator('#observation-query').fill('src'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
+    await h.page.getByRole('button', { name: 'Files', exact: true }).click(); await ready(h)
+    assert.equal(await h.page.locator('#observation-query').inputValue(), '')
+    await h.page.locator('#observation-query').fill('Cache'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
+    await h.page.locator('#observation-match-paths').fill('src/Main.elm\nsrc/View.elm')
+    await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await ready(h)
+    await h.page.getByRole('button', { name: 'All', exact: true }).click(); await ready(h)
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'Cache evidence')
+    await h.page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('hmem.observation-ui.v1:') && JSON.parse(localStorage.getItem(key)).queries?.match === 'Cache'))
+    await h.page.reload(); await ready(h)
+    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await ready(h)
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'src')
+    await h.page.getByRole('button', { name: 'Files', exact: true }).click(); await ready(h)
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'Cache')
+    assert.equal(await h.page.locator('#observation-match-paths').inputValue(), 'src/Main.elm\nsrc/View.elm')
+    await navigate(h, tuple('facets', 'src'))
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'src')
+    assert.equal(JSON.parse(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('oq'))[0], 'tree')
+  } finally { await h.close() }
+})
+
+test('a restored incomplete SHA is local until cleared and does not issue a failing bootstrap read', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await navigate(h, tuple('flat', '', null, '', 'abc'))
+    assert.equal(h.receipts.length, 0)
+    assert.match(await applied(h.page), /Enter a full lowercase 40-character Git SHA/)
+    await h.page.locator('#observation-advanced-toggle').click()
+    await h.page.locator('#observation-git-sha').fill(''); await ready(h)
+    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
+    assert.equal(resultReceipts(h).at(-1).params.query_scope, 'content')
+  } finally { await h.close() }
+})
+
+test('percent-encoded explicit query keys outrank a different saved query during reload hydration', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start()
+    await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
+    const before = h.receipts.length
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '?hydration=encoded#tab=observations&o%76=1&o%71=' + encodeURIComponent(JSON.stringify(tuple('flat', 'Documentation'))))
+    await ready(h)
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'Documentation')
+    const reads = resultReceipts(h).filter(value => h.receipts.indexOf(value) >= before)
+    assert.ok(reads.length > 0)
+    assert.ok(reads.every(value => value.params.query === 'Documentation'))
+  } finally { await h.close() }
+})
+
+test('terminal selection retires a still-pending text timer and exact results finish outside editing state', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await ready(h)
+    await h.page.locator('#observation-query').fill('src')
+    await h.page.locator('.observation-facet-card').first().click(); await ready(h)
+    await h.page.waitForTimeout(350); await ready(h)
+    assert.equal(await h.page.locator('.observation-filter-pending').count(), 0)
+    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
+    assert.ok(!String(await h.page.locator('.observation-mode-navigation').innerText()).includes('Counting'))
+  } finally { await h.close() }
+})
+
+test('accepted active-mode preferences restore physical viewport scroll after fresh result loading', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start(); await h.page.locator('#observation-query').press('Enter'); await ready(h)
+    await h.page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('hmem.observation-ui.v1:')))
+    await h.page.evaluate(() => {
+      const key = Object.keys(localStorage).find(value => value.startsWith('hmem.observation-ui.v1:'))
+      const prefs = JSON.parse(localStorage.getItem(key))
+      localStorage.setItem(key, JSON.stringify({ ...prefs, detail: null, scrolls: { flat: 900, tree: 400 } }))
+    })
+    await h.page.reload(); await ready(h)
+    await h.page.waitForFunction(() => {
+      const viewport = document.getElementById('observation-viewport'), scroll = document.getElementById('main-content-scroll')
+      return viewport && scroll && scroll.getBoundingClientRect().top - viewport.getBoundingClientRect().top > 800
+    }, null, { timeout: 5000 })
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+  } finally { await h.close() }
+})
+
+test('production live flat URI excludes pending debounce input, has no Copy link, and reloads once after admission', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
     await h.start()
@@ -41,7 +199,7 @@ test('production applied flat URI excludes drafts, has no Copy link, and reloads
 test('production subject and locked exact links reload the correct mode and Back restores the previous applied tuple without echo', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
-    await h.start(); await h.page.getByRole('button', { name: 'Subject', exact: true }).click(); await ready(h)
+    await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await ready(h)
     const facetUrl = h.page.url()
     await h.page.reload(); await ready(h)
     assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-facets')
@@ -51,12 +209,11 @@ test('production subject and locked exact links reload the correct mode and Back
     await h.page.reload(); await ready(h)
     assert.equal(resultReceipts(h).length, before + 1)
     assert.equal(resultReceipts(h).at(-1).params.subject_kind, 'glob'); assert.equal(resultReceipts(h).at(-1).params.subject, 'src/**/*.elm')
-    assert.equal(resultReceipts(h).at(-1).params.query, 'Cache evidence')
+    assert.equal(resultReceipts(h).at(-1).params.query, undefined)
     await h.page.locator('#observation-advanced-toggle').click()
     assert.match(await h.page.locator('.observation-selected-facet-value').innerText(), /Glob: src\/\*\*\/\*\.elm/)
     assert.equal(await h.page.locator('#observation-subject').count(), 0)
     assert.equal(h.page.url(), exactUrl)
-    await history(h, 'back'); assert.equal(resultReceipts(h).at(-1).params.query, undefined)
     await history(h, 'back'); assert.equal(h.page.url(), facetUrl); assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-facets')
     const count = resultReceipts(h).length
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
@@ -218,7 +375,7 @@ for (const mode of ['exact', 'match']) test(`production ${mode} public URL conte
     const publicUrl = h.page.url()
     assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
     unauthorized = true
-    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click()
+    await h.page.locator('#observation-query').press('Enter')
     await h.page.waitForFunction(() => !document.getElementById('observation-panel'), null, { timeout: 5000 })
     assert.equal(h.page.url(), publicUrl)
     await h.page.evaluate(() => { window.HMEM_CONFIG.authToken = 'public-controlled-fixture-login'; window.dispatchEvent(new Event('focus')) })
@@ -229,7 +386,7 @@ for (const mode of ['exact', 'match']) test(`production ${mode} public URL conte
     const result = resultReceipts(h).filter(receipt => receipt.endpoint === (mode === 'match' ? '/api/v1/observations/match' : '/api/v1/observations')).at(-1)
     if (mode === 'match') assert.deepEqual(result.payload.paths, query[7])
     else { assert.equal(result.params.subject_kind, 'glob'); assert.equal(result.params.subject, 'src/**/*.elm') }
-    assert.equal(mode === 'match' ? result.payload.query : result.params.query, 'Cache evidence')
+    assert.equal(mode === 'match' ? result.payload.query : result.params.query, mode === 'match' ? 'Cache evidence' : undefined)
     assert.equal(mode === 'match' ? result.payload.git_sha : result.params.git_sha, h.sha)
     assert.equal(await h.page.locator('.observation-detail-content').textContent(), 'Cache evidence for Main')
   } finally { await h.close() }

@@ -290,7 +290,7 @@ handleUrlChangeWithoutProtectedExit url model =
                     initialObservations =
                         let
                             observations =
-                                Feature.Observation.init
+                                Feature.Observation.retireSessionState model.observations
                         in
                         Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice }
 

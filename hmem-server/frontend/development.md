@@ -22,7 +22,16 @@ npm run preview
 The build replaces `hmem-server/static`. Use the
 [live integration reference](tests-js/testing.md) for an isolated API and the
 [performance reference](perf/performance.md) for qualification commands and evidence rules.
-Focused browser scripts are listed in [package.json](package.json). Conditional
+Focused browser scripts are listed in [package.json](package.json).
+
+`npm run test:observation-state` checks live query ownership and explorer state;
+`npm run test:observation-state-browser` checks URL, preferences and navigation
+against the current production assets. Run `npm run build` before that browser
+script. Text debounce is 250 ms and retains workspace/session/actor/mode tokens;
+SHA validation issues no read until every populated SHA is canonical. Requested
+and last completed query identities remain separate during replacement reads.
+
+Conditional
 and populated Observation tests need the native test harness and configured
 PostgreSQL tools; their isolated fixtures expire within ten minutes and remove
 their browser, server, PostgreSQL process, and sandbox. The conditional script
@@ -167,7 +176,7 @@ once per opening; Refresh replaces that frozen snapshot. Mark changes observed
 during a pending read stale too. Global Audit has no all-workspace subscription;
 loaded-at and Refresh establish freshness. A 404 alone does not establish deletion.
 
-All/Subject switches preserve scroll, including scrolling during load. Observation
+All/Subject Tree switches retain their scroll context, including scrolling during load. Observation
 and Project card surfaces have a responsive 78rem maximum outer width; controls
 and lifecycle graphs use available width. Observation details return to their
 originating card if present, otherwise results. Preserve copied content line endings

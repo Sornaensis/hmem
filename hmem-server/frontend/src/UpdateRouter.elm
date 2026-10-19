@@ -459,6 +459,12 @@ route msg model =
         SetObservationQuery _ ->
             Ok (Feature.Observation.update msg model)
 
+        ObservationFiltersReady _ ->
+            Ok (Feature.Observation.update msg model)
+
+        GotObservationTree _ _ ->
+            Ok (Feature.Observation.update msg model)
+
         SetObservationSubjectKind _ ->
             Ok (Feature.Observation.update msg model)
 

@@ -1,6 +1,7 @@
 module ObservationLiveTest exposing (suite)
 
 import Api
+import Array
 import AppShell
 import Dict
 import Expect
@@ -295,6 +296,45 @@ liveFilterTests =
             , \_ -> Expect.equal [("a/file", Just Api.SubjectFile)] (List.map (\guard -> (guard.prefix, guard.kind)) branch.observations.tree.physical)
             , \_ -> Expect.equal [] completed.observations.tree.physical
             , \_ -> Expect.equal branch.observations.tree.expanded completed.observations.tree.expanded
+            ] ()
+    , test "logical connector topology distinguishes typed owners, sibling endings, incomplete tails and unrelated roots" <| \_ ->
+        let
+            node path children terminals = {path = path, segment = path |> String.split "/" |> List.reverse |> List.head |> Maybe.withDefault path, hasChildren = children, observationCount = 2, terminals = terminals}
+            subject kind = {subjectKind = kind, subject = "a", observationCount = 1}
+            accept prefix nodes tree =
+                let (started, request) = ObservationTree.begin prefix 0 tree in
+                request |> Maybe.map (\guard -> ObservationTree.receive guard (Ok {items = nodes, hasMore = False, totalCount = 2, matchCount = 2}) started) |> Maybe.withDefault started
+            catalog = ObservationTree.retire "topology" ObservationTree.init
+                |> accept "" [node "a" True [subject Api.SubjectFile, subject Api.SubjectGlob], node "z" False []]
+                |> accept "a" [node "a/b" False [], node "a/c" False []]
+            terminal kind tree =
+                let typed = {subjectKind = kind, subject = "a"}
+                    item = row (Api.subjectKindToString kind)
+                    (started, request) = ObservationTree.beginTerminal typed 0 tree
+                in request |> Maybe.map (\guard -> ObservationTree.receiveTerminal guard (Ok {items = [{item | subjects = [typed], subject = "a", subjectKind = kind}], hasMore = False}) started) |> Maybe.withDefault started
+            loaded = terminal Api.SubjectFile catalog |> terminal Api.SubjectGlob
+            completeTree = {loaded | expanded = Set.singleton "a"}
+            state = O.init
+            rows current = O.projectResultRows {state | requestMode = ObservationFacetMode, tree = current} |> Array.toList
+            topology matches current = rows current |> List.filterMap (\entry -> case entry of
+                ObservationTreeRow value content -> if matches content then Just value else Nothing
+                _ -> Nothing) |> List.head
+            matchesPath name content = case content of
+                ObservationTreePathRow value -> value.path == name
+                _ -> False
+            card content = case content of
+                ObservationCardRow _ value -> value.id == "file"
+                _ -> False
+            incomplete = {completeTree | branches = Dict.update "a" (Maybe.map (\branch -> {branch | error = Just "Retry paths"})) completeTree.branches}
+        in
+        Expect.all
+            [ \_ -> topology (matchesPath "a") completeTree |> Maybe.andThen .children |> Maybe.map (\rail -> (rail.owner, rail.tail, rail.unknown)) |> Expect.equal (Just ("tree-path:a", "tree-path:a/c", False))
+            , \_ -> topology (matchesPath "a/c") completeTree |> Maybe.map .following |> Expect.equal (Just TreeEnd)
+            , \_ -> topology (matchesPath "a/c") incomplete |> Maybe.map .following |> Expect.equal (Just TreeUnknown)
+            , \_ -> topology (matchesPath "a") incomplete |> Maybe.andThen .children |> Maybe.map (\rail -> (rail.tail, rail.unknown)) |> Expect.equal (Just ("tree-page:branch:a", True))
+            , \_ -> topology card completeTree |> Maybe.andThen .parent |> Maybe.map .owner |> Expect.equal (Just "tree-terminal:file:a")
+            , \_ -> topology card completeTree |> Maybe.map (\value -> List.map .owner value.ancestors) |> Expect.equal (Just ["tree-path:a"])
+            , \_ -> topology (matchesPath "z") completeTree |> Maybe.map (\value -> (value.parent, value.ancestors, value.root)) |> Expect.equal (Just (Nothing, [], "tree-path:z"))
             ] ()
     , test "a stale root callback cannot advance the last completed query while the latest root is pending" <| \_ ->
         let

@@ -4607,14 +4607,16 @@ textarea.observation-edit-content {
 }
 
 /* Subject paths share the measured Observation preorder and row budget. */
-.observation-tree-path { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; min-width: 0; border-radius: .25rem; }
-.observation-tree-path:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
-.observation-tree-path[aria-selected="true"] { background: var(--bg-elevated); }
+.observation-tree-path { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; min-width: 0; padding: .5rem .625rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg-surface); }
+.observation-tree-path:hover { background: var(--bg-elevated); }
+.observation-tree-path:focus { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+.observation-tree-path[aria-selected="true"] { border-color: var(--accent-hover); background: color-mix(in srgb, var(--accent) 14%, var(--bg-surface)); }
 .observation-tree-label { flex: 1; min-width: 0; cursor: pointer; overflow-wrap: anywhere; font-weight: 600; }
 .observation-tree-pattern { font-size: .75rem; color: var(--text-muted); }
 .observation-tree-copy { margin-left: auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .observation-tree-terminal, .observation-tree-page { display: flex; align-items: center; gap: .5rem; padding-block: .35rem; overflow-wrap: anywhere; }
 .observation-tree-observation { min-width: 0; }
+.observation-tree-observation .observation-history-time { white-space: normal; overflow-wrap: anywhere; }
 
 /* Compact live discovery controls keep status and disclosure in document flow. */
 .observation-discovery-controls .observation-search { padding: 0; border: 0; background: transparent; gap: .5rem; }
@@ -4641,20 +4643,30 @@ textarea.observation-edit-content {
   .observation-tree-path { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr); gap: .375rem; }
   .observation-tree-chevron { grid-column: 1; grid-row: 1; }
   .observation-tree-label { grid-column: 2; grid-row: 1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-  .observation-tree-pattern, .observation-tree-path .observation-loaded-count { grid-column: 2; }
+  .observation-tree-pattern, .observation-tree-path .observation-loaded-count { grid-column: 1 / -1; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
   .observation-tree-terminal { flex-wrap: wrap; }
-  .observation-tree-copy { grid-column: 2; max-width: 100%; width: 100%; margin-left: 0; text-align: left; }
+  .observation-tree-copy { grid-column: 1 / -1; max-width: 100%; width: 100%; margin-left: 0; text-align: left; }
 }
 
-/* Compress visual indentation without changing canonical or semantic depth. */
-.observation-tree-path, .observation-tree-terminal, .observation-tree-observation, .observation-tree-page {
-  box-sizing: border-box; min-width: 0;
-  padding-inline-start: min(calc(var(--observation-tree-depth, 0) * 20px), 20%);
+/* A single responsive gutter positions cards and decorative logical rails. */
+.observation-tree-presentation, .observation-viewport-spacer {
+  --tree-step: min(20px, calc(20% / var(--tree-levels, 1)));
+  position: relative; min-width: 0;
 }
-.observation-tree-depth { color: var(--text-muted); font-size: .75rem; }
-@media (max-width: 600px) {
-  .observation-tree-depth { grid-column: 2; }
-}
+.observation-tree-presentation { padding-bottom: .75rem; }
+.observation-viewport-row:has(> .observation-tree-presentation) { padding-bottom: 0; }
+.observation-tree-row-content { margin-inline-start: calc(var(--tree-depth) * var(--tree-step)); min-width: 0; }
+.observation-tree-connectors { position: absolute; inset: 0; pointer-events: none; user-select: none; }
+.observation-tree-rail, .observation-tree-elbow { position: absolute; pointer-events: none; user-select: none; border-color: color-mix(in srgb, var(--border) 75%, var(--text-muted)); }
+.observation-tree-rail { left: calc((var(--tree-rail-depth) - .5) * var(--tree-step)); border-left-width: 1px; border-left-style: solid; width: 0; }
+.tree-rail-ancestor { top: 0; bottom: 0; }
+.tree-rail-incoming { top: 0; height: calc((100% - .75rem) / 2); }
+.tree-rail-following { top: calc((100% - .75rem) / 2); bottom: 0; }
+.tree-rail-following[data-tree-following="unknown"], .tree-rail-gap[data-tree-rail-state="unknown"] { border-left-style: dashed; }
+.tree-rail-child { top: calc(100% - .75rem); bottom: 0; }
+.tree-rail-gap { --tree-step: min(20px, calc(20% / var(--tree-levels, 1))); }
+.observation-tree-elbow { left: calc((var(--tree-rail-depth) - .5) * var(--tree-step)); top: calc((100% - .75rem) / 2); width: calc(.5 * var(--tree-step)); border-top: 1px solid var(--border); }
+.observation-tree-terminal, .observation-tree-observation, .observation-tree-page { box-sizing: border-box; min-width: 0; }
 
 .observation-tree-page { flex-wrap: wrap; }
 .observation-tree-more { min-width: 0; max-width: 100%; padding-inline: .5rem; white-space: normal; overflow-wrap: anywhere; }

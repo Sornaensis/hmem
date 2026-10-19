@@ -395,7 +395,7 @@ test('eighteen-segment paths keep path terminal card copy and continuation contr
     assert.ok(rect.width > 0 && rect.left >= rect.host.left - 1 && rect.right <= rect.host.right + 1 && rect.top >= rect.host.top - 1 && rect.bottom <= rect.host.bottom + 1, name + ': ' + JSON.stringify(rect))
   }
   const indented = async (row, name) => {
-    const value = await row.evaluate(element => ({padding: parseFloat(getComputedStyle(element).paddingInlineStart), width: element.getBoundingClientRect().width}))
+    const value = await row.evaluate(element => {const row = element.closest('[data-observation-key]'), content = row.querySelector('.observation-tree-row-content'); return {padding: content.getBoundingClientRect().left - row.getBoundingClientRect().left, width: row.getBoundingClientRect().width}})
     assert.ok(value.padding > 0 && value.padding <= value.width * .2 + 1, name + ': ' + JSON.stringify(value))
   }
   const snapshot = async (name, target) => {
@@ -411,7 +411,7 @@ test('eighteen-segment paths keep path terminal card copy and continuation contr
       const path = parts.slice(0, depth).join('/'), row = pathRow(h, path)
       await inside(row, 'Path level ' + depth)
       if (depth > 1) {
-        const indent = await row.evaluate(element => ({padding: parseFloat(getComputedStyle(element).paddingInlineStart), width: element.getBoundingClientRect().width}))
+        const indent = await row.evaluate(element => {const row = element.closest('[data-observation-key]'), content = row.querySelector('.observation-tree-row-content'); return {padding: content.getBoundingClientRect().left - row.getBoundingClientRect().left, width: row.getBoundingClientRect().width}})
         assert.ok(indent.padding > 0 && indent.padding <= indent.width * .2 + 1, 'Actual indentation remains positive and bounded: ' + JSON.stringify(indent))
       }
       await inside(row.locator('.observation-tree-chevron'), 'Chevron level ' + depth)
@@ -422,7 +422,9 @@ test('eighteen-segment paths keep path terminal card copy and continuation contr
     assert.equal(await leaf.getAttribute('aria-selected'), 'false', 'Expansion does not synthesize selection')
     await inside(leaf, 'Deep selectable path'); await leaf.locator('.observation-tree-label').click(); await paint(h.page)
     assert.equal(await leaf.getAttribute('aria-selected'), 'true')
-    assert.match(await leaf.locator('.observation-tree-depth').innerText(), /Level 18/)
+    assert.equal(await h.page.locator('.observation-tree-depth').count(), 0)
+    assert.ok(!/Level\s+\d+/.test(await h.page.locator('#observation-panel').innerText()))
+    assert.ok(await h.page.locator('.observation-tree-pattern, .observation-tree-path .observation-loaded-count').evaluateAll(elements => elements.every(element => element.scrollWidth <= element.clientWidth + 1)), 'Path metadata remains readable within deep/narrow cards')
     await inside(leaf.locator('.observation-tree-copy'), 'Deep canonical path copy')
     assert.equal(await leaf.locator('.observation-tree-copy').getAttribute('aria-label'), 'Copy canonical subject path: ' + deep)
     const terminal = h.page.getByRole('region', {name: 'File observations for ' + deep, exact: true})
@@ -549,4 +551,93 @@ test('hidden staged terminal refresh pauses continuation and retains scroll, sel
     assert.equal(await pathRow(h, 'a').getAttribute('aria-selected'), 'true')
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
   } finally { release?.(); await h.close() }
+})
+
+
+for (const width of [1440, 320]) test(`connector cards ${width}: logical typed owners, decorative gutters and accessible depth`, {timeout: 60000}, async () => {
+  const h = await openDiscovery({width: 1440, height: 1000}, examples)
+  try {
+    await tree(h)
+    await toggle(h, 'src'); await toggle(h, 'src/auth'); await toggle(h, 'docs')
+    await revealObservationRow(h.page, pathRow(h, 'src/auth'))
+    await pathRow(h, 'src/auth').locator('.observation-tree-label').click(); await paint(h.page)
+    const wrapper = pathRow(h, 'src/auth').locator('..').locator('..')
+    assert.equal(await wrapper.getAttribute('data-tree-parent'), 'tree-path:src')
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-level'), '2')
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-selected'), 'true')
+    assert.equal(await h.page.locator('.observation-tree-depth').count(), 0)
+    assert.ok(!/Level\s+\d+/.test(await h.page.locator('#observation-panel').innerText()))
+    assert.ok(await h.page.locator('.observation-tree-pattern, .observation-tree-path .observation-loaded-count').evaluateAll(elements => elements.every(element => element.scrollWidth <= element.clientWidth + 1)), 'Path metadata remains readable within deep/narrow cards')
+    const root = pathRow(h, 'src').locator('..').locator('..')
+    assert.equal(await root.getAttribute('data-tree-parent'), '')
+    assert.equal(await root.locator('.tree-rail-incoming').count(), 0)
+    const typed = h.page.getByRole('region', {name: 'File observations for src/auth', exact: true})
+    await typed.scrollIntoViewIfNeeded(); await paint(h.page)
+    const header = typed.locator('..').locator('..')
+    assert.equal(await header.getAttribute('data-tree-parent'), 'tree-path:src/auth')
+    const cards = h.page.locator('.observation-tree-presentation[data-tree-parent="tree-terminal:file:src/auth"]')
+    assert.ok(await cards.count() > 0, 'Direct cards belong to their typed header')
+    assert.ok(await h.page.getByRole('region', {name: 'Glob observations for src/auth', exact: true}).count() > 0)
+    assert.ok(await h.page.locator('.observation-tree-connectors').evaluateAll(elements => elements.every(element => element.getAttribute('aria-hidden') === 'true' && getComputedStyle(element).pointerEvents === 'none' && !element.querySelector('button,a,input,[tabindex]'))))
+    await pathRow(h, 'src/auth').focus(); await paint(h.page)
+    await h.page.setViewportSize({width, height: 1000})
+    if (width === 320) await h.page.addStyleTag({content: 'html {font-size: 200%;}'})
+    await pathRow(h, 'src/auth').scrollIntoViewIfNeeded(); await paint(h.page)
+    const elbows = await h.page.locator('.observation-tree-elbow').evaluateAll(elements => elements.map(element => {
+      const bounds = element.getBoundingClientRect(), content = element.closest('.observation-tree-presentation').querySelector('.observation-tree-row-content').getBoundingClientRect()
+      return {width: bounds.width, left: bounds.left, right: bounds.right, contentLeft: content.left}
+    }))
+    assert.ok(elbows.length > 0 && elbows.every(value => value.width > 0 && value.right <= value.contentLeft + 1), 'Connectors stay in the common responsive gutter: ' + JSON.stringify(elbows))
+    const requests = h.receipts.length; await paint(h.page); await paint(h.page)
+    assert.equal(h.receipts.length, requests, 'Decoration creates no reads')
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+    const overflow = await h.page.evaluate(() => {const host = document.getElementById('main-content-scroll'); return {document: document.documentElement.scrollWidth, width: innerWidth, host: host.scrollWidth, client: host.clientWidth, offenders: [...host.querySelectorAll('*')].filter(element => element.getBoundingClientRect().right > innerWidth + 1).slice(0, 8).map(element => ({class: element.className, right: element.getBoundingClientRect().right, text: element.textContent.slice(0, 60)}))}})
+    assert.ok(overflow.document <= overflow.width + 1 && overflow.host <= overflow.client + 1, JSON.stringify(overflow))
+    if (process.env.HMEM_TREE_SCREENSHOT_DIR) {
+      await mkdir(process.env.HMEM_TREE_SCREENSHOT_DIR, {recursive: true})
+      await h.page.screenshot({path: join(process.env.HMEM_TREE_SCREENSHOT_DIR, (width === 1440 ? 'desktop.png' : 'narrow.png'))})
+    }
+  } finally {await h.close()}
+})
+
+
+test('connector virtual gaps clip parent-owned rails across roots and preserve unknown paginated siblings with distant pins', {timeout: 60000}, async () => {
+  const h = await openDiscovery(undefined, values => ['alpha', 'beta'].flatMap(prefix => Array.from({length: 450}, (_, i) => ({...values[0], id: prefix + '-' + i,
+    subject_kind: 'file', subject: prefix + '/child-' + String(i).padStart(3, '0'), subjects: [file(prefix + '/child-' + String(i).padStart(3, '0'))]}))).concat([{...values[0], id: 'unrelated', subjects: [file('az')], subject_kind: 'file', subject: 'az'}]))
+  let release, waiting
+  try {
+    await h.start(); await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle()
+    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
+      const url = new URL(route.request().url())
+      if (url.searchParams.get('prefix') !== 'alpha' || url.searchParams.get('offset') !== '200' || waiting) return route.fallback()
+      waiting = true; await new Promise(resolve => {release = resolve}); await route.fallback()
+    })
+    await toggle(h, 'alpha')
+    await h.bounded((async () => {while (!release) await h.page.waitForTimeout(20)})(), 5000, 'Unknown second branch page held')
+    await revealObservationRow(h.page, pathRow(h, 'alpha/child-199').locator('.observation-tree-copy'))
+    const last = pathRow(h, 'alpha/child-199').locator('..').locator('..')
+    assert.equal(await last.getAttribute('data-tree-following'), 'unknown')
+    assert.equal(await last.locator('.tree-rail-following').evaluate(element => getComputedStyle(element).borderLeftStyle), 'dashed')
+    release(); release = null; await h.idle()
+    await revealObservationRow(h.page, pathRow(h, 'alpha/child-449').locator('.observation-tree-copy'))
+    const end = pathRow(h, 'alpha/child-449').locator('..').locator('..')
+    assert.equal(await end.getAttribute('data-tree-following'), 'end')
+    assert.equal(await end.locator('.tree-rail-following').count(), 0)
+    await toggle(h, 'beta')
+    await revealObservationRow(h.page, pathRow(h, 'alpha')); await pathRow(h, 'alpha').focus(); await paint(h.page)
+    // An actual scroll keeps the distant native focus pin while moving the ordinary window.
+    await h.page.locator('#main-content-scroll').hover(); await h.page.mouse.wheel(0, 52000); await paint(h.page)
+    await h.bounded((async () => {while (!(await h.page.locator('.observation-viewport-spacer').evaluateAll(elements => elements.some(element => element.querySelector('[data-tree-owner="tree-path:alpha"]') && element.querySelector('[data-tree-owner="tree-path:beta"]'))))) {await h.page.mouse.wheel(0, -1500); await paint(h.page)}})(), 10000, 'Gap spanning distinct parent owners')
+    const gap = h.page.locator('.observation-viewport-spacer').filter({has: h.page.locator('[data-tree-owner="tree-path:alpha"]')}).filter({has: h.page.locator('[data-tree-owner="tree-path:beta"]')}).first()
+    const rails = await gap.locator('.tree-rail-gap').evaluateAll(elements => elements.map(element => ({owner: element.dataset.treeOwner, top: parseFloat(element.style.top), height: parseFloat(element.style.height)})))
+    const alpha = rails.find(value => value.owner === 'tree-path:alpha'), beta = rails.find(value => value.owner === 'tree-path:beta')
+    assert.ok(alpha && beta && alpha.top + alpha.height < beta.top, 'No line joins through the unrelated root or beta parent card: ' + JSON.stringify(rails))
+    assert.ok(await pathRow(h, 'alpha').count() > 0, 'Distant native focus remains pinned')
+    assert.equal(await pathRow(h, 'beta').count(), 0, 'Parent may stay offscreen while its rail remains truthful')
+    assert.ok(await h.page.locator('.observation-tree-presentation[data-tree-parent="tree-path:beta"] .tree-rail-incoming').count() > 0)
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+    assert.ok(await h.page.locator('.tree-rail-gap').count() <= 6, 'Omitted middle trees do not create decorative DOM')
+    assert.ok(await h.page.locator('.tree-rail-gap').evaluateAll(elements => elements.every(element => element.closest('[aria-hidden="true"]') && getComputedStyle(element).pointerEvents === 'none' && !element.hasAttribute('tabindex'))))
+    assert.deepEqual(h.errors, [])
+  } finally {release?.(); await h.close()}
 })

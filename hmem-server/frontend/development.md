@@ -93,6 +93,12 @@ feedback, and an unavailable state with Retry when a read fails. Canonical plann
 changes and resynchronization refresh the totals through one coalesced physical
 request; workspace, session and audience changes retire old responses.
 
+Subject Tree path cards use decorative parent and sibling connectors derived from
+the logical preorder. Incomplete sibling lists keep a dashed continuation.
+Connector intervals stop within their owning tree across viewport gaps; deep
+indentation compresses with the same gutter as the lines. Accessible depth and
+canonical path copying retain the full hierarchy.
+
 Subject Tree ordinary branch and terminal reads pause while its tab is hidden.
 In-flight replies retain their slots until their exact callbacks; returning resumes
 incomplete expanded paths without discarding cached state. Explicit selection

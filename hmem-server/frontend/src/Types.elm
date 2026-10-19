@@ -636,6 +636,23 @@ type ObservationResultRow
     | ObservationTreePathRow Api.ObservationSubjectTreeNode
     | ObservationTreeTerminalRow Api.ObservationSubject
     | ObservationTreePageRow String (Maybe Api.SubjectKind)
+    | ObservationTreeRow ObservationTreeTopology ObservationResultRow
+
+
+type TreeContinuation
+    = TreeNext
+    | TreeUnknown
+    | TreeEnd
+
+
+type alias ObservationTreeRail =
+    { owner : String, tail : String, depth : Int, unknown : Bool }
+
+
+type alias ObservationTreeTopology =
+    { depth : Int, levels : Int, root : String, following : TreeContinuation
+    , parent : Maybe ObservationTreeRail, ancestors : List ObservationTreeRail, children : Maybe ObservationTreeRail
+    }
 
 
 type alias ObservationReturnIntent =

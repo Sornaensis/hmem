@@ -4415,6 +4415,7 @@ observationProjectionTests =
             loaded = { initial | items = observations |> List.map (\value -> ( value.id, value )) |> Dict.fromList, orderedIds = ids }
             cardIds state = Feature.Observation.projectResultRows state |> Array.toList |> List.filterMap (\row -> case row of
                 ObservationCardRow _ value -> Just value.id
+                ObservationTreeRow _ (ObservationCardRow _ value) -> Just value.id
                 _ -> Nothing)
         in
         Expect.equal [ ids, ids ] [ cardIds loaded, cardIds { loaded | requestMode = ObservationExactSubjectMode, tree = treeWithItems observations } ]

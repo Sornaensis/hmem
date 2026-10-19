@@ -3859,30 +3859,75 @@ resultRowKey row =
         ObservationFacetRow facet -> "observation-facet-" ++ domToken (facetKey facet.subjectKind facet.subject)
         ObservationPathRow path _ -> "observation-path-" ++ domToken path
         ObservationSubjectRow _ key _ _ _ _ -> "observation-group-" ++ domToken key
+        ObservationTreeRow _ content -> resultRowKey content
         ObservationTreePathRow node -> treePathKey node.path
         ObservationTreeTerminalRow subject -> "tree-terminal:" ++ ObservationTree.terminalKey subject
         ObservationTreePageRow path kind -> "tree-page:" ++ (kind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault "branch") ++ ":" ++ path
 
 
+type TreePresentation
+    = TreePresentation ObservationResultRow (List TreePresentation)
+
+
+rowContent : ObservationResultRow -> ObservationResultRow
+rowContent row =
+    case row of
+        ObservationTreeRow _ content -> content
+        _ -> row
+
+
+{-| Topology is built with the logical preorder, before the viewport chooses
+rows or pins. Rails belong to a parent and end at its own last loaded child or
+continuation row, so a virtual gap cannot join unrelated root trees.
+-}
 treeResultRows : ObservationModel -> List ObservationResultRow
 treeResultRows state =
-    let tree = state.tree
-        pageRow prefix kind pending = if pending then [ObservationTreePageRow prefix kind] else []
+    let
+        tree = state.tree
+        pageRow prefix kind pending = if pending then [TreePresentation (ObservationTreePageRow prefix kind) []] else []
         branchRows prefix =
             let branch = Dict.get prefix tree.branches
                 paths = branch |> Maybe.map .paths |> Maybe.withDefault []
                 pending = branch |> Maybe.map (\value -> value.request /= Nothing || value.error /= Nothing || value.hasMore) |> Maybe.withDefault True
-            in List.concatMap nodeRows paths ++ pageRow prefix Nothing pending
+            in List.filterMap nodeRows paths ++ pageRow prefix Nothing pending
         terminalRows terminal =
             let subject = {subjectKind = terminal.subjectKind, subject = terminal.subject}
                 loaded = Dict.get (ObservationTree.terminalKey subject) tree.terminals
                 items = loaded |> Maybe.map .items |> Maybe.withDefault []
                 pending = loaded |> Maybe.map (\value -> value.request /= Nothing || value.error /= Nothing || value.hasMore) |> Maybe.withDefault True
-            in ObservationTreeTerminalRow subject :: (List.map (\item -> ObservationCardRow (treeCardContext subject) (Dict.get item.id state.items |> Maybe.withDefault item)) items ++ pageRow subject.subject (Just subject.subjectKind) pending)
+            in TreePresentation (ObservationTreeTerminalRow subject)
+                (List.map (\item -> TreePresentation (ObservationCardRow (treeCardContext subject) (Dict.get item.id state.items |> Maybe.withDefault item)) []) items ++ pageRow subject.subject (Just subject.subjectKind) pending)
         nodeRows path = Dict.get path tree.nodes |> Maybe.map (\node ->
-            ObservationTreePathRow node :: (if Set.member path tree.expanded then
-                List.concatMap terminalRows node.terminals ++ (if node.hasChildren then branchRows path else []) else [])) |> Maybe.withDefault []
-    in branchRows ""
+            TreePresentation (ObservationTreePathRow node) (if Set.member path tree.expanded then
+                List.map terminalRows node.terminals ++ (if node.hasChildren then branchRows path else []) else []))
+        key (TreePresentation row _) = resultRowKey row
+        unknown (TreePresentation row _) = case row of
+            ObservationTreePageRow _ _ -> True
+            _ -> False
+        forest depth root parent rails entries =
+            let walk remaining = case remaining of
+                    [] -> []
+                    entry :: rest ->
+                        let following = case rest of
+                                next :: _ -> if unknown next then TreeUnknown else TreeNext
+                                [] -> if unknown entry then TreeUnknown else TreeEnd
+                        in flatten depth root parent rails following entry ++ walk rest
+            in walk entries
+        flatten depth root parent rails following (TreePresentation row children) =
+            let
+                owner = resultRowKey row
+                rootKey = if depth == 0 then owner else root
+                childRail = children |> List.reverse |> List.head |> Maybe.map (\tail -> {owner = owner, tail = key tail, depth = depth + 1, unknown = unknown tail})
+                inherited = rails ++ (if depth > 0 && following /= TreeEnd then parent |> Maybe.map List.singleton |> Maybe.withDefault [] else [])
+                topology = {depth = depth, levels = 1, root = rootKey, following = following, parent = parent, ancestors = rails, children = childRail}
+            in ObservationTreeRow topology row :: forest (depth + 1) rootKey childRail inherited children
+        projected = forest 0 "" Nothing [] (branchRows "")
+        levels = projected |> List.filterMap (\row -> case row of
+            ObservationTreeRow topology _ -> Just topology.depth
+            _ -> Nothing) |> List.maximum |> Maybe.withDefault 1 |> Basics.max 1
+    in List.map (\row -> case row of
+        ObservationTreeRow topology content -> ObservationTreeRow {topology | levels = levels} content
+        _ -> row) projected
 
 
 projectResultRows : ObservationModel -> Array.Array ObservationResultRow
@@ -4175,7 +4220,7 @@ timestampSources state =
         rowSources piece =
             case piece of
                 HierarchyViewport.Row at _ _ ->
-                    case Array.get at rows of
+                    case Array.get at rows |> Maybe.map rowContent of
                         Just (ObservationCardRow context observation) ->
                             if owner == Just (observationCardDomId context observation.id) then []
                             else [ observation.updatedAt, (revisionDisplay observation).recordedAt ]
@@ -4201,7 +4246,7 @@ viewResultRows display canEdit state =
         piece item =
             case item of
                 HierarchyViewport.Gap at height ->
-                    ( "gap:" ++ String.fromInt at, div [ class "observation-viewport-spacer", style "height" (String.fromFloat height ++ "px"), attribute "aria-hidden" "true" ] [] )
+                    ( "gap:" ++ String.fromInt at, div [ class "observation-viewport-spacer", style "height" (String.fromFloat height ++ "px"), attribute "aria-hidden" "true" ] (viewTreeGap rows viewport at height) )
                 HierarchyViewport.Row at key _ ->
                     ( key, Array.get at rows |> Maybe.map (\row ->
                         div [ class "observation-viewport-row", attribute "data-observation-key" key, attribute "data-observation-position" (String.fromInt at) ]
@@ -4220,9 +4265,76 @@ viewResultRows display canEdit state =
         (ObservationViewport.piecesWithOwner owner state.detailReturnTarget viewport |> List.map piece)
 
 
+continuationLabel : TreeContinuation -> String
+continuationLabel continuation =
+    case continuation of
+        TreeNext -> "next"
+        TreeUnknown -> "unknown"
+        TreeEnd -> "end"
+
+
+treeRail : String -> ObservationTreeRail -> List ( String, String ) -> List (Html.Attribute Msg) -> Html Msg
+treeRail kind rail styles extra =
+    span ([ class ("observation-tree-rail " ++ kind)
+        , attribute "style" (("--tree-rail-depth", String.fromInt rail.depth) :: styles |> List.map (\(key, value) -> key ++ ":" ++ value) |> String.join ";")
+        , attribute "data-tree-owner" rail.owner
+        , attribute "data-tree-rail-tail" rail.tail
+        , attribute "data-tree-rail-state" (if rail.unknown then "unknown" else "complete") ] ++ extra) []
+
+
+viewTreePresentation : ObservationTreeTopology -> Html Msg -> Html Msg
+viewTreePresentation topology content =
+    let
+        parent = topology.parent |> Maybe.map (\rail ->
+            [ treeRail "tree-rail-incoming" rail [] []
+            , span [class "observation-tree-elbow", attribute "style" ("--tree-rail-depth:" ++ String.fromInt rail.depth)] [] ]
+                ++ (if topology.following == TreeEnd then [] else [treeRail "tree-rail-following" rail [] [attribute "data-tree-following" (continuationLabel topology.following)]])) |> Maybe.withDefault []
+        rails = List.map (\rail -> treeRail "tree-rail-ancestor" rail [] []) topology.ancestors
+            ++ parent ++ (topology.children |> Maybe.map (\rail -> [treeRail "tree-rail-child" rail [] []]) |> Maybe.withDefault [])
+    in
+    div [class "observation-tree-presentation", attribute "style" ("--tree-depth:" ++ String.fromInt topology.depth ++ ";--tree-levels:" ++ String.fromInt topology.levels)
+        , attribute "data-tree-depth" (String.fromInt topology.depth), attribute "data-tree-root" topology.root
+        , attribute "data-tree-parent" (topology.parent |> Maybe.map .owner |> Maybe.withDefault "")
+        , attribute "data-tree-following" (continuationLabel topology.following) ]
+        [ div [class "observation-tree-connectors", attribute "aria-hidden" "true"] rails
+        , div [class "observation-tree-row-content"] [content] ]
+
+
+{-| Only rails at the two gap boundaries can meet a mounted window or pin.
+Clip each parent-owned interval against the existing spacer geometry; omitted
+middle trees add no DOM and cannot create a line through unrelated roots.
+-}
+viewTreeGap : Array.Array ObservationResultRow -> ObservationViewport.State -> Int -> Float -> List (Html Msg)
+viewTreeGap rows viewport at height =
+    let
+        top = HierarchyViewport.offset at viewport.index
+        end = Basics.min (Array.length rows - 1) (HierarchyViewport.positionAt (top + height - 0.001) viewport.index)
+        topology position = Array.get position rows |> Maybe.andThen (\row -> case row of
+            ObservationTreeRow value _ -> Just value
+            _ -> Nothing)
+        boundaries = List.filterMap topology [at, end]
+        candidates = boundaries |> List.concatMap (\value -> value.ancestors ++ List.filterMap identity [value.parent, value.children])
+            |> List.foldl (\rail found -> Dict.insert rail.owner rail found) Dict.empty |> Dict.values
+        levels = boundaries |> List.head |> Maybe.map .levels |> Maybe.withDefault 1
+        rowTop key = Dict.get key viewport.index.positions |> Maybe.map (\position -> HierarchyViewport.offset position viewport.index)
+        rowHeight key = Dict.get key viewport.index.positions |> Maybe.map (\position -> HierarchyViewport.offset (position + 1) viewport.index - HierarchyViewport.offset position viewport.index)
+        segment rail =
+            case (rowTop rail.owner, rowTop rail.tail) of
+                (Just start, Just tail) ->
+                    let
+                        from = Basics.max top (start + Maybe.withDefault 0 (rowHeight rail.owner))
+                        to = Basics.min (top + height) (tail + (Maybe.withDefault 0 (rowHeight rail.tail) * (if rail.unknown then 1 else 0.5)))
+                    in if to <= from then Nothing else Just (treeRail "tree-rail-gap" rail
+                        [("top", String.fromFloat (from - top) ++ "px"), ("height", String.fromFloat (to - from) ++ "px"), ("--tree-levels", String.fromInt levels)] [])
+                _ -> Nothing
+    in List.filterMap segment candidates
+
+
 viewResultRow : TimestampDisplay.State -> Bool -> Maybe String -> ObservationModel -> ObservationResultRow -> Html Msg
 viewResultRow display canEdit owner state row =
     case row of
+        ObservationTreeRow topology content ->
+            viewTreePresentation topology (viewResultRow display canEdit owner state content)
         ObservationCardRow context observation ->
             if String.startsWith "tree-terminal:" context then
                 div [class "observation-tree-observation", treeIndent (List.length (String.split "/" context))]
@@ -4278,7 +4390,6 @@ viewTreeNode state node =
         [ button [class "tree-toggle observation-tree-chevron", type_ "button", tabindex -1, onClick (ToggleObservationTreePath node.path)
             , attribute "aria-label" ((if expanded then "Collapse " else "Expand ") ++ node.path)] [text (if expanded then "▼" else "▶")]
         , span [class "observation-tree-label", onClick (SelectObservationTreePath node.path)] [text node.segment]
-        , if List.length (String.split "/" node.path) > 3 then span [class "observation-tree-depth"] [text ("Level " ++ String.fromInt (List.length (String.split "/" node.path)))] else text ""
         , if List.any (\symbol -> String.contains symbol node.segment) ["*", "?", "["] then span [class "observation-tree-pattern"] [text "Literal pattern"] else text ""
         , span [class "observation-loaded-count"] [text (String.fromInt node.observationCount ++ (if node.observationCount == 1 then " observation" else " observations"))]
         , Helpers.copyableValue "observation-tree-copy" "canonical subject path" node.path node.path ]
@@ -4905,11 +5016,11 @@ resolveSelectedOwner rows viewport state =
             case state.detailReturnTarget of
                 Just origin ->
                     Dict.get origin viewport.index.positions |> Maybe.andThen (\position ->
-                        Array.get position rows |> Maybe.andThen (\row -> case row of
+                        Array.get position rows |> Maybe.andThen (\row -> case rowContent row of
                             ObservationCardRow _ observation -> if observation.id == selected then Just origin else Nothing
                             _ -> Nothing))
                 Nothing ->
-                    Array.toList rows |> List.filterMap (\row -> case row of
+                    Array.toList rows |> List.filterMap (\row -> case rowContent row of
                         ObservationCardRow context observation -> if observation.id == selected then Just (observationCardDomId context observation.id) else Nothing
                         _ -> Nothing) |> List.head
 

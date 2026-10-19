@@ -199,7 +199,7 @@ startupFingerprint model =
     let
         root = model.dataLoading.rootNavigationRequest
         counts = model.dataLoading.planningCounts
-        observation = model.observations.counts
+        observation = model.observations.workspaceCounts
         stream = model.selectedWorkspaceId |> Maybe.andThen (\id -> Dict.get ("workspace:" ++ id) model.webSocket.streams)
     in
     Encode.encode 0 (Encode.list Encode.string
@@ -219,7 +219,7 @@ startupSettled model =
         loading = model.dataLoading
         state = loading.startupAdmission
         counts = loading.planningCounts
-        observation = model.observations.counts
+        observation = model.observations.workspaceCounts
         parked = StartupAdmission.remaining state == 0
         needsObservations = model.selectedWorkspaceId |> Maybe.andThen (\id -> Dict.get id model.workspaces) |> Maybe.map (\workspace -> workspace.workspaceType == Api.Repository) |> Maybe.withDefault True
         headers = counts.active == Nothing && observation.active == Nothing

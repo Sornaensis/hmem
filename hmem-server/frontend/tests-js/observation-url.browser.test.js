@@ -112,7 +112,9 @@ test('a restored incomplete SHA is local until cleared and does not issue a fail
   const h = await openDiscovery()
   try {
     await navigate(h, tuple('flat', '', null, '', 'abc'))
-    assert.equal(h.receipts.length, 0)
+    assert.equal(resultReceipts(h).length, 0)
+    assert.ok(h.receipts.length > 0 && h.receipts.every(value => value.endpoint.endsWith('/count') && Object.keys(value.payload).join() === 'workspace_id'), 'Only the independent unfiltered header read may proceed')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
     assert.match(await applied(h.page), /Enter a full lowercase 40-character Git SHA/)
     await h.page.locator('#observation-advanced-toggle').click()
     await h.page.locator('#observation-git-sha').fill(''); await ready(h)

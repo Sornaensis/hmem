@@ -120,12 +120,12 @@ tests =
                 base = ready
                 workspace = Dict.get "workspace-1" base.workspaces |> Maybe.map (\value -> { value | workspaceType = Api.Repository })
                 requested = { base | workspaces = workspace |> Maybe.map (Dict.singleton "workspace-1") |> Maybe.withDefault Dict.empty } |> sync
-                old = requested.observations.counts.active |> Maybe.withDefault { workspaceId = "missing", sessionEpoch = -1, actor = "", token = -1, generation = -1, fingerprint = "" }
+                old = requested.observations.workspaceCounts.active |> Maybe.withDefault { workspaceId = "missing", sessionEpoch = -1, actor = "", token = -1, generation = -1, fingerprint = "" }
                 switched = { requested | sessionRequestEpoch = requested.sessionRequestEpoch + 1 } |> sync
-                released = Main.update (GotObservationCounts old (Ok { workspaceId = "workspace-1", totalCount = 99, matchCount = 99 })) switched |> Tuple.first
+                released = Main.update (GotWorkspaceObservationCounts old (Ok { workspaceId = "workspace-1", totalCount = 99, matchCount = 99 })) switched |> Tuple.first
             in
             Expect.equal ( Nothing, Nothing, True )
-                ( switched.observations.counts.active, released.observations.counts.value, released.observations.counts.active /= Nothing )
+                ( switched.observations.workspaceCounts.active, released.observations.workspaceCounts.value, released.observations.workspaceCounts.active /= Nothing )
         , test "actual session retirement retains physical count debt until exact stale callback" <| \_ ->
             let
                 requested = Loading.syncPlanningCounts ready |> Tuple.first
@@ -150,7 +150,7 @@ countOnlyProgress tab =
         resumed = sync pending
     in
     Expect.equal ( ( False, True ), ( 6, 0, HeaderOnly ) )
-        ( ( resumed.dataLoading.planningCounts.current || resumed.observations.counts.current, resumed.dataLoading.planningCounts.active /= Nothing && resumed.observations.counts.active /= Nothing ), ( resumed.dataLoading.startupAdmission.spent, resumed.dataLoading.backgroundAdmission.remaining, resumed.dataLoading.startupAdmission.phase ) )
+        ( ( resumed.dataLoading.planningCounts.current || resumed.observations.workspaceCounts.current, resumed.dataLoading.planningCounts.active /= Nothing && resumed.observations.workspaceCounts.active /= Nothing ), ( resumed.dataLoading.startupAdmission.spent, resumed.dataLoading.backgroundAdmission.remaining, resumed.dataLoading.startupAdmission.phase ) )
 
 
 exhaustedRepository : WorkspaceTab -> Model
@@ -160,19 +160,19 @@ exhaustedRepository tab =
         workspace = Dict.get "workspace-1" base.workspaces |> Maybe.map (\value -> { value | workspaceType = Api.Repository })
         requested = { base | workspaces = workspace |> Maybe.map (Dict.singleton "workspace-1") |> Maybe.withDefault Dict.empty } |> sync
         planning = Main.update (GotWorkspacePlanningCounts (planningGuard requested) (Ok { openProjects = 1, openTasks = 2 })) requested |> Tuple.first
-        guard = planning.observations.counts.active |> Maybe.withDefault { workspaceId = "missing", sessionEpoch = -1, actor = "", token = -1, generation = -1, fingerprint = "" }
-        accepted = Main.update (GotObservationCounts guard (Ok { workspaceId = "workspace-1", totalCount = 60, matchCount = 60 })) planning |> Tuple.first
+        guard = planning.observations.workspaceCounts.active |> Maybe.withDefault { workspaceId = "missing", sessionEpoch = -1, actor = "", token = -1, generation = -1, fingerprint = "" }
+        accepted = Main.update (GotWorkspaceObservationCounts guard (Ok { workspaceId = "workspace-1", totalCount = 60, matchCount = 60 })) planning |> Tuple.first
         loading = accepted.dataLoading
         counts = loading.planningCounts
         admission = loading.startupAdmission
         observations = accepted.observations
-        observationCounts = observations.counts
+        observationCounts = observations.workspaceCounts
         root = loading.rootNavigationRequest |> Maybe.map (\request -> { request | inFlight = False, projectCardCount = 1, succeeded = True })
         socket = accepted.webSocket
     in
     { accepted | activeTab = tab
         , dataLoading = { loading | rootNavigationRequest = root, planningCounts = { counts | current = False, pending = True, active = Nothing }, startupAdmission = { admission | spent = 6, physical = Set.empty } }
-        , observations = { observations | counts = { observationCounts | current = False, pending = True, active = Nothing } }
+        , observations = { observations | workspaceCounts = { observationCounts | current = False, pending = True, active = Nothing } }
         , webSocket = { socket | streams = Dict.singleton "workspace:workspace-1" liveStream }
     }
 

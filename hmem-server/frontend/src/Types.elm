@@ -509,6 +509,7 @@ type alias ObservationDeleteState =
 
 type alias ObservationModel =
     { items : Dict String Api.Observation
+    , workspaceCounts : ObservationCountState
     , counts : ObservationCountState
     , resultRows : Array ObservationResultRow
     , viewport : ObservationViewport.State
@@ -1396,6 +1397,8 @@ type Msg
     | ApplyObservationFilters
     | RevertObservationFilters
     | RefreshObservationResults
+    | GotWorkspaceObservationCounts ObservationCountGuard (Result Http.Error Api.ObservationCounts)
+    | RetryWorkspaceObservationCounts
     | GotObservationCounts ObservationCountGuard (Result Http.Error Api.ObservationCounts)
     | RetryObservationCounts
     | RetryObservationResults

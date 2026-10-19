@@ -104,6 +104,7 @@ import Url
 init : ObservationModel
 init =
     { items = Dict.empty
+    , workspaceCounts = emptyCounts
     , counts = emptyCounts
     , resultRows = Array.empty
     , viewport = ObservationViewport.init
@@ -525,23 +526,57 @@ countActor model =
 
 invalidateCounts : ObservationModel -> ObservationModel
 invalidateCounts state =
-    let counts = state.counts in
-    { state | counts = { counts | generation = counts.generation + 1, pending = True, current = False, error = Nothing } }
+    let
+        invalidate counts = { counts | generation = counts.generation + 1, pending = True, current = False, error = Nothing }
+    in
+    { state | counts = invalidate state.counts, workspaceCounts = invalidate state.workspaceCounts }
 
 
 syncCounts : Model -> ( Model, Cmd Msg )
 syncCounts model =
-    let counts = model.observations.counts in
+    let
+        ( workspace, workspaceCommand ) = syncCount True model
+        ( scoped, scopedCommand ) = syncCount False workspace
+    in
+    ( scoped, Cmd.batch [ workspaceCommand, scopedCommand ] )
+
+
+countState : Bool -> ObservationModel -> ObservationCountState
+countState workspace state =
+    if workspace then state.workspaceCounts else state.counts
+
+
+setCountState : Bool -> ObservationCountState -> ObservationModel -> ObservationModel
+setCountState workspace counts state =
+    if workspace then { state | workspaceCounts = counts } else { state | counts = counts }
+
+
+countRequest : Bool -> String -> ObservationModel -> Api.ObservationCountQuery
+countRequest workspace workspaceId state =
+    if workspace then countQuery workspaceId init else countQuery workspaceId state
+
+
+countRequestFingerprint : Bool -> String -> ObservationModel -> String
+countRequestFingerprint workspace workspaceId state =
+    if workspace then "workspace:" ++ workspaceId else countFingerprint workspaceId state
+
+
+syncCount : Bool -> Model -> ( Model, Cmd Msg )
+syncCount workspace model =
+    let
+        counts = countState workspace model.observations
+        updateCounts next = updateObservation (setCountState workspace next) model
+    in
     if model.auth.status /= AuthReady || model.sessionContext == Nothing || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing then
-        ( updateObservation (\state -> { state | counts = { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 } }) model, Cmd.none )
-    else if treeMode model.observations.requestMode || model.observations.filterDebounce /= Nothing || filterValidationError model.observations /= Nothing || (model.observations.requestMode == ObservationMatchMode && List.isEmpty model.observations.matchAppliedPaths) then
+        ( updateCounts { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 }, Cmd.none )
+    else if not workspace && (treeMode model.observations.requestMode || model.observations.filterDebounce /= Nothing || filterValidationError model.observations /= Nothing || (model.observations.requestMode == ObservationMatchMode && List.isEmpty model.observations.matchAppliedPaths)) then
         ( model, Cmd.none )
     else
         case repositoryWorkspaceId model of
-            Nothing -> ( updateObservation (\state -> { state | counts = { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 } }) model, Cmd.none )
+            Nothing -> ( updateCounts { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 }, Cmd.none )
             Just workspaceId ->
                 let
-                    fingerprint = countFingerprint workspaceId model.observations
+                    fingerprint = countRequestFingerprint workspace workspaceId model.observations
                     owner = { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, actor = countActor model, token = 0, generation = 0, fingerprint = "" }
                     previousOwner = counts.owner
                     changedOwner = previousOwner /= Just owner
@@ -560,31 +595,31 @@ syncCounts model =
                         admission = StartupAdmission.reconcile
                             (if model.workspaceAdmin.authorizationPending == Nothing then Just { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, audience = countActor model } else Nothing)
                             loading.startupAdmission
-                        occupied = Set.toList admission.physical |> List.any (String.startsWith "observation|")
+                        occupied = Set.toList admission.physical |> List.any (String.startsWith (if workspace then "observation-workspace|" else "observation|"))
                     in
-                    case if occupied then Nothing else StartupAdmission.admit (countPhysicalKey guard) admission of
+                    case if occupied then Nothing else StartupAdmission.admit (countPhysicalKey workspace guard) admission of
                         Just admitted ->
-                            let next = updateObservation (\state -> { state | counts = started }) model in
-                            ( { next | dataLoading = { loading | startupAdmission = admitted } }, Api.fetchScopedObservationCounts (model.observations.requestMode == ObservationFlatMode) model.flags.apiUrl (countQuery workspaceId model.observations) (GotObservationCounts guard) )
+                            let next = updateCounts started in
+                            ( { next | dataLoading = { loading | startupAdmission = admitted } }, Api.fetchScopedObservationCounts (not workspace && model.observations.requestMode == ObservationFlatMode) model.flags.apiUrl (countRequest workspace workspaceId model.observations) ((if workspace then GotWorkspaceObservationCounts else GotObservationCounts) guard) )
                         Nothing ->
-                            let next = updateObservation (\state -> { state | counts = queued }) model in
+                            let next = updateCounts queued in
                             ( { next | dataLoading = { loading | startupAdmission = admission } }, Cmd.none )
                 else
-                    ( updateObservation (\state -> { state | counts = queued }) model, Cmd.none )
+                    ( updateCounts queued, Cmd.none )
 
 
-acceptCounts : ObservationCountGuard -> Result Http.Error Api.ObservationCounts -> Model -> ( Model, Cmd Msg )
-acceptCounts guard result source =
+acceptCounts : Bool -> ObservationCountGuard -> Result Http.Error Api.ObservationCounts -> Model -> ( Model, Cmd Msg )
+acceptCounts workspace guard result source =
     let
         loading = source.dataLoading
-        model = { source | dataLoading = { loading | startupAdmission = StartupAdmission.complete (countPhysicalKey guard) loading.startupAdmission } }
-        counts = model.observations.counts
+        model = { source | dataLoading = { loading | startupAdmission = StartupAdmission.complete (countPhysicalKey workspace guard) loading.startupAdmission } }
+        counts = countState workspace model.observations
     in
     if counts.active /= Just guard then ( model, Cmd.none )
     else
         let
             owned = guard.workspaceId == Maybe.withDefault "" (repositoryWorkspaceId model) && guard.sessionEpoch == model.sessionRequestEpoch && guard.actor == countActor model && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model && model.workspaceAdmin.authorizationPending == Nothing
-            current = owned && guard.generation == counts.generation && guard.fingerprint == countFingerprint guard.workspaceId model.observations && not counts.pending && model.observations.filterDebounce == Nothing && filterValidationError model.observations == Nothing
+            current = owned && guard.generation == counts.generation && guard.fingerprint == countRequestFingerprint workspace guard.workspaceId model.observations && not counts.pending && (workspace || (model.observations.filterDebounce == Nothing && filterValidationError model.observations == Nothing))
             completed = { counts | active = Nothing, settledFingerprint = guard.fingerprint }
             settled = if not current then { completed | pending = owned, error = Nothing }
                 else case result of
@@ -592,12 +627,12 @@ acceptCounts guard result source =
                         else { completed | current = False, error = Just "Observation counts returned the wrong workspace." }
                     Err _ -> { completed | current = False, error = Just "Unable to load Observation counts." }
         in
-        syncCounts (updateObservation (\state -> { state | counts = settled }) model)
+        syncCounts (updateObservation (setCountState workspace settled) model)
 
 
-countPhysicalKey : ObservationCountGuard -> String
-countPhysicalKey guard =
-    "observation|" ++ Encode.encode 0 (Encode.list Encode.string [ guard.workspaceId, String.fromInt guard.sessionEpoch, guard.actor, String.fromInt guard.token, String.fromInt guard.generation, guard.fingerprint ])
+countPhysicalKey : Bool -> ObservationCountGuard -> String
+countPhysicalKey workspace guard =
+    (if workspace then "observation-workspace|" else "observation|") ++ Encode.encode 0 (Encode.list Encode.string [ guard.workspaceId, String.fromInt guard.sessionEpoch, guard.actor, String.fromInt guard.token, String.fromInt guard.generation, guard.fingerprint ])
 
 
 {-| Read permission may be revoked and regranted within the same session epoch.
@@ -606,7 +641,8 @@ Retire private state while keeping request/navigation identities monotonic.
 retireSessionState : ObservationModel -> ObservationModel
 retireSessionState previous =
     { init
-        | counts = let counts = previous.counts in { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 }
+        | workspaceCounts = let counts = previous.workspaceCounts in { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 }
+        , counts = let counts = previous.counts in { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 }
         , requestGeneration = previous.requestGeneration + 1
         , facetRequestGeneration = previous.facetRequestGeneration + 1
         , nextDetailRequestToken = previous.nextDetailRequestToken
@@ -753,8 +789,11 @@ update msg model =
 updateRaw : Msg -> Model -> ( Model, Cmd Msg )
 updateRaw msg model =
     case msg of
+        GotWorkspaceObservationCounts guard result ->
+            acceptCounts True guard result model
+
         GotObservationCounts guard result ->
-            acceptCounts guard result model
+            acceptCounts False guard result model
 
         GotObservationTree request result ->
             let state = model.observations
@@ -802,6 +841,10 @@ updateRaw msg model =
                     let subject = {subjectKind = value, subject = prefix}
                         offset = Dict.get (ObservationTree.terminalKey subject) state.tree.terminals |> Maybe.map (\terminal -> if terminal.lifetime == state.tree.lifetime then terminal.nextOffset else 0) |> Maybe.withDefault 0
                     in loadTreeTerminal subject offset model
+
+        RetryWorkspaceObservationCounts ->
+            let counts = model.observations.workspaceCounts in
+            syncCounts (updateObservation (setCountState True { counts | error = Nothing, pending = True }) model)
 
         RetryObservationCounts ->
             syncCounts (updateObservation (\state -> let counts = state.counts in { state | counts = { counts | error = Nothing, pending = True } }) model)
@@ -3311,6 +3354,7 @@ applyCanonicalObservationWithProof conditionalProof candidate state =
         , edit = edit
         , matchEvidence = matchEvidence
         , resultsStale = resultsStale
+        , workspaceCounts = (if existing /= Just accepted then invalidateCounts state else state).workspaceCounts
         , counts = (if existing /= Just accepted then invalidateCounts state else state).counts
         , refreshPending = state.refreshPending || (existing /= Just accepted)
         , refreshPass = if existing /= Just accepted then Maybe.map (\pass -> { pass | invalidated = True }) state.refreshPass else state.refreshPass
@@ -3454,7 +3498,8 @@ removeObservation observationId state =
             confirmation.observationId == observationId
     in
     { state
-        | counts = (if isLoadedOrSelected observationId state then invalidateCounts state else state).counts
+        | workspaceCounts = (if isLoadedOrSelected observationId state then invalidateCounts state else state).workspaceCounts
+        , counts = (if isLoadedOrSelected observationId state then invalidateCounts state else state).counts
         , items = Dict.remove observationId state.items
         , expandedSubjects = Dict.remove observationId state.expandedSubjects
         , preferenceValue = let prefs = state.preferenceValue in { prefs | detail = if Maybe.map .id prefs.detail == Just observationId then Nothing else prefs.detail, subjects = List.filter ((/=) observationId) prefs.subjects }

@@ -487,11 +487,11 @@ suite =
                 loading = rooted.dataLoading
                 counts = loading.planningCounts
                 observations = rooted.observations
-                observationCounts = observations.counts
+                observationCounts = observations.workspaceCounts
                 socket = rooted.webSocket
                 stream = ChangeStream.init (ChangeStream.Workspace workspaceId) []
                 settled = { rooted | dataLoading = { loading | planningCounts = { counts | current = True, pending = False, active = Nothing } }
-                    , observations = { observations | counts = { observationCounts | current = True, pending = False, active = Nothing } }
+                    , observations = { observations | workspaceCounts = { observationCounts | current = True, pending = False, active = Nothing } }
                     , webSocket = { socket | streams = Dict.singleton ("workspace:" ++ workspaceId) { stream | live = True } } }
                 hydrated = case settled.dataLoading.activeNavigationFocus of
                     Nothing -> settled
@@ -638,13 +638,13 @@ suite =
                 startup = loading.startupAdmission
                 counts = loading.planningCounts
                 observations = seed.observations
-                observationCounts = observations.counts
+                observationCounts = observations.workspaceCounts
                 socket = seed.webSocket
                 stream = ChangeStream.init (ChangeStream.Workspace workspaceId) []
                 source = { seed | focus = Focus.init (Just ( "task", parent.id ))
                     , dataLoading = { loading | startupAdmission = { startup | phase = StartupAdmission.HeaderOnly, physical = Set.empty }
                         , planningCounts = { counts | current = True, active = Nothing, pending = False } }
-                    , observations = { observations | counts = { observationCounts | current = True, active = Nothing, pending = False } }
+                    , observations = { observations | workspaceCounts = { observationCounts | current = True, active = Nothing, pending = False } }
                     , webSocket = { socket | streams = Dict.singleton ("workspace:" ++ workspaceId) { stream | live = True } } }
                 queued = DataLoading.beginNavigationBranch "task" workspaceId (Just parent.id) source |> Tuple.first
                 admitted = painted queued

@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 import { paint } from './observation-viewport-fixture.mjs'
-import { fixtureObservationCounts } from './hierarchy-fixture.mjs'
+import { fixtureObservationCounts, hierarchyFixture } from './hierarchy-fixture.mjs'
 
 const counts = h => h.receipts.filter(value => value.endpoint.endsWith('/count'))
 async function capture(h, name) {
@@ -98,7 +98,11 @@ test('production inactive workspace totals coalesce stale replies, count unloade
     assert.equal(await h.page.locator('#observation-panel').count(), 0)
     const requests = []; let held = true, fail = false, sequence = 0
     await h.page.route('**/api/v1/observations/count**', async route => {
-      const query = route.request().postDataJSON(); requests.push(query)
+      const query = route.request().postDataJSON()
+      if (new URL(route.request().url()).searchParams.has('query_scope')) {
+        await route.fulfill({ status: 200, json: fixtureObservationCounts(h.fixture, query) }); return
+      }
+      requests.push(query)
       const body = fixtureObservationCounts(h.fixture, query)
       if (held) { held = false; await new Promise(resolve => { release = resolve }); body.total_count = 999; body.match_count = 999 }
       if (fail) { fail = false; await route.fulfill({ status: 503, body: '{}' }); return }
@@ -109,7 +113,7 @@ test('production inactive workspace totals coalesce stale replies, count unloade
         occurred_at: '2026-10-07T00:00:00Z', transaction: { id: 'count-tx-' + sequence, cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
         entity: { type: 'observation', id, action }, invalidations: [{ kind: 'collection', target: 'observations:' + h.fixture.workspace.id }] }
     })
-    await push(); await h.bounded((async () => { while (!release) await h.page.waitForTimeout(20) })(), 5000, 'Held inactive count request')
+    await push(); await h.bounded((async () => { while (!release) await h.page.waitForTimeout(20) })(), 5000, 'Held inactive count request'); await paint(h.page)
     assert.match((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), /Updating Observation total/)
     await push(); await push(); await paint(h.page); assert.equal(requests.length, 1)
     release(); release = null; await h.idle()
@@ -138,6 +142,9 @@ test('production held count success cannot survive live read revocation and a fr
     })
     await h.page.route('**/api/v1/observations/count**', async route => {
       const body = fixtureObservationCounts(h.fixture, route.request().postDataJSON())
+      if (new URL(route.request().url()).searchParams.has('query_scope')) {
+        await route.fulfill({ status: 200, json: body }); return
+      }
       if (hold) { hold = false; await new Promise(resolve => { release = resolve }); body.total_count = 999; body.match_count = 999 }
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     })
@@ -152,4 +159,110 @@ test('production held count success cannot survive live read revocation and a fr
     canRead = true; await h.page.reload(); await h.page.locator('#observation-panel').waitFor(); await h.idle()
     assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '64 observations')
   } finally { release?.(); await h.close() }
+})
+
+
+for (const phase of ['Initial', 'HeaderOnly']) test(`production ${phase}: held workspace and stale browse counts settle after Tree entry and release bounded project demand`, { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  const hierarchy = hierarchyFixture()
+  h.fixture.projects = hierarchy.projects
+  h.fixture.tasks = hierarchy.tasks
+  const releases = []
+  const requests = []
+  let hold = phase === 'Initial'
+  try {
+    await h.page.route('**/api/v1/observations/count**', async route => {
+      const query = route.request().postDataJSON()
+      const scoped = new URL(route.request().url()).searchParams.has('query_scope')
+      const receipt = { query, scoped, done: false }
+      requests.push(receipt)
+      const body = fixtureObservationCounts(h.fixture, query)
+      if (hold) {
+        await new Promise(resolve => releases.push(resolve))
+        if (scoped) { body.total_count = 999; body.match_count = 999 }
+      }
+      await route.fulfill({ status: 200, json: body })
+      receipt.done = true
+    })
+    await h.start()
+    if (phase === 'HeaderOnly') {
+      assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
+      hold = true
+      await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'change', event: {
+        schema_version: 1, event_id: 'held-header-refresh', scope: 'workspace', workspace_id: workspace,
+        occurred_at: '2026-10-19T00:00:00Z', transaction: { id: 'held-header-tx', cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
+        entity: { type: 'observation', id: 'unloaded-observation', action: 'created' }, invalidations: [{ kind: 'collection', target: 'observations:' + workspace }]
+      } }]), h.fixture.workspace.id)
+    }
+    await h.bounded((async () => { while (releases.length < 2) await h.page.waitForTimeout(20) })(), 5000, 'Both independent count lifetimes held')
+    const heldCount = requests.length
+    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click()
+    await h.bounded((async () => { while (!h.receipts.some(value => value.endpoint.endsWith('/subject-tree') && value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Tree root completed while counts held')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), phase === 'Initial' ? /Loading Observation total/ : /Updating Observation total/)
+    await h.page.getByRole('button', { name: 'Projects', exact: true }).click()
+    await h.page.locator('#entity-root-project').waitFor({ timeout: 5000 })
+    await paint(h.page)
+    assert.equal(requests.length, heldCount, 'Mode changes neither retire nor replace the occupied workspace read')
+    if (phase === 'Initial') assert.ok(requests.length + h.requests.filter(value => value.path.endsWith('/planning-counts') || (value.kind && value.parent) || /\/api\/v1\/(projects|tasks)\/[^/]+$/.test(value.path)).length <= 6, 'Initial headers and ordinary owners share six startup credits')
+    hold = false
+    for (const release of releases.splice(0)) release()
+    await h.idle()
+    await h.bounded((async () => { while (requests.some(value => !value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Exact count callbacks complete')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
+    await h.bounded((async () => { while (!h.requests.some(value => value.parent === 'root-project' && value.kind === 'project' && value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Project branch progresses after header settlement')
+    assert.ok(h.requests.some(value => /\/api\/v1\/(projects|tasks)\/[^/]+$/.test(value.path) && value.done), 'Visible project/task details progress')
+    assert.ok(h.caps().maxBranches <= 4 && h.caps().maxDetails <= 6)
+    assert.ok(await h.page.locator('[data-hierarchy-key]').count() <= 28)
+    assert.ok(requests.filter(value => !value.scoped).length <= (phase === 'Initial' ? 2 : 3), 'At most one coalesced canonical invalidation follows the held workspace read')
+    assert.deepEqual(h.errors, [])
+  } finally { for (const release of releases) release(); await h.close() }
+})
+
+
+test('production direct Tree selection keeps workspace total independent of subject search and inactive live changes', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    const query = ['tree', 'src', null, '', '', null, null, [], '', '']
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=cache-main')
+    await h.page.locator('#observation-panel').waitFor(); await h.idle()
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
+    assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.ok(h.receipts.some(value => value.endpoint.endsWith('/subject-tree') && value.params.subject_query === 'src'))
+    assert.ok(counts(h).every(value => Object.keys(value.payload).join() === 'workspace_id'), 'Header query excludes every Tree/selection filter')
+    const before = counts(h).length
+    await h.page.locator('#observation-query').fill('docs'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
+    assert.equal(counts(h).length, before, 'Subject search does not recount the workspace')
+    await h.page.getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
+    h.fixture.observations.push({ ...h.fixture.observations[0], id: 'new-unloaded', subjects: [{ subject_kind: 'file', subject: 'other/Unloaded.elm' }] })
+    await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'change', event: {
+      schema_version: 1, event_id: 'tree-inactive-create', scope: 'workspace', workspace_id: workspace,
+      occurred_at: '2026-10-19T00:00:00Z', transaction: { id: 'tree-inactive-tx', cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
+      entity: { type: 'observation', id: 'new-unloaded', action: 'created' }, invalidations: [{ kind: 'collection', target: 'observations:' + workspace }]
+    } }]), h.fixture.workspace.id)
+    await h.idle()
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /65 observations/)
+    for (const action of ['updated', 'deleted']) {
+      const reads = counts(h).length
+      if (action === 'deleted') h.fixture.observations = h.fixture.observations.filter(value => value.id !== 'new-unloaded')
+      await h.page.evaluate(({ workspace, action }) => window.pushHierarchyFrames([{ schema_version: 1, type: 'change', event: {
+        schema_version: 1, event_id: 'tree-inactive-' + action, scope: 'workspace', workspace_id: workspace,
+        occurred_at: '2026-10-19T00:00:00Z', transaction: { id: 'tree-inactive-' + action + '-tx', cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
+        entity: { type: 'observation', id: 'new-unloaded', action }, invalidations: [{ kind: 'collection', target: 'observations:' + workspace }]
+      } }]), { workspace: h.fixture.workspace.id, action })
+      await h.idle()
+      assert.ok(counts(h).length > reads, action + ' refreshes the independent total')
+      assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), action === 'deleted' ? /64 observations/ : /65 observations/)
+    }
+    h.fixture.observations = h.fixture.observations.filter(value => value.id !== 'other-js')
+    const beforeResync = counts(h).length
+    await h.page.evaluate(() => window.pushHierarchyFrames([{ schema_version: 1, type: 'resync_required' }]))
+    await h.idle()
+    assert.ok(counts(h).length > beforeResync, 'Canonical resync refreshes total with Tree filtered and inactive')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /63 observations/)
+    assert.equal(await h.page.locator('#observation-panel').count(), 0)
+    await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.idle()
+    assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'docs')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /63 observations/)
+  } finally { await h.close() }
 })

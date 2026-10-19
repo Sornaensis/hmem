@@ -677,6 +677,55 @@ suite = describe "automatic observation refresh and scoped preferences"
         let value total matched = "{\"workspace_id\":\"" ++ workspaceId ++ "\",\"total_count\":" ++ total ++ ",\"match_count\":" ++ matched ++ "}" in
         Expect.equal [ True, False, False, False, False ] (List.map (\json -> D.decodeString Api.observationCountsDecoder json |> Result.toMaybe |> (/=) Nothing)
             [ value "0" "0", value "-1" "0", value "2.5" "1", value "9007199254740992" "0", value "1" "2" ])
+    , test "workspace total accepts its initial read through Tree entry and survives filters and mode switches" <| \_ ->
+        let
+            initial = O.syncCounts model |> Tuple.first
+            guard = initial.observations.workspaceCounts.active |> Maybe.withDefault emptyCountGuard
+            tree = O.update (SetObservationBrowseMode ObservationFacetMode) initial |> Tuple.first
+            filtered = O.update (SetObservationQuery "needle") tree |> Tuple.first
+            accepted = O.update (GotWorkspaceObservationCounts guard (Ok { workspaceId = workspaceId, totalCount = 300, matchCount = 300 })) filtered |> Tuple.first
+            files = O.update (SetObservationBrowseMode ObservationMatchMode) accepted |> Tuple.first
+        in
+        Expect.equal ( ( Just guard, False ), ( True, Just 300 ), ( True, Just 300 ) )
+            ( ( tree.observations.workspaceCounts.active, tree.observations.workspaceCounts.pending )
+            , ( accepted.observations.workspaceCounts.current, Maybe.map .totalCount accepted.observations.workspaceCounts.value )
+            , ( files.observations.workspaceCounts.current, Maybe.map .totalCount files.observations.workspaceCounts.value ) )
+    , test "Tree inactive workspace invalidations coalesce, reject a foreign result and retry with a fresh token" <| \_ ->
+        let
+            observations = model.observations
+            initial = O.syncCounts { model | activeTab = ProjectsTab, observations = { observations | requestMode = ObservationFacetMode } } |> Tuple.first
+            guard = initial.observations.workspaceCounts.active |> Maybe.withDefault emptyCountGuard
+            invalidated = { initial | observations = O.invalidateCounts (O.invalidateCounts initial.observations) } |> O.syncCounts |> Tuple.first
+            successor = O.update (GotWorkspaceObservationCounts guard (Ok { workspaceId = workspaceId, totalCount = 99, matchCount = 99 })) invalidated |> Tuple.first
+            next = successor.observations.workspaceCounts.active |> Maybe.withDefault emptyCountGuard
+            foreign = O.update (GotWorkspaceObservationCounts next (Ok { workspaceId = "foreign", totalCount = 100, matchCount = 100 })) successor |> Tuple.first
+            retry = O.update RetryWorkspaceObservationCounts foreign |> Tuple.first
+        in
+        Expect.equal ( ( Nothing, guard.token + 1 ), ( Nothing, True ), Just (next.token + 1) )
+            ( ( successor.observations.workspaceCounts.value, next.token )
+            , ( foreign.observations.workspaceCounts.value, foreign.observations.workspaceCounts.error /= Nothing )
+            , Maybe.map .token retry.observations.workspaceCounts.active )
+    , test "workspace total cannot revive private values across workspace actor session or read authority changes" <| \_ ->
+        let
+            started = O.syncCounts model |> Tuple.first
+            guard = started.observations.workspaceCounts.active |> Maybe.withDefault emptyCountGuard
+            reply current = O.update (GotWorkspaceObservationCounts guard (Ok { workspaceId = workspaceId, totalCount = 100, matchCount = 100 })) current |> Tuple.first |> O.syncCounts |> Tuple.first
+            session = model.sessionContext |> Maybe.withDefault { authMode = "local", effectiveActor = Nothing, principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }, workspace = Nothing }
+            principal = session.principal
+            retired = O.syncCounts { started | auth = { status = AuthBooting, mode = Just "local" } } |> Tuple.first
+            regranted = { retired | auth = model.auth } |> O.syncCounts |> Tuple.first
+            cases =
+                [ { started | selectedWorkspaceId = Just "other" }
+                , { started | sessionRequestEpoch = model.sessionRequestEpoch + 1 }
+                , { started | sessionContext = Just { session | principal = { principal | actorId = "other" } } }
+                , { started | sessionContext = Just { session | workspace = Just { workspaceId = workspaceId, role = Just "read", canRead = False, canEdit = False, canAdmin = False } } }
+                , regranted ] |> List.map reply
+        in
+        Expect.all
+            [ \_ -> Expect.equal (List.repeat 5 Nothing) (List.map (\current -> current.observations.workspaceCounts.value) cases)
+            , \_ -> Expect.equal Nothing regranted.observations.workspaceCounts.active
+            , \_ -> Expect.equal True ((List.reverse cases |> List.head |> Maybe.andThen (\current -> current.observations.workspaceCounts.active) |> Maybe.map .token |> Maybe.withDefault 0) > guard.token)
+            ] ()
     , test "draft filters do not request counts and applied filters preserve total while held" <| \_ ->
         let
             started = O.syncCounts model |> Tuple.first

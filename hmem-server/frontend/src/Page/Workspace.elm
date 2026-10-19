@@ -64,13 +64,13 @@ viewReadableWorkspacePage wsId model ws =
             , div [ class "workspace-summary" ]
                 [ viewPlanningSummary model summaryParts
                 , if ws.workspaceType == Api.Repository then
-                    let counts = model.observations.counts in
+                    let counts = model.observations.workspaceCounts in
                     span [ class "workspace-observation-total", attribute "aria-live" "polite" ]
                         [ text ((if List.isEmpty summaryParts then "" else " · ") ++
                             (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations") |> Maybe.withDefault "Observation total unavailable"
                              else if counts.error /= Nothing then "Observation total unavailable"
                              else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
-                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]
+                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
                   else text "" ]
             , div [ class "workspace-details" ]
                 [ div [ class "workspace-detail" ]
@@ -213,13 +213,13 @@ viewStickyWorkspaceBar model ws summaryParts =
             , span [ class "sticky-workspace-summary" ]
                 [ viewPlanningSummary model summaryParts
                 , if ws.workspaceType == Api.Repository then
-                    let counts = model.observations.counts in
+                    let counts = model.observations.workspaceCounts in
                     span [ class "workspace-observation-total" ]
                         [ text ((if List.isEmpty summaryParts then "" else " · ") ++
                             (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations") |> Maybe.withDefault "Observation total unavailable"
                              else if counts.error /= Nothing then "Observation total unavailable"
                              else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
-                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]
+                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
                   else text "" ]
             ]
         ]

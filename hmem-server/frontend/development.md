@@ -93,6 +93,12 @@ feedback, and an unavailable state with Retry when a read fails. Canonical plann
 changes and resynchronization refresh the totals through one coalesced physical
 request; workspace, session and audience changes retire old responses.
 
+Repository workspace Observation totals have their own authority, invalidation and
+physical request identity. They load and refresh on every tab, including Subject
+Tree, independently of browse filters and match/tree totals. Mode changes preserve
+a settled total; canonical Observation changes and resynchronization refresh it.
+Project startup settlement uses this independent header read.
+
 Startup count reads and the first ordinary navigation wave share six admission
 credits under the current workspace, session and audience. Completed or retired
 requests do not refund those credits. A settled canonical stream, root and header

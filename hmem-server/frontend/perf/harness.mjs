@@ -686,6 +686,30 @@ export function workspaceReadinessSnapshot(anchorId) {
     active: active ? { id: active.id.slice(0, 128), tag: active.tagName } : null }
 }
 
+export function scrollProjectsRoot(workspaceId) {
+  const host = document.getElementById('main-content-scroll'), viewport = document.getElementById('hierarchy-viewport')
+  const tab = document.querySelector('.tabs button.active')
+  let context
+  try { context = JSON.parse(viewport?.getAttribute('data-hierarchy-context') || 'null') } catch { context = null }
+  // Each measurement owns a new browser context and its first authorized session.
+  if (!host || !viewport || tab?.textContent !== 'Projects' || location.pathname !== '/workspace/' + workspaceId
+    || new URLSearchParams(location.hash.slice(1)).get('tab') !== 'projects'
+    || context?.workspace !== workspaceId || context.epoch !== 1 || context.paintReady !== true
+    || !Number.isSafeInteger(context.generation) || context.generation < 0 || !Number.isSafeInteger(context.revision) || context.revision < 0) {
+    throw new Error('Projects return requires the current authorized Projects viewport and native scroll host')
+  }
+  const before = host.scrollTop
+  host.scrollTop = 0
+  return { method: 'native scroll host to root after measured click and two paints', before, after: host.scrollTop,
+    workspace: context.workspace, epoch: context.epoch, generation: context.generation, revision: context.revision }
+}
+
+export async function measureProjectsTabReturn(page, workspaceId) {
+  const ms = await requiredDoubleFrame(page, '.tabs button:nth-child(1)')
+  const setup = await page.evaluate(scrollProjectsRoot, workspaceId)
+  return { ms, setup }
+}
+
 async function waitForWorkspaceReady(page, tracker, fixture, anchorId, label) {
   const expectedSnapshotItems = workspaceShellSnapshotItems(fixture).length
   const expectedPages = Math.ceil(expectedSnapshotItems / DIRECT_FOCUS_CONTRACT.pageSize)
@@ -1945,9 +1969,9 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
 
   const projectsTabBefore = requestSnapshot(tracker)
   stage('Projects tab restore')
-  const returnProjectsMs = await requiredDoubleFrame(page, '.tabs button:nth-child(1)')
+  const returnProjects = await measureProjectsTabReturn(page, fixture.workspace.id)
   await waitForWorkspaceReady(page, tracker, fixture, anchors.first, 'Projects tab representative restore')
-  interactions.projectsTabMs = { ms: returnProjectsMs, ...requestDelta(tracker, projectsTabBefore) }
+  interactions.projectsTabMs = { ms: returnProjects.ms, restoreSetup: returnProjects.setup, ...requestDelta(tracker, projectsTabBefore) }
   tabSwitches.projects = interactions.projectsTabMs
   stage('direct focus')
   const directFocus = await measureDirectFocus(browser, origin, fixture)

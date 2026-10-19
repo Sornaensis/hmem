@@ -5,9 +5,9 @@ import fs from 'node:fs'
 import vm from 'node:vm'
 import { SUBJECT_TREE_LIVE_FILTERS_BASE as BASE, SUBJECT_TREE_LIVE_FILTERS_TASK as TASK, SUBJECT_TREE_LIVE_FILTERS_PROJECT as PROJECT, SUBJECT_TREE_LIVE_FILTERS_REVISION as REVISION,
   FOCUSED_FILTERING_BASE, FOCUSED_FILTERING_TASK, evidenceProfile, evidenceOwnerFields, assertEvidenceIdentity, assertEvidenceWrite, isolatedRecordOutputs, prepareEvidenceScratch, createEvidenceOperations, checkQualification } from './evidence-profile.mjs'
-import { SUBJECT_TREE_LIVE_FILTERS_CONTRACT, HARNESS_CONFIGURATION, assertObservationContentScopeUrl, observationPageReceipt, assertObservationPageReceipt, classifyLiveObservationHydration } from './contracts.mjs'
+import { SUBJECT_TREE_LIVE_FILTERS_CONTRACT, HARNESS_CONFIGURATION, assertObservationContentScopeUrl, observationPageReceipt, assertObservationPageReceipt, classifyLiveObservationHydration, representativeReadiness } from './contracts.mjs'
 import { generateFixture, fixtureHash, queryObservations, queryObservationCounts } from './fixtures.mjs'
-import { createTracker, fixtureResponder, observationResetProof, requiredLiveInputDoubleFrame, workspaceReadinessSnapshot } from './harness.mjs'
+import { createTracker, fixtureResponder, observationResetProof, requiredLiveInputDoubleFrame, workspaceReadinessSnapshot, scrollProjectsRoot, measureProjectsTabReturn } from './harness.mjs'
 
 const frontend = path.resolve('fixture-root/hmem-server/frontend'), temporary = path.resolve('outside-temporary')
 const plan = () => evidenceProfile(BASE, frontend, temporary)
@@ -37,6 +37,35 @@ test('workspace failure telemetry distinguishes offscreen anchor, current contex
   assert.equal(snapshot.tabs[0].text, 'Projects'); assert.equal(snapshot.filters[0].value, 'active')
   assert.equal(snapshot.focused, false); assert.equal(snapshot.loading.length, 0)
   assert.equal(host.scrollTop, 800); assert.equal(document.activeElement.id, 'current-control')
+})
+
+test('Projects return scrolls the native current root only after the unchanged click and two-paint measurement', async () => {
+  const events = []; let now = 0, top = 4500
+  const context = { workspace: 'current', epoch: 1, generation: 36, revision: 73, paintReady: true }
+  const host = { get scrollTop() { return top }, set scrollTop(value) { events.push('scroll'); top = value } }
+  const button = { click() { events.push('click') } }
+  const document = { getElementById: id => id === 'main-content-scroll' ? host : { getAttribute: () => JSON.stringify(context) },
+    querySelector: selector => selector === '.tabs button.active' ? { textContent: 'Projects' } : button }
+  const location = { pathname: '/workspace/current', hash: '#tab=projects&ov=1' }
+  const sandbox = { document, location, URLSearchParams, performance: { now: () => now }, requestAnimationFrame: callback => { events.push('paint'); now += 10; callback() } }
+  const page = { evaluate: (action, arg) => vm.runInNewContext('(' + action.toString() + ')(arg)', { ...sandbox, arg }) }
+  const result = await measureProjectsTabReturn(page, 'current')
+  assert.deepEqual(events, ['click', 'paint', 'paint', 'scroll'])
+  assert.equal(result.ms, 20); assert.equal(result.setup.before, 4500); assert.equal(result.setup.after, 0)
+  const good = { modelComplete: true, activeRequests: 0, loading: false, focused: false, anchorVisible: true }
+  assert.equal(representativeReadiness(good), true)
+  for (const bad of [{ modelComplete: false }, { activeRequests: 1 }, { loading: true }, { focused: true }, { anchorVisible: false }]) assert.equal(representativeReadiness({ ...good, ...bad }), false)
+  for (const mutate of [() => { context.workspace = 'old' }, () => { context.epoch = 2 }, () => { context.paintReady = false }, () => { context.generation = -1 },
+    () => { location.hash = '#tab=observations' }, () => { location.pathname = '/workspace/old' },
+    () => { document.getElementById = () => null }, () => { document.querySelector = () => ({ textContent: 'Timeline' }) }]) {
+    Object.assign(context, { workspace: 'current', epoch: 1, generation: 36, revision: 73, paintReady: true })
+    location.pathname = '/workspace/current'; location.hash = '#tab=projects'
+    document.getElementById = id => id === 'main-content-scroll' ? host : { getAttribute: () => JSON.stringify(context) }
+    document.querySelector = () => ({ textContent: 'Projects' })
+    top = 4500; mutate()
+    assert.throws(() => vm.runInNewContext('(' + scrollProjectsRoot.toString() + ')("current")', sandbox), /current authorized/)
+    assert.equal(top, 4500)
+  }
 })
 
 test('Subject Tree qualification has its exact isolated owner, five bounded artifacts and strict source/trace retirement', () => {

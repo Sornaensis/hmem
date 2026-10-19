@@ -47,7 +47,12 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     }
     assert.equal(await h.page.locator('.observation-summary').first().textContent().then(value => value.endsWith('…')), true)
     assert.equal(await h.page.evaluate(() => !!window.previewUnsafe), false)
-    assert.equal(await h.page.locator('.observation-sha').first().textContent(), 'Creation revision: ' + h.sha.slice(0, 12) + '… · 2026-01-01 00:00 · Local User')
+    const revision = h.page.locator('.observation-sha').first()
+    assert.equal(await revision.locator(':scope > span').first().textContent(), 'Creation revision:')
+    assert.equal(await revision.locator('.copyable-value').textContent(), h.sha.slice(0, 12) + '…')
+    assert.equal(await revision.locator('.observation-history-time').textContent(), '2026-01-01 00:00')
+    assert.equal(await revision.locator('.actor-attribution-kind').textContent(), 'User')
+    assert.equal(await revision.locator('.actor-attribution-label').textContent(), 'Local User')
     assert.match(await h.page.locator('.observation-updated').first().textContent(), /2026-10-06 12:35/)
     const originalStamp = await h.page.locator('#observation-panel').getAttribute('data-observation-context'), before = h.receipts.length
     await h.page.locator('.observation-sha .copyable-value').first().click()

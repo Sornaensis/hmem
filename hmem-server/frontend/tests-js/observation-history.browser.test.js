@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
-import { paint } from './observation-viewport-fixture.mjs'
+import { paint, revealObservationRow } from './observation-viewport-fixture.mjs'
 import { hierarchyFixture } from './hierarchy-fixture.mjs'
 
 const originalSha = '0123456789abcdef0123456789abcdef01234567'
@@ -17,7 +17,19 @@ const transform = values => values.slice(0, 2).map((value, index) => ({ ...value
   created_at: '2020-02-03T04:05:59+02:00', current_provenance: index ? { ...provenance(53), content_digest: createHash('sha256').update(value.content).digest('hex') } : null }))
 const rows = h => h.page.locator('.observation-history-entry')
 const card = (h, id = 'cache-main') => h.page.locator('.observation-result[data-observation-id=' + JSON.stringify(id) + ']').first()
-const stamp = value => value.replace('T', ' ').slice(0, 16)
+async function stamps(h, values) {
+  return h.page.evaluate(values => values.map(value => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      calendar: 'gregory', numberingSystem: 'latn', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+      .formatToParts(new Date(value)).map(({ type, value }) => [type, value]))
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`
+  }), values)
+}
+async function activate(h, id = 'cache-main') {
+  const toggle = card(h, id).locator('.observation-card')
+  await revealObservationRow(h.page, toggle)
+  await toggle.click(); await h.idle()
+}
 async function screenshot(h, name) {
   if (!process.env.HMEM_HISTORY_SCREENSHOT_DIR) return
   await mkdir(process.env.HMEM_HISTORY_SCREENSHOT_DIR, { recursive: true })
@@ -52,20 +64,25 @@ test('production compact history auto-pages once, retains repeated SHAs and sequ
       else await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     })
     await h.start()
-    assert.match(await card(h).innerText(), /Creation revision.*2020-02-03 04:05/)
-    assert.match(await card(h, 'cache-view').innerText(), /Current reviewed revision.*2021-03-04 05:17/)
+    const [created, reviewed] = await stamps(h, [h.fixture.observations[0].created_at, provenance(53).recorded_at])
+    assert.match(await card(h).innerText(), /Creation revision:/)
+    assert.equal(await card(h).locator('.observation-history-time').innerText(), created)
+    assert.match(await card(h, 'cache-view').innerText(), /Current reviewed revision:/)
+    assert.equal(await card(h, 'cache-view').locator('.observation-history-time').innerText(), reviewed)
+    assert.equal(await card(h, 'cache-view').locator('.actor-attribution-kind').innerText(), 'User')
+    assert.equal(await card(h, 'cache-view').locator('.actor-attribution-label').innerText(), 'Technical actor label')
     await card(h).locator('.observation-sha .copyable-value').click()
     await h.page.waitForFunction(() => window.historyCopies.length === 1)
     assert.equal(await h.page.evaluate(() => window.historyCopies[0]), originalSha)
     await screenshot(h, 'folded-revisions.png')
-    await card(h).locator('.observation-card').click(); await h.idle()
+    await activate(h)
     assert.equal(await h.page.locator('.observation-detail-sha').count(), 1)
     await h.page.locator('#observation-history-toggle').click()
     await h.page.waitForFunction(() => document.querySelectorAll('.observation-history-entry').length === 1)
     assert.equal(await rows(h).locator('.copyable-value').innerText(), originalSha)
-    assert.equal(await rows(h).locator('.observation-history-time').innerText(), '2020-02-03 04:05')
+    assert.equal(await rows(h).locator('.observation-history-time').innerText(), created)
     await screenshot(h, 'legacy-compact-history.png')
-    await card(h, 'cache-view').locator('.observation-card').click(); await h.idle()
+    await activate(h, 'cache-view')
     await h.page.locator('#observation-history-toggle').click()
     await history.waitFor(value => value.offset === 25)
     assert.equal(await rows(h).count(), 25)
@@ -86,14 +103,22 @@ test('production compact history auto-pages once, retains repeated SHAs and sequ
     assert.equal(await h.page.locator('.observation-history [role=status], .observation-history [role=alert]').count(), 0)
     const expected = Array.from({ length: 53 }, (_, index) => provenance(53 - index))
     assert.deepEqual(await rows(h).locator('.copyable-value').allTextContents(), expected.map(value => value.reviewed_git_sha))
-    assert.deepEqual(await rows(h).locator('.observation-history-time').allTextContents(), expected.map(value => stamp(value.sequence === 1 ? h.fixture.observations[1].created_at : value.recorded_at)))
-    assert.ok(!(await h.page.locator('.observation-history').innerText()).match(/head|assertion|actor|update|legacy_creation|version|digest/i))
+    assert.deepEqual(await rows(h).locator('.observation-history-time').allTextContents(), await stamps(h, expected.map(value => value.sequence === 1 ? h.fixture.observations[1].created_at : value.recorded_at)))
+    assert.deepEqual(await rows(h).locator('.actor-attribution-kind').allTextContents(), expected.map(() => 'User'))
+    assert.deepEqual(await rows(h).locator('.actor-attribution-label').allTextContents(), expected.map(value => value.sequence === 1 ? 'Local User' : value.actor_label))
+    assert.ok(!(await h.page.locator('.observation-history').innerText()).match(/\b(?:head \d+|assertion|event_kind|legacy_creation|content_version|content_digest|actor_type|actor_id)\b/i))
+    assert.equal(await h.page.locator('.observation-history input, .observation-history select, .observation-history textarea').count(), 0)
     await rows(h).first().locator('.copyable-value').focus(); await h.page.keyboard.press('Enter')
     await h.page.waitForFunction(() => window.historyCopies.length === 2)
     assert.equal(await h.page.evaluate(() => window.historyCopies[1]), expected[0].reviewed_git_sha)
     const current = h.page.locator('.observation-current-provenance')
-    assert.match(await current.innerText(), new RegExp(reviewedSha + '.*2021-03-04 05:17', 's'))
-    await current.locator('.observation-revision-value .copyable-value').click()
+    const currentRevision = current.locator(':scope > dd > .observation-revision-value')
+    const currentActor = current.locator(':scope > dd > .observation-actor')
+    assert.equal(await currentRevision.locator('.copyable-value').innerText(), reviewedSha)
+    assert.equal(await currentRevision.locator('.observation-history-time').innerText(), reviewed)
+    assert.equal(await currentActor.locator('.actor-attribution-kind').innerText(), 'User')
+    assert.equal(await currentActor.locator('.actor-attribution-label').innerText(), 'Technical actor label')
+    await currentRevision.locator('.copyable-value').click()
     await h.page.waitForFunction(() => window.historyCopies.length === 3)
     assert.equal(await h.page.evaluate(() => window.historyCopies[2]), reviewedSha)
     await screenshot(h, 'current-revision.png')
@@ -109,13 +134,13 @@ test('production delayed history cannot populate another observation and an open
       if (receipt.id === 'cache-view' && receipt.offset === 25 && history.receipts.filter(value => value.id === 'cache-view' && value.offset === 25).length === 1) await hold()
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     })
-    await h.start(); await card(h, 'cache-view').locator('.observation-card').click(); await h.idle()
+    await h.start(); await activate(h, 'cache-view')
     await h.page.locator('#observation-history-toggle').click(); await history.waitFor(value => value.offset === 25)
-    await card(h).locator('.observation-card').click(); await h.idle()
+    await activate(h)
     history.receipts.find(value => value.id === 'cache-view' && value.offset === 25).release()
     await history.waitFor(value => value.id === 'cache-view' && value.offset === 25 && value.done); await paint(h.page)
     assert.equal(await rows(h).count(), 0)
-    await card(h, 'cache-view').locator('.observation-card').click(); await h.idle()
+    await activate(h, 'cache-view')
     await h.page.locator('#observation-history-toggle').click()
     await h.page.waitForFunction(() => document.querySelectorAll('.observation-history-entry').length === 53)
     h.fixture.observations[1] = { ...h.fixture.observations[1], latest_sequence: 54, content_version: '30000000-0000-4000-8000-000000000000', current_provenance: { ...provenance(54), content_version: '30000000-0000-4000-8000-000000000000', content_digest: createHash('sha256').update(h.fixture.observations[1].content).digest('hex') } }
@@ -138,7 +163,7 @@ test('production completed old-workspace history cannot restore rows after a wor
       if (receipt.offset === 25) await hold()
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     })
-    await h.start(); await card(h, 'cache-view').locator('.observation-card').click(); await h.idle()
+    await h.start(); await activate(h, 'cache-view')
     await h.page.locator('#observation-history-toggle').click(); await history.waitFor(value => value.offset === 25)
     await h.page.locator('a.sidebar-link[href="/workspace/other-workspace"]').click({ timeout: 5000 })
     await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.idle()

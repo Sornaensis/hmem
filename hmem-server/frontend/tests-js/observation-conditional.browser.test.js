@@ -40,7 +40,7 @@ function pidAlive(pid) { try { process.kill(pid, 0); return true } catch (error)
 test('production read-only Elm converges after real conditional writers and delayed canonical notifications', { timeout: 600000 }, async () => {
   let harness, harnessClosed, buildProcess, buildClosed, browser, browserServer, context, writer, root, postgresPid, lifetime
   let primaryFailure
-  const coordinates = {}, received = [], held = [], errors = [], pagePuts = []
+  const coordinates = {}, received = [], held = [], errors = [], pagePuts = [], canonicalReads = [], historyPages = []
   let holding = false, heldBytes = 0
   try {
     const { stdout } = await promisify(execFile)('stack', ['path', '--local-install-root'], { cwd: repo, windowsHide: true, timeout: 30000 })
@@ -138,7 +138,16 @@ test('production read-only Elm converges after real conditional writers and dela
     }, { url: 'ws://127.0.0.1:' + port + '/api/v1/ws' })
     page.on('pageerror', error => errors.push(error.message))
     page.on('response', async response => {
-      if (response.request().method() === 'PUT' && new URL(response.url()).pathname === target) {
+      const url = new URL(response.url()), method = response.request().method()
+      if (method === 'GET' && url.pathname === target && response.status() === 200) {
+        canonicalReads.push(await response.json())
+        assert.ok(canonicalReads.length <= 256, 'Canonical read receipts stay bounded')
+      }
+      if (method === 'GET' && url.pathname === target + '/history' && response.status() === 200) {
+        historyPages.push({ offset: Number(url.searchParams.get('offset')), limit: Number(url.searchParams.get('limit')), body: await response.json() })
+        assert.ok(historyPages.length <= 64, 'History page receipts stay bounded')
+      }
+      if (method === 'PUT' && url.pathname === target) {
         pagePuts.push({ status: response.status(), headers: response.request().headers(), data: response.request().postDataJSON(), body: await response.json() })
       }
     })
@@ -236,20 +245,45 @@ test('production read-only Elm converges after real conditional writers and dela
       const repeated = await api(target, 'PUT', { content: historyHead.content, reviewed_git_sha: historyHead.current_provenance.reviewed_git_sha }, { 'If-Match': '"' + historyHead.content_version + '"' })
       assert.equal(repeated.status, 200); historyHead = repeated.body
     }
-    await until(async () => (await page.locator('.observation-history').innerText()).includes('head ' + historyHead.latest_sequence + '.'), 'Real current assertion head refresh')
-    await page.locator('#observation-history-load').click()
-    await until(async () => await page.locator('.observation-history-entry').count() === 25, 'Real bounded first revision page')
-    await page.locator('#observation-history-load').click()
-    await until(async () => await page.locator('.observation-history-entry').count() === historyHead.latest_sequence, 'Real bounded revision continuation')
+    await until(() => canonicalReads.some(value => value.content_version === historyHead.content_version && value.latest_sequence === historyHead.latest_sequence), 'Real current assertion head refresh')
+    const revision = page.locator('.observation-current-provenance > dd > .observation-revision-value')
+    const currentActor = page.locator('.observation-current-provenance > dd > .observation-actor')
+    const displayTimes = values => page.evaluate(values => values.map(value => {
+      const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        calendar: 'gregory', numberingSystem: 'latn', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+        .formatToParts(new Date(value)).map(({ type, value }) => [type, value]))
+      return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`
+    }), values)
+    const actorLabel = value => value.actor_label || value.actor_id || (value.actor_type === 'user' ? 'User' : 'Local User')
+    assert.equal(await revision.locator('.copyable-value').innerText(), historyHead.current_provenance.reviewed_git_sha)
+    assert.equal(await revision.locator('.observation-history-time').innerText(), (await displayTimes([historyHead.current_provenance.recorded_at]))[0])
+    assert.equal(historyHead.current_provenance.actor_type, 'user')
+    assert.equal(await currentActor.locator('.actor-attribution-kind').innerText(), 'User')
+    assert.equal(await currentActor.locator('.actor-attribution-label').innerText(), actorLabel(historyHead.current_provenance))
+    await page.locator('#observation-history-toggle').click()
+    await until(async () => await page.locator('.observation-history-entry').count() === historyHead.latest_sequence, 'Real automatic bounded revision continuation')
+    const assertHistory = async (head, pages) => {
+      assert.deepEqual(pages.map(value => [value.offset, value.limit, value.body.items.length, value.body.has_more]), [[0, 25, 25, true], [25, 25, head.latest_sequence - 25, false]])
+      const events = pages.flatMap(value => value.body.items)
+      assert.deepEqual(events.map(value => value.sequence), Array.from({ length: head.latest_sequence }, (_, index) => head.latest_sequence - index))
+      assert.equal(events[0].content_version, head.content_version)
+      assert.equal(events[0].reviewed_git_sha, head.current_provenance.reviewed_git_sha)
+      const rows = page.locator('.observation-history-entry')
+      assert.deepEqual(await rows.locator('.copyable-value').allTextContents(), events.map(value => value.reviewed_git_sha))
+      assert.deepEqual(await rows.locator('.observation-history-time').allTextContents(), await displayTimes(events.map(value => value.recorded_at)))
+      assert.deepEqual(await rows.locator('.actor-attribution-kind').allTextContents(), events.map(() => 'User'))
+      assert.deepEqual(await rows.locator('.actor-attribution-label').allTextContents(), events.map(actorLabel))
+      assert.equal(await page.locator('#observation-history-load').count(), 0, 'Successful history pages continue automatically')
+    }
+    await assertHistory(historyHead, historyPages)
+    const beforeAdvance = historyPages.length
     const historyAdvance = await api(target, 'PUT', { content: historyHead.content, reviewed_git_sha: historyHead.current_provenance.reviewed_git_sha }, { 'If-Match': '"' + historyHead.content_version + '"' })
     assert.equal(historyAdvance.status, 200)
-    await until(async () => await page.locator('.observation-history-entry').count() === 0, 'Live assertion head retires retained history')
-    await page.locator('#observation-history-load').click()
-    await until(async () => await page.locator('.observation-history-entry').count() === 25, 'History restarts at current head')
-    assert.ok((await page.locator('.observation-history').innerText()).includes('Content-bound update'))
+    await until(async () => await page.locator('.observation-history-entry').count() === historyAdvance.body.latest_sequence, 'Live assertion head restarts automatic history at current head')
+    await assertHistory(historyAdvance.body, historyPages.slice(beforeAdvance))
     assert.equal(await page.locator('.observation-detail-card h2, .observation-detail-card h3').count(), 0, 'Subject header owns expanded content')
     assert.equal(await page.locator('.observation-card-header .tree-toggle').count(), 1)
-    assert.ok(await page.locator('.observation-detail-sha .copyable-value').count())
+    assert.equal(await revision.locator('.copyable-value').innerText(), historyAdvance.body.current_provenance.reviewed_git_sha)
     assert.equal(await page.locator('#observation-edit, #observation-edit-content').count(), 0)
     assert.deepEqual(errors, [])
     console.log(JSON.stringify({ phase: 'real-conditional-writers-readonly-client', harnessHash, chromium: browser.version(), assetHashes, statuses: [competing.status, stale.status, rebased.status], versionAdvance: true, provenanceSHA256: digest(JSON.stringify(provenance(final.body))), heldFrames: actualHeld.length, heldBytes, heldDigest, canonicalReadConverged: true, rollback: false }))

@@ -3,6 +3,7 @@ import test from 'node:test'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { openDiscovery, subjectTreePage } from './observation-discovery-fixture.mjs'
+import { hierarchyFixture } from './hierarchy-fixture.mjs'
 import { paint, revealObservationRow } from './observation-viewport-fixture.mjs'
 
 const subject = (kind, path) => ({ subject_kind: kind, subject: path })
@@ -446,4 +447,106 @@ test('eighteen-segment paths keep path terminal card copy and continuation contr
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
     assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
   } finally {await h.close()}
+})
+
+
+test('hidden ordinary Tree branch and terminal callbacks drain four slots without admitting queued work while Projects progresses', {timeout: 60000}, async () => {
+  const h = await openDiscovery(undefined, values => {
+    const make = (id, path) => ({...values[0], id, subjects: [file(path)], subject_kind: 'file', subject: path})
+    return [...Array.from({length: 205}, (_, i) => make('terminal-' + i, 'a')),
+      ...['a', 'b', 'c', 'd'].flatMap(prefix => Array.from({length: 225}, (_, i) => make(prefix + '-' + i, prefix + '/child-' + String(i).padStart(3, '0'))))]
+  })
+  const hierarchy = hierarchyFixture()
+  h.fixture.projects = hierarchy.projects.slice(0, 3); h.fixture.tasks = hierarchy.tasks.slice(0, 3)
+  const requests = [], held = []
+  let holding = true, active = 0, maximum = 0
+  try {
+    await h.page.route('**/api/v1/observations**', async route => {
+      const url = new URL(route.request().url())
+      const branch = url.pathname.endsWith('/subject-tree')
+      const terminal = url.pathname === '/api/v1/observations' && url.searchParams.has('subject')
+      if (!branch && !terminal) return route.fallback()
+      const receipt = {prefix: url.searchParams.get(branch ? 'prefix' : 'subject'), kind: terminal ? url.searchParams.get('subject_kind') : null, offset: Number(url.searchParams.get('offset')), done: false}
+      requests.push(receipt); active++; maximum = Math.max(maximum, active)
+      if (holding && receipt.prefix) await new Promise(resolve => held.push({release: resolve, receipt}))
+      await route.fallback(); receipt.done = true; active--
+    })
+    await h.start(); await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle()
+    for (const path of ['a', 'b', 'c', 'd']) await toggle(h, path)
+    await h.bounded((async () => { while (held.length < 4) await h.page.waitForTimeout(20) })(), 5000, 'Four held Tree owners')
+    assert.equal(held.filter(value => value.receipt.kind).length, 1, 'A typed terminal shares the four physical slots')
+    await pathRow(h, 'd').locator('.observation-tree-label').click(); await paint(h.page)
+    await h.page.getByRole('button', {name: 'Projects', exact: true}).click(); await h.idle()
+    const hiddenAt = requests.length
+    for (const gate of held) {
+      gate.release()
+      await h.bounded((async () => { while (!gate.receipt.done) await h.page.waitForTimeout(20) })(), 5000, 'Exact hidden Tree callback')
+      await h.idle(); await paint(h.page)
+      assert.equal(requests.length, hiddenAt, 'A hidden completion must not replace its physical slot')
+    }
+    assert.equal(active, 0)
+    assert.ok(h.requests.some(value => value.parent === 'root-project' && value.done), 'Project branches progress with Tree hidden')
+    assert.ok(h.requests.some(value => /\/api\/v1\/(projects|tasks)\/[^/]+$/.test(value.path) && value.done), 'Planning detail work progresses')
+    assert.ok(h.caps().maxBranches <= 4 && h.caps().maxDetails <= 6)
+    holding = false
+    await h.page.getByRole('button', {name: 'Observations', exact: true}).click(); await h.idle()
+    await h.bounded((async () => { while (!requests.slice(hiddenAt).some(value => value.prefix === 'a' && value.kind === null && value.offset === 200 && value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Visible branch continuation resumes')
+    assert.ok(requests.slice(hiddenAt).some(value => value.prefix === 'd' && value.done), 'Previously queued expansion resumes')
+    await revealObservationRow(h.page, pathRow(h, 'd'))
+    assert.equal(await pathRow(h, 'd').getAttribute('aria-expanded'), 'true')
+    assert.equal(await pathRow(h, 'd').getAttribute('aria-selected'), 'true')
+    assert.ok(maximum <= 4)
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+  } finally { for (const gate of held) gate.release(); await h.close() }
+})
+
+
+test('hidden staged terminal refresh pauses continuation and retains scroll, selection and expansion until return', {timeout: 60000}, async () => {
+  const h = await openDiscovery(undefined, values => Array.from({length: 405}, (_, i) => ({...values[0], id: 'staged-' + i, subjects: [file('a')], subject_kind: 'file', subject: 'a'})))
+  let release, held = false
+  const requests = []
+  try {
+    await h.start(); await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle(); await toggle(h, 'a')
+    const more = h.page.getByRole('button', {name: 'Load more observations', exact: true})
+    await revealObservationRow(h.page, more); await more.click(); await h.idle()
+    assert.ok(h.receipts.some(value => value.params.subject === 'a' && value.params.offset === '200'))
+    await revealObservationRow(h.page, pathRow(h, 'a')); await pathRow(h, 'a').locator('.observation-tree-label').click()
+    await h.page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 600 }); await paint(h.page)
+    await h.page.route('**/api/v1/observations?**', async route => {
+      const url = new URL(route.request().url())
+      if (url.searchParams.get('subject') !== 'a') return route.fallback()
+      const receipt = {offset: Number(url.searchParams.get('offset')), done: false}; requests.push(receipt)
+      if (!held) { held = true; await new Promise(resolve => { release = resolve }) }
+      await route.fallback(); receipt.done = true
+    })
+    await h.page.evaluate(workspace => window.pushHierarchyFrames([{schema_version: 1, type: 'change', event: {
+      schema_version: 1, event_id: 'terminal-stage', scope: 'workspace', workspace_id: workspace, occurred_at: '2026-10-19T00:00:00Z',
+      transaction: {id: 'terminal-stage-tx', cause: 'rest', request_id: null}, actor: {type: 'system', id: null}, entity: {type: 'observation', id: 'unloaded', action: 'updated'},
+      invalidations: [{kind: 'collection', target: 'observations:' + workspace}]
+    }}]), h.fixture.workspace.id)
+    await h.bounded((async () => { while (!release) await h.page.waitForTimeout(20) })(), 5000, 'Staged terminal first page held')
+    const savedScroll = await h.page.locator('#main-content-scroll').evaluate(element => element.scrollTop)
+    const savedAnchor = await h.page.evaluate(() => {
+      const edge = document.getElementById('main-content-scroll').getBoundingClientRect().top + 12
+      const row = [...document.querySelectorAll('[data-observation-key]')].find(element => element.getBoundingClientRect().bottom > edge)
+      return {key: row.dataset.observationKey, offset: edge - row.getBoundingClientRect().top}
+    })
+    await h.page.getByRole('button', {name: 'Projects', exact: true}).click(); await h.idle()
+    release(); release = null; await h.idle(); await paint(h.page)
+    assert.deepEqual(requests.map(value => value.offset), [0], 'Hidden staged success does not fetch terminal page two')
+    const treeBefore = h.receipts.filter(value => value.endpoint.endsWith('/subject-tree')).length
+    await h.page.evaluate(() => window.pushHierarchyFrames([{schema_version: 1, type: 'resync_required'}])); await h.idle()
+    assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/subject-tree')).length, treeBefore, 'Hidden canonical invalidation defers ordinary root work')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /405 observations/)
+    const resumedAt = requests.length
+    await h.page.getByRole('button', {name: 'Observations', exact: true}).click(); await h.idle(); await paint(h.page)
+    assert.ok(requests.slice(resumedAt).some(value => value.offset === 200 && value.done), 'Return resumes current staged terminal span')
+    const restoredScroll = await h.page.locator('#main-content-scroll').evaluate(element => element.scrollTop)
+    const restoredAnchor = await h.page.locator('[data-observation-key=' + JSON.stringify(savedAnchor.key) + ']').evaluate(element => ({key: element.dataset.observationKey, offset: document.getElementById('main-content-scroll').getBoundingClientRect().top + 12 - element.getBoundingClientRect().top}))
+    assert.ok(Math.abs(restoredAnchor.offset - savedAnchor.offset) < 3, 'Explorer row and intrarow scroll survive the hidden refresh: ' + JSON.stringify({savedScroll, restoredScroll, savedAnchor, restoredAnchor}))
+    await revealObservationRow(h.page, pathRow(h, 'a'))
+    assert.equal(await pathRow(h, 'a').getAttribute('aria-expanded'), 'true')
+    assert.equal(await pathRow(h, 'a').getAttribute('aria-selected'), 'true')
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+  } finally { release?.(); await h.close() }
 })

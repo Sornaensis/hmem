@@ -240,6 +240,62 @@ liveFilterTests =
             , \_ -> progressed.observations.tree.lastOwner |> Expect.equal (Just ("a", Just Api.SubjectFile))
             , \_ -> stale.observations.tree.lastOwner |> Expect.equal progressed.observations.tree.lastOwner
             , \_ -> stale.observations.tree.nextToken |> Expect.equal progressed.observations.tree.nextToken ] ()
+    , test "hidden Tree callbacks release only their own slots and return resumes preserved branch and terminal demand" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            started = step (SetObservationBrowseMode ObservationFacetMode) model
+            node path hasChildren terminals = {path = path, segment = path |> String.split "/" |> List.reverse |> List.head |> Maybe.withDefault path, hasChildren = hasChildren, observationCount = 500, terminals = terminals}
+            roots = [node "a" True [{subjectKind = Api.SubjectFile, subject = "a", observationCount = 500}], node "b" True [], node "c" True [], node "d" True []]
+            pageOf nodes more = {items = nodes, hasMore = more, totalCount = 1000, matchCount = 1000}
+            root = List.head started.observations.tree.physical |> Maybe.map (\guard -> step (GotObservationTree guard (Ok (pageOf roots False))) started) |> Maybe.withDefault started
+            wave = List.foldl (\path current -> step (ToggleObservationTreePath path) current) root ["a", "b", "c", "d"]
+            selected = step (SelectObservationTreePath "a") wave
+            hidden = {selected | activeTab = ProjectsTab} |> project selected
+            branch = wave.observations.tree.physical |> List.filter (\guard -> guard.prefix == "a" && guard.kind == Nothing) |> List.head
+            terminal = wave.observations.tree.physical |> List.filter (\guard -> guard.kind == Just Api.SubjectFile) |> List.head
+            children = List.range 1 200 |> List.map (\index -> node ("a/" ++ String.fromInt index) False [])
+            branchDone = branch |> Maybe.map (\guard -> step (GotObservationTree guard (Ok (pageOf children True))) hidden) |> Maybe.withDefault hidden
+            items = List.range 1 200 |> List.map (\index -> let item = row (String.fromInt index) in {item | subjects = [{subjectKind = Api.SubjectFile, subject = "a"}], subject = "a"})
+            terminalDone = terminal |> Maybe.map (\guard -> step (GotObservationTreeTerminal guard (Ok {items = items, hasMore = True})) branchDone) |> Maybe.withDefault branchDone
+            hiddenManual = step (LoadObservationTreePage "a" (Just Api.SubjectFile)) terminalDone
+            drained = List.foldl (\guard current -> step (GotObservationTree guard (Ok (pageOf [] False))) current) hiddenManual hiddenManual.observations.tree.physical
+            returned = {drained | activeTab = ObservationsTab} |> project drained
+            resumed = step (LoadObservationTreePage "a" (Just Api.SubjectFile)) returned
+        in
+        Expect.all
+            [ \_ -> Expect.equal [4,4,3,2,2,0] (List.map (\current -> List.length current.observations.tree.physical) [wave,hidden,branchDone,terminalDone,hiddenManual,drained])
+            , \_ -> Expect.equal wave.observations.tree.nextToken drained.observations.tree.nextToken
+            , \_ -> Expect.equal selected.observations.tree.selectedPath returned.observations.tree.selectedPath
+            , \_ -> Expect.equal selected.observations.tree.expanded returned.observations.tree.expanded
+            , \_ -> Expect.equal True (List.any (\guard -> guard.prefix == "a" && guard.offset == 200 && guard.kind == Nothing) resumed.observations.tree.physical)
+            , \_ -> Expect.equal True (List.any (\guard -> guard.prefix == "d" && guard.kind == Nothing) resumed.observations.tree.physical)
+            , \_ -> Expect.equal True (List.any (\guard -> guard.prefix == "a" && guard.offset == 200 && guard.kind == Just Api.SubjectFile) resumed.observations.tree.physical)
+            ] ()
+    , test "hidden explicit typed reveal admits only its current ancestor chain and matching terminal" <| \_ ->
+        let
+            subject = {subjectKind = Api.SubjectFile, subject = "a/file"}
+            observations = model.observations
+            query = Helpers.observationAppliedQuery observations
+            restored = Helpers.restoreObservationQuery {query | requestMode = ObservationExactSubjectMode, selectedFacet = Just subject} observations
+            started = O.bootstrapObservation 1 {model | activeTab = ProjectsTab, observations = restored} |> Tuple.first
+            tree = started.observations.tree
+            state = started.observations
+            queued = {started | observations = {state | tree = {tree | expanded = Set.insert "b" tree.expanded}}}
+            node path children terminals = {path = path, segment = path |> String.split "/" |> List.reverse |> List.head |> Maybe.withDefault path, hasChildren = children, observationCount = 1, terminals = terminals}
+            receive nodes previous = previous.observations.tree.physical |> List.filter (\guard -> guard.kind == Nothing) |> List.head
+                |> Maybe.map (\guard -> O.update (GotObservationTree guard (Ok {items = nodes, hasMore = False, totalCount = 1, matchCount = 1})) previous |> Tuple.first |> project previous) |> Maybe.withDefault previous
+            root = receive [node "a" True [], node "b" True []] queued
+            branch = receive [node "a/file" False [{subjectKind = Api.SubjectFile, subject = "a/file", observationCount = 1}, {subjectKind = Api.SubjectGlob, subject = "a/file", observationCount = 1}]] root
+            suspended = {branch | observations = O.selectionForTab ProjectsTab branch.observations} |> project branch
+            completed = List.head suspended.observations.tree.physical |> Maybe.map (\guard -> O.update (GotObservationTreeTerminal guard (Err Http.NetworkError)) suspended |> Tuple.first |> project suspended) |> Maybe.withDefault suspended
+        in
+        Expect.all
+            [ \_ -> Expect.equal [("", Nothing)] (List.map (\guard -> (guard.prefix, guard.kind)) started.observations.tree.physical)
+            , \_ -> Expect.equal [("a", Nothing)] (List.map (\guard -> (guard.prefix, guard.kind)) root.observations.tree.physical)
+            , \_ -> Expect.equal [("a/file", Just Api.SubjectFile)] (List.map (\guard -> (guard.prefix, guard.kind)) branch.observations.tree.physical)
+            , \_ -> Expect.equal [] completed.observations.tree.physical
+            , \_ -> Expect.equal branch.observations.tree.expanded completed.observations.tree.expanded
+            ] ()
     , test "a stale root callback cannot advance the last completed query while the latest root is pending" <| \_ ->
         let
             step message previous = O.update message previous |> Tuple.first |> project previous

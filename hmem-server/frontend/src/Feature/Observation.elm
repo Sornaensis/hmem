@@ -214,12 +214,31 @@ ownedTree model =
     in if lifetime == "unavailable" then {owned | resolvedPath = Nothing} else owned
 
 
+{-| Ordinary Tree demand belongs to its visible tab. A current explicit reveal
+may still resolve its own ancestor chain and typed terminal; cached expansions
+never turn that exception into an invisible backlog.
+-}
+treeDemandAllowed : String -> Maybe Api.SubjectKind -> Model -> Bool
+treeDemandAllowed prefix kind model =
+    if model.activeTab == ObservationsTab then True
+    else
+        let state = model.observations in
+        state.tree.lifetime == treeLifetime model && (state.tree.revealTarget |> Maybe.map (\target ->
+            target.focus
+                && (case target.observationId of
+                    Just identity -> state.selectedId == Just identity
+                    Nothing -> state.selectedFacet == Just target.subject)
+                && (case kind of
+                    Nothing -> prefix == "" || List.member prefix (ObservationTree.ancestors target.subject.subject)
+                    Just value -> prefix == target.subject.subject && value == target.subject.subjectKind)) |> Maybe.withDefault False)
+
+
 loadTreeTerminal : Api.ObservationSubject -> Int -> Model -> (Model, Cmd Msg)
 loadTreeTerminal subject offset model =
     case repositoryWorkspaceId model of
         Nothing -> (model, Cmd.none)
         Just workspaceId ->
-            if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (treeMode model.observations.requestMode) then (model, Cmd.none)
+            if not (treeDemandAllowed subject.subject (Just subject.subjectKind) model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (treeMode model.observations.requestMode) then (model, Cmd.none)
             else
                 let state = model.observations
                     owned = if state.tree.lifetime == treeLifetime model then state.tree else ObservationTree.retire (treeLifetime model) state.tree
@@ -284,7 +303,8 @@ pumpTree model =
             after = tree.lastOwner |> Maybe.andThen (\owner -> owners |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> (==) owner) |> List.head |> Maybe.map (Tuple.first >> (+) 1)) |> Maybe.withDefault 0
             -- Rotate the existing owner order before eligibility filtering, so an
             -- in-flight last owner cannot send a queued terminal back to the tail.
-            work = rootWork ++ ((List.drop after owners ++ List.take after owners) |> List.filter (\owner -> List.member owner (branches ++ terminals)))
+            work = (rootWork ++ ((List.drop after owners ++ List.take after owners) |> List.filter (\owner -> List.member owner (branches ++ terminals))))
+                |> List.filter (\(prefix, kind) -> treeDemandAllowed prefix kind model)
             admit (prefix, kind) (source, accumulated) =
                 let (next, command) = case kind of
                         Nothing -> loadTreeBranch prefix (offset prefix) source
@@ -409,7 +429,7 @@ loadTreeBranch prefix offset model =
     case repositoryWorkspaceId model of
         Nothing -> ( model, Cmd.none )
         Just workspaceId ->
-            if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (List.member model.observations.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then ( model, Cmd.none )
+            if not (treeDemandAllowed prefix Nothing model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (List.member model.observations.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then ( model, Cmd.none )
             else
                 let
                     state = model.observations
@@ -732,7 +752,11 @@ selectionForTab tab state =
         state
 
     else
-        clearSelection state
+        let
+            cleared = clearSelection state
+            tree = cleared.tree
+        in
+        { cleared | tree = { tree | revealTarget = Maybe.map (\target -> { target | focus = False }) tree.revealTarget } }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )

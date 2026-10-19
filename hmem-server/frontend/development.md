@@ -93,6 +93,11 @@ feedback, and an unavailable state with Retry when a read fails. Canonical plann
 changes and resynchronization refresh the totals through one coalesced physical
 request; workspace, session and audience changes retire old responses.
 
+Subject Tree ordinary branch and terminal reads pause while its tab is hidden.
+In-flight replies retain their slots until their exact callbacks; returning resumes
+incomplete expanded paths without discarding cached state. Explicit selection
+reveal remains limited to its own ancestor chain and typed terminal.
+
 Repository workspace Observation totals have their own authority, invalidation and
 physical request identity. They load and refresh on every tab, including Subject
 Tree, independently of browse filters and match/tree totals. Mode changes preserve

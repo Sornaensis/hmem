@@ -102,7 +102,7 @@ test('canonical enabled lifecycle points accept zero activity and enforce count/
   const fixture = generateFixture('small'), expected = expectedFor(fixture)
   for (const bucket of expected.buckets.buckets) for (const counts of Object.values(bucket.series)) for (const key of Object.keys(counts)) counts[key] = 0
   const chart = timelineChartExpectation({ items: [] }, expected.buckets)
-  assert.equal(chart.points.every(point => point.label.endsWith(', 0, not selected')), true)
+  assert.equal(chart.points.every(point => point.label.startsWith('Observations Total: history unavailable. Lifecycle activity,') && point.label.endsWith(' exclusive, not selected')), true)
   await withDocument(documentFor(chart), () => {
     assert.equal(document.querySelectorAll('.timeline-series-toggle').length, 9)
     assert.equal(timelineDomReady(chart), true)
@@ -202,19 +202,48 @@ test('current six-series counts and summary labels are independent and follow ca
   Object.assign(bucket.series.project, { created: 1, completed: 2, deleted: 3, archived: 4, cancelled: 999 })
   Object.assign(bucket.series.task, { created: 5, completed: 6, deleted: 7, archived: 999, cancelled: 8 })
   Object.assign(bucket.series.subtask, { created: 9, completed: 10, deleted: 11, archived: 999, cancelled: 12 })
-  Object.assign(bucket.series.observation, { created: 13, completed: 999, deleted: 999, archived: 999, cancelled: 999 })
+  Object.assign(bucket.series.observation, { created: 13, completed: 999, deleted: 14, archived: 999, cancelled: 999 })
+  Object.assign(bucket, { observation_status: 'available', observation_total: 42 })
   const chart = timelineChartExpectation(expected.events, histogram, { timeZone: 'Europe/Copenhagen' })
   assert.deepEqual(chart.series, ['created', 'completed', 'deleted', 'archived', 'cancelled', 'observations'])
   const first = chart.points.filter(point => point.id.endsWith('-0'))
-  assert.deepEqual(first.map(point => Number(point.label.match(/exclusive, (\d+),/)[1])), [15, 18, 21, 4, 20, 13])
-  assert.ok(first.every(point => point.label.startsWith('13 Observations; 1 Projects Created; 14 Tasks/Subtasks Created; 2 Projects Completed; 16 Tasks/Subtasks Completed; 3 Projects Deleted; 18 Tasks/Subtasks Deleted; 20 Tasks/Subtasks Cancelled; 4 Projects Archived. ')))
-  assert.match(first[0].label, /Lifecycle activity, Create, 2026-07-27 02:00 to 2026-08-03 02:00 exclusive, 15, not selected$/)
+  const summary = 'Projects Created: 1; Projects Completed: 2; Projects Deleted: 3; Projects Archived: 4; Tasks/Subtasks Created: 14; Tasks/Subtasks Completed: 16; Tasks/Subtasks Deleted: 18; Tasks/Subtasks Cancelled: 20; Observations Created: 13; Observations Deleted: 14; Observations Total: 42'
+  assert.ok(first.every(point => point.label.startsWith(summary + '. ')))
+  assert.ok(first.every(point => !point.label.includes('999')))
+  assert.deepEqual(first.map(point => point.label.slice(summary.length + 2).split(', ')[1]), ['Create', 'Complete', 'Delete', 'Archive', 'Cancel', 'Observations'])
+  assert.match(first[0].label, /Lifecycle activity, Create, 2026-07-27 02:00 to 2026-08-03 02:00 exclusive, not selected$/)
   assert.notEqual(first[0].label, timelineChartExpectation(expected.events, histogram, { timeZone: 'UTC' }).points[0].label)
   assert.throws(() => timelineChartExpectation(expected.events, histogram, { timeZone: '' }), /timezone is missing/)
   assert.throws(() => timelineChartExpectation(expected.events, histogram, { timeZone: 'invalid' }), /Invalid time zone/)
   const observations = chart.points.find(point => point.id.includes('-observations-'))
-  assert.match(observations.label, /Observations, .*exclusive, 13, not selected$/)
+  assert.match(observations.label, /Observations, .*exclusive, not selected$/)
   assert.equal(chart.title, 'Lifecycle activity by interval')
+})
+
+test('current Timeline inventory status and zero-group omission are explicit without fabricating optional totals', () => {
+  const expected = expectedFor(generateFixture('small')), histogram = structuredClone(expected.buckets)
+  const bucket = histogram.buckets[0]
+  for (const counts of Object.values(bucket.series)) for (const key of Object.keys(counts)) counts[key] = 0
+  const summary = () => timelineChartExpectation(expected.events, histogram).points[0].label.split('. Lifecycle activity,')[0]
+  delete bucket.observation_status; delete bucket.observation_total
+  assert.equal(summary(), 'Observations Total: history unavailable')
+  bucket.observation_status = 'available'; bucket.observation_total = null
+  assert.equal(summary(), 'Observations Total: history unavailable')
+  bucket.observation_status = 'future'; bucket.observation_total = 0
+  assert.equal(summary(), 'Observations Total: future')
+  bucket.observation_status = 'available'
+  assert.equal(summary(), '')
+  bucket.series.task.created = 2
+  assert.equal(summary(), 'Tasks/Subtasks Created: 2')
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '7']) {
+    bucket.observation_total = invalid
+    assert.throws(summary, /invalid/)
+    bucket.observation_total = 0; bucket.series.observation.deleted = invalid
+    assert.throws(summary, /invalid/)
+    bucket.series.observation.deleted = 0
+  }
+  bucket.series.task.created = Number.MAX_SAFE_INTEGER; bucket.series.subtask.created = 1
+  assert.throws(summary, /invalid/)
 })
 
 

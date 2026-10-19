@@ -151,17 +151,24 @@ export function timelineChartExpectation(events, histogram, { timeZone = 'UTC' }
     if (!Number.isSafeInteger(value) || value < 0) throw new Error('Timeline canonical count is invalid')
     return value
   }
-  const total = (bucket, action) => action === 'observations' ? count(bucket, 'observation', 'created')
-    : (action === 'cancelled' ? 0 : count(bucket, 'project', action))
-      + (action === 'archived' ? 0 : count(bucket, 'task', action) + count(bucket, 'subtask', action))
-  const summary = bucket => [count(bucket, 'observation', 'created') + ' Observations',
-    ...[['created', 'Created'], ['completed', 'Completed'], ['deleted', 'Deleted'], ['cancelled', 'Cancelled'], ['archived', 'Archived']].flatMap(([action, label]) => [
-      ...(action === 'cancelled' ? [] : [count(bucket, 'project', action) + ' Projects ' + label]),
-      ...(action === 'archived' ? [] : [count(bucket, 'task', action) + count(bucket, 'subtask', action) + ' Tasks/Subtasks ' + label])
-    ])].join('; ')
+  const summary = bucket => {
+    const row = (label, value) => {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error('Timeline canonical count is invalid')
+      return value === 0 ? [] : [label + ': ' + value]
+    }
+    const actions = [['created', 'Created'], ['completed', 'Completed'], ['deleted', 'Deleted'], ['cancelled', 'Cancelled'], ['archived', 'Archived']]
+    const projects = actions.flatMap(([action, label]) => action === 'cancelled' ? [] : row('Projects ' + label, count(bucket, 'project', action)))
+    const tasks = actions.flatMap(([action, label]) => action === 'archived' ? [] : row('Tasks/Subtasks ' + label, count(bucket, 'task', action) + count(bucket, 'subtask', action)))
+    const inventory = bucket.observation_total
+    if (inventory != null && (!Number.isSafeInteger(inventory) || inventory < 0)) throw new Error('Timeline canonical count is invalid')
+    const total = bucket.observation_status === 'available' && inventory != null ? row('Observations Total', inventory)
+      : [bucket.observation_status === 'future' ? 'Observations Total: future' : 'Observations Total: history unavailable']
+    return [...projects, ...tasks, ...row('Observations Created', count(bucket, 'observation', 'created')),
+      ...row('Observations Deleted', count(bucket, 'observation', 'deleted')), ...total].join('; ')
+  }
   const points = TIMELINE_CURRENT_CONTRACT.series.flatMap(action => histogram.buckets.map((bucket, index) => ({
     id: `timeline-point-lifecycle-${action}-${index}`, role: 'button', tabindex: index === 0 ? '0' : '-1', pressed: 'false',
-    label: `${summary(bucket)}. Lifecycle activity, ${labels[action]}, ${format(bucket.bucket_start)} to ${format(bucket.bucket_end)} exclusive, ${total(bucket, action)}, not selected`
+    label: `${summary(bucket)}. Lifecycle activity, ${labels[action]}, ${format(bucket.bucket_start)} to ${format(bucket.bucket_end)} exclusive, not selected`
   })))
   return { eventIds: events.items.map(event => 'timeline-event-' + event.id), points, actions: TIMELINE_CURRENT_CONTRACT.actions,
     series: TIMELINE_CURRENT_CONTRACT.series, title: TIMELINE_CURRENT_CONTRACT.title, description: TIMELINE_CURRENT_CONTRACT.description, timeZone, window: '30', bucket: 'week' }

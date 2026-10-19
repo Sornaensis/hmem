@@ -108,6 +108,9 @@ route msg model =
             Ok (Feature.Cards.updateViewport payload model)
 
         -- WebSocket
+        RefreshTaskStatusEligibility _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
         WsConnectedMsg ->
             Ok (Feature.WebSocket.update msg model)
 

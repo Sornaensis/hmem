@@ -1001,7 +1001,7 @@ suite =
                         , blockedSubtaskCount = 0
                         , dependencyBlockedTaskCount = 0
                         , openDependencyCount = 0
-                        , completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False
+                        , completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False, ownOpenDependencyCount = Just 0
                         }
 
                     staleProjectRollup =
@@ -1183,7 +1183,7 @@ suite =
                         , blockedSubtaskCount = 0
                         , dependencyBlockedTaskCount = 0
                         , openDependencyCount = 0
-                        , completionReady = False, inProgressSubtaskCount = 0, canStartSubtasks = False
+                        , completionReady = False, inProgressSubtaskCount = 0, canStartSubtasks = False, ownOpenDependencyCount = Just 0
                         }
 
                     staleProjectRollup =
@@ -1689,7 +1689,7 @@ dependentTaskCardSummary =
         , blockedSubtaskCount = 0
         , dependencyBlockedTaskCount = 0
         , openDependencyCount = 1
-        , completionReady = False, inProgressSubtaskCount = 0, canStartSubtasks = False
+        , completionReady = False, inProgressSubtaskCount = 0, canStartSubtasks = False, ownOpenDependencyCount = Just 0
         }
     }
 

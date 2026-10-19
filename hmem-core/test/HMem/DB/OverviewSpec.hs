@@ -51,6 +51,27 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
           map (.status) overview.dependencies `shouldBe` [Todo]
           overview.readinessRollup.completionReady `shouldBe` True
 
+    it "keeps own prerequisites separate from descendant edges and counts closed roots for reopening" $ \env -> do
+      workspace <- createTestWorkspace env "overview-own-prerequisites"
+      project <- createProject env.pool (CreateProject workspace.id Nothing "project" Nothing Nothing Nothing)
+      prerequisite <- createTask env.pool (newTask workspace.id (Just project.id) "prerequisite")
+      parent <- createTask env.pool (newTask workspace.id (Just project.id) "parent")
+      child <- createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "child" Nothing Nothing Nothing)
+      closed <- createTask env.pool (newTask workspace.id (Just project.id) "closed")
+      _ <- updateTask env.pool closed.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing)
+      addDependency env.pool child.id prerequisite.id
+      addDependency env.pool closed.id prerequisite.id
+      let check expected = do
+            singles <- traverse (getTaskOverview env.pool) [parent.id, child.id, closed.id]
+            batch <- taskCardSummaries env.pool [parent, child, closed]
+            map (fmap (\overview -> overview.readinessRollup.ownOpenDependencyCount)) singles `shouldBe` map (Just . Just) expected
+            map (\summary -> summary.readinessRollup.ownOpenDependencyCount) batch `shouldBe` map Just expected
+      check [0,1,1]
+      parentOverview <- getTaskOverview env.pool parent.id
+      fmap (\overview -> overview.readinessRollup.openDependencyCount) parentOverview `shouldBe` Just 1
+      _ <- updateTask env.pool prerequisite.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Cancelled) Nothing Nothing)
+      check [0,0,0]
+
     it "keeps batched card rollups equal to the legacy single-overview semantics" $ \env -> do
       workspace <- createTestWorkspace env "overview-card-rollup-parity"
       project <- createProject env.pool CreateProject

@@ -122,7 +122,7 @@ emptyProjectReadinessRollup :: ProjectReadinessRollup
 emptyProjectReadinessRollup = ProjectReadinessRollup 0 0 0 0 0 0 0 0 True 0
 
 emptyTaskReadinessRollup :: TaskReadinessRollup
-emptyTaskReadinessRollup = TaskReadinessRollup 0 0 0 0 0 0 True 0 False
+emptyTaskReadinessRollup = TaskReadinessRollup 0 0 0 0 0 0 True 0 False Nothing
 
 listTaskDependencyPage :: Pool Hasql.Connection -> UUID -> Int -> Int -> IO TaskDependencyPage
 listTaskDependencyPage pool taskId requestedLimit requestedOffset = do
@@ -192,6 +192,7 @@ taskReadinessRollupStatement = Statement.Statement sql encoder decoder True
       , " NOT EXISTS (SELECT 1 FROM desc_tasks WHERE hmem_is_open_task_status(status))"
       , " , (SELECT count(*)::bigint FROM desc_tasks WHERE parent_id=$1 AND status='in_progress'::task_status_enum)"
       , " , hmem_task_can_start_subtasks($1)"
+      , " , (SELECT count(*)::bigint FROM task_dependencies link JOIN tasks dep ON dep.id=link.depends_on_id WHERE link.task_id=$1 AND dep.deleted_at IS NULL AND hmem_is_open_task_status(dep.status))"
       ]
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = taskReadinessRollupRowDecoder
@@ -223,6 +224,7 @@ taskReadinessRollupsBatchStatement = Statement.Statement sql encoder decoder Tru
       , " NOT EXISTS (SELECT 1 FROM desc_tasks t WHERE t.root_id=roots.root_id AND hmem_is_open_task_status(t.status))"
       , " , (SELECT count(*)::bigint FROM desc_tasks t WHERE t.root_id=roots.root_id AND t.parent_id=roots.root_id AND t.status='in_progress'::task_status_enum)"
       , " , hmem_task_can_start_subtasks(roots.root_id)"
+      , " , (SELECT count(*)::bigint FROM task_dependencies link JOIN tasks dep ON dep.id=link.depends_on_id WHERE link.task_id=roots.root_id AND dep.deleted_at IS NULL AND hmem_is_open_task_status(dep.status))"
       , "FROM roots"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
@@ -239,6 +241,7 @@ taskReadinessRollupFields = TaskReadinessRollup
   <*> Dec.column (Dec.nonNullable Dec.bool)
   <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
   <*> Dec.column (Dec.nonNullable Dec.bool)
+  <*> (Just . fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
 
 getProjectReadinessRollup :: Pool Hasql.Connection -> UUID -> IO ProjectReadinessRollup
 getProjectReadinessRollup pool projectId = runSession pool $ Session.statement projectId projectReadinessRollupStatement

@@ -930,6 +930,92 @@ suite =
                         , Api.allTaskStatuses
                         , [ Api.Todo, Api.Blocked, Api.Cancelled ]
                         ]
+        , test "canonical own prerequisite gates top-level and subtask controls and dispatch with sparse caches" <| \_ ->
+            let
+                model = statusEligibilityModel (Just 1)
+                blocked id target = Helpers.taskStatusDisabledReason model (Dict.get id model.tasks |> Maybe.withDefault (task id Nothing Nothing)) target /= Nothing
+                dispatch id target = Feature.Editing.update (ChangeTaskStatus id target) model |> Tuple.first
+                card id = Feature.Cards.viewProjectsTree "workspace-a" model |> Query.fromHtml |> Query.find [ Selector.id ("entity-" ++ id) ]
+            in
+            Expect.all
+                [ \_ -> [ "own", "own-child" ] |> List.concatMap (\id -> List.map (blocked id) [ Api.Todo, Api.InProgress, Api.Done ]) |> Expect.equal (List.repeat 6 True)
+                , \_ -> [ "own", "own-child" ] |> List.concatMap (\id -> List.map (blocked id) [ Api.Blocked, Api.Cancelled ]) |> Expect.equal (List.repeat 4 False)
+                , \_ -> [ "own", "own-child" ] |> List.concatMap (\id -> List.map (dispatch id >> .mutations >> .nextRequestId) [ Api.Todo, Api.InProgress, Api.Done ]) |> Expect.equal (List.repeat 6 model.mutations.nextRequestId)
+                , \_ -> card "own" |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "done") ] |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.text "completed" ]
+                , \_ -> card "own-child" |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "in_progress") ] |> Query.has [ Selector.attribute (Attributes.disabled True) ]
+                , \_ -> model.dependencies.taskDependencyLinks |> Expect.equal []
+                ] ()
+        , test "manual blocked and descendant-only counts keep canonical zero transitions" <| \_ ->
+            let
+                model = statusEligibilityModel (Just 0)
+                own = Dict.get "own" model.tasks |> Maybe.withDefault (task "own" Nothing Nothing)
+                rollup = Dict.get "own" model.dependencies.taskReadinessRollups |> Maybe.withDefault statusEligibilityRollup
+                recursiveOnly = Helpers.applyTaskReadiness 100 "own" { rollup | openDependencyCount = 9, dependencyBlockedTaskCount = 3 } model
+            in
+            Expect.equal [ Nothing, Nothing, Nothing, Nothing ]
+                [ Helpers.taskStatusDisabledReason recursiveOnly own Api.Todo
+                , Helpers.taskStatusDisabledReason recursiveOnly own Api.InProgress
+                , Helpers.taskStatusDisabledReason recursiveOnly own Api.Done
+                , Helpers.taskStatusDisabledReason (statusEligibilityModel Nothing) { own | status = Api.Todo } Api.Todo
+                ]
+        , test "unknown readiness blocks transitions and explicit retry retires zero before failure and recovery" <| \_ ->
+            let
+                model = statusEligibilityModel (Just 0)
+                ( refreshing, _ ) = Feature.WebSocket.update (RefreshTaskStatusEligibility model.selectedWorkspaceId model.sessionRequestEpoch "own") model
+                own = Dict.get "own" model.tasks |> Maybe.withDefault (task "own" Nothing Nothing)
+                old = Helpers.applyTaskReadiness 0 "own" statusEligibilityRollup refreshing
+                recovered = Helpers.applyTaskReadiness (old.dataLoading.nextNavigationSummaryRevision + 1) "own" statusEligibilityRollup old
+                unknown = statusEligibilityModel Nothing
+                staleWorkspace = Feature.WebSocket.update (RefreshTaskStatusEligibility (Just "other") model.sessionRequestEpoch "own") model |> Tuple.first
+                staleSession = Feature.WebSocket.update (RefreshTaskStatusEligibility model.selectedWorkspaceId (model.sessionRequestEpoch - 1) "own") model |> Tuple.first
+            in
+            Expect.equal (List.repeat 9 True)
+                [ Helpers.taskOwnOpenDependencyCount refreshing "own" == Nothing
+                , Helpers.taskOwnOpenDependencyCount old "own" == Nothing
+                , Helpers.taskStatusDisabledReason old own Api.Done /= Nothing
+                , Helpers.taskOwnOpenDependencyCount recovered "own" == Just 0
+                , Helpers.taskStatusDisabledReason recovered own Api.Done == Nothing
+                , Helpers.taskStatusDisabledReason unknown own Api.InProgress /= Nothing
+                , (Feature.Editing.update (ChangeTaskStatus "own" Api.InProgress) unknown |> Tuple.first |> .mutations |> .nextRequestId) == unknown.mutations.nextRequestId
+                , staleWorkspace == model
+                , staleSession == model
+                ]
+        , test "legacy missing and malformed own counts never decode as ready" <| \_ ->
+            let
+                taskOverviewBody = """{"task":{"id":"own","workspace_id":"workspace-a","title":"Own","status":"blocked","priority":5,"dependency_count":1,"created_at":"now","updated_at":"now"},"dependencies":[],"readiness_rollup":{"completion_ready":false}}"""
+                decode suffix = Decode.decodeString Api.taskOverviewDecoder (String.replace "\"completion_ready\":false" ("\"completion_ready\":false" ++ suffix) taskOverviewBody) |> Result.toMaybe |> Maybe.andThen (.readinessRollup >> .ownOpenDependencyCount)
+            in
+            Expect.equal [ Nothing, Nothing, Just 0, Just 2, Nothing, Nothing ]
+                [ decode "", decode ",\"own_open_dependency_count\":null", decode ",\"own_open_dependency_count\":0", decode ",\"own_open_dependency_count\":2", decode ",\"own_open_dependency_count\":-1", decode ",\"own_open_dependency_count\":\"0\"" ]
+        , test "failed eligibility refresh recovers while stale success error and session callbacks stay retired" <| \_ ->
+            let
+                initial = statusEligibilityModel (Just 0)
+                retry model = Feature.WebSocket.update (RefreshTaskStatusEligibility model.selectedWorkspaceId model.sessionRequestEpoch "own") model |> Tuple.first
+                first = retry initial
+                second = retry first
+                response count = { projects = [], tasks = [ statusEligibilitySummary count ], missingProjectIds = [], missingTaskIds = [] }
+                receive guard result model = Feature.WebSocket.update (CanonicalNavigationSummariesFetched guard "workspace-a" [] [ "own" ] result) model |> Tuple.first
+                staleSuccess = receive (statusEligibilityGuard first) (Ok (response 0)) second
+                failed = receive (statusEligibilityGuard second) (Err Http.NetworkError) staleSuccess
+                third = retry failed
+                recovered = receive (statusEligibilityGuard third) (Ok (response 2)) third
+                stale = receive (statusEligibilityGuard second) (Ok (response 0)) recovered |> receive (statusEligibilityGuard second) (Err Http.NetworkError)
+                sessionChanged = { recovered | sessionRequestEpoch = recovered.sessionRequestEpoch + 1 }
+                crossSession = receive (statusEligibilityGuard third) (Ok (response 0)) sessionChanged
+            in
+            Expect.equal [ Nothing, Nothing, Just 2, Just 2, Just 2 ]
+                (List.map (\model -> Helpers.taskOwnOpenDependencyCount model "own") [ staleSuccess, failed, recovered, stale, crossSession ])
+        , test "refresh records a planning fence even before any rollup or summary is cached" <| \_ ->
+            let
+                base = statusEligibilityModel Nothing
+                deps = base.dependencies
+                empty = { base | dependencies = { deps | taskReadinessRollups = Dict.empty } }
+                pending = Feature.WebSocket.update (RefreshTaskStatusEligibility empty.selectedWorkspaceId empty.sessionRequestEpoch "own") empty |> Tuple.first
+                oldOverview = Helpers.applyTaskReadiness 0 "own" statusEligibilityRollup pending
+                oldSummary = Feature.DataLoading.mergeNavigationSummariesAt 0 [] [ statusEligibilitySummary 0 ] oldOverview
+                failed = Feature.WebSocket.update (CanonicalNavigationSummariesFetched (statusEligibilityGuard pending) "workspace-a" [] [ "own" ] (Err Http.NetworkError)) oldSummary |> Tuple.first
+            in
+            Expect.equal [ Nothing, Nothing, Nothing ] (List.map (\model -> Helpers.taskOwnOpenDependencyCount model "own") [ oldOverview, oldSummary, failed ])
         , test "task status option disabled reasons preserve subtask and completion gates" <|
             \_ ->
                 [ Feature.Cards.taskStatusOptionDisabledReason Nothing 0 True (Just Api.Todo) False Api.InProgress
@@ -961,7 +1047,7 @@ suite =
                 let
                     deps = lifecycleModel.dependencies
                     parent = taskWithStatus "parent" Nothing (Just "project-a") Api.Blocked
-                    rollup = { openSubtaskCount = 2, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = True }
+                    rollup = { openSubtaskCount = 2, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = True, ownOpenDependencyCount = Just 0 }
                     source readiness = { lifecycleModel | tasks = Dict.singleton "parent" parent, dependencies = { deps | taskReadinessRollups = Dict.singleton "parent" readiness } }
                     card readiness = Feature.Cards.viewProjectsTree "workspace-a" (source readiness) |> Query.fromHtml |> Query.find [ Selector.id "entity-parent" ]
                 in
@@ -1458,6 +1544,49 @@ suite =
                     Err err ->
                         Expect.fail (Decode.errorToString err)
         ]
+
+
+statusEligibilitySummary : Int -> Api.TaskCardSummary
+statusEligibilitySummary count =
+    let own = taskWithStatus "own" Nothing (Just "project-a") Api.Blocked in
+    { id = own.id, workspaceId = own.workspaceId, projectId = own.projectId, parentId = Nothing, title = own.title
+    , status = own.status, priority = own.priority, completedAt = Nothing, dependencyCount = 1, createdAt = own.createdAt, updatedAt = own.updatedAt
+    , directSubtaskCount = 0, hasChildren = False, readinessRollup = { statusEligibilityRollup | ownOpenDependencyCount = Just count } }
+
+
+statusEligibilityGuard : Types.Model -> Types.CanonicalNavigationRequestGuard
+statusEligibilityGuard model =
+    let
+        scope = "workspace:workspace-a"
+        target = "navigation-summaries:task:own"
+        entity = scope ++ "|navigation-summary:task:own"
+    in
+    { request = { scopeKey = scope, targetKey = target, targetGeneration = Dict.get (scope ++ "|" ++ target) model.webSocket.targetGenerations |> Maybe.withDefault -1
+        , sessionEpoch = model.sessionRequestEpoch, routeWorkspace = model.selectedWorkspaceId, audienceId = model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "" }
+    , entityGenerations = Dict.singleton entity (Dict.get entity model.webSocket.targetGenerations |> Maybe.withDefault -1)
+    , navigationGeneration = model.dataLoading.navigationGeneration, filterFingerprint = Feature.DataLoading.navigationFilterFingerprint model }
+
+
+statusEligibilityRollup : Api.TaskReadinessRollup
+statusEligibilityRollup =
+    { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0
+    , dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True
+    , inProgressSubtaskCount = 0, canStartSubtasks = True, ownOpenDependencyCount = Just 0 }
+
+
+statusEligibilityModel : Maybe Int -> Types.Model
+statusEligibilityModel ownCount =
+    let
+        base = lifecycleModel
+        deps = base.dependencies
+        own = taskWithStatus "own" Nothing (Just "project-a") Api.Blocked
+        child = taskWithStatus "own-child" (Just "eligible-parent") (Just "project-a") Api.Blocked
+        parent = task "eligible-parent" Nothing (Just "project-a")
+        rollup = { statusEligibilityRollup | ownOpenDependencyCount = ownCount }
+    in
+    { base | tasks = Dict.fromList (List.map (\value -> ( value.id, value )) [ own, child, parent ])
+        , dependencies = { deps | taskReadinessRollups = Dict.fromList [ (own.id, rollup), (child.id, rollup), (parent.id, statusEligibilityRollup) ] }
+    }
 
 
 lifecycleModel : Types.Model

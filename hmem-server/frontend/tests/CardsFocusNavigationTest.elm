@@ -652,25 +652,29 @@ suite =
                         ] ()
         , test "canonical prerequisite status changes refresh Done eligibility and task order with unchanged links" <| \_ ->
             let
-                seeded = DataLoading.mergeNavigationSummaries [] [ task "dependent" Nothing, task "prerequisite" Nothing ] model
+                dependent count = let base = task "dependent" Nothing in { base | readinessRollup = let rollup = base.readinessRollup in { rollup | ownOpenDependencyCount = Just count } }
+                seeded = DataLoading.mergeNavigationSummaries [] [ dependent 1, task "prerequisite" Nothing ] model
                 websocket = seeded.webSocket
                 dependencies = seeded.dependencies
                 loading = seeded.dataLoading
                 ready = viewportReady { seeded | dataLoading = { loading | navigationVisibilityActive = True, navigationVisibleTaskIds = Set.fromList [ "dependent", "prerequisite" ] }, sessionContext = Just editorSession, dependencies = { dependencies | taskDependencyLinks = [ { taskId = "dependent", dependsOnId = "prerequisite" } ] }, webSocket = { websocket | targetGenerations = Dict.singleton "workspace:workspace-1|task:prerequisite" 1 } }
                 guard = { scopeKey = "workspace:workspace-1", targetKey = "task:prerequisite", targetGeneration = 1, sessionEpoch = ready.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
                 prerequisite = Api.taskFromCardSummary (task "prerequisite" Nothing)
-                completed = routed (CanonicalTaskFetched guard "prerequisite" (Ok { prerequisite | status = Api.Done })) ready
-                reopened = routed (CanonicalTaskFetched guard "prerequisite" (Ok prerequisite)) completed
-                removed = routed (CanonicalTaskFetched guard "prerequisite" (Err (Http.BadStatus 404))) reopened
-                restored = routed (CanonicalTaskFetched guard "prerequisite" (Ok prerequisite)) removed
-                done source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "entity-dependent" ] |> Query.findAll [ Selector.tag "option", Selector.attribute (Html.Attributes.value "done") ]
+                canonical count source =
+                    let ( pending, targets ) = ReadinessTestSupport.prepare [ ( "task", "dependent" ) ] source in
+                    routed (CanonicalReadinessSummariesFetched workspaceId targets (Ok { projects = [], tasks = [ dependent count ], missingProjectIds = [], missingTaskIds = [] })) pending
+                completed = routed (CanonicalTaskFetched guard "prerequisite" (Ok { prerequisite | status = Api.Done })) ready |> canonical 0
+                reopened = routed (CanonicalTaskFetched guard "prerequisite" (Ok prerequisite)) completed |> canonical 1
+                removed = routed (CanonicalTaskFetched guard "prerequisite" (Err (Http.BadStatus 404))) reopened |> canonical 0
+                restored = routed (CanonicalTaskFetched guard "prerequisite" (Ok prerequisite)) removed |> canonical 1
+                done source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "entity-dependent" ] |> Query.find [ Selector.tag "option", Selector.attribute (Html.Attributes.value "done") ]
             in
             Expect.all
-                [ \_ -> done ready |> Query.count (Expect.equal 0)
-                , \_ -> done completed |> Query.count (Expect.equal 1)
-                , \_ -> done reopened |> Query.count (Expect.equal 0)
-                , \_ -> done removed |> Query.count (Expect.equal 1)
-                , \_ -> done restored |> Query.count (Expect.equal 0)
+                [ \_ -> done ready |> Query.has [ Selector.attribute (Html.Attributes.disabled True) ]
+                , \_ -> done completed |> Query.hasNot [ Selector.attribute (Html.Attributes.disabled True) ]
+                , \_ -> done reopened |> Query.has [ Selector.attribute (Html.Attributes.disabled True) ]
+                , \_ -> done removed |> Query.hasNot [ Selector.attribute (Html.Attributes.disabled True) ]
+                , \_ -> done restored |> Query.has [ Selector.attribute (Html.Attributes.disabled True) ]
                 , \_ -> Expect.greaterThan ready.cards.viewport.revision restored.cards.viewport.revision
                 , \_ -> Expect.equal ready.cards.viewport.index reopened.cards.viewport.index
                 ] ()
@@ -678,17 +682,17 @@ suite =
             let
                 seeded = DataLoading.mergeNavigationSummaries [] [ task "dependent" Nothing, task "prerequisite" Nothing ] model
                 websocket = seeded.webSocket
-                ready = viewportReady { seeded | sessionContext = Just editorSession, webSocket = { websocket | targetGenerations = Dict.singleton "workspace:workspace-1|task-overview:dependent" 1 } }
+                ready = viewportReady (Helpers.capturePlanningRead "workspace:workspace-1|task-overview:dependent" 1 { seeded | sessionContext = Just editorSession, webSocket = { websocket | targetGenerations = Dict.singleton "workspace:workspace-1|task-overview:dependent" 1 } })
                 guard = { scopeKey = "workspace:workspace-1", targetKey = "task-overview:dependent", targetGeneration = 1, sessionEpoch = ready.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
-                overview dependencies = { task = Dict.get "dependent" ready.tasks |> Maybe.withDefault (Api.taskFromCardSummary (task "dependent" Nothing)), dependencies = dependencies, readinessRollup = (task "dependent" Nothing).readinessRollup }
+                overview dependencies = { task = Dict.get "dependent" ready.tasks |> Maybe.withDefault (Api.taskFromCardSummary (task "dependent" Nothing)), dependencies = dependencies, readinessRollup = let rollup = (task "dependent" Nothing).readinessRollup in { rollup | ownOpenDependencyCount = Just (List.length dependencies) } }
                 linked = routed (CanonicalTaskOverviewFetched guard "dependent" (Ok (overview [ { id = "prerequisite", name = "prerequisite", status = Api.Todo } ]))) ready
                 unlinked = routed (CanonicalTaskOverviewFetched guard "dependent" (Ok (overview []))) linked
-                done source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "entity-dependent" ] |> Query.findAll [ Selector.tag "option", Selector.attribute (Html.Attributes.value "done") ]
+                done source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "entity-dependent" ] |> Query.find [ Selector.tag "option", Selector.attribute (Html.Attributes.value "done") ]
             in
             Expect.all
-                [ \_ -> done ready |> Query.count (Expect.equal 1)
-                , \_ -> done linked |> Query.count (Expect.equal 0)
-                , \_ -> done unlinked |> Query.count (Expect.equal 1)
+                [ \_ -> done ready |> Query.hasNot [ Selector.attribute (Html.Attributes.disabled True) ]
+                , \_ -> done linked |> Query.has [ Selector.attribute (Html.Attributes.disabled True) ]
+                , \_ -> done unlinked |> Query.hasNot [ Selector.attribute (Html.Attributes.disabled True) ]
                 , \_ -> Expect.equal ready.cards.viewport.revision unlinked.cards.viewport.revision
                 , \_ -> Expect.equal ready.cards.viewport.index unlinked.cards.viewport.index
                 ] ()
@@ -1082,7 +1086,7 @@ task id parentId =
     , updatedAt = "2026-01-01T00:00:00Z"
     , directSubtaskCount = 0
     , hasChildren = False
-    , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False }
+    , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False, ownOpenDependencyCount = Just 0 }
     }
 
 

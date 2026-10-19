@@ -1503,6 +1503,7 @@ type Msg
     | RequestTaskOverview (Maybe String) Int String
     | GotTaskDependencyPage String String Int Int Int (Result Http.Error Api.TaskDependencyPage)
     | RefreshTaskDependencies String
+    | RefreshTaskStatusEligibility (Maybe String) Int String
     | LoadTaskDependencyPage String
     | GotProjectOverview CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
     | GotProjectNextTaskPage CanonicalRequestGuard String Bool Int (List Api.NextTaskCandidate) (Result Http.Error Api.NextTaskPage)

@@ -89,7 +89,7 @@ suite =
             let
                 loaded = step (OpenMove "task" "child") base |> loadRoot [ pausedProject ]
                 dependencies = loaded.dependencies
-                rollup = { openSubtaskCount = 1, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = False }
+                rollup = { openSubtaskCount = 1, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = False, ownOpenDependencyCount = Just 0 }
                 running = { loaded | dependencies = { dependencies | taskReadinessRollups = Dict.singleton "child" rollup } }
             in
             Expect.equal (Just "Running work cannot move into paused ancestry.") (running.move.dialog |> Maybe.andThen (\d -> Move.destinationReason running d (Just "paused")))
@@ -184,7 +184,7 @@ suite =
         , test "fresh focus target replaces cached project/parent/readiness before confirmation" <| \_ ->
             let
                 opened = step (OpenMove "task" "child") base
-                rollup = { openSubtaskCount = 1, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = False }
+                rollup = { openSubtaskCount = 1, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = False, ownOpenDependencyCount = Just 0 }
                 target = { id = "child", workspaceId = "ws", projectId = Just "destination", parentId = Nothing, title = "Fresh child", status = Api.Blocked, priority = 5, completedAt = Nothing, dependencyCount = 0, createdAt = "now", updatedAt = "newer", directSubtaskCount = 1, hasChildren = True, readinessRollup = rollup }
                 fresh = step (MoveFocusFetched (readId "@focus" opened) (Ok { workspaceId = "ws", target = Api.NavigationTaskSummary target, ancestors = [ Api.NavigationProjectSummary (project "destination" Nothing) ], ancestorsTruncated = False, nextAncestorOffset = Nothing })) opened
             in
@@ -211,7 +211,7 @@ suite =
                 opened = step (OpenMove "task" "child") base
                 parent = project "source" (Just "ancestor")
                 ancestor = project "ancestor" Nothing
-                response = { workspaceId = "ws", target = Api.NavigationTaskSummary { id = "child", workspaceId = "ws", projectId = Just "source", parentId = Nothing, title = "Child", status = Api.Todo, priority = 5, completedAt = Nothing, dependencyCount = 0, createdAt = "now", updatedAt = "now", directSubtaskCount = 0, hasChildren = False, readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = True } }, ancestors = [ Api.NavigationProjectSummary { ancestor | status = Api.ProjCompleted }, Api.NavigationProjectSummary parent ], ancestorsTruncated = False, nextAncestorOffset = Nothing }
+                response = { workspaceId = "ws", target = Api.NavigationTaskSummary { id = "child", workspaceId = "ws", projectId = Just "source", parentId = Nothing, title = "Child", status = Api.Todo, priority = 5, completedAt = Nothing, dependencyCount = 0, createdAt = "now", updatedAt = "now", directSubtaskCount = 0, hasChildren = False, readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = True, ownOpenDependencyCount = Just 0 } }, ancestors = [ Api.NavigationProjectSummary { ancestor | status = Api.ProjCompleted }, Api.NavigationProjectSummary parent ], ancestorsTruncated = False, nextAncestorOffset = Nothing }
                 focused = step (MoveFocusFetched (readId "@focus" opened) (Ok response)) opened
             in
             Expect.equal (Just ( [ ( "ancestor", 0 ), ( "source", 1 ) ], True, True ))
@@ -370,7 +370,7 @@ childFocus : Api.NavigationFocusResponse
 childFocus =
     { workspaceId = "ws", target = Api.NavigationTaskSummary
         { id = "child", workspaceId = "ws", projectId = Just "source", parentId = Nothing, title = "Child", status = Api.Todo, priority = 5, completedAt = Nothing, dependencyCount = 0, createdAt = "now", updatedAt = "now", directSubtaskCount = 0, hasChildren = False
-        , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = True } }
+        , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = True, ownOpenDependencyCount = Just 0 } }
     , ancestors = [ Api.NavigationProjectSummary (project "source" Nothing) ], ancestorsTruncated = False, nextAncestorOffset = Nothing }
 
 

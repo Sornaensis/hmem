@@ -21,7 +21,7 @@ test('dependency ancestors refresh through bounded readiness summaries without o
   fixture.projects = [project, { ...project, id: 'nested-project', name: 'Nested project', parent_id: project.id }]
   fixture.tasks = [
     { ...task, id: 'parent', title: 'Parent', project_id: 'nested-project', status: 'blocked', auto_blocked: true },
-    { ...task, id: 'child', title: 'Child', project_id: 'nested-project', parent_id: 'parent' },
+    { ...task, id: 'child', title: 'Child', project_id: 'nested-project', parent_id: 'parent', status: 'blocked', auto_blocked: true },
     { ...task, id: 'prerequisite', title: 'Prerequisite', project_id: 'nested-project' },
   ]
   const h = await openHierarchy(fixture)
@@ -34,6 +34,9 @@ test('dependency ancestors refresh through bounded readiness summaries without o
       await h.page.evaluate(frames => window.pushHierarchyFrames(frames), [dependencyFrame(fixture.workspace.id, action, 'edge-' + action)])
       await h.bounded(batch.arrived, 10000, 'Ancestor readiness summary batch')
       batch.release(); await h.idle()
+      const availability = await h.page.locator('#entity-child .status-select option').evaluateAll(options => Object.fromEntries(options.map(option => [option.value, !option.disabled])))
+      for (const target of ['todo', 'in_progress', 'done']) assert.equal(availability[target], action === 'deleted', action + ' prerequisite: ' + target)
+      assert.equal(availability.blocked, true); assert.equal(availability.cancelled, true)
     }
     const refreshed = h.requests.slice(mark)
     const ancestorBatches = refreshed.filter(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('parent'))

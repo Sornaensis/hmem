@@ -1021,6 +1021,82 @@ updateTaskDependencyCount taskId delta model =
                 model
 
 
+{-| Only canonical own counts authorize status transitions. Sparse links, endpoint
+rows and recursive descendant rollups cannot establish a zero count.
+-}
+taskOwnOpenDependencyCount : Model -> String -> Maybe Int
+taskOwnOpenDependencyCount model taskId =
+    Dict.get taskId model.dependencies.taskReadinessRollups
+        |> Maybe.andThen .ownOpenDependencyCount
+
+
+taskPrerequisiteBlockerReason : Model -> String -> Maybe String
+taskPrerequisiteBlockerReason model taskId =
+    case taskOwnOpenDependencyCount model taskId of
+        Just 0 -> Nothing
+        Just count -> Just ("Finish or cancel " ++ String.fromInt count ++ " open prerequisite(s) before changing this task to todo, in progress or completed.")
+        Nothing -> Just "Prerequisite eligibility is unavailable. Refresh to retry."
+
+
+taskStatusDisabledReason : Model -> Api.Task -> Api.TaskStatus -> Maybe String
+taskStatusDisabledReason model task status =
+    let
+        rollup = taskReadinessRollupForTask model task.id
+        openSubtasks = rollup |> Maybe.map .openSubtaskCount |> Maybe.withDefault 0
+        parent = task.parentId |> Maybe.andThen (\id -> Dict.get id model.tasks)
+        closedTaskAncestor seen maybeId =
+            case maybeId of
+                Nothing -> False
+                Just id ->
+                    if Set.member id seen then True
+                    else case Dict.get id model.tasks of
+                        Just ancestor -> List.member ancestor.status [ Api.Done, Api.Cancelled ] || closedTaskAncestor (Set.insert id seen) ancestor.parentId
+                        Nothing -> True
+        closedProjectAncestor seen maybeId =
+            case maybeId of
+                Nothing -> False
+                Just id ->
+                    if Set.member id seen then True
+                    else case Dict.get id model.projects of
+                        Just ancestor -> List.member ancestor.status [ Api.ProjCompleted, Api.ProjArchived ] || closedProjectAncestor (Set.insert id seen) ancestor.parentId
+                        Nothing -> True
+    in
+    if status == task.status || status == Api.Cancelled then Nothing
+    else if isOpenTaskCardStatus status && (parent |> Maybe.map .status) == Just Api.Cancelled then
+        Just "Reopen the cancelled parent task before reopening this subtask."
+    else if isOpenTaskCardStatus status && (parent |> Maybe.map .status) == Just Api.Done then
+        Just "Reopen the parent task before reopening this subtask."
+    else if List.member status [ Api.Todo, Api.InProgress, Api.Done ] && taskPrerequisiteBlockerReason model task.id /= Nothing then
+        taskPrerequisiteBlockerReason model task.id
+    else if isOpenTaskCardStatus status && (closedTaskAncestor Set.empty task.parentId || closedProjectAncestor Set.empty task.projectId) then
+        Just "Reopen the closed parent task or project before reopening this task."
+    else if status == Api.Done && openSubtasks > 0 then
+        Just ("Finish or cancel " ++ String.fromInt openSubtasks ++ " subtasks before marking this task done.")
+    else if status == Api.InProgress && openSubtasks > 0 then
+        Just "Finish or cancel all incomplete subtasks before starting this task."
+    else if status == Api.InProgress && task.parentId /= Nothing && not (parent |> Maybe.andThen (\value -> taskReadinessRollupForTask model value.id) |> Maybe.map .canStartSubtasks |> Maybe.withDefault False) then
+        Just "Resolve parent prerequisites, manual blocking, or closed ancestors before starting subtasks."
+    else Nothing
+
+
+{-| Retire ready authority before a canonical refresh. The planning revision also
+fences older overview/navigation replies, while preserving presentation counts.
+-}
+invalidateTaskPrerequisiteEligibility : List String -> Model -> Model
+invalidateTaskPrerequisiteEligibility ids model =
+    let
+        ( revision, issued ) = allocatePlanningRead model
+        invalidate id current =
+            let cached = case Dict.get id current.dependencies.taskReadinessRollups of
+                    Just rollup -> Just rollup
+                    Nothing -> Dict.get id current.dataLoading.taskCardSummaries |> Maybe.map .readinessRollup
+            in case cached of
+                Just rollup -> applyTaskReadiness revision id { rollup | ownOpenDependencyCount = Nothing } current
+                Nothing -> recordPlanningAuthority revision ("task:" ++ id) Nothing Nothing current
+    in
+    List.foldl invalidate issued ids
+
+
 taskReadinessRollupForTask : Model -> String -> Maybe Api.TaskReadinessRollup
 taskReadinessRollupForTask model taskId =
     case Dict.get taskId model.dependencies.taskReadinessRollups of
@@ -1111,6 +1187,7 @@ computeTaskReadinessRollupFrom allTasks taskDependencyLinks taskId =
     -- Task rows cannot distinguish automatic blocking from manual intent.
     -- Eligibility comes from the authoritative readiness summary.
     , canStartSubtasks = False
+    , ownOpenDependencyCount = Nothing
     }
 
 

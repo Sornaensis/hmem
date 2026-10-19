@@ -181,7 +181,7 @@ project id =
 task : String -> Api.TaskCardSummary
 task id =
     { id = id, workspaceId = workspaceId, projectId = Nothing, parentId = Nothing, title = id, status = Api.Todo, priority = 1, completedAt = Nothing, dependencyCount = 0, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z", directSubtaskCount = 0, hasChildren = False
-    , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False }
+    , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True, inProgressSubtaskCount = 0, canStartSubtasks = False, ownOpenDependencyCount = Just 0 }
     }
 
 

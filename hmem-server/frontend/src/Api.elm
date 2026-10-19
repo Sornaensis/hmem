@@ -749,6 +749,7 @@ type alias TaskReadinessRollup =
     , completionReady : Bool
     , inProgressSubtaskCount : Int
     , canStartSubtasks : Bool
+    , ownOpenDependencyCount : Maybe Int
     }
 
 
@@ -4061,6 +4062,7 @@ taskReadinessRollupDecoder =
 
         |> optional "in_progress_subtask_count" D.int 0
         |> optional "can_start_subtasks" D.bool False
+        |> optional "own_open_dependency_count" (D.nullable (D.int |> D.andThen (\count -> if count >= 0 then D.succeed count else D.fail "Negative prerequisite count"))) Nothing
 
 
 defaultTaskReadinessRollup : TaskReadinessRollup
@@ -4074,6 +4076,7 @@ defaultTaskReadinessRollup =
     , completionReady = True
     , inProgressSubtaskCount = 0
     , canStartSubtasks = False
+    , ownOpenDependencyCount = Nothing
     }
 
 

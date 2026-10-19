@@ -2182,18 +2182,6 @@ viewTaskCardBody descendants projection showProject model task =
         isSubtask =
             task.parentId /= Nothing
 
-        parentTask =
-            task.parentId
-                |> Maybe.andThen (\parentId -> Dict.get parentId model.tasks)
-
-        parentStatus =
-            case parentTask of
-                Just parent ->
-                    Just parent.status
-
-                Nothing ->
-                    task.parentId |> Maybe.andThen (\parentId -> Dict.get parentId model.dataLoading.taskCardSummaries) |> Maybe.map .status
-
         typeLabel =
             if isSubtask then
                 "SUB"
@@ -2227,15 +2215,8 @@ viewTaskCardBody descendants projection showProject model task =
                 |> Maybe.map .openDependencyCount
                 |> Maybe.withDefault 0
 
-        directOpenDependencyCount =
-            Dict.get task.id projection.taskDirectOpenDependencyCounts
-                |> Maybe.withDefault 0
-
-        dependencyBlockedForStatusOptions =
-            directOpenDependencyCount > 0
-
         taskStatusOptions =
-            taskStatusOptionsForTask dependencyBlockedForStatusOptions task
+            Api.allTaskStatuses
 
         query =
             String.toLower (String.trim model.search.query)
@@ -2257,16 +2238,8 @@ viewTaskCardBody descendants projection showProject model task =
                 && Set.member task.id projection.taskCriteriaMatches
                 && not (taskMatchesActiveCriteria query hasSearch taskPassesFilters task)
 
-        openDescendantTaskCount =
-            maybeRollup |> Maybe.map .openSubtaskCount |> Maybe.withDefault 0
-
-        completionBlockerReason =
-            taskCompletionBlockerReason openDescendantTaskCount
-
         taskStatusDisabled status =
-            taskStatusOptionDisabledReason completionBlockerReason openDescendantTaskCount isSubtask parentStatus
-                (task.parentId |> Maybe.andThen (taskRollupForProjection projection model) |> Maybe.map .canStartSubtasks |> Maybe.withDefault False)
-                status
+            Helpers.taskStatusDisabledReason model task status
 
         taskProjectAllowsOpenTasks =
             task.projectId
@@ -2375,6 +2348,15 @@ viewTaskCardBody descendants projection showProject model task =
 
           else
             div [ class "card-summary" ] [ text (String.join " · " summaryParts) ]
+        , case Helpers.taskPrerequisiteBlockerReason model task.id of
+            Just reason ->
+                div [ class "card-filter-context-note" ]
+                    [ text reason
+                    , if Helpers.taskOwnOpenDependencyCount model task.id == Nothing then
+                        button [ class "btn-inline-create", onClick (RefreshTaskStatusEligibility model.selectedWorkspaceId model.sessionRequestEpoch task.id) ] [ text "Refresh eligibility" ]
+                      else text ""
+                    ]
+            Nothing -> text ""
         , if shownForMatchingSubtask then
             div [ class "card-filter-context-note" ] [ text "Shown because a subtask matches the current filters." ]
 

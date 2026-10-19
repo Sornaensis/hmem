@@ -14,6 +14,17 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 
 spec :: Spec
 spec = do
+  describe "task own prerequisite readiness serialization" $ do
+    let rollup = TaskReadinessRollup 0 0 0 0 0 0 True 0 False (Just 2)
+    it "round trips the canonical own count independently of descendant counts" $ do
+      eitherDecode (encode rollup) `shouldBe` Right rollup
+      case toJSON rollup of
+        Object fields -> KM.lookup "own_open_dependency_count" fields `shouldBe` Just (toJSON (2 :: Int))
+        _ -> expectationFailure "Expected rollup object"
+    it "keeps legacy missing counts unknown" $ do
+      case toJSON rollup of
+        Object fields -> eitherDecode (encode (Object (KM.delete "own_open_dependency_count" fields))) `shouldBe` Right rollup { ownOpenDependencyCount = Nothing }
+        _ -> expectationFailure "Expected rollup object"
   describe "Subject Tree query validation" $ do
     let workspace = read "20000000-0000-4000-8000-000000000001" :: UUID
         query :: ObservationSubjectTreeQuery

@@ -1433,7 +1433,8 @@ instance FromJSON TaskDependencySummary where parseJSON = genericParseJSON jsonO
 data TaskReadinessRollup = TaskReadinessRollup
   { openSubtaskCount :: Int, doneSubtaskCount :: Int, cancelledSubtaskCount :: Int, blockedSubtaskCount :: Int
   , dependencyBlockedTaskCount :: Int, openDependencyCount :: Int, completionReady :: Bool
-  , inProgressSubtaskCount :: Int, canStartSubtasks :: Bool }
+  , inProgressSubtaskCount :: Int, canStartSubtasks :: Bool
+  , ownOpenDependencyCount :: Maybe Int }
   deriving (Show, Eq, Generic)
 instance ToJSON TaskReadinessRollup where toJSON = genericToJSON jsonOptions
 instance FromJSON TaskReadinessRollup where parseJSON = genericParseJSON jsonOptions

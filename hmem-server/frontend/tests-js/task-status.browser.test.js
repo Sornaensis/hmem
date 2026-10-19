@@ -31,9 +31,110 @@ async function appearance(h, id) {
   })
 }
 
+function prerequisiteFixture() {
+  const data = hierarchyFixture(), base = data.tasks[0], project = data.projects[0]
+  data.projects = [project, { ...project, id: 'hidden-project', name: 'Hidden prerequisites', parent_id: project.id }]
+  data.tasks = [
+    { ...base, id: 'own', title: 'Own prerequisite', status: 'blocked', dependency_count: 1 },
+    { ...base, id: 'eligible-parent', title: 'Eligible parent', status: 'blocked', auto_blocked: true },
+    { ...base, id: 'own-child', title: 'Child prerequisite', parent_id: 'eligible-parent', status: 'blocked', dependency_count: 1 },
+    { ...base, id: 'prerequisite', title: 'Unloaded prerequisite', project_id: 'hidden-project' },
+    { ...base, id: 'manual', title: 'Manual block', status: 'blocked', auto_blocked: false },
+  ]
+  data.dependencies = ['own', 'own-child'].map(task_id => ({ task_id, depends_on_id: 'prerequisite' }))
+  return data
+}
+const statusControl = (h, id) => h.page.locator('#entity-' + id + ' .status-select').first()
+async function transitionAvailability(h, id) {
+  return statusControl(h, id).locator('option').evaluateAll(options => Object.fromEntries(options.map(option => [option.value, !option.disabled])))
+}
+function prerequisiteFrame(workspace, eventId) {
+  // V022 emits exact dependent readiness IDs even when their links and endpoint
+  // rows were never disclosed. Ancestor readiness is carried independently.
+  return { schema_version: 1, type: 'change', event: { schema_version: 1, event_id: eventId,
+    scope: 'workspace', workspace_id: workspace, occurred_at: '2026-10-19T12:00:00Z',
+    transaction: { id: eventId, cause: 'rest', request_id: null }, actor: { type: 'service', id: 'controlled-browser' },
+    entity: { type: 'task', id: 'prerequisite', action: 'updated' }, invalidations: [
+      { kind: 'entity', target: 'task:prerequisite' },
+      ...['own', 'own-child', 'eligible-parent'].map(id => ({ kind: 'readiness', target: 'task:' + id })),
+      { kind: 'readiness', target: 'project:root-project' },
+    ] } }
+}
+
+test('canonical prerequisite authority gates hierarchy and focused task/subtask controls before detail or dependency disclosure', { timeout: 60000 }, async () => {
+  for (const target of ['own', 'own-child']) {
+    const h = await openHierarchy(prerequisiteFixture())
+    const detail = h.gate(r => r.path === '/api/v1/tasks/' + target, { hold: true })
+    try {
+      await h.start('tab=projects&focus=task:' + target, target)
+      await h.bounded(detail.arrived, 5000, 'Focused detail request')
+      assert.deepEqual(await transitionAvailability(h, target), { todo: false, in_progress: false, blocked: true, done: false, cancelled: true })
+      assert.equal(await statusControl(h, target).inputValue(), 'blocked')
+      assert.equal(await statusControl(h, target).locator('option[value="done"]').innerText(), 'completed')
+      assert.match(await h.page.locator('#entity-' + target).innerText(), /open prerequisite/)
+      assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview') || r.path === '/api/v1/tasks/prerequisite'), false)
+    } finally { detail.release(); await h.close() }
+  }
+  const h = await openHierarchy(prerequisiteFixture())
+  const hidden = h.gate(r => r.kind === 'project' && r.parent === 'hidden-project', { hold: true })
+  const ownDetail = h.gate(r => r.path === '/api/v1/tasks/own', { hold: true })
+  const childDetail = h.gate(r => r.path === '/api/v1/tasks/own-child', { hold: true })
+  try {
+    await h.page.setViewportSize({ width: 1600, height: 1200 })
+    await h.start(); await h.bounded(hidden.arrived, 5000, 'Hidden branch request')
+    await h.page.locator('#entity-hidden-project .tree-toggle').first().click(); hidden.release()
+    for (const id of ['own', 'own-child']) {
+      await h.page.locator('#entity-' + id).waitFor()
+      assert.deepEqual(await transitionAvailability(h, id), { todo: false, in_progress: false, blocked: true, done: false, cancelled: true })
+    }
+    assert.equal(await h.page.locator('#entity-prerequisite').count(), 0)
+    assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview')), false)
+    ownDetail.release(); childDetail.release(); await h.idle()
+    assert.deepEqual(await transitionAvailability(h, 'manual'), { todo: true, in_progress: true, blocked: true, done: true, cancelled: true })
+    assert.match(await statusControl(h, 'eligible-parent').locator('option[value="in_progress"]').getAttribute('title'), /incomplete subtasks/)
+    h.fixture.tasks.find(task => task.id === 'prerequisite').status = 'cancelled'
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), prerequisiteFrame(h.fixture.workspace.id, 'prerequisite-cancelled'))
+    await h.idle()
+    for (const id of ['own', 'own-child']) assert.deepEqual(await transitionAvailability(h, id), { todo: true, in_progress: true, blocked: true, done: true, cancelled: true })
+    assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview')), false)
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { hidden.release(); ownDetail.release(); childDetail.release(); await h.close() }
+})
+
+test('legacy unknown eligibility retries bounded summaries and delayed ready replies cannot undo a live prerequisite blocker', { timeout: 60000 }, async () => {
+  const h = await openHierarchy(prerequisiteFixture())
+  const legacy = h.gate(r => r.path.includes('/navigation/focus/task/own'), { transform(value) { delete value.target.summary.readiness_rollup.own_open_dependency_count; return value } })
+  const detail = h.gate(r => r.path === '/api/v1/tasks/own', { hold: true })
+  try {
+    await h.start('tab=projects&focus=task:own', 'own')
+    await h.bounded(detail.arrived, 5000, 'Legacy detail request')
+    assert.ok(legacy.used)
+    assert.equal((await transitionAvailability(h, 'own')).in_progress, false)
+    const retry = h.page.locator('#entity-own').getByRole('button', { name: 'Refresh eligibility' })
+    const failed = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('own'), { error: 503 })
+    await retry.click(); await h.bounded(failed.arrived, 5000, 'Failed eligibility retry')
+    await h.page.waitForTimeout(50)
+    assert.equal((await transitionAvailability(h, 'own')).done, false)
+    const ready = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('own'), { hold: true, transform(value) { value.tasks.find(task => task.id === 'own').readiness_rollup.own_open_dependency_count = 0; return value } })
+    await retry.click(); await h.bounded(ready.arrived, 5000, 'Delayed ready summary')
+    const current = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('own'), { hold: true })
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), prerequisiteFrame(h.fixture.workspace.id, 'new-prerequisite-authority'))
+    await h.bounded(current.arrived, 5000, 'Current prerequisite summary')
+    assert.equal((await transitionAvailability(h, 'own')).done, false, 'refresh retires prior authority before completion')
+    current.release(); await h.page.waitForTimeout(50); ready.release(); detail.release(); await h.idle()
+    assert.deepEqual(await transitionAvailability(h, 'own'), { todo: false, in_progress: false, blocked: true, done: false, cancelled: true })
+    const retries = h.requests.filter(r => r.path.endsWith('/navigation/summaries'))
+    assert.ok(retries.length >= 3); assert.ok(retries.every(r => r.taskIds.length + r.projectIds.length <= 100))
+    assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview')), false)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { detail.release(); await h.close() }
+})
+
 test('five task statuses and mixed subtasks retain independent palette, neutral blocked semantics and single opacity', { timeout: 60000 }, async () => {
   const h = await openHierarchy(fixture())
   try {
+    await h.page.addInitScript(({ id, statuses }) => localStorage.setItem('hmem-ws-' + id, JSON.stringify({ filterTaskStatuses: statuses })), { id: h.fixture.workspace.id, statuses })
     await h.page.setViewportSize({ width: 1600, height: 1000 })
     await h.start(); await h.idle()
     for (const status of statuses) {

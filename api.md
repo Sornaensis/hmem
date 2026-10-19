@@ -135,6 +135,11 @@ Task overview and navigation readiness summaries derive `in_progress_subtask_cou
 and `can_start_subtasks` from the database, including children outside the loaded
 view. Closing the last child returns an automatically blocked parent to todo once
 its prerequisites are closed; starting or completing the parent remains explicit.
+Readiness also includes `own_open_dependency_count`: the task's direct unfinished
+prerequisites, independent of its current status. Cancelled prerequisites are closed.
+The recursive `open_dependency_count` still includes descendant work. Clients must
+treat a missing or null own count as unknown and refresh bounded summaries before
+allowing todo, in-progress or completed transitions.
 
 Most list routes return `{"items":[...],"has_more":true}`. Start at `offset=0`,
 advance by the number of returned items, and stop when `has_more` is false.

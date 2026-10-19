@@ -85,6 +85,13 @@ update msg model =
 updateRaw : Msg -> Model -> ( Model, Cmd Msg )
 updateRaw msg model =
     case msg of
+        RefreshTaskStatusEligibility workspace epoch taskId ->
+            if workspace /= model.selectedWorkspaceId || epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspace) |> Maybe.withDefault False) then
+                ( model, Cmd.none )
+            else case workspace of
+                Just workspaceId -> requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) [ ( "task", taskId ) ] model
+                Nothing -> ( model, Cmd.none )
+
         WsConnectingMsg ->
             if model.auth.status == AuthReady then
                 ( Feature.DataLoading.invalidatePlanningCounts (setWebSocketState Connecting model), Cmd.none )
@@ -1537,7 +1544,8 @@ requestNavigationSummaryBatches scope targets model =
                         let target = "navigation-summary:" ++ entityType ++ ":" ++ entityId
                             key = ChangeStream.scopeKey scope ++ "|" ++ target
                             advanced = advanceCanonicalTarget scope target currentModel
-                        in Helpers.capturePlanningRead key (Dict.get key advanced.webSocket.targetGenerations |> Maybe.withDefault 0) advanced) current batch
+                        in Helpers.capturePlanningRead key (Dict.get key advanced.webSocket.targetGenerations |> Maybe.withDefault 0) advanced)
+                        (Helpers.invalidateTaskPrerequisiteEligibility taskIds current) batch
 
                 entityGenerations =
                     batch |> List.filterMap (\( entityType, entityId ) ->
@@ -1643,7 +1651,7 @@ requestReadinessSummaryBatches scope targets model =
                 Nothing -> ( current, prepared )
         dispatch workspaceId batch ( current, commands ) =
             let
-                ( prepared, reversed ) = List.foldl prepare ( current, [] ) batch
+                ( prepared, reversed ) = List.foldl prepare ( Helpers.invalidateTaskPrerequisiteEligibility (batch |> List.filter (Tuple.first >> (==) "task") |> List.map Tuple.second) current, [] ) batch
                 guarded = List.reverse reversed
                 ids kind = guarded |> List.filter (\target -> target.kind == kind) |> List.map .id
             in

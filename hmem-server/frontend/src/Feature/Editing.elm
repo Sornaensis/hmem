@@ -406,18 +406,16 @@ update msg model =
             )
 
         ChangeTaskStatus taskId newStatus ->
-            let
-                ( trackedModel, requestId, clearCmd ) =
-                    beginTrackedMutation [ taskId ] model
-            in
-            ( trackedModel
-            , Cmd.batch
-                [ clearCmd
-                , Helpers.taskUpdateCmd model requestId
-                    taskId
-                    [ ( "status", Encode.string (Api.taskStatusToString newStatus) ), ( "request_id", Encode.string requestId ) ]
-                ]
-            )
+            case Dict.get taskId model.tasks of
+                Nothing -> ( model, Cmd.none )
+                Just task ->
+                    if not (Permissions.canEditCurrentWorkspace model) || Just task.workspaceId /= model.selectedWorkspaceId || model.auth.status /= AuthReady then
+                        ( model, Cmd.none )
+                    else if task.status == newStatus then
+                        ( model, Cmd.none )
+                    else case Helpers.taskStatusDisabledReason model task newStatus of
+                        Just reason -> addToast Warning reason model
+                        Nothing -> changeTaskStatus taskId newStatus model
 
         ChangeProjectPriority projId newPri ->
             let
@@ -955,6 +953,20 @@ viewEditableTextarea model entityType entityId field currentValue =
 -- STATUS / PRIORITY SELECTORS
 
 
+changeTaskStatus : String -> Api.TaskStatus -> Model -> ( Model, Cmd Msg )
+changeTaskStatus taskId newStatus model =
+    let
+        ( trackedModel, requestId, clearCmd ) = beginTrackedMutation [ taskId ] model
+    in
+    ( trackedModel
+    , Cmd.batch
+        [ clearCmd
+        , Helpers.taskUpdateCmd model requestId taskId
+            [ ( "status", Encode.string (Api.taskStatusToString newStatus) ), ( "request_id", Encode.string requestId ) ]
+        ]
+    )
+
+
 viewStatusSelect : Model -> String -> String -> String -> List a -> (a -> String) -> (String -> a -> Msg) -> Html Msg
 viewStatusSelect model entityType entityId currentStr allValues toString toMsg =
     viewStatusSelectWithDisabled model entityType entityId currentStr allValues toString (\_ -> Nothing) toMsg
@@ -971,11 +983,9 @@ viewStatusSelectWithDisabled model entityType entityId currentStr allValues toSt
                 "status-select badge badge-" ++ currentStr
 
         selectTitle =
-            if entityType == "task" && currentStr == "blocked" then
-                [ title "Blocked by incomplete dependencies" ]
-
-            else
-                []
+            if entityType == "task" then
+                Helpers.taskPrerequisiteBlockerReason model entityId |> Maybe.map (title >> List.singleton) |> Maybe.withDefault []
+            else []
     in
     select
         ([ class selectClass
@@ -1015,7 +1025,7 @@ viewStatusSelectWithDisabled model entityType entityId currentStr allValues toSt
                                     []
                            )
                     )
-                    [ text (str |> String.replace "_" " ") ]
+                    [ text (if entityType == "task" && str == "done" then "completed" else str |> String.replace "_" " ") ]
             )
             allValues
         )

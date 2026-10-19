@@ -153,6 +153,7 @@ export function taskReadinessRollup(fixture, taskId) {
     blocked_subtask_count: descendants.filter(task => task.status === 'blocked').length,
     dependency_blocked_task_count: new Set(openEdges.map(edge => edge.task_id)).size,
     open_dependency_count: openEdges.length,
+      own_open_dependency_count: fixture.dependencies.filter(edge => edge.task_id === taskId && tasks.has(edge.depends_on_id) && !tasks.get(edge.depends_on_id).deleted_at && OPEN_TASK_STATUSES.has(tasks.get(edge.depends_on_id).status)).length,
     completion_ready: !descendants.some(task => OPEN_TASK_STATUSES.has(task.status)),
     in_progress_subtask_count: fixture.tasks.filter(task => task.parent_id === taskId && task.status === 'in_progress').length,
     can_start_subtasks: (['todo', 'in_progress'].includes(parent.status) || (parent.status === 'blocked' && parent.auto_blocked === true))

@@ -425,9 +425,12 @@ observationSubjectTreeStatement = Statement.Statement sql encoder decoder True
       , "  FROM descendants GROUP BY path"
       , "), page AS ("
       , "  SELECT * FROM nodes ORDER BY path COLLATE \"C\" LIMIT $8 OFFSET $9"
-      , "), terminals AS ("
+      -- Compute terminals once, with page membership kept as a hashed subplan
+      -- rather than a nested join against the full catalog in generic plans.
+      , "), terminals AS MATERIALIZED ("
       , "  SELECT m.subject, m.subject_kind, COUNT(DISTINCT m.id) AS observation_count"
-      , "  FROM matching m JOIN page p ON p.path = m.subject GROUP BY m.subject, m.subject_kind"
+      , "  FROM matching m WHERE (m.subject IN (SELECT path FROM page)) IS TRUE"
+      , "  GROUP BY m.subject, m.subject_kind"
       , ")"
       , "SELECT jsonb_build_object("
       , "  'total_count', (SELECT COUNT(*) FROM observations WHERE workspace_id = $1),"

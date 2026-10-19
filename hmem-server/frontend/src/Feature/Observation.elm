@@ -191,6 +191,182 @@ pageSize =
     200
 
 
+treeMode : ObservationRequestMode -> Bool
+treeMode mode = List.member mode [ ObservationFacetMode, ObservationExactSubjectMode ]
+
+
+treePathKey : String -> String
+treePathKey path = "tree-path:" ++ path
+
+
+treeCardContext : Api.ObservationSubject -> String
+treeCardContext subject = "tree-terminal:" ++ ObservationTree.terminalKey subject
+
+
+ownedTree : Model -> ObservationTree.State
+ownedTree model =
+    let tree = model.observations.tree
+        lifetime = if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing then "unavailable" else treeLifetime model
+        owned = if tree.lifetime == lifetime then tree else ObservationTree.retire lifetime tree
+    in if lifetime == "unavailable" then {owned | resolvedPath = Nothing} else owned
+
+
+loadTreeTerminal : Api.ObservationSubject -> Int -> Model -> (Model, Cmd Msg)
+loadTreeTerminal subject offset model =
+    case repositoryWorkspaceId model of
+        Nothing -> (model, Cmd.none)
+        Just workspaceId ->
+            if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (treeMode model.observations.requestMode) then (model, Cmd.none)
+            else
+                let state = model.observations
+                    owned = if state.tree.lifetime == treeLifetime model then state.tree else ObservationTree.retire (treeLifetime model) state.tree
+                    (tree, request) = ObservationTree.beginTerminal subject offset owned
+                    query = listQuery workspaceId offset state
+                    exact = {query | subjectKind = Just subject.subjectKind, subject = Just subject.subject, query = Nothing}
+                in ({model | observations = {state | tree = tree}}, request |> Maybe.map (\guard -> Api.fetchObservations model.flags.apiUrl exact (GotObservationTreeTerminal guard)) |> Maybe.withDefault Cmd.none)
+
+
+startTree : Bool -> Model -> (Model, Cmd Msg)
+startTree refresh model =
+    let state = (if refresh then ensureAppliedQuery else commitAppliedQuery) (retireFilterReads model.observations)
+        prepared = {model | observations = {state | nextFilterToken = state.nextFilterToken + 1, loading = False, facetLoading = False, refreshPass = Nothing, refreshPending = False, refreshError = Nothing}}
+        current = prepared.observations
+        owned = if current.tree.resolvedPath |> Maybe.map (\resolved -> resolved.owner /= treeOwner prepared) |> Maybe.withDefault False then let previousTree = current.tree in {previousTree | resolvedPath = Nothing} else current.tree
+        retired = (if refresh then ObservationTree.revalidate else ObservationTree.retire) (treeLifetime prepared) owned
+        tree =
+            if refresh then
+                case retired.revealTarget of
+                    Just _ -> retired
+                    Nothing ->
+                        if current.selectedId == Nothing then current.selectedFacet |> Maybe.map (\subject -> if (retired.resolvedPath |> Maybe.map .subject) == Just subject then retired else ObservationTree.revealPath subject retired) |> Maybe.withDefault retired
+                        else
+                        let subject = case current.selectedFacet of
+                                Just selected -> Just selected
+                                Nothing -> currentSelectedObservation current |> Maybe.map (\observation -> {subjectKind = observation.subjectKind, subject = observation.subject})
+                        in case (subject, current.selectedId) of
+                            (Just selected, Just identity) -> {retired | revealTarget = Just {subject = selected, observationId = Just identity, focus = False}}
+                            _ -> retired
+            else if current.selectedId /= Nothing then
+                current.selectedDetail |> Maybe.map (\observation ->
+                    let subject = current.selectedFacet |> Maybe.withDefault {subjectKind = observation.subjectKind, subject = observation.subject}
+                    in ObservationTree.reveal subject observation.id retired) |> Maybe.withDefault retired
+            else if current.selectedId == Nothing then current.selectedFacet |> Maybe.map (\subject -> if (retired.resolvedPath |> Maybe.map .subject) == Just subject then retired else ObservationTree.revealPath subject retired) |> Maybe.withDefault retired else retired
+    in pumpTree {prepared | observations = {current | tree = tree}}
+
+
+pumpTree : Model -> (Model, Cmd Msg)
+pumpTree model =
+    let state = model.observations in
+    if not (treeMode state.requestMode) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending state || state.refreshPending then (model, Cmd.none)
+    else
+        let
+            tree = if state.tree.lifetime == treeLifetime model then state.tree else ObservationTree.retire (treeLifetime model) state.tree
+            root = Dict.get "" tree.branches
+            current branch = branch.lifetime == tree.lifetime
+            needs prefix = Dict.get prefix tree.branches |> Maybe.map (\branch -> branch.request == Nothing && branch.error == Nothing && (not (current branch) || (prefix /= "" && branch.hasMore))) |> Maybe.withDefault True
+            offset prefix = Dict.get prefix tree.branches |> Maybe.map (\branch -> if current branch || branch.stagedPaths /= Nothing then branch.nextOffset else 0) |> Maybe.withDefault 0
+            reveal = tree.revealTarget |> Maybe.map (.subject >> .subject)
+            missingReveal = reveal |> Maybe.andThen (ObservationTree.ancestors >> List.head) |> Maybe.map (\path -> not (Dict.member path tree.nodes)) |> Maybe.withDefault False
+            rootMore = missingReveal && (root |> Maybe.map (\branch -> current branch && branch.hasMore && branch.request == Nothing && branch.error == Nothing) |> Maybe.withDefault False)
+            ready = root |> Maybe.map current |> Maybe.withDefault False
+            expanded = if ready then ObservationTree.visiblePaths tree |> List.filter (\path -> Set.member path tree.expanded) else []
+            rootWork = if needs "" || rootMore then [("", Nothing)] else []
+            branchOwners = expanded |> List.filter (\path -> Dict.get path tree.nodes |> Maybe.map .hasChildren |> Maybe.withDefault False) |> List.map (\path -> (path, Nothing))
+            branches = rootWork ++ List.filter (Tuple.first >> needs) branchOwners
+            subjects = expanded |> List.concatMap (\path -> Dict.get path tree.nodes |> Maybe.map .terminals |> Maybe.withDefault []) |> List.map (\terminal -> {subjectKind = terminal.subjectKind, subject = terminal.subject})
+            terminals = subjects
+                |> List.filter (\subject -> Dict.get (ObservationTree.terminalKey subject) tree.terminals |> Maybe.map (\terminal -> terminal.request == Nothing && terminal.error == Nothing && (terminal.lifetime /= tree.lifetime || (terminal.hasMore && (tree.revealTarget |> Maybe.map (\target -> target.subject.subjectKind == subject.subjectKind && target.subject.subject == subject.subject && (target.observationId |> Maybe.map (\identity -> not (List.any (\item -> item.id == identity) terminal.items)) |> Maybe.withDefault False)) |> Maybe.withDefault False)))) |> Maybe.withDefault True)
+                |> List.map (\subject -> (subject.subject, Just subject.subjectKind))
+            owners = branchOwners ++ List.map (\subject -> (subject.subject, Just subject.subjectKind)) subjects
+            after = tree.lastOwner |> Maybe.andThen (\owner -> owners |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> (==) owner) |> List.head |> Maybe.map (Tuple.first >> (+) 1)) |> Maybe.withDefault 0
+            -- Rotate the existing owner order before eligibility filtering, so an
+            -- in-flight last owner cannot send a queued terminal back to the tail.
+            work = rootWork ++ ((List.drop after owners ++ List.take after owners) |> List.filter (\owner -> List.member owner (branches ++ terminals)))
+            admit (prefix, kind) (source, accumulated) =
+                let (next, command) = case kind of
+                        Nothing -> loadTreeBranch prefix (offset prefix) source
+                        Just value ->
+                            let subject = {subjectKind = value, subject = prefix}
+                                at = Dict.get (ObservationTree.terminalKey subject) source.observations.tree.terminals |> Maybe.map (\terminal -> if terminal.lifetime == tree.lifetime || terminal.stagedItems /= Nothing then terminal.nextOffset else 0) |> Maybe.withDefault 0
+                            in loadTreeTerminal subject at source
+                in (next, command :: accumulated)
+            converged = if ready && List.isEmpty branches && List.isEmpty terminals && not (List.any (\request -> request.lifetime == tree.lifetime) tree.physical) then {tree | refreshing = False} else tree
+            (loaded, commands) = List.foldl admit ({model | observations = {state | tree = converged}}, []) work
+        in (loaded, Cmd.batch commands)
+
+
+focusTreePath : String -> Model -> (Model, Cmd Msg)
+focusTreePath path model =
+    let state = model.observations
+        subject = Dict.get path state.tree.nodes |> Maybe.andThen (\node -> case node.terminals of
+            [terminal] -> Just {subjectKind = terminal.subjectKind, subject = terminal.subject}
+            _ -> Nothing)
+        selected = ObservationTree.select path subject state.tree
+    in ({model | observations = {state | tree = {selected | focusPending = Just path}}}, Cmd.none)
+
+
+finishTreeReveal : Model -> (Model, Cmd Msg)
+finishTreeReveal model =
+    let state = model.observations
+        tree = state.tree
+        subject = case state.selectedFacet of
+            Just selected -> Just selected
+            Nothing -> currentSelectedObservation state |> Maybe.map (\observation -> {subjectKind = observation.subjectKind, subject = observation.subject})
+        validation = subject |> Maybe.map (\selected -> {subject = selected, observationId = state.selectedId, focus = False})
+        target = if not (treeMode state.requestMode) then Nothing else case tree.revealTarget of
+            Just reveal -> Just reveal
+            Nothing -> validation
+    in case target of
+        Nothing -> (model, Cmd.none)
+        Just requested ->
+            let
+                terminal = Dict.get (ObservationTree.terminalKey requested.subject) tree.terminals
+                loaded = terminal |> Maybe.map (\value -> value.lifetime == tree.lifetime && (requested.observationId |> Maybe.map (\identity -> List.any (\item -> item.id == identity) value.items) |> Maybe.withDefault True)) |> Maybe.withDefault False
+                missing = ObservationTree.ancestors requested.subject.subject |> List.filter (\path -> not (Dict.member path tree.nodes)) |> List.head
+                missingProof = missing |> Maybe.map (\path -> Dict.get (ObservationTree.parent path) tree.branches |> Maybe.map (\branch -> branch.lifetime == tree.lifetime && not branch.hasMore && branch.request == Nothing && branch.error == Nothing) |> Maybe.withDefault False) |> Maybe.withDefault False
+                parentCurrent = Dict.get (ObservationTree.parent requested.subject.subject) tree.branches |> Maybe.map (\branch -> branch.lifetime == tree.lifetime && List.member requested.subject.subject branch.paths) |> Maybe.withDefault False
+                typedProof = parentCurrent && (Dict.get requested.subject.subject tree.nodes |> Maybe.map (\node -> not (List.any (\value -> value.subjectKind == requested.subject.subjectKind) node.terminals)) |> Maybe.withDefault False)
+                cardProof = terminal |> Maybe.map (\value -> value.lifetime == tree.lifetime && not value.hasMore && value.request == Nothing && value.error == Nothing && not loaded) |> Maybe.withDefault False
+            in
+            if missingProof || typedProof || cardProof then
+                let reconciled = ObservationTree.recoverFocus tree {tree | revealTarget = Nothing, selected = Nothing, resolvedPath = Nothing}
+                    cleared = commitAppliedQuery {state | selectedFacet = Nothing, requestMode = ObservationFacetMode, tree = reconciled} |> clearSelection
+                in Helpers.writeObservationHistory False {model | observations = cleared}
+            else if tree.revealTarget == Nothing || not loaded then (model, Cmd.none)
+            else case requested.observationId of
+                Nothing -> ({model | observations = {state | tree = {tree | revealTarget = Nothing, resolvedPath = Just {subject = requested.subject, owner = treeOwner model}, focusPending = if requested.focus then Just requested.subject.subject else Nothing}}}, Cmd.none)
+                Just observationId ->
+                    if state.selectedId /= Just observationId then (model, Cmd.none) else
+                    let
+                        origin = observationCardDomId (treeCardContext requested.subject) observationId
+                        viewport = state.viewport
+                        intent = {intent = "detail", selectedId = state.selectedId, workspaceId = Maybe.withDefault "" model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch
+                            , queryGeneration = tree.lifetime, navigationToken = state.detailNavigationToken + 1, previousToken = state.detailNavigationToken, previousSelection = state.selectedId
+                            , originKey = origin, readyRevision = Nothing, fallback = False}
+                    in ({model | observations = {state | tree = {tree | revealTarget = Nothing, focusPending = Nothing}, detailReturnTarget = Just origin, detailNavigationEpoch = model.sessionRequestEpoch
+                        , detailNavigationToken = if requested.focus then state.detailNavigationToken + 1 else state.detailNavigationToken, pendingReturnNavigation = if requested.focus then Just intent else Nothing, viewport = {viewport | returnPin = Just origin}}}, Cmd.none)
+
+
+treeKey : String -> String -> Model -> (Model, Cmd Msg)
+treeKey path key model =
+    let tree = model.observations.tree
+        paths = ObservationTree.visiblePaths tree
+        position = paths |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> (==) path) |> List.head |> Maybe.map Tuple.first |> Maybe.withDefault 0
+        at index = List.drop (Basics.max 0 index) paths |> List.head |> Maybe.withDefault path
+        expanded = Set.member path tree.expanded
+        toggleNode = updateRaw (ToggleObservationTreePath path) model
+    in case key of
+        "ArrowDown" -> focusTreePath (at (Basics.min (List.length paths - 1) (position + 1))) model
+        "ArrowUp" -> focusTreePath (at (position - 1)) model
+        "Home" -> focusTreePath (at 0) model
+        "End" -> focusTreePath (at (List.length paths - 1)) model
+        "ArrowRight" -> if not expanded then toggleNode else focusTreePath (List.filter (ObservationTree.parent >> (==) path) paths |> List.head |> Maybe.withDefault path) model
+        "ArrowLeft" -> if expanded then toggleNode else if ObservationTree.parent path /= "" then focusTreePath (ObservationTree.parent path) model else (model, Cmd.none)
+        "Enter" -> toggleNode
+        " " -> toggleNode
+        _ -> (model, Cmd.none)
+
+
 validPage : Int -> Bool -> List String -> List String -> Bool
 validPage offset hasMore received existing =
     List.length received <= pageSize
@@ -203,6 +379,11 @@ treeQuery workspaceId prefix offset input =
     { workspaceId = workspaceId, prefix = prefix, subjectQuery = nonEmpty state.query, subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha, currentGitSha = nonEmpty state.currentGitSha, historyGitSha = nonEmpty state.historyGitSha
     , limit = pageSize, offset = offset }
+
+
+treeOwner : Model -> String
+treeOwner model =
+    Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" model.selectedWorkspaceId, String.fromInt model.sessionRequestEpoch, countActor model])
 
 
 treeLifetime : Model -> String
@@ -231,9 +412,9 @@ loadTreeBranch prefix offset model =
 
 revealTreeSelection : Api.Observation -> ObservationModel -> ObservationModel
 revealTreeSelection observation state =
-    if state.selectedId /= Just observation.id || not (List.member state.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then state
+    if state.selectedId /= Just observation.id || state.detailReturnTarget /= Nothing || not (List.member state.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then state
     else
-        let subject = state.selectedFacet |> Maybe.andThen (\terminal -> if List.member terminal observation.subjects then Just terminal else Nothing) |> Maybe.withDefault { subjectKind = observation.subjectKind, subject = observation.subject } in
+        let subject = state.selectedFacet |> Maybe.withDefault { subjectKind = observation.subjectKind, subject = observation.subject } in
         { state | tree = ObservationTree.reveal subject observation.id state.tree }
 
 
@@ -342,7 +523,7 @@ syncCounts model =
     let counts = model.observations.counts in
     if model.auth.status /= AuthReady || model.sessionContext == Nothing || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing then
         ( updateObservation (\state -> { state | counts = { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 } }) model, Cmd.none )
-    else if model.observations.filterDebounce /= Nothing || filterValidationError model.observations /= Nothing || (model.observations.requestMode == ObservationMatchMode && List.isEmpty model.observations.matchAppliedPaths) then
+    else if treeMode model.observations.requestMode || model.observations.filterDebounce /= Nothing || filterValidationError model.observations /= Nothing || (model.observations.requestMode == ObservationMatchMode && List.isEmpty model.observations.matchAppliedPaths) then
         ( model, Cmd.none )
     else
         case repositoryWorkspaceId model of
@@ -535,6 +716,9 @@ update msg model =
         touched = intentional || liveChange || (case msg of
             ToggleObservationSubjects _ -> True
             ToggleObservationMatchGroup _ -> True
+            SelectObservationTreePath _ -> True
+            ToggleObservationTreePath _ -> True
+            ObservationTreeKey _ _ -> True
             _ -> False)
         updated = if touched then rememberPreferences queryUpdated else queryUpdated
     in
@@ -554,9 +738,45 @@ updateRaw msg model =
             acceptCounts guard result model
 
         GotObservationTree request result ->
+            let state = model.observations
+                owned = if state.refreshPending then ObservationTree.retire state.tree.lifetime (ownedTree model) else ownedTree model
+                received = ObservationTree.receive request (Result.mapError (\_ -> "Unable to load Subject Tree.") result) owned
+                recovered = if state.viewport.focus |> Maybe.map (String.startsWith "tree-path:") |> Maybe.withDefault False then received else {received | focusPending = Nothing}
+                completed = request.prefix == "" && request.kind == Nothing && request.lifetime == owned.lifetime
+                    && (Dict.get "" owned.branches |> Maybe.map .request) == Just (Just request)
+                    && received.displayLifetime == request.lifetime
+                    && (Dict.get "" received.branches |> Maybe.map (\branch -> branch.error == Nothing && branch.lifetime == request.lifetime) |> Maybe.withDefault False)
+            in ( { model | observations = { state | tree = recovered, completedQuery = if completed then state.appliedQuery else state.completedQuery } }, Cmd.none )
+
+        GotObservationTreeTerminal request result ->
+            let state = model.observations
+                owned = if state.refreshPending then ObservationTree.retire state.tree.lifetime (ownedTree model) else ownedTree model
+                tree = ObservationTree.receiveTerminal request (Result.mapError (\_ -> "Unable to load subject observations.") result) owned
+                items = Dict.values tree.terminals |> List.concatMap .items
+                received = {state | tree = tree, items = List.foldl (\item accumulated -> Dict.update item.id (\old -> Just (old |> Maybe.map (preferNewerObservation item) |> Maybe.withDefault item)) accumulated) state.items items}
+                reconciled = List.foldl applyAuthoritativeObservation received items
+            in ({model | observations = reconciled}, Cmd.none)
+
+        SelectObservationTreePath path -> focusTreePath path model
+
+        ToggleObservationTreePath path ->
+            let state = model.observations
+                selected = ObservationTree.select path state.tree.selected state.tree |> ObservationTree.toggle path
+            in ({model | observations = {state | tree = selected}}, Cmd.none)
+
+        ObservationTreeKey path key -> treeKey path key model
+
+        LoadObservationTreePage prefix kind ->
             let state = model.observations in
-            ( { model | observations = { state | tree = ObservationTree.receive request (Result.mapError (\_ -> "Unable to load Subject Tree.") result)
-                (if state.tree.lifetime == treeLifetime model then state.tree else ObservationTree.retire (treeLifetime model) state.tree) } }, Cmd.none )
+            case kind of
+                Nothing ->
+                    let branch = Dict.get prefix state.tree.branches
+                        offset = branch |> Maybe.map (\value -> if value.lifetime == state.tree.lifetime then value.nextOffset else 0) |> Maybe.withDefault 0
+                    in loadTreeBranch prefix offset model
+                Just value ->
+                    let subject = {subjectKind = value, subject = prefix}
+                        offset = Dict.get (ObservationTree.terminalKey subject) state.tree.terminals |> Maybe.map (\terminal -> if terminal.lifetime == state.tree.lifetime then terminal.nextOffset else 0) |> Maybe.withDefault 0
+                    in loadTreeTerminal subject offset model
 
         RetryObservationCounts ->
             syncCounts (updateObservation (\state -> let counts = state.counts in { state | counts = { counts | error = Nothing, pending = True } }) model)
@@ -690,7 +910,13 @@ updateRaw msg model =
             activateObservation observationId Nothing model
 
         SelectObservationFrom observationId originId ->
-            activateObservation observationId (Just originId) model
+            let state = model.observations
+                subject = if treeMode state.requestMode then Dict.values state.tree.terminals |> List.filter (\terminal -> observationCardDomId (treeCardContext terminal.subject) observationId == originId) |> List.head |> Maybe.map .subject else Nothing
+                tree = state.tree
+                prepared = case subject of
+                    Nothing -> model
+                    Just value -> {model | observations = {state | selectedFacet = Just value, tree = {tree | selected = Just value}, appliedQuery = Maybe.map (\query -> {query | selectedFacet = Just value}) state.appliedQuery}}
+            in activateObservation observationId (Just originId) prepared
 
         ReturnObservationResults ->
             returnToResults model
@@ -1592,7 +1818,7 @@ applyObservationFilters model =
             reloadAppliedMatch model
 
         ObservationExactSubjectMode ->
-            reloadResultMode ObservationExactSubjectMode model
+            startTree False model
 
         ObservationFlatMode ->
             reloadResultMode ObservationFlatMode model
@@ -1617,9 +1843,7 @@ switchBrowseMode mode model =
     else
         case mode of
             ObservationFacetMode -> reloadFacets prepared
-            ObservationExactSubjectMode ->
-                if prepared.observations.selectedFacet == Nothing then reloadResultMode ObservationFlatMode prepared
-                else reloadResultMode ObservationExactSubjectMode prepared
+            ObservationExactSubjectMode -> startTree False prepared
             ObservationMatchMode -> applyLiveFilters prepared
             ObservationFlatMode -> reloadResultMode ObservationFlatMode prepared)
         |> preserve
@@ -1633,13 +1857,14 @@ selectFacet subjectKind subject model =
                 retireFilterReads { state
                     | selectedFacet = Just { subjectKind = subjectKind, subject = subject }
                     , requestMode = ObservationExactSubjectMode
+                    , tree = ObservationTree.revealPath {subjectKind = subjectKind, subject = subject} state.tree
                     , matchValidationError = Nothing
                     , matchEvidence = Dict.empty
                     , expandedMatchGroups = Dict.empty
                     , browseReturn = Nothing
                 }
             )
-        |> reloadResultMode ObservationExactSubjectMode
+        |> startTree False
         |> (\( updated, command ) -> ( updated, Cmd.batch [ command, focusElement "observation-mode-heading" ] ))
 
 
@@ -1722,19 +1947,7 @@ reloadResultMode mode model =
 
 reloadFacets : Model -> ( Model, Cmd Msg )
 reloadFacets model =
-    case repositoryWorkspaceId model of
-        Just workspaceId ->
-            let
-                state =
-                    startFacetReload model.sessionRequestEpoch workspaceId model.observations
-
-                updated =
-                    updateObservation (always state) model
-            in
-            fetchFacetPage 0 updated
-
-        Nothing ->
-            ( updateObservation (\state -> { state | facetLoading = False, facetExpectedOffset = Nothing }) model, Cmd.none )
+    startTree False model
 
 
 refreshActiveResults : Model -> ( Model, Cmd Msg )
@@ -1768,7 +1981,11 @@ refreshActiveResultsRaw model =
     let
         state = model.observations
     in
-    if state.filterDebounce /= Nothing || filterValidationError state /= Nothing then
+    if treeMode state.requestMode && state.filterDebounce == Nothing && filterValidationError state == Nothing then
+        if List.any (\request -> request.lifetime == state.tree.lifetime) state.tree.physical then
+            (updateObservation (\current -> {current | refreshPending = True}) model, Cmd.none)
+        else startTree True model
+    else if state.filterDebounce /= Nothing || filterValidationError state /= Nothing then
         ( updateObservation (\current -> { current | refreshPending = True }) model, Cmd.none )
     else if state.refreshPass /= Nothing then
         ( updateObservation (\current -> { current | refreshPass = Maybe.map (\pass -> { pass | invalidated = True }) current.refreshPass, refreshPending = True }) model, Cmd.none )
@@ -2006,8 +2223,9 @@ matchObservations model =
 
                 Ok paths ->
                     let
+                        previous = model.observations
                         state =
-                            startMatchReload model.sessionRequestEpoch workspaceId paths model.observations
+                            startMatchReload model.sessionRequestEpoch workspaceId paths {previous | filterDebounce = Nothing, nextFilterToken = previous.nextFilterToken + 1}
 
                         updated =
                             updateObservation (always state) model
@@ -2649,6 +2867,7 @@ selectDifferentObservation observationId model =
                         (\current ->
                             { current
                                 | selectedId = Just observationId
+                                , tree = let tree = current.tree in {tree | revealFocus = True}
                                 , history = Nothing
                                 , historyExpanded = False
                                 , selectedDetail =
@@ -3206,6 +3425,7 @@ removeObservation observationId state =
         , preferenceValue = let prefs = state.preferenceValue in { prefs | detail = if Maybe.map .id prefs.detail == Just observationId then Nothing else prefs.detail, subjects = List.filter ((/=) observationId) prefs.subjects }
         , orderedIds = List.filter ((/=) observationId) state.orderedIds
         , matchEvidence = Dict.remove observationId state.matchEvidence
+        , tree = let tree = state.tree in {tree | terminals = Dict.map (\_ terminal -> {terminal | items = List.filter (.id >> (/=) observationId) terminal.items, stagedItems = Maybe.map (List.filter (.id >> (/=) observationId)) terminal.stagedItems}) tree.terminals}
         , selectedId =
             if selected then
                 Nothing
@@ -3535,6 +3755,30 @@ resultRowKey row =
         ObservationFacetRow facet -> "observation-facet-" ++ domToken (facetKey facet.subjectKind facet.subject)
         ObservationPathRow path _ -> "observation-path-" ++ domToken path
         ObservationSubjectRow _ key _ _ _ _ -> "observation-group-" ++ domToken key
+        ObservationTreePathRow node -> treePathKey node.path
+        ObservationTreeTerminalRow subject -> "tree-terminal:" ++ ObservationTree.terminalKey subject
+        ObservationTreePageRow path kind -> "tree-page:" ++ (kind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault "branch") ++ ":" ++ path
+
+
+treeResultRows : ObservationModel -> List ObservationResultRow
+treeResultRows state =
+    let tree = state.tree
+        pageRow prefix kind pending = if pending then [ObservationTreePageRow prefix kind] else []
+        branchRows prefix =
+            let branch = Dict.get prefix tree.branches
+                paths = branch |> Maybe.map .paths |> Maybe.withDefault []
+                pending = branch |> Maybe.map (\value -> value.request /= Nothing || value.error /= Nothing || value.hasMore) |> Maybe.withDefault True
+            in List.concatMap nodeRows paths ++ pageRow prefix Nothing pending
+        terminalRows terminal =
+            let subject = {subjectKind = terminal.subjectKind, subject = terminal.subject}
+                loaded = Dict.get (ObservationTree.terminalKey subject) tree.terminals
+                items = loaded |> Maybe.map .items |> Maybe.withDefault []
+                pending = loaded |> Maybe.map (\value -> value.request /= Nothing || value.error /= Nothing || value.hasMore) |> Maybe.withDefault True
+            in ObservationTreeTerminalRow subject :: (List.map (\item -> ObservationCardRow (treeCardContext subject) (Dict.get item.id state.items |> Maybe.withDefault item)) items ++ pageRow subject.subject (Just subject.subjectKind) pending)
+        nodeRows path = Dict.get path tree.nodes |> Maybe.map (\node ->
+            ObservationTreePathRow node :: (if Set.member path tree.expanded then
+                List.concatMap terminalRows node.terminals ++ (if node.hasChildren then branchRows path else []) else [])) |> Maybe.withDefault []
+    in branchRows ""
 
 
 projectResultRows : ObservationModel -> Array.Array ObservationResultRow
@@ -3547,12 +3791,11 @@ projectResultRows state =
                 :: (if expanded then cards group.key group.observationIds else [])
         pathRows group = ObservationPathRow group.path (List.isEmpty group.subjectGroups)
             :: List.concatMap (subject group.path) group.subjectGroups
-        exact = state.selectedFacet |> Maybe.map (\facet -> "exact:" ++ facetKey facet.subjectKind facet.subject) |> Maybe.withDefault "exact:missing"
     in
     Array.fromList (case state.requestMode of
-        ObservationFacetMode -> state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets |> Maybe.map ObservationFacetRow)
+        ObservationFacetMode -> treeResultRows state
         ObservationMatchMode -> groupPathMatches state.matchAppliedPaths state.orderedIds state.matchEvidence |> List.concatMap pathRows
-        ObservationExactSubjectMode -> cards exact state.orderedIds
+        ObservationExactSubjectMode -> treeResultRows state
         ObservationFlatMode -> cards "flat" state.orderedIds)
 
 
@@ -3561,8 +3804,16 @@ viewportLifetime model =
     let state = model.observations in
     { workspace = if model.activeTab == ObservationsTab then repositoryWorkspaceId model |> Maybe.withDefault "" else ""
     , epoch = model.sessionRequestEpoch
-    , generation = if state.requestMode == ObservationFacetMode then facetFingerprintFor model.sessionRequestEpoch (facetQuery (Maybe.withDefault "" model.selectedWorkspaceId) 0 state) else resultViewFingerprint model.sessionRequestEpoch (Maybe.withDefault "" model.selectedWorkspaceId) state
+    , generation = if treeMode state.requestMode then state.tree.lifetime else resultViewFingerprint model.sessionRequestEpoch (Maybe.withDefault "" model.selectedWorkspaceId) state
     , revision = state.viewport.stamp.revision }
+
+
+treeReadsPending : ObservationModel -> Bool
+treeReadsPending state =
+    treeMode state.requestMode &&
+        (not (Dict.member "" state.tree.branches)
+            || (Dict.values state.tree.branches |> List.any (\branch -> branch.request /= Nothing))
+            || (Dict.values state.tree.terminals |> List.any (\terminal -> terminal.request /= Nothing)))
 
 
 {-| Build membership projection only after a structural/canonical change, never
@@ -3571,20 +3822,21 @@ for a draft keystroke. Transport caches and their counts remain untouched.
 refreshViewport : Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
 refreshViewport previous ( incoming, command ) =
     let
-        ( model, preferenceCmd ) = syncPreferences previous incoming
+        (revealed, revealCmd) = finishTreeReveal incoming
+        ( model, preferenceCmd ) = syncPreferences previous revealed
         old = previous.observations
         state = model.observations
         lifetime = viewportLifetime model
         sameContext = lifetime.workspace /= "" && lifetime.workspace == old.viewport.stamp.workspace && lifetime.epoch == old.viewport.stamp.epoch
-        preserveScroll = sameContext && state.viewport.preserveScroll && List.member state.requestMode [ ObservationFlatMode, ObservationFacetMode ]
+        preserveScroll = sameContext && state.viewport.preserveScroll && List.member state.requestMode [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode ]
             && (old.requestMode /= state.requestMode || lifetime.generation == old.viewport.stamp.generation)
             && old.selectedId == state.selectedId && old.detailNavigationToken == state.detailNavigationToken
             && (old.requestMode /= state.requestMode || (old.expandedMatchGroups == state.expandedMatchGroups && old.expandedSubjects == state.expandedSubjects))
         currentViewport = state.viewport
         preparedViewport = { currentViewport | preserveScroll = preserveScroll, preserveExtent = if preserveScroll then currentViewport.preserveExtent else 0 }
         restoreScroll = state.preferenceScroll /= Nothing && state.selectedId == Nothing && model.activeTab == ObservationsTab
-            && not state.loading && not state.facetLoading && state.refreshPass == Nothing
-        changed = restoreScroll || old.items /= state.items || old.orderedIds /= state.orderedIds || old.requestMode /= state.requestMode
+            && not state.loading && not state.facetLoading && not (treeReadsPending state) && state.refreshPass == Nothing
+        changed = restoreScroll || old.tree /= state.tree || old.items /= state.items || old.orderedIds /= state.orderedIds || old.requestMode /= state.requestMode
             || old.selectedFacet /= state.selectedFacet || old.facets /= state.facets || old.facetKeys /= state.facetKeys
             || old.matchAppliedPaths /= state.matchAppliedPaths || old.matchEvidence /= state.matchEvidence
             || old.expandedMatchGroups /= state.expandedMatchGroups
@@ -3598,20 +3850,24 @@ refreshViewport previous ( incoming, command ) =
         oldStamp = projectedViewport.stamp
         navigationChanged = projectedViewport.navigationToken /= state.detailNavigationToken
         navigationViewport = if navigationChanged then { projectedViewport | navigationToken = state.detailNavigationToken, stamp = { oldStamp | revision = oldStamp.revision + 1 } } else projectedViewport
-        viewport = if restoreScroll then { navigationViewport | top = Maybe.withDefault navigationViewport.top state.preferenceScroll, preserveScroll = False } else navigationViewport
+        scrollViewport = if restoreScroll then { navigationViewport | top = Maybe.withDefault navigationViewport.top state.preferenceScroll, preserveScroll = False } else navigationViewport
+        treeTarget = state.tree.focusPending |> Maybe.map treePathKey
+        viewport = if treeTarget /= Nothing then {scrollViewport | focus = treeTarget} else scrollViewport
         invalidatedReturn = changed && (old.items /= state.items || old.expandedMatchGroups /= state.expandedMatchGroups || old.orderedIds /= state.orderedIds)
         ownedPending = state.pendingReturnNavigation |> Maybe.andThen (\intent ->
             if intent.workspaceId == lifetime.workspace && intent.sessionEpoch == lifetime.epoch && intent.queryGeneration == lifetime.generation && intent.navigationToken == state.detailNavigationToken then Just intent else Nothing)
         pending = if invalidatedReturn then ownedPending |> Maybe.map (\intent -> { intent | fallback = intent.intent == "return" && not (Dict.member intent.originKey viewport.index.positions), readyRevision = Nothing }) else ownedPending
         owner = if changed || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget then resolveSelectedOwner rows viewport state else state.inlineOwner
-        updated = { state | resultRows = rows, viewport = viewport, inlineOwner = owner, pendingReturnNavigation = pending, preferenceScroll = if restoreScroll then Nothing else state.preferenceScroll }
+        updated = { state | resultRows = rows, viewport = viewport, inlineOwner = owner, pendingReturnNavigation = pending, preferenceScroll = if restoreScroll then Nothing else state.preferenceScroll
+            , tree = let tree = state.tree in {tree | focusPending = Nothing} }
         synchronize = changed || navigationChanged || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget || old.viewport.focus /= viewport.focus || old.viewport.returnPin /= viewport.returnPin || old.viewport.stamp /= viewport.stamp || old.viewport.preserveScroll /= viewport.preserveScroll || (preserveScroll && (old.loading /= state.loading || old.facetLoading /= state.facetLoading))
     in
     let
         ( automatic, automaticCmd ) = continueAutomaticRefresh { model | observations = updated }
-        ( counted, countsCmd ) = syncCounts automatic
+        ( pumped, treeCmd ) = pumpTree automatic
+        ( counted, countsCmd ) = syncCounts pumped
     in
-    ( counted, Cmd.batch [ command, preferenceCmd, automaticCmd, countsCmd, if synchronize then Ports.syncObservationViewport (ObservationViewport.sync changed 0 Nothing viewport) else Cmd.none ] )
+    ( counted, Cmd.batch [ command, revealCmd, preferenceCmd, automaticCmd, treeCmd, countsCmd, if synchronize || treeTarget /= Nothing then Ports.syncObservationViewport (ObservationViewport.sync changed 0 (treeTarget |> Maybe.map (\key -> (key, "first"))) viewport) else Cmd.none ] )
 
 
 preferenceMode : ObservationRequestMode -> String
@@ -3785,11 +4041,12 @@ updateViewport payload model =
                     settled = viewport.stamp == state.viewport.stamp && viewport.index.heights == state.viewport.index.heights
                         && not viewport.restoring && abs adjustment < 0.01 && target == Nothing
                         && (pending == Nothing || Maybe.map .readyRevision pending == Maybe.map .readyRevision state.pendingReturnNavigation)
-                    releaseExtent = settled && viewport.preserveExtent > 0 && not (if state.requestMode == ObservationFacetMode then state.facetLoading else state.loading)
+                    releaseExtent = settled && viewport.preserveExtent > 0 && not state.loading && not state.facetLoading && not (treeReadsPending state)
                     stamp = viewport.stamp
                     finalViewport = if releaseExtent then { viewport | preserveExtent = 0, stamp = { stamp | revision = stamp.revision + 1 } } else viewport
                 in
-                ( { model | observations = { state | viewport = finalViewport, pendingReturnNavigation = pending } }
+                ( { model | observations = { state | viewport = finalViewport, pendingReturnNavigation = pending
+                    , tree = if Decode.decodeValue (Decode.field "focus" (Decode.nullable Decode.string)) payload == Ok (Just "@outside") then let tree = state.tree in {tree | revealFocus = False, revealTarget = Maybe.map (\intent -> {intent | focus = False}) tree.revealTarget} else state.tree } }
                 , Cmd.batch [ Ports.syncObservationViewport (ObservationViewport.syncReceipt (settled && not releaseExtent) adjustment target finalViewport), navigation ] )
 
 
@@ -3845,21 +4102,26 @@ viewResultRows display canEdit state =
                             [ Lazy.lazy5 viewResultRow display canEdit owner state row ]) |> Maybe.withDefault (text "") )
     in
     Keyed.node "div"
-        [ id "observation-viewport", class "observation-list-rows observation-viewport"
+        ([ id "observation-viewport", class "observation-list-rows observation-viewport"
         , style "min-height" (String.fromFloat viewport.preserveExtent ++ "px")
         , attribute "data-observation-preserve-scroll" (if viewport.preserveScroll then "true" else "false")
         , attribute "data-observation-viewport-context" (Encode.encode 0 (ObservationViewport.stampValue viewport.stamp))
         , attribute "data-observation-layout-ready" (if viewport.restoring then "false" else "true")
         , attribute "data-observation-focus-key" (Maybe.withDefault "" viewport.focus)
         , attribute "data-observation-logical-count" (String.fromInt (Array.length rows))
-        , attribute "data-observation-loaded-count" (String.fromInt (List.length state.orderedIds)) ]
+        , attribute "data-observation-loaded-count" (String.fromInt (if treeMode state.requestMode then Dict.values state.tree.terminals |> List.concatMap (.items >> List.map .id) |> Set.fromList |> Set.size else List.length state.orderedIds)) ]
+            ++ (if treeMode state.requestMode then [attribute "role" "tree", attribute "aria-label" "Stored subject paths"] else []))
         (ObservationViewport.piecesWithOwner owner state.detailReturnTarget viewport |> List.map piece)
 
 
 viewResultRow : TimestampDisplay.State -> Bool -> Maybe String -> ObservationModel -> ObservationResultRow -> Html Msg
 viewResultRow display canEdit owner state row =
     case row of
-        ObservationCardRow context observation -> viewObservationRow display canEdit owner state context observation
+        ObservationCardRow context observation ->
+            if String.startsWith "tree-terminal:" context then
+                div [class "observation-tree-observation", style "padding-left" (String.fromInt (List.length (String.split "/" context) * 20) ++ "px")]
+                    [viewObservationRow display canEdit owner state context observation]
+            else viewObservationRow display canEdit owner state context observation
         ObservationFacetRow facet -> viewFacet display facet
         ObservationPathRow path empty ->
             section [ class "observation-path-group" ]
@@ -3875,6 +4137,64 @@ viewResultRow display canEdit owner state row =
                         , span [ class "observation-loaded-count" ] [ text (String.fromInt count ++ " loaded") ] ]
                     , Helpers.copyableValue "observation-subject observation-subject-copy" "matching subject" subject subject
                     ] ]
+        ObservationTreePathRow node -> viewTreeNode state node
+        ObservationTreeTerminalRow subject ->
+            div [ class "observation-tree-terminal", attribute "role" "region", attribute "aria-label" (subjectKindLabel subject.subjectKind ++ " observations for " ++ subject.subject)
+                , style "padding-left" (String.fromInt (List.length (String.split "/" subject.subject) * 20) ++ "px") ]
+                [ span [class "entity-type-label observation-kind"] [text (subjectKindLabel subject.subjectKind)]
+                , span [] [text (subject.subject ++ " observations")] ]
+        ObservationTreePageRow prefix kind -> viewTreePage state prefix kind
+
+
+viewTreeNode : ObservationModel -> Api.ObservationSubjectTreeNode -> Html Msg
+viewTreeNode state node =
+    let tree = state.tree
+        expanded = Set.member node.path tree.expanded
+        siblings = Dict.get (ObservationTree.parent node.path) tree.branches
+        paths = siblings |> Maybe.map .paths |> Maybe.withDefault []
+        setSize = if siblings |> Maybe.map .hasMore |> Maybe.withDefault True then -1 else List.length paths
+        position = paths |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> (==) node.path) |> List.head |> Maybe.map (Tuple.first >> (+) 1) |> Maybe.withDefault 1
+        focused = tree.focused |> Maybe.withDefault (ObservationTree.visiblePaths tree |> List.head |> Maybe.withDefault "")
+        keyEvent = Decode.map2 Tuple.pair (Decode.field "key" Decode.string) (Decode.at ["target", "role"] (Decode.nullable Decode.string))
+            |> Decode.andThen (\(key, role) -> if role == Just "treeitem" && List.member key ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "Enter", " "] then Decode.succeed {message = ObservationTreeKey node.path key, preventDefault = True, stopPropagation = True} else Decode.fail "Not path navigation")
+    in
+    div [ id ("observation-tree-path-" ++ domToken node.path), class "observation-tree-path", attribute "role" "treeitem"
+        , tabindex (if focused == node.path then 0 else -1), attribute "aria-level" (String.fromInt (List.length (String.split "/" node.path)))
+        , attribute "aria-posinset" (String.fromInt position), attribute "aria-setsize" (String.fromInt setSize)
+        , attribute "aria-expanded" (if expanded then "true" else "false"), attribute "aria-selected" (if focused == node.path then "true" else "false")
+        , attribute "aria-label" node.path, attribute "data-tree-path" node.path
+        , style "padding-left" (String.fromInt ((List.length (String.split "/" node.path) - 1) * 20) ++ "px")
+        , Html.Events.onFocus (SelectObservationTreePath node.path), custom "keydown" keyEvent ]
+        [ button [class "tree-toggle observation-tree-chevron", type_ "button", tabindex -1, onClick (ToggleObservationTreePath node.path)
+            , attribute "aria-label" ((if expanded then "Collapse " else "Expand ") ++ node.path)] [text (if expanded then "▼" else "▶")]
+        , span [class "observation-tree-label", onClick (SelectObservationTreePath node.path)] [text node.segment]
+        , if List.any (\symbol -> String.contains symbol node.segment) ["*", "?", "["] then span [class "observation-tree-pattern"] [text "Literal pattern"] else text ""
+        , span [class "observation-loaded-count"] [text (String.fromInt node.observationCount ++ " observations")]
+        , Helpers.copyableValue "observation-tree-copy" "canonical subject path" node.path node.path ]
+
+
+viewTreePage : ObservationModel -> String -> Maybe Api.SubjectKind -> Html Msg
+viewTreePage state prefix kind =
+    let (loading, error, more) = case kind of
+            Nothing -> Dict.get prefix state.tree.branches |> Maybe.map (\branch -> (branch.request /= Nothing, branch.error, branch.hasMore)) |> Maybe.withDefault (True, Nothing, False)
+            Just value -> Dict.get (ObservationTree.terminalKey {subjectKind = value, subject = prefix}) state.tree.terminals |> Maybe.map (\terminal -> (terminal.request /= Nothing, terminal.error, terminal.hasMore)) |> Maybe.withDefault (True, Nothing, False)
+        label = if kind == Nothing then "paths" else "observations"
+        exhausted = case kind of
+            Nothing -> Dict.get prefix state.tree.branches |> Maybe.map (\branch -> branch.nextOffset > 2147483647) |> Maybe.withDefault False
+            Just value -> Dict.get (ObservationTree.terminalKey {subjectKind = value, subject = prefix}) state.tree.terminals |> Maybe.map (\terminal -> terminal.nextOffset > 100000) |> Maybe.withDefault False
+    in div [class "observation-tree-page", style "padding-left" (String.fromInt (List.length (String.split "/" prefix) * 20) ++ "px")]
+        [ if loading then span [attribute "role" "status"] [text ("Loading " ++ label ++ "…")] else text ""
+        , error |> Maybe.map (\message -> p [class "form-error", attribute "role" "alert"] [text message]) |> Maybe.withDefault (text "")
+        , if not loading && (more || error /= Nothing) then button [type_ "button", class "btn btn-secondary observation-tree-more", disabled exhausted, onClick (LoadObservationTreePage prefix kind)] [text (if exhausted then "Offset limit reached" else (if error /= Nothing then "Retry " else "Load more ") ++ label)] else text "" ]
+
+
+viewTree : TimestampDisplay.State -> Bool -> ObservationModel -> Html Msg
+viewTree display canEdit state =
+    div [id "observation-results", class "entity-list observation-list observation-subject-tree", tabindex -1]
+        [ viewStaleResultsNotice state
+        , if state.tree.refreshing || state.refreshPending then p [class "form-help", attribute "role" "status"] [text "Refreshing Subject Tree. Showing the last completed paths."] else text ""
+        , if state.tree.totals |> Maybe.map (Tuple.second >> (==) 0) |> Maybe.withDefault False then p [class "empty-state"] [text "No matching subjects."] else text ""
+        , viewResultRows display canEdit state ]
 
 
 viewObservations : Api.Workspace -> Model -> Html Msg
@@ -3934,7 +4254,7 @@ viewObservationsStateWithPermission display canEdit workspace state =
                         , ( "observation-layout-with-detail", state.selectedId /= Nothing )
                         ]
                     ]
-                    [ if state.selectedId /= Nothing && selectedOwner state == Nothing then
+                    [ if state.selectedId /= Nothing && selectedOwner state == Nothing && not (treeMode state.requestMode) then
                         div [ class "card observation-result observation-detached", attribute "data-observation-detached" "true" ]
                             [ p [ class "form-help", attribute "role" "status" ] [ text "Selected observation is outside the displayed result rows. Loaded counts and file-match evidence are unchanged." ]
                             , case state.selectedDetail of
@@ -4182,7 +4502,10 @@ viewModeNavigation state =
                 ]
                 [ text "Files" ]
             ]
-        , if hasAppliedCountFilter state then
+        , if treeMode state.requestMode then
+            p [class "observation-mode-announcement", attribute "aria-live" "polite"]
+                [text (state.tree.totals |> Maybe.map (\(total, matches) -> String.fromInt matches ++ " matching observations · " ++ String.fromInt total ++ " in workspace") |> Maybe.withDefault (if Dict.get "" state.tree.branches |> Maybe.andThen .error |> (/=) Nothing then "Subject Tree unavailable" else "Loading Subject Tree…"))]
+          else if hasAppliedCountFilter state then
             let counts = state.counts in
             p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
                 [ text (if state.requestMode == ObservationMatchMode && List.isEmpty state.matchAppliedPaths then "Select Match files to load file results."
@@ -4201,13 +4524,13 @@ viewList : TimestampDisplay.State -> Bool -> String -> ObservationModel -> Html 
 viewList display canEdit workspaceId state =
     case state.requestMode of
         ObservationFacetMode ->
-            viewFacetCatalogue display canEdit workspaceId state
+            viewTree display canEdit state
 
         ObservationMatchMode ->
             viewMatchResults display canEdit workspaceId state
 
         ObservationExactSubjectMode ->
-            viewObservationResults display canEdit workspaceId "Exact subject observations" "No observations share this exact subject" state
+            viewTree display canEdit state
 
         ObservationFlatMode ->
             viewObservationResults display canEdit workspaceId "Observations" "No observations found" state
@@ -4833,11 +5156,23 @@ subjectKindLabel subjectKind =
             "Glob"
 
 
+armTreeRoute : Model -> Model
+armTreeRoute model =
+    let state = model.observations in
+    if treeMode state.requestMode && state.selectedId == Nothing then
+        case state.selectedFacet of
+            Just subject -> {model | observations = {state | tree = ObservationTree.revealPath subject state.tree}}
+            Nothing -> model
+    else model
+
+
 restoreRouteResults : Model -> ( Model, Cmd Msg )
-restoreRouteResults model =
+restoreRouteResults incoming =
+    let model = armTreeRoute incoming in
     (if filterValidationError model.observations /= Nothing then ( model, Cmd.none ) else
         case model.observations.requestMode of
             ObservationFacetMode -> reloadFacets model
+            ObservationExactSubjectMode -> startTree False model
             ObservationMatchMode -> reloadAppliedMatch model
             mode -> reloadResultMode mode model)
         |> migrateLegacySubjectLink
@@ -4862,12 +5197,14 @@ bootstrapObservation token model =
 
 
 bootstrapObservationRaw : Int -> Model -> ( Model, Cmd Msg )
-bootstrapObservationRaw token model =
+bootstrapObservationRaw token incoming =
+    let model = armTreeRoute incoming in
     if filterValidationError model.observations /= Nothing then ( model, Cmd.none ) else
     case repositoryWorkspaceId model of
         Just workspaceId ->
             case model.observations.requestMode of
                 ObservationFacetMode -> reloadFacets model
+                ObservationExactSubjectMode -> startTree False model
                 ObservationMatchMode -> reloadAppliedMatch model
                 mode ->
                     let

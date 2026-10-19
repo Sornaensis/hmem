@@ -1,0 +1,314 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { openDiscovery, subjectTreePage } from './observation-discovery-fixture.mjs'
+import { paint, revealObservationRow } from './observation-viewport-fixture.mjs'
+
+const subject = (kind, path) => ({ subject_kind: kind, subject: path })
+const file = path => subject('file', path)
+const glob = path => subject('glob', path)
+const examples = values => {
+  const make = (id, subjects, content = 'Evidence without subject search tokens') => ({ ...values[0], id, subjects, subject_kind: subjects[0].subject_kind, subject: subjects[0].subject, content })
+  return [make('auth-main', [file('src/auth/main.elm'), glob('src/**/auth/*.elm')]),
+    make('auth-direct', [file('src/auth'), glob('src/auth')]),
+    make('shared-doc', [file('docs/readme.md'), file('src/auth/readme.md')]),
+    make('content-only', [file('other/path.md')], 'src/auth content only'),
+    make('literal', [file('src/auth%_literal.elm')])]
+}
+const pathRow = (h, path) => h.page.locator('[data-tree-path=' + JSON.stringify(path) + ']')
+const rootReads = h => h.receipts.filter(value => value.endpoint.endsWith('/subject-tree') && value.params.prefix === '')
+async function tree(h) { await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle(); await pathRow(h, 'src').waitFor() }
+async function toggle(h, path) { await revealObservationRow(h.page, pathRow(h, path)); await pathRow(h, path).locator('.observation-tree-chevron').click(); await h.idle(); await paint(h.page) }
+async function search(h, value) { await h.page.locator('#observation-query').fill(value); await h.page.locator('#observation-query').press('Enter'); await h.idle(); await paint(h.page) }
+
+test('authoritative literal subject search retains ancestors, deduplicates counts and omits unrelated/content-only terminals', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, examples)
+  try {
+    await tree(h); await search(h, 'src/auth')
+    assert.equal(rootReads(h).at(-1).params.subject_query, 'src/auth')
+    assert.equal(rootReads(h).at(-1).params.query, undefined)
+    assert.deepEqual(rootReads(h).at(-1).response.items.map(value => [value.path, value.observation_count]), [['src', 4]])
+    assert.equal(rootReads(h).at(-1).response.total_count, 5)
+    assert.equal(rootReads(h).at(-1).response.match_count, 4)
+    await toggle(h, 'src'); await toggle(h, 'src/auth')
+    assert.equal(await pathRow(h, 'docs').count(), 0)
+    assert.equal(await pathRow(h, 'src/**').count(), 0)
+    assert.equal(await pathRow(h, 'src/auth/main.elm').count(), 1)
+    const lists = h.receipts.filter(value => value.endpoint === '/api/v1/observations' && value.params.subject === 'src/auth')
+    assert.deepEqual(lists.map(value => value.params.subject_kind).sort(), ['file', 'glob'])
+    assert.ok(lists.every(value => value.params.query === undefined && value.response.items.length === 1))
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    assert.match(await h.page.locator('.observation-mode-announcement').innerText(), /4 matching observations.*5 in workspace/)
+    await search(h, 'docs')
+    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true, 'Membership focus recovery cannot override newer filter input focus')
+    await search(h, 'src/Auth'); assert.equal(rootReads(h).at(-1).response.match_count, 0)
+    await h.page.getByRole('button', { name: 'All', exact: true }).click(); await h.idle(); await search(h, 'src/auth')
+    const all = h.receipts.filter(value => value.endpoint === '/api/v1/observations' && !value.params.subject).at(-1)
+    assert.equal(all.params.query_scope, 'content'); assert.deepEqual(all.response.items.map(value => value.id), ['content-only'])
+    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle(); await search(h, '**')
+    if (await pathRow(h, 'src').getAttribute('aria-expanded') === 'false') await toggle(h, 'src')
+    await pathRow(h, 'src/**').waitFor()
+    assert.match(await pathRow(h, 'src/**').innerText(), /Literal pattern/)
+    assert.match(await pathRow(h, 'src/**').locator('.observation-tree-copy').innerText(), /src\/\*\*/)
+    await h.page.setViewportSize({width: 320, height: 800}); await h.page.addStyleTag({content: 'html {font-size: 200%;}'}); await paint(h.page)
+    const layout = await h.page.evaluate(() => ({overflow: document.documentElement.scrollWidth - innerWidth, rows: [...document.querySelectorAll('[data-tree-path]')].map(element => ({path: element.dataset.treePath, right: element.getBoundingClientRect().right}))}))
+    assert.ok(layout.overflow <= 1, 'Enlarged narrow Subject Tree fits the viewport: ' + JSON.stringify(layout))
+  } finally { await h.close() }
+})
+
+test('classic path labels, chevrons, card controls and every path key keep independent in-place identities', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, examples)
+  try {
+    await tree(h)
+    await pathRow(h, 'src').locator('.observation-tree-label').click(); await paint(h.page)
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-expanded'), 'false')
+    assert.equal(await pathRow(h, 'src/auth').count(), 0)
+    await pathRow(h, 'src').focus(); await h.page.keyboard.press('Enter'); await h.idle()
+    await h.page.keyboard.press('ArrowRight'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'src/**')
+    await h.page.keyboard.press('ArrowDown'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'src/auth')
+    await h.page.keyboard.press(' '); await h.idle()
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-expanded'), 'true')
+    await toggle(h, 'docs')
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-expanded'), 'true')
+    await toggle(h, 'src'); assert.equal(await pathRow(h, 'src/auth').count(), 0)
+    await toggle(h, 'src'); assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-expanded'), 'true')
+    assert.equal(await h.page.getByRole('tree', { name: 'Stored subject paths' }).count(), 1)
+    await pathRow(h, 'src/auth/main.elm').focus(); await h.page.keyboard.press('ArrowLeft'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'src/auth')
+    await h.page.keyboard.press('ArrowLeft'); await paint(h.page)
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-expanded'), 'false')
+    await h.page.keyboard.press('ArrowUp'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'src/**')
+    await h.page.keyboard.press('ArrowUp'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'src')
+    await h.page.keyboard.press('Home'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'docs')
+    await h.page.keyboard.press('ArrowUp'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'docs')
+    await h.page.keyboard.press('End'); await paint(h.page)
+    const last = await h.page.locator(':focus').getAttribute('data-tree-path')
+    await h.page.keyboard.press('ArrowDown'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), last)
+    await toggle(h, 'src/auth'); await toggle(h, 'src/auth/main.elm')
+    await pathRow(h, 'src/auth/main.elm').focus(); await h.page.keyboard.press('ArrowRight'); await paint(h.page)
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'src/auth/main.elm')
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    const card = h.page.locator('.observation-result[data-observation-id="auth-main"] .observation-card').first()
+    await card.click(); await h.idle(); assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    const expanded = await pathRow(h, 'src/auth/main.elm').getAttribute('aria-expanded')
+    await card.focus(); await h.page.keyboard.press('ArrowLeft'); await paint(h.page)
+    assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-expanded'), expanded)
+    await toggle(h, 'src'); await toggle(h, 'src')
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    await search(h, 'docs')
+    assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, null, 'An authoritative filtered catalog retires a removed card selection')
+    assert.equal(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).has('observation'), false)
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'docs')
+  } finally { await h.close() }
+})
+
+test('wide continuation lazily reveals a direct observation beyond the first child page under the global viewport bound', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, values => {
+    const base = examples(values)[0]
+    const make = (id, path) => ({ ...base, id, subject_kind: 'file', subject: path, subjects: [file(path)] })
+    return [...Array.from({ length: 225 }, (_, i) => make('wide-' + i, 'wide/branch-' + String(i).padStart(3, '0') + '/file.elm')),
+      make('deep-target', 'wide/branch-224/deep/auth/main.elm')]
+  })
+  try {
+    const query = ['tree', '', null, '', '', null, null, [], '', '']
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=deep-target')
+    await h.page.waitForFunction(() => document.querySelector('.observation-detail-content')?.textContent.includes('Evidence'), null, { timeout: 10000 })
+    await h.idle(); await paint(h.page)
+    assert.ok(h.receipts.some(value => value.params.prefix === 'wide' && value.params.offset === '200'))
+    assert.ok(h.receipts.some(value => value.params.prefix === 'wide/branch-224/deep/auth'))
+    assert.ok(!h.receipts.some(value => value.params.prefix === 'wide/branch-000'))
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+    assert.ok(Number(await h.page.locator('#observation-viewport').getAttribute('data-observation-logical-count')) > 225)
+    await h.page.waitForFunction(() => document.activeElement?.matches('[data-observation-detail-anchor]'), null, { timeout: 5000 })
+  } finally { await h.close() }
+})
+
+test('branch errors retry and stale prior-filter root replies cannot revive retired membership', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, examples)
+  let release, arrived
+  try {
+    let fail = true
+    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
+      const url = new URL(route.request().url())
+      if (url.searchParams.get('prefix') === 'src' && fail) { fail = false; return route.fulfill({status: 503, body: '{}'}) }
+      return route.fallback()
+    })
+    await tree(h); await toggle(h, 'src')
+    await h.page.getByRole('button', { name: 'Retry paths', exact: true }).click(); await h.idle()
+    await pathRow(h, 'src/auth').waitFor()
+    const held = new Promise(resolve => { release = resolve }), arrival = new Promise(resolve => { arrived = resolve })
+    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
+      const url = new URL(route.request().url())
+      if (url.searchParams.get('subject_query') !== 'src/auth' || url.searchParams.get('prefix') !== '') return route.fallback()
+      arrived(); await held
+      return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(subjectTreePage(h.fixture, {prefix: '', subjectQuery: 'src/auth', offset: 0, limit: 200}))})
+    })
+    await h.page.locator('#observation-query').fill('src/auth'); await h.page.locator('#observation-query').press('Enter')
+    await h.bounded(arrival, 5000, 'Old literal subject read admitted')
+    await search(h, 'docs'); release(); await h.idle(); await paint(h.page)
+    assert.equal(await pathRow(h, 'src').count(), 0)
+    assert.equal(await pathRow(h, 'docs').count(), 1)
+  } finally { release?.(); await h.close() }
+})
+
+test('terminal continuation and canonical replacement retain a demanded off-page card until the full staged span completes', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, values => Array.from({length: 205}, (_, i) => ({ ...values[0], id: 'many-' + String(i).padStart(3, '0'), subjects: [file('src/auth/main.elm')], subject_kind: 'file', subject: 'src/auth/main.elm' })))
+  let release
+  try {
+    const query = ['tree', '', null, '', '', null, null, [], '', '']
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=many-000')
+    await h.page.waitForFunction(() => document.querySelector('#observation-viewport')?.dataset.observationLoadedCount === '205', null, {timeout: 10000})
+    await h.idle()
+    assert.ok(h.receipts.some(value => value.params.subject === 'src/auth/main.elm' && value.params.offset === '200'))
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+    let arrived
+    const arrival = new Promise(resolve => { arrived = resolve }), held = new Promise(resolve => { release = resolve })
+    await h.page.route('**/api/v1/observations?**', async route => {
+      const url = new URL(route.request().url())
+      if (url.searchParams.get('subject') !== 'src/auth/main.elm' || url.searchParams.get('offset') !== '200') return route.fallback()
+      arrived(); await held; return route.fallback()
+    })
+    h.fixture.observations = h.fixture.observations.filter(value => value.id !== 'many-204')
+    await h.page.evaluate(workspace => window.pushHierarchyFrames([{schema_version: 1, type: 'change', event: {schema_version: 1, event_id: 'tree-refresh', scope: 'workspace', workspace_id: workspace, occurred_at: '2026-10-19T10:00:00Z', transaction: {id: 'tree-refresh-tx', cause: 'rest', request_id: null}, actor: {type: 'system', id: null}, entity: {type: 'observation', id: 'unloaded-canonical-change', action: 'created'}, invalidations: [{kind: 'collection', target: 'observations:' + workspace}]}}]), h.fixture.workspace.id)
+    await h.bounded(arrival, 10000, 'Staged terminal continuation admitted')
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '205')
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    release(); await h.idle()
+    await h.page.waitForFunction(() => document.querySelector('#observation-viewport')?.dataset.observationLoadedCount === '204', null, {timeout: 10000})
+    assert.equal(rootReads(h).at(-1).response.match_count, 204)
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+  } finally { release?.(); await h.close() }
+})
+
+
+test('five expanded branches share four physical slots through collapse and stale completion', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, values => ['a', 'b', 'c', 'd', 'e', 'src'].map((path, i) => ({...values[0], id: 'slot-' + i, subjects: [file(path + '/child.elm')], subject: path + '/child.elm'})))
+  const releases = new Map(), arrivals = [], active = new Set()
+  let maximum = 0
+  try {
+    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
+      const url = new URL(route.request().url()), prefix = url.searchParams.get('prefix')
+      if (!['a', 'b', 'c', 'd', 'e'].includes(prefix)) return route.fallback()
+      arrivals.push(prefix); active.add(prefix); maximum = Math.max(maximum, active.size)
+      await new Promise(resolve => releases.set(prefix, resolve))
+      active.delete(prefix)
+      await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(subjectTreePage(h.fixture, {prefix, offset: 0, limit: 200}))})
+    })
+    await tree(h)
+    for (const prefix of ['a', 'b', 'c', 'd', 'e']) await toggle(h, prefix)
+    assert.deepEqual(arrivals, ['a', 'b', 'c', 'd'])
+    await toggle(h, 'a'); await paint(h.page)
+    assert.deepEqual(arrivals, ['a', 'b', 'c', 'd'], 'collapse does not refund an outstanding transport')
+    releases.get('a')()
+    await h.bounded((async () => { while (!releases.has('e')) await h.page.waitForTimeout(20) })(), 5000, 'Queued fifth branch after exact callback')
+    assert.equal(await pathRow(h, 'a/child.elm').count(), 0)
+    for (const prefix of ['b', 'c', 'd', 'e']) releases.get(prefix)()
+    await h.idle(); await paint(h.page)
+    assert.equal(maximum, 4)
+    assert.equal(await pathRow(h, 'e/child.elm').count(), 1)
+    assert.equal(await pathRow(h, 'a').getAttribute('aria-expanded'), 'false')
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+  } finally { for (const release of releases.values()) release(); await h.close() }
+})
+
+
+test('late detail and ancestor reveal completes membership without overriding newer outside focus', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, examples)
+  let release, arrived
+  const held = new Promise(resolve => {release = resolve}), arrival = new Promise(resolve => {arrived = resolve})
+  try {
+    await h.page.route('**/api/v1/observations/auth-main', async route => {
+      arrived(); await held; return route.fallback()
+    })
+    const query = ['tree', '', null, '', '', null, null, [], '', '']
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=auth-main')
+    await h.bounded(arrival, 5000, 'Deep-link ancestor admitted')
+    await h.page.locator('#observation-query').focus(); await paint(h.page)
+    release(); await h.idle()
+    await h.page.locator('.observation-detail-content').waitFor({timeout: 5000}); await paint(h.page)
+    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
+    assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-expanded'), 'true')
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+  } finally {release?.(); await h.close()}
+})
+
+async function invalidateTree(h, id) {
+  await h.page.evaluate(({workspace, id}) => window.pushHierarchyFrames([{schema_version: 1, type: 'change', event: {schema_version: 1, event_id: id, scope: 'workspace', workspace_id: workspace, occurred_at: '2026-10-19T10:00:00Z', transaction: {id, cause: 'rest', request_id: null}, actor: {type: 'system', id: null}, entity: {type: 'observation', id: 'unloaded-' + id, action: 'created'}, invalidations: [{kind: 'collection', target: 'observations:' + workspace}]}}]), {workspace: h.fixture.workspace.id, id})
+}
+
+for (const boundary of ['root', 'terminal']) test('live ' + boundary + ' boundary insertion retains an open card throughout held continuation without stealing focus', {timeout: 60000}, async () => {
+  const targetId = boundary === 'root' ? 'root-card-199' : 'many-005'
+  const targetPath = boundary === 'root' ? 'root-199' : 'src/auth/main.elm'
+  const h = await openDiscovery(undefined, values => Array.from({length: boundary === 'root' ? 201 : 205}, (_, i) => {
+    const path = boundary === 'root' ? 'root-' + String(i).padStart(3, '0') + (i === 0 ? '/child.elm' : '') : targetPath
+    return {...values[0], id: (boundary === 'root' ? 'root-card-' : 'many-') + String(i).padStart(3, '0'), subjects: [file(path)], subject_kind: 'file', subject: path}
+  }))
+  let release
+  try {
+    const query = ['tree', '', null, '', '', null, null, [], '', '']
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=' + targetId)
+    await h.page.locator('.observation-detail-content').waitFor(); await h.idle(); await paint(h.page)
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), boundary === 'root' ? '1' : '200')
+    if (boundary === 'root') {
+      await toggle(h, 'root-000')
+      assert.equal(await pathRow(h, 'root-000').getAttribute('aria-expanded'), 'true')
+      assert.equal(await pathRow(h, 'root-000').getAttribute('aria-setsize'), '-1')
+    }
+    let arrived
+    const arrival = new Promise(resolve => {arrived = resolve}), held = new Promise(resolve => {release = resolve})
+    await h.page.route(boundary === 'root' ? '**/api/v1/observations/subject-tree?**' : '**/api/v1/observations?**', async route => {
+      const params = new URL(route.request().url()).searchParams
+      if (params.get('offset') !== '200' || (boundary === 'root' ? params.get('prefix') !== '' : params.get('subject') !== targetPath)) return route.fallback()
+      arrived(); await held; return route.fallback()
+    })
+    const base = h.fixture.observations[0], insertedPath = boundary === 'root' ? 'earlier' : targetPath
+    h.fixture.observations.push({...base, id: 'zz-inserted', subjects: [file(insertedPath)], subject: insertedPath})
+    await h.page.locator('#observation-query').focus(); await paint(h.page)
+    await invalidateTree(h, 'shift-' + boundary)
+    await h.bounded(arrival, 10000, 'Selected card continuation admitted after live boundary insertion')
+    assert.equal(await h.page.locator('.observation-detail').count(), 1, 'The old demanded card stays displayed before offset200 returns')
+    assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, targetId)
+    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
+    if (boundary === 'terminal') assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '200')
+    release(); await h.idle(); await paint(h.page)
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, targetId)
+    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
+    if (boundary === 'root') {
+      await revealObservationRow(h.page, pathRow(h, 'root-000'))
+      assert.equal(await pathRow(h, 'root-000').getAttribute('aria-expanded'), 'true')
+      assert.equal(await pathRow(h, 'root-000').getAttribute('aria-setsize'), '202')
+      assert.ok(!h.receipts.some(value => value.params.subject === 'root-198'), 'Other terminal cards are not eagerly fetched')
+    }
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+  } finally { release?.(); await h.close() }
+})
+
+test('a settled terminal-only link preserves newer parent collapse and native focus through canonical refresh', {timeout: 60000}, async () => {
+  const h = await openDiscovery()
+  try {
+    const query = ['exact', 'src', null, '', h.sha, 'glob', 'src/**/*.elm', [], '', '']
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)))
+    await h.page.waitForFunction(() => document.activeElement?.getAttribute('data-tree-path') === 'src/**/*.elm', null, {timeout: 5000})
+    await h.idle()
+    await toggle(h, 'src')
+    await pathRow(h, 'src').focus(); await paint(h.page)
+    const reads = h.receipts.length
+    await invalidateTree(h, 'settled-terminal-collapse'); await h.idle(); await paint(h.page)
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-expanded'), 'false')
+    assert.equal(await pathRow(h, 'src/**/*.elm').count(), 0)
+    assert.equal(await pathRow(h, 'src').evaluate(element => document.activeElement === element), true)
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    const context = JSON.parse(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('oq'))
+    assert.equal(context[0], 'exact'); assert.equal(context[5], 'glob'); assert.equal(context[6], 'src/**/*.elm')
+    assert.ok(!h.receipts.slice(reads).some(value => value.params.prefix === 'src' || value.params.subject), 'Collapsed selection does not admit hidden subtree or terminal refresh')
+  } finally { await h.close() }
+})

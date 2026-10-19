@@ -15,6 +15,8 @@ import Helpers
 import Html.Attributes exposing (attribute, hidden, tabindex)
 import Http
 import ObservationViewport
+import ObservationTree
+import Set
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Route
@@ -532,7 +534,7 @@ suite =
                                     && completed.observations.appliedQuery == prepared.observations.appliedQuery
                                     && (completed.observations.edit |> Maybe.map .draft) == Just "Draft during page load"
                 in
-                [ ObservationFlatMode, ObservationExactSubjectMode, ObservationMatchMode, ObservationFacetMode ] |> List.map check |> Expect.equal [ True, True, True, True ]
+                [ ObservationFlatMode, ObservationMatchMode ] |> List.map check |> Expect.equal [ True, True ]
         , test "hidden save owner accepts a provenance-checked409 without selecting or admitting its observation, and rejects mismatched latest" <|
             \_ ->
                 let
@@ -1161,7 +1163,7 @@ suite =
                                     }
                                 )
                     , \_ ->
-                        [ flat, exact, matched ]
+                        [ flat, matched ]
                             |> List.map
                                 (\model ->
                                     { loading = model.observations.loading
@@ -1170,14 +1172,9 @@ suite =
                                     , fingerprintChanged = model.observations.queryFingerprint /= "pre-snapshot-results"
                                     }
                                 )
-                            |> Expect.equal (List.repeat 3 { loading = True, generation = 12, expectedOffset = Just 0, fingerprintChanged = True })
+                            |> Expect.equal (List.repeat 2 { loading = True, generation = 12, expectedOffset = Just 0, fingerprintChanged = True })
                     , \_ ->
-                        { loading = facets.observations.facetLoading
-                        , generation = facets.observations.facetRequestGeneration
-                        , expectedOffset = facets.observations.facetExpectedOffset
-                        , fingerprintChanged = facets.observations.facetFingerprint /= "pre-snapshot-facets"
-                        }
-                            |> Expect.equal { loading = True, generation = 8, expectedOffset = Just 0, fingerprintChanged = True }
+                        [ facets, exact ] |> List.all (\current -> not (List.isEmpty current.observations.tree.physical) && current.observations.requestGeneration > 11 && current.observations.facetExpectedOffset == Nothing) |> Expect.equal True
                     , \_ -> ( exact.observations.selectedFacet, exact.observations.subjectKind, exact.observations.subject ) |> Expect.equal ( Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, Just Api.SubjectFile, "manual/flat.elm" )
                     , \_ -> Dict.member unrelated.id flat.observations.items |> Expect.equal False
                     ]
@@ -1976,7 +1973,7 @@ suite =
                             && (saving.observations.edit |> Maybe.map .saving) == Just True
                             && List.all preserved [ edited, saving ]
                 in
-                [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode, ObservationMatchMode ]
+                [ ObservationFlatMode, ObservationMatchMode ]
                     |> List.all unchanged
                     |> Expect.equal True
         , test "native discovery controls expose disclosure state and explicit search submission" <|
@@ -2770,7 +2767,7 @@ suite =
                                 , paths = []
                                 , browseReturn = Nothing
                                 }
-                    , \_ -> ( restoredFacet.observations.facetLoading, restoredFacet.observations.facetExpectedOffset ) |> Expect.equal ( True, Just 0 )
+                    , \_ -> List.map .prefix restoredFacet.observations.tree.physical |> Expect.equal [ "" ]
                     ]
                     ()
         , test "path grouping follows caller and canonical subject order, keeps empty paths, and dedupes only inside a group" <|
@@ -2948,9 +2945,9 @@ suite =
                         base ObservationMatchMode
                 in
                 [ flat.observations.expectedOffset == Just 0
-                , facets.observations.facetExpectedOffset == Just 0
+                , List.any (\request -> request.prefix == "" && request.offset == 0) facets.observations.tree.physical
                 , facets.observations.facetRequestGeneration > 5
-                , exact.observations.expectedOffset == Just 0
+                , List.any (\request -> request.prefix == "" && request.offset == 0) exact.observations.tree.physical
                 , exact.observations.selectedFacet == Just { subjectKind = Api.SubjectFile, subject = observation.subject }
                 , matched.observations.expectedOffset == Just 0
                 , Dict.isEmpty matched.observations.items
@@ -3017,7 +3014,7 @@ suite =
                             && Maybe.map preserved saved == Just True
                             && Maybe.map preserved deleted == Just True
                 in
-                observationModes |> List.map check |> Expect.equal [ True, True, True, True ]
+                observationModes |> List.map check |> Expect.equal [ True, True ]
         , describe "dirty filters and paging controls"
             (List.map
                 (\mode -> test (Debug.toString mode) <| \_ ->
@@ -3101,7 +3098,7 @@ suite =
                             && not (Feature.Observation.hasUnappliedFilters applied.observations)
                             && afterLate.observations == applied.observations
                 in
-                observationModes |> List.map check |> Expect.equal [ True, True, True, True ]
+                observationModes |> List.map check |> Expect.equal [ True, True ]
         , test "match browse return restores the prior applied search SHA and exact tuple" <|
             \_ ->
                 let
@@ -3423,6 +3420,7 @@ suite =
                             , facets = Dict.singleton (Feature.Observation.facetKey facet.subjectKind facet.subject) facet
                             , facetKeys = [ Feature.Observation.facetKey facet.subjectKind facet.subject ]
                             , facetHasMore = True
+                            , tree = treeAccept "" [ {path = "very", segment = "very", hasChildren = True, observationCount = 123, terminals = []} ] (ObservationTree.retire "fixture" ObservationTree.init)
                         }
 
                     facetView =
@@ -3476,7 +3474,7 @@ suite =
                 in
                 Expect.all
                     [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text "Subject Tree" ]
-                    , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more subjects" ]
+                    , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.attribute (attribute "role" "tree"), Selector.attribute (attribute "aria-expanded" "false") ]
                     , \_ -> facetView |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-subject-group-toggle", Selector.attribute (attribute "aria-expanded" "false") ] |> Query.count (Expect.equal 2)
@@ -3517,7 +3515,27 @@ applyObservationPage message model =
 
 observationModes : List ObservationRequestMode
 observationModes =
-    [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode, ObservationMatchMode ]
+    -- List and Files paging keep their legacy transport fences. Tree branch and
+    -- terminal lifetimes are exercised by ObservationTreeTest and live tree tests.
+    [ ObservationFlatMode, ObservationMatchMode ]
+
+
+treeAccept prefix nodes tree =
+    let (started, request) = ObservationTree.begin prefix 0 tree in
+    request |> Maybe.map (\guard -> ObservationTree.receive guard (Ok {items = nodes, hasMore = False, totalCount = 1000, matchCount = 1000}) started) |> Maybe.withDefault started
+
+
+treeWithItems observations =
+    let
+        count = List.length observations
+        subject = observations |> List.head |> Maybe.map (\item -> {subjectKind = item.subjectKind, subject = item.subject}) |> Maybe.withDefault {subjectKind = Api.SubjectFile, subject = "src/Main.elm"}
+        segment = String.split "/" subject.subject |> List.reverse |> List.head |> Maybe.withDefault "Main.elm"
+        tree = ObservationTree.init |> ObservationTree.retire "fixture"
+            |> treeAccept "" [{path = "src", segment = "src", hasChildren = True, observationCount = count, terminals = []}]
+            |> treeAccept "src" [{path = subject.subject, segment = segment, hasChildren = False, observationCount = count, terminals = [{subjectKind = subject.subjectKind, subject = subject.subject, observationCount = count}]}]
+        opened = {tree | expanded = Set.fromList ["src", subject.subject]}
+        (started, request) = ObservationTree.beginTerminal subject 0 opened
+    in request |> Maybe.map (\guard -> ObservationTree.receiveTerminal guard (Ok {items = observations, hasMore = False}) started) |> Maybe.withDefault started
 
 
 appliedModeModel : ObservationRequestMode -> Model
@@ -3995,8 +4013,8 @@ observationUrlTests =
                 in
                 Expect.all
                     [ \_ -> Helpers.observationAppliedQuery after.observations |> Expect.equal query
-                    , \_ -> (after.observations.requestMode, after.observations.expectedOffset, after.observations.facetExpectedOffset) |> Expect.equal ( mode, if mode == ObservationFacetMode then Nothing else Just 0, if mode == ObservationFacetMode then Just 0 else Nothing )
-                    , \_ -> after.dataLoading.pendingWorkspaceLoads |> Expect.equal (if List.member mode [ ObservationFlatMode, ObservationExactSubjectMode ] then 2 else 1)
+                    , \_ -> (after.observations.requestMode, after.observations.expectedOffset, after.observations.facetExpectedOffset) |> Expect.equal ( mode, if List.member mode [ ObservationFlatMode, ObservationMatchMode ] then Just 0 else Nothing, Nothing )
+                    , \_ -> after.dataLoading.pendingWorkspaceLoads |> Expect.equal (if mode == ObservationFlatMode then 2 else 1)
                     ] ()
             ])
         |> (\modeTests -> modeTests ++
@@ -4399,7 +4417,7 @@ observationProjectionTests =
                 ObservationCardRow _ value -> Just value.id
                 _ -> Nothing)
         in
-        Expect.equal [ ids, ids ] [ cardIds loaded, cardIds { loaded | requestMode = ObservationExactSubjectMode } ]
+        Expect.equal [ ids, ids ] [ cardIds loaded, cardIds { loaded | requestMode = ObservationExactSubjectMode, tree = treeWithItems observations } ]
     , test "ordered match paths and overlapping subject groups preserve every canonical contextual duplicate through collapse" <| \_ ->
         let
             initial = Feature.Observation.init

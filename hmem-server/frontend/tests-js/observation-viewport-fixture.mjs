@@ -17,15 +17,20 @@ export async function scanObservationRows(page) {
   await retireSelectedReveal(page)
   const keys = new Set(), positions = new Map(), cards = new Map(), groups = new Map(), facets = new Map(), paths = new Map()
   await page.locator('#main-content-scroll').evaluate(scroll => { const list = document.getElementById('observation-viewport'); scroll.scrollTop += list.getBoundingClientRect().top - scroll.getBoundingClientRect().top })
-  const deadline = Date.now() + 15000
+  const startedAt = Date.now(), deadline = startedAt + 15000
+  const progress = {iterations: 0, paintMs: 0, evaluateMs: 0, forward: 0, backward: 0, stationary: 0, last: []}
+  let previousTop = null, frontier = -1
+  const observedPositions = new Set()
   let end = false, maxMounted = 0
   while (Date.now() < deadline) {
-    await paint(page)
-    // Capture every half-height sample and advance in one browser round trip;
-    // RPC overhead must not consume the fixed logical reachability deadline.
+    const paintAt = Date.now(); await paint(page); progress.paintMs += Date.now() - paintAt
+    const evaluateAt = Date.now()
+    // Sample one viewport at a time; mounted overscan overlaps adjacent samples.
+    // Every logical position must be observed, including gaps around distant pins.
     const receipt = await page.locator('#observation-viewport').evaluate((root, atEnd) => {
       const scroll = document.getElementById('main-content-scroll')
-      const before = scroll.scrollTop
+      const before = scroll.scrollTop, host = scroll.getBoundingClientRect()
+      const visible = [...root.querySelectorAll('[data-observation-key]')].filter(row => {const box = row.getBoundingClientRect(); return box.bottom > host.top && box.top < host.bottom}).map(row => Number(row.dataset.observationPosition))
       const sample = {
       logicalCount: Number(root.dataset.observationLogicalCount), keys: [...root.querySelectorAll('[data-observation-key]')].map(row => ({ key: row.dataset.observationKey, position: Number(row.dataset.observationPosition) })),
       cards: [...root.querySelectorAll('.observation-result')].map(row => ({ key: row.closest('[data-observation-key]').dataset.observationKey, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), id: row.dataset.observationId, context: row.dataset.observationContextKey })),
@@ -34,18 +39,25 @@ export async function scanObservationRows(page) {
       paths: [...root.querySelectorAll('.observation-path-heading')].map(row => ({ key: row.id, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), path: row.textContent }))
       }
       if (atEnd) scroll.scrollTop += root.getBoundingClientRect().top - scroll.getBoundingClientRect().top
-      else scroll.scrollTop += Math.max(120, scroll.clientHeight / 2)
-      return { ...sample, end: !atEnd && before === scroll.scrollTop }
+      else scroll.scrollTop += Math.max(120, scroll.clientHeight)
+      return { ...sample, top: before, nextTop: scroll.scrollTop, visible, end: !atEnd && before === scroll.scrollTop }
     }, end)
+    progress.evaluateMs += Date.now() - evaluateAt; progress.iterations++
+    if (previousTop !== null) progress[receipt.top > previousTop ? 'forward' : receipt.top < previousTop ? 'backward' : 'stationary']++
+    previousTop = receipt.top
+    receipt.keys.forEach(row => observedPositions.add(row.position))
+    while (observedPositions.has(frontier + 1)) frontier++
+    progress.last.push({top: receipt.top, nextTop: receipt.nextTop, visible: receipt.visible, frontier}); progress.last = progress.last.slice(-8)
     maxMounted = Math.max(maxMounted, receipt.keys.length)
     assert.ok(receipt.keys.length <= 28, '25 ordinary logical rows plus three deduplicated owners')
     receipt.keys.forEach(row => { keys.add(row.key); positions.set(row.key, row.position) }); receipt.cards.forEach(row => cards.set(row.key, row)); receipt.groups.forEach(row => groups.set(row.key, row))
     receipt.facets.forEach(row => facets.set(row.key, row))
     receipt.paths.forEach(row => paths.set(row.key, row.path))
-    if (end && keys.size === receipt.logicalCount) {
+    if (end && keys.size === receipt.logicalCount && frontier === receipt.logicalCount - 1) {
       const ordered = values => new Map([...values].sort((a, b) => a[1].position - b[1].position))
       return { keys: new Set([...positions].sort((a, b) => a[1] - b[1]).map(([key]) => key)), cards: ordered(cards), groups: ordered(groups), facets: ordered(facets),
-        paths: new Map([...paths].sort((a, b) => positions.get(a[0]) - positions.get(b[0]))), maxMounted }
+        paths: new Map([...paths].sort((a, b) => positions.get(a[0]) - positions.get(b[0]))), maxMounted,
+        scan: {elapsedMs: Date.now() - startedAt, iterations: progress.iterations, paintMs: progress.paintMs, evaluateMs: progress.evaluateMs, frontier, logicalCount: receipt.logicalCount, contiguous: true, backward: progress.backward, stationary: progress.stationary} }
     }
     if (end) {
       // Newly measured heights can extend the physical end or anchor a paint
@@ -59,7 +71,7 @@ export async function scanObservationRows(page) {
   const geometry = await page.locator('#observation-viewport').evaluate(root => ({ logicalCount: root.dataset.observationLogicalCount,
     top: document.getElementById('main-content-scroll').scrollTop, height: document.getElementById('main-content-scroll').scrollHeight, clientHeight: document.getElementById('main-content-scroll').clientHeight, rootRect: root.getBoundingClientRect().toJSON(), scrollRect: document.getElementById('main-content-scroll').getBoundingClientRect().toJSON(),
     mountedPositions: [...root.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition) }))
-  throw new Error('Observation logical scan exceeded its finite 15-second deadline: ' + JSON.stringify({ observed: keys.size, positions: [...positions.values()].sort((a, b) => a - b), ...geometry }))
+  throw new Error('Observation logical scan exceeded its finite 15-second deadline: ' + JSON.stringify({ elapsedMs: Date.now() - startedAt, observed: keys.size, frontier, remaining: Number(geometry.logicalCount) - keys.size, maxMounted, progress, ...geometry }))
 }
 
 export async function revealObservationRow(page, predicate) {

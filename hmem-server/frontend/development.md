@@ -26,8 +26,10 @@ Focused browser scripts are listed in [package.json](package.json).
 
 `npm run test:observation-state` checks live query ownership and explorer state;
 `npm run test:observation-state-browser` checks URL, preferences and navigation
-against the current production assets. Run `npm run build` before that browser
-script. Text debounce is 250 ms and retains workspace/session/actor/mode tokens;
+against the current production assets. `npm run test:observation-tree` checks
+literal subjects, lazy reveal, explorer keys and staged live replacement;
+`npm run test:observation-tree-regression` covers the affected discovery, counts,
+URL, scroll and recovery flows. Run `npm run build` before these browser scripts. Text debounce is 250 ms and retains workspace/session/actor/mode tokens;
 SHA validation issues no read until every populated SHA is canonical. Requested
 and last completed query identities remain separate during replacement reads.
 
@@ -36,7 +38,14 @@ and populated Observation tests need the native test harness and configured
 PostgreSQL tools; their isolated fixtures expire within ten minutes and remove
 their browser, server, PostgreSQL process, and sandbox. The conditional script
 rebuilds the harness; the populated script uses the installed harness, which must
-be relinked after snapshot migrations. Navigation checks include 320 CSS-pixel
+be relinked after snapshot migrations. For current-source qualification, build
+`hmem-server:exe:hmem-test-harness` with Stack, obtain the SHA-256 of that build's
+`stack path --local-install-root` executable, then run
+`npm run test:observation-populated-current -- --current-source-harness-sha256=<digest>`.
+The supplied full digest must match before startup; the default populated command
+retains its historical binary pin. Logical reachability scans inspect actual mounted
+rows after normal scroll/paint, advance by one viewport, and require contiguous
+coverage within the existing 15-second scan deadline. Navigation checks include 320 CSS-pixel
 reflow and enlarged text; they do not qualify native browser zoom or assistive
 technology behavior. Local bridge/layout tests do not replace production browser
 and performance acceptance.

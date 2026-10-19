@@ -465,6 +465,12 @@ route msg model =
         GotObservationTree _ _ ->
             Ok (Feature.Observation.update msg model)
 
+        GotObservationTreeTerminal _ _ -> Ok (Feature.Observation.update msg model)
+        SelectObservationTreePath _ -> Ok (Feature.Observation.update msg model)
+        ToggleObservationTreePath _ -> Ok (Feature.Observation.update msg model)
+        ObservationTreeKey _ _ -> Ok (Feature.Observation.update msg model)
+        LoadObservationTreePage _ _ -> Ok (Feature.Observation.update msg model)
+
         SetObservationSubjectKind _ ->
             Ok (Feature.Observation.update msg model)
 

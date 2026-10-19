@@ -4599,3 +4599,13 @@ textarea.observation-edit-content {
   .audit-entry-row .audit-timestamp { margin-left: auto; }
   .audit-row-diff, .audit-view-diff { min-height: 32px; padding: 0.35rem 0.6rem; }
 }
+
+/* Subject paths share the measured Observation preorder and row budget. */
+.observation-tree-path { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; min-width: 0; border-radius: .25rem; }
+.observation-tree-path:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.observation-tree-path[aria-selected="true"] { background: var(--bg-elevated); }
+.observation-tree-label { cursor: pointer; overflow-wrap: anywhere; font-weight: 600; }
+.observation-tree-pattern { font-size: .75rem; color: var(--text-muted); }
+.observation-tree-copy { margin-left: auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.observation-tree-terminal, .observation-tree-page { display: flex; align-items: center; gap: .5rem; padding-block: .35rem; overflow-wrap: anywhere; }
+.observation-tree-observation { min-width: 0; }

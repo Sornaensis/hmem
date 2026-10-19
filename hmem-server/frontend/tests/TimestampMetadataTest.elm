@@ -14,6 +14,7 @@ import Feature.Groups as Groups
 import Permissions
 import Json.Encode as Encode
 import Main
+import ObservationTree
 import ObservationViewport
 import Page.Workspace
 import Set
@@ -246,17 +247,27 @@ suite =
                         accepted = Main.update (TimestampsFormatted payload) pending |> Tuple.first
                     in
                     Expect.equal ( [ audit ], model.auditLog.filters ) ( accepted.auditLog.entries, accepted.auditLog.filters )
-        , test "facet pagination and formatting replies update localized lazy row content" <| \_ ->
+        , test "typed terminal results and formatting replies update mounted localized card timestamps" <| \_ ->
             let
                 initial = Observation.init
-                facet time subject = { subjectKind = Api.SubjectFile, subject = subject, observationCount = 1, latestUpdatedAt = time }
-                first = Observation.mergeFacetPage 0 { items = [ facet raw "a.elm" ], hasMore = False } { initial | requestMode = ObservationFacetMode }
-                paginated = Observation.mergeFacetPage 25 { items = [ facet later "b.elm" ], hasMore = False } first
+                accept prefix nodes priorTree =
+                    let (branchStarted, branchRequest) = ObservationTree.begin prefix 0 priorTree in
+                    branchRequest |> Maybe.map (\guard -> ObservationTree.receive guard (Ok {items = nodes, hasMore = False, totalCount = 2, matchCount = 2}) branchStarted) |> Maybe.withDefault branchStarted
+                tree = ObservationTree.init |> ObservationTree.retire "fixture"
+                    |> accept "" [{path = "src", segment = "src", hasChildren = True, observationCount = 2, terminals = []}]
+                    |> accept "src" [{path = "src/Main.elm", segment = "Main.elm", hasChildren = False, observationCount = 2, terminals = [{subjectKind = Api.SubjectFile, subject = "src/Main.elm", observationCount = 2}]}]
+                opened = {tree | expanded = Set.fromList ["src", "src/Main.elm"]}
+                first = observation "first"
+                second = {first | id = "second", updatedAt = later}
+                subject = {subjectKind = Api.SubjectFile, subject = "src/Main.elm"}
+                (started, request) = ObservationTree.beginTerminal subject 0 opened
+                completed = request |> Maybe.map (\guard -> ObservationTree.receiveTerminal guard (Ok {items = [first, second], hasMore = False}) started) |> Maybe.withDefault started
+                paginated = {initial | requestMode = ObservationFacetMode, tree = completed}
                 view = Observation.viewObservationsState display workspace paginated |> Query.fromHtml
             in
             Expect.all
-                [ \_ -> Observation.timestampSources paginated |> Set.fromList |> Expect.equal (Set.fromList [ raw, later ])
-                , \_ -> view |> Query.has [ Selector.text ("Latest update: " ++ local), Selector.text "Latest update: 2025-12-31 16:01" ]
-                , \_ -> Observation.viewObservationsState Display.empty workspace paginated |> Query.fromHtml |> Query.has [ Selector.text "Latest update: …" ]
+                [ \_ -> Observation.timestampSources paginated |> Set.fromList |> Expect.equal (Set.fromList [ later, latest ])
+                , \_ -> view |> Query.has [ Selector.text "2025-12-31 16:02", Selector.text "2025-12-31 16:01" ]
+                , \_ -> Observation.viewObservationsState Display.empty workspace paginated |> Query.fromHtml |> Query.has [ Selector.text "…" ]
                 ] ()
         ]

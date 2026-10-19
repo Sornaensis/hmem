@@ -14,6 +14,7 @@ import Json.Encode as E
 import ObservationPreferences as P
 import ObservationTree
 import Route
+import Set
 import TimestampDisplay
 import Test exposing (..)
 import Test.Html.Query as Query
@@ -62,7 +63,150 @@ settleFilters current =
 
 
 liveFilterTests =
-    [ test "encoded explicit query keys outrank a different stored context during hydration" <| \_ ->
+    [ test "simultaneous live branch refresh admits a demanded typed terminal before unrelated branches exhaust" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            starting = step (SetObservationBrowseMode ObservationFacetMode) model
+            node path hasChildren = {path = path, segment = String.split "/" path |> List.reverse |> List.head |> Maybe.withDefault path, hasChildren = hasChildren, observationCount = if hasChildren then 201 else 1, terminals = if path == "a" then [{subjectKind = Api.SubjectFile, subject = path, observationCount = 1}] else []}
+            roots = List.map (\path -> node path True) ["a", "b", "c", "d"]
+            pageOf nodes more = {items = nodes, hasMore = more, totalCount = 1000, matchCount = 1000}
+            rootGuard = List.head starting.observations.tree.physical
+            accepted = rootGuard |> Maybe.map (\guard -> ObservationTree.receive guard (Ok (pageOf roots False)) starting.observations.tree) |> Maybe.withDefault starting.observations.tree
+            children prefix = List.range 1 200 |> List.map (\index -> node (prefix ++ "/" ++ String.padLeft 3 '0' (String.fromInt index)) False)
+            seed prefix prior =
+                let (admitted, guard) = ObservationTree.begin prefix 0 prior in
+                guard |> Maybe.map (\request -> ObservationTree.receive request (Ok (pageOf (children prefix) False)) admitted) |> Maybe.withDefault admitted
+            populated = List.foldl seed accepted ["a", "b", "c", "d"]
+            subject = {subjectKind = Api.SubjectFile, subject = "a"}
+            original = row "fair-terminal"
+            item = {original | subjects = [subject], subject = "a"}
+            (terminalStarted, terminalGuard) = ObservationTree.beginTerminal subject 0 populated
+            terminalReady = terminalGuard |> Maybe.map (\guard -> ObservationTree.receiveTerminal guard (Ok {items = [item], hasMore = False}) terminalStarted) |> Maybe.withDefault terminalStarted
+            visible = {terminalReady | expanded = Set.fromList ["a", "b", "c", "d"]}
+            state = starting.observations
+            refreshing = O.refreshActiveResults {starting | observations = {state | tree = visible}} |> Tuple.first
+            wave = refreshing.observations.tree.physical |> List.head |> Maybe.map (\guard -> step (GotObservationTree guard (Ok (pageOf roots False))) refreshing) |> Maybe.withDefault refreshing
+            progressed = wave.observations.tree.physical |> List.filter (\guard -> guard.prefix == "a" && guard.kind == Nothing) |> List.head
+                |> Maybe.map (\guard -> step (GotObservationTree guard (Ok (pageOf (children "a") True))) wave) |> Maybe.withDefault wave
+            stale = rootGuard |> Maybe.map (\guard -> step (GotObservationTree guard (Ok (pageOf roots False))) progressed) |> Maybe.withDefault progressed
+        in Expect.all
+            [ \_ -> wave.observations.tree.physical |> List.map .kind |> Expect.equal [Nothing, Nothing, Nothing, Nothing]
+            , \_ -> progressed.observations.tree.physical |> List.any (\guard -> guard.prefix == "a" && guard.kind == Just Api.SubjectFile) |> Expect.equal True
+            , \_ -> progressed.observations.tree.physical |> List.any (\guard -> guard.prefix == "a" && guard.kind == Nothing) |> Expect.equal False
+            , \_ -> Dict.get "a" progressed.observations.tree.branches |> Maybe.map .hasMore |> Expect.equal (Just True)
+            , \_ -> List.length stale.observations.tree.physical |> Expect.equal 4
+            , \_ -> progressed.observations.tree.lastOwner |> Expect.equal (Just ("a", Just Api.SubjectFile))
+            , \_ -> stale.observations.tree.lastOwner |> Expect.equal progressed.observations.tree.lastOwner
+            , \_ -> stale.observations.tree.nextToken |> Expect.equal progressed.observations.tree.nextToken ] ()
+    , test "a stale root callback cannot advance the last completed query while the latest root is pending" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            started = step (SetObservationBrowseMode ObservationFacetMode) model
+            emptyPage = {items = [], hasMore = False, totalCount = 1, matchCount = 0}
+            completed = List.head started.observations.tree.physical |> Maybe.map (\request -> step (GotObservationTree request (Ok emptyPage)) started) |> Maybe.withDefault started
+            first = step (SetObservationQuery "first") completed |> settleFilters
+            second = step (SetObservationQuery "second") first |> settleFilters
+            stale = List.head first.observations.tree.physical |> Maybe.map (\request -> step (GotObservationTree request (Ok emptyPage)) second) |> Maybe.withDefault second
+        in Expect.all
+            [ \_ -> stale.observations.completedQuery |> Expect.equal completed.observations.completedQuery
+            , \_ -> stale.observations.query |> Expect.equal "second"
+            , \_ -> stale.observations.tree.totals |> Expect.equal completed.observations.tree.totals
+            , \_ -> List.length stale.observations.tree.physical |> Expect.equal 1 ] ()
+    , test "a filtered catalog retires an existing card only after current complete membership proof" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            accept prefix nodes previous =
+                previous.observations.tree.physical |> List.filter (\request -> request.prefix == prefix && request.kind == Nothing) |> List.head
+                    |> Maybe.map (\request -> step (GotObservationTree request (Ok {items = nodes, hasMore = False, totalCount = 1, matchCount = if List.isEmpty nodes then 0 else 1})) previous) |> Maybe.withDefault previous
+            directory = {path = "src", segment = "src", hasChildren = True, observationCount = 1, terminals = []}
+            leaf = {path = "src/Main.elm", segment = "Main.elm", hasChildren = False, observationCount = 1, terminals = [{subjectKind = Api.SubjectFile, subject = "src/Main.elm", observationCount = 1}]}
+            started = step (SetObservationBrowseMode ObservationFacetMode) model
+            root = accept "" [directory] started |> step (ToggleObservationTreePath "src")
+            branch = accept "src" [leaf] root |> step (ToggleObservationTreePath "src/Main.elm")
+            item = row "loaded-card"
+            loaded = branch.observations.tree.physical |> List.filter (\request -> request.kind == Just Api.SubjectFile) |> List.head
+                |> Maybe.map (\request -> step (GotObservationTreeTerminal request (Ok {items = [item], hasMore = False})) branch) |> Maybe.withDefault branch
+            selected = step (SelectObservationFrom item.id (O.observationCardDomId "tree-terminal:file:src/Main.elm" item.id)) loaded
+            requested = step (SetObservationQuery "absent") selected |> settleFilters
+            completed = accept "" [] requested
+        in Expect.all
+            [ \_ -> selected.observations.selectedId |> Expect.equal (Just item.id)
+            , \_ -> requested.observations.selectedId |> Expect.equal (Just item.id)
+            , \_ -> completed.observations.selectedId |> Expect.equal Nothing
+            , \_ -> completed.observations.selectedFacet |> Expect.equal Nothing
+            , \_ -> completed.observations.query |> Expect.equal "absent"
+            , \_ -> completed.observations.activeDetailRequest |> Expect.equal Nothing ] ()
+    , test "an old typed catalog cannot reject a newly restored terminal before its authoritative parent arrives" <| \_ ->
+        let
+            oldNode = {path = "a", segment = "a", hasChildren = False, observationCount = 1, terminals = [{subjectKind = Api.SubjectFile, subject = "a", observationCount = 1}]}
+            (oldStarted, oldRequest) = ObservationTree.begin "" 0 (ObservationTree.retire "old" ObservationTree.init)
+            oldTree = oldRequest |> Maybe.map (\request -> ObservationTree.receive request (Ok {items = [oldNode], hasMore = False, totalCount = 1, matchCount = 1}) oldStarted) |> Maybe.withDefault oldStarted
+            query = Helpers.observationAppliedQuery model.observations
+            restored = Helpers.restoreObservationQuery {query | requestMode = ObservationExactSubjectMode, selectedFacet = Just {subjectKind = Api.SubjectGlob, subject = "a"}} model.observations
+            started = O.bootstrapObservation 1 {model | observations = {restored | tree = oldTree}} |> Tuple.first
+            projected = project started started
+        in Expect.all
+            [ \_ -> projected.observations.selectedFacet |> Expect.equal restored.selectedFacet
+            , \_ -> projected.observations.tree.revealTarget |> Maybe.map (.subject >> .subjectKind) |> Expect.equal (Just Api.SubjectGlob)
+            , \_ -> List.length projected.observations.tree.physical |> Expect.equal 1 ] ()
+    , test "automatic path recovery keeps newer outside focus while preserving the roving successor" <| \_ ->
+        let
+            start = O.update (SetObservationBrowseMode ObservationFacetMode) model |> Tuple.first
+            node path = {path = path, segment = path, hasChildren = False, observationCount = 1, terminals = []}
+            root = List.head start.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTree request (Ok {items = [node "a"], hasMore = False, totalCount = 1, matchCount = 1})) start |> Tuple.first |> project start) |> Maybe.withDefault start
+            focused = O.update (SelectObservationTreePath "a") root |> Tuple.first |> project root
+            replacement = O.update (SetObservationQuery "b") focused |> Tuple.first |> settleFilters
+            state = replacement.observations
+            viewport = state.viewport
+            outside = {replacement | observations = {state | viewport = {viewport | focus = Nothing}}}
+            completed = List.head outside.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTree request (Ok {items = [node "b"], hasMore = False, totalCount = 1, matchCount = 1})) outside |> Tuple.first) |> Maybe.withDefault outside
+        in Expect.all
+            [ \_ -> completed.observations.tree.focused |> Expect.equal (Just "b")
+            , \_ -> completed.observations.tree.focusPending |> Expect.equal Nothing
+            , \_ -> completed.observations.viewport.focus |> Expect.equal Nothing ] ()
+    , test "explicit Files submission consumes its pending text timer without a duplicate late reload" <| \_ ->
+        let
+            files = O.update OpenObservationFileComposer model |> Tuple.first
+                |> O.update (SetObservationQuery "latest text") |> Tuple.first
+                |> O.update (SetObservationMatchPaths "src/Main.elm") |> Tuple.first
+            submitted = O.update ApplyObservationMatch files |> Tuple.first
+            late = files.observations.filterDebounce |> Maybe.map (\stamp -> O.update (ObservationFiltersReady stamp) submitted |> Tuple.first) |> Maybe.withDefault submitted
+        in Expect.all
+            [ \_ -> submitted.observations.filterDebounce |> Expect.equal Nothing
+            , \_ -> submitted.observations.requestGeneration |> Expect.equal late.observations.requestGeneration
+            , \_ -> late.observations |> Expect.equal submitted.observations
+            , \_ -> (O.matchQuery workspaceId ["src/Main.elm"] 0 submitted.observations).query |> Expect.equal (Just "latest text") ] ()
+    , test "contradictory legacy terminal selection retires only after authoritative typed proof and preserves shared filters" <| \_ ->
+        let
+            query = Helpers.observationAppliedQuery model.observations
+            state = Helpers.restoreObservationQuery {query | requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, selectedFacet = Just {subjectKind = Api.SubjectGlob, subject = "a"}} model.observations
+            started = O.bootstrapObservation 1 {model | observations = state} |> Tuple.first
+            node = {path = "a", segment = "a", hasChildren = False, observationCount = 1, terminals = [{subjectKind = Api.SubjectFile, subject = "a", observationCount = 1}]}
+            completed = List.head started.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTree request (Ok {items = [node], hasMore = False, totalCount = 1, matchCount = 1})) started |> Tuple.first |> project started) |> Maybe.withDefault started
+        in Expect.all
+            [ \_ -> started.observations.tree.revealTarget |> Maybe.map .observationId |> Expect.equal (Just Nothing)
+            , \_ -> completed.observations.selectedFacet |> Expect.equal Nothing
+            , \_ -> completed.observations.subjectKind |> Expect.equal (Just Api.SubjectFile)
+            , \_ -> completed.observations.tree.revealTarget |> Expect.equal Nothing
+            , \_ -> completed.observations.activeDetailRequest |> Expect.equal Nothing
+            , \_ -> List.map .kind completed.observations.tree.physical |> Expect.equal [Just Api.SubjectFile] ] ()
+    , test "terminal-only legacy links reveal an exact typed path without admitting any card detail" <| \_ ->
+        let
+            query = Helpers.observationAppliedQuery model.observations
+            subject = {subjectKind = Api.SubjectFile, subject = "a"}
+            state = Helpers.restoreObservationQuery {query | requestMode = ObservationExactSubjectMode, selectedFacet = Just subject} model.observations
+            started = O.bootstrapObservation 1 {model | observations = state} |> Tuple.first
+            node = {path = "a", segment = "a", hasChildren = False, observationCount = 1, terminals = [{subjectKind = Api.SubjectFile, subject = "a", observationCount = 1}]}
+            root = List.head started.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTree request (Ok {items = [node], hasMore = False, totalCount = 1, matchCount = 1})) started |> Tuple.first |> project started) |> Maybe.withDefault started
+            original = row observationId
+            item = {original | subjects = [subject], subject = "a"}
+            completed = List.head root.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTreeTerminal request (Ok {items = [item], hasMore = False})) root |> Tuple.first |> project root) |> Maybe.withDefault root
+        in Expect.all
+            [ \_ -> completed.observations.tree.revealTarget |> Expect.equal Nothing
+            , \_ -> completed.observations.viewport.focus |> Expect.equal (Just "tree-path:a")
+            , \_ -> completed.observations.selectedId |> Expect.equal Nothing
+            , \_ -> completed.observations.activeDetailRequest |> Expect.equal Nothing ] ()
+    , test "encoded explicit query keys outrank a different stored context during hydration" <| \_ ->
         let
             query = Helpers.observationAppliedQuery model.observations
             active = { query | query = "explicit B" }
@@ -86,13 +230,13 @@ liveFilterTests =
             physical = ObservationTree.begin "" 0 state.tree |> Tuple.first
             selected = O.update (SelectObservationFacet Api.SubjectFile "src/Main.elm") { typed | observations = { state | tree = physical } } |> Tuple.first
             late = stamp |> Maybe.map (\guard -> O.update (ObservationFiltersReady guard) selected |> Tuple.first) |> Maybe.withDefault selected
-            completed = page 0 [ row observationId ] False late |> O.syncCounts |> Tuple.first
+            completed = List.head late.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTree request (Ok {items = [], hasMore = False, totalCount = 1, matchCount = 0})) late |> Tuple.first) |> Maybe.withDefault late
         in Expect.all
             [ \_ -> selected.observations.filterDebounce |> Expect.equal Nothing
             , \_ -> selected.observations.nextFilterToken > typed.observations.nextFilterToken |> Expect.equal True
-            , \_ -> List.length selected.observations.tree.physical |> Expect.equal 1
+            , \_ -> List.all (\request -> List.member request selected.observations.tree.physical) physical.physical |> Expect.equal True
             , \_ -> late.observations |> Expect.equal selected.observations
-            , \_ -> completed.observations.counts.active |> Maybe.map .workspaceId |> Expect.equal (Just workspaceId)
+            , \_ -> completed.observations.tree.totals |> Expect.equal (Just (1, 0))
             , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture completed.observations |> Query.fromHtml |> Query.hasNot [ Selector.class "observation-filter-pending" ] ] ()
     , test "invalid restored SHA reserves no bootstrap observation obligation and root completion settles loading" <| \_ ->
         let
@@ -187,6 +331,75 @@ liveFilterTests =
                     cleared = O.update (setter "") invalid |> Tuple.first
                 in invalid.observations.expectedOffset == Nothing && not invalid.observations.loading && O.filterValidationError invalid.observations /= Nothing && cleared.observations.expectedOffset == Just 0
         in List.concatMap (\setter -> List.map (check setter) [ "abc", String.repeat 40 "A", " " ++ String.repeat 40 "a" ]) [ SetObservationGitSha, SetObservationCurrentGitSha, SetObservationHistoryGitSha ] |> List.all identity |> Expect.equal True
+    , test "terminal-only refresh preserves lazy typed path reveal and its original focus intent" <| \_ ->
+        let
+            selected = {subjectKind = Api.SubjectGlob, subject = "src/**/*.elm"}
+            query = Helpers.observationAppliedQuery model.observations
+            state = Helpers.restoreObservationQuery {query | requestMode = ObservationExactSubjectMode, selectedFacet = Just selected} model.observations
+            refreshing = O.refreshActiveResults {model | observations = state} |> Tuple.first
+        in Expect.all
+            [ \_ -> refreshing.observations.tree.revealTarget |> Expect.equal (Just {subject = selected, observationId = Nothing, focus = True})
+            , \_ -> List.all (\path -> Set.member path refreshing.observations.tree.expanded) ["src", "src/**", "src/**/*.elm"] |> Expect.equal True
+            , \_ -> refreshing.observations.selectedId |> Expect.equal Nothing ] ()
+    , test "settled terminal-only selection never reopens its collapsed parent during canonical refresh" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            subject = {subjectKind = Api.SubjectFile, subject = "src/Main.elm"}
+            query = Helpers.observationAppliedQuery model.observations
+            state = Helpers.restoreObservationQuery {query | requestMode = ObservationExactSubjectMode, selectedFacet = Just subject} model.observations
+            started = O.bootstrapObservation 1 {model | observations = state} |> Tuple.first
+            accept prefix nodes previous = previous.observations.tree.physical |> List.filter (\request -> request.prefix == prefix && request.kind == Nothing) |> List.head
+                |> Maybe.map (\request -> step (GotObservationTree request (Ok {items = nodes, hasMore = False, totalCount = 1, matchCount = 1})) previous) |> Maybe.withDefault previous
+            rootNode = {path = "src", segment = "src", hasChildren = True, observationCount = 1, terminals = []}
+            terminalNode = {path = subject.subject, segment = "Main.elm", hasChildren = False, observationCount = 1, terminals = [{subjectKind = Api.SubjectFile, subject = subject.subject, observationCount = 1}]}
+            branch = started |> accept "" [rootNode] |> accept "src" [terminalNode]
+            completed = branch.observations.tree.physical |> List.filter (\request -> request.kind == Just Api.SubjectFile) |> List.head
+                |> Maybe.map (\request -> step (GotObservationTreeTerminal request (Ok {items = [row observationId], hasMore = False})) branch) |> Maybe.withDefault branch
+            collapsed = step (ToggleObservationTreePath "src") completed
+            refreshing = O.refreshActiveResults collapsed |> Tuple.first
+            settled = accept "" [rootNode] refreshing
+            filtered = O.update (SetObservationQuery "src") settled |> Tuple.first |> settleFilters
+            explicit = O.restoreRouteResults settled |> Tuple.first
+            newSession = {settled | sessionRequestEpoch = settled.sessionRequestEpoch + 1} |> O.refreshActiveResults |> Tuple.first
+        in Expect.all
+            [ \_ -> completed.observations.tree.resolvedPath |> Maybe.map .subject |> Expect.equal (Just subject)
+            , \_ -> settled.observations.tree.revealTarget |> Expect.equal Nothing
+            , \_ -> Set.member "src" settled.observations.tree.expanded |> Expect.equal False
+            , \_ -> settled.observations.tree.focused |> Expect.equal (Just "src")
+            , \_ -> settled.observations.selectedFacet |> Expect.equal (Just subject)
+            , \_ -> settled.observations.tree.physical |> Expect.equal []
+            , \_ -> Set.member "src" filtered.observations.tree.expanded |> Expect.equal False
+            , \_ -> filtered.observations.tree.revealTarget |> Expect.equal Nothing
+            , \_ -> explicit.observations.tree.revealTarget |> Maybe.map .focus |> Expect.equal (Just True)
+            , \_ -> explicit.observations.tree.resolvedPath |> Expect.equal Nothing
+            , \_ -> newSession.observations.tree.resolvedPath |> Expect.equal Nothing ] ()
+    , test "manual terminal continuation and retry require valid filters mode and current read authority" <| \_ ->
+        let
+            started = O.update (SetObservationBrowseMode ObservationFacetMode) model |> Tuple.first
+            state = started.observations
+            initTree = ObservationTree.init
+            (admitted, guard) = ObservationTree.beginTerminal {subjectKind = Api.SubjectFile, subject = "src/Main.elm"} 0 {initTree | lifetime = state.tree.lifetime, displayLifetime = state.tree.lifetime}
+            cached = guard |> Maybe.map (\request -> ObservationTree.receiveTerminal request (Ok {items = List.range 1 200 |> List.map (String.fromInt >> row), hasMore = True}) admitted) |> Maybe.withDefault admitted
+            clean = {started | observations = {state | tree = cached}}
+            invalid = O.update (SetObservationHistoryGitSha "abc") clean |> Tuple.first
+            typing = O.update (SetObservationQuery "pending") clean |> Tuple.first
+            denied = {clean | auth = {status = AuthBooting, mode = Nothing}}
+            otherMode = {clean | observations = {state | requestMode = ObservationFlatMode, tree = clean.observations.tree}}
+            attempt previous = O.update (LoadObservationTreePage "src/Main.elm" (Just Api.SubjectFile)) previous |> Tuple.first
+            admin = clean.workspaceAdmin
+            pendingAuthority = {clean | workspaceAdmin = {admin | authorizationPending = Just {workspaceId = workspaceId, sessionEpoch = 3, sessionKey = "pending"}}}
+            blocked = [invalid, typing, denied, otherMode, pendingAuthority, {clean | sessionContext = Nothing}, {clean | selectedWorkspaceId = Nothing}]
+            valid = attempt clean
+            failed = List.head valid.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTreeTerminal request (Err Http.NetworkError)) valid |> Tuple.first) |> Maybe.withDefault valid
+            invalidRetry = O.update (SetObservationHistoryGitSha "abc") failed |> Tuple.first
+            retried = attempt failed
+        in Expect.all
+            [ \_ -> blocked |> List.all (\previous -> (attempt previous).observations.tree == previous.observations.tree) |> Expect.equal True
+            , \_ -> List.length valid.observations.tree.physical |> Expect.equal 1
+            , \_ -> List.head valid.observations.tree.physical |> Maybe.map .kind |> Expect.equal (Just (Just Api.SubjectFile))
+            , \_ -> List.head valid.observations.tree.physical |> Maybe.map .offset |> Expect.equal (Just 200)
+            , \_ -> (attempt invalidRetry).observations.tree |> Expect.equal invalidRetry.observations.tree
+            , \_ -> List.length retried.observations.tree.physical |> Expect.equal 1 ] ()
     , test "incomplete SHA also blocks explicit Files submission and typed terminal reads" <| \_ ->
         let
             invalid = O.update OpenObservationFileComposer model |> Tuple.first
@@ -545,20 +758,20 @@ suite = describe "automatic observation refresh and scoped preferences"
             [ \_ -> P.normalize prefs |> Expect.equal { preferenceDefaults | detail = Nothing, subjects = [ observationId ], groups = [] }
             , \_ -> D.decodeString (P.decoder owner) invalid |> Result.toMaybe |> Expect.equal Nothing
             , \_ -> P.uuid "00000000-0000-4000-8000-000000000002" |> Expect.equal True ] ()
-    , test "facet demanded span survives pass invalidation and failure then fresh Retry" <| \_ ->
+    , test "tree invalidations coalesce behind physical completion and errors pause until a fresh retry" <| \_ ->
         let
-            state = model.observations
-            base = { model | observations = { state | requestMode = ObservationFacetMode, appliedQuery = Nothing, facetNextOffset = 450 } }
+            base = O.update (SetObservationBrowseMode ObservationFacetMode) model |> Tuple.first
             started = O.refreshActiveResults base |> Tuple.first
             invalidated = O.refreshActiveResults started |> Tuple.first
-            request = invalidated.observations
-            restarted = O.update (GotObservationSubjectFacets workspaceId 3 request.facetRequestGeneration request.facetFingerprint 0 (Ok { items = [], hasMore = False })) invalidated |> Tuple.first
-            failure = O.failResultPage workspaceId 0 "Failed" restarted.observations
-            retry = O.update RetryObservationResults { restarted | observations = failure } |> Tuple.first
+            complete current result = List.head current.observations.tree.physical |> Maybe.map (\request -> O.update (GotObservationTree request result) current |> Tuple.first |> project current) |> Maybe.withDefault current
+            restarted = complete invalidated (Ok {items = [], hasMore = False, totalCount = 0, matchCount = 0})
+            failed = complete restarted (Err Http.NetworkError)
+            retry = O.update (LoadObservationTreePage "" Nothing) failed |> Tuple.first
         in Expect.all
-            [ \_ -> Maybe.map .targetOffset restarted.observations.refreshPass |> Expect.equal (Just 450)
-            , \_ -> Maybe.map .targetOffset retry.observations.refreshPass |> Expect.equal (Just 450)
-            , \_ -> retry.observations.facetExpectedOffset |> Expect.equal (Just 0) ] ()
+            [ \_ -> List.length invalidated.observations.tree.physical |> Expect.equal 1
+            , \_ -> restarted.observations.tree.totals |> Expect.equal Nothing
+            , \_ -> Dict.get "" failed.observations.tree.branches |> Maybe.andThen .error |> (/=) Nothing |> Expect.equal True
+            , \_ -> List.head retry.observations.tree.physical |> Maybe.map .token |> Expect.equal (List.head restarted.observations.tree.physical |> Maybe.map (.token >> (+) 1)) ] ()
     , test "actual canonical, deletion and unloaded invalidation retire active staging without a collection event; equal canonical is no-op" <| \_ ->
         let
             started = O.refreshActiveResults model |> Tuple.first

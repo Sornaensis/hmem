@@ -46,9 +46,12 @@ test('production startup profiles carry real multipage versioned snapshots throu
     const { stdout } = await promisify(execFile)('stack', ['path', '--local-install-root'], { cwd: repo, windowsHide: true, timeout: 30000 })
     const executable = join(stdout.trim(), 'bin', process.platform === 'win32' ? 'hmem-test-harness.exe' : 'hmem-test-harness')
     const harnessHash = digest(await readFile(executable))
-    assert.equal(harnessHash, 'c37f5c8f51e258d2af7dc44801f7e340b3926504c1e53174413831462ebb20a1', 'Use the installed harness relinked with the Observation count API')
+    const currentSource = process.argv.find(value => value.startsWith('--current-source-harness-sha256'))
+    const expectedHarnessHash = currentSource?.slice('--current-source-harness-sha256='.length) || 'c37f5c8f51e258d2af7dc44801f7e340b3926504c1e53174413831462ebb20a1'
+    if (currentSource) assert.match(currentSource.slice('--current-source-harness-sha256='.length), /^[0-9a-f]{64}$/, 'Current-source mode requires the digest from a successful harness build')
+    assert.equal(harnessHash, expectedHarnessHash, 'Installed harness must match the supplied current-source build or the historical default pin')
     const port = await freePort(), origin = 'http://127.0.0.1:' + port
-    harness = spawn(executable, ['deployed', '--interactive', '--port', String(port)], { cwd: repo, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    harness = spawn(executable, ['deployed', '--interactive', '--port', String(port)], { cwd: repo, env: currentSource ? {...process.env, HMEM_TEST_POSTGRES_BACKEND: 'native'} : process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     harnessClosed = once(harness, 'close')
     harness.stderr.resume()
     createInterface({ input: harness.stdout }).on('line', line => {
@@ -194,7 +197,7 @@ test('production startup profiles carry real multipage versioned snapshots throu
     } finally { releaseRest(); await page.unroute('**/api/v1/observations**', holdRest) }
     await until(() => fullClient.receipts.some(value => value.complete && value.path.endsWith('/ticket') && value.request.scope.workspace_id === workspace.id), 'Real ticket handoff')
     await until(() => frames.some(value => value.page === page && value.type === 'checkpoint'), 'Real WebSocket checkpoint')
-    await until(async () => (await page.locator('.workspace-header .workspace-observation-total').textContent()) === '112 observations', 'Real authorized aggregate reaches production workspace information')
+    await until(async () => (await page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, '') === '112 observations', 'Real authorized aggregate reaches production workspace information')
     const fullPages = fullClient.receipts.filter(value => value.path.endsWith('/resync') && value.request.scope.workspace_id === workspace.id)
     assert.equal(fullPages.length, 2)
     assert.equal(fullPages[0].request.snapshot_profile, 'full_v1')
@@ -212,7 +215,13 @@ test('production startup profiles carry real multipage versioned snapshots throu
       const candidate = snapshotObservations.find(item => item.id === value.id)
       const { created_at: created, updated_at: updated, ...fields } = candidate
       const { created_at: originalCreated, updated_at: originalUpdated, ...originalFields } = value
-      assert.deepEqual(fields, originalFields)
+      const canonicalProvenance = value => {
+        if (value === null) return null
+        const instant = Date.parse(value.recorded_at)
+        assert.ok(Number.isFinite(instant), 'Canonical provenance timestamp is a valid instant')
+        return {...value, recorded_at: {milliseconds: instant, fraction: (value.recorded_at.match(/\.(\d+)(?:Z|[+-]\d\d:\d\d)$/)?.[1] || '').padEnd(12, '0')}}
+      }
+      assert.deepEqual({...fields, current_provenance: canonicalProvenance(fields.current_provenance)}, {...originalFields, current_provenance: canonicalProvenance(originalFields.current_provenance)})
       assert.equal(Date.parse(created), Date.parse(originalCreated))
       assert.equal(Date.parse(updated), Date.parse(originalUpdated))
     }
@@ -222,7 +231,7 @@ test('production startup profiles carry real multipage versioned snapshots throu
     const globalStart = fullClient.receipts.find(value => value.path.endsWith('/resync') && value.request.scope.scope === 'global')
     assert.equal(globalStart.request.snapshot_profile, 'full_v1')
     const original = representatives[0], target = '/api/v1/observations/' + original.id
-    const changed = await api(target, 'PUT', { content: 'Real canonical full-profile update' }, { 'If-Match': '"' + original.content_version + '"' })
+    const changed = await api(target, 'PUT', { content: 'Real canonical full-profile update', reviewed_git_sha: sha }, { 'If-Match': '"' + original.content_version + '"' })
     assert.equal(changed.status, 200)
     assert.notEqual(changed.body.content_version, original.content_version)
     assert.deepEqual(changed.body.subjects, original.subjects)
@@ -233,10 +242,12 @@ test('production startup profiles carry real multipage versioned snapshots throu
     const applyRoute = async tuple => {
       await page.evaluate(fragment => { location.hash = fragment }, 'tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(tuple)))
     }
-    await applyRoute(['facets', 'Real populated evidence', null, '', sha, null, null, []])
-    await page.locator('.observation-facet-card').first().waitFor({ timeout: 5000 })
-    await applyRoute(['exact', 'Real populated evidence', null, '', sha, 'glob', 'src/**/*.elm', []])
-    await until(async () => (await page.locator('.observation-card').count()) === 2, 'Real exact facet results')
+    await applyRoute(['tree', 'src', null, '', sha, null, null, []])
+    await page.locator('[data-tree-path="src"]').first().waitFor({ timeout: 5000 })
+    await applyRoute(['exact', 'src', null, '', sha, 'glob', 'src/**/*.elm', []])
+    const expectedTerminalIds = representatives.filter(value => value.git_sha === sha && value.subjects.some(subject => subject.subject_kind === 'glob' && subject.subject === 'src/**/*.elm')).map(value => value.id).sort()
+    await until(async () => (await page.locator('.observation-card').count()) === expectedTerminalIds.length, 'Real typed terminal results')
+    assert.deepEqual((await page.locator('.observation-result').evaluateAll(elements => elements.map(element => element.dataset.observationId))).sort(), expectedTerminalIds)
     await applyRoute(['match', '', null, '', sha, null, null, paths])
     await until(async () => (await page.locator('.observation-path-group').count()) === 2 && (await page.locator('.observation-subject-group-toggle').count()) === 4, 'Real ordered path groups')
     const groupKeys = await page.locator('[data-observation-group]').evaluateAll(elements => elements.map(element => element.dataset.observationGroup))

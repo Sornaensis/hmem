@@ -81,7 +81,7 @@ test('production card and independently ordered subjects survive live refresh an
   } finally { await h.close() }
 })
 
-test('production automatic refresh stages loaded span, coalesces bursts, keeps drafts and cache, and explicit Retry is fresh', { timeout: 60000 }, async () => {
+test('production automatic refresh stages loaded span, coalesces bursts, keeps disclosures and cache, and explicit Retry is fresh', { timeout: 60000 }, async () => {
   const h = await openDiscovery(undefined, values => transform([...values, ...Array.from({ length: 201 }, (_, i) => ({ ...values[3], id: 'live-extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${i}.md` }] }))]))
   let release
   try {
@@ -89,7 +89,7 @@ test('production automatic refresh stages loaded span, coalesces bursts, keeps d
     const card = h.page.locator('[data-observation-id=' + JSON.stringify(uuid(0)) + ']').first()
     await card.locator('.observation-card').click(); await h.idle()
     await h.page.getByRole('button', { name: 'Load more', exact: true }).click(); await h.idle()
-    await h.page.locator('#observation-query').fill('unapplied draft')
+    await card.locator('.observation-subjects-toggle').click(); await paint(h.page)
     await card.locator('.observation-detail-sha .copyable-value').focus()
     const before = await owner(h.page); const requests = []; let hold = true, fail = false
     await h.page.route('**/api/v1/observations?**', async route => {
@@ -106,7 +106,7 @@ test('production automatic refresh stages loaded span, coalesces bursts, keeps d
     await push(h, 4); await paint(h.page); assert.equal(requests.length, 1)
     release(); release = null; await h.idle(); await paint(h.page)
     assert.deepEqual(requests.map(value => value.offset), ['0', '0', '200'])
-    assert.ok(requests.every(value => !value.query)); assert.equal(await h.page.locator('#observation-query').inputValue(), 'unapplied draft')
+    assert.ok(requests.every(value => !value.query)); assert.equal(await card.locator('.observation-subjects-toggle').getAttribute('aria-expanded'), 'true')
     assert.equal(await owner(h.page), before); assert.equal(await h.page.locator('[data-observation-loaded-count]').getAttribute('data-observation-loaded-count'), '265')
     assert.equal(await h.page.evaluate(() => document.activeElement.closest('.observation-detail-sha') !== null), true)
     assert.equal(await h.page.getByText('Results may have changed.', { exact: true }).count(), 0)

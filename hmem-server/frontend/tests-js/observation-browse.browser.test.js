@@ -7,6 +7,7 @@ import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 import { paint, revealObservationRow } from './observation-viewport-fixture.mjs'
 
 const top = h => h.page.locator('#main-content-scroll').evaluate(element => element.scrollTop)
+const wideRoots = values => values.map((value, index) => ({...value, subjects: [{subject_kind: 'file', subject: 'branch-' + String(index).padStart(3, '0') + '/leaf.elm'}]}))
 const mode = (h, name) => h.page.locator('.observation-mode-actions').getByRole('button', { name, exact: true })
 async function activate(h, name) {
   await mode(h, name).evaluate(element => element.focus({ preventScroll: true }))
@@ -34,11 +35,11 @@ async function gateFacets(h, empty = false, failure = false) {
   let release, arrived
   const wait = new Promise(resolve => { release = resolve }), arrival = new Promise(resolve => { arrived = resolve })
   let used = false
-  await h.page.route('**/api/v1/observations/subject-facets?**', async route => {
+  await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
     if (used) { await route.fallback(); return }
     used = true; arrived(); await wait
-    if (failure) await route.fulfill({ status: 500, body: 'Controlled facet failure' })
-    else if (empty) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], has_more: false }) })
+    if (failure) await route.fulfill({ status: 500, body: 'Controlled tree failure' })
+    else if (empty) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], has_more: false, total_count: 64, match_count: 0 }) })
     else await route.fallback()
   })
   return { release, arrival }
@@ -50,26 +51,26 @@ async function screenshot(h, name) {
 }
 
 test('Observation mode changes preserve current physical scroll through delayed responses and reflow, with newer scroll and focus authoritative', { timeout: 60000 }, async () => {
-  const h = await openDiscovery({ width: 2560, height: 900 })
+  const h = await openDiscovery({ width: 2560, height: 900 }, wideRoots)
   let held
   try {
     await h.start(); const positioned = await position(h, 160)
     assert.ok(positioned > 100)
     held = await gateFacets(h)
-    const subject = await mode(h, 'Subject').boundingBox()
+    const subject = await mode(h, 'Subject Tree').boundingBox()
     const before = await top(h)
     await h.page.mouse.click(subject.x + subject.width / 2, subject.y + subject.height / 2)
     await h.bounded(held.arrival, 5000, 'Subject request arrival'); await paint(h.page)
     assert.equal(await top(h), before, 'immediate mode switch retains physical offset')
     assert.equal(await h.page.locator('#main-content-scroll').evaluate(element => getComputedStyle(element).overflowAnchor), 'none', 'native anchoring is disabled only by the current preservation phase')
-    assert.equal(await mode(h, 'Subject').evaluate(element => document.activeElement === element), true, 'clicked mode retains keyboard focus')
+    assert.equal(await mode(h, 'Subject Tree').evaluate(element => document.activeElement === element), true, 'clicked mode retains keyboard focus')
     const latest = await position(h, before + 40)
     assert.equal(latest, before + 40, 'newer scroll remains exact while the response is held')
     await h.page.locator('#observation-query').evaluate(element => element.focus({ preventScroll: true }))
     held.release(); await h.idle(); await paint(h.page)
     assert.equal(await top(h), latest, 'delayed replacement retains the current offset, including newer input')
     assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
-    await h.page.addStyleTag({ content: '.observation-facet { font-size: 19px; }' }); await h.page.waitForTimeout(150); await paint(h.page)
+    await h.page.addStyleTag({ content: '.observation-tree-path { font-size: 19px; }' }); await h.page.waitForTimeout(150); await paint(h.page)
     assert.equal(await top(h), latest, 'later measured height changes do not move the physical offset')
     assert.equal(await h.page.locator('#observation-viewport').evaluate(element => parseFloat(getComputedStyle(element).minHeight)), 0, 'settled response releases temporary extent')
     await activate(h, 'All'); await h.idle(); await paint(h.page)
@@ -87,27 +88,27 @@ test('superseded mode/workspace replies cannot restore scroll and shorter result
     await h.start(); const before = await position(h, 1600)
     assert.ok(before > 1200, 'rapid replacement starts deeper than the viewport height')
     held = await gateFacets(h)
-    await activate(h, 'Subject'); await h.bounded(held.arrival, 5000, 'First Subject request arrival')
+    await activate(h, 'Subject Tree'); await h.bounded(held.arrival, 5000, 'First Subject request arrival')
     await activate(h, 'All'); await h.idle(); await paint(h.page)
     const current = await top(h)
     assert.equal(current, before)
     held.release(); await h.idle(); await paint(h.page)
     assert.equal(await top(h), current); assert.equal(await mode(h, 'All').getAttribute('aria-pressed'), 'true')
     held = await gateFacets(h, true)
-    await activate(h, 'Subject'); await h.bounded(held.arrival, 5000, 'Shorter Subject request arrival')
+    await activate(h, 'Subject Tree'); await h.bounded(held.arrival, 5000, 'Shorter Subject request arrival')
     assert.equal(await top(h), current)
     held.release(); await h.idle(); await paint(h.page)
     const shorter = await h.page.locator('#main-content-scroll').evaluate(element => ({ top: element.scrollTop, bottom: Math.max(0, element.scrollHeight - element.clientHeight), extent: parseFloat(getComputedStyle(document.getElementById('observation-viewport')).minHeight) }))
     assert.equal(shorter.extent, 0); assert.equal(shorter.top, shorter.bottom)
     await activate(h, 'All'); await h.idle(); await position(h, 120)
     held = await gateFacets(h, false, true)
-    await activate(h, 'Subject'); await h.bounded(held.arrival, 5000, 'Failed Subject request arrival')
+    await activate(h, 'Subject Tree'); await h.bounded(held.arrival, 5000, 'Failed Subject request arrival')
     held.release(); await h.idle(); await paint(h.page)
-    assert.ok((await h.page.locator('.observation-state-error').innerText()).includes('Unable to load shared subjects'))
+    assert.ok((await h.page.locator('.observation-tree-page .form-error').innerText()).includes('Unable to load Subject Tree'))
     assert.equal(await h.page.locator('#observation-viewport').evaluate(element => parseFloat(getComputedStyle(element).minHeight)), 0, 'failed request also releases temporary extent')
     await activate(h, 'All'); await h.idle(); await position(h, 120)
     held = await gateFacets(h)
-    await activate(h, 'Subject'); await h.bounded(held.arrival, 5000, 'Old workspace Subject request arrival')
+    await activate(h, 'Subject Tree'); await h.bounded(held.arrival, 5000, 'Old workspace Subject request arrival')
     await h.page.locator('a.sidebar-link[href="/workspace/browse-other"]').click({ timeout: 5000 })
     await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.idle()
     const switched = await top(h)
@@ -121,11 +122,11 @@ test('superseded mode/workspace replies cannot restore scroll and shorter result
 })
 
 test('All and Subject keep physical scroll when leaving Files with an expanded subject group', { timeout: 60000 }, async () => {
-  const h = await openDiscovery(undefined, values => values.map(value => ({ ...value, subjects: [{ subject_kind: 'file', subject: value.subject }, { subject_kind: 'glob', subject: 'src/**/*.elm' }] })))
+  const h = await openDiscovery(undefined, values => values.map((value, index) => ({ ...value, subjects: [{ subject_kind: 'file', subject: value.subject }, { subject_kind: 'glob', subject: 'src/**/*.elm' }, { subject_kind: 'file', subject: 'branch-' + String(index).padStart(3, '0') + '/leaf.elm' }] })))
   let held
   try {
     await h.start()
-    for (const name of ['All', 'Subject']) {
+    for (const name of ['All', 'Subject Tree']) {
       await h.page.getByRole('button', { name: 'Files', exact: true }).click()
       await h.page.locator('#observation-match-paths').fill('src/Main.elm')
       await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
@@ -135,7 +136,7 @@ test('All and Subject keep physical scroll when leaving Files with an expanded s
       await paint(h.page)
       const before = await position(h, 400)
       assert.ok(before > 100)
-      if (name === 'Subject') held = await gateFacets(h)
+      if (name === 'Subject Tree') held = await gateFacets(h)
       await activate(h, name)
       if (held) await h.bounded(held.arrival, 5000, 'Files to Subject arrival')
       assert.equal(await top(h), before, 'internal group reset does not retire mode scroll preservation')
@@ -164,8 +165,8 @@ for (const width of [2560, 320]) test(`responsive ${width} Observation and Proje
       if (width === 2560) { assert.ok(Math.abs(geometry.width - geometry.cap) <= 1); assert.ok(geometry.parentWidth > geometry.cap + 100) }
       if (width === 320) assert.ok(geometry.width <= geometry.parentWidth + 1)
     }
-    await activate(h, 'Subject'); await h.idle(); await paint(h.page)
-    assert.ok(await h.page.locator('.observation-facet').first().evaluate(element => element.getBoundingClientRect().width <= parseFloat(getComputedStyle(document.documentElement).fontSize) * 78 + 1))
+    await activate(h, 'Subject Tree'); await h.idle(); await paint(h.page)
+    assert.ok(await h.page.locator('.observation-tree-path').first().evaluate(element => element.getBoundingClientRect().width <= parseFloat(getComputedStyle(document.documentElement).fontSize) * 78 + 1))
     await screenshot(h, width === 2560 ? 'wide-subjects.png' : 'narrow-subjects.png')
     await screenshot(project, width === 2560 ? 'wide-projects.png' : 'narrow-projects.png')
     await activate(h, 'All'); await h.idle()

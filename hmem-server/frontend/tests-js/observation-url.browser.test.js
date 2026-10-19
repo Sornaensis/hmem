@@ -141,10 +141,10 @@ test('terminal selection retires a still-pending text timer and exact results fi
   try {
     await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await ready(h)
     await h.page.locator('#observation-query').fill('src')
-    await h.page.locator('.observation-facet-card').first().click(); await ready(h)
+    await h.page.locator('[data-tree-path="src"] .observation-tree-chevron').click(); await ready(h)
     await h.page.waitForTimeout(350); await ready(h)
     assert.equal(await h.page.locator('.observation-filter-pending').count(), 0)
-    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
+    assert.ok(resultReceipts(h).some(value => value.endpoint.endsWith('/subject-tree') && value.params.subject_query === 'src'))
     assert.ok(!String(await h.page.locator('.observation-mode-navigation').innerText()).includes('Counting'))
   } finally { await h.close() }
 })
@@ -196,29 +196,40 @@ test('production live flat URI excludes pending debounce input, has no Copy link
   } finally { await h.close() }
 })
 
-test('production subject and locked exact links reload the correct mode and Back restores the previous applied tuple without echo', { timeout: 60000 }, async () => {
+test('production tree and typed terminal links reload lazy ancestors and Back restores the preceding tree context', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
     await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await ready(h)
-    const facetUrl = h.page.url()
+    const treeUrl = h.page.url()
     await h.page.reload(); await ready(h)
-    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-facets')
-    await h.page.locator('.observation-facet').filter({ hasText: 'src/**/*.elm' }).locator('.observation-facet-card').click(); await ready(h)
-    await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
-    const exactUrl = h.page.url(), before = resultReceipts(h).length
+    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-tree')
+    const exact = tuple('exact', 'src', null, '', h.sha, 'glob', 'src/**/*.elm')
+    await h.page.evaluate(hash => { location.hash = hash }, fragment(exact)); await ready(h)
+    const exactUrl = h.page.url()
     await h.page.reload(); await ready(h)
-    assert.equal(resultReceipts(h).length, before + 1)
-    assert.equal(resultReceipts(h).at(-1).params.subject_kind, 'glob'); assert.equal(resultReceipts(h).at(-1).params.subject, 'src/**/*.elm')
-    assert.equal(resultReceipts(h).at(-1).params.query, undefined)
-    await h.page.locator('#observation-advanced-toggle').click()
-    assert.match(await h.page.locator('.observation-selected-facet-value').innerText(), /Glob: src\/\*\*\/\*\.elm/)
-    assert.equal(await h.page.locator('#observation-subject').count(), 0)
+    const terminal = resultReceipts(h).filter(value => value.endpoint === '/api/v1/observations' && value.params.subject === 'src/**/*.elm').at(-1)
+    assert.equal(terminal.params.subject_kind, 'glob'); assert.equal(terminal.params.query, undefined)
+    assert.deepEqual(terminal.response.items.map(value => value.id).sort(), ['cache-main', 'cache-view'])
+    assert.equal(await h.page.locator('[data-tree-path="src/**/*.elm"]').getAttribute('aria-expanded'), 'true')
+    assert.equal(await h.page.locator(':focus').getAttribute('data-tree-path'), 'src/**/*.elm')
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
     assert.equal(h.page.url(), exactUrl)
-    await history(h, 'back'); assert.equal(h.page.url(), facetUrl); assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-facets')
-    const count = resultReceipts(h).length
+    await history(h, 'back'); assert.equal(h.page.url(), treeUrl)
+    assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
-    assert.equal(h.page.url(), facetUrl)
-    assert.equal(resultReceipts(h).length, count)
+  } finally { await h.close() }
+})
+
+test('contradictory typed terminal links retire the lock after authoritative proof while preserving shared filters', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await navigate(h, tuple('exact', 'src', 'file', '', h.sha, 'glob', 'src/**/*.elm'))
+    const context = JSON.parse(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('oq'))
+    assert.equal(context[0], 'tree'); assert.equal(context[1], 'src'); assert.equal(context[2], 'file'); assert.equal(context[4], h.sha)
+    assert.equal(context[5], null); assert.equal(context[6], null)
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    assert.ok(!h.receipts.some(value => value.endpoint === '/api/v1/observations' && value.params.subject_kind === 'glob'))
+    assert.ok(h.receipts.filter(value => value.endpoint.endsWith('/subject-tree')).every(value => value.params.subject_kind === 'file' && value.params.subject_query === 'src'))
   } finally { await h.close() }
 })
 
@@ -369,7 +380,7 @@ for (const mode of ['exact', 'match']) test(`production ${mode} public URL conte
       } else await route.fallback()
     })
     const query = mode === 'exact'
-      ? tuple('exact', 'Cache evidence', 'file', 'unapplied-to-locked-facet', h.sha, 'glob', 'src/**/*.elm')
+      ? tuple('exact', 'src', null, '', h.sha, 'glob', 'src/**/*.elm')
       : tuple('match', 'Cache evidence', null, '', h.sha, null, null, ['src/Main.elm', 'src/View.elm'])
     await navigate(h, query, 'cache-main')
     const publicUrl = h.page.url()

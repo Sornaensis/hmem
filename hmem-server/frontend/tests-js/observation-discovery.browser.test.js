@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 import { paint, scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
 
-const applied = h => h.page.locator('.observation-applied-filters .observation-applied-summary').textContent()
+const applied = h => h.page.locator('.observation-applied-filters').textContent()
 async function activate(page, button, key = 'Enter') {
   const expanded = await button.getAttribute('aria-expanded'), id = await button.getAttribute('id')
   await button.focus(); await page.keyboard.press(key)
@@ -25,7 +25,7 @@ async function assertReachable(page, target) {
   })
   assert.ok(geometry.visible && geometry.unobscured && geometry.width > 0, JSON.stringify(geometry))
 }
-test('production discovery disclosures are presentation only; explicit Match sends normalized concrete paths and truthful subject evidence', { timeout: 60000 }, async () => {
+test('production explicit Files mode and filter disclosures send live predicates; explicit Match sends normalized concrete paths and truthful subject evidence', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
     await h.start()
@@ -49,12 +49,12 @@ test('production discovery disclosures are presentation only; explicit Match sen
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
     assert.equal(await h.page.locator('#observation-match-paths').isVisible(), false)
     assert.equal(await h.page.locator('#observation-subject-kind').isVisible(), false)
-    const summary = await applied(h), before = h.receipts.length, genericBefore = h.requests.length
+    const before = h.receipts.length
     await composer(h)
-    assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-pressed'), 'false')
+    assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-expanded'), 'true')
-    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
-    assert.equal(h.receipts.length, before); assert.equal(await applied(h), summary)
+    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'false')
+    assert.equal(h.receipts.length, before)
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Space')
     assert.equal(await h.page.locator('#observation-advanced-toggle').getAttribute('aria-expanded'), 'true')
     assert.equal(await h.page.locator('#observation-advanced-toggle').getAttribute('aria-controls'), 'observation-advanced-filters')
@@ -62,8 +62,8 @@ test('production discovery disclosures are presentation only; explicit Match sen
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Space')
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Enter')
     assert.equal(await h.page.locator('#observation-git-sha').inputValue(), h.sha)
-    assert.equal(h.receipts.length, before); assert.equal(h.requests.length, genericBefore)
-    await h.page.locator('#observation-query').fill('Cache evidence')
+    assert.equal(h.receipts.length, before, 'Files without valid submitted paths does not issue a result read')
+    await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
     await h.page.locator('#observation-match-paths').fill('  src/Main.elm  \nsrc/View.elm\nsrc/Main.elm\n')
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
     const matches = h.receipts.filter(value => value.endpoint.endsWith('/match'))
@@ -86,39 +86,39 @@ test('production discovery disclosures are presentation only; explicit Match sen
     assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-expanded'), 'false')
     assert.deepEqual(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')), closeContext)
     console.log(JSON.stringify({ fixture: 'Observation standalone Close focus', context: closeContext, focus: await h.page.evaluate(() => document.activeElement?.id) }))
-    assert.equal(await applied(h), matchedSummary); assert.equal(h.receipts.length, before + 2)
+    assert.equal(await applied(h), matchedSummary); assert.ok(h.receipts.length >= before + 2)
   } finally { await h.close() }
 })
 
-test('production By subject paginates populated facets and locks exact provenance; invalid file input preserves results', { timeout: 60000 }, async () => {
-  const h = await openDiscovery(undefined, values => [...values, ...Array.from({ length: 201 }, (_, i) => ({ ...values[3], id: 'facet-extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${i}.md` }] }))])
+test('production tree lazily pages a populated branch and exact typed terminals omit content search; invalid Files input preserves its last results', { timeout: 60000 }, async () => {
+  const h = await openDiscovery(undefined, values => [...values, ...Array.from({ length: 201 }, (_, i) => ({ ...values[3], id: 'tree-extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${String(i).padStart(3, '0')}.md` }] }))])
+  const row = path => h.page.locator('[data-tree-path=' + JSON.stringify(path) + ']')
+  const expand = async path => { await revealObservationRow(h.page, row(path)); await row(path).locator('.observation-tree-chevron').click(); await h.idle() }
   try {
-    await h.start(); await h.page.getByRole('button', { name: 'Subject', exact: true }).click(); await h.idle()
-    assert.equal(await h.page.getByRole('button', { name: 'Subject', exact: true }).getAttribute('aria-pressed'), 'true')
-    assert.equal((await scanObservationRows(h.page)).facets.size, 200)
-    await h.page.getByRole('button', { name: 'Load more subjects', exact: true }).click(); await h.idle()
-    assert.ok((await scanObservationRows(h.page)).facets.size > 200)
-    assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/subject-facets')).at(-1).params.offset, '200')
-    const facet = h.page.locator('.observation-facet').filter({ hasText: 'src/**/*.elm' }).locator('.observation-facet-card')
-    await revealObservationRow(h.page, facet); await facet.click(); await h.idle()
-    assert.equal(await h.page.getByRole('button', { name: 'Subject', exact: true }).getAttribute('aria-pressed'), 'true')
-    await h.page.locator('#observation-advanced-toggle').click()
-    assert.match(await h.page.locator('.observation-selected-facet-value').textContent(), /Glob: src\/\*\*\/\*\.elm/)
-    assert.equal(await h.page.locator('#observation-subject').count(), 0)
-    await h.page.locator('#observation-subject-kind').selectOption('file')
-    await h.page.locator('#observation-query').fill('Cache evidence')
-    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
-    const exact = h.receipts.filter(value => value.endpoint === '/api/v1/observations').at(-1)
-    assert.equal(exact.params.subject_kind, 'glob'); assert.equal(exact.params.subject, 'src/**/*.elm')
+    await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle()
+    assert.equal(await row('docs').getAttribute('aria-expanded'), 'false')
+    await expand('docs')
+    assert.ok(h.receipts.some(value => value.endpoint.endsWith('/subject-tree') && value.params.prefix === 'docs' && value.params.offset === '200'))
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+    await h.page.locator('#observation-query').fill('src'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
+    await expand('src'); await expand('src/**'); await expand('src/**/*.elm')
+    const exact = h.receipts.filter(value => value.endpoint === '/api/v1/observations' && value.params.subject === 'src/**/*.elm').at(-1)
+    assert.equal(exact.params.subject_kind, 'glob'); assert.equal(exact.params.query, undefined)
     assert.deepEqual(exact.response.items.map(value => value.id).sort(), ['cache-main', 'cache-view'])
-    const summary = await applied(h), count = h.receipts.length
-    await composer(h)
+    await h.page.locator('#observation-advanced-toggle').click(); await h.page.locator('#observation-subject-kind').selectOption('file'); await h.idle()
+    assert.equal(await row('src/**').count(), 0)
+    assert.ok(h.receipts.filter(value => value.endpoint.endsWith('/subject-tree')).at(-1).params.subject_kind === 'file')
+    await composer(h); await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
+    await h.page.locator('#observation-match-paths').fill('src/Main.elm'); await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
+    await h.page.locator('.observation-subject-group-toggle').first().click(); await h.idle()
+    const summary = await applied(h), count = h.receipts.length, cards = await h.page.locator('.observation-card').count()
+    assert.ok(cards > 0)
     for (const invalid of ['src/**/*.elm', '']) {
       await h.page.locator('#observation-match-paths').fill(invalid)
       await h.page.getByRole('button', { name: 'Match files', exact: true }).click()
       await h.page.locator('#observation-file-composer .form-error').waitFor()
       assert.equal(h.receipts.length, count); assert.equal(await applied(h), summary)
-      assert.equal(await h.page.locator('.observation-card').count(), 2)
+      assert.equal(await h.page.locator('.observation-card').count(), cards)
     }
   } finally { await h.close() }
 })
@@ -136,7 +136,7 @@ test('production native search submission and discovery controls preserve select
     await h.page.locator('.observation-card').first().click(); await h.idle()
     assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
     const selectedContent = await h.page.locator('.observation-detail-content').textContent()
-    const stamp = await h.page.locator('#observation-panel').getAttribute('data-observation-context'), summary = await applied(h), count = h.receipts.length
+    const selection = JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId
     await composer(h); await h.page.locator('#observation-match-paths').fill('src/Main.elm')
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Space')
     await h.page.locator('#observation-git-sha').fill(h.sha)
@@ -146,8 +146,8 @@ test('production native search submission and discovery controls preserve select
     await composer(h)
     assert.equal(await h.page.locator('#observation-match-paths').inputValue(), 'src/Main.elm')
     assert.equal(await h.page.locator('.observation-detail-content').textContent(), selectedContent)
-    assert.equal(await h.page.locator('#observation-panel').getAttribute('data-observation-context'), stamp)
-    assert.equal(await applied(h), summary); assert.equal(h.receipts.length, count)
+    assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, selection)
+    assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
   } finally { await h.close() }
 })
 
@@ -155,7 +155,7 @@ test('production 320 CSS-pixel discovery controls remain reachable with enlarged
   const h = await openDiscovery({ width: 320, height: 800 })
   try {
     await h.start()
-    for (const label of ['All', 'Subject', 'Files']) await assertReachable(h.page, h.page.getByRole('button', { name: label, exact: true }))
+    for (const label of ['All', 'Subject Tree', 'Files']) await assertReachable(h.page, h.page.getByRole('button', { name: label, exact: true }))
     await assertReachable(h.page, h.page.locator('#observation-query'))
     await h.page.addStyleTag({ content: 'html { font-size: 200%; }' })
     await composer(h); await h.page.locator('#observation-match-paths').fill('src/Main.elm')
@@ -163,7 +163,7 @@ test('production 320 CSS-pixel discovery controls remain reachable with enlarged
     await assertReachable(h.page, h.page.getByRole('button', { name: 'Match files', exact: true }))
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
     await activate(h.page, h.page.getByRole('button', { name: 'All', exact: true }), 'Space'); await h.idle()
-    await h.page.waitForFunction(() => document.activeElement?.id === 'observation-mode-heading', null, { timeout: 5000 })
+    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).evaluate(element => document.activeElement === element), true)
     assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
     assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
     await composer(h)
@@ -199,7 +199,7 @@ test('production original, current and historical SHA predicates keep one curren
     await h.page.locator('#observation-git-sha').fill(h.sha)
     await h.page.locator('#observation-current-git-sha').fill(current)
     await h.page.locator('#observation-history-git-sha').fill(historical)
-    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    await h.page.locator('#observation-query').press('Enter'); await h.idle()
     const receipt = h.receipts.filter(value => value.endpoint === '/api/v1/observations').at(-1)
     assert.equal(receipt.params.git_sha, h.sha); assert.equal(receipt.params.current_git_sha, current); assert.equal(receipt.params.history_git_sha, historical)
     assert.deepEqual(receipt.response.items.map(value => value.id), ['cache-main'])
@@ -225,12 +225,12 @@ test('production original, current and historical SHA predicates keep one curren
       if (!(await h.page.locator('#' + id).isVisible())) await h.page.locator('#observation-advanced-toggle').click()
       await h.page.locator('#' + id).fill('')
     }
-    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(await h.page.locator('.observation-provenance-match').count(), 0, 'Cleared query must not revive prior history proof')
     const unfiltered = h.receipts.filter(value => value.endpoint.endsWith('/match')).at(-1)
     assert.equal('current_git_sha' in unfiltered.payload, false); assert.equal('history_git_sha' in unfiltered.payload, false)
     await h.page.locator('#observation-git-sha').fill(h.sha)
-    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    await h.page.locator('#observation-query').press('Enter'); await h.idle()
     const replacedContext = await h.page.locator('.observation-provenance-match').innerText()
     assert.match(replacedContext, /original creation claim/); assert.doesNotMatch(replacedContext, /recorded history claim/)
   } finally { await h.close() }

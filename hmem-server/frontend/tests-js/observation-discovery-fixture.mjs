@@ -8,6 +8,29 @@ const patterns = new Map([
   ['src/**/*.js', /^src\/(?:[^/]+\/)*[^/]+\.js$/],
   ['docs/**/*.md', /^docs\/(?:[^/]+\/)*[^/]+\.md$/]
 ])
+
+export function subjectTreePage(fixture, options) {
+  const rows = allFixtureObservations(fixture, { gitSha: options.gitSha, currentGitSha: options.currentGitSha, historyGitSha: options.historyGitSha })
+  const terminals = rows.flatMap(observation => observation.subjects.filter(subject => (!options.subjectKind || subject.subject_kind === options.subjectKind)
+    && (!options.subjectQuery || subject.subject.includes(options.subjectQuery))).map(subject => ({ ...subject, id: observation.id })))
+  const prefix = options.prefix ? options.prefix + '/' : ''
+  const children = new Map()
+  for (const terminal of terminals) {
+    if (!terminal.subject.startsWith(prefix) || terminal.subject === options.prefix) continue
+    const segment = terminal.subject.slice(prefix.length).split('/')[0], path = prefix + segment
+    if (!children.has(path)) children.set(path, { path, segment, ids: new Set(), terminals: new Map(), has_children: false })
+    const node = children.get(path); node.ids.add(terminal.id)
+    if (terminal.subject === path) {
+      const key = terminal.subject_kind + ':' + terminal.subject
+      if (!node.terminals.has(key)) node.terminals.set(key, { subject_kind: terminal.subject_kind, subject: path, ids: new Set() })
+      node.terminals.get(key).ids.add(terminal.id)
+    } else node.has_children = true
+  }
+  const items = [...children.values()].sort((a, b) => Buffer.compare(Buffer.from(a.segment), Buffer.from(b.segment))).map(node => ({ path: node.path, segment: node.segment, has_children: node.has_children, observation_count: node.ids.size,
+    terminals: [...node.terminals.values()].sort((a, b) => a.subject_kind.localeCompare(b.subject_kind)).map(value => ({ subject_kind: value.subject_kind, subject: value.subject, observation_count: value.ids.size })) }))
+  return { items: items.slice(options.offset, options.offset + options.limit), has_more: options.offset + options.limit < items.length,
+    total_count: new Set(fixture.observations.map(value => value.id)).size, match_count: new Set(terminals.map(value => value.id)).size }
+}
 export async function openDiscovery(viewport = { width: 1440, height: 900 }, transformObservations = values => values, additionalFixtures = []) {
   const fixture = hierarchyFixture()
   fixture.projects = []; fixture.tasks = []
@@ -55,6 +78,9 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
           return path_matches.length ? [{ observation, path_matches }] : []
         })
         body = { items: matched.slice(query.offset, query.offset + query.limit), has_more: query.offset + query.limit < matched.length }
+      } else if (url.pathname.endsWith('/subject-tree')) {
+        assert.equal(request.method(), 'GET'); assert.equal(options.query, null)
+        body = subjectTreePage(scopedFixture, { ...options, prefix: url.searchParams.get('prefix') || '', subjectQuery: url.searchParams.get('subject_query') })
       } else if (url.pathname.endsWith('/subject-facets')) body = queryObservationFacets(scopedFixture, options)
       else if (url.pathname === '/api/v1/observations') body = queryObservations(contentScope(scopedFixture, options.query), options)
       else {

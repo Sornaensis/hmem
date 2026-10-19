@@ -44,7 +44,7 @@ for (const width of [1440, 320]) test(`production ${width}: 200 pages and author
   try {
     await h.start()
     assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '200')
-    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), '265 observations')
+    assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '265 observations')
     assert.equal(await h.page.locator('.observation-mode-announcement').count(), 0)
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
     const first = h.receipts.find(value => value.endpoint === '/api/v1/observations')
@@ -57,9 +57,9 @@ for (const width of [1440, 320]) test(`production ${width}: 200 pages and author
     assert.equal(h.receipts.filter(value => value.endpoint === '/api/v1/observations').at(-1).params.offset, '200')
     await h.page.locator('#observation-query').fill('Cache')
     assert.equal(counts(h).length, countRequests); assert.equal(await h.page.locator('.observation-mode-announcement').count(), 0)
-    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(await h.page.locator('.observation-mode-announcement').textContent(), '2 Observations match')
-    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), '265 observations')
+    assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '265 observations')
     if (width === 320) await h.page.evaluate(() => { document.documentElement.style.fontSize = '200%' })
     await capture(h, `observation-counts-filtered-${width === 320 ? 'narrow' : 'desktop'}`)
     assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
@@ -72,12 +72,12 @@ for (const width of [1440, 320]) test(`production ${width}: 200 pages and author
     }), 'Workspace name, total and applied-filter controls fit their actual scroll host at enlarged text')
     await h.page.locator('#main-content-scroll').hover(); await h.page.mouse.wheel(0, 1200); await paint(h.page)
     assert.match(await h.page.locator('.sticky-workspace-bar .workspace-observation-total').textContent(), /265 observations/)
-    await h.page.locator('#observation-query').fill('absentword'); await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    await h.page.locator('#observation-query').fill('absentword'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(await h.page.locator('.observation-mode-announcement').textContent(), '0 Observations match')
-    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), '265 observations')
-    await h.page.locator('#observation-query').fill('Documentation'); await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '265 observations')
+    await h.page.locator('#observation-query').fill('Documentation'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(await h.page.locator('.observation-mode-announcement').textContent(), '262 Observations match', 'Full filtered count exceeds the 200 loaded rows')
-    await h.page.locator('#observation-query').fill(''); await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    await h.page.locator('#observation-query').fill(''); await h.page.locator('#observation-query').press('Enter'); await h.idle()
     await h.page.getByRole('button', { name: 'Files', exact: true }).click()
     await h.page.locator('#observation-match-paths').fill('src/Main.elm\nsrc/View.elm\nsrc/Main.elm')
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
@@ -97,7 +97,7 @@ test('production inactive workspace totals coalesce stale replies, count unloade
     await h.page.getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
     assert.equal(await h.page.locator('#observation-panel').count(), 0)
     const requests = []; let held = true, fail = false, sequence = 0
-    await h.page.route('**/api/v1/observations/count', async route => {
+    await h.page.route('**/api/v1/observations/count**', async route => {
       const query = route.request().postDataJSON(); requests.push(query)
       const body = fixtureObservationCounts(h.fixture, query)
       if (held) { held = false; await new Promise(resolve => { release = resolve }); body.total_count = 999; body.match_count = 999 }
@@ -110,18 +110,18 @@ test('production inactive workspace totals coalesce stale replies, count unloade
         entity: { type: 'observation', id, action }, invalidations: [{ kind: 'collection', target: 'observations:' + h.fixture.workspace.id }] }
     })
     await push(); await h.bounded((async () => { while (!release) await h.page.waitForTimeout(20) })(), 5000, 'Held inactive count request')
-    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /Updating Observation total/)
+    assert.match((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), /Updating Observation total/)
     await push(); await push(); await paint(h.page); assert.equal(requests.length, 1)
     release(); release = null; await h.idle()
-    assert.equal(requests.length, 2); assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), '265 observations')
+    assert.equal(requests.length, 2); assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '265 observations')
     h.fixture.observations = h.fixture.observations.filter(value => value.id !== 'extra-0')
     await push('deleted', 'extra-0'); await h.idle()
-    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), '264 observations', 'Committed off-page deletion invalidates the full total')
+    assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '264 observations', 'Committed off-page deletion invalidates the full total')
     fail = true; await push(); await h.idle()
-    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /Observation total unavailable/)
+    assert.match((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), /Observation total unavailable/)
     const failedRequests = requests.length; await paint(h.page); assert.equal(requests.length, failedRequests)
     await h.page.locator('.workspace-header').getByRole('button', { name: 'Retry counts', exact: true }).click(); await h.idle()
-    assert.equal(requests.length, failedRequests + 1); assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), '264 observations')
+    assert.equal(requests.length, failedRequests + 1); assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '264 observations')
     assert.equal(await h.page.locator('#observation-panel').count(), 0)
   } finally { release?.(); await h.close() }
 })
@@ -136,13 +136,13 @@ test('production held count success cannot survive live read revocation and a fr
         principal: { actor_type: 'user', actor_id: 'fixture-user', actor_label: 'Fixture User', authority: 'local', grant_user_id: null }, global_permissions: { create_workspace: false, superadmin: false },
         workspace: { workspace_id: h.fixture.workspace.id, role: canRead ? 'owner' : null, can_read: canRead, can_edit: canRead, can_admin: canRead } }) })
     })
-    await h.page.route('**/api/v1/observations/count', async route => {
+    await h.page.route('**/api/v1/observations/count**', async route => {
       const body = fixtureObservationCounts(h.fixture, route.request().postDataJSON())
       if (hold) { hold = false; await new Promise(resolve => { release = resolve }); body.total_count = 999; body.match_count = 999 }
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     })
     await h.start(); await h.bounded((async () => { while (!release) await h.page.waitForTimeout(20) })(), 5000, 'Count held before revocation')
-    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /Loading Observation total/)
+    assert.match((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), /Loading Observation total/)
     canRead = false
     await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'access_revoked', workspace_id: workspace }]), h.fixture.workspace.id)
     await h.page.waitForFunction(() => !document.getElementById('observation-panel'), null, { timeout: 5000 })
@@ -150,6 +150,6 @@ test('production held count success cannot survive live read revocation and a fr
     assert.equal(await h.page.locator('.workspace-observation-total').count(), 0)
     assert.ok(!(await h.page.locator('body').textContent()).includes('999 observations'))
     canRead = true; await h.page.reload(); await h.page.locator('#observation-panel').waitFor(); await h.idle()
-    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), '64 observations')
+    assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '64 observations')
   } finally { release?.(); await h.close() }
 })

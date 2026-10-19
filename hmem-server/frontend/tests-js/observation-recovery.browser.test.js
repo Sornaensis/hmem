@@ -3,7 +3,7 @@ import test from 'node:test'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 import { scanObservationRows } from './observation-viewport-fixture.mjs'
 
-test('production cached incremental failure retries the exact applied offset and changed-query Apply replaces page zero', { timeout: 60000 }, async () => {
+test('production cached incremental failure retries the exact applied offset and live changed query replaces page zero', { timeout: 60000 }, async () => {
   const h = await openDiscovery(undefined, values => [...values, ...Array.from({ length: 200 }, (_, i) => ({ ...values[3], id: 'recovery-extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${i}.md` }] }))])
   try {
     const observed = []
@@ -31,14 +31,13 @@ test('production cached incremental failure retries the exact applied offset and
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).waitFor({ timeout: 5000 })
     assert.equal((await scanObservationRows(h.page)).cards.size, 200)
     assert.match(await h.page.locator('.observation-state-error').innerText(), /loaded results|cached|Retry results/i)
-    await h.page.locator('#observation-query').fill('unapplied private control')
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).click(); await h.idle()
     assert.equal((await scanObservationRows(h.page)).cards.size, 264)
     assert.deepEqual(observed.filter(value => value.offset === '200').map(value => ({ query: value.query || '', offset: value.offset, limit: value.limit })), [
       { query: '', offset: '200', limit: '200' }, { query: '', offset: '200', limit: '200' }
     ])
     await h.page.locator('#observation-query').fill('Cache evidence')
-    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(await h.page.locator('.observation-card').count(), 2)
     assert.equal(observed.at(-1).offset, '0')
     assert.equal(observed.at(-1).query, 'Cache evidence')

@@ -58,6 +58,8 @@ test('production ordered350 Match members and every repeated group stay scroll-r
     assert.equal(expanded.cards.size, expectedRepeated, 'all ordered repeated evidence remains reachable, not deduplicated')
     assert.equal(new Set([...expanded.cards.values()].map(row => row.id)).size, 350)
     assert.equal(expanded.keys.size, expectedRepeated + 6, 'two path labels plus four headers plus1061 repeated cards')
+    assert.equal(expanded.scan.contiguous, true); assert.equal(expanded.scan.frontier, 1066)
+    console.log(JSON.stringify({fixture: 'Observation complete mounted scan', ...expanded.scan, maxMounted: expanded.maxMounted}))
     for (const key of closed.groups.keys()) assert.equal(expanded.groups.get(key).expanded, 'true')
     const nativeMove = await h.page.evaluate(() => window.observationNativeMove)
     assert.deepEqual(nativeMove, { phase: 'keyed-window-pin-paint', sameControl: true, sameRow: true, sameViewport: true, sameParent: true, sameStamp: true, nativeFocusFellToBody: true })

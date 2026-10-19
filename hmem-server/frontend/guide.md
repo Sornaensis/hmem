@@ -61,7 +61,16 @@ Observation text filters update after a short pause. Clearing text, selecting a
 kind, and completing or clearing a SHA filter update immediately. Enter a full
 lowercase Git SHA; incomplete values stay local while the last completed results
 remain visible. All, Subject Tree and Files remember separate search text.
-All searches content; exact subject results stay locked to their typed subject.
+All searches content. Subject Tree searches stored subject paths literally and
+case-sensitively, including wildcard characters. Matching ancestors remain visible;
+counts include distinct observations. Select a path label to focus it, or use its
+chevron, Enter or Space to expand its children and file/glob observation lists.
+Several branches can stay open. Closing a parent remembers its descendants and
+open observation card. Arrow keys, Home and End navigate paths; card controls
+keep their normal keys. Root and observation-list continuation is explicit;
+expanded child branches continue as needed. An open card stays visible while live
+updates follow any pages needed to confirm its membership. Shared links reveal their ancestors
+and focus the requested path or observation.
 **Match files** explicitly submits concrete paths; wildcards are rejected and
 duplicate paths are removed. Editing the path list leaves previous matches active.
 

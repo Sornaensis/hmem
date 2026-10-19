@@ -630,6 +630,9 @@ type ObservationResultRow
     | ObservationFacetRow Api.ObservationSubjectFacet
     | ObservationPathRow String Bool
     | ObservationSubjectRow String String Api.SubjectKind String Int Bool
+    | ObservationTreePathRow Api.ObservationSubjectTreeNode
+    | ObservationTreeTerminalRow Api.ObservationSubject
+    | ObservationTreePageRow String (Maybe Api.SubjectKind)
 
 
 type alias ObservationReturnIntent =
@@ -1377,6 +1380,11 @@ type Msg
     | SetObservationQuery String
     | ObservationFiltersReady ObservationFilterDebounce
     | GotObservationTree ObservationTree.Request (Result Http.Error Api.ObservationSubjectTreePage)
+    | GotObservationTreeTerminal ObservationTree.Request (Result Http.Error (Api.PaginatedResult Api.Observation))
+    | SelectObservationTreePath String
+    | ToggleObservationTreePath String
+    | ObservationTreeKey String String
+    | LoadObservationTreePage String (Maybe Api.SubjectKind)
     | SetObservationSubjectKind String
     | SetObservationSubject String
     | SetObservationGitSha String

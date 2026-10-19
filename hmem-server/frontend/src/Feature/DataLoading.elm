@@ -3122,7 +3122,7 @@ updateResponse msg model =
 
                                 initialObservationPending =
                                     isRepository && Feature.Observation.filterValidationError model.observations == Nothing
-                                        && List.member model.observations.requestMode [ ObservationFlatMode, ObservationExactSubjectMode ]
+                                        && model.observations.requestMode == ObservationFlatMode
 
                                 pendingLoads =
                                     -- Demand pages are independent of the initial workspace load.

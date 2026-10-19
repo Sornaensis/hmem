@@ -57,6 +57,7 @@ a:hover {
 
 .sidebar-header {
   padding: 1rem 1.25rem;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
 

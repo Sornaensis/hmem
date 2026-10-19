@@ -68,10 +68,15 @@ a:hover {
 }
 
 .sidebar-logo {
-  font-size: 1.25rem;
-  font-weight: 700;
-  color: var(--accent-hover) !important;
-  letter-spacing: 0.05em;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.sidebar-logo img {
+  display: block;
+  max-width: 100%;
+  height: auto;
 }
 
 .sidebar-logo:hover {

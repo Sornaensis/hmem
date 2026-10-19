@@ -265,7 +265,9 @@ viewSidebar model =
     in
     nav [ class "sidebar" ]
         [ div [ class "sidebar-header" ]
-            [ a [ href "/", class "sidebar-logo" ] [ text "hmem" ] ]
+            [ a [ href "/", class "sidebar-logo" ]
+                [ img [ src "/hmem-logo.svg", alt "hmem", width 183, height 48 ] [] ]
+            ]
         , if model.dataLoading.loadingWorkspaces then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]

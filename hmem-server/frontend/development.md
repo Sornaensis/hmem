@@ -205,7 +205,9 @@ loaded-at and Refresh establish freshness. A 404 alone does not establish deleti
 All/Subject Tree switches retain their scroll context, including scrolling during load. Observation
 and Project card surfaces have a responsive 78rem maximum outer width; controls
 and lifecycle graphs use available width. Observation details return to their
-originating card if present, otherwise results. Preserve copied content line endings
+originating card if present, otherwise results. Observation card disclosure uses the
+shared compact +/− control; Subject Tree path chevrons remain independent.
+Preserve copied content line endings
 and complete UUID/path/glob/SHA values.
 
 Shared links exceeding 4096 UTF-8 bytes use a bounded marker while keeping the

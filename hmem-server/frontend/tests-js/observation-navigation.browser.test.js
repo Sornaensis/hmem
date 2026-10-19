@@ -15,6 +15,21 @@ async function flatCard(page, position) {
 
 const focusId = page => page.evaluate(() => document.activeElement?.id)
 const scrollTop = page => page.locator('#main-content-scroll').evaluate(element => element.scrollTop)
+async function assertDisclosure(page, control, expanded) {
+  assert.equal(await control.textContent(), expanded ? '−' : '+')
+  assert.equal(await control.getAttribute('aria-expanded'), String(expanded))
+  assert.match(await control.getAttribute('aria-label'), expanded ? /^Collapse / : /^Open /)
+  const body = await control.getAttribute('aria-controls')
+  assert.equal(await page.locator('[id=' + JSON.stringify(body) + ']').count(), 1, 'Disclosure controls one existing body')
+  const style = await control.evaluate(element => {
+    const box = element.getBoundingClientRect(), css = getComputedStyle(element)
+    return { shared: element.classList.contains('btn-extras-toggle'), legacy: element.classList.contains('tree-toggle'),
+      width: box.width, height: box.height, expected: parseFloat(getComputedStyle(document.documentElement).fontSize) * 1.5,
+      border: css.borderTopWidth, nested: element.querySelectorAll('button,a,input').length }
+  })
+  assert.ok(style.shared && !style.legacy && Math.abs(style.width - style.expected) <= 1 && Math.abs(style.height - style.expected) <= 1, JSON.stringify(style))
+  assert.equal(style.border, '1px'); assert.equal(style.nested, 0)
+}
 async function assertUnobscured(page, target) {
   const result = await target.evaluate(element => {
     const rect = element.getBoundingClientRect(), main = document.getElementById('main-content-scroll').getBoundingClientRect()
@@ -42,6 +57,7 @@ async function installFocusProbe(page) {
   })
 }
 async function keyboardActivate(page, card) {
+  await assertDisclosure(page, card, false)
   await installFocusProbe(page)
   await card.focus()
   const calls = await page.evaluate(() => window.observationArrowFocusCalls.length)
@@ -49,13 +65,16 @@ async function keyboardActivate(page, card) {
   await page.keyboard.press('Enter')
   try { await page.waitForFunction(calls => window.observationArrowFocusCalls.length > calls && document.activeElement?.matches('[data-observation-detail-anchor]'), calls, { timeout: 5000 }) }
   catch (error) { throw new Error(error.message + ' ' + JSON.stringify(await page.evaluate(before => ({ before, after: document.getElementById('observation-panel')?.dataset.observationContext, focus: document.activeElement?.id, heading: !!document.querySelector('[data-observation-detail-anchor]') }), before))) }
+  await assertDisclosure(page, card, true)
 }
 async function returnToResults(page) {
+  await assertDisclosure(page, page.locator('[data-observation-detail-anchor]'), true)
   await installFocusProbe(page)
   const calls = await page.evaluate(() => window.observationArrowFocusCalls.length)
   await page.locator('[data-observation-detail-anchor]').click()
   await page.waitForFunction(calls => !document.getElementById('observation-detail') && window.observationArrowFocusCalls.length > calls
     && document.activeElement?.matches('.observation-card, #observation-results'), calls, { timeout: 5000 })
+  if (await page.locator('.observation-card:focus').count()) await assertDisclosure(page, page.locator('.observation-card:focus'), false)
 }
 
 test('production keyboard detail entry and return restore the exact card and physical scroll', { timeout: 60000 }, async () => {

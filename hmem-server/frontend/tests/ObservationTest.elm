@@ -1926,7 +1926,7 @@ suite =
                     , \_ -> view |> Query.find [ Selector.tag "label", Selector.attribute (Html.Attributes.for "observation-query") ] |> Query.has [ Selector.text "Search content" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
                     , \_ -> view |> Query.hasNot [ Selector.class "observation-filter-apply" ]
-                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "tree-toggle", Selector.class "observation-card", Selector.class "observation-card-selected" ]
+                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "btn-extras-toggle", Selector.class "observation-disclosure", Selector.class "observation-card", Selector.class "observation-card-selected" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-list-rows" ] |> Query.has [ Selector.class "observation-card" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.tag "article", Selector.class "card", Selector.class "observation-detail-content", Selector.class "observation-detail-meta", Selector.text fullSha ]
                     ]
@@ -3333,7 +3333,7 @@ suite =
                     , \_ -> returned.observations.detailNavigationToken |> Expect.equal (activated.observations.detailNavigationToken + 1)
                     , \_ -> returned.observations.detailReturnTarget |> Expect.equal Nothing
                     ] ()
-        , test "originating repeated card uses its exact native arrow and removes redundant detail chrome" <|
+        , test "originating repeated card uses its exact native disclosure and removes redundant detail chrome" <|
             \_ ->
                 let
                     model =
@@ -3347,7 +3347,7 @@ suite =
                 in
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Event.simulate Event.click |> Event.expect ReturnObservationResults
-                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Query.has [ Selector.tag "button", Selector.text "▼", Selector.attribute (attribute "aria-expanded" "true"), Selector.attribute (attribute "aria-controls" "observation-detail"), Selector.attribute (attribute "data-observation-detail-anchor" "true") ]
+                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Query.has [ Selector.tag "button", Selector.text "−", Selector.attribute (attribute "aria-expanded" "true"), Selector.attribute (attribute "aria-controls" "observation-detail"), Selector.attribute (attribute "data-observation-detail-anchor" "true") ]
                     , \_ -> view |> Query.hasNot [ Selector.id "observation-detail-heading" ]
                     , \_ -> view |> Query.hasNot [ Selector.class "observation-return" ]
                     , \_ -> view |> Query.hasNot [ Selector.id "observation-edit" ]

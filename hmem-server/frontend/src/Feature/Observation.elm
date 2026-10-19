@@ -4986,7 +4986,7 @@ observationToggle : Bool -> String -> String -> Msg -> Html Msg
 observationToggle expanded cardId name message =
     button
         ([ id cardId
-         , classList [ ( "tree-toggle", True ), ( "observation-card", cardId /= "observation-detached-toggle" ), ( "observation-card-selected", expanded ) ]
+         , classList [ ( "btn-extras-toggle", True ), ( "observation-disclosure", True ), ( "observation-card", cardId /= "observation-detached-toggle" ), ( "observation-card-selected", expanded ) ]
          , type_ "button"
          , attribute "aria-label" (plainTextExcerpt 180 ((if expanded then "Collapse " else "Open ") ++ name))
          , attribute "aria-expanded" (if expanded then "true" else "false")
@@ -4994,7 +4994,7 @@ observationToggle expanded cardId name message =
          , attribute "aria-controls" (if expanded then "observation-detail" else cardId ++ "-body")
          , onClick message
          ] ++ (if expanded then [ attribute "data-observation-detail-anchor" "true" ] else []))
-        [ text (if expanded then "▼" else "▶") ]
+        [ text (if expanded then "−" else "+") ]
 
 
 {-| Only one exact repeated occurrence owns detail. Linked selection chooses the

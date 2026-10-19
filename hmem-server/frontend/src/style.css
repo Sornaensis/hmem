@@ -2198,7 +2198,7 @@ textarea.observation-filter-input {
 .observation-filter-select:focus-visible,
 .observation-filter-apply:focus-visible,
 .observation-load-more:focus-visible,
-.observation-card:focus-visible {
+.observation-disclosure:focus-visible {
   outline: 2px solid var(--accent-hover);
   outline-offset: 2px;
 }
@@ -2343,29 +2343,6 @@ button.observation-facet-card:hover {
 
 .observation-match-loading-more {
   color: var(--text-muted);
-}
-
-button.observation-card {
-  appearance: none;
-  -webkit-appearance: none;
-  display: inline-flex;
-  width: auto;
-  flex: 0 0 auto;
-  min-width: 0;
-  margin: 0;
-  color: var(--text);
-  cursor: pointer;
-  box-shadow: none;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
-}
-
-button.observation-card:hover {
-  background: rgba(99, 102, 241, 0.08);
-}
-
-button.observation-card.observation-card-selected {
-  background: rgba(99, 102, 241, 0.14);
-  border-color: var(--accent-hover);
 }
 
 .observation-card-header {
@@ -4636,7 +4613,7 @@ textarea.observation-edit-content {
   .observation-mode-announcement { flex-basis: 100%; margin-left: 0; }
   .observation-mode-actions { flex-basis: 100%; }
   .observation-card-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .25rem; }
-  .observation-card-header > .observation-card { grid-column: 1; grid-row: 1; }
+  .observation-card-header > .observation-disclosure { grid-column: 1; grid-row: 1; }
   .observation-card-header > .observation-kind { grid-column: 2; grid-row: 1; justify-self: start; }
   .observation-card-header > .observation-subject-count { grid-column: 3; grid-row: 1; }
   .observation-card-header > .observation-subject { grid-column: 1 / -1; grid-row: 2; width: 100%; text-align: left; }

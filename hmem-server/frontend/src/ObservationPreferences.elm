@@ -17,12 +17,12 @@ type alias Detail =
 
 type alias Preferences =
     { detail : Maybe Detail, subjects : List String, groups : List String
-    , paths : List String, focusedPath : Maybe String, context : Maybe String, queries : Dict String String, scrolls : Dict String Float, fileInput : String }
+    , paths : List String, focusedPath : Maybe String, selectedPath : Maybe String, context : Maybe String, queries : Dict String String, scrolls : Dict String Float, fileInput : String }
 
 
 empty : Preferences
 empty =
-    { detail = Nothing, subjects = [], groups = [], paths = [], focusedPath = Nothing, context = Nothing, queries = Dict.empty, scrolls = Dict.empty, fileInput = "" }
+    { detail = Nothing, subjects = [], groups = [], paths = [], focusedPath = Nothing, selectedPath = Nothing, context = Nothing, queries = Dict.empty, scrolls = Dict.empty, fileInput = "" }
 
 
 uuid : String -> Bool
@@ -88,7 +88,7 @@ scopedDecoder owner =
         |> D.andThen (\( scoped, base ) -> D.map5 (\paths focused context queries fileInput -> (scoped, { base | paths = paths, focusedPath = focused, context = context, queries = queries, fileInput = fileInput }))
             (optional "paths" (D.list D.string) []) (optional "focusedPath" (D.nullable D.string) Nothing)
             (optional "context" (D.nullable D.string) Nothing) (optional "queries" (D.dict D.string) Dict.empty) (optional "fileInput" D.string ""))
-        |> D.andThen (\( scoped, prefs ) -> D.map (\scrolls -> (scoped, { prefs | scrolls = scrolls })) (optional "scrolls" (D.dict D.float) Dict.empty))
+        |> D.andThen (\( scoped, prefs ) -> D.map2 (\scrolls selectedPath -> (scoped, { prefs | scrolls = scrolls, selectedPath = selectedPath })) (optional "scrolls" (D.dict D.float) Dict.empty) (optional "selectedPath" (D.nullable D.string) Nothing))
         |> D.andThen (\( scoped, prefs ) ->
             if scoped
                 && List.length prefs.subjects <= 128 && List.length prefs.groups <= 128 && List.length prefs.paths <= 128
@@ -115,6 +115,7 @@ normalize prefs =
     { detail = prefs.detail |> Maybe.andThen (\detail -> if validDetail detail then Just { detail | mode = if detail.mode == "facets" then "tree" else detail.mode } else Nothing)
     , subjects = bounded uuid prefs.subjects, groups = bounded validGroup prefs.groups
     , paths = bounded validPath prefs.paths, focusedPath = prefs.focusedPath |> Maybe.andThen (\path -> if validPath path then Just path else Nothing)
+    , selectedPath = prefs.selectedPath |> Maybe.andThen (\path -> if validPath path then Just path else Nothing)
     , context = prefs.context |> Maybe.andThen (\value -> if String.length value <= 16384 then Just value else Nothing)
     , queries = (case Dict.get "facets" prefs.queries of
             Just value -> Dict.insert "tree" (Dict.get "tree" prefs.queries |> Maybe.withDefault value) (Dict.remove "facets" prefs.queries)
@@ -129,5 +130,5 @@ encode owner raw =
     E.object [ ( "version", E.int 1 ), ( "workspaceId", E.string owner.workspaceId ), ( "actorId", E.string owner.actorId ), ( "authority", E.string owner.authority )
         , ( "detail", prefs.detail |> Maybe.map (\detail -> E.object [ ( "id", E.string detail.id ), ( "occurrence", detail.occurrence |> Maybe.map E.string |> Maybe.withDefault E.null ), ( "mode", E.string detail.mode ) ]) |> Maybe.withDefault E.null )
         , ( "subjects", E.list E.string prefs.subjects ), ( "groups", E.list E.string prefs.groups )
-        , ( "paths", E.list E.string prefs.paths ), ( "focusedPath", Maybe.map E.string prefs.focusedPath |> Maybe.withDefault E.null )
+        , ( "paths", E.list E.string prefs.paths ), ( "focusedPath", Maybe.map E.string prefs.focusedPath |> Maybe.withDefault E.null ), ( "selectedPath", Maybe.map E.string prefs.selectedPath |> Maybe.withDefault E.null )
         , ( "context", Maybe.map E.string prefs.context |> Maybe.withDefault E.null ), ( "queries", E.dict identity E.string prefs.queries ), ( "scrolls", E.dict identity E.float prefs.scrolls ), ( "fileInput", E.string prefs.fileInput ) ]

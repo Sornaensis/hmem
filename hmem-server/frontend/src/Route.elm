@@ -231,20 +231,23 @@ handleUrlChangeWithoutProtectedExit url model =
 
                     ( queryModel, queryCmd ) =
                         let
-                            restored = { queryInput | observations = { routeState | linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
+                            targetState = if frag.observationId /= model.observations.selectedId then Feature.Observation.clearSelection routeState else routeState
+                            restored = { queryInput | observations = { targetState | linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
                         in
                         if queryChanged then Feature.Observation.restoreRouteResults restored else ( restored, Cmd.none )
 
                     ( observationModel, observationCmd ) =
                         if frag.tab == ObservationsTab then
-                            if frag.observationId /= model.observations.selectedId then
+                            if frag.observationId /= model.observations.selectedId || (queryChanged && frag.observationId /= Nothing) then
                                 case frag.observationId of
                                     Just observationId ->
-                                        Feature.Observation.selectObservation observationId queryModel
+                                        Feature.Observation.selectRouteObservation observationId queryModel
 
                                     Nothing ->
                                         ( { queryModel | observations = Feature.Observation.clearSelection queryModel.observations }, Cmd.none )
 
+                            else if frag.observationId == Nothing && (queryModel.observations.treeSelectionPending || (queryModel.observations.tree.revealTarget |> Maybe.map (.observationId >> (/=) Nothing) |> Maybe.withDefault False)) then
+                                ( {queryModel | observations = Feature.Observation.clearSelection queryModel.observations}, Cmd.none )
                             else
                                 ( queryModel, Cmd.none )
 

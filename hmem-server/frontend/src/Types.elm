@@ -579,6 +579,7 @@ type alias ObservationModel =
     , detailLoading : Bool
     , detailError : Maybe String
     , activeDetailRequest : Maybe ObservationDetailRequest
+    , treeSelectionPending : Bool
     , nextDetailRequestToken : Int
     , detailNavigationEpoch : Int
     , detailNavigationToken : Int
@@ -1381,6 +1382,7 @@ type Msg
     | ObservationFiltersReady ObservationFilterDebounce
     | GotObservationTree ObservationTree.Request (Result Http.Error Api.ObservationSubjectTreePage)
     | GotObservationTreeTerminal ObservationTree.Request (Result Http.Error (Api.PaginatedResult Api.Observation))
+    | FocusObservationTreePath String
     | SelectObservationTreePath String
     | ToggleObservationTreePath String
     | ObservationTreeKey String String

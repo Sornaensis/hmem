@@ -1892,7 +1892,7 @@ suite =
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
-                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Creation revision", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Creation revision", Selector.text fullSha, Selector.text "Subject kind", Selector.text "Exact subject", Selector.text "Creation Git SHA" ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
@@ -1923,7 +1923,7 @@ suite =
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.class "observation-search" ] |> Query.has [ Selector.class "filter-bar" ]
                     , \_ -> view |> Query.findAll [ Selector.class "observation-filters" ] |> Query.count (Expect.equal 3)
-                    , \_ -> view |> Query.findAll [ Selector.class "observation-filter-input" ] |> Query.count (Expect.equal 4)
+                    , \_ -> view |> Query.find [ Selector.tag "label", Selector.attribute (Html.Attributes.for "observation-query") ] |> Query.has [ Selector.text "Search content" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
                     , \_ -> view |> Query.hasNot [ Selector.class "observation-filter-apply" ]
                     , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "tree-toggle", Selector.class "observation-card", Selector.class "observation-card-selected" ]
@@ -2643,7 +2643,7 @@ suite =
                     , \_ -> exactTuple oppositeKind |> Expect.equal ( Just Api.SubjectGlob, Just "src/**/*.elm" )
                     , \_ -> exactTuple afterApply |> Expect.equal ( Just Api.SubjectGlob, Just "src/**/*.elm" )
                     , \_ -> oppositeKind.observations.subjectKind |> Expect.equal (Just Api.SubjectFile)
-                    , \_ -> view |> Query.has [ Selector.text "Glob: ", Selector.text "src/**/*.elm", Selector.text "Exact results stay locked to this subject tuple." ]
+                    , \_ -> view |> Query.has [ Selector.text "Glob: ", Selector.text "src/**/*.elm", Selector.text "Locked terminal" ]
                     ]
                     ()
         , test "match draft changes do not reinterpret applied evidence, paging, filters, or refresh" <|

@@ -29,22 +29,6 @@ test('production explicit Files mode and filter disclosures send live predicates
   const h = await openDiscovery()
   try {
     await h.start()
-    if (process.env.HMEM_HEADER_SCREENSHOT_DIR) {
-      await mkdir(process.env.HMEM_HEADER_SCREENSHOT_DIR, { recursive: true })
-      for (const width of [1440, 320]) {
-        await h.page.setViewportSize({ width, height: 900 }); await paint(h.page)
-        await h.page.locator('#main-content-scroll').hover()
-        await h.page.mouse.wheel(0, -5000); await paint(h.page)
-        await h.page.locator('#observation-mode-heading').scrollIntoViewIfNeeded(); await paint(h.page)
-        const geometry = await h.page.locator('.observation-mode-navigation').evaluate(element => {
-          const header = element.getBoundingClientRect(), scroll = document.getElementById('main-content-scroll').getBoundingClientRect()
-          return { visible: header.top >= scroll.top && header.bottom <= scroll.bottom, overflow: document.documentElement.scrollWidth - innerWidth }
-        })
-        assert.ok(geometry.visible && geometry.overflow <= 1, JSON.stringify(geometry))
-        await h.page.screenshot({ path: join(process.env.HMEM_HEADER_SCREENSHOT_DIR, width === 1440 ? 'observation-header-desktop.png' : 'observation-header-narrow.png') })
-      }
-      await h.page.setViewportSize({ width: 1440, height: 900 }); await paint(h.page)
-    }
     assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
     assert.equal(await h.page.locator('#observation-match-paths').isVisible(), false)
@@ -233,5 +217,74 @@ test('production original, current and historical SHA predicates keep one curren
     await h.page.locator('#observation-query').press('Enter'); await h.idle()
     const replacedContext = await h.page.locator('.observation-provenance-match').innerText()
     assert.match(replacedContext, /original creation claim/); assert.doesNotMatch(replacedContext, /recorded history claim/)
+  } finally { await h.close() }
+})
+
+for (const width of [1440, 320]) test(`production ${width} compact live filters have mode labels associated errors and distinct explorer controls`, {timeout: 60000}, async () => {
+  const longPath = 'src/' + 'long-canonical-segment-'.repeat(10) + 'main.elm'
+  const h = await openDiscovery({width, height: 1100}, values => values.map((value, i) => i ? value : {...value, subject: longPath, subjects: [{subject_kind: 'file', subject: longPath}, value.subjects[1]]}))
+  const snapshot = async (name, target) => {
+    if (!process.env.HMEM_HEADER_SCREENSHOT_DIR) return
+    await mkdir(process.env.HMEM_HEADER_SCREENSHOT_DIR, {recursive: true})
+    if (target) { await target.evaluate(element => element.scrollIntoView({block: 'center'})); await paint(h.page) }
+    const image = width === 320 ? h.page.locator('#main-content-scroll') : h.page
+    await image.screenshot({path: join(process.env.HMEM_HEADER_SCREENSHOT_DIR, `${name}-${width}.png`)})
+  }
+  const noOverflow = async () => assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Long paths and SHA controls fit the page')
+  try {
+    await h.start()
+    assert.equal(await h.page.getByLabel('Search content', {exact: true}).count(), 1)
+    assert.equal(await h.page.getByRole('button', {name: /^(Apply|Revert)$/}).count(), 0)
+    assert.equal(await h.page.locator('#observation-panel dialog').count(), 0)
+    assert.equal(await h.page.locator('.observation-filter-mode-help, .observation-applied-summary').count(), 0)
+    await activate(h.page, h.page.locator('#observation-advanced-toggle'))
+    for (const label of ['Subject kind', 'Exact subject', 'Creation Git SHA', 'Current reviewed Git SHA', 'Recorded history Git SHA']) assert.equal(await h.page.getByLabel(label, {exact: true}).count(), 1)
+    await h.page.locator('#observation-subject-kind').selectOption('file'); await h.idle()
+    await h.page.locator('#observation-git-sha').fill(h.sha); await h.idle()
+    await activate(h.page, h.page.locator('#observation-advanced-toggle'))
+    assert.match(await h.page.locator('#observation-advanced-toggle').innerText(), /2 active/)
+    assert.equal(await h.page.locator('#observation-advanced-toggle').getAttribute('aria-expanded'), 'false')
+    await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.waitForTimeout(300); await h.idle()
+    assert.equal(h.receipts.filter(value => value.endpoint === '/api/v1/observations').at(-1).params.query, 'Cache evidence')
+    await activate(h.page, h.page.locator('#observation-advanced-toggle'))
+    if (width === 320) await h.page.addStyleTag({content: 'html {font-size: 200%;}'})
+    await noOverflow()
+    if (width === 320) assert.ok(await h.page.locator('.observation-card-header .observation-subject').first().evaluate(element => element.getBoundingClientRect().width >= 80), 'Card subject retains readable width at enlarged text')
+    await h.page.locator('#observation-mode-heading').scrollIntoViewIfNeeded(); await paint(h.page); await snapshot('advanced', h.page.locator('#observation-subject-kind'))
+    if (width === 320) await snapshot('advanced-sha', h.page.locator('#observation-current-git-sha'))
+    const before = h.receipts.length
+    await h.page.locator('#observation-git-sha').fill('abc'); await h.page.waitForTimeout(300); await h.idle()
+    assert.equal(h.receipts.length, before, 'Invalid populated SHA remains local')
+    assert.equal(await h.page.locator('#observation-git-sha').getAttribute('aria-invalid'), 'true')
+    assert.equal(await h.page.locator('#observation-git-sha').getAttribute('aria-describedby'), 'observation-filter-validation')
+    assert.match(await h.page.locator('#observation-filter-validation').innerText(), /40-character Git SHA/)
+    await activate(h.page, h.page.locator('#observation-advanced-toggle'))
+    assert.match(await h.page.locator('#observation-advanced-toggle').innerText(), /Editing/)
+    assert.equal(await h.page.locator('#observation-filter-validation').isVisible(), true)
+    await activate(h.page, h.page.locator('#observation-advanced-toggle')); await h.page.locator('#observation-git-sha').fill(''); await h.idle()
+    assert.equal(await h.page.locator('#observation-git-sha').getAttribute('aria-invalid'), 'false')
+    assert.equal(await h.page.locator('#observation-filter-validation').count(), 0)
+    assert.ok(h.receipts.length > before)
+    await h.page.locator('#observation-subject-kind').selectOption(''); await h.idle()
+    await activate(h.page, h.page.locator('#observation-advanced-toggle'))
+    await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle()
+    assert.equal(await h.page.getByLabel('Search subjects', {exact: true}).count(), 1)
+    assert.equal(await h.page.locator('#observation-subject').count(), 0)
+    const row = path => h.page.locator('[data-tree-path=' + JSON.stringify(path) + ']')
+    await revealObservationRow(h.page, row('src')); await row('src').locator('.observation-tree-chevron').click(); await h.idle()
+    await revealObservationRow(h.page, row(longPath)); await row(longPath).locator('.observation-tree-label').click(); await paint(h.page)
+    assert.ok(await row(longPath).evaluate(element => element.getBoundingClientRect().height <= document.getElementById('main-content-scroll').clientHeight), 'Long path keeps its disclosure and focus row reachable')
+    assert.equal(await row(longPath).getAttribute('aria-selected'), 'true')
+    assert.equal(await row(longPath).getAttribute('aria-expanded'), 'false')
+    assert.equal(await row(longPath).locator('.observation-tree-chevron').getAttribute('tabindex'), '-1')
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    assert.equal(await row(longPath).locator('.observation-tree-copy').getAttribute('aria-label'), 'Copy canonical subject path: ' + longPath)
+    await h.page.keyboard.press('ArrowRight'); await h.idle(); await paint(h.page)
+    assert.equal(await row(longPath).getAttribute('aria-expanded'), 'true')
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    await noOverflow(); await snapshot('tree', row(longPath))
+    await composer(h)
+    assert.equal(await h.page.getByLabel('Search file matches', {exact: true}).count(), 1)
+    assert.equal(await h.page.locator('#observation-subject').count(), 0)
   } finally { await h.close() }
 })

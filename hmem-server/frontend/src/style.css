@@ -4604,8 +4604,51 @@ textarea.observation-edit-content {
 .observation-tree-path { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; min-width: 0; border-radius: .25rem; }
 .observation-tree-path:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
 .observation-tree-path[aria-selected="true"] { background: var(--bg-elevated); }
-.observation-tree-label { cursor: pointer; overflow-wrap: anywhere; font-weight: 600; }
+.observation-tree-label { flex: 1; min-width: 0; cursor: pointer; overflow-wrap: anywhere; font-weight: 600; }
 .observation-tree-pattern { font-size: .75rem; color: var(--text-muted); }
 .observation-tree-copy { margin-left: auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .observation-tree-terminal, .observation-tree-page { display: flex; align-items: center; gap: .5rem; padding-block: .35rem; overflow-wrap: anywhere; }
 .observation-tree-observation { min-width: 0; }
+
+/* Compact live discovery controls keep status and disclosure in document flow. */
+.observation-discovery-controls .observation-search { padding: 0; border: 0; background: transparent; gap: .5rem; }
+.observation-search > .observation-filter-group { flex-basis: 18rem; }
+.observation-search .observation-advanced-toggle { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; min-height: 2.25rem; white-space: normal; }
+.observation-active-filter-count { font-size: .75rem; color: var(--accent-hover); }
+.observation-advanced-active { border-color: var(--accent); }
+.observation-filters .filter-label { text-transform: none; letter-spacing: normal; font-size: .75rem; }
+.observation-advanced-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); align-items: start; gap: .75rem; padding: .75rem; }
+.observation-filters input, .observation-filters select, .observation-filters textarea { box-sizing: border-box; max-width: 100%; min-width: 0; }
+.observation-filters [aria-invalid="true"] { border-color: var(--error); }
+.observation-applied-filters:empty { display: none; }
+.observation-applied-filters p { margin: .5rem 0 0; }
+.observation-tree-path .observation-loaded-count { font-size: .75rem; color: var(--text-muted); }
+.observation-tree-path[aria-expanded="true"] > .observation-tree-chevron { color: var(--accent-hover); }
+@media (max-width: 600px) {
+  .observation-mode-announcement { flex-basis: 100%; margin-left: 0; }
+  .observation-mode-actions { flex-basis: 100%; }
+  .observation-card-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .25rem; }
+  .observation-card-header > .observation-card { grid-column: 1; grid-row: 1; }
+  .observation-card-header > .observation-kind { grid-column: 2; grid-row: 1; justify-self: start; }
+  .observation-card-header > .observation-subject-count { grid-column: 3; grid-row: 1; }
+  .observation-card-header > .observation-subject { grid-column: 1 / -1; grid-row: 2; width: 100%; text-align: left; }
+  .observation-tree-path { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr); gap: .375rem; }
+  .observation-tree-chevron { grid-column: 1; grid-row: 1; }
+  .observation-tree-label { grid-column: 2; grid-row: 1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .observation-tree-pattern, .observation-tree-path .observation-loaded-count { grid-column: 2; }
+  .observation-tree-terminal { flex-wrap: wrap; }
+  .observation-tree-copy { grid-column: 2; max-width: 100%; width: 100%; margin-left: 0; text-align: left; }
+}
+
+/* Compress visual indentation without changing canonical or semantic depth. */
+.observation-tree-path, .observation-tree-terminal, .observation-tree-observation, .observation-tree-page {
+  box-sizing: border-box; min-width: 0;
+  padding-inline-start: min(calc(var(--observation-tree-depth, 0) * 20px), 20%);
+}
+.observation-tree-depth { color: var(--text-muted); font-size: .75rem; }
+@media (max-width: 600px) {
+  .observation-tree-depth { grid-column: 2; }
+}
+
+.observation-tree-page { flex-wrap: wrap; }
+.observation-tree-more { min-width: 0; max-width: 100%; padding-inline: .5rem; white-space: normal; overflow-wrap: anywhere; }

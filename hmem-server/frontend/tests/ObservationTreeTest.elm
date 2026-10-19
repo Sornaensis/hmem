@@ -47,7 +47,22 @@ terminalPage offset numbers more state =
 
 suite : Test
 suite = describe "Subject Tree explorer state"
-    [ test "partial branch refresh stages terminal metadata with paths before pruning a displayed typed card" <| \_ ->
+    [ test "path selection survives collapse and partial or unloaded catalogs without becoming focus fallback" <| \_ ->
+        let
+            chosen = populated |> Tree.toggle "a" |> Tree.toggle "a/x" |> Tree.select "a/x/leaf" Nothing
+            collapsed = Tree.toggle "a" chosen
+            partial = chosen |> Tree.revalidate "new" |> branchPage 0 (List.range 1 200 |> List.map (\n -> "other-" ++ String.fromInt n)) True
+            absent = partial |> branchPage 200 ["other-last"] False
+            unknown = {chosen | nodes = Dict.remove "a/x/leaf" chosen.nodes, branches = Dict.remove "a/x" chosen.branches} |> Tree.recoverFocus chosen
+        in Expect.all
+            [ \_ -> collapsed.selectedPath |> Expect.equal (Just "a/x/leaf")
+            , \_ -> collapsed.focused |> Expect.equal (Just "a")
+            , \_ -> partial.selectedPath |> Expect.equal (Just "a/x/leaf")
+            , \_ -> unknown.selectedPath |> Expect.equal (Just "a/x/leaf")
+            , \_ -> absent.selectedPath |> Expect.equal Nothing
+            , \_ -> absent.focused |> Maybe.map (String.startsWith "other-") |> Expect.equal (Just True)
+            , \_ -> List.length partial.physical |> Expect.equal 0 ] ()
+    , test "partial branch refresh stages terminal metadata with paths before pruning a displayed typed card" <| \_ ->
         let
             typed path terminalKinds = let base = node path False in {base | terminals = List.map (\kind -> {subjectKind = kind, subject = path, observationCount = 1}) terminalKinds}
             fileNode index = typed ("a/" ++ String.padLeft 3 '0' (String.fromInt index)) [Api.SubjectFile]

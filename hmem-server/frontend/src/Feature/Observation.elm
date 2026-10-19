@@ -56,6 +56,7 @@ module Feature.Observation exposing
     , reload
     , removeObservation
     , selectObservation
+    , selectRouteObservation
     , selectionForTab
     , startReload
     , startReloadForSession
@@ -175,6 +176,7 @@ init =
     , detailError = Nothing
     , activeDetailRequest = Nothing
     , nextDetailRequestToken = 1
+    , treeSelectionPending = False
     , detailNavigationEpoch = 0
     , detailNavigationToken = 0
     , detailReturnTarget = Nothing
@@ -298,11 +300,18 @@ pumpTree model =
 focusTreePath : String -> Model -> (Model, Cmd Msg)
 focusTreePath path model =
     let state = model.observations
+        tree = state.tree
+    in ({model | observations = {state | tree = {tree | focused = Just path, focusPending = Just path}}}, Cmd.none)
+
+
+selectTreePath : String -> Model -> (Model, Cmd Msg)
+selectTreePath path model =
+    let state = model.observations
         subject = Dict.get path state.tree.nodes |> Maybe.andThen (\node -> case node.terminals of
             [terminal] -> Just {subjectKind = terminal.subjectKind, subject = terminal.subject}
             _ -> Nothing)
         selected = ObservationTree.select path subject state.tree
-    in ({model | observations = {state | tree = {selected | focusPending = Just path}}}, Cmd.none)
+    in ({model | observations = {state | tree = {selected | focusPending = Just path}, treeSelectionPending = False}}, Cmd.none)
 
 
 finishTreeReveal : Model -> (Model, Cmd Msg)
@@ -415,7 +424,9 @@ revealTreeSelection observation state =
     if state.selectedId /= Just observation.id || state.detailReturnTarget /= Nothing || not (List.member state.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then state
     else
         let subject = state.selectedFacet |> Maybe.withDefault { subjectKind = observation.subjectKind, subject = observation.subject } in
-        { state | tree = ObservationTree.reveal subject observation.id state.tree }
+        -- Only the current guarded detail reply may consume deferred route selection.
+        let revealed = ObservationTree.reveal subject observation.id state.tree in
+        { state | tree = if state.treeSelectionPending then {revealed | selectedPath = Just subject.subject} else revealed, treeSelectionPending = False }
 
 
 emptyCounts : ObservationCountState
@@ -612,9 +623,12 @@ retireSessionState previous =
 
 clearSelection : ObservationModel -> ObservationModel
 clearSelection state =
-    let viewport = state.viewport in
+    let viewport = state.viewport
+        tree = state.tree
+    in
     { state
         | selectedId = Nothing
+        , tree = {tree | revealTarget = tree.revealTarget |> Maybe.andThen (\target -> if target.observationId == Nothing then Just target else Nothing)}
         , inlineOwner = Nothing
         , selectedDetail = Nothing
         , history = Nothing
@@ -622,6 +636,7 @@ clearSelection state =
         , detailLoading = False
         , detailError = Nothing
         , activeDetailRequest = Nothing
+        , treeSelectionPending = False
         , detailNavigationToken = state.detailNavigationToken + 1
         , detailReturnTarget = Nothing
         , pendingReturnNavigation = Nothing
@@ -689,7 +704,10 @@ update msg model =
     let
         ( rawUpdated, command ) =
             updateRaw msg model
-        queryUpdated = rawUpdated
+        queryUpdated =
+            if model.observations.tree.selectedPath /= Nothing && rawUpdated.observations.tree.selectedPath == Nothing then
+                updateObservation (\state -> let prefs = state.preferenceValue in {state | preferenceValue = {prefs | selectedPath = Nothing}, treeSelectionPending = False}) rawUpdated
+            else if not (treeMode rawUpdated.observations.requestMode) then updateObservation (\state -> {state | treeSelectionPending = False}) rawUpdated else rawUpdated
 
         intentional =
             case msg of
@@ -716,6 +734,7 @@ update msg model =
         touched = intentional || liveChange || (case msg of
             ToggleObservationSubjects _ -> True
             ToggleObservationMatchGroup _ -> True
+            FocusObservationTreePath _ -> True
             SelectObservationTreePath _ -> True
             ToggleObservationTreePath _ -> True
             ObservationTreeKey _ _ -> True
@@ -757,11 +776,17 @@ updateRaw msg model =
                 reconciled = List.foldl applyAuthoritativeObservation received items
             in ({model | observations = reconciled}, Cmd.none)
 
-        SelectObservationTreePath path -> focusTreePath path model
+        FocusObservationTreePath path ->
+            let state = model.observations
+                tree = state.tree
+            in ({model | observations = {state | tree = {tree | focused = Just path}}}, Cmd.none)
+
+        SelectObservationTreePath path -> selectTreePath path model
 
         ToggleObservationTreePath path ->
             let state = model.observations
-                selected = ObservationTree.select path state.tree.selected state.tree |> ObservationTree.toggle path
+                tree = state.tree
+                selected = ObservationTree.toggle path {tree | focused = Just path}
             in ({model | observations = {state | tree = selected}}, Cmd.none)
 
         ObservationTreeKey path key -> treeKey path key model
@@ -1033,7 +1058,7 @@ updateRaw msg model =
                             )
 
                         else
-                            ( updateObservation (\state -> { state | detailLoading = False, detailError = Just "Observation detail did not match this workspace.", activeDetailRequest = Nothing }) model, Cmd.none )
+                            ( updateObservation (\state -> { state | detailLoading = False, detailError = Just "Observation detail did not match this workspace.", activeDetailRequest = Nothing, treeSelectionPending = False }) model, Cmd.none )
 
                     Err (Http.BadStatus 404) ->
                         let
@@ -1857,7 +1882,8 @@ selectFacet subjectKind subject model =
                 retireFilterReads { state
                     | selectedFacet = Just { subjectKind = subjectKind, subject = subject }
                     , requestMode = ObservationExactSubjectMode
-                    , tree = ObservationTree.revealPath {subjectKind = subjectKind, subject = subject} state.tree
+                    , tree = ObservationTree.revealPath {subjectKind = subjectKind, subject = subject} (ObservationTree.select subject (Just {subjectKind = subjectKind, subject = subject}) state.tree)
+                    , treeSelectionPending = False
                     , matchValidationError = Nothing
                     , matchEvidence = Dict.empty
                     , expandedMatchGroups = Dict.empty
@@ -2748,6 +2774,14 @@ utf8Bytes value =
 {-| Select by id rather than list membership: unified-search hits may not occur
 on the active observations page or under its current filters.
 -}
+selectRouteObservation : String -> Model -> ( Model, Cmd Msg )
+selectRouteObservation observationId model =
+    let state = model.observations
+        tree = state.tree
+        (selected, command) = selectObservation observationId {model | observations = {state | treeSelectionPending = False, tree = {tree | revealTarget = Nothing}}}
+    in (armTreeRoute selected, command)
+
+
 selectObservation : String -> Model -> ( Model, Cmd Msg )
 selectObservation observationId model =
     if
@@ -2779,7 +2813,7 @@ activateObservation observationId origin model =
 
                 updated =
                     updateObservation
-                        (\current -> { current | detailNavigationEpoch = model.sessionRequestEpoch, detailNavigationToken = current.detailNavigationToken + 1, detailReturnTarget = origin, pendingReturnNavigation = Nothing
+                        (\current -> { current | detailNavigationEpoch = model.sessionRequestEpoch, detailNavigationToken = current.detailNavigationToken + 1, detailReturnTarget = origin, pendingReturnNavigation = Nothing, treeSelectionPending = False
                             , viewport = if origin == Nothing then current.viewport else ObservationViewport.captureOrigin current.viewport })
                         selected
                 state = updated.observations
@@ -2868,6 +2902,7 @@ selectDifferentObservation observationId model =
                             { current
                                 | selectedId = Just observationId
                                 , tree = let tree = current.tree in {tree | revealFocus = True}
+                                , treeSelectionPending = current.treeSelectionPending && current.selectedId == Just observationId
                                 , history = Nothing
                                 , historyExpanded = False
                                 , selectedDetail =
@@ -3890,7 +3925,7 @@ rememberPreferences model =
             { detail = state.selectedId |> Maybe.map (\observationId -> { id = observationId, occurrence = state.detailReturnTarget, mode = preferenceMode state.requestMode })
             , subjects = Dict.toList state.expandedSubjects |> List.filter Tuple.second |> List.map Tuple.first
             , groups = Dict.toList state.expandedMatchGroups |> List.filter Tuple.second |> List.map Tuple.first
-            , paths = Set.toList state.tree.expanded, focusedPath = state.tree.focused
+            , paths = Set.toList state.tree.expanded, focusedPath = state.tree.focused, selectedPath = state.tree.selectedPath
             , context = Just (Helpers.encodeObservationQuery (Helpers.observationAppliedQuery state))
             , queries = Dict.insert (modeKey state.requestMode) state.query state.modeQueries, scrolls = Dict.insert (modeKey state.requestMode) state.viewport.top state.modeScrolls, fileInput = state.matchPathsInput }
         }) model
@@ -3958,12 +3993,14 @@ hydratePreferences payload model =
                 Err _ -> ( { model | observations = { accepted | preferenceEntryHistory = Nothing } }, Cmd.none )
                 Ok prefs ->
                     let
-                        hydrated = { accepted | preferenceValue = prefs, preferencePendingDetail = prefs.detail /= Nothing, preferenceEntryHistory = if prefs.detail == Nothing then Nothing else accepted.preferenceEntryHistory, expandedSubjects = Dict.fromList (List.map (\key -> ( key, True )) prefs.subjects)
+                        restoredTree = let tree = accepted.tree in ObservationTree.reconcileSelection { tree | expanded = Set.fromList prefs.paths, focused = prefs.focusedPath
+                            , selectedPath = if explicit || tree.revealTarget /= Nothing || tree.selectedPath /= Nothing then tree.selectedPath else prefs.selectedPath }
+                        hydrated = { accepted | preferenceValue = {prefs | selectedPath = restoredTree.selectedPath}, preferencePendingDetail = prefs.detail /= Nothing, preferenceEntryHistory = if prefs.detail == Nothing then Nothing else accepted.preferenceEntryHistory, expandedSubjects = Dict.fromList (List.map (\key -> ( key, True )) prefs.subjects)
                             , expandedMatchGroups = Dict.fromList (List.map (\key -> ( key, True )) prefs.groups)
                             , modeQueries = if explicit then Dict.union accepted.modeQueries prefs.queries else Dict.union prefs.queries accepted.modeQueries
                             , modeScrolls = Dict.union accepted.modeScrolls prefs.scrolls
                             , matchPathsInput = if accepted.matchPathsInput == "" then prefs.fileInput else accepted.matchPathsInput
-                            , tree = let tree = accepted.tree in { tree | expanded = Set.fromList prefs.paths, focused = prefs.focusedPath } }
+                            , tree = restoredTree }
                         context = Helpers.observationUrlContext model.url
                         explicit = model.url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (String.split "=" >> List.head >> Maybe.andThen Url.percentDecode)
                             |> List.any (\key -> List.member key [ "ov", "oq", "ox", "observation" ])
@@ -4119,7 +4156,7 @@ viewResultRow display canEdit owner state row =
     case row of
         ObservationCardRow context observation ->
             if String.startsWith "tree-terminal:" context then
-                div [class "observation-tree-observation", style "padding-left" (String.fromInt (List.length (String.split "/" context) * 20) ++ "px")]
+                div [class "observation-tree-observation", treeIndent (List.length (String.split "/" context))]
                     [viewObservationRow display canEdit owner state context observation]
             else viewObservationRow display canEdit owner state context observation
         ObservationFacetRow facet -> viewFacet display facet
@@ -4140,10 +4177,14 @@ viewResultRow display canEdit owner state row =
         ObservationTreePathRow node -> viewTreeNode state node
         ObservationTreeTerminalRow subject ->
             div [ class "observation-tree-terminal", attribute "role" "region", attribute "aria-label" (subjectKindLabel subject.subjectKind ++ " observations for " ++ subject.subject)
-                , style "padding-left" (String.fromInt (List.length (String.split "/" subject.subject) * 20) ++ "px") ]
+                , treeIndent (List.length (String.split "/" subject.subject)) ]
                 [ span [class "entity-type-label observation-kind"] [text (subjectKindLabel subject.subjectKind)]
-                , span [] [text (subject.subject ++ " observations")] ]
+                , span [] [text "Observations"] ]
         ObservationTreePageRow prefix kind -> viewTreePage state prefix kind
+
+
+treeIndent : Int -> Html.Attribute Msg
+treeIndent depth = attribute "style" ("--observation-tree-depth:" ++ String.fromInt depth)
 
 
 viewTreeNode : ObservationModel -> Api.ObservationSubjectTreeNode -> Html Msg
@@ -4161,15 +4202,16 @@ viewTreeNode state node =
     div [ id ("observation-tree-path-" ++ domToken node.path), class "observation-tree-path", attribute "role" "treeitem"
         , tabindex (if focused == node.path then 0 else -1), attribute "aria-level" (String.fromInt (List.length (String.split "/" node.path)))
         , attribute "aria-posinset" (String.fromInt position), attribute "aria-setsize" (String.fromInt setSize)
-        , attribute "aria-expanded" (if expanded then "true" else "false"), attribute "aria-selected" (if focused == node.path then "true" else "false")
+        , attribute "aria-expanded" (if expanded then "true" else "false"), attribute "aria-selected" (if tree.selectedPath == Just node.path then "true" else "false")
         , attribute "aria-label" node.path, attribute "data-tree-path" node.path
-        , style "padding-left" (String.fromInt ((List.length (String.split "/" node.path) - 1) * 20) ++ "px")
-        , Html.Events.onFocus (SelectObservationTreePath node.path), custom "keydown" keyEvent ]
+        , treeIndent (List.length (String.split "/" node.path) - 1)
+        , Html.Events.onFocus (FocusObservationTreePath node.path), custom "keydown" keyEvent ]
         [ button [class "tree-toggle observation-tree-chevron", type_ "button", tabindex -1, onClick (ToggleObservationTreePath node.path)
             , attribute "aria-label" ((if expanded then "Collapse " else "Expand ") ++ node.path)] [text (if expanded then "▼" else "▶")]
         , span [class "observation-tree-label", onClick (SelectObservationTreePath node.path)] [text node.segment]
+        , if List.length (String.split "/" node.path) > 3 then span [class "observation-tree-depth"] [text ("Level " ++ String.fromInt (List.length (String.split "/" node.path)))] else text ""
         , if List.any (\symbol -> String.contains symbol node.segment) ["*", "?", "["] then span [class "observation-tree-pattern"] [text "Literal pattern"] else text ""
-        , span [class "observation-loaded-count"] [text (String.fromInt node.observationCount ++ " observations")]
+        , span [class "observation-loaded-count"] [text (String.fromInt node.observationCount ++ (if node.observationCount == 1 then " observation" else " observations"))]
         , Helpers.copyableValue "observation-tree-copy" "canonical subject path" node.path node.path ]
 
 
@@ -4182,7 +4224,7 @@ viewTreePage state prefix kind =
         exhausted = case kind of
             Nothing -> Dict.get prefix state.tree.branches |> Maybe.map (\branch -> branch.nextOffset > 2147483647) |> Maybe.withDefault False
             Just value -> Dict.get (ObservationTree.terminalKey {subjectKind = value, subject = prefix}) state.tree.terminals |> Maybe.map (\terminal -> terminal.nextOffset > 100000) |> Maybe.withDefault False
-    in div [class "observation-tree-page", style "padding-left" (String.fromInt (List.length (String.split "/" prefix) * 20) ++ "px")]
+    in div [class "observation-tree-page", treeIndent (if prefix == "" then 0 else List.length (String.split "/" prefix))]
         [ if loading then span [attribute "role" "status"] [text ("Loading " ++ label ++ "…")] else text ""
         , error |> Maybe.map (\message -> p [class "form-error", attribute "role" "alert"] [text message]) |> Maybe.withDefault (text "")
         , if not loading && (more || error /= Nothing) then button [type_ "button", class "btn btn-secondary observation-tree-more", disabled exhausted, onClick (LoadObservationTreePage prefix kind)] [text (if exhausted then "Offset limit reached" else (if error /= Nothing then "Retry " else "Load more ") ++ label)] else text "" ]
@@ -4300,15 +4342,25 @@ viewFilters state =
 
 viewFilterInputs : ObservationModel -> Html Msg
 viewFilterInputs state =
+    let
+        searchLabel = case state.requestMode of
+            ObservationFlatMode -> "Search content"
+            ObservationMatchMode -> "Search file matches"
+            _ -> "Search subjects"
+        active = List.length (List.filter identity
+            [ state.subjectKind /= Nothing, if state.requestMode == ObservationFlatMode then state.subject /= "" else state.requestMode == ObservationExactSubjectMode && state.selectedFacet /= Nothing
+            , state.gitSha /= "", state.currentGitSha /= "", state.historyGitSha /= "" ])
+        indication = if filterValidationError state /= Nothing then "Editing" else String.fromInt active ++ " active"
+    in
     div [ class "observation-discovery-controls" ]
         [ Html.form [ class "filter-bar observation-filters observation-search", onSubmit ApplyObservationFilters ]
             [ div [ class "filter-group observation-filter-group" ]
-                [ label [ class "filter-label", for "observation-query" ] [ text "Search observations" ]
+                [ label [ class "filter-label", for "observation-query" ] [ text searchLabel ]
                 , input
                     [ id "observation-query"
                     , class "form-input observation-filter-input"
                     , type_ "search"
-                    , placeholder "Search observation text"
+                    , placeholder (if treeMode state.requestMode then "Literal subject path" else "Search observations")
                     , value state.query
                     , onInput SetObservationQuery
                     ]
@@ -4316,13 +4368,14 @@ viewFilterInputs state =
                 ]
             , button
                 [ id "observation-advanced-toggle"
-                , class "btn btn-secondary"
+                , classList [("btn", True), ("btn-secondary", True), ("observation-advanced-toggle", True), ("observation-advanced-active", active > 0)]
                 , type_ "button"
+                , attribute "aria-label" ("Advanced" ++ (if active > 0 then ", " ++ indication else ""))
                 , onClick ToggleObservationAdvancedFilters
                 , attribute "aria-expanded" (if state.advancedFiltersOpen then "true" else "false")
                 , attribute "aria-controls" "observation-advanced-filters"
                 ]
-                [ text "Advanced filters" ]
+                [ text "Advanced", if active > 0 then span [class "observation-active-filter-count", attribute "aria-hidden" "true"] [text indication] else text "" ]
             ]
         , viewAdvancedFilters state
         , viewFileComposer state
@@ -4331,74 +4384,39 @@ viewFilterInputs state =
 
 viewAdvancedFilters : ObservationModel -> Html Msg
 viewAdvancedFilters state =
+    let
+        shaField fieldId fieldLabel fieldValue setter =
+            let invalid = filterValidationError {state | gitSha = fieldValue, currentGitSha = "", historyGitSha = ""} /= Nothing in
+            div [class "filter-group observation-filter-group"]
+                [ label [class "filter-label", for fieldId] [text fieldLabel]
+                , input ([id fieldId, class "form-input observation-filter-input observation-filter-sha", value fieldValue, onInput setter, placeholder "40-character SHA", spellcheck False
+                    , attribute "aria-invalid" (if invalid then "true" else "false")]
+                    ++ (if invalid then [attribute "aria-describedby" "observation-filter-validation"] else [])) [] ]
+    in
     div [ id "observation-advanced-filters", class "filter-bar observation-filters observation-advanced-filters", hidden (not state.advancedFiltersOpen) ]
         [ div [ class "filter-group observation-filter-group observation-filter-kind" ]
-            [ label [ class "filter-label", for "observation-subject-kind" ]
-                [ text
-                    (if state.requestMode == ObservationExactSubjectMode then
-                        "Browse/match subject kind"
-
-                     else
-                        "Subject kind"
-                    )
-                ]
+            [ label [ class "filter-label", for "observation-subject-kind" ] [text "Subject kind"]
             , select [ id "observation-subject-kind", class "filter-select observation-filter-select", onInput SetObservationSubjectKind ]
-                [ option [ value "", selected (state.subjectKind == Nothing) ] [ text "All subjects" ]
+                [ option [ value "", selected (state.subjectKind == Nothing) ] [ text "Any kind" ]
                 , option [ value "file", selected (state.subjectKind == Just Api.SubjectFile) ] [ text "Files" ]
-                , option [ value "glob", selected (state.subjectKind == Just Api.SubjectGlob) ] [ text "Globs" ]
-                ]
-            ]
+                , option [ value "glob", selected (state.subjectKind == Just Api.SubjectGlob) ] [ text "Globs" ] ] ]
         , case state.requestMode of
             ObservationFlatMode ->
                 div [ class "filter-group observation-filter-group" ]
                     [ label [ class "filter-label", for "observation-subject" ] [ text "Exact subject" ]
-                    , input
-                        [ id "observation-subject"
-                        , class "form-input observation-filter-input"
-                        , placeholder "Optional file or glob"
-                        , value state.subject
-                        , onInput SetObservationSubject
-                        ]
-                        []
-                    ]
-
+                    , input [ id "observation-subject", class "form-input observation-filter-input", placeholder "File or glob subject", value state.subject, onInput SetObservationSubject ] [] ]
             ObservationExactSubjectMode ->
                 case state.selectedFacet of
                     Just selectedFacet ->
                         div [ class "filter-group observation-filter-group observation-selected-facet" ]
-                            [ span [ class "filter-label" ] [ text "Selected shared subject" ]
+                            [ span [ class "filter-label" ] [ text "Locked terminal" ]
                             , strong [ class "observation-selected-facet-value" ]
-                                [ text (subjectKindLabel selectedFacet.subjectKind ++ ": "), Helpers.copyableValue "" "repository subject" selectedFacet.subject selectedFacet.subject ]
-                            , p [ class "form-help" ] [ text "Exact results stay locked to this subject tuple. Browse/match kind changes do not alter it." ]
-                            ]
-
-                    Nothing ->
-                        p [ class "form-error", attribute "role" "alert" ] [ text "No exact shared subject is selected." ]
-
-            ObservationFacetMode ->
-                p [ class "form-help observation-filter-mode-help" ] [ text "Subject ignores the manual exact-subject filter and uses the shared search, kind, and Git SHA filters." ]
-
-            ObservationMatchMode ->
-                p [ class "form-help observation-filter-mode-help" ] [ text "Concrete path matching uses the shared search, kind, and Git SHA filters and ignores manual exact-subject filtering." ]
-        , div [ class "filter-group observation-filter-group" ]
-            [ label [ class "filter-label", for "observation-git-sha" ] [ text "Original Git SHA" ]
-            , input
-                [ id "observation-git-sha"
-                , class "form-input observation-filter-input observation-filter-sha"
-                , placeholder "Full Git SHA"
-                , value state.gitSha
-                , onInput SetObservationGitSha
-                ]
-                []
-            ]
-        , div [ class "filter-group observation-filter-group" ]
-            [ label [ class "filter-label", for "observation-current-git-sha" ] [ text "Current reviewed Git SHA" ]
-            , input [ id "observation-current-git-sha", class "form-input observation-filter-sha", value state.currentGitSha, onInput SetObservationCurrentGitSha, placeholder "Full Git SHA" ] []
-            ]
-        , div [ class "filter-group observation-filter-group" ]
-            [ label [ class "filter-label", for "observation-history-git-sha" ] [ text "Recorded history Git SHA" ]
-            , input [ id "observation-history-git-sha", class "form-input observation-filter-sha", value state.historyGitSha, onInput SetObservationHistoryGitSha, placeholder "Full Git SHA" ] []
-            ]
+                                [ text (subjectKindLabel selectedFacet.subjectKind ++ ": "), Helpers.copyableValue "" "repository subject" selectedFacet.subject selectedFacet.subject ] ]
+                    Nothing -> p [ class "form-error", attribute "role" "alert" ] [ text "No terminal is selected." ]
+            _ -> text ""
+        , shaField "observation-git-sha" "Creation Git SHA" state.gitSha SetObservationGitSha
+        , shaField "observation-current-git-sha" "Current reviewed Git SHA" state.currentGitSha SetObservationCurrentGitSha
+        , shaField "observation-history-git-sha" "Recorded history Git SHA" state.historyGitSha SetObservationHistoryGitSha
         ]
 
 
@@ -4406,9 +4424,7 @@ viewFileComposer : ObservationModel -> Html Msg
 viewFileComposer state =
     section [ id "observation-file-composer", class "filter-bar observation-filters observation-file-composer", hidden (not state.fileComposerOpen), attribute "aria-labelledby" "observation-file-composer-heading" ]
         [ div [ class "filter-group observation-filter-group observation-match-input" ]
-            [ h3 [ id "observation-file-composer-heading" ] [ text "Find observations for files" ]
-            , p [ class "form-help" ] [ text "The displayed results stay unchanged until you select Match files." ]
-            , label [ class "filter-label", for "observation-match-paths" ] [ text "Repository file paths" ]
+            [ label [ id "observation-file-composer-heading", class "filter-label", for "observation-match-paths" ] [ text "Repository file paths" ]
             , textarea
                 [ id "observation-match-paths"
                 , class "form-input observation-filter-input"
@@ -4416,13 +4432,14 @@ viewFileComposer state =
                 , value state.matchPathsInput
                 , onInput SetObservationMatchPaths
                 , attribute "rows" "4"
-                , attribute "aria-describedby" "observation-match-help"
+                , attribute "aria-describedby" ("observation-match-help" ++ (if state.matchValidationError /= Nothing then " observation-match-error" else ""))
+                , attribute "aria-invalid" (if state.matchValidationError /= Nothing then "true" else "false")
                 ]
                 []
-            , p [ id "observation-match-help", class "form-help" ] [ text "For example: src/Main.elm. Enter one concrete repository-relative file path per line. Matches saved file and glob subjects; wildcards are not accepted as input and no checkout is scanned." ]
+            , p [ id "observation-match-help", class "form-help" ] [ text "One concrete repository-relative path per line, without wildcards. Select Match files to update results." ]
             , case state.matchValidationError of
                 Just message ->
-                    p [ class "form-error", attribute "role" "alert" ] [ text message ]
+                    p [ id "observation-match-error", class "form-error", attribute "role" "alert" ] [ text message ]
 
                 Nothing ->
                     text ""
@@ -4441,7 +4458,7 @@ viewAppliedFilters : ObservationModel -> Html Msg
 viewAppliedFilters state =
     div [ class "observation-applied-filters", attribute "role" "status" ]
         [ case filterValidationError state of
-            Just message -> p [ class "form-error" ] [ text message ]
+            Just message -> p [ id "observation-filter-validation", class "form-error", attribute "role" "alert" ] [ text message ]
             Nothing -> text ""
         , if filtersPending state then
             p [ class "form-help observation-filter-pending" ] [ text (if state.completedQuery == Nothing && List.isEmpty state.orderedIds && List.isEmpty state.facetKeys then "Editing filters." else "Editing filters. Showing the last completed results.") ]
@@ -4475,19 +4492,7 @@ viewModeNavigation state =
                 ]
                 [ text labelText ]
 
-        headingText =
-            case state.requestMode of
-                ObservationFlatMode ->
-                    "All observations"
-
-                ObservationFacetMode ->
-                    "Stored subjects"
-
-                ObservationExactSubjectMode ->
-                    "Exact subject results"
-
-                ObservationMatchMode ->
-                    "File matches"
+        headingText = "Observations"
     in
     section [ class "observation-mode-navigation", attribute "aria-labelledby" "observation-mode-heading" ]
         [ h2 [ id "observation-mode-heading", class "observation-mode-heading", tabindex -1 ] [ text headingText ]
@@ -4504,7 +4509,7 @@ viewModeNavigation state =
             ]
         , if treeMode state.requestMode then
             p [class "observation-mode-announcement", attribute "aria-live" "polite"]
-                [text (state.tree.totals |> Maybe.map (\(total, matches) -> String.fromInt matches ++ " matching observations · " ++ String.fromInt total ++ " in workspace") |> Maybe.withDefault (if Dict.get "" state.tree.branches |> Maybe.andThen .error |> (/=) Nothing then "Subject Tree unavailable" else "Loading Subject Tree…"))]
+                [text (state.tree.totals |> Maybe.map (\(total, matches) -> if matches == total then String.fromInt total ++ (if total == 1 then " observation" else " observations") else String.fromInt matches ++ " matching observations · " ++ String.fromInt total ++ " in workspace") |> Maybe.withDefault (if Dict.get "" state.tree.branches |> Maybe.andThen .error |> (/=) Nothing then "Subject Tree unavailable" else "Loading Subject Tree…"))]
           else if hasAppliedCountFilter state then
             let counts = state.counts in
             p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
@@ -5158,12 +5163,21 @@ subjectKindLabel subjectKind =
 
 armTreeRoute : Model -> Model
 armTreeRoute model =
-    let state = model.observations in
-    if treeMode state.requestMode && state.selectedId == Nothing then
+    let state = model.observations
+        select subject = ObservationTree.select subject.subject (Just subject) state.tree
+        known = case state.selectedFacet of
+            Just subject -> Just subject
+            Nothing -> currentSelectedObservation state |> Maybe.map (\observation -> {subjectKind = observation.subjectKind, subject = observation.subject})
+    in
+    if not (treeMode state.requestMode) then {model | observations = {state | treeSelectionPending = False}}
+    else if state.selectedId == Nothing then
         case state.selectedFacet of
-            Just subject -> {model | observations = {state | tree = ObservationTree.revealPath subject state.tree}}
-            Nothing -> model
-    else model
+            Just subject -> {model | observations = {state | tree = ObservationTree.revealPath subject (select subject), treeSelectionPending = False}}
+            Nothing -> {model | observations = {state | treeSelectionPending = False}}
+    else
+        case known of
+            Just subject -> {model | observations = {state | tree = state.selectedId |> Maybe.map (\identity -> ObservationTree.reveal subject identity (select subject)) |> Maybe.withDefault (select subject), treeSelectionPending = False}}
+            Nothing -> let tree = state.tree in {model | observations = {state | tree = {tree | selectedPath = Nothing}, treeSelectionPending = True}}
 
 
 restoreRouteResults : Model -> ( Model, Cmd Msg )

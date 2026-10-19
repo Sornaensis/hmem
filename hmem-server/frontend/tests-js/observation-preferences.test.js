@@ -42,11 +42,11 @@ test('disabled/malformed storage does not break UI or leak untagged values', () 
 test('live query and explorer preferences stay actor scoped and share the finite byte budget', () => {
   const writes = []; const h = harness({ getItem() { return null }, setItem(key, value) { writes.push({ key, value }) } })
   h.send({ operation: 'read', owner }); h.paint()
-  const value = { ...preference, queries: { flat: 'content', tree: 'src/auth', match: 'coverage' }, context: 'legacy-facets-context', paths: ['src', 'src/**'], focusedPath: 'src/**', scrolls: { tree: 100, flat: 50 }, fileInput: 'src/Main.elm' }
+  const value = { ...preference, queries: { flat: 'content', tree: 'src/auth', match: 'coverage' }, context: 'legacy-facets-context', paths: ['src', 'src/**'], focusedPath: 'src/**', selectedPath: 'src/auth', scrolls: { tree: 100, flat: 50 }, fileInput: 'src/Main.elm' }
   h.send({ operation: 'write', owner, value })
   const restored = JSON.parse(writes[0].value)
   assert.deepEqual(restored.queries, value.queries); assert.deepEqual(restored.paths, value.paths)
-  assert.equal(restored.focusedPath, value.focusedPath); assert.equal(restored.fileInput, value.fileInput)
+  assert.equal(restored.focusedPath, value.focusedPath); assert.equal(restored.selectedPath, value.selectedPath); assert.equal(restored.fileInput, value.fileInput)
   assert.deepEqual(restored.scrolls, value.scrolls)
   h.send({ operation: 'write', owner, value: { ...value, fileInput: 'é'.repeat(32768), paths: Array.from({ length: 128 }, () => 'src/' + 'é'.repeat(1000)) } })
   assert.ok(Buffer.byteLength(writes.at(-1).value) <= 32768)

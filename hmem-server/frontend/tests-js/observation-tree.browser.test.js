@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { openDiscovery, subjectTreePage } from './observation-discovery-fixture.mjs'
 import { paint, revealObservationRow } from './observation-viewport-fixture.mjs'
 
@@ -220,7 +222,7 @@ test('five expanded branches share four physical slots through collapse and stal
 })
 
 
-test('late detail and ancestor reveal completes membership without overriding newer outside focus', { timeout: 60000 }, async () => {
+test('late detail membership and mode return preserve a newer path selection and outside focus', { timeout: 60000 }, async () => {
   const h = await openDiscovery(undefined, examples)
   let release, arrived
   const held = new Promise(resolve => {release = resolve}), arrival = new Promise(resolve => {arrived = resolve})
@@ -231,12 +233,45 @@ test('late detail and ancestor reveal completes membership without overriding ne
     const query = ['tree', '', null, '', '', null, null, [], '', '']
     await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=auth-main')
     await h.bounded(arrival, 5000, 'Deep-link ancestor admitted')
+    await pathRow(h, 'docs').waitFor()
+    await pathRow(h, 'docs').locator('.observation-tree-label').click(); await paint(h.page)
+    assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'true')
     await h.page.locator('#observation-query').focus(); await paint(h.page)
     release(); await h.idle()
     await h.page.locator('.observation-detail-content').waitFor({timeout: 5000}); await paint(h.page)
     assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
     assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-expanded'), 'true')
     assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'true')
+    assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-selected'), 'false')
+    await h.page.getByRole('button', {name: 'All', exact: true}).click(); await h.idle()
+    await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle(); await paint(h.page)
+    assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'true')
+    assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-selected'), 'false')
+  } finally {release?.(); await h.close()}
+})
+
+test('same-query explicit card navigation selects its resolved path while an internal URL echo preserves newer path selection', {timeout: 60000}, async () => {
+  const h = await openDiscovery(undefined, examples)
+  let release, arrived
+  const held = new Promise(resolve => {release = resolve}), arrival = new Promise(resolve => {arrived = resolve})
+  try {
+    await tree(h)
+    await pathRow(h, 'docs').locator('.observation-tree-label').click(); await paint(h.page)
+    const roots = rootReads(h).length
+    await h.page.route('**/api/v1/observations/auth-main', async route => {arrived(); await held; return route.fallback()})
+    const query = ['tree', '', null, '', '', null, null, [], '', '']
+    await h.page.evaluate(fragment => {location.hash = fragment}, 'tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=auth-main')
+    await h.bounded(arrival, 5000, 'Explicit same-query card detail admitted')
+    release(); await h.idle(); await h.page.locator('.observation-detail-content').waitFor(); await paint(h.page)
+    assert.equal(rootReads(h).length, roots, 'Same-query navigation uses the current root membership')
+    assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-selected'), 'true')
+    assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'false')
+    await revealObservationRow(h.page, pathRow(h, 'docs'))
+    await pathRow(h, 'docs').locator('.observation-tree-label').click(); await paint(h.page)
+    await h.page.evaluate(() => window.dispatchEvent(new PopStateEvent('popstate'))); await paint(h.page)
+    assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'true')
+    assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-selected'), 'false')
   } finally {release?.(); await h.close()}
 })
 
@@ -311,4 +346,104 @@ test('a settled terminal-only link preserves newer parent collapse and native fo
     assert.equal(context[0], 'exact'); assert.equal(context[5], 'glob'); assert.equal(context[6], 'src/**/*.elm')
     assert.ok(!h.receipts.slice(reads).some(value => value.params.prefix === 'src' || value.params.subject), 'Collapsed selection does not admit hidden subtree or terminal refresh')
   } finally { await h.close() }
+})
+
+test('scaffold and dual-kind label selection stays separate from focus expansion and passive preferences', {timeout: 60000}, async () => {
+  const h = await openDiscovery(undefined, examples)
+  try {
+    await tree(h)
+    await pathRow(h, 'src').locator('.observation-tree-label').click(); await paint(h.page)
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-selected'), 'true')
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-expanded'), 'false')
+    await h.page.keyboard.press('Home'); await paint(h.page)
+    assert.equal(await pathRow(h, 'docs').evaluate(element => document.activeElement === element), true)
+    assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'false')
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-selected'), 'true')
+    await pathRow(h, 'docs').focus(); await paint(h.page)
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-selected'), 'true')
+    await toggle(h, 'docs'); await toggle(h, 'src')
+    await pathRow(h, 'src/auth').locator('.observation-tree-label').click(); await paint(h.page)
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-selected'), 'true', 'Both terminal kinds share one selectable path')
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-expanded'), 'false')
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    await toggle(h, 'src'); await toggle(h, 'src')
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-selected'), 'true')
+    await toggle(h, 'src')
+    await h.page.goto(h.origin + '/'); await h.idle()
+    const before = h.receipts.length
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations'); await h.idle(); await paint(h.page)
+    assert.equal(await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).getAttribute('aria-pressed'), 'true')
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-expanded'), 'false')
+    assert.ok(!h.receipts.slice(before).some(value => value.params.prefix === 'src' || value.params.subject === 'src/auth'), 'Saved selection does not reveal or read its hidden ancestry')
+    await toggle(h, 'src')
+    assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-selected'), 'true')
+    assert.equal(await pathRow(h, 'src').getAttribute('aria-selected'), 'false')
+  } finally {await h.close()}
+})
+
+test('eighteen-segment paths keep path terminal card copy and continuation controls inside the narrow enlarged-text scrollport', {timeout: 90000}, async () => {
+  const parts = Array.from({length: 18}, (_, i) => 'd' + String(i).padStart(2, '0')), deep = parts.join('/')
+  const h = await openDiscovery({width: 320, height: 1100}, values => Array.from({length: 205}, (_, i) => ({...values[0], id: 'deep-' + String(i).padStart(3, '0'), subjects: [file(deep)], subject_kind: 'file', subject: deep})))
+  const inside = async (control, name, interactive = true) => {
+    if (interactive) await revealObservationRow(h.page, control)
+    else {await control.scrollIntoViewIfNeeded(); await paint(h.page)}
+    const rect = await control.evaluate(element => {
+      const box = element.getBoundingClientRect(), host = document.getElementById('main-content-scroll').getBoundingClientRect()
+      return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, host: {left: host.left, right: host.right, top: host.top, bottom: host.bottom}}
+    })
+    assert.ok(rect.width > 0 && rect.left >= rect.host.left - 1 && rect.right <= rect.host.right + 1 && rect.top >= rect.host.top - 1 && rect.bottom <= rect.host.bottom + 1, name + ': ' + JSON.stringify(rect))
+  }
+  const indented = async (row, name) => {
+    const value = await row.evaluate(element => ({padding: parseFloat(getComputedStyle(element).paddingInlineStart), width: element.getBoundingClientRect().width}))
+    assert.ok(value.padding > 0 && value.padding <= value.width * .2 + 1, name + ': ' + JSON.stringify(value))
+  }
+  const snapshot = async (name, target) => {
+    if (!process.env.HMEM_HEADER_SCREENSHOT_DIR) return
+    await mkdir(process.env.HMEM_HEADER_SCREENSHOT_DIR, {recursive: true})
+    await target.evaluate(element => element.scrollIntoView({block: 'center'})); await paint(h.page)
+    await h.page.locator('#main-content-scroll').screenshot({path: join(process.env.HMEM_HEADER_SCREENSHOT_DIR, name + '-320.png')})
+  }
+  try {
+    await h.start(); await h.page.addStyleTag({content: 'html {font-size: 200%;}'})
+    await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle()
+    for (let depth = 1; depth <= parts.length; depth++) {
+      const path = parts.slice(0, depth).join('/'), row = pathRow(h, path)
+      await inside(row, 'Path level ' + depth)
+      if (depth > 1) {
+        const indent = await row.evaluate(element => ({padding: parseFloat(getComputedStyle(element).paddingInlineStart), width: element.getBoundingClientRect().width}))
+        assert.ok(indent.padding > 0 && indent.padding <= indent.width * .2 + 1, 'Actual indentation remains positive and bounded: ' + JSON.stringify(indent))
+      }
+      await inside(row.locator('.observation-tree-chevron'), 'Chevron level ' + depth)
+      await row.locator('.observation-tree-chevron').click(); await h.idle(); await paint(h.page)
+    }
+    const leaf = pathRow(h, deep)
+    assert.equal(await leaf.getAttribute('aria-level'), '18')
+    assert.equal(await leaf.getAttribute('aria-selected'), 'false', 'Expansion does not synthesize selection')
+    await inside(leaf, 'Deep selectable path'); await leaf.locator('.observation-tree-label').click(); await paint(h.page)
+    assert.equal(await leaf.getAttribute('aria-selected'), 'true')
+    assert.match(await leaf.locator('.observation-tree-depth').innerText(), /Level 18/)
+    await inside(leaf.locator('.observation-tree-copy'), 'Deep canonical path copy')
+    assert.equal(await leaf.locator('.observation-tree-copy').getAttribute('aria-label'), 'Copy canonical subject path: ' + deep)
+    const terminal = h.page.getByRole('region', {name: 'File observations for ' + deep, exact: true})
+    await inside(terminal, 'Deep typed terminal', false)
+    await inside(terminal.locator('span').last(), 'Deep typed terminal heading', false)
+    await indented(terminal, 'Terminal indentation')
+    const card = h.page.locator('.observation-result[data-observation-id="deep-204"] .observation-card')
+    await inside(card, 'Deep observation disclosure')
+    await indented(card.locator('xpath=ancestor::div[contains(@class,"observation-tree-observation")][1]'), 'Observation indentation')
+    await card.click(); await h.idle()
+    assert.equal(await h.page.locator('.observation-detail').count(), 1)
+    await inside(h.page.locator('.observation-result[data-observation-id="deep-204"] .observation-subject').first(), 'Deep observation canonical copy')
+    await snapshot('deep-tree', leaf)
+    const more = h.page.getByRole('button', {name: 'Load more observations', exact: true})
+    await inside(more, 'Deep terminal continuation')
+    await indented(more.locator('..'), 'Continuation indentation')
+    await snapshot('deep-continuation', more)
+    await more.click(); await h.idle(); await paint(h.page)
+    assert.ok(h.receipts.some(value => value.params.subject === deep && value.params.offset === '200'))
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '205')
+    assert.equal(await h.page.locator('#observation-panel').evaluate(element => JSON.parse(element.dataset.observationContext).selectedId), 'deep-204')
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+    assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
+  } finally {await h.close()}
 })

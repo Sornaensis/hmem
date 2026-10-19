@@ -63,7 +63,149 @@ settleFilters current =
 
 
 liveFilterTests =
-    [ test "simultaneous live branch refresh admits a demanded typed terminal before unrelated branches exhaust" <| \_ ->
+    [ test "scaffold and dual-kind paths select independently from native keyboard focus typed lock and expansion" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            started = step (SetObservationBrowseMode ObservationFacetMode) model
+            node path hasChildren kinds = {path = path, segment = String.split "/" path |> List.reverse |> List.head |> Maybe.withDefault path, hasChildren = hasChildren, observationCount = 2, terminals = List.map (\kind -> {subjectKind = kind, subject = path, observationCount = 1}) kinds}
+            accept prefix nodes previous = previous.observations.tree.physical |> List.filter (\request -> request.prefix == prefix && request.kind == Nothing) |> List.head
+                |> Maybe.map (\request -> step (GotObservationTree request (Ok {items = nodes, hasMore = False, totalCount = 2, matchCount = 2})) previous) |> Maybe.withDefault previous
+            root = accept "" [node "docs" False [], node "src" True []] started
+            selected = step (SelectObservationTreePath "src") root
+            moved = step (ObservationTreeKey "src" "Home") selected
+            native = step (FocusObservationTreePath "docs") moved
+            expanded = step (ToggleObservationTreePath "src") native |> accept "src" [node "src/auth" False [Api.SubjectFile, Api.SubjectGlob]]
+            dual = step (SelectObservationTreePath "src/auth") expanded
+            collapsed = step (ToggleObservationTreePath "src") dual
+        in Expect.all
+            [ \_ -> selected.observations.tree.selectedPath |> Expect.equal (Just "src")
+            , \_ -> selected.observations.tree.selected |> Expect.equal Nothing
+            , \_ -> native.observations.tree.focused |> Expect.equal (Just "docs")
+            , \_ -> native.observations.tree.selectedPath |> Expect.equal (Just "src")
+            , \_ -> expanded.observations.tree.selectedPath |> Expect.equal (Just "src")
+            , \_ -> dual.observations.tree.selectedPath |> Expect.equal (Just "src/auth")
+            , \_ -> dual.observations.tree.selected |> Expect.equal Nothing
+            , \_ -> collapsed.observations.tree.selectedPath |> Expect.equal (Just "src/auth")
+            , \_ -> collapsed.observations.selectedFacet |> Expect.equal Nothing ] ()
+    , test "late detail membership and generic mode return preserve newer explicit path selection including proven absence" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            identity = "route-card"
+            subject = {subjectKind = Api.SubjectFile, subject = "src/Main.elm"}
+            query = Helpers.observationAppliedQuery model.observations
+            restored = Helpers.restoreObservationQuery {query | requestMode = ObservationFacetMode} model.observations
+            incoming = {model | observations = {restored | selectedId = Just identity, selectedDetail = Nothing, items = Dict.empty}}
+            requested = O.bootstrapObservation 1 incoming |> Tuple.first |> O.selectObservation identity |> Tuple.first
+            node path children = {path = path, segment = path, hasChildren = children, observationCount = 1, terminals = []}
+            accept nodes previous = previous.observations.tree.physical |> List.filter (\request -> request.prefix == "" && request.kind == Nothing) |> List.head
+                |> Maybe.map (\request -> step (GotObservationTree request (Ok {items = nodes, hasMore = False, totalCount = 1, matchCount = 1})) previous) |> Maybe.withDefault previous
+            root = accept [node "docs" False, node "src" True] requested
+            selected = step (SelectObservationTreePath "docs") root
+            item = row identity
+            receive value previous = previous.observations.activeDetailRequest |> Maybe.map (\request -> step (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Ok value)) previous) |> Maybe.withDefault previous
+            completed = receive item selected
+            returned = completed |> step (SetObservationBrowseMode ObservationFlatMode) |> step (SetObservationBrowseMode ObservationFacetMode)
+            fresh = receive item root
+            absent = O.refreshActiveResults selected |> Tuple.first |> accept [node "src" True]
+            lateAbsent = receive item absent
+            left = step (SetObservationBrowseMode ObservationFlatMode) root
+            lateOutside = receive item left |> step (SetObservationBrowseMode ObservationFacetMode)
+            wrong = receive {item | id = "wrong-target"} root
+            superseded = O.selectObservation "different-card" root |> Tuple.first
+            activated = step (SelectObservation identity) root
+            lateActivated = receive item activated
+            failed = root.observations.activeDetailRequest |> Maybe.map (\request -> step (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Err Http.NetworkError)) root) |> Maybe.withDefault root
+            retry = O.selectObservation identity failed |> Tuple.first |> receive item
+            explicit = O.restoreRouteResults completed |> Tuple.first
+        in Expect.all
+            [ \_ -> root.observations.treeSelectionPending |> Expect.equal True
+            , \_ -> selected.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> completed.observations.selectedId |> Expect.equal (Just identity)
+            , \_ -> completed.observations.tree.selectedPath |> Expect.equal (Just "docs")
+            , \_ -> completed.observations.tree.revealTarget |> Maybe.map .subject |> Expect.equal (Just subject)
+            , \_ -> returned.observations.tree.selectedPath |> Expect.equal (Just "docs")
+            , \_ -> returned.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> fresh.observations.tree.selectedPath |> Expect.equal (Just subject.subject)
+            , \_ -> fresh.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> absent.observations.tree.selectedPath |> Expect.equal Nothing
+            , \_ -> lateAbsent.observations.tree.selectedPath |> Expect.equal Nothing
+            , \_ -> left.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> lateOutside.observations.tree.selectedPath |> Expect.equal Nothing
+            , \_ -> wrong.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> superseded.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> activated.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> lateActivated.observations.tree.selectedPath |> Expect.equal Nothing
+            , \_ -> retry.observations.tree.selectedPath |> Expect.equal (Just subject.subject)
+            , \_ -> retry.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> explicit.observations.tree.selectedPath |> Expect.equal (Just subject.subject)
+            ] ()
+    , test "actual Route dispatch arms only incoming explicit card changes and retires abandoned card reveals" <| \_ ->
+        let
+            step message previous = O.update message previous |> Tuple.first |> project previous
+            started = step (SetObservationBrowseMode ObservationFacetMode) model
+            original = O.selectRouteObservation observationId started |> Tuple.first |> step (SelectObservationTreePath "docs")
+            url routeQuery identity previous = let oldUrl = previous.url in {oldUrl | fragment = Just ("tab=observations&ov=1&oq=" ++ Helpers.encodeObservationQuery routeQuery ++ (identity |> Maybe.map ((++) "&observation=") |> Maybe.withDefault ""))}
+            query = Helpers.observationAppliedQuery original.observations
+            changedQuery = {query | query = "changed"}
+            next identity selectedQuery previous = Route.handleUrlChange (url selectedQuery identity previous) previous |> Tuple.first
+            sameQuery = next (Just "next-card") query original
+            otherQuery = next (Just "next-card") changedQuery original
+            noCard = next Nothing changedQuery original
+            sameCard = next (Just observationId) changedQuery original
+            item = row "next-card"
+            completed = sameQuery.observations.activeDetailRequest |> Maybe.map (\request -> step (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Ok item)) sameQuery) |> Maybe.withDefault sameQuery
+            selected = step (SelectObservationTreePath "docs") completed
+            echo = Route.handleUrlChange selected.url selected |> Tuple.first
+            state = started.observations
+            tree = state.tree
+            orphaned = {started | observations = {state | selectedId = Nothing, treeSelectionPending = True, tree = ObservationTree.reveal {subjectKind = Api.SubjectFile, subject = "old/path"} "old-card" tree}}
+            cleared = next Nothing query orphaned
+        in Expect.all
+            [ \_ -> sameQuery.observations.selectedId |> Expect.equal (Just "next-card")
+            , \_ -> sameQuery.observations.treeSelectionPending |> Expect.equal True
+            , \_ -> sameQuery.observations.tree.revealTarget |> Expect.equal Nothing
+            , \_ -> sameQuery.observations.activeDetailRequest |> Maybe.map .observationId |> Expect.equal (Just "next-card")
+            , \_ -> otherQuery.observations.treeSelectionPending |> Expect.equal True
+            , \_ -> otherQuery.observations.tree.revealTarget |> Expect.equal Nothing
+            , \_ -> noCard.observations.selectedId |> Expect.equal Nothing
+            , \_ -> noCard.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> noCard.observations.tree.revealTarget |> Expect.equal Nothing
+            , \_ -> sameCard.observations.tree.selectedPath |> Expect.equal (Just "src/Main.elm")
+            , \_ -> sameCard.observations.tree.revealTarget |> Maybe.map .observationId |> Expect.equal (Just (Just observationId))
+            , \_ -> completed.observations.tree.selectedPath |> Expect.equal (Just "src/Main.elm")
+            , \_ -> echo.observations.tree.selectedPath |> Expect.equal (Just "docs")
+            , \_ -> echo.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> cleared.observations.treeSelectionPending |> Expect.equal False
+            , \_ -> cleared.observations.tree.revealTarget |> Expect.equal Nothing
+            ] ()
+    , test "selected path preference is optional bounded passive and subordinate to explicit reveal" <| \_ ->
+        let
+            initial = project model model
+            owner = initial.observations.preferenceOwner |> Maybe.withDefault {workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0}
+            prefs = {preferenceDefaults | selectedPath = Just "unloaded/**/target", focusedPath = Just "different-focus"}
+            encoded = P.encode owner prefs
+            legacy = D.decodeValue (D.keyValuePairs D.value) encoded |> Result.withDefault [] |> List.filter (Tuple.first >> (/=) "selectedPath") |> E.object
+            payload = E.object [("owner", P.ownerValue owner), ("value", encoded)]
+            hydrated = O.update (ObservationPreferencesReceived payload) initial |> Tuple.first
+            state = initial.observations
+            intended = {initial | observations = {state | tree = ObservationTree.revealPath {subjectKind = Api.SubjectFile, subject = "explicit/path"} (ObservationTree.select "explicit/path" Nothing state.tree)}}
+            explicit = O.update (ObservationPreferencesReceived payload) intended |> Tuple.first
+            (cacheStarted, cacheGuard) = ObservationTree.begin "" 0 (ObservationTree.retire "current" ObservationTree.init)
+            cache = cacheGuard |> Maybe.map (\request -> ObservationTree.receive request (Ok {items = [], hasMore = False, totalCount = 0, matchCount = 0}) cacheStarted) |> Maybe.withDefault cacheStarted
+            proven = O.update (ObservationPreferencesReceived payload) {initial | observations = {state | tree = cache}} |> Tuple.first
+        in Expect.all
+            [ \_ -> D.decodeValue (P.decoder owner) legacy |> Result.map .selectedPath |> Expect.equal (Ok Nothing)
+            , \_ -> D.decodeValue (P.decoder owner) encoded |> Result.map .selectedPath |> Expect.equal (Ok prefs.selectedPath)
+            , \_ -> P.normalize {prefs | selectedPath = Just "../invalid"} |> .selectedPath |> Expect.equal Nothing
+            , \_ -> hydrated.observations.tree.selectedPath |> Expect.equal prefs.selectedPath
+            , \_ -> hydrated.observations.tree.focused |> Expect.equal prefs.focusedPath
+            , \_ -> hydrated.observations.tree.expanded |> Expect.equal Set.empty
+            , \_ -> hydrated.observations.tree.physical |> Expect.equal initial.observations.tree.physical
+            , \_ -> explicit.observations.tree.selectedPath |> Expect.equal (Just "explicit/path")
+            , \_ -> proven.observations.tree.selectedPath |> Expect.equal Nothing
+            , \_ -> proven.observations.preferenceValue.selectedPath |> Expect.equal Nothing
+            , \_ -> proven.observations.tree.physical |> Expect.equal [] ] ()
+    , test "simultaneous live branch refresh admits a demanded typed terminal before unrelated branches exhaust" <| \_ ->
         let
             step message previous = O.update message previous |> Tuple.first |> project previous
             starting = step (SetObservationBrowseMode ObservationFacetMode) model

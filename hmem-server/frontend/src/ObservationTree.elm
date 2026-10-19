@@ -1,4 +1,4 @@
-module ObservationTree exposing (State, Request, Branch, Terminal, init, retire, revalidate, begin, receive, beginTerminal, receiveTerminal, terminalKey, visiblePaths, toggle, select, recoverFocus, reveal, revealPath, parent, ancestors)
+module ObservationTree exposing (State, Request, Branch, Terminal, init, retire, revalidate, begin, receive, beginTerminal, receiveTerminal, terminalKey, visiblePaths, toggle, select, recoverFocus, reconcileSelection, reveal, revealPath, parent, ancestors)
 
 import Api
 import Dict exposing (Dict)
@@ -16,7 +16,7 @@ type alias Branch =
 type alias State =
     { lifetime : String, displayLifetime : String, nextToken : Int, physical : List Request, totals : Maybe ( Int, Int )
     , nodes : Dict String Api.ObservationSubjectTreeNode, branches : Dict String Branch, terminals : Dict String Terminal, refreshing : Bool
-    , expanded : Set String, focused : Maybe String, selected : Maybe Api.ObservationSubject
+    , expanded : Set String, focused : Maybe String, selectedPath : Maybe String, selected : Maybe Api.ObservationSubject
     , revealTarget : Maybe { subject : Api.ObservationSubject, observationId : Maybe String, focus : Bool }
     , focusPending : Maybe String, revealFocus : Bool, resolvedPath : Maybe { subject : Api.ObservationSubject, owner : String }
     , lastOwner : Maybe ( String, Maybe Api.SubjectKind )
@@ -34,7 +34,7 @@ terminalKey subject = Api.subjectKindToString subject.subjectKind ++ ":" ++ subj
 init : State
 init =
     { lifetime = "", displayLifetime = "", nextToken = 1, physical = [], totals = Nothing, nodes = Dict.empty, branches = Dict.empty
-    , terminals = Dict.empty, refreshing = False, expanded = Set.empty, focused = Nothing, selected = Nothing, revealTarget = Nothing, focusPending = Nothing, revealFocus = True, resolvedPath = Nothing, lastOwner = Nothing }
+    , terminals = Dict.empty, refreshing = False, expanded = Set.empty, focused = Nothing, selectedPath = Nothing, selected = Nothing, revealTarget = Nothing, focusPending = Nothing, revealFocus = True, resolvedPath = Nothing, lastOwner = Nothing }
 
 
 {-| Logical retirement never releases physical occupancy. Only the exact
@@ -192,7 +192,14 @@ recoverFocus previous state =
         nearest = visible |> List.drop (Basics.min oldIndex (Basics.max 0 (List.length visible - 1))) |> List.head
         focus = if state.revealTarget /= Nothing then state.focused else if List.member old visible then Just old else if nearestAncestor /= Nothing then nearestAncestor else nearest
         selected = if state.revealTarget /= Nothing then state.selected else state.selected |> Maybe.andThen (\subject -> if (Dict.get subject.subject state.nodes |> Maybe.map (\node -> List.any (\terminal -> terminal.subjectKind == subject.subjectKind) node.terminals) |> Maybe.withDefault False) then Just subject else Nothing)
-    in { state | focused = focus, selected = selected, focusPending = if state.revealTarget /= Nothing then Nothing else if previous.focused /= Nothing && focus /= previous.focused then focus else state.focusPending }
+        selectedPath = (reconcileSelection state).selectedPath
+    in { state | focused = focus, selectedPath = selectedPath, selected = selected, focusPending = if state.revealTarget /= Nothing then Nothing else if previous.focused /= Nothing && focus /= previous.focused then focus else state.focusPending }
+
+
+reconcileSelection : State -> State
+reconcileSelection state =
+    let absent path = ancestors path |> List.any (\part -> Dict.get (parent part) state.branches |> Maybe.map (\branch -> branch.lifetime == state.lifetime && branch.stagedPaths == Nothing && not branch.hasMore && branch.request == Nothing && branch.error == Nothing && not (List.member part branch.paths)) |> Maybe.withDefault False)
+    in {state | selectedPath = state.selectedPath |> Maybe.andThen (\path -> if absent path then Nothing else Just path)}
 
 
 toggle : String -> State -> State
@@ -207,7 +214,7 @@ toggle path state =
 
 select : String -> Maybe Api.ObservationSubject -> State -> State
 select path subject state =
-    { state | focused = Just path, selected = subject }
+    { state | focused = Just path, selectedPath = Just path, selected = subject }
 
 
 reveal : Api.ObservationSubject -> String -> State -> State

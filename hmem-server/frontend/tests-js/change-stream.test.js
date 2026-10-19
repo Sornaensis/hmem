@@ -404,3 +404,96 @@ test('malformed or cross-scope snapshot pages never become durable', async () =>
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.deepEqual(snapshots, []); assert.equal(readCheckpoint(s, 'actor', 'workspace', 'a'), null); assert.equal(states.at(-1)[2], 'invalid_snapshot')
 })
+
+
+const assertion = () => ({sequence: 2, event_kind: 'update', reviewed_git_sha: 'a'.repeat(40),
+  content_version: '10000000-0000-4000-8000-000000000001', content_digest: 'b'.repeat(64), recorded_at: '2026-10-19T12:00:00Z',
+  actor_type: 'bot', actor_id: 'declared-agent', actor_label: 'Developer', bot_identity: {role: 'Developer', 'model-id': 'test:model'}})
+const observationSnapshot = () => ({schema_version: 2, kind: 'observation', data: {id: 'observation', workspace_id: 'a',
+  subjects: [{subject_kind: 'file', subject: 'src/Main.elm'}], subject_kind: 'file', subject: 'src/Main.elm', git_sha: 'a'.repeat(40), content: 'Exact canonical content',
+  content_version: '10000000-0000-4000-8000-000000000001', latest_sequence: 2, current_provenance: assertion(), created_at: '2026-10-19T11:00:00Z', updated_at: '2026-10-19T12:00:00Z'}})
+const planningSnapshot = (kind, id) => ({schema_version: 1, kind, data: kind === 'workspace' ? {id} : {id, workspace_id: 'a'}})
+const snapshotPage = (items, next = null) => ({snapshot_profile: 'full_v1', items, has_more: next !== null,
+  ...(next === null ? {resume_token: 'terminal-resume'} : {next_page_token: next})})
+function fullSnapshotHarness(pages) {
+  const s = storage(), snapshots = [], states = [], sockets = [], requests = [], order = []
+  let at = 0
+  class Socket {constructor() {sockets.push(this); order.push('socket')} close() {}}
+  const manager = createChangeStreamManager({apiUrl: 'https://api.example', wsUrl: 'wss://api.example/ws', storage: s, WebSocketImpl: Socket,
+    onSnapshot: (scope, workspace, snapshot) => {assert.equal(readCheckpoint(s, 'actor', 'workspace', 'a'), null); order.push('snapshot'); snapshots.push({scope, workspace, ...snapshot})},
+    onState: (...value) => states.push(value), setTimer: () => 0, clearTimer: () => {},
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body); requests.push({url, body})
+      if (url.endsWith('/ticket')) {order.push('ticket'); assert.equal(snapshots.length, 1); return {ok: true, status: 200, json: async () => ({ticket: 'ticket'})}}
+      assert.equal(snapshots.length, 0, 'No partial canonical delivery between pages')
+      assert.equal(readCheckpoint(s, 'actor', 'workspace', 'a'), null)
+      const page = pages[at++]
+      return {ok: true, status: 200, json: async () => typeof page === 'function' ? page() : page}
+    }})
+  return {manager, storage: s, snapshots, states, sockets, requests, order,
+    connect: (extra = {}) => manager.connect({audienceId: 'actor', scope: 'workspace', workspaceId: 'a', snapshotProfile: 'full_v1', ...extra})}
+}
+
+test('mixed planning v1 and Observation v2 pages deliver complete provenance once before checkpoint and ticket', async () => {
+  const bound = observationSnapshot(), legacy = observationSnapshot(); legacy.data = {...legacy.data, id: 'legacy', latest_sequence: 1, current_provenance: null}
+  const first = [planningSnapshot('workspace', 'a'), planningSnapshot('project', 'project'), planningSnapshot('task', 'task'), bound]
+  const h = fullSnapshotHarness([snapshotPage(first, 'next-page'), snapshotPage([legacy])])
+  h.connect(); await settled()
+  assert.deepEqual(h.requests.map(value => value.body.page_token || (value.body.start_idempotency_key ? 'start' : 'ticket')), ['start', 'next-page', 'ticket'])
+  assert.deepEqual(h.snapshots, [{scope: 'workspace', workspace: 'a', items: [...first, legacy], resumeToken: 'terminal-resume', snapshotProfile: 'full_v1'}])
+  assert.strictEqual(h.snapshots[0].items[3].data.current_provenance, bound.data.current_provenance)
+  assert.strictEqual(h.snapshots[0].items[4].data.current_provenance, null)
+  assert.deepEqual(h.order, ['snapshot', 'ticket', 'socket'])
+  assert.deepEqual(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), {resumeToken: 'terminal-resume', eventIds: []})
+  assert.equal(h.sockets.length, 1)
+})
+
+const malformedObservation = [
+  ['retired Observation v1', value => {value.schema_version = 1}], ['future Observation version', value => {value.schema_version = 3}],
+  ['missing head', value => {delete value.data.latest_sequence}], ['zero head', value => {value.data.latest_sequence = 0}],
+  ['fractional head', value => {value.data.latest_sequence = 1.5}], ['unsafe head', value => {value.data.latest_sequence = Number.MAX_SAFE_INTEGER + 1}],
+  ['missing current projection', value => {delete value.data.current_provenance}], ['array projection', value => {value.data.current_provenance = []}],
+  ['missing assertion sequence', value => {delete value.data.current_provenance.sequence}], ['negative assertion sequence', value => {value.data.current_provenance.sequence = -1}],
+  ['unsupported assertion kind', value => {value.data.current_provenance.event_kind = 'invented'}], ['malformed reviewed SHA', value => {value.data.current_provenance.reviewed_git_sha = 'abc'}],
+  ['missing nullable content version', value => {delete value.data.current_provenance.content_version}], ['malformed version', value => {value.data.current_provenance.content_version = 'version'}],
+  ['missing nullable digest', value => {delete value.data.current_provenance.content_digest}], ['malformed digest shape', value => {value.data.current_provenance.content_digest = 3}],
+  ['missing recorded timestamp', value => {delete value.data.current_provenance.recorded_at}], ['missing nullable actor', value => {delete value.data.current_provenance.actor_type}],
+  ['malformed actor ID', value => {value.data.current_provenance.actor_id = {}}], ['malformed actor label', value => {value.data.current_provenance.actor_label = []}],
+  ['malformed bot identity', value => {value.data.current_provenance.bot_identity = {role: 'Developer'}}],
+  ['foreign Observation scope', value => {value.data.workspace_id = 'other'}], ['unsupported kind', value => {value.kind = 'unknown'}],
+  ['planning kind at v2', value => {value.kind = 'task'}]
+]
+for (const [label, mutate] of malformedObservation) test(`a malformed terminal page rejects ${label} without partial delivery or checkpoint`, async () => {
+  const value = observationSnapshot(); mutate(value)
+  const h = fullSnapshotHarness([snapshotPage([planningSnapshot('workspace', 'a')], 'next-page'), snapshotPage([value])])
+  h.connect(); await settled()
+  assert.deepEqual(h.snapshots, []); assert.deepEqual(h.sockets, [])
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  assert.equal(h.states.at(-1)[2], 'invalid_snapshot')
+  assert.equal(h.requests.length, 2)
+})
+
+test('Observation v2 remains unavailable in a workspace shell or global snapshot profile', async () => {
+  for (const extra of [{snapshotProfile: 'workspace_shell_v1'}, {scope: 'global', workspaceId: null}]) {
+    const page = snapshotPage([observationSnapshot()]); page.snapshot_profile = extra.snapshotProfile || 'full_v1'
+    const h = fullSnapshotHarness([page]); h.connect(extra); await settled()
+    assert.deepEqual(h.snapshots, []); assert.equal(h.sockets.length, 0); assert.equal(h.states.at(-1)[2], 'invalid_snapshot')
+    assert.equal(readCheckpoint(h.storage, 'actor', extra.scope || 'workspace', extra.workspaceId === null ? null : 'a'), null)
+  }
+})
+
+test('a repeated continuation token rejects a mixed snapshot without delivering its accumulated prefix', async () => {
+  const h = fullSnapshotHarness([snapshotPage([planningSnapshot('workspace', 'a')], 'same-token'), snapshotPage([observationSnapshot()], 'same-token')])
+  h.connect(); await settled()
+  assert.deepEqual(h.snapshots, []); assert.equal(h.sockets.length, 0); assert.equal(h.states.at(-1)[2], 'invalid_snapshot')
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+})
+
+test('a delayed Observation v2 continuation cannot complete after scoped retirement', async () => {
+  let release
+  const h = fullSnapshotHarness([snapshotPage([planningSnapshot('workspace', 'a')], 'next-page'), () => new Promise(resolve => {release = resolve})])
+  h.connect(); await settled(); assert.equal(typeof release, 'function')
+  h.manager.disconnect('workspace', 'a'); release(snapshotPage([observationSnapshot()])); await settled()
+  assert.deepEqual(h.snapshots, []); assert.equal(h.sockets.length, 0)
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+})

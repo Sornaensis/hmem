@@ -212,13 +212,30 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     return body.ticket
   }
   function validSnapshotItem(entry, item) {
-    if (!item || item.schema_version !== 1 || !SNAPSHOT_KINDS.has(item.kind) || !item.data || typeof item.data !== 'object' || Array.isArray(item.data)) return false
+    if (!item || !SNAPSHOT_KINDS.has(item.kind) || item.schema_version !== (item.kind === 'observation' ? 2 : 1)
+      || !item.data || typeof item.data !== 'object' || Array.isArray(item.data)) return false
     const allowed = entry.snapshotProfile === WORKSPACE_SHELL_SNAPSHOT_PROFILE
       ? entry.scope === 'workspace' && item.kind === 'workspace'
       : entry.scope === 'global'
       ? item.kind === 'workspace' || item.kind === 'workspace_group'
       : ['workspace', 'project', 'task', 'task_dependency', 'observation'].includes(item.kind)
     if (!allowed) return false
+    if (item.kind === 'observation') {
+      const positive = value => Number.isSafeInteger(value) && value > 0
+      const nullableString = value => value === null || typeof value === 'string'
+      const nullableVersion = value => value === null || (typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))
+      const provenance = item.data.current_provenance
+      if (!positive(item.data.latest_sequence)) return false
+      // Null is an explicit legacy projection; absence must never fabricate one.
+      if (provenance !== null && (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)
+        || !positive(provenance.sequence) || !['creation', 'update', 'legacy_creation'].includes(provenance.event_kind)
+        || typeof provenance.reviewed_git_sha !== 'string' || !/^[0-9a-f]{40}$/.test(provenance.reviewed_git_sha)
+        || !nullableVersion(provenance.content_version) || !nullableString(provenance.content_digest)
+        || typeof provenance.recorded_at !== 'string'
+        || !['actor_type', 'actor_id', 'actor_label'].every(key => nullableString(provenance[key]))
+        || (provenance.bot_identity != null && (typeof provenance.bot_identity !== 'object' || Array.isArray(provenance.bot_identity)
+          || typeof provenance.bot_identity.role !== 'string' || typeof provenance.bot_identity['model-id'] !== 'string')))) return false
+    }
     if (item.kind === 'task_dependency') return typeof item.data.task_id === 'string' && item.data.task_id.length > 0 && typeof item.data.depends_on_id === 'string' && item.data.depends_on_id.length > 0
     if (typeof item.data.id !== 'string' || !item.data.id) return false
     if (entry.scope !== 'workspace') return true

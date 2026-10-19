@@ -7,7 +7,25 @@ fixtures, without a backend, database, or external network.
 
 ## Commands and result policy
 
-For focused filtering verification, set PowerShell
+For Subject Tree/live-filter qualification, set PowerShell
+`$env:HMEM_EVIDENCE_BASE_COMMIT = 'cc4cc17468ad59c93c2c3e6f5d6b898aaf0b2a60'`,
+then run `npm run perf:self-check`, `npm run perf:record-after`, and
+`npm run perf:check` sequentially on committed, stable inputs. Task
+`5ca20bf4-4752-463c-b01e-b44f787bdd97`, project
+`f32849f1-a6f7-48c6-923f-f25c83369f20`, owns `subject-tree-live-filters.v1`.
+Its five receipt kinds live only in the verified OS temporary directory child
+`hmem-subject-tree-live-filters-5ca20bf4-4752-463c-b01e-b44f787bdd97`.
+Retain them through project closure plus 30 days, then dispose; each is at most
+64 MiB. Verify/hash and remove `temporary/large-subject-tree-live-filters-trace.zip`
+before success. Unresolved diagnostics expire at resolution or task closure.
+
+This profile measures live input/clearing through two paints against the existing
+100 ms local-interaction budget. Debounce, accepted membership, transport idle and
+two-paint settlement have separate informational durations, with no new threshold.
+All list and count URLs require explicit `query_scope=content`; legacy profiles
+retain their omitted-scope contracts, ordinary fixtures and frozen snapshot bytes.
+
+Historical focused filtering verification uses PowerShell
 `$env:HMEM_EVIDENCE_BASE_COMMIT = '30e428e65f5f6b34ae24fe6e5a32ab3aa1efb547'`,
 then run `npm run perf:self-check`, `npm run perf:record-after`, and
 `npm run perf:check` sequentially against stable sources and assets, without
@@ -63,6 +81,8 @@ measurement. These recipes select distinct task-owned outputs:
 
 | Profile | `HMEM_EVIDENCE_BASE_COMMIT` | Task |
 | --- | --- | --- |
+| Subject Tree/live filters | `cc4cc17468ad59c93c2c3e6f5d6b898aaf0b2a60` | `5ca20bf4-4752-463c-b01e-b44f787bdd97` |
+| Focused filtering | `30e428e65f5f6b34ae24fe6e5a32ab3aa1efb547` | `a70d06e3-8993-4af2-a328-914e0dc35c37` |
 | Observation scaling | `c5230077a643d06e7ca5a4ff6b5616cfb90862ec` | `b9f1de65-f016-4178-89a0-ac13a5d7fff8` |
 | Observation rendering | `ed3aca53afe346f928dc00f2e2a7b0a8e07aaecb` | `cbb38fd2-fc89-449c-a308-168374f23f82` |
 | Expanded hierarchy | `d9ff753763f086fa4faef078b451f2e48ca1a7a4` | `555ebf6e-8442-43f4-a75d-c33fcffc76f4` |

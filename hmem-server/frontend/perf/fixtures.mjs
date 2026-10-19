@@ -462,12 +462,13 @@ function simpleLexemes(value) {
   return (String(value).toLowerCase().match(/[\p{L}\p{N}_]+/gu) || [])
 }
 
-function observationSearch(fixture, query) {
+function observationSearch(fixture, query, queryScope = null) {
+  if (queryScope != null && !['combined', 'content'].includes(queryScope)) throw new Error('Unsupported Observation query scope')
   if (query == null) return fixture.observations.map(observation => ({ observation, rank: 0 }))
   const wanted = [...new Set(simpleLexemes(query))]
   if (wanted.length === 0) return []
   return fixture.observations.flatMap(observation => {
-    const document = simpleLexemes(`${observation.content} ${observation.subjects.map(subject => subject.subject).join(' ')}`)
+    const document = simpleLexemes(queryScope === 'content' ? observation.content : `${observation.content} ${observation.subjects.map(subject => subject.subject).join(' ')}`)
     const counts = new Map()
     for (const lexeme of document) counts.set(lexeme, (counts.get(lexeme) || 0) + 1)
     if (!wanted.every(lexeme => counts.has(lexeme))) return []
@@ -476,7 +477,7 @@ function observationSearch(fixture, query) {
 }
 
 export function queryObservations(fixture, options = {}) {
-  let ranked = observationSearch(fixture, options.query)
+  let ranked = observationSearch(fixture, options.query, options.queryScope)
   if (options.subjectKind || options.subject) {
     ranked = ranked.filter(({ observation }) => observation.subjects.some(candidate =>
       (!options.subjectKind || candidate.subject_kind === options.subjectKind)
@@ -504,7 +505,7 @@ export function queryObservationCounts(fixture, query) {
   const candidates = []
   for (let offset = 0; ; offset += 200) {
     const page = queryObservations({ ...fixture, observations: eligible }, {
-      query: query.query, subjectKind: query.subject_kind, subject: query.subject,
+      query: query.query, queryScope: query.query_scope, subjectKind: query.subject_kind, subject: query.subject,
       gitSha: query.git_sha, currentGitSha: query.current_git_sha, historyGitSha: query.history_git_sha,
       offset, limit: 200
     })

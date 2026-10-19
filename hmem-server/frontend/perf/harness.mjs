@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test'
 import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
 import { evidenceProfile, evidenceOwnerFields, isolatedRecordOutputs, assertEvidenceIdentity, prepareEvidenceScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
-import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, LIVE_OBSERVATION_REFRESH_CONTRACT, classifyLiveObservationHydration, aggregateLiveHydration, assertNavigationBatchOutcomes, navigationBatchTransportProof, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, TIMELINE_CURRENT_CONTRACT, timelineReceipt, assertTimelineReceipt, timelineChartExpectation, OBSERVATION_PAGINATION_CONTRACT, SUBJECT_TREE_LIVE_FILTERS_CONTRACT, assertObservationContentScopeUrl, observationPageReceipt, assertObservationPageReceipt, aggregateObservationLoadMore, observationPaginationMetrics, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, LIVE_OBSERVATION_REFRESH_CONTRACT, classifyLiveObservationHydration, aggregateLiveHydration, assertNavigationBatchOutcomes, navigationBatchTransportProof, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, PLANNING_COUNTS_CONTRACT, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationBatchDescriptors, navigationBatchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationCounts, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspacePlanningCounts, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -479,8 +479,12 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       projectId: url.searchParams.get('project_id'), status: url.searchParams.get('status'), priority: url.searchParams.get('priority'),
       offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit')
     }))
+    if (['/api/v1/observations', '/api/v1/observations/count'].includes(pathname)) {
+      if (url.searchParams.getAll('query_scope').length > 1) throw new Error('Duplicate Observation query scope')
+      if (options.contentOnly) assertObservationContentScopeUrl(url.href)
+    }
     if (pathname === '/api/v1/observations') return reply(route, request, queryObservations(fixture, {
-      query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'),
+      queryScope: url.searchParams.get('query_scope'), query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'),
       currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'),
       offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit')
     }))
@@ -491,7 +495,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     }))
     if (pathname === '/api/v1/observations/match') return reply(route, request, fixture.observationScaling
       ? queryObservationScalingMatches(fixture, request.postDataJSON()) : { items: [], has_more: false })
-    if (pathname === '/api/v1/observations/count' && request.method() === 'POST') return reply(route, request, queryObservationCounts(fixture, request.postDataJSON()))
+    if (pathname === '/api/v1/observations/count' && request.method() === 'POST') return reply(route, request, queryObservationCounts(fixture, { ...request.postDataJSON(), query_scope: url.searchParams.get('query_scope') }))
     const projectOverview = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/overview$/)
     if (projectOverview) {
       return reply(route, request, projectOverviewResponse(fixture, decodeURIComponent(projectOverview[1])))
@@ -595,6 +599,19 @@ async function requiredDoubleFrame(page, selector) {
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     return performance.now() - start
   }, selector)
+}
+
+export async function requiredLiveInputDoubleFrame(page, selector, value) {
+  return page.evaluate(async ({ selector, value }) => {
+    const element = document.querySelector(selector)
+    if (!(element instanceof HTMLInputElement)) throw new Error('required live input target missing: ' + selector)
+    const start = performance.now()
+    element.focus()
+    element.value = value
+    element.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    return performance.now() - start
+  }, { selector, value })
 }
 
 async function requiredDoubleFrameByText(page, selector, label) {
@@ -1163,11 +1180,11 @@ export function observationResetProof(tracker, fixture, page, expected) {
     recipe: 'reset-timeline-projects-separate-focus-projects-live.v1', recipeCompleted: false }
 }
 
-export function assertObservationPagination(tracker, before, fixture, offset, query, label) {
+export function assertObservationPagination(tracker, before, fixture, offset, query, label, queryScope = null) {
   const pages = tracker.requests.slice(before.index).filter(request => request.key === 'observations:list')
   if (pages.length !== 1) throw new Error(label + ' requires exactly one actual Observation list page, observed ' + pages.length)
-  const expected = queryObservations(fixture, { query, offset, limit: OBSERVATION_PAGINATION_CONTRACT.pageSize })
-  return assertObservationPageReceipt(pages[0].observationPage, { workspaceId: fixture.workspace.id, offset, query,
+  const expected = queryObservations(fixture, { query, queryScope, offset, limit: OBSERVATION_PAGINATION_CONTRACT.pageSize })
+  return assertObservationPageReceipt(pages[0].observationPage, { workspaceId: fixture.workspace.id, offset, query, queryScope,
     expectedIds: expected.items.map(item => item.id), hasMore: expected.has_more })
 }
 
@@ -1774,7 +1791,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const consoleErrors = []
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
   page.on('pageerror', error => consoleErrors.push(error.message))
-  await page.route('**/api/v1/**', fixtureResponder(fixture, tracker))
+  await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { contentOnly: evidencePlan.subjectTreeLiveFilters }))
   const cdp = await context.newCDPSession(page)
   const blankHeap = (await cdp.send('Runtime.getHeapUsage')).usedSize
   const coldStart = performance.now()
@@ -1831,7 +1848,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const observationPageSize = OBSERVATION_PAGINATION_CONTRACT.pageSize
   await waitObservationMembers(page, Math.min(observationPageSize, fixture.observations.length), 'Observations initial page')
   await waitForTransportQuiescence(page, tracker, 'Observations initial page')
-  const initialObservationPage = assertObservationPagination(tracker, observationStartupBefore, fixture, 0, null, 'Observations initial page')
+  const initialObservationPage = assertObservationPagination(tracker, observationStartupBefore, fixture, 0, null, 'Observations initial page', evidencePlan.subjectTreeLiveFilters ? 'content' : null)
   interactions.observationsTabMs = { ms: obsTabMs, ...requestDelta(tracker, observationsTabBefore) }
   tabSwitches.observations = interactions.observationsTabMs
   dom.push({ tab: 'observations', ...(await domMetrics(page)) })
@@ -1849,26 +1866,38 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
     await waitObservationMembers(page, 2 * observationPageSize, 'Observation load more')
     await waitForTransportQuiescence(page, tracker, 'Observation load more')
     const ms = performance.now() - loadStart
-    const receipt = assertObservationPagination(tracker, loadBefore, fixture, observationPageSize, null, 'Observation load more')
+    const receipt = assertObservationPagination(tracker, loadBefore, fixture, observationPageSize, null, 'Observation load more', evidencePlan.subjectTreeLiveFilters ? 'content' : null)
     observationLoadMore = { applicable: true, exercised: true, loaded: 2 * observationPageSize, ms, ...requestDelta(tracker, loadBefore), receipt }
     if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== 2 * observationPageSize) throw new Error('Paged flat Observation membership was not scroll-reachable')
   }
   const filterInput = page.locator('#observation-query')
   if (await filterInput.count() !== 1) throw new Error(`required Observation query target count was ${await filterInput.count()}`)
   const filterBefore = requestSnapshot(tracker)
-  await filterInput.fill(OBSERVATION_MEASURED_QUERY)
-  const observationFilterMs = await requiredDoubleFrame(page, '.observation-filter-apply')
+  const observationFilterStart = performance.now()
+  let observationFilterMs
+  if (evidencePlan.subjectTreeLiveFilters) observationFilterMs = await requiredLiveInputDoubleFrame(page, '#observation-query', OBSERVATION_MEASURED_QUERY)
+  else {
+    await filterInput.fill(OBSERVATION_MEASURED_QUERY)
+    observationFilterMs = await requiredDoubleFrame(page, '.observation-filter-apply')
+  }
   await waitObservationMembers(page, 1, 'Observation filter', true)
   await waitForTransportQuiescence(page, tracker, 'Observation filter')
-  const filteredObservationPage = assertObservationPagination(tracker, filterBefore, fixture, 0, OBSERVATION_MEASURED_QUERY, 'Observation filter')
+  const filteredObservationPage = assertObservationPagination(tracker, filterBefore, fixture, 0, OBSERVATION_MEASURED_QUERY, 'Observation filter', evidencePlan.subjectTreeLiveFilters ? 'content' : null)
+  const observationFilterSettledMs = performance.now() - observationFilterStart
   interactions.observationFilterMs = { ms: observationFilterMs, ...requestDelta(tracker, filterBefore) }
   filters.observations = interactions.observationFilterMs
   const observationFilterResetBefore = requestSnapshot(tracker)
-  await filterInput.fill('')
-  const observationFilterResetMs = await requiredDoubleFrame(page, '.observation-filter-apply')
+  const observationFilterResetStart = performance.now()
+  let observationFilterResetMs
+  if (evidencePlan.subjectTreeLiveFilters) observationFilterResetMs = await requiredLiveInputDoubleFrame(page, '#observation-query', '')
+  else {
+    await filterInput.fill('')
+    observationFilterResetMs = await requiredDoubleFrame(page, '.observation-filter-apply')
+  }
   await waitObservationMembers(page, Math.min(observationPageSize, fixture.observations.length), 'Observation filter reset')
   await waitForTransportQuiescence(page, tracker, 'Observation filter reset')
-  const resetObservationPage = assertObservationPagination(tracker, observationFilterResetBefore, fixture, 0, null, 'Observation filter reset')
+  const resetObservationPage = assertObservationPagination(tracker, observationFilterResetBefore, fixture, 0, null, 'Observation filter reset', evidencePlan.subjectTreeLiveFilters ? 'content' : null)
+  const observationFilterResetSettledMs = performance.now() - observationFilterResetStart
   const resetProof = observationResetProof(tracker, fixture, resetObservationPage, Math.min(observationPageSize, fixture.observations.length))
   interactions.observationFilterResetMs = { ms: observationFilterResetMs, ...requestDelta(tracker, observationFilterResetBefore) }
   filters.observationReset = interactions.observationFilterResetMs
@@ -1929,7 +1958,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const entityRoutes = Object.entries(liveDelta.routes).filter(([key]) => key.includes(':entity:'))
   const duplicateRequests = entityRoutes.reduce((sum, [, count]) => sum + Math.max(0, count - 1), 0)
   const updatedObservationIds = [...new Set(fixture.liveFrames.filter(frame => frame.event.workspace_id === fixture.workspace.id && frame.event.entity.type === 'observation' && frame.event.entity.action === 'updated').map(frame => frame.event.entity.id))]
-  const hydration = classifyLiveObservationHydration({ runId: tracker.paintRunId, workspaceId: fixture.workspace.id,
+  const hydration = classifyLiveObservationHydration({ queryScope: evidencePlan.subjectTreeLiveFilters ? 'content' : null, runId: tracker.paintRunId, workspaceId: fixture.workspace.id,
     total: fixture.observations.length, expectedPrefix: queryObservations(fixture, { offset: 0, limit: 200 }).items.map(item => item.id),
     updatedObservationIds,
     expectedObservationEntities: Object.fromEntries(fixture.observations.filter(value => updatedObservationIds.includes(value.id)).map(value => [value.id, { hash: hashJson(value), bytes: Buffer.byteLength(JSON.stringify(value)) }])),
@@ -1952,6 +1981,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const renderMaximums = renderMaximum(dom)
   const result = {
     fixture: fixture.size, measured, cold, background, lifetimeRender, tabSwitches, filters, interactions, observationLoadMore, observationScaling, directFocus, liveBatch, dom,
+    ...(evidencePlan.subjectTreeLiveFilters ? { observationFilterSettlement: { filterMs: observationFilterSettledMs, resetMs: observationFilterResetSettledMs } } : {}),
     observationPagination: { revision: OBSERVATION_PAGINATION_CONTRACT.revision, initial: initialObservationPage, filtered: filteredObservationPage, reset: resetObservationPage },
     timelineQualification: { revision: TIMELINE_CURRENT_CONTRACT.revision, ...timelineQualification },
     maxDomNodes: renderMaximums.nodes, maxCollectionRows: renderMaximums.rows,
@@ -1976,7 +2006,7 @@ function aggregates(runs) {
   const cold = values(run => run.cold.ms, 'cold')
   const focus = values(run => run.directFocus.ms, 'direct focus')
   if (runs.some(run => run.fixture !== runs[0].fixture)) throw new Error('Observation pagination samples changed scale')
-  const observationLoadMore = aggregateObservationLoadMore(runs.map(run => run.observationLoadMore), runs[0].fixture)
+  const observationLoadMore = aggregateObservationLoadMore(runs.map(run => run.observationLoadMore), runs[0].fixture, evidencePlan.subjectTreeLiveFilters ? 'content' : null)
   const live = values(run => run.liveBatch.ms, 'live batch')
   const interactionNames = Object.keys(runs[0].interactions).sort()
   if (interactionNames.length === 0) throw new Error('at least one named local interaction is required')
@@ -2005,6 +2035,7 @@ function aggregates(runs) {
   }, 'live batch'))
   return {
     observationScaling: aggregateObservationScaling(runs),
+    ...(evidencePlan.subjectTreeLiveFilters ? { observationFilterSettlement: Object.fromEntries(['filterMs', 'resetMs'].map(key => { const rawMs = values(run => run.observationFilterSettlement[key], 'live filter settlement ' + key); return [key, { rawMs, medianMs: median(rawMs), p95Ms: nearestRankP95(rawMs) }] })) } : {}),
     background: runs.map(run => run.background),
     lifetimeRender: runs.map(run => run.lifetimeRender),
     cold: { rawMs: cold, medianMs: median(cold), p95Ms: nearestRankP95(cold), requestCounts: runs.map(run => run.cold.requests), fixtureBytes: runs.map(run => run.cold.bytes), entityOverviewRequests: runs.map(run => run.cold.entityOverviewRequests), canonicalSnapshotItems: runs.map(run => run.cold.canonicalSnapshotItems), canonicalSnapshotPages: runs.map(run => run.cold.canonicalSnapshotPages) },
@@ -2177,6 +2208,7 @@ async function main() {
   attemptState.sourceProvenance = qualifiedProvenance
   const contracts = {
     budgetsHash: hashJson(budgets),
+    ...(evidencePlan.subjectTreeLiveFilters ? { subjectTreeLiveFiltersContractHash: hashJson(SUBJECT_TREE_LIVE_FILTERS_CONTRACT) } : {}),
     configurationHash: hashJson(HARNESS_CONFIGURATION),
     directFocusContractHash: hashJson(DIRECT_FOCUS_CONTRACT),
     observationPaginationContractHash: hashJson(OBSERVATION_PAGINATION_CONTRACT),

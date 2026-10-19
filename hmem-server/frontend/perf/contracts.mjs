@@ -34,35 +34,57 @@ export const OBSERVATION_PAGINATION_CONTRACT = Object.freeze({
   legacyTimingComparability: Object.freeze({ pageSize: 50, comparable: false, reason: 'Current 200-item pagination has a different measured workload from retained 50-item pagination.' })
 })
 
+export const SUBJECT_TREE_LIVE_FILTERS_CONTRACT = Object.freeze({
+  revision: 'subject-tree-live-filters.v1', queryScope: 'content',
+  immediatePhase: 'live input dispatch through two paints; existing local-interaction budget applies',
+  settledPhase: 'input through debounce, current membership, transport idle and two paints; informational without a new timing threshold',
+  unfilteredListParameters: Object.freeze(['workspace_id', 'limit', 'offset', 'query_scope']),
+  countParameters: Object.freeze(['query_scope'])
+})
+
+export function assertObservationContentScopeUrl(input) {
+  const url = new URL(input), count = url.pathname === '/api/v1/observations/count'
+  const expected = count ? ['query_scope'] : ['workspace_id', 'limit', 'offset', 'query_scope', ...(url.searchParams.has('query') ? ['query'] : [])]
+  const actual = [...url.searchParams.keys()]
+  if ((!count && url.pathname !== '/api/v1/observations') || url.searchParams.get('query_scope') !== 'content'
+    || actual.length !== expected.length || new Set(actual).size !== actual.length || actual.some(key => !expected.includes(key))) throw new Error('Observation content scope URL parameter mismatch')
+  return url
+}
+
 export function observationPageReceipt(input, method, value, status = 200) {
   const url = new URL(input)
   const integer = name => { const raw = url.searchParams.get(name); return raw != null && /^\d+$/.test(raw) ? Number(raw) : null }
   return { request: { method, path: url.pathname, workspace_id: url.searchParams.get('workspace_id'),
+    ...(url.searchParams.has('query_scope') ? { query_scope: url.searchParams.get('query_scope'), url: url.href } : {}),
     query: url.searchParams.get('query'), subject_kind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'),
     git_sha: url.searchParams.get('git_sha'), current_git_sha: url.searchParams.get('current_git_sha'), history_git_sha: url.searchParams.get('history_git_sha'),
     offset: integer('offset'), limit: integer('limit') },
     response: { ids: value.items?.map(item => item.id) || null, hasMore: value.has_more, status, fulfilled: false } }
 }
 
-export function assertObservationPageReceipt(receipt, { workspaceId, offset, query = null, expectedIds, hasMore }) {
+export function assertObservationPageReceipt(receipt, { workspaceId, offset, query = null, queryScope = null, expectedIds, hasMore }) {
   const request = receipt?.request, response = receipt?.response
   if (!request || request.method !== 'GET' || request.path !== OBSERVATION_PAGINATION_CONTRACT.path
     || request.workspace_id !== workspaceId || request.offset !== offset || request.limit !== 200
-    || (request.query || null) !== (query || null)
+    || (request.query || null) !== (query || null) || (request.query_scope ?? null) !== queryScope
     || ['subject_kind', 'subject', 'git_sha', 'current_git_sha', 'history_git_sha'].some(key => request[key] != null)
     || !response || response.status !== 200 || response.fulfilled !== true || response.hasMore !== hasMore
     || JSON.stringify(response.ids) !== JSON.stringify(expectedIds)) throw new Error('Observation pagination wire/prefix receipt mismatch')
+  if (queryScope === 'content') {
+    const url = assertObservationContentScopeUrl(request.url)
+    if (url.searchParams.get('workspace_id') !== workspaceId || url.searchParams.get('offset') !== String(offset) || url.searchParams.get('limit') !== '200' || url.searchParams.get('query') !== query) throw new Error('Observation pagination URL/receipt mismatch')
+  }
   return receipt
 }
 
-export function aggregateObservationLoadMore(samples, scale) {
+export function aggregateObservationLoadMore(samples, scale, queryScope = null) {
   if (!['small', 'large'].includes(scale) || samples.length !== 5) throw new Error('Observation pagination requires five samples from one known scale')
   const applicable = scale === 'large'
   if (samples.some(sample => sample?.applicable !== applicable)) throw new Error('Observation load-more applicability changed or contradicts its scale')
   for (const sample of samples) {
     const receipt = sample.receipt, ids = receipt?.response?.ids
     if (!Array.isArray(ids) || new Set(ids).size !== ids.length || !receipt?.request?.workspace_id) throw new Error('Observation pagination lacks an actual unique page receipt')
-    assertObservationPageReceipt(receipt, { workspaceId: receipt.request.workspace_id, offset: applicable ? 200 : 0, expectedIds: ids, hasMore: applicable })
+    assertObservationPageReceipt(receipt, { workspaceId: receipt.request.workspace_id, offset: applicable ? 200 : 0, queryScope, expectedIds: ids, hasMore: applicable })
     if (ids.length !== (applicable ? 200 : 60) || sample.loaded !== (applicable ? 400 : 60)) throw new Error('Observation pagination membership/exhaustion mismatch')
     if (applicable) {
       if (sample.exercised !== true || !Number.isFinite(sample.ms) || sample.ms <= 0 || !Number.isInteger(sample.count) || sample.count < 1) throw new Error('Eligible Observation load-more requires actual finite timing and requests')
@@ -218,7 +240,7 @@ export const LIVE_OBSERVATION_REFRESH_CONTRACT = Object.freeze({
 })
 
 export function classifyLiveObservationHydration(input) {
-  const { runId, workspaceId, total, expectedPrefix, reset, intervening, requests, delta, active, unknownRoutes, snapshotGeneration, liveStartIndex, updatedObservationIds, expectedObservationEntities } = input
+  const { runId, workspaceId, total, expectedPrefix, reset, intervening, requests, delta, active, unknownRoutes, snapshotGeneration, liveStartIndex, updatedObservationIds, expectedObservationEntities, queryScope = null } = input
   const legacy = liveWholeWorkspaceReload(delta?.routes || {})
   const batchProofs = []
   const result = (classification, reason, proof = null) => ({ revision: LIVE_OBSERVATION_REFRESH_CONTRACT.revision, classification,
@@ -264,10 +286,13 @@ export function classifyLiveObservationHydration(input) {
   const exactPage = (request, hasMore = true) => {
     const url = new URL(request.url)
     const keys = [...url.searchParams.keys()]
+    const expectedKeys = ['workspace_id', 'limit', 'offset', ...(queryScope === 'content' ? ['query_scope'] : [])]
+    if (queryScope != null && queryScope !== 'content') throw new Error('Unsupported live Observation query scope')
     if (request.runId !== runId || request.workspaceId !== workspaceId || request.method !== 'GET' || url.pathname !== '/api/v1/observations' || request.done !== true || request.fulfilled !== true || request.status !== 200
-      || keys.length !== 3 || new Set(keys).size !== 3 || keys.some(key => !['workspace_id', 'limit', 'offset'].includes(key))
+      || keys.length !== expectedKeys.length || new Set(keys).size !== expectedKeys.length || keys.some(key => !expectedKeys.includes(key))
+      || (url.searchParams.get('query_scope') ?? null) !== queryScope
       || url.searchParams.get('workspace_id') !== workspaceId || url.searchParams.get('limit') !== '200' || url.searchParams.get('offset') !== '0') throw new Error('Not an exact current unfiltered first page')
-    assertObservationPageReceipt(request.observationPage, { workspaceId, offset: 0, expectedIds: expectedPrefix, hasMore })
+    assertObservationPageReceipt(request.observationPage, { workspaceId, offset: 0, queryScope, expectedIds: expectedPrefix, hasMore })
   }
   const compact = request => ({ runId: request.runId, workspaceId: request.workspaceId, requestId: request.requestId, requestIndex: request.requestIndex, method: request.method, url: request.url,
     bytes: request.bytes, status: request.status, fulfilled: request.fulfilled, count: request.observationPage.response.ids.length,

@@ -665,14 +665,37 @@ async function projectUiSignals(page, anchorId) {
   }), anchorId)
 }
 
+export function workspaceReadinessSnapshot(anchorId) {
+  const host = document.getElementById('main-content-scroll'), viewport = document.getElementById('hierarchy-viewport')
+  const anchor = document.getElementById('entity-' + anchorId), active = document.activeElement
+  const rect = element => element ? { top: element.getBoundingClientRect().top, bottom: element.getBoundingClientRect().bottom, height: element.getBoundingClientRect().height } : null
+  const hostRect = rect(host), anchorRect = rect(anchor), viewportRect = rect(viewport)
+  const rows = [...document.querySelectorAll('[data-hierarchy-key]')]
+  const key = element => element?.getAttribute('data-hierarchy-key')?.slice(0, 128) || null
+  return { hash: location.hash.slice(0, 512), loading: [...document.querySelectorAll('.loading-indicator')].slice(0, 8).map(element => element.textContent.slice(0, 128)),
+    focused: !!document.querySelector('.focus-breadcrumb-bar'),
+    tabs: [...document.querySelectorAll('.tabs button')].slice(0, 8).map(element => ({ text: element.textContent.slice(0, 64), class: element.className.slice(0, 128), selected: element.getAttribute('aria-selected') })),
+    filters: [...document.querySelectorAll('.filter-bar button,.filter-bar input,.filter-bar select')].slice(0, 20).map(element => ({ id: element.id.slice(0, 64), text: element.textContent.slice(0, 64), value: element.value?.slice(0, 128), class: element.className.slice(0, 128), pressed: element.getAttribute('aria-pressed') })),
+    anchor: { id: anchorId.slice(0, 128), present: !!anchor, rect: anchorRect, withinHost: !!(anchorRect && hostRect && anchorRect.top >= hostRect.top && anchorRect.bottom <= hostRect.bottom) },
+    scroll: host ? { top: host.scrollTop, clientHeight: host.clientHeight, scrollHeight: host.scrollHeight, rect: hostRect,
+      viewportOrigin: viewportRect ? viewportRect.top - hostRect.top + host.scrollTop : null,
+      hostRelativeTop: viewportRect ? Math.max(0, hostRect.top - viewportRect.top) : null } : null,
+    hierarchy: viewport ? { context: viewport.getAttribute('data-hierarchy-context')?.slice(0, 2048) || null, rect: viewportRect, mountedCount: rows.length,
+      keys: rows.slice(0, 25).map(element => ({ key: key(element), index: element.getAttribute('data-hierarchy-index')?.slice(0, 16), rect: rect(element) })),
+      activeKey: key(active?.closest('[data-hierarchy-key]')), anchorKey: key(anchor?.closest('[data-hierarchy-key]')) } : null,
+    active: active ? { id: active.id.slice(0, 128), tag: active.tagName } : null }
+}
+
 async function waitForWorkspaceReady(page, tracker, fixture, anchorId, label) {
   const expectedSnapshotItems = workspaceShellSnapshotItems(fixture).length
   const expectedPages = Math.ceil(expectedSnapshotItems / DIRECT_FOCUS_CONTRACT.pageSize)
   const modelReady = () => transportContractReady({ protocol: 'bounded', transportedItems: tracker.model.snapshotItems, expectedItems: expectedSnapshotItems, fullBackingItems: snapshotItems(fixture).length, transportedPages: tracker.model.snapshotPages, expectedPages, complete: tracker.model.snapshotComplete })
   const deadline = performance.now() + 30000
+  let lastUi
   while (performance.now() < deadline) {
     assertNoUnhandledApiRoutes(tracker)
     const ui = await projectUiSignals(page, anchorId)
+    lastUi = ui
     if (representativeReadiness({
       modelComplete: modelReady(),
       activeRequests: tracker.active,
@@ -682,11 +705,19 @@ async function waitForWorkspaceReady(page, tracker, fixture, anchorId, label) {
     })) {
       await waitForTransportQuiescence(page, tracker, label)
       const stableUi = await projectUiSignals(page, anchorId)
+      lastUi = stableUi
       if (representativeReadiness({ modelComplete: modelReady(), activeRequests: tracker.active, loading: stableUi.loading, focused: stableUi.focused, anchorVisible: stableUi.anchorVisible })) return
     }
     await page.waitForTimeout(25)
   }
-  throw new Error(`${label} readiness failed: ${tracker.model.snapshotProfile} snapshot ${tracker.model.snapshotItems}/${expectedSnapshotItems} shell items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, navigation=${tracker.counts['navigation:branch'] || 0}, active=${tracker.active}, anchor=${anchorId}`)
+  let ui, timer
+  try { ui = await Promise.race([page.evaluate(workspaceReadinessSnapshot, anchorId), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Workspace diagnostic capture exceeded 1000ms')), 1000) })]) }
+  catch (error) { ui = { captureError: error.message.slice(0, 256) } }
+  finally { clearTimeout(timer) }
+  const diagnostic = { label, lastPoll: lastUi, ui, modelReady: modelReady(), model: { profile: tracker.model.snapshotProfile, items: tracker.model.snapshotItems, expectedItems: expectedSnapshotItems, pages: tracker.model.snapshotPages, expectedPages, complete: tracker.model.snapshotComplete },
+    active: tracker.active, activeBranches: tracker.activeBranches, activeRootBranches: tracker.activeRootBranches,
+    arrivals: tracker.requests.slice(-8).map(request => ({ method: request.method, url: request.url.slice(0, 512), done: request.done ?? null, fulfilled: request.navigationFulfilled ?? request.timeline?.response.fulfilled ?? null, status: request.navigationStatus ?? request.timeline?.response.status ?? null })) }
+  throw Object.assign(new Error(`${label} readiness failed: ${tracker.model.snapshotProfile} snapshot ${tracker.model.snapshotItems}/${expectedSnapshotItems} shell items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, navigation=${tracker.counts['navigation:branch'] || 0}, active=${tracker.active}, anchor=${anchorId}; UI ${JSON.stringify(diagnostic)}`), { workspaceReadiness: diagnostic })
 }
 
 export async function waitForFirstUsefulViewport(page, tracker, fixture, anchorId) {
@@ -2169,6 +2200,7 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
       ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
+      ...(error.workspaceReadiness ? { workspaceReadiness: error.workspaceReadiness } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
     failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
       ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.strictSourceIdentity ? { sourceProvenance: attemptState.sourceProvenance } : {}),
@@ -2176,6 +2208,7 @@ function qualificationAttempt(command, qualifiedInputs, retirement, action, cold
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
       ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
+      ...(error.workspaceReadiness ? { workspaceReadiness: error.workspaceReadiness } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}),
       validationRecord: { path: evidenceArtifactPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
   }, action)
@@ -2400,7 +2433,7 @@ async function main() {
     command.exitCode = checkQualification({ recordEvaluation: previous.recordEvaluation, checkEvaluation: measuredResult.evaluation,
       commands: [...previous.commands, command], retirement }).exitCode
   }
-  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), { ...(failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {}), ...(failure?.observationMembership ? { observationMembership: failure.observationMembership } : {}), ...(failure?.timelineQualification ? { timelineQualification: failure.timelineQualification } : {}), ...(failure?.navigationFeedback ? { navigationFeedback: failure.navigationFeedback } : {}) })
+  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), { ...(failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {}), ...(failure?.observationMembership ? { observationMembership: failure.observationMembership } : {}), ...(failure?.timelineQualification ? { timelineQualification: failure.timelineQualification } : {}), ...(failure?.navigationFeedback ? { navigationFeedback: failure.navigationFeedback } : {}), ...(failure?.workspaceReadiness ? { workspaceReadiness: failure.workspaceReadiness } : {}) })
   if (failure) {
     persistOrRetainFailureDiagnostics(attemptState, () => qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure }, diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() }))))
     throw failure
@@ -2421,6 +2454,7 @@ if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main
     observationMembership: error.observationMembership || null,
     timelineQualification: error.timelineQualification || null,
     navigationFeedback: error.navigationFeedback || null,
+    workspaceReadiness: error.workspaceReadiness || null,
     captureOptions: traceCaptureOptions, retirement: attemptState?.retirement,
     priorFailureDiagnosticsPreserved: !!attemptState?.pendingFailure && !(attemptState.traceVerified && attemptState.retirement?.passed),
     retainedPaths: [validationRecordPath, evidenceManifestPath]

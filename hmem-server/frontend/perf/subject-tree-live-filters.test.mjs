@@ -7,13 +7,37 @@ import { SUBJECT_TREE_LIVE_FILTERS_BASE as BASE, SUBJECT_TREE_LIVE_FILTERS_TASK 
   FOCUSED_FILTERING_BASE, FOCUSED_FILTERING_TASK, evidenceProfile, evidenceOwnerFields, assertEvidenceIdentity, assertEvidenceWrite, isolatedRecordOutputs, prepareEvidenceScratch, createEvidenceOperations, checkQualification } from './evidence-profile.mjs'
 import { SUBJECT_TREE_LIVE_FILTERS_CONTRACT, HARNESS_CONFIGURATION, assertObservationContentScopeUrl, observationPageReceipt, assertObservationPageReceipt, classifyLiveObservationHydration } from './contracts.mjs'
 import { generateFixture, fixtureHash, queryObservations, queryObservationCounts } from './fixtures.mjs'
-import { createTracker, fixtureResponder, observationResetProof, requiredLiveInputDoubleFrame } from './harness.mjs'
+import { createTracker, fixtureResponder, observationResetProof, requiredLiveInputDoubleFrame, workspaceReadinessSnapshot } from './harness.mjs'
 
 const frontend = path.resolve('fixture-root/hmem-server/frontend'), temporary = path.resolve('outside-temporary')
 const plan = () => evidenceProfile(BASE, frontend, temporary)
 const head = '1'.repeat(40)
 const identity = profile => ({ taskId: TASK, projectId: PROJECT, evidenceBaseCommit: BASE, measurementRevision: REVISION,
   sourceProvenance: { reviewBaseCommit: BASE, headCommit: head }, inputQualification: { implementationCommit: head } })
+
+test('workspace failure telemetry distinguishes offscreen anchor, current context and bounded mounted rows without mutating UI', () => {
+  const rect = (top, height) => ({ top, bottom: top + height, height })
+  const element = (values = {}) => ({ id: '', textContent: '', className: '', value: '', tagName: 'DIV',
+    getBoundingClientRect: () => rect(0, 10), getAttribute: () => null, closest: () => null, ...values })
+  const rows = Array.from({ length: 40 }, (_, index) => element({ getAttribute: name => name === 'data-hierarchy-key' ? 'project:' + index : String(index), getBoundingClientRect: () => rect(index * 100, 100) }))
+  const anchor = element({ getBoundingClientRect: () => rect(-200, 100), closest: () => rows[0] })
+  const host = element({ scrollTop: 800, clientHeight: 600, scrollHeight: 4000, getBoundingClientRect: () => rect(100, 600) })
+  const viewport = element({ getAttribute: () => JSON.stringify({ workspace: 'current', epoch: 3, generation: 'current', revision: 5, top: 800 }), getBoundingClientRect: () => rect(-700, 4000) })
+  const tab = element({ textContent: 'Projects', className: 'active' }), filter = element({ id: 'status', value: 'active' })
+  const document = { activeElement: element({ id: 'current-control', tagName: 'BUTTON', closest: () => rows[39] }),
+    getElementById: id => ({ 'main-content-scroll': host, 'hierarchy-viewport': viewport, 'entity-target': anchor })[id],
+    querySelector: () => null,
+    querySelectorAll: selector => ({ '[data-hierarchy-key]': rows, '.loading-indicator': [], '.tabs button': [tab], '.filter-bar button,.filter-bar input,.filter-bar select': [filter] })[selector] || [] }
+  const snapshot = vm.runInNewContext('(' + workspaceReadinessSnapshot.toString() + ')("target")', { document, location: { hash: '#tab=projects' } })
+  assert.equal(snapshot.anchor.present, true); assert.equal(snapshot.anchor.withinHost, false)
+  assert.equal(snapshot.scroll.hostRelativeTop, 800); assert.equal(snapshot.scroll.top, 800); assert.equal(snapshot.scroll.viewportOrigin, 0)
+  assert.equal(snapshot.hierarchy.mountedCount, 40); assert.equal(snapshot.hierarchy.keys.length, 25)
+  assert.equal(snapshot.hierarchy.activeKey, 'project:39'); assert.equal(snapshot.hierarchy.anchorKey, 'project:0')
+  assert.equal(JSON.parse(snapshot.hierarchy.context).revision, 5)
+  assert.equal(snapshot.tabs[0].text, 'Projects'); assert.equal(snapshot.filters[0].value, 'active')
+  assert.equal(snapshot.focused, false); assert.equal(snapshot.loading.length, 0)
+  assert.equal(host.scrollTop, 800); assert.equal(document.activeElement.id, 'current-control')
+})
 
 test('Subject Tree qualification has its exact isolated owner, five bounded artifacts and strict source/trace retirement', () => {
   const profile = plan()

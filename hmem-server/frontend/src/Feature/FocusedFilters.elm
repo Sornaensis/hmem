@@ -1,4 +1,4 @@
-module Feature.FocusedFilters exposing (apply, capture, clearTransientSearchState, enter, initialize, normalSearch, reconcile, stored)
+module Feature.FocusedFilters exposing (apply, capture, clearTransientSearchState, edit, enter, initialize, normalSearch, reconcile, stored, workspace)
 
 import Dict
 import Set
@@ -17,22 +17,10 @@ apply filters search =
         , filterPriority = filters.priority, filterProjectStatuses = filters.projectStatuses, filterTaskStatuses = filters.taskStatuses }
 
 
-defaults : HierarchyFilters
-defaults =
-    { query = "", showOnly = ShowAll, showEmptyProjects = True, priority = AnyPriority
-    , projectStatuses = []
-    , taskStatuses = [] }
-
-
 clearTransientSearchState : SearchModel -> SearchModel
 clearTransientSearchState search =
     { search | unifiedResults = Nothing, isSearching = False, searchError = Nothing
         , activeRequestQuery = Nothing, activeRequest = Nothing, submittedQuery = Nothing, refreshPending = False }
-
-
-focusSearch : SearchModel -> SearchModel
-focusSearch =
-    clearTransientSearchState >> apply defaults
 
 
 current : Model -> Maybe FocusedFilterContext
@@ -51,6 +39,16 @@ Changed base filters invalidate the old membership receipt.
 -}
 stored : SearchModel -> Model -> Model
 stored loaded model =
+    updateBase False loaded model
+
+
+workspace : SearchModel -> Model -> Model
+workspace loaded model =
+    updateBase True loaded model
+
+
+updateBase : Bool -> SearchModel -> Model -> Model
+updateBase preserveFocused loaded model =
     case current model of
         Nothing -> { model | search = loaded }
         Just context ->
@@ -60,7 +58,15 @@ stored loaded model =
                     , projectIds = if base == context.base then context.projectIds else Set.empty
                     , taskIds = if base == context.base then context.taskIds else Set.empty }
             in
-            { model | search = apply (capture model.search) loaded, focusedFilters = Just updated }
+            { model | search = apply (if preserveFocused || context.edited then capture model.search else base) loaded, focusedFilters = Just updated }
+
+
+{-| Deliberate hierarchy edits own the focused values, even if they select the
+startup defaults again before storage arrives.
+-}
+edit : Model -> Model
+edit model =
+    { model | focusedFilters = current model |> Maybe.map (\context -> { context | edited = True }) }
 
 
 initialize : Model -> Model
@@ -68,16 +74,15 @@ initialize model =
     reconcile model model
 
 
-{-| An explicit focus action starts an inclusive view even when its target is
-unchanged. Passive URL echoes use initialize/reconcile and preserve overrides.
-The revision lets the router restage demand after this pre-transport reset.
+{-| Explicit focus retires accepted search authority without changing controls.
+Passive URL echoes preserve both the controls and current search authority.
 -}
 enter : Model -> Model
 enter model =
     let normalized = initialize model in
     case current normalized of
         Just context ->
-            { normalized | search = focusSearch normalized.search
+            { normalized | search = clearTransientSearchState normalized.search
                 , focusedFilters = Just { context | entryRevision = context.entryRevision + 1 } }
         Nothing -> normalized
 
@@ -115,12 +120,12 @@ reconcile previous model =
         ( True, Just context, _ ) ->
             let receipt = pruned context in
             { model | focusedFilters = Just { receipt | target = model.focus.focusedEntity }
-                , search = if context.target /= model.focus.focusedEntity then focusSearch model.search else model.search }
+                , search = if context.target /= model.focus.focusedEntity then clearTransientSearchState model.search else model.search }
 
         ( True, Nothing, Just workspaceId ) ->
-            { model | focusedFilters = Just { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, target = model.focus.focusedEntity, entryRevision = 0, base = capture model.search
+            { model | focusedFilters = Just { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, target = model.focus.focusedEntity, entryRevision = 0, edited = False, base = capture model.search
                     , projectIds = model.dataLoading.navigationVisibleProjectIds, taskIds = model.dataLoading.navigationVisibleTaskIds }
-                , search = focusSearch model.search }
+                , search = clearTransientSearchState model.search }
 
         ( False, Just context, _ ) ->
             let

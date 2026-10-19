@@ -97,7 +97,7 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case hierarchySearchChange msg model.search of
         Just search ->
-            reloadNavigation { model | search = search }
+            reloadNavigation (Feature.FocusedFilters.edit { model | search = search })
 
         Nothing ->
             updateOther msg model
@@ -145,7 +145,7 @@ updateOther msg model =
                     _ ->
                         case hierarchySearchChange action (Feature.FocusedFilters.normalSearch model) of
                             Just search ->
-                                let updated = Feature.FocusedFilters.stored search model in
+                                let updated = Feature.FocusedFilters.workspace search model in
                                 ( updated, saveFiltersCmd updated )
                             Nothing ->
                                 ( model, Cmd.none )

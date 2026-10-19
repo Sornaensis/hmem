@@ -430,6 +430,7 @@ type alias FocusedFilterContext =
     , sessionEpoch : Int
     , target : Maybe ( String, String )
     , entryRevision : Int
+    , edited : Bool
     , base : HierarchyFilters
     , projectIds : Set String
     , taskIds : Set String

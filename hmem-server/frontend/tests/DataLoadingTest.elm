@@ -224,7 +224,7 @@ suite =
         , test "focused project and parent task branches load below collapsed, missing or filtered external ancestry" <| \_ ->
             List.concatMap (\kind -> List.map (focusedBranchRecovery kind) [ "collapsed", "missing", "filtered" ]) [ "project", "task" ]
                 |> Expect.equal (List.repeat 6 { admitted = True, mounted = True, ancestry = True, collapse = True, restored = True, bounded = True })
-        , test "Timeline focus replaces conflicting hierarchy filters and restores the original context on exit" <| \_ ->
+        , test "Timeline focus preserves every hierarchy filter and restores the original context on exit" <| \_ ->
             let
                 check kind =
                     let
@@ -233,14 +233,11 @@ suite =
                         focused = timelineFocusFrom kind { model | search = original }
                         restored = Main.update ClearFocus focused |> Tuple.first
                     in
-                    { query = focused.search.query, show = focused.search.filterShowOnly, priority = focused.search.filterPriority
-                    , empty = focused.search.filterShowEmptyProjects
-                    , statuses = List.all (\status -> List.isEmpty focused.search.filterTaskStatuses || List.member status focused.search.filterTaskStatuses) [ "todo", "in_progress", "blocked", "done", "cancelled" ]
-                        && List.all (\status -> List.isEmpty focused.search.filterProjectStatuses || List.member status focused.search.filterProjectStatuses) [ "active", "paused", "completed", "archived" ]
+                    { preserved = Feature.FocusedFilters.capture focused.search == Feature.FocusedFilters.capture original
                     , restored = restored.search.query == original.query && restored.search.filterShowOnly == original.filterShowOnly && restored.search.filterPriority == original.filterPriority && restored.search.filterShowEmptyProjects == original.filterShowEmptyProjects && restored.search.filterTaskStatuses == original.filterTaskStatuses && restored.search.filterProjectStatuses == original.filterProjectStatuses }
             in
             List.map check [ "task", "project" ]
-                |> Expect.equal (List.repeat 2 { query = "", show = Types.ShowAll, priority = Types.AnyPriority, empty = True, statuses = True, restored = True })
+                |> Expect.equal (List.repeat 2 { preserved = True, restored = True })
         , test "focus entry retires accepted normal search intent before current live search invalidation" <| \_ ->
             let
                 parent = let value = task "timeline-target" Nothing in { value | projectId = Nothing }
@@ -266,7 +263,7 @@ suite =
             , \source -> Main.update (UrlChanged { url | fragment = Just "tab=projects&focus=task:timeline-target" }) source |> Tuple.first ]
                 |> List.map check
                 |> Expect.equal (List.repeat 3 { submitted = Nothing, active = Nothing, searching = False, results = Nothing, focused = True })
-        , test "explicit same-target focus resets restrictive branch authority and retires accepted search while preserving its base" <| \_ ->
+        , test "explicit same-target focus preserves restrictive selections and retires accepted search while preserving its base" <| \_ ->
             let
                 parent = let value = task "timeline-target" Nothing in { value | projectId = Nothing, hasChildren = True, directSubtaskCount = 1 }
                 child = let value = task "same-target-child" (Just parent.id) in { value | projectId = Nothing }
@@ -279,11 +276,10 @@ suite =
                     Nothing -> restricted
                     Just request -> Main.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "task" parent.id 0 (Ok { workspaceId = workspaceId, target = Api.NavigationTaskSummary parent, ancestors = [], ancestorsTruncated = False, nextAncestorOffset = Nothing })) restricted |> Tuple.first
                 complete = branchReply ("task:" ++ parent.id) [] [] False False (painted hydrated)
-                currentSearch = complete.search
                 auditEntry = { id = "same-target-audit", workspaceId = Just workspaceId, entityType = "task", entityId = parent.id
                     , action = Api.AuditUpdate, oldValues = Nothing, newValues = Nothing, requestId = Nothing, actorType = Nothing
                     , actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing, changedAt = "2026-10-16T00:00:00Z" }
-                submitted = Main.update SubmitSearch { complete | search = { currentSearch | query = "focused-query" } } |> Tuple.first
+                submitted = Main.update SubmitSearch complete |> Tuple.first
                 results = { projects = [], tasks = [ Api.taskFromCardSummary parent ], observations = [] }
                 accepted = case submitted.search.activeRequest of
                     Just request -> Main.update (GotUnifiedSearchResults workspaceId request.sessionEpoch request.token request.query (Ok results)) submitted |> Tuple.first
@@ -306,8 +302,8 @@ suite =
             , \source -> Main.update (NavigateToSearchResult "task" parent.id) source |> Tuple.first
             , \source -> Main.update (NavigateToAuditEntity auditEntry) source |> Tuple.first ]
                 |> List.map check
-                |> Expect.equal (List.repeat 6 { base = Just "normal-base", query = "", show = Types.ShowAll, submitted = Nothing, results = Nothing
-                    , requested = Just True, current = True, replaced = True, child = True })
+                |> Expect.equal (List.repeat 6 { base = Just "normal-base", query = "normal-base", show = Types.ShowProjectsOnly, submitted = Nothing, results = Nothing
+                    , requested = Just False, current = True, replaced = False, child = False })
         , test "deliberate focused search survives its own URL echo and retires only when its focus context exits" <| \_ ->
             let
                 search = model.search
@@ -329,7 +325,7 @@ suite =
                 { preserved = echo.search.activeRequest == submitted.search.activeRequest && echo.search.submittedQuery == Just "focused-query" && echo.focusedFilters == submitted.focusedFilters
                 , accepted = accepted.search.unifiedResults, base = late.search.query, retired = late.search.submittedQuery, result = late.search.unifiedResults
                 , newQuery = resubmitted.search.activeRequest |> Maybe.map .query }
-        , test "focused edits survive URL echoes and new targets reset overrides while persistence and exit retain the normal context" <| \_ ->
+        , test "focused edits survive URL echoes and new targets while persistence and exit retain the normal context" <| \_ ->
             let
                 search = model.search
                 original = { search | query = "normal", filterPriority = Types.ExactPriority 9 }
@@ -340,7 +336,7 @@ suite =
                 persisted = Helpers.encodeFilterState switched
                 cleared = Main.update ClearFocus switched |> Tuple.first
             in
-            Expect.equal { edit = Types.ShowTasksOnly, switched = Types.ShowAll, saved = Ok "normal", priority = Ok 9, restored = "normal", show = original.filterShowOnly }
+            Expect.equal { edit = Types.ShowTasksOnly, switched = Types.ShowTasksOnly, saved = Ok "normal", priority = Ok 9, restored = "normal", show = original.filterShowOnly }
                 { edit = echo.search.filterShowOnly, switched = switched.search.filterShowOnly
                 , saved = Decode.decodeValue (Decode.field "searchQuery" Decode.string) persisted
                 , priority = Decode.decodeValue (Decode.at [ "filterPriority", "exact" ] Decode.int) persisted
@@ -384,10 +380,24 @@ suite =
             in
             Expect.all
                 [ \_ -> input "Search all entities... (Enter to search)" "workspace query" Feature.Search.viewSearchBar
-                , \_ -> input "Filter focused view... (Enter to search workspace)" "" Feature.Search.viewFocusedSearchBar
+                , \_ -> input "Filter focused view... (Enter to search workspace)" "workspace query" Feature.Search.viewFocusedSearchBar
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = TimelineTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = ObservationsTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
                 ] ()
+        , test "cold focused URLs inherit late stored base until deliberate focused edits" <| \_ ->
+            let
+                stored = Encode.object [ ( "workspaceId", Encode.string workspaceId ), ( "searchQuery", Encode.string "late-base" ), ( "filterShowOnly", Encode.string "projects" )
+                    , ( "filterTaskStatuses", Encode.list Encode.string [ "done" ] ), ( "filterShowEmptyProjects", Encode.bool False ) ]
+                focused = AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing (Helpers.parseFragment (Just "tab=projects&focus=task:cold-target")) |> AppShell.finalizeInit (WorkspacePage workspaceId)
+                switched = Main.update (FocusEntity "project" "next-cold-target") focused |> Tuple.first
+                loaded = Helpers.applyStoredFiltersIfCurrentWorkspace stored switched
+                defaultSelected = Main.update (SetFilterShowOnly focused.search.filterShowOnly) switched |> Tuple.first
+                overridden = Helpers.applyStoredFiltersIfCurrentWorkspace stored defaultSelected
+                expected = Helpers.applyStoredFiltersIfCurrentWorkspace stored model
+            in
+            Expect.equal ( Feature.FocusedFilters.capture expected.search, Feature.FocusedFilters.capture focused.search, Feature.FocusedFilters.capture expected.search )
+                ( Feature.FocusedFilters.capture loaded.search, Feature.FocusedFilters.capture overridden.search
+                , Feature.FocusedFilters.capture (Feature.FocusedFilters.normalSearch overridden) )
         , test "cold focus and late storage restore the base without replacing focused overrides" <| \_ ->
             let
                 focused = AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing (Helpers.parseFragment (Just "tab=projects&focus=task:cold-target")) |> AppShell.finalizeInit (WorkspacePage workspaceId)

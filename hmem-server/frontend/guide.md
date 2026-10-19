@@ -2,11 +2,11 @@
 
 ## Timeline and history
 
-Opening a focused project or task temporarily shows all statuses and priorities,
-including empty projects, and clears the focused hierarchy search. Its contextual
-controls let you adjust these temporary filters while exploring or switch focus.
-Choosing a focus link again resets these temporary filters and closes any previous
-search results, including when the link points to the same entity.
+Opening a focused project or task keeps your current hierarchy filters and search
+text. Its contextual controls let you adjust these filters while exploring.
+Switching focus or choosing the same focus link keeps those selections and closes
+previous search results. The focused target stays accessible even when excluded
+by the filters; its descendants follow the selected filters.
 The workspace toolbar keeps its own filters throughout. Editing it updates only
 your workspace preferences; submitting its search closes focus and searches the
 workspace. Closing focus or returning to its Timeline or Audit source uses those

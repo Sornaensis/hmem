@@ -3363,6 +3363,9 @@ suite =
                         in
                         Expect.all
                             [ \_ -> view |> Query.findAll [ Selector.class "observation-mode-button" ] |> Query.count (Expect.equal 3)
+                            , \_ -> view |> Query.findAll [ Selector.class "observation-mode-button" ] |> Query.index 0 |> Query.has [ Selector.text "Subject Tree" ]
+                            , \_ -> view |> Query.findAll [ Selector.class "observation-mode-button" ] |> Query.index 1 |> Query.has [ Selector.text "All Observations" ]
+                            , \_ -> view |> Query.findAll [ Selector.class "observation-mode-button" ] |> Query.index 2 |> Query.has [ Selector.text "Files" ]
                             , \_ -> view |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text label, Selector.attribute (attribute "aria-pressed" "true"), Selector.tag "button" ]
                             , \_ -> view |> Query.find [ Selector.id "observation-for-files" ] |> Query.has [ Selector.attribute (attribute "aria-expanded" (if open then "true" else "false")), Selector.attribute (attribute "aria-controls" "observation-file-composer") ]
                             , \_ -> view |> Query.find [ Selector.id "observation-mode-heading" ] |> Query.has [ Selector.attribute (tabindex -1) ]
@@ -3372,7 +3375,7 @@ suite =
                             ] ()
                 in
                 Expect.all (List.map (\scenario _ -> check scenario)
-                    [ ( ObservationFlatMode, False, "All" ), ( ObservationFlatMode, True, "All" ), ( ObservationFacetMode, False, "Subject Tree" )
+                    [ ( ObservationFlatMode, False, "All Observations" ), ( ObservationFlatMode, True, "All Observations" ), ( ObservationFacetMode, False, "Subject Tree" )
                     , ( ObservationExactSubjectMode, True, "Subject Tree" ), ( ObservationMatchMode, False, "Files" ), ( ObservationMatchMode, True, "Files" ) ]) ()
         , test "direct user selection chooses results fallback instead of inheriting an earlier card origin" <|
             \_ ->

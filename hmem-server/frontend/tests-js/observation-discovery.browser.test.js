@@ -25,11 +25,40 @@ async function assertReachable(page, target) {
   })
   assert.ok(geometry.visible && geometry.unobscured && geometry.width > 0, JSON.stringify(geometry))
 }
+for (const width of [1440, 320]) test(`production ${width} mode DOM visual and native Tab order preserves the All Observations default`, { timeout: 60000 }, async () => {
+  const h = await openDiscovery({ width, height: 800 })
+  try {
+    await h.start()
+    if (width === 320) { await h.page.addStyleTag({ content: 'html { font-size: 200%; }' }); await paint(h.page) }
+    const labels = ['Subject Tree', 'All Observations', 'Files']
+    const buttons = h.page.getByRole('group', { name: 'Observation browse mode', exact: true }).getByRole('button')
+    assert.deepEqual(await buttons.allTextContents(), labels)
+    assert.deepEqual(await buttons.evaluateAll(elements => elements.map(element => element.getAttribute('aria-pressed'))), ['false', 'true', 'false'])
+    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).count(), 0)
+    const boxes = await buttons.evaluateAll(elements => elements.map(element => element.getBoundingClientRect().toJSON()))
+    for (let index = 1; index < boxes.length; index++) {
+      const previous = boxes[index - 1], current = boxes[index]
+      assert.ok(current.top > previous.top + 1 || (Math.abs(current.top - previous.top) <= 1 && current.left >= previous.right - 1), JSON.stringify(boxes))
+    }
+    await buttons.first().focus()
+    for (let index = 0; index < labels.length; index++) {
+      assert.equal(await h.page.locator(':focus').textContent(), labels[index])
+      if (index + 1 < labels.length) await h.page.keyboard.press('Tab')
+    }
+    await h.page.keyboard.press('Shift+Tab')
+    assert.equal(await h.page.locator(':focus').textContent(), 'All Observations')
+    assert.deepEqual(await buttons.evaluateAll(elements => elements.map(element => element.getAttribute('aria-pressed'))), ['false', 'true', 'false'], 'Focus order does not select Subject Tree')
+    assert.ok(h.receipts.some(value => value.endpoint === '/api/v1/observations'))
+    assert.equal(h.receipts.some(value => value.endpoint.endsWith('/subject-tree')), false, 'First visual mode does not replace the initial flat read')
+    assert.deepEqual(h.errors, [])
+  } finally { await h.close() }
+})
+
 test('production explicit Files mode and filter disclosures send live predicates; explicit Match sends normalized concrete paths and truthful subject evidence', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
     await h.start()
-    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
     assert.equal(await h.page.locator('#observation-match-paths').isVisible(), false)
     assert.equal(await h.page.locator('#observation-subject-kind').isVisible(), false)
@@ -37,7 +66,7 @@ test('production explicit Files mode and filter disclosures send live predicates
     await composer(h)
     assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-expanded'), 'true')
-    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'false')
+    assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).getAttribute('aria-pressed'), 'false')
     assert.equal(h.receipts.length, before)
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Space')
     assert.equal(await h.page.locator('#observation-advanced-toggle').getAttribute('aria-expanded'), 'true')
@@ -139,17 +168,17 @@ test('production 320 CSS-pixel discovery controls remain reachable with enlarged
   const h = await openDiscovery({ width: 320, height: 800 })
   try {
     await h.start()
-    for (const label of ['All', 'Subject Tree', 'Files']) await assertReachable(h.page, h.page.getByRole('button', { name: label, exact: true }))
+    for (const label of ['Subject Tree', 'All Observations', 'Files']) await assertReachable(h.page, h.page.getByRole('button', { name: label, exact: true }))
     await assertReachable(h.page, h.page.locator('#observation-query'))
     await h.page.addStyleTag({ content: 'html { font-size: 200%; }' })
     await composer(h); await h.page.locator('#observation-match-paths').fill('src/Main.elm')
     await assertReachable(h.page, h.page.locator('#observation-match-paths'))
     await assertReachable(h.page, h.page.getByRole('button', { name: 'Match files', exact: true }))
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
-    await activate(h.page, h.page.getByRole('button', { name: 'All', exact: true }), 'Space'); await h.idle()
-    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).evaluate(element => document.activeElement === element), true)
+    await activate(h.page, h.page.getByRole('button', { name: 'All Observations', exact: true }), 'Space'); await h.idle()
+    assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).evaluate(element => document.activeElement === element), true)
     assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
-    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).getAttribute('aria-pressed'), 'true')
     await composer(h)
     await h.page.evaluate(() => {
       const records = []; window.observationToolbarEvents = records

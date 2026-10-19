@@ -202,7 +202,7 @@ once per opening; Refresh replaces that frozen snapshot. Mark changes observed
 during a pending read stale too. Global Audit has no all-workspace subscription;
 loaded-at and Refresh establish freshness. A 404 alone does not establish deletion.
 
-All/Subject Tree switches retain their scroll context, including scrolling during load. Observation
+All Observations/Subject Tree switches retain their scroll context, including scrolling during load. Observation
 and Project card surfaces have a responsive 78rem maximum outer width; controls
 and lifecycle graphs use available width. Observation details return to their
 originating card if present, otherwise results. Observation card disclosure uses the

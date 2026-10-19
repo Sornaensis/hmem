@@ -4677,8 +4677,8 @@ viewModeNavigation state =
     section [ class "observation-mode-navigation", attribute "aria-labelledby" "observation-mode-heading" ]
         [ h2 [ id "observation-mode-heading", class "observation-mode-heading", tabindex -1 ] [ text headingText ]
         , div [ class "observation-mode-actions", attribute "role" "group", attribute "aria-label" "Observation browse mode" ]
-            [ modeButton ObservationFlatMode (state.requestMode == ObservationFlatMode) "All"
-            , modeButton ObservationFacetMode (state.requestMode == ObservationFacetMode || state.requestMode == ObservationExactSubjectMode) "Subject Tree"
+            [ modeButton ObservationFacetMode (state.requestMode == ObservationFacetMode || state.requestMode == ObservationExactSubjectMode) "Subject Tree"
+            , modeButton ObservationFlatMode (state.requestMode == ObservationFlatMode) "All Observations"
             , button
                 [ id "observation-for-files", classList [ ( "filter-pill", True ), ( "filter-pill-active", state.requestMode == ObservationMatchMode ), ( "observation-mode-button", True ) ], type_ "button", onClick OpenObservationFileComposer
                 , attribute "aria-pressed" (if state.requestMode == ObservationMatchMode then "true" else "false")

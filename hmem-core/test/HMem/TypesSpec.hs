@@ -14,6 +14,23 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 
 spec :: Spec
 spec = do
+  describe "Subject Tree query validation" $ do
+    let workspace = read "20000000-0000-4000-8000-000000000001" :: UUID
+        query :: ObservationSubjectTreeQuery
+        query = ObservationSubjectTreeQuery workspace "" Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+    it "accepts the root sentinel and canonical literal glob prefixes" $ do
+      mapM_ (\prefix -> validateObservationSubjectTreeQuery query { prefix = prefix } `shouldBe` [])
+        ["", "src", "src/**", "src/*/test?", "src/[literal]", "src/{literal}"]
+      validateObservationSubjectTreeQuery query { offset = Just maxUnifiedSearchOffset, limit = Just 200 } `shouldBe` []
+    it "rejects noncanonical prefixes, invalid SHA predicates and unsupported pagination" $ do
+      mapM_ (\prefix -> validateObservationSubjectTreeQuery query { prefix = prefix } `shouldSatisfy` (not . null))
+        ["/src", "C:/src", "src/", "src//auth", "src/../auth", "src/./auth", "src\\auth", "src/a**b"]
+      mapM_ (\bad -> validateObservationSubjectTreeQuery bad `shouldSatisfy` (not . null))
+        ([ query { gitSha = Just "bad" }, query { currentGitSha = Just "bad" }, query { historyGitSha = Just "bad" }
+        , query { limit = Just 0 }, query { limit = Just 201 }, query { offset = Just (-1) }, query { offset = Just (maxUnifiedSearchOffset + 1) }
+        , query { subjectQuery = Just (T.replicate (maxObservationSubjectBytes + 1) "x") } ] :: [ObservationSubjectTreeQuery])
+      eitherDecode "\"content\"" `shouldBe` Right ObservationContent
+      (eitherDecode "\"unknown\"" :: Either String ObservationQueryScope) `shouldSatisfy` isLeft
   describe "navigation owner batches" $ do
     let owner = read "20000000-0000-4000-8000-000000000001" :: UUID
         other = read "20000000-0000-4000-8000-000000000002" :: UUID

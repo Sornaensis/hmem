@@ -8,6 +8,10 @@ module HMem.DB.Observation
   , listObservations
   , countObservations
   , listObservationsOverfetch
+  , listObservationsScoped
+  , listObservationsScopedOverfetch
+  , countObservationsScoped
+  , listObservationSubjectTree
   , listObservationsSearchOverfetch
   , listObservationSubjectFacets
   , listObservationSubjectFacetsOverfetch
@@ -195,19 +199,25 @@ deleteObservation pool workspace observationId = do
 -- | Lists observations with composable exact provenance filters and optional
 -- FTS. FTS is ranked first, with recency and ID as deterministic tie-breakers.
 listObservations :: Pool Hasql.Connection -> ObservationQuery -> IO [Observation]
-listObservations pool queryValue = do
+listObservations pool = listObservationsScoped pool ObservationCombined
+
+listObservationsScoped :: Pool Hasql.Connection -> ObservationQueryScope -> ObservationQuery -> IO [Observation]
+listObservationsScoped pool scope queryValue = do
   validateOrThrow $ validateObservationQuery queryValue
-  listObservationsUnchecked pool queryValue
+  listObservationsUnchecked pool scope queryValue
 
 -- | The HTTP layer needs one extra row solely to calculate @has_more@.  Keep
 -- that implementation detail out of public validation so limit=200 remains a
 -- valid client request while limit=201 remains invalid client input.
 listObservationsOverfetch :: Pool Hasql.Connection -> ObservationQuery -> IO [Observation]
-listObservationsOverfetch pool queryValue = do
+listObservationsOverfetch pool = listObservationsScopedOverfetch pool ObservationCombined
+
+listObservationsScopedOverfetch :: Pool Hasql.Connection -> ObservationQueryScope -> ObservationQuery -> IO [Observation]
+listObservationsScopedOverfetch pool scope queryValue = do
   validateOrThrow $ validateObservationQuery queryValue
   let queryWithExtra :: ObservationQuery
       queryWithExtra = queryValue { limit = Just (fromMaybe 50 queryValue.limit + 1) }
-  listObservationsUnchecked pool queryWithExtra
+  listObservationsUnchecked pool scope queryWithExtra
 
 -- Search keeps the same provenance validation and SQL ordering, but its
 -- continuation offset may exceed the generic Observation list cap.
@@ -219,10 +229,10 @@ listObservationsSearchOverfetch pool queryValue = do
   let (limitValue, _) = capUnifiedSearchOverfetch queryValue.limit queryValue.offset
       queryWithExtra :: ObservationQuery
       queryWithExtra = queryValue { limit = Just limitValue }
-  listObservationsUnchecked pool queryWithExtra
+  listObservationsUnchecked pool ObservationCombined queryWithExtra
 
-listObservationsUnchecked :: Pool Hasql.Connection -> ObservationQuery -> IO [Observation]
-listObservationsUnchecked pool queryValue = do
+listObservationsUnchecked :: Pool Hasql.Connection -> ObservationQueryScope -> ObservationQuery -> IO [Observation]
+listObservationsUnchecked pool scope queryValue = do
   let limitValue = fromIntegral (fromMaybe 50 queryValue.limit) :: Int32
       offsetValue = fromIntegral (fromMaybe 0 queryValue.offset) :: Int32
   rows <- runSession pool $ Session.statement
@@ -233,7 +243,7 @@ listObservationsUnchecked pool queryValue = do
     , queryValue.query
     , limitValue
     , offsetValue, queryValue.currentGitSha, queryValue.historyGitSha
-    ) listObservationsStatement
+    ) (listObservationsStatement scope)
   pure $ map (attachProvenanceMatch queryValue.gitSha queryValue.currentGitSha queryValue.historyGitSha) rows
 
 -- | Aggregate exact stored subjects over the full filtered Observation set.
@@ -287,12 +297,16 @@ matchObservationsOverfetch pool queryValue = do
   matchObservationsUnchecked pool queryValue { limit = Just (fromMaybe 50 queryValue.limit + 1) }
 
 -- The aggregate and row query share exact same-row provenance and FTS filters.
-observationFilterSql :: [String]
-observationFilterSql =
+observationSearchVector :: ObservationQueryScope -> String
+observationSearchVector ObservationCombined = "o.search_vector"
+observationSearchVector ObservationContent = "to_tsvector('simple', o.content)"
+
+observationFilterSql :: ObservationQueryScope -> [String]
+observationFilterSql scope =
   [ "WHERE o.workspace_id = $1"
   , "  AND (($2::text IS NULL AND $3::text IS NULL) OR EXISTS (SELECT 1 FROM observation_subjects f WHERE f.observation_id = o.id AND ($2::text IS NULL OR f.subject_kind::text = $2) AND ($3::text IS NULL OR f.subject = $3)))"
   , "  AND ($4::text IS NULL OR o.git_sha = $4)"
-  , "  AND ($5::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $5))"
+  , "  AND ($5::text IS NULL OR " <> observationSearchVector scope <> " @@ plainto_tsquery('simple', $5))"
   ]
 
 -- EXISTS retains one current row even when many historical assertions match.
@@ -315,22 +329,25 @@ globPathPredicate path = "s.subject_kind = 'glob' AND hmem_observation_subject_m
 -- One statement provides total and distinct matches from the same snapshot;
 -- neither count projects content nor aggregates subject payloads.
 countObservations :: Pool Hasql.Connection -> ObservationCountQuery -> IO ObservationCounts
-countObservations pool value = do
+countObservations pool = countObservationsScoped pool ObservationCombined
+
+countObservationsScoped :: Pool Hasql.Connection -> ObservationQueryScope -> ObservationCountQuery -> IO ObservationCounts
+countObservationsScoped pool scope value = do
   validateOrThrow $ validateObservationCountQuery value
   (total, matched) <- runSession pool $ Session.statement
     (value.workspaceId, subjectKindToText <$> value.subjectKind, value.subject, value.gitSha, value.query,
-     subjectsJson . map (ObservationSubject SubjectFile) . normalizePaths <$> value.paths, value.currentGitSha, value.historyGitSha) countObservationsStatement
+     subjectsJson . map (ObservationSubject SubjectFile) . normalizePaths <$> value.paths, value.currentGitSha, value.historyGitSha) (countObservationsStatement scope)
   validateOrThrow ["Observation count exceeds the supported exact integer range" | total > 9007199254740991 || matched > 9007199254740991]
   pure $ ObservationCounts value.workspaceId total matched
 
-countObservationsStatement :: Statement.Statement
+countObservationsStatement :: ObservationQueryScope -> Statement.Statement
   (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text) (Int64, Int64)
-countObservationsStatement = Statement.Statement sql encoder decoder True
+countObservationsStatement scope = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines $
       [ "SELECT (SELECT COUNT(*) FROM observations WHERE workspace_id = $1), COUNT(*)"
       , "FROM observations o"
-      ] <> observationFilterSql <> [revisionFilterSql 7 8] <>
+      ] <> observationFilterSql scope <> [revisionFilterSql 7 8] <>
       [ "AND ($6::jsonb IS NULL OR EXISTS (SELECT 1 FROM observation_subjects s"
       , "  JOIN jsonb_array_elements($6::jsonb) rp ON (" <> filePathPredicate "(rp.value ->> 'subject')" <> " OR " <> globPathPredicate "(rp.value ->> 'subject')" <> ")"
       , "  WHERE s.observation_id = o.id AND ($2::text IS NULL OR s.subject_kind::text = $2)))"
@@ -346,18 +363,18 @@ countObservationsStatement = Statement.Statement sql encoder decoder True
       <> contramap (\(_,_,_,_,_,_,_,h) -> h) (Enc.param (Enc.nullable Enc.text))
     decoder = Dec.singleRow $ (,) <$> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8)
 
-listObservationsStatement :: Statement.Statement
+listObservationsStatement :: ObservationQueryScope -> Statement.Statement
   (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32, Maybe Text, Maybe Text) [Observation]
-listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observationDecoder) True
+listObservationsStatement scope = Statement.Statement sql encoder (Dec.rowList observationDecoder) True
   where
     sql = BS8.pack $ unlines $
       [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version,"
       , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text, o.latest_sequence, o.current_provenance"
       , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
-      ] <> observationFilterSql <> [revisionFilterSql 8 9] <>
+      ] <> observationFilterSql scope <> [revisionFilterSql 8 9] <>
       [ "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector, o.latest_sequence, o.current_provenance"
       , "ORDER BY"
-      , "  CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC,"
+      , "  CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(" <> observationSearchVector scope <> ", plainto_tsquery('simple', $5)) END DESC,"
       , "  o.updated_at DESC, o.id DESC"
       , "LIMIT $6 OFFSET $7"
       ]
@@ -371,6 +388,72 @@ listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observa
       <> contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nonNullable Enc.int4))
       <> contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nullable Enc.text))
       <> contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nullable Enc.text))
+
+-- Filter the complete terminal catalog before deriving immediate path children.
+-- The page and all distinct counts share one PostgreSQL statement snapshot.
+listObservationSubjectTree :: Pool Hasql.Connection -> ObservationSubjectTreeQuery -> IO ObservationSubjectTreePage
+listObservationSubjectTree pool value = do
+  validateOrThrow $ validateObservationSubjectTreeQuery value
+  let takeN = fromMaybe 50 value.limit
+  result <- runSession pool $ Session.statement
+    ( value.workspaceId, value.prefix, value.subjectQuery, subjectKindToText <$> value.subjectKind
+    , value.gitSha, value.currentGitSha, value.historyGitSha
+    , fromIntegral takeN :: Int32, fromIntegral (fromMaybe 0 value.offset) :: Int32
+    ) observationSubjectTreeStatement
+  validateOrThrow ["Observation count exceeds the supported exact integer range" | result.totalCount > 9007199254740991]
+  pure result
+
+observationSubjectTreeStatement :: Statement.Statement
+  (UUID, Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) ObservationSubjectTreePage
+observationSubjectTreeStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH matching AS MATERIALIZED ("
+      , "  SELECT o.id, s.subject_kind::text AS subject_kind, s.subject"
+      , "  FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
+      , "  WHERE o.workspace_id = $1"
+      , "    AND ($3::text IS NULL OR position($3 IN s.subject) > 0)"
+      , "    AND ($4::text IS NULL OR s.subject_kind::text = $4)"
+      , "    AND ($5::text IS NULL OR o.git_sha = $5)"
+      , revisionFilterSql 6 7
+      , "), descendants AS ("
+      , "  SELECT *, CASE WHEN $2 = '' THEN split_part(subject, '/', 1)"
+      , "    ELSE $2 || '/' || split_part(substr(subject, length($2) + 2), '/', 1) END AS path"
+      , "  FROM matching WHERE $2 = '' OR left(subject, length($2) + 1) = $2 || '/'"
+      , "), nodes AS ("
+      , "  SELECT path, COUNT(DISTINCT id) AS observation_count, bool_or(subject <> path) AS has_children"
+      , "  FROM descendants GROUP BY path"
+      , "), page AS ("
+      , "  SELECT * FROM nodes ORDER BY path COLLATE \"C\" LIMIT $8 OFFSET $9"
+      , "), terminals AS ("
+      , "  SELECT m.subject, m.subject_kind, COUNT(DISTINCT m.id) AS observation_count"
+      , "  FROM matching m JOIN page p ON p.path = m.subject GROUP BY m.subject, m.subject_kind"
+      , ")"
+      , "SELECT jsonb_build_object("
+      , "  'total_count', (SELECT COUNT(*) FROM observations WHERE workspace_id = $1),"
+      , "  'match_count', (SELECT COUNT(DISTINCT id) FROM matching),"
+      , "  'has_more', (SELECT COUNT(*) FROM nodes) > $9::bigint + $8::bigint,"
+      , "  'items', COALESCE((SELECT jsonb_agg(jsonb_build_object("
+      , "    'path', p.path, 'segment', CASE WHEN $2 = '' THEN p.path ELSE substr(p.path, length($2) + 2) END,"
+      , "    'has_children', p.has_children, 'observation_count', p.observation_count,"
+      , "    'terminals', COALESCE((SELECT jsonb_agg(jsonb_build_object("
+      , "       'subject_kind', t.subject_kind, 'subject', t.subject, 'observation_count', t.observation_count)"
+      , "       ORDER BY t.subject_kind COLLATE \"C\") FROM terminals t WHERE t.subject = p.path), '[]'::jsonb))"
+      , "    ORDER BY p.path COLLATE \"C\") FROM page p), '[]'::jsonb))"
+      ]
+    encoder =
+         contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f,_,_,_) -> f) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nonNullable Enc.int4))
+    decoder = Dec.singleRow $ Dec.column (Dec.nonNullable Dec.jsonb) >>= \value -> case Aeson.fromJSON value of
+      Aeson.Success result -> pure result
+      Aeson.Error message -> fail message
 
 listObservationSubjectFacetsStatement :: Statement.Statement
   (UUID, Maybe Text, Maybe Text, Maybe Text, Int32, Int32, Maybe Text, Maybe Text) [ObservationSubjectFacet]

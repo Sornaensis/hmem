@@ -42,6 +42,8 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations" . _Just . get %~ fmap tagObservation
   & paths . at "/api/v1/observations" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/subject-facets" . _Just . get %~ fmap tagObservation
+  & paths . at "/api/v1/observations/subject-tree" . _Just . get %~ fmap tagObservation
+  & paths . at "/api/v1/observations/count" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/match" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/similar" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}" . _Just . get %~ fmap tagObservation
@@ -224,6 +226,11 @@ instance ToSchema Observation where
       & properties . at "current_provenance" ?~ Inline (mempty & allOf ?~ [Ref (Reference "ObservationProvenance")] & nullable ?~ True)
       & properties . at "content_version" ?~ Inline (uuidSchema
           & description ?~ "Opaque content precondition advanced by every accepted content write. Not ordered; embedding-only writes do not advance it. Send as a strong quoted If-Match token for conditional curation."))
+instance ToParamSchema ObservationQueryScope where
+  toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["combined", "content"]
+instance ToSchema ObservationSubjectTreeTerminal where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ObservationSubjectTreeNode where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ObservationSubjectTreePage where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ObservationSubjectFacet where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationSubjectFacet)

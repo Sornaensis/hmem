@@ -292,6 +292,38 @@ Supplied filters combine with AND. A historical match returns current content,
 not content as it existed at that revision. If history changes while paging,
 restart at offset 0 to refresh.
 
+## Observation search and Subject Tree
+
+`GET /api/v1/observations` and `POST /api/v1/observations/count` accept the
+optional URL parameter `query_scope=content` for content-only full-text matching
+and relevance ranking. Omitted or `combined` scope preserves content plus subject
+search, including existing MCP behavior. List and count use the same predicates.
+
+`GET /api/v1/observations/subject-tree?workspace_id=...` returns immediate stored
+path children below `prefix` (empty or omitted means root). `subject_query` is a
+case-sensitive literal substring of complete stored subject text; `%`, `_`, `*`
+and `?` have no search syntax. Kind and the three SHA filters above combine with
+AND before paths and ancestors are derived. This does not search content or read
+the checkout. Canonical prefixes may include literal glob components such as `**`.
+
+The response has `items`, `has_more`, `total_count` and `match_count`. Each child
+has `path`, `segment`, `has_children`, `observation_count`, and `terminals`.
+Terminals carry exact `subject_kind`, `subject`, and direct `observation_count`;
+a path can have both file/glob terminals and child paths. `has_children` describes
+path descendants only. Unrelated terminals on matching ancestors are omitted.
+Load a terminal's cards with the existing exact typed list filters, without `query`.
+
+All counts are distinct Observations: `total_count` covers the full workspace,
+`match_count` the global filtered catalog independently of `prefix`, and each
+node count its filtered subtree. Overlapping terminal counts must not be summed.
+Child paths use C lexical ordering. `limit` defaults to 50 (1..200), `offset` to
+0 (0..2147483647); `has_more` describes only that child page. Clients must stop
+before a continuation would exceed that offset range and report the exhausted
+range without wrapping. Existing list/facet offsets retain their 100000 cap.
+As with other offset
+pages, refresh from offset 0 when canonical data changes. Repository workspace
+read authorization is required.
+
 ## Match files and search by vector
 
 Send concrete repository-relative paths to `POST /api/v1/observations/match`:

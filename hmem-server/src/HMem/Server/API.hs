@@ -135,9 +135,10 @@ type ObservationAPI =
          :> QueryParam "current_git_sha" Text
          :> QueryParam "history_git_sha" Text
          :> QueryParam "query" Text
+         :> QueryParam "query_scope" ObservationQueryScope
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
-         :> Description "Lists Observations from an active repository workspace after repository read authorization. The optional full-text query searches Observation content and all stored subject text. Exact subject_kind and subject filters must match the same stored subject row. Results rank by text relevance when query is set, then updated_at DESC and id DESC. Pagination defaults to limit 50 and offset 0; limit is 1..200 and offset is 0..100000."
+         :> Description "Lists Observations from an active repository workspace after repository read authorization. query_scope=content searches and ranks content only; omitted or combined scope searches content and stored subjects. Exact subject_kind and subject filters must match the same stored subject row. Results rank by scoped text relevance, then updated_at DESC and id DESC. Pagination defaults to limit 50 and offset 0; limit is 1..200 and offset is 0..100000."
          :> Get '[JSON] (PaginatedResult Observation)
   :<|> ReqBody '[JSON] CreateObservationRequest :> Post '[JSON] Observation
   :<|> "subject-facets"
@@ -156,8 +157,20 @@ type ObservationAPI =
          :> Description "Requires repository read authorization for the requested active repository workspace. Matches concrete canonical repository-relative paths against stored file and glob subjects. The optional full-text query searches Observation content and all stored subject text. Canonical path_matches correlates each caller path with its ordered matched stored subjects."
          :> Post '[JSON] (PaginatedResult ObservationMatch)
   :<|> "similar" :> ReqBody '[JSON] SimilarObservationQuery :> Post '[JSON] [SimilarObservation]
-  :<|> "count" :> ReqBody '[JSON] ObservationCountRequest
-         :> Description "Requires active repository workspace read authorization. Returns full workspace total_count and distinct match_count from one database statement snapshot. Filters share list same-subject provenance, SHA and simple full-text predicates; optional concrete paths use canonical file/glob OR matching. subject and paths are mutually exclusive. Counts ignore pagination and are nonnegative exact integers at most 9007199254740991. Deployed cookie requests require CSRF."
+  :<|> "subject-tree"
+         :> QueryParam' '[Required] "workspace_id" UUID
+         :> QueryParam "prefix" Text
+         :> QueryParam "subject_query" Text
+         :> QueryParam "subject_kind" SubjectKind
+         :> QueryParam "git_sha" Text
+         :> QueryParam "current_git_sha" Text
+         :> QueryParam "history_git_sha" Text
+         :> QueryParam "limit" Int
+         :> QueryParam "offset" Int
+         :> Description "Authorized active repository workspace read. Filters the complete stored typed subject catalog by case-sensitive literal subject_query substring, kind and three AND SHA predicates, then derives immediate child paths below prefix (omitted/empty is root). Wildcard components remain literal; no filesystem lookup. Paths order lexically with C collation. Nodes expose distinct subtree observation_count, has_children for path descendants, and exact typed terminals with direct counts. Unrelated terminals on matching ancestors are omitted. total_count is the full workspace Observation count; match_count is the global filtered DISTINCT count independent of prefix. has_more applies only to the child page. Defaults limit 50, offset 0; limit 1..200, offset 0..2147483647. Clients must report representational exhaustion before a continuation would exceed that offset range."
+         :> Get '[JSON] ObservationSubjectTreePage
+  :<|> "count" :> QueryParam "query_scope" ObservationQueryScope :> ReqBody '[JSON] ObservationCountRequest
+         :> Description "Requires active repository workspace read authorization. Returns full workspace total_count and distinct match_count from one database statement snapshot. query_scope=content searches content only; omitted or combined scope searches content and stored subjects. Filters share list same-subject provenance, SHA and scoped simple full-text predicates; optional concrete paths use canonical file/glob OR matching. subject and paths are mutually exclusive. Counts ignore pagination and are nonnegative exact integers at most 9007199254740991. Deployed cookie requests require CSRF."
          :> Post '[JSON] ObservationCounts
   :<|> Capture "observationId" UUID :> Get '[JSON] Observation
   :<|> Capture "observationId" UUID :> "history" :> QueryParam "limit" Int :> QueryParam "offset" Int
@@ -206,6 +219,10 @@ type AuditAPI =
 
 instance FromHttpApiData SubjectKind where
   parseQueryParam value = maybe (Left "subject_kind must be file or glob") Right (subjectKindFromText value)
+instance FromHttpApiData ObservationQueryScope where
+  parseQueryParam "combined" = Right ObservationCombined
+  parseQueryParam "content" = Right ObservationContent
+  parseQueryParam _ = Left "query_scope must be combined or content"
 instance FromHttpApiData ProjectStatus where
   parseQueryParam value = maybe (Left "invalid project status") Right (projectStatusFromText value)
 instance FromHttpApiData TaskStatus where
@@ -773,13 +790,13 @@ groups pool = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembersH :<|> a
     pure NoContent
 
 observations :: Pool Hasql.Connection -> Server ObservationAPI
-observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> similarH :<|> countH :<|> getH :<|> historyH :<|> updateH :<|> deleteH :<|> embeddingH where
-  countH (ObservationCountRequest requestBody) = do
+observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> similarH :<|> subjectTreeH :<|> countH :<|> getH :<|> historyH :<|> updateH :<|> deleteH :<|> embeddingH where
+  countH scope (ObservationCountRequest requestBody) = do
     value <- decodeRequest requestBody
     requireObservationWorkspace pool value.workspaceId Auth.WorkspaceRoleRead
     reject (validateObservationCountQuery value)
-    handleDBErrors $ Observation.countObservations pool value
-  listH workspaceId kind subjectValue sha currentSha historySha queryValue limit offset = do
+    handleDBErrors $ Observation.countObservationsScoped pool (fromMaybe ObservationCombined scope) value
+  listH workspaceId kind subjectValue sha currentSha historySha queryValue scope limit offset = do
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
     -- Validate client-supplied values before pagination defaults/caps are
     -- applied; otherwise invalid bounds would be silently normalized.
@@ -787,7 +804,7 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     reject (validateObservationQuery rawQuery)
     let (takeN, skipN) = page limit offset
         query = ObservationQuery workspaceId kind subjectValue sha queryValue (Just takeN) (Just skipN) currentSha historySha
-    rows <- handleDBErrors $ Observation.listObservationsOverfetch pool query
+    rows <- handleDBErrors $ Observation.listObservationsScopedOverfetch pool (fromMaybe ObservationCombined scope) query
     pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
   createH (CreateObservationRequest requestBody) = do
     input <- decodeRequest requestBody
@@ -803,6 +820,11 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
         pagedQuery = ObservationSubjectFacetQuery workspaceId kind sha queryValue (Just takeN) (Just skipN) currentSha historySha
     rows <- handleDBErrors $ Observation.listObservationSubjectFacetsOverfetch pool pagedQuery
     pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+  subjectTreeH workspaceId prefix subjectQuery kind sha currentSha historySha limit offset = do
+    requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    let query = ObservationSubjectTreeQuery workspaceId (fromMaybe "" prefix) subjectQuery kind sha currentSha historySha limit offset
+    reject (validateObservationSubjectTreeQuery query)
+    handleDBErrors $ Observation.listObservationSubjectTree pool query
   matchH (ObservationMatchRequest requestBody) = do
     query <- decodeRequest requestBody
     requireObservationWorkspace pool query.workspaceId Auth.WorkspaceRoleRead

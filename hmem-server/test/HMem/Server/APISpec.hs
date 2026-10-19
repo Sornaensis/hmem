@@ -38,6 +38,7 @@ import HMem.DB.Auth qualified as Auth
 import HMem.DB.Audit qualified as Audit
 import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..), ReplayPage(..), OutboxRecord(..), listOutboxAfter, replayAndRotateResumeToken)
 import HMem.DB.Pool qualified as DBPool
+import HMem.DB.Observation qualified as Observation
 import HMem.DB.Project qualified as Project
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
@@ -2573,6 +2574,58 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         call [cookie] >>= (\response -> responseStatus response `shouldBe` status403)
         call [cookie, ("X-CSRF-Token", "count-csrf")] >>= (\response -> responseStatus response `shouldBe` status200)
 
+    it "exposes explicit content scope without changing omitted-scope REST or MCP search" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "content-scope-api"
+      let input path body = object ["workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectFile path], "git_sha" .= T.replicate 40 "a", "content" .= (body :: T.Text)]
+          base = "/api/v1/observations?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "&query=subjectonlytoken"
+          counts = object ["workspace_id" .= workspace.id, "query" .= ("subjectonlytoken" :: T.Text)]
+      _ <- postJson app "/api/v1/observations" (input "subjectonlytoken" "ordinary")
+      _ <- postJson app "/api/v1/observations" (input "other" "subjectonlytoken")
+      forM_ [("", 2), ("&query_scope=combined", 2), ("&query_scope=content", 1)] $ \(scope, expected) -> do
+        response <- request app methodGet (base <> scope) ""
+        responseStatus response `shouldBe` status200
+        let Just result = decode (responseBody response) :: Maybe (PaginatedResult Observation)
+        length result.items `shouldBe` expected
+      legacy <- postJson app "/api/v1/observations/count" counts
+      scoped <- postJson app "/api/v1/observations/count?query_scope=content" counts
+      (decode (responseBody legacy) :: Maybe ObservationCounts) `shouldBe` Just (ObservationCounts workspace.id 2 2)
+      (decode (responseBody scoped) :: Maybe ObservationCounts) `shouldBe` Just (ObservationCounts workspace.id 2 1)
+      request app methodGet (base <> "&query_scope=invalid") "" >>= (\response -> responseStatus response `shouldBe` status400)
+      postJson app "/api/v1/observations/count?query_scope=invalid" counts >>= (\response -> responseStatus response `shouldBe` status400)
+      -- Unified search is the unchanged HTTP path used by MCP search.
+      mcpLegacy <- postJson app "/api/v1/search" (object ["workspace_id" .= workspace.id, "entity_types" .= ["observation" :: T.Text], "query" .= ("subjectonlytoken" :: T.Text)])
+      responseStatus mcpLegacy `shouldBe` status200
+      let Just search = decode (responseBody mcpLegacy) :: Maybe UnifiedSearchResults
+      length search.observations `shouldBe` 2
+
+    it "serves bounded literal Subject Tree paths and global distinct totals" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "tree-api"
+      other <- createTestWorkspace env "tree-api-other"
+      _ <- Observation.createObservation env.pool (CreateObservation workspace.id
+        [ObservationSubject SubjectFile "src", ObservationSubject SubjectGlob "src", ObservationSubject SubjectFile "src/auth/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"] (T.replicate 40 "a") "ordinary")
+      _ <- Observation.createObservation env.pool (CreateObservation other.id [ObservationSubject SubjectFile "src/auth/Other.hs"] (T.replicate 40 "a") "ordinary")
+      let base = "/api/v1/observations/subject-tree?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id))
+          get suffix = do
+            response <- request app methodGet (base <> suffix) ""
+            responseStatus response `shouldBe` status200
+            maybe (expectationFailure "invalid tree response" >> fail "invalid tree") pure (decode (responseBody response) :: Maybe ObservationSubjectTreePage)
+      root <- get ""
+      (root.totalCount, root.matchCount, map (.path) root.items) `shouldBe` (1, 1, ["src"])
+      map (map (.subjectKind) . (.terminals)) root.items `shouldBe` [[SubjectFile, SubjectGlob]]
+      first <- get "&prefix=src&limit=1"
+      second <- get "&prefix=src&limit=1&offset=1"
+      (map (.path) first.items, first.hasMore) `shouldBe` (["src/**"], True)
+      (map (.path) second.items, second.hasMore) `shouldBe` (["src/auth"], False)
+      filtered <- get "&subject_query=src/auth"
+      (filtered.matchCount, map (.terminals) filtered.items) `shouldBe` (1, [[]])
+      empty <- get "&subject_query=ordinary"
+      (empty.items, empty.matchCount) `shouldBe` ([], 0)
+      lastOffset <- get "&limit=200&offset=2147483647"
+      (lastOffset.items, lastOffset.hasMore, lastOffset.matchCount) `shouldBe` ([], False, 1)
+      forM_ ["&prefix=/absolute", "&prefix=src/../bad", "&prefix=src//bad", "&prefix=src/", "&limit=0", "&limit=201", "&offset=-1", "&offset=2147483648", "&git_sha=bad", "&current_git_sha=bad", "&history_git_sha=bad"] $ \suffix ->
+        request app methodGet (base <> suffix) "" >>= expectValidationError
+      request app methodGet "/api/v1/observations/subject-tree" "" >>= (\response -> responseStatus response `shouldBe` status400)
+
     it "lists deterministic workspace-isolated subject facets with full filtered counts" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-facets-api"
       otherWorkspace <- createTestWorkspace env "observation-facets-api-other"
@@ -2749,6 +2802,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
               , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text), "content" .= ("auth observation" :: T.Text) ]
             matchInput = encode (object ["workspace_id" .= workspace.id, "paths" .= (["src/Main.hs"] :: [T.Text])])
             facetsPath = "/api/v1/observations/subject-facets?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id))
+            treePath = "/api/v1/observations/subject-tree?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id))
         created <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations" (authHeader superadminToken) (encode input)
         responseStatus created `shouldBe` status200
         request ctx.deployedApplication methodPost "/api/v1/observations/match" matchInput >>= (\response -> responseStatus response `shouldBe` status401)
@@ -2757,6 +2811,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         request ctx.deployedApplication methodGet facetsPath "" >>= (\response -> responseStatus response `shouldBe` status401)
         requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
         requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        request ctx.deployedApplication methodGet treePath "" >>= (\response -> responseStatus response `shouldBe` status401)
+        requestWithHeaders ctx.deployedApplication methodGet treePath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodGet treePath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
 
     it "enforces the deployed Observation curation lifecycle across authorization, validation, and hard deletion" $ \_ ->
       withDeployedSandboxAppContext $ \ctx -> do
@@ -2868,6 +2925,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       postJson app "/api/v1/observations" (observationInput planning.id) >>= rejected
       request app methodGet ("/api/v1/observations?workspace_id=" <> planningId) "" >>= rejected
       request app methodGet ("/api/v1/observations/subject-facets?workspace_id=" <> planningId) "" >>= rejected
+      request app methodGet ("/api/v1/observations/subject-tree?workspace_id=" <> planningId) "" >>= rejected
       postJson app "/api/v1/observations/match" (object ["workspace_id" .= planning.id, "paths" .= (["src/Scope.hs"] :: [T.Text])]) >>= rejected
       postJson app "/api/v1/observations/count" (object ["workspace_id" .= planning.id]) >>= rejected
       postJson app "/api/v1/observations/similar" (object ["workspace_id" .= planning.id, "embedding" .= ([] :: [Double])]) >>= rejected
@@ -2883,6 +2941,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       markWorkspaceDeleted env repository.id
       request app methodGet ("/api/v1/observations?workspace_id=" <> repositoryId) "" >>= rejected
       request app methodGet ("/api/v1/observations/subject-facets?workspace_id=" <> repositoryId) "" >>= rejected
+      request app methodGet ("/api/v1/observations/subject-tree?workspace_id=" <> repositoryId) "" >>= rejected
       postJson app "/api/v1/observations" (observationInput repository.id) >>= rejected
       postJson app "/api/v1/observations/match" (object ["workspace_id" .= repository.id, "paths" .= (["src/Scope.hs"] :: [T.Text])]) >>= rejected
       postJson app "/api/v1/observations/count" (object ["workspace_id" .= repository.id]) >>= rejected
@@ -3168,8 +3227,17 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         ["workspace_id", "subject_kind", "git_sha", "query", "limit", "offset"]
       (facetParameter "workspace_id" >>= jsonField "required") `shouldBe` Just (Bool True)
       observationParameter "query" `shouldSatisfy` isJust
+      observationParameter "query_scope" `shouldSatisfy` isJust
+      pathParameter "/api/v1/observations/count" "post" "query_scope" `shouldSatisfy` isJust
+      let treeParameter = pathParameter "/api/v1/observations/subject-tree" "get"
+      mapM_ (\parameterName -> treeParameter parameterName `shouldSatisfy` isJust)
+        ["workspace_id", "prefix", "subject_query", "subject_kind", "git_sha", "current_git_sha", "history_git_sha", "limit", "offset"]
+      mapM_ (\propertyName -> hasSchemaProperty "ObservationSubjectTreePage" propertyName `shouldBe` True)
+        ["items", "has_more", "total_count", "match_count"]
+      mapM_ (\propertyName -> hasSchemaProperty "ObservationSubjectTreeNode" propertyName `shouldBe` True)
+        ["path", "segment", "has_children", "observation_count", "terminals"]
       operationDescription "/api/v1/observations" "get" `shouldBe`
-        Just (String "Lists Observations from an active repository workspace after repository read authorization. The optional full-text query searches Observation content and all stored subject text. Exact subject_kind and subject filters must match the same stored subject row. Results rank by text relevance when query is set, then updated_at DESC and id DESC. Pagination defaults to limit 50 and offset 0; limit is 1..200 and offset is 0..100000.")
+        Just (String "Lists Observations from an active repository workspace after repository read authorization. query_scope=content searches and ranks content only; omitted or combined scope searches content and stored subjects. Exact subject_kind and subject filters must match the same stored subject row. Results rank by scoped text relevance, then updated_at DESC and id DESC. Pagination defaults to limit 50 and offset 0; limit is 1..200 and offset is 0..100000.")
       operationDescription "/api/v1/observations/subject-facets" "get" `shouldBe`
         Just (String "Requires repository read authorization for the requested active repository workspace. Each facet is identified by the exact (subject_kind, subject) tuple. Groups stored subjects after workspace, subject_kind, git_sha, and query filtering. The optional full-text query searches Observation content and all stored subject text before grouping. observation_count is COUNT DISTINCT over the full filtered Observation set before subject-group pagination. Results order by observation_count DESC, latest_updated_at DESC, subject_kind, then subject. Pagination defaults to limit 50 and offset 0; limit is 1..200 and offset is 0..100000.")
       operationDescription "/api/v1/observations/match" "post" `shouldBe`

@@ -17,6 +17,133 @@ import HMem.Types
 
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
+  describe "Observation Subject Tree" $ do
+    it "keeps content scope separate from legacy combined matching and relevance" $ \env -> do
+      workspace <- createTestWorkspace env "content-scope"
+      subjectOnly <- createObservation env.pool (newObservation workspace.id SubjectFile "subjectonlytoken" "ordinary")
+      contentHit <- createObservation env.pool (newObservation workspace.id SubjectFile "other" "subjectonlytoken")
+      -- Subject frequency must not influence content-only relevance.
+      strong <- createObservation env.pool (newObservation workspace.id SubjectFile "strong" "ranktoken ranktoken ranktoken")
+      weak <- createObservation env.pool (newObservation workspace.id SubjectFile "ranktoken/ranktoken/ranktoken/ranktoken" "ranktoken")
+      let input = observationQuery workspace.id (Just "subjectonlytoken") Nothing Nothing
+          counts = ObservationCountQuery workspace.id Nothing Nothing Nothing (Just "subjectonlytoken") Nothing Nothing Nothing
+      legacy <- listObservations env.pool input
+      map (.id) legacy `shouldMatchList` [subjectOnly.id, contentHit.id]
+      scoped <- listObservationsScoped env.pool ObservationContent input
+      map (.id) scoped `shouldBe` [contentHit.id]
+      countObservations env.pool counts `shouldReturn` ObservationCounts workspace.id 4 2
+      countObservationsScoped env.pool ObservationContent counts `shouldReturn` ObservationCounts workspace.id 4 1
+      ranked <- listObservationsScoped env.pool ObservationContent input { query = Just "ranktoken" }
+      map (.id) ranked `shouldBe` [strong.id, weak.id]
+
+    it "keeps typed terminals, children and literal wildcard components with distinct totals" $ \env -> do
+      workspace <- createTestWorkspace env "tree-trie"
+      _ <- createObservation env.pool (CreateObservation workspace.id
+        [ObservationSubject SubjectFile "src", ObservationSubject SubjectGlob "src", ObservationSubject SubjectFile "src/auth/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"] canonicalSha "ordinary")
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "src/auth/Main.hs" "second")
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "Z" "upper")
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "a" "lower")
+      let input = treeQuery workspace.id
+      root <- listObservationSubjectTree env.pool input
+      (root.totalCount, root.matchCount, root.hasMore) `shouldBe` (4, 4, False)
+      map (.path) root.items `shouldBe` ["Z", "a", "src"]
+      let src = last root.items
+      (src.hasChildren, src.observationCount) `shouldBe` (True, 2)
+      map (\t -> (t.subjectKind, t.subject, t.observationCount)) src.terminals `shouldBe`
+        [(SubjectFile, "src", 1), (SubjectGlob, "src", 1)]
+      children <- listObservationSubjectTree env.pool input { prefix = "src" }
+      map (.path) children.items `shouldBe` ["src/**", "src/auth"]
+      glob <- listObservationSubjectTree env.pool input { prefix = "src/**" }
+      map (.path) glob.items `shouldBe` ["src/**/*.hs"]
+      map (.hasChildren) glob.items `shouldBe` [False]
+      direct <- listObservations env.pool (ObservationQuery workspace.id (Just SubjectGlob) (Just "src") Nothing Nothing Nothing Nothing Nothing Nothing)
+      length direct `shouldBe` 1
+
+    it "preserves repeated segments and concrete punctuation through terminal-only and empty branches" $ \env -> do
+      workspace <- createTestWorkspace env "tree-prefixes"
+      let input = treeQuery workspace.id
+      empty <- listObservationSubjectTree env.pool input
+      empty `shouldBe` ObservationSubjectTreePage [] False 0 0
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "src/src/[literal]/leaf" "ordinary")
+      root <- listObservationSubjectTree env.pool input
+      map (.path) root.items `shouldBe` ["src"]
+      repeated <- listObservationSubjectTree env.pool input { prefix = "src" }
+      map (.path) repeated.items `shouldBe` ["src/src"]
+      punctuation <- listObservationSubjectTree env.pool input { prefix = "src/src" }
+      map (.path) punctuation.items `shouldBe` ["src/src/[literal]"]
+      leaf <- listObservationSubjectTree env.pool input { prefix = "src/src/[literal]" }
+      map (\n -> (n.path, n.hasChildren, map (.subject) n.terminals)) leaf.items `shouldBe`
+        [("src/src/[literal]/leaf", False, ["src/src/[literal]/leaf"])]
+      terminal <- listObservationSubjectTree env.pool input { prefix = "src/src/[literal]/leaf" }
+      (terminal.items, terminal.hasMore, terminal.matchCount) `shouldBe` ([], False, 1)
+      -- No int32 overflow from page-width arithmetic at the largest offset.
+      lastOffset <- listObservationSubjectTree env.pool input { offset = Just maxUnifiedSearchOffset, limit = Just 200 }
+      (lastOffset.items, lastOffset.hasMore, lastOffset.matchCount) `shouldBe` ([], False, 1)
+
+    it "filters full subject text before deriving ancestors and never executes SQL wildcards or content search" $ \env -> do
+      workspace <- createTestWorkspace env "tree-substrings"
+      other <- createTestWorkspace env "tree-substrings-other"
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "src/auth/Main.hs" "ordinary")
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "src/author.hs" "ordinary")
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "src" "src/auth")
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "percent%/under_score" "ordinary")
+      _ <- createObservation env.pool (newObservation workspace.id SubjectFile "percentX/underXscore" "ordinary")
+      _ <- createObservation env.pool (newObservation other.id SubjectFile "src/auth/Other.hs" "ordinary")
+      let input = (treeQuery workspace.id) { subjectQuery = Just "src/auth" }
+      root <- listObservationSubjectTree env.pool input
+      (root.totalCount, root.matchCount) `shouldBe` (5, 2)
+      map (.path) root.items `shouldBe` ["src"]
+      map (.terminals) root.items `shouldBe` [[]]
+      children <- listObservationSubjectTree env.pool input { prefix = "src" }
+      map (.path) children.items `shouldBe` ["src/auth", "src/author.hs"]
+      mapM_ (\needle -> do
+        page <- listObservationSubjectTree env.pool (treeQuery workspace.id) { subjectQuery = Just needle }
+        page.matchCount `shouldBe` 1
+        map (.path) page.items `shouldBe` ["percent%"])
+        ["%", "_"]
+      empty <- listObservationSubjectTree env.pool input { subjectQuery = Just "SRC/auth" }
+      (empty.items, empty.matchCount, empty.hasMore) `shouldBe` ([], 0, False)
+      missing <- listObservationSubjectTree env.pool input { prefix = "missing" }
+      (missing.items, missing.matchCount) `shouldBe` ([], 2)
+
+    it "finds subjects beyond a catalog page and pages immediate children in stable lexical order" $ \env -> do
+      workspace <- createTestWorkspace env "tree-pages"
+      mapM_ (\n -> createObservation env.pool (newObservation workspace.id SubjectFile
+        ("src/" <> T.justifyRight 3 '0' (T.pack (show n)) <> "/target.hs") "ordinary")) [1..205 :: Int]
+      let input = (treeQuery workspace.id) { prefix = "src", limit = Just 100 }
+      first <- listObservationSubjectTree env.pool input
+      second <- listObservationSubjectTree env.pool input { offset = Just 100 }
+      third <- listObservationSubjectTree env.pool input { offset = Just 200 }
+      map (.hasMore) [first, second, third] `shouldBe` [True, True, False]
+      map (length . (.items)) [first, second, third] `shouldBe` [100, 100, 5]
+      map (.path) (first.items <> second.items <> third.items) `shouldBe`
+        ["src/" <> T.justifyRight 3 '0' (T.pack (show n)) | n <- [1..205 :: Int]]
+      root <- listObservationSubjectTree env.pool input { prefix = "", subjectQuery = Just "205/target" }
+      (root.matchCount, map (.path) root.items) `shouldBe` (1, ["src"])
+      child <- listObservationSubjectTree env.pool input { subjectQuery = Just "205/target" }
+      map (.path) child.items `shouldBe` ["src/205"]
+      leaf <- listObservationSubjectTree env.pool input { prefix = "src/205", subjectQuery = Just "205/target" }
+      map (.path) leaf.items `shouldBe` ["src/205/target.hs"]
+
+    it "ANDs kind and original/current/history SHA filters without multiplying historical assertions" $ \env -> do
+      workspace <- createTestWorkspace env "tree-revisions"
+      original <- createObservation env.pool (CreateObservation workspace.id
+        [ObservationSubject SubjectFile "src/auth.hs", ObservationSubject SubjectGlob "src/auth.hs"] canonicalSha "original")
+      ObservationUpdated first <- updateObservationReviewed env.pool workspace.id original.id original.contentVersion (ReviewedObservationUpdate "middle" alternateSha)
+      ObservationUpdated second <- updateObservationReviewed env.pool workspace.id original.id first.contentVersion (ReviewedObservationUpdate "middle" alternateSha)
+      let current = T.replicate 40 "c"
+      ObservationUpdated latest <- updateObservationReviewed env.pool workspace.id original.id second.contentVersion (ReviewedObservationUpdate "current" current)
+      let input :: ObservationSubjectTreeQuery
+          input = (treeQuery workspace.id) { subjectQuery = Just "auth", subjectKind = Just SubjectFile, gitSha = Just canonicalSha, currentGitSha = Just current, historyGitSha = Just alternateSha }
+      root <- listObservationSubjectTree env.pool input
+      (root.matchCount, map (.observationCount) root.items) `shouldBe` (1, [1])
+      terminal <- listObservationSubjectTree env.pool input { prefix = "src" }
+      map (map (.subjectKind) . (.terminals)) terminal.items `shouldBe` [[SubjectFile]]
+      exact <- listObservations env.pool (ObservationQuery workspace.id (Just SubjectFile) (Just "src/auth.hs") (Just canonicalSha) Nothing Nothing Nothing (Just current) (Just alternateSha))
+      map (\o -> (o.id, o.content)) exact `shouldBe` [(latest.id, "current")]
+      mapM_ (\bad -> listObservationSubjectTree env.pool bad >>= (\page -> page.matchCount `shouldBe` 0))
+        ([input { gitSha = Just alternateSha }, input { currentGitSha = Just alternateSha }, input { historyGitSha = Just (T.replicate 40 "d") }] :: [ObservationSubjectTreeQuery])
+
   describe "Observation aggregate counts" $ do
     it "counts full distinct sets using list and concrete-path predicates" $ \env -> do
       workspace <- createTestWorkspace env "counts"
@@ -369,6 +496,9 @@ backdateObservation env observationId = runSession env.pool $ do
   Session.sql "ALTER TABLE observations DISABLE TRIGGER trg_observations_updated_at"
   Session.sql ("UPDATE observations SET updated_at = '2000-01-01T00:00:00Z' WHERE id = '" <> B8.pack (show observationId) <> "'")
   Session.sql "ALTER TABLE observations ENABLE TRIGGER trg_observations_updated_at"
+
+treeQuery :: UUID -> ObservationSubjectTreeQuery
+treeQuery workspace = ObservationSubjectTreeQuery workspace "" Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 listIds :: TestEnv -> ObservationQuery -> IO [UUID]
 listIds env = fmap (map (.id)) . listObservations env.pool

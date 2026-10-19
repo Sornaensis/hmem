@@ -7,6 +7,7 @@ module HMem.Types
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
   , ObservationEmbedding(..), EmbeddingSpaceFingerprint, embeddingSpaceFingerprintText, legacyManualEmbeddingSpace, parseEmbeddingSpaceFingerprint
   , ObservationCountQuery(..), ObservationCounts(..), validateObservationCountQuery
+  , ObservationQueryScope(..), ObservationSubjectTreeQuery(..), ObservationSubjectTreeTerminal(..), ObservationSubjectTreeNode(..), ObservationSubjectTreePage(..), validateObservationSubjectTreeQuery
   , validateCreateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspacePlanningCounts(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
@@ -532,6 +533,71 @@ instance ToJSON CreateObservation where
 instance FromJSON CreateObservation where
   parseJSON = withObject "CreateObservation" $ \o -> CreateObservation
     <$> o .: "workspace_id" <*> parseCreateObservationSubjects o <*> o .: "git_sha" <*> o .: "content"
+
+-- | Omission at public boundaries preserves the combined search contract.
+data ObservationQueryScope = ObservationCombined | ObservationContent
+  deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationQueryScope where
+  toJSON ObservationCombined = String "combined"
+  toJSON ObservationContent = String "content"
+instance FromJSON ObservationQueryScope where
+  parseJSON = withText "ObservationQueryScope" $ \case
+    "combined" -> pure ObservationCombined
+    "content" -> pure ObservationContent
+    _ -> fail "query_scope must be combined or content"
+
+data ObservationSubjectTreeQuery = ObservationSubjectTreeQuery
+  { workspaceId :: UUID
+  , prefix :: Text
+  , subjectQuery :: Maybe Text
+  , subjectKind :: Maybe SubjectKind
+  , gitSha :: Maybe Text
+  , currentGitSha :: Maybe Text
+  , historyGitSha :: Maybe Text
+  , limit :: Maybe Int
+  , offset :: Maybe Int
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationSubjectTreeQuery where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSubjectTreeQuery where parseJSON = genericParseJSON jsonOptions
+
+data ObservationSubjectTreeTerminal = ObservationSubjectTreeTerminal
+  { subjectKind :: SubjectKind
+  , subject :: Text
+  , observationCount :: Int64
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationSubjectTreeTerminal where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSubjectTreeTerminal where parseJSON = genericParseJSON jsonOptions
+
+data ObservationSubjectTreeNode = ObservationSubjectTreeNode
+  { path :: Text
+  , segment :: Text
+  , hasChildren :: Bool
+  , observationCount :: Int64
+  , terminals :: [ObservationSubjectTreeTerminal]
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationSubjectTreeNode where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSubjectTreeNode where parseJSON = genericParseJSON jsonOptions
+
+data ObservationSubjectTreePage = ObservationSubjectTreePage
+  { items :: [ObservationSubjectTreeNode]
+  , hasMore :: Bool
+  , totalCount :: Int64
+  , matchCount :: Int64
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationSubjectTreePage where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSubjectTreePage where parseJSON = genericParseJSON jsonOptions
+
+validateObservationSubjectTreeQuery :: ObservationSubjectTreeQuery -> [Text]
+validateObservationSubjectTreeQuery value =
+  (if T.null value.prefix then [] else validateObservationSubjects
+    [ObservationSubject (if T.any (`elem` ['*', '?']) value.prefix then SubjectGlob else SubjectFile) value.prefix])
+  <> maybe [] (validateByteLength "subject_query" maxObservationSubjectBytes) value.subjectQuery
+  <> maybe [] validateGitSha value.gitSha
+  <> maybe [] validateGitSha value.currentGitSha
+  <> maybe [] validateGitSha value.historyGitSha
+  <> validateObservationPagination value.limit Nothing
+  <> validateUnifiedSearchOffset value.offset
 
 -- | Exact provenance filters compose with optional full-text search.
 data ObservationQuery = ObservationQuery

@@ -141,6 +141,12 @@ The recursive `open_dependency_count` still includes descendant work. Clients mu
 treat a missing or null own count as unknown and refresh bounded summaries before
 allowing todo, in-progress or completed transitions.
 
+Task prerequisites stay at the same hierarchy level: roots may depend only on
+roots, and subtasks only on siblings with the same parent. Invalid links or
+hierarchy changes return HTTP 409 `lifecycle_conflict` with code
+`TASK_DEPENDENCY_SCOPE_MISMATCH`. Explicit cycles still return HTTP 400
+`dependency_cycle`. See [dependency scope migration and diagnostics](task-dependencies.md).
+
 Most list routes return `{"items":[...],"has_more":true}`. Start at `offset=0`,
 advance by the number of returned items, and stop when `has_more` is false.
 Ordinary list pages default to 50 items and allow up to 200; navigation pages

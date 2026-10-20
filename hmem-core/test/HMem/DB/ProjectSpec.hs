@@ -820,7 +820,7 @@ spec = do
       prerequisite <- Task.createTask env.pool CreateTask
         { workspaceId = workspace.id, projectId = Just project.id, parentId = Nothing, title = "prerequisite", description = Nothing, priority = Nothing, metadata = Nothing }
       dependent <- Task.createTask env.pool CreateTask
-        { workspaceId = workspace.id, projectId = Just project.id, parentId = Just prerequisite.id, title = "dependent", description = Nothing, priority = Nothing, metadata = Nothing }
+        { workspaceId = workspace.id, projectId = Just project.id, parentId = Nothing, title = "dependent", description = Nothing, priority = Nothing, metadata = Nothing }
       Task.addDependency env.pool dependent.id prerequisite.id
       _ <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/ChangeStream.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "captured")
       group <- WorkspaceGroup.createGroup env.pool (CreateWorkspaceGroup "change-stream-group" Nothing)

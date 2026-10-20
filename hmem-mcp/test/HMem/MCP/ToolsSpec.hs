@@ -417,6 +417,19 @@ spec = do
         jsonRpcToolCall manager base initialized workspaceContext "task_dependency" arguments
           >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "dependency_cycle" value))
 
+    it "dependencyScope preserves structured hierarchy conflicts through MCP and JSON-RPC" $
+      testWithApplication (pure dependencyScopeApp) $ \port ->
+        bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager -> do
+          let arguments = object ["action" .= ("add" :: Text), "task_id" .= observationId, "depends_on_id" .= workspaceId]
+              base = "http://127.0.0.1:" <> show port
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("task_dependency" :: Text), "arguments" .= arguments])
+          response `shouldSatisfy` isMcpError
+          response `shouldSatisfy` contains "TASK_DEPENDENCY_SCOPE_MISMATCH"
+          initialized <- newTVarIO True
+          workspaceContext <- newTVarIO (Just (MCPContext Nothing testIdentity))
+          jsonRpcToolCall manager base initialized workspaceContext "task_dependency" arguments
+            >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "TASK_DEPENDENCY_SCOPE_MISMATCH" value))
+
     it "parses, validates, and dispatches one atomic task batch-move request" $ do
       let observationUuid = read (T.unpack observationId) :: UUID
           workspaceUuid = read (T.unpack workspaceId) :: UUID
@@ -1514,6 +1527,10 @@ withDependencyCycleMock action =
 dependencyCycleApp :: Wai.Application
 dependencyCycleApp _ respond = respond $ Wai.responseLBS status400 [("Content-Type", "application/json")]
   (encode (object ["error" .= ("dependency_cycle" :: Text), "message" .= ("Task dependency would create a cycle" :: Text)]))
+
+dependencyScopeApp :: Wai.Application
+dependencyScopeApp _ respond = respond $ Wai.responseLBS status409 [("Content-Type", "application/json")]
+  (encode (object ["error" .= ("lifecycle_conflict" :: Text), "code" .= ("TASK_DEPENDENCY_SCOPE_MISMATCH" :: Text), "message" .= ("Task prerequisites must be roots or siblings under the same parent." :: Text)]))
 
 withLifecycleConflictMock :: (Manager -> String -> IO a) -> IO a
 withLifecycleConflictMock action =

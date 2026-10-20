@@ -57,6 +57,7 @@ data-files:
     migrations/V037__project_pause_audit_provenance.sql
     migrations/V038__remove_task_due.sql
     migrations/V039__declared_bot_identity.sql
+    migrations/V040__task_dependency_scopes.sql
 
 library
   exposed-modules:

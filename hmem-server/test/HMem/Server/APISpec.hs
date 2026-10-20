@@ -1133,6 +1133,28 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       add otherDependency.id >>= (\response -> responseStatus response `shouldBe` status400)
       add (read "00000000-0000-0000-0000-000000000001" :: UUID) >>= (\response -> responseStatus response `shouldBe` status404)
 
+    it "dependencyScope returns structured conflicts for forbidden edges and hierarchy changes" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "dependency-scope-http"
+      let create parent title = do
+            response <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "parent_id" .= parent, "title" .= (title :: T.Text)])
+            responseStatus response `shouldBe` status200
+            maybe (fail "expected task") pure (decode (responseBody response) :: Maybe Task)
+          path taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
+          add source target = postJson app (path source <> "/dependencies") (object ["depends_on_id" .= target])
+          assertScope response = do
+            responseStatus response `shouldBe` status409
+            let Just body = decode (responseBody response) :: Maybe Value
+            jsonField "error" body `shouldBe` Just (String "lifecycle_conflict")
+            jsonField "code" body `shouldBe` Just (String "TASK_DEPENDENCY_SCOPE_MISMATCH")
+      parent <- create (Nothing :: Maybe UUID) "parent"
+      child <- create (Just parent.id) "child"
+      root <- create Nothing "root"
+      add parent.id child.id >>= assertScope
+      add child.id root.id >>= assertScope
+      add parent.id root.id >>= (\response -> responseStatus response `shouldBe` status200)
+      putJson app (path root.id) (object ["parent_id" .= parent.id]) >>= assertScope
+      Task.getTask env.pool root.id >>= (`shouldSatisfy` maybe False (\task -> task.parentId == Nothing))
+
     it "returns a structured dependency_cycle error without changing a multi-hop graph" $ \(env, app) -> do
       workspace <- createTestWorkspace env "task-dependency-cycle"
       let create title = postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "title" .= (title :: T.Text)])

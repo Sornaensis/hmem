@@ -113,11 +113,12 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
       ]
 
     documentDependencyAdd operation = operation
-      & description ?~ "Mutates one prerequisite edge. Requests that would introduce a direct or transitive task-dependency cycle return the structured 400 dependency_cycle error; the dependency graph and automatic task blocking state are unchanged."
+      & description ?~ "Mutates one prerequisite edge between roots or siblings with the same parent. Forbidden hierarchy scopes return HTTP 409 lifecycle_conflict with code TASK_DEPENDENCY_SCOPE_MISMATCH. Explicit dependency cycles return HTTP 400 dependency_cycle; rejected mutations preserve graph and readiness state."
       & responses %~ (<> dependencyAddErrors)
 
     dependencyAddErrors = Responses Nothing $ InsOrdMap.fromList
-      [ (400, Inline (mempty & description .~ "Validation error. A cycle is reported as {error: dependency_cycle, message: Task dependency would create a cycle}; self-edges and cross-workspace edges are also rejected with 400.")) ]
+      [ (400, Inline (mempty & description .~ "Validation error. A cycle is reported as {error: dependency_cycle, message: Task dependency would create a cycle}; self-edges and cross-workspace edges are also rejected with 400."))
+      , (409, Inline (mempty & description .~ "A root/subtask or cross-parent subtask edge is rejected as lifecycle_conflict with code TASK_DEPENDENCY_SCOPE_MISMATCH.")) ]
 
     documentDependencyRemove operation = operation
       & description ?~ "Removes one prerequisite edge. Self-edges and cross-workspace edges are rejected with 400."

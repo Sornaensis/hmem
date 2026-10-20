@@ -179,6 +179,42 @@ test('closed prerequisites recover subtask starts after a failed parent eligibil
   }
 })
 
+test('legacy-topology authority permits eligible subtask beneath an automatic parent', { timeout: 60000 }, async () => {
+  for (const focused of [false, true]) {
+    const data = prerequisiteFixture(), base = data.tasks[0]
+    data.tasks = [
+      { ...base, id: 'parent', title: 'Integrate capabilities, shared REST and legacy HTTP', status: 'blocked', auto_blocked: true, dependency_count: 0 },
+      { ...base, id: 'child', title: 'Port the isolated-session HTTP compatibility adapter', parent_id: 'parent', status: 'todo', dependency_count: 2 },
+      { ...base, id: 'sibling-a', title: 'Sibling A', parent_id: 'parent', status: 'blocked', dependency_count: 3 },
+      { ...base, id: 'sibling-b', title: 'Sibling B', parent_id: 'parent', status: 'blocked', dependency_count: 2 },
+      { ...base, id: 'finished-child', title: 'Finished child', parent_id: 'parent', status: 'done', dependency_count: 0 },
+      ...['done', 'cancelled'].map(status => ({ ...base, id: 'closed-' + status, title: status, project_id: 'hidden-project', status, dependency_count: 0 })),
+      ...Array.from({ length: 5 }, (_, index) => ({ ...base, id: 'open-' + index, title: 'Open prerequisite ' + index, project_id: 'hidden-project', status: 'todo', dependency_count: 0 })),
+    ]
+    data.dependencies = [
+      ...['done', 'cancelled'].map(status => ({ task_id: 'child', depends_on_id: 'closed-' + status })),
+      ...Array.from({ length: 5 }, (_, index) => ({ task_id: index < 3 ? 'sibling-a' : 'sibling-b', depends_on_id: 'open-' + index })),
+    ]
+    const parent = taskReadinessRollup(data, 'parent'), child = taskReadinessRollup(data, 'child')
+    assert.equal(parent.open_subtask_count, 3); assert.equal(parent.done_subtask_count, 1)
+    assert.equal(parent.open_dependency_count, 5); assert.equal(parent.own_open_dependency_count, 0)
+    assert.equal(parent.can_start_subtasks, true); assert.equal(child.own_open_dependency_count, 0)
+    const h = await openHierarchy(data, [], { updateTask(fixture, id, update) {
+      assert.equal(id, 'child'); assert.equal(update.status, 'in_progress')
+      const task = fixture.tasks.find(value => value.id === id); task.status = update.status; return task
+    } })
+    try {
+      await h.start(focused ? 'tab=projects&focus=task:child' : 'tab=projects', focused ? 'child' : 'root-project'); await h.idle()
+      if (!focused) assert.match(await h.page.locator('#entity-parent').innerText(), /5 open dependencies/)
+      await h.scrollTo('task:child')
+      assert.equal((await transitionAvailability(h, 'child')).in_progress, true)
+      await statusControl(h, 'child').selectOption('in_progress'); await h.idle()
+      assert.equal(h.requests.filter(r => r.path === '/api/v1/tasks/child' && r.method === 'PUT').length, 1)
+      assert.equal(await statusControl(h, 'child').inputValue(), 'in_progress')
+    } finally { await h.close() }
+  }
+})
+
 test('five task statuses and mixed subtasks retain independent palette, neutral blocked semantics and single opacity', { timeout: 60000 }, async () => {
   const h = await openHierarchy(fixture())
   try {

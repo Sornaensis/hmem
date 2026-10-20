@@ -1,6 +1,7 @@
 module HMem.DB.TaskSpec (spec) where
 
 import Control.Exception (try)
+import Control.Concurrent.Async (concurrently)
 import Data.Aeson (Value(..), object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -20,7 +21,7 @@ import Test.Hspec
 import HMem.DB.Observation
 import HMem.DB.Overview (getTaskOverview, taskCardSummaries)
 import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
-import HMem.DB.Pool (DBException(..), withConn, runSession)
+import HMem.DB.Pool (DBException(..), withConn, runSession, runTransaction)
 import HMem.DB.Project qualified as Project
 import HMem.DB.Task
 import HMem.DB.TestHarness
@@ -148,7 +149,7 @@ spec = do
       expectLifecycleCode "TASK_SUBTASK_START_BLOCKED" $ restoreTask env.pool child.id
       _ <- updateTask env.pool parent.id (cancelStatusUpdate Todo)
       restoreTask env.pool child.id `shouldReturn` True
-      prerequisite <- createTaskFor env workspace.id Nothing Nothing "prerequisite"
+      prerequisite <- createTaskFor env workspace.id Nothing (Just parent.id) "prerequisite"
       addDependency env.pool child.id prerequisite.id
       fmap (fmap (.status)) (getTask env.pool child.id) `shouldReturn` Just Blocked
       _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
@@ -238,7 +239,100 @@ spec = do
       getTask env.pool child.id `shouldReturn` Nothing
 
   taskLifecycleSpec
+  dependencyScopeSpec
 
+dependencyScopeSpec :: Spec
+dependencyScopeSpec = around withTestEnv $ describe "dependencyScope" $ do
+    it "rejects dependency scope crossings from parent prerequisites to owned subtasks atomically" $ \env -> do
+      workspace <- createTestWorkspace env "scheduling-parent-child-cycle"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      before <- mapM (getTaskOverview env.pool) [parent.id, child.id]
+      beforeAudit <- mapM (getAuditLogRows env.pool "task" . showText) [parent.id, child.id]
+      beforeEvents <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ addDependency env.pool parent.id child.id
+      mapM (getTaskOverview env.pool) [parent.id, child.id] `shouldReturn` before
+      mapM (getAuditLogRows env.pool "task" . showText) [parent.id, child.id] `shouldReturn` beforeAudit
+      listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` beforeEvents
+    it "dependency scope rejects both root-child directions and cross-parent siblings, including closed tasks" $ \env -> do
+      workspace <- createTestWorkspace env "dependency-scope-directions"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      other <- createTaskFor env workspace.id Nothing Nothing "other"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      sibling <- createTaskFor env workspace.id Nothing (Just parent.id) "sibling"
+      foreignChild <- createTaskFor env workspace.id Nothing (Just other.id) "foreign child"
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Done)
+      _ <- updateTask env.pool foreignChild.id (cancelStatusUpdate Cancelled)
+      mapM_ (\(source, target) -> expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ addDependency env.pool source target)
+        [(parent.id,child.id),(child.id,parent.id),(other.id,child.id),(child.id,other.id),(child.id,foreignChild.id),(foreignChild.id,child.id)]
+      addDependency env.pool sibling.id child.id
+      dependencyIds env sibling.id `shouldReturn` [child.id]
+    it "dependency scope rejects hierarchy attachment, detachment and reparenting in either endpoint order" $ \env -> do
+      workspace <- createTestWorkspace env "dependency-scope-placement"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      other <- createTaskFor env workspace.id Nothing Nothing "other"
+      source <- createTaskFor env workspace.id Nothing Nothing "source"
+      target <- createTaskFor env workspace.id Nothing Nothing "target"
+      addDependency env.pool source.id target.id
+      mapM_ (\id -> expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ updateTask env.pool id (placementUpdate (Just parent.id))) [source.id,target.id]
+      runTransaction env.pool $ Session.statement ([source.id,target.id],Just parent.id) setParentsDirect
+      mapM_ (\id -> do
+        expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ updateTask env.pool id (placementUpdate Nothing)
+        expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ updateTask env.pool id (placementUpdate (Just other.id))) [source.id,target.id]
+      runTransaction env.pool $ Session.statement ([source.id,target.id],Just other.id) setParentsDirect
+      runTransaction env.pool $ Session.statement ([source.id,target.id],Nothing) setParentsDirect
+      dependencyIds env source.id `shouldReturn` [target.id]
+      mapM (taskState env) [source.id,target.id] >>= (`shouldSatisfy` all (\(_,_,parentId,_) -> parentId == Nothing))
+    it "dependency scope serializes a concurrent edge insertion against endpoint attachment" $ \env -> do
+      workspace <- createTestWorkspace env "dependency-scope-concurrent"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      source <- createTaskFor env workspace.id Nothing Nothing "source"
+      target <- createTaskFor env workspace.id Nothing Nothing "target"
+      (edge, placement) <- concurrently
+        (try (addDependency env.pool source.id target.id) :: IO (Either DBException ()))
+        (try (updateTask env.pool source.id (placementUpdate (Just parent.id))) :: IO (Either DBException (Maybe Task)))
+      isLeft edge `shouldBe` not (isLeft placement)
+      case edge of Left (DBLifecycleViolation code _ _ _) -> code `shouldBe` "TASK_DEPENDENCY_SCOPE_MISMATCH"; Left other -> expectationFailure (show other); _ -> pure ()
+      case placement of Left (DBLifecycleViolation code _ _ _) -> code `shouldBe` "TASK_DEPENDENCY_SCOPE_MISMATCH"; Left other -> expectationFailure (show other); _ -> pure ()
+    it "dependency scope preserves root and sibling reconvergent DAGs and the existing cycle error" $ \env -> do
+      workspace <- createTestWorkspace env "dependency-scope-dags"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      mapM_ (\family -> do
+        [a,b,c,d] <- mapM (createTaskFor env workspace.id Nothing family) ["a","b","c","d"]
+        mapM_ (\(source,target) -> addDependency env.pool source target) [(a.id,b.id),(a.id,c.id),(b.id,d.id),(c.id,d.id)]
+        addDependency env.pool d.id a.id `shouldThrow` (\case DBTaskDependencyCycle _ -> True; _ -> False)) [Nothing,Just parent.id]
+    it "dependency scope revalidates restored incident links and permits legacy metadata and edge removal" $ \env -> do
+      workspace <- createTestWorkspace env "dependency-scope-restore"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      source <- createTaskFor env workspace.id Nothing Nothing "source"
+      target <- createTaskFor env workspace.id Nothing Nothing "target"
+      addDependency env.pool source.id target.id
+      runTransaction env.pool $ do
+        Session.statement target.id softDeleteDirect
+        Session.sql "ALTER TABLE tasks DISABLE TRIGGER trg_task_zz_dependency_scope_update"
+        Session.statement ([target.id],Just parent.id) setParentsDirect
+        Session.sql "ALTER TABLE tasks ENABLE TRIGGER trg_task_zz_dependency_scope_update"
+        Session.sql "ALTER TABLE task_dependencies DISABLE TRIGGER trg_dependency_zz_scope_insert"
+        Session.statement (source.id,target.id) insertDependencyDirect
+        Session.sql "ALTER TABLE task_dependencies ENABLE TRIGGER trg_dependency_zz_scope_insert"
+      expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ restoreTask env.pool target.id
+      diagnostic <- runSession env.pool $ Session.statement workspace.id scopeDiagnostics
+      objectField "total_count" diagnostic `shouldBe` Just (toJSON (1 :: Int))
+      objectField "truncated" diagnostic `shouldBe` Just (Bool True)
+      _ <- updateTask env.pool source.id ((placementUpdate Nothing) { title = Just "metadata remains writable" })
+      removeDependency env.pool source.id target.id
+      restoreTask env.pool target.id `shouldReturn` True
+    it "dependency scope rejects raw bulk edge insertion and endpoint rewrites without partial effects" $ \env -> do
+      workspace <- createTestWorkspace env "dependency-scope-raw"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      source <- createTaskFor env workspace.id Nothing Nothing "source"
+      target <- createTaskFor env workspace.id Nothing Nothing "target"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ runTransaction env.pool $ Session.statement (source.id,[target.id,child.id]) insertDependenciesDirect
+      dependencyIds env source.id `shouldReturn` []
+      addDependency env.pool source.id target.id
+      expectLifecycleCode "TASK_DEPENDENCY_SCOPE_MISMATCH" $ runTransaction env.pool $ Session.statement (source.id,target.id,child.id) rewriteDependencyDirect
+      dependencyIds env source.id `shouldReturn` [target.id]
 taskLifecycleSpec :: Spec
 taskLifecycleSpec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Task lifecycle" $ do
@@ -330,13 +424,13 @@ taskLifecycleSpec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       _ <- deleteTask env.pool deletedChild.id
       beforeDeleted <- runSession env.pool $ Session.statement deletedChild.id taskRowForCascadeStatement
       beforeDone <- getTask env.pool doneChild.id
-      addDependency env.pool unrelated.id child.id
+      addDependency env.pool unrelated.id parent.id
       _ <- updateTask env.pool parent.id (cancelStatusUpdate Cancelled)
       mapM (fmap (fmap (.status)) . getTask env.pool) [parent.id, child.id, unrelated.id]
         `shouldReturn` [Just Cancelled, Just Cancelled, Just Todo]
       getTask env.pool doneChild.id `shouldReturn` beforeDone
       runSession env.pool (Session.statement deletedChild.id taskRowForCascadeStatement) `shouldReturn` beforeDeleted
-      dependencyIds env unrelated.id `shouldReturn` [child.id]
+      dependencyIds env unrelated.id `shouldReturn` [parent.id]
       _ <- updateTask env.pool parent.id (cancelStatusUpdate Cancelled)
       getTask env.pool doneChild.id `shouldReturn` beforeDone
 
@@ -495,6 +589,28 @@ cancelStatusUpdate :: TaskStatus -> UpdateTask
 cancelStatusUpdate status = UpdateTask
   { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
   , status = Just status, priority = Nothing, metadata = Nothing }
+
+placementUpdate :: Maybe UUID -> UpdateTask
+placementUpdate parent = (cancelStatusUpdate Todo) { status = Nothing, parentId = maybe SetNull SetTo parent }
+
+scopeDiagnostics :: Statement.Statement UUID Value
+scopeDiagnostics = Statement.Statement "SELECT hmem_task_dependency_scope_diagnostics($1,0)"
+  (Enc.param (Enc.nonNullable Enc.uuid)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.jsonb))) True
+
+setParentsDirect :: Statement.Statement ([UUID], Maybe UUID) ()
+setParentsDirect = Statement.Statement "UPDATE tasks SET parent_id=$2 WHERE id=ANY($1)"
+  (contramap fst (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) <> contramap snd (Enc.param (Enc.nullable Enc.uuid))) Dec.noResult True
+
+softDeleteDirect :: Statement.Statement UUID ()
+softDeleteDirect = Statement.Statement "UPDATE tasks SET deleted_at=now() WHERE id=$1" (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+insertDependenciesDirect :: Statement.Statement (UUID,[UUID]) ()
+insertDependenciesDirect = Statement.Statement "INSERT INTO task_dependencies(task_id,depends_on_id) SELECT $1, unnest($2::uuid[])"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid))))) Dec.noResult True
+
+rewriteDependencyDirect :: Statement.Statement (UUID,UUID,UUID) ()
+rewriteDependencyDirect = Statement.Statement "UPDATE task_dependencies SET depends_on_id=$3 WHERE task_id=$1 AND depends_on_id=$2"
+  (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
 
 cancelTaskStatement :: Statement.Statement UUID ()
 cancelTaskStatement = Statement.Statement

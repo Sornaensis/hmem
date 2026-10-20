@@ -116,6 +116,10 @@ rationales show combined blockers. Expanded project cards load all next tasks;
 blocked work and closed dependencies have separate, initially collapsed count
 disclosures. Open dependencies appear directly on task cards.
 
+Root tasks can depend only on other root tasks. Subtasks can depend only on
+siblings under the same parent. Remove conflicting dependencies before moving
+a task into or out of a subtask group.
+
 Tasks have no deadline editor, due filter or due timeline series. Completion dates,
 priority, hierarchy and readiness remain available. History labels old deadlines
 **Due at (obsolete)**. A replay that changed only deadlines is refused; supported

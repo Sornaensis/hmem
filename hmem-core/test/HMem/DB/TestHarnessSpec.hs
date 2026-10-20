@@ -667,6 +667,37 @@ spec = do
       withTestEnv $ \env -> withRollbackTestEnv env (exerciseRollbackBoundary SavepointRollback)
 
   describe "migration resolution" $ do
+    it "dependencyScopeMigration cleans forbidden saved links atomically while retaining hierarchy and valid DAG links" $
+      withDueRemovalDatabase $ \sandbox migrations pool -> do
+        beforeDir <- copyMigrationSubset sandbox migrations "scope-pre-v040" (< "V040")
+        upgradeDir <- copyMigrationSubset sandbox migrations "scope-v040-only" (== "V040__task_dependency_scopes.sql")
+        initial <- Migration.runMigrations pool beforeDir
+        initial.failed `shouldBe` Nothing
+        runSession pool $ Session.sql dependencyScopeFixture
+        original <- runSession pool dependencyScopeSnapshot
+        runSession pool $ Session.sql "CREATE FUNCTION fail_scope_ledger() RETURNS trigger AS $$ BEGIN IF NEW.version=40 THEN RAISE EXCEPTION 'injected V040 ledger failure'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER fail_scope_ledger BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION fail_scope_ledger();"
+        failed <- Migration.runMigrations pool upgradeDir
+        show failed.failed `shouldSatisfy` isInfixOf "injected V040 ledger failure"
+        runSession pool dependencyScopeSnapshot `shouldReturn` original
+        runSession pool (queryBool "SELECT NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=40) AND to_regprocedure('hmem_enforce_task_dependency_scope()') IS NULL") `shouldReturn` True
+        runSession pool $ Session.sql "DROP TRIGGER fail_scope_ledger ON schema_migrations; DROP FUNCTION fail_scope_ledger();"
+        upgraded <- Migration.runMigrations pool upgradeDir
+        upgraded.failed `shouldBe` Nothing
+        upgraded.applied `shouldBe` ["V040__task_dependency_scopes.sql"]
+        runSession pool (queryBool "SELECT (SELECT count(*) FROM task_dependencies)=2 AND NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks a ON a.id=d.task_id JOIN tasks b ON b.id=d.depends_on_id WHERE a.parent_id IS DISTINCT FROM b.parent_id) AND (SELECT count(*) FROM tasks WHERE parent_id='00000000-0000-0000-0000-000000004101')=3") `shouldReturn` True
+        runSession pool (queryBool "SELECT (hmem_task_dependency_scope_diagnostics('00000000-0000-0000-0000-000000004001')->>'total_count')::int=0 AND status='blocked' AND auto_blocked FROM tasks WHERE title='scope parent'") `shouldReturn` True
+        runSession pool (queryBool "SELECT count(*)=4 FROM audit_log WHERE entity_type='task_dependency' AND action='delete'") `shouldReturn` True
+        runSession pool (queryBool "SELECT count(*)=4 FROM change_stream_outbox WHERE transaction_cause='migration' AND envelope->'entity'->>'type'='task_dependency' AND envelope->'entity'->>'action'='deleted'") `shouldReturn` True
+        after <- runSession pool dependencyScopeSnapshot
+        skipped <- Migration.runMigrations pool upgradeDir
+        skipped.failed `shouldBe` Nothing
+        skipped.applied `shouldBe` []
+        runSession pool dependencyScopeSnapshot `shouldReturn` after
+        -- The valid parent->root prerequisite remains a real start gate.
+        runSession pool (queryBool "SELECT NOT hmem_task_can_start_subtasks(id) FROM tasks WHERE title='scope parent'") `shouldReturn` True
+        runSession pool $ Session.sql "UPDATE tasks SET status='done' WHERE title='scope external'; UPDATE tasks SET status='in_progress' WHERE title='scope child';"
+        runSession pool (queryBool "SELECT status='blocked' AND auto_blocked AND hmem_task_can_start_subtasks(id) FROM tasks WHERE title='scope parent'") `shouldReturn` True
+        runSession pool (queryBool "SELECT status='in_progress' FROM tasks WHERE title='scope child'") `shouldReturn` True
     it "taskDueRemovalMigration upgrades V037 atomically, retries after ledger failure and skips registered work" $
       withDueRemovalDatabase $ \sandbox migrations pool -> do
         beforeDir <- copyMigrationSubset sandbox migrations "due-pre-v038" (< "V038")
@@ -1578,6 +1609,18 @@ spec = do
 -- Fresh and upgrade cases need distinct databases because they exercise the
 -- production runner against different ledgers. The standard sandbox bracket
 -- owns both database and migration copies and removes them after each case.
+dependencyScopeSnapshot :: Session.Session Text
+dependencyScopeSnapshot = queryText "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM tasks t),(SELECT jsonb_agg(to_jsonb(d) ORDER BY task_id,depends_on_id) FROM task_dependencies d),(SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM audit_log a),(SELECT jsonb_agg(to_jsonb(o) ORDER BY scope,workspace_id,cursor) FROM change_stream_outbox o),(SELECT jsonb_agg(to_jsonb(c) ORDER BY scope,workspace_id) FROM change_stream_scope_counters c))::text"
+
+dependencyScopeFixture :: BS.ByteString
+dependencyScopeFixture = B8.unlines
+  [ "INSERT INTO workspaces(id,name) VALUES ('00000000-0000-0000-0000-000000004001','dependency scope upgrade');"
+  , "INSERT INTO tasks(id,workspace_id,title) VALUES ('00000000-0000-0000-0000-000000004101','00000000-0000-0000-0000-000000004001','scope parent'),('00000000-0000-0000-0000-000000004102','00000000-0000-0000-0000-000000004001','scope external');"
+  , "INSERT INTO tasks(id,workspace_id,parent_id,title,status) VALUES ('00000000-0000-0000-0000-000000004103','00000000-0000-0000-0000-000000004001','00000000-0000-0000-0000-000000004101','scope child','todo'),('00000000-0000-0000-0000-000000004104','00000000-0000-0000-0000-000000004001','00000000-0000-0000-0000-000000004101','scope sibling','todo'),('00000000-0000-0000-0000-000000004105','00000000-0000-0000-0000-000000004001','00000000-0000-0000-0000-000000004101','scope completed','done');"
+  , "UPDATE tasks SET deleted_at=now() WHERE title='scope sibling';"
+  , "INSERT INTO task_dependencies(task_id,depends_on_id) VALUES ('00000000-0000-0000-0000-000000004101','00000000-0000-0000-0000-000000004103'),('00000000-0000-0000-0000-000000004101','00000000-0000-0000-0000-000000004104'),('00000000-0000-0000-0000-000000004101','00000000-0000-0000-0000-000000004102'),('00000000-0000-0000-0000-000000004102','00000000-0000-0000-0000-000000004104'),('00000000-0000-0000-0000-000000004104','00000000-0000-0000-0000-000000004103'),('00000000-0000-0000-0000-000000004101','00000000-0000-0000-0000-000000004105');"
+  ]
+
 withDueRemovalDatabase :: (TestSandbox -> FilePath -> Pool Hasql.Connection -> IO ()) -> IO ()
 withDueRemovalDatabase action = withTestSandbox $ \sandbox -> do
   migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot

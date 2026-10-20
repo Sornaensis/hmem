@@ -6,6 +6,41 @@ import { openDiscovery, discoverySelection } from './observation-discovery-fixtu
 import { paint, scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
 
 const applied = h => h.page.locator('.observation-applied-filters').textContent()
+
+test('production backend wire omission loads hidden counts, flat pages and typed tree observations', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  const row = path => h.page.locator('[data-tree-path=' + JSON.stringify(path) + ']')
+  try {
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id)
+    await h.idle()
+    const count = h.receipts.find(value => value.payload?.view === 'count')
+    assert.ok(count, 'Projects startup admits the shared hidden count bootstrap')
+    assert.equal(Object.hasOwn(count.response.page, 'tree'), false, 'Actual backend count shape omits Nothing tree')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
+    await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.idle()
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '50')
+    await h.page.getByRole('button', { name: 'Load more', exact: true }).click(); await h.idle()
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '64')
+    const flat = h.receipts.filter(value => value.payload?.view === 'list')
+    assert.deepEqual(flat.map(value => value.payload.offset), [0, 50])
+    assert.ok(flat.every(value => !Object.hasOwn(value.response.page, 'tree')))
+    assert.equal(flat[1].payload.context_token, count.response.context_token)
+    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle()
+    for (const path of ['src', 'src/**', 'src/**/*.elm']) {
+      await revealObservationRow(h.page, row(path))
+      await row(path).locator('.observation-tree-chevron').click(); await h.idle()
+    }
+    const leaf = h.receipts.find(value => value.payload?.terminal?.subject === 'src/**/*.elm')
+    assert.ok(leaf)
+    assert.equal(Object.hasOwn(leaf.response.page, 'tree'), false, 'Typed list shares the omitted tree wire shape')
+    assert.deepEqual(leaf.response.page.items.map(value => value.id).sort(), ['cache-main', 'cache-view'])
+    assert.equal(await h.page.locator('[data-observation-id="cache-main"]').count(), 1)
+    assert.equal(await h.page.locator('[data-observation-id="cache-view"]').count(), 1)
+    assert.equal(await h.page.getByRole('button', { name: 'Retry search', exact: true }).count(), 0)
+    assert.deepEqual(h.errors, [])
+  } finally { await h.close() }
+})
+
 async function activate(page, button, key = 'Enter') {
   const expanded = await button.getAttribute('aria-expanded'), id = await button.getAttribute('id')
   await button.focus(); await page.keyboard.press(key)

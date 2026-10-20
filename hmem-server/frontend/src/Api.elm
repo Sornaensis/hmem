@@ -635,11 +635,25 @@ observationDiscoveryBody query =
 
 observationDiscoveryDecoder : Decoder ObservationDiscoveryResponse
 observationDiscoveryDecoder =
+    let
+        -- The backend omits Nothing for list/count pages. A present tree must
+        -- still decode strictly rather than treating malformed data as absent.
+        optionalTree =
+            D.keyValuePairs D.value
+                |> D.andThen
+                    (\fields ->
+                        if List.any (Tuple.first >> (==) "tree") fields then
+                            D.field "tree" (D.nullable observationSubjectTreeDecoder)
+
+                        else
+                            D.succeed Nothing
+                    )
+    in
     D.map5 ObservationDiscoveryResponse (D.field "context_token" D.string) (D.field "expires_at" D.string)
         (D.field "retrieval" (D.map2 (\mode reason -> { mode = mode, reason = reason }) (D.field "mode" D.string) (D.field "reason" (D.nullable D.string))))
         (D.field "complete" D.bool)
         (D.field "page" (D.map4 (\items tree counts more -> { items = items, tree = tree, counts = counts, hasMore = more })
-            (D.field "items" (D.list observationDecoder)) (D.field "tree" (D.nullable observationSubjectTreeDecoder)) (D.field "counts" observationCountsDecoder) (D.field "has_more" D.bool)))
+            (D.field "items" (D.list observationDecoder)) optionalTree (D.field "counts" observationCountsDecoder) (D.field "has_more" D.bool)))
         |> D.andThen (\response -> if response.complete && response.contextToken /= "" && List.member response.retrieval.mode [ "hybrid", "fts_only" ] && List.length response.page.items <= 50 && (response.page.tree |> Maybe.map (\tree -> List.length tree.items <= 50) |> Maybe.withDefault True) then D.succeed response else D.fail "Invalid discovery response")
 
 

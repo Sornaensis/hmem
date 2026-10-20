@@ -61,13 +61,14 @@ export function createObservationDiscoveryAdapter(fixtures, { allObservations, a
       const values = ordered(scoped.filter(value => scores.has(value.id))).sort((a, b) => scores.get(b.id) - scores.get(a.id))
       const counts = { workspace_id: fixture.workspace.id, total_count: new Set(all.map(value => value.id)).size, match_count: new Set(values.map(value => value.id)).size }
       let page
-      if(payload.view==='count') page={items:[],has_more:false,counts,tree:null}
+      // ObservationDiscoveryPage's Aeson instance omits absent Maybe fields.
+      if(payload.view==='count') page={items:[],has_more:false,counts}
       else if (payload.view === 'tree') {
         const tree = discoveryTreePage(values, subjects, payload.prefix || '', payload.offset, payload.limit, counts)
         page = { items: [], has_more: tree.has_more, counts, tree }
       } else {
         const rows = payload.terminal ? values.filter(value => subjects(value).some(subject => subject.subject_kind === payload.terminal.subject_kind && subject.subject === payload.terminal.subject)) : values
-        page = { ...slice(rows, payload.offset, payload.limit), counts, tree: null }
+        page = { ...slice(rows, payload.offset, payload.limit), counts }
       }
       const provenance = {...(filters.git_sha?{original_git_sha:filters.git_sha}:{}),...(filters.current_git_sha?{current_git_sha:filters.current_git_sha}:{}),...(filters.history_git_sha?{history_git_sha:filters.history_git_sha}:{})}
       if(Object.keys(provenance).length) page.items=page.items.map(value=>({...value,provenance_match:provenance}))

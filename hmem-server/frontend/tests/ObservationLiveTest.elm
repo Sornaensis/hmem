@@ -811,6 +811,19 @@ suite = describe "automatic observation refresh and scoped preferences"
             accepted = D.decodeString Api.observationDiscoveryDecoder >> Result.toMaybe >> (/=) Nothing
         in Expect.equal ([True,False,False,False,False],True)
             (List.map accepted [envelope 50 "true" "token" "hybrid",envelope 51 "true" "token" "hybrid",envelope 50 "false" "token" "fts_only",envelope 50 "true" "" "fts_only",envelope 50 "true" "token" "unknown"],D.decodeString Api.observationSubjectTreeDecoder (tree 200) |> Result.toMaybe |> (/=) Nothing)
+    , test "discovery accepts omitted count and list trees but rejects malformed present trees" <| \_ ->
+        let
+            envelope treeField = "{\"context_token\":\"token\",\"expires_at\":\"2099-01-01T00:00:00Z\",\"retrieval\":{\"mode\":\"fts_only\",\"reason\":\"empty_query\"},\"complete\":true,\"page\":{\"items\":[],\"has_more\":false,\"counts\":{\"workspace_id\":\"" ++ workspaceId ++ "\",\"total_count\":202,\"match_count\":202}" ++ treeField ++ "}}"
+            accepted = envelope >> D.decodeString Api.observationDiscoveryDecoder >> Result.toMaybe >> (/=) Nothing
+        in
+        Expect.equal [ True, True, True, False, False, False, False ]
+            (List.map accepted
+                [ "", ",\"tree\":null"
+                , ",\"tree\":{\"items\":[],\"has_more\":false,\"total_count\":202,\"match_count\":202}"
+                , ",\"tree\":false", ",\"tree\":{}"
+                , ",\"tree\":{\"items\":[],\"has_more\":false,\"total_count\":1,\"match_count\":2}"
+                , ",\"tree\":{\"items\":\"invalid\",\"has_more\":false,\"total_count\":202,\"match_count\":202}"
+                ])
     , test "stages demanded pages without replacing cache and commits membership once" <| \_ ->
         let
             initial = project model model

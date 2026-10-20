@@ -12,6 +12,24 @@ import { untrackedFileDiff, navigateToFirstUsefulViewport, waitForFirstUsefulVie
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
+test('discovery additive route classification preserves legacy Observation and global entity route exports', () => {
+  assert.equal(perfApiRouteKey('/api/v1/observations','GET'),'observations:list')
+  assert.equal(perfApiRouteKey('/api/v1/observations/count','POST'),'observations:count')
+  assert.equal(perfApiRouteKey('/api/v1/observations/subject-facets','GET'),'observations:facets')
+  assert.equal(perfApiRouteKey('/api/v1/tasks/example','GET'),'tasks:entity:example')
+  assert.equal(perfApiRouteKey('/api/v1/observations/discovery','POST'),'observations:discovery')
+})
+
+test('discovery accounting preserves historical GET fixture response bytes and list pagination', async () => {
+  const fixture=generateFixture('small'),tracker=createTracker(fixture),respond=fixtureResponder(fixture,tracker)
+  const url=`http://fixture/api/v1/observations?workspace_id=${fixture.workspace.id}&limit=2&offset=1`
+  const request={url:()=>url,method:()=> 'GET',postData:()=>null};let response
+  await respond({request:()=>request,fulfill:async value=>{response=value}})
+  assert.deepEqual(JSON.parse(response.body),queryObservations(fixture,{limit:2,offset:1}))
+  assert.deepEqual(tracker.physicalAccounting.snapshot(),{requests:1,completed:1,requestBytes:0,responseBytes:Buffer.byteLength(response.body)})
+  assert.equal(tracker.bytes['observations:list'],Buffer.byteLength(response.body))
+})
+
 const navigationRepairBase = '7249b786947938697d085b545dc4fa3f67abc5c8'
 let navigationReference
 async function navigationImplementations() {

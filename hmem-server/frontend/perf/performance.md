@@ -396,3 +396,36 @@ performance. Historical hotspot ownership remains
 For a bounded visual smoke, build first, run `node perf/serve.mjs large`, and open
 the printed URL in a named Playwright CLI session. The deterministic server does
 not modify production assets. This smoke does not replace qualification.
+# Live Observation search protocol fixture
+
+The `live-observation-search.v1` evidence profile identifies project
+`c32727d8-8d62-4e55-b6f7-62eacdaeced7`, qualification task
+`707a9421-cc30-4d3c-9978-3ece14bd6d5e`, and original review base
+`b73d5d5d0b07f2f27c5e982764b1886d5cafc41a`. It uses a separate task-owned
+temporary directory, five bounded evidence files, and the existing trace
+retirement and retention rules. The original review base does not identify
+the implementation HEAD; source and production-asset hashes identify that input.
+
+`fixtureResponder` supports keyed POST `/api/v1/observations/discovery`
+creation and token-only continuation. One pinned membership drives list pages,
+counts, tree branches and typed leaves. Subject/provenance predicates apply
+before content FTS union injected semantic membership (threshold 0.5, RRF k=60).
+Generations retire older contexts; modes and semantic inputs remain pinned.
+This deterministic fixture establishes protocol and membership causality, not
+database, GPU or network latency. Physical accounting records each intercepted
+request body and serialized response body once, including failed fulfillment;
+receipt acceptance separately requires successful fulfillment.
+
+Pure checks (no browser, server, build, install or operator configuration):
+
+```sh
+node --test perf/live-observation-search.test.mjs
+node --test --test-name-pattern=discovery perf/fixtures.test.mjs
+node --test perf/subject-tree-live-filters.test.mjs
+```
+
+Production workflow execution, source/assets/environment capture and supported
+record-after/check qualification belong to the qualification task after the
+paired Observation UI stabilizes. Existing budgets and historical assertions
+remain required; these pure checks create no benchmark receipt.
+

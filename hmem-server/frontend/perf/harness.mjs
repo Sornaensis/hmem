@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { assertQualificationEnvironment, createPhysicalRequestAccounting, observationDiscoveryReceipt } from './contracts.mjs'
+import { createObservationDiscoveryFixture } from './fixtures.mjs'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -243,6 +245,7 @@ export function assertLinkedNavigationPage(tracker, page) {
 }
 
 export function fixtureResponder(fixture, tracker, options = {}) {
+  const discovery = options.discovery || createObservationDiscoveryFixture(fixture,options.discoveryOptions)
   const snapshots = options.snapshots || snapshotItems(fixture)
   const resyncGate = options.resyncGate || null
   const focusContinuationPause = options.focusContinuationPause || null
@@ -259,6 +262,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     receipt.status = status
     receipt.workspaceId ||= value?.workspace_id || null
     receipt.bytes = Buffer.byteLength(body)
+    if (key === 'observations:discovery') receipt.discovery = observationDiscoveryReceipt(receipt.requestBody,value,status,false,receipt.rawRequestBody,body)
     if (key === 'navigation:batch') receipt.batchResponse = value
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
     if (key === 'navigation:branch') { receipt.navigation = value; receipt.navigationStatus = status }
@@ -277,6 +281,8 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     } finally {
       tracker.liveDiagnostics?.fulfilled(receipt.requestId, performance.now(), fulfilled)
       receipt.fulfilled = fulfilled
+      tracker.physicalAccounting.finish(receipt.requestId,body,fulfilled)
+      if (receipt.discovery) receipt.discovery.fulfilled = fulfilled
       if (receipt.observationPage) receipt.observationPage.response.fulfilled = fulfilled
       if (receipt.timeline) receipt.timeline.response.fulfilled = fulfilled
       if (key === 'navigation:branch') receipt.navigationFulfilled = fulfilled
@@ -351,6 +357,15 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       workspaceId: pathname.match(/^\/api\/v1\/workspaces\/([^/]+)(?:\/|$)/)?.[1] || url.searchParams.get('workspace_id')
         || (key === 'observations:count' ? request.postDataJSON()?.workspace_id : null),
       key, metadataEpoch: tracker.metadataEpoch, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
+    const rawRequestBody = typeof request.postData === 'function' ? request.postData() || ''
+      : request.method() === 'POST' && typeof request.postDataJSON === 'function' ? JSON.stringify(request.postDataJSON()) : ''
+    tracker.physicalAccounting.begin(receipt.requestId,rawRequestBody)
+    receipt.requestBytes = Buffer.byteLength(rawRequestBody || '')
+    if (key === 'observations:discovery') {
+      receipt.rawRequestBody = rawRequestBody
+      receipt.requestBody = request.postDataJSON()
+      receipt.workspaceId = receipt.requestBody?.workspace_id || null
+    }
     if (tracker.navigationProof) {
       if (key === 'session' || key === 'change-stream:resync') receipt.paintReceiptId = tracker.paintRunId + '-' + tracker.requests.length
       if (key === 'session') { tracker.metadataEpoch++; tracker.navigationMetadata.clear(); receipt.metadataEpoch = tracker.metadataEpoch; receipt.proofSession = tracker.navigationProof.beginSession(); receipt.paintSession = tracker.paintReadiness.beginSession(receipt.at, receipt.paintReceiptId, request.url()) }
@@ -482,6 +497,10 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     if (['/api/v1/observations', '/api/v1/observations/count'].includes(pathname)) {
       if (url.searchParams.getAll('query_scope').length > 1) throw new Error('Duplicate Observation query scope')
       if (options.contentOnly) assertObservationContentScopeUrl(url.href)
+    }
+    if (pathname === '/api/v1/observations/discovery' && request.method() === 'POST') {
+      const result = discovery.handle(receipt.requestBody,options.discoveryAudience || 'fixture-reader')
+      return reply(route,request,result.value,result.status)
     }
     if (pathname === '/api/v1/observations') return reply(route, request, queryObservations(fixture, {
       queryScope: url.searchParams.get('query_scope'), query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'),
@@ -1484,7 +1503,7 @@ export function createTracker(fixture = null) {
   let paintDecision = null
   const coldDiagnostics = createColdDiagnostics()
   const navigationProof = fixture && contextualNavigationProof(fixture)
-  return { navigationProof, navigationMetadata: fixture && new Map(), metadataEpoch: 0, liveNavigationPrepared: false, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
+  return { physicalAccounting:createPhysicalRequestAccounting(), navigationProof, navigationMetadata: fixture && new Map(), metadataEpoch: 0, liveNavigationPrepared: false, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
     requests: [], arrivals: new WeakMap(), counts: {}, bytes: {}, active: 0, activeBranches: 0, activeExpandedBranches: 0, activeRootBranches: 0, activeDetails: 0, maxBranches: 0, maxExpandedBranches: 0, maxRootBranches: 0, maxDetails: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
     model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
   }
@@ -2333,6 +2352,7 @@ async function main() {
       ...toolVersions, chromium: browser.version(), viewport: `${HARNESS_CONFIGURATION.viewport.width}x${HARNESS_CONFIGURATION.viewport.height}`, headless: true
     }
     environment.fingerprint = hashJson(environment)
+    if (evidencePlan.liveObservationSearch) assertQualificationEnvironment(environment)
     attemptState.phase = 'deep-focus prerequisite'
     process.stdout.write('deep-focus continuation... ')
     const staleFocusContinuation = await verifyStaleDeepFocusContinuation(browser, server.origin)

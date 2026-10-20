@@ -83,7 +83,7 @@ for (const mode of ['All Observations', 'Subject Tree']) for (const field of ['s
     const before = await h.page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 650; return element.scrollTop })
     assert.ok(before > 100, 'Completed rows retain a scrollable viewport while pending: ' + JSON.stringify(await h.page.evaluate(() => ({ top: document.getElementById('main-content-scroll').scrollTop, height: document.getElementById('main-content-scroll').scrollHeight, logical: document.getElementById('observation-viewport')?.dataset.observationLogicalCount, rows: document.querySelectorAll('[data-observation-key]').length, status: document.querySelector('.observation-applied-filters')?.textContent, errors: [...document.querySelectorAll('.observation-state-error,.observation-refresh-error')].map(e=>e.textContent) }))))
     if (field === 'subjects') await h.page.getByRole('button', { name: 'Clear Subjects', exact: true }).evaluate(element => element.click())
-    else { await input.press('ControlOrMeta+A'); await input.press('Backspace') }
+    else await h.page.getByRole('button', { name: 'Clear Search observations', exact: true }).evaluate(element => element.click())
     await h.page.waitForFunction(() => document.getElementById('main-content-scroll').scrollTop === 0)
     assert.equal(await input.inputValue(), '')
     assert.equal(await h.page.locator(field === 'subjects' ? '#observation-query' : '#observation-subject-query').inputValue(), field === 'subjects' ? 'Documentation' : 'docs/')

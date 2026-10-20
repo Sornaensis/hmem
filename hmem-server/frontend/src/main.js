@@ -1,4 +1,5 @@
 import { installSearchNavigation } from './search-navigation.js'
+import { installSearchEditViewport } from './search-edit-viewport.js'
 import { installObservationSearch } from './observation-search.js'
 import { installHierarchyViewport } from './hierarchy-viewport.js'
 import { installObservationNavigation } from './observation-navigation.js'
@@ -705,6 +706,7 @@ app.ports.requestLocalStorage.subscribe(function (key) {
   }
 })()
 
+installSearchEditViewport()
 installHierarchyViewport(app)
 const observationViewport = installObservationViewport(app)
 installObservationNavigation(app, { viewport: observationViewport })

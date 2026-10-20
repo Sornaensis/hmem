@@ -688,6 +688,27 @@ liveFilterTests =
             , \_ -> stale.observations |> Expect.equal latest.observations
             , \_ -> ready.observations.refreshPass |> Maybe.map (.query >> .query) |> Expect.equal (Just "latest")
             , \_ -> ready.observations.items |> Expect.equal model.observations.items ] ()
+    , test "ordinary search edits retain physical viewport ownership while explicit clear resets it" <| \_ ->
+        let
+            seeded = project model model
+            state = seeded.observations
+            viewport = state.viewport
+            positioned = { seeded | observations = { state | viewport = { viewport | top = 120 } } }
+            edit message previous = update message previous |> Tuple.first |> project previous
+            typed = edit (SetObservationQuery "latest") positioned
+            emptied = edit (SetObservationQuery "") typed
+            cleared = edit (ClearObservationSearchText False) typed
+            treeMode = edit (SetObservationBrowseMode ObservationFacetMode) positioned
+            treeTyped = edit (SetObservationQuery "latest") treeMode
+            treeSettled = settleFilters treeTyped |> project treeTyped
+            treeState = treeMode.observations
+            canonical = project treeMode { treeMode | observations = { treeState | tree = ObservationTree.retire "new-canonical-generation" treeState.tree } }
+        in
+        Expect.equal { top = [120,120,0], preserve = [True,True,False], clear = [0,0,1], tree = [True,True,False] }
+            { top = List.map (.observations >> .viewport >> .top) [typed,emptied,cleared]
+            , preserve = List.map (.observations >> .viewport >> .preserveScroll) [typed,emptied,cleared]
+            , clear = List.map (.observations >> .clearViewportToken) [typed,emptied,cleared]
+            , tree = List.map (.observations >> .viewport >> .preserveScroll) [treeTyped,treeSettled,canonical] }
     , test "clear and selects submit immediately and retire an outstanding text timer" <| \_ ->
         let
             typed = update (SetObservationQuery "latest") model |> Tuple.first

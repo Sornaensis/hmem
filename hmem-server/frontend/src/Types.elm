@@ -1461,6 +1461,7 @@ type Msg
     | ToggleFilterTag String
     | SetObservationQuery String
     | SetObservationSubjectQuery String
+    | ClearObservationSearchText Bool
     | ObservationDiscoveryRuntimeReceived Encode.Value
     | GotObservationDiscovery ObservationDiscoveryRequest (Result Http.Error Api.ObservationDiscoveryResponse)
     | ObservationFilterCompositionStart

@@ -32,6 +32,22 @@ function harness({ resizeObserver = true } = {}) {
     setRows(value) { rows = value }, setStamp(value) { container.dataset.hierarchyContext = JSON.stringify(value) }, mutate(records) { for (const callback of mutationCallbacks) callback(records) }, hide() { viewport = false }, show() { viewport = true } }
 }
 
+test('a search edit consumes a queued prior anchor without moving the viewport or blocking later navigation', () => {
+  const h = harness(), row = h.row('project:p', 0)
+  h.setRows([row]); h.flush(); h.scroller.scrollTop = 120
+  h.callbacks.sync({ ...h.stamp, top: 0 })
+  h.scroller.dataset = { searchViewportEditing: 'true' }
+  h.flush(); assert.equal(h.scroller.scrollTop, 120)
+  h.scroller.scrollTop = 240
+  h.callbacks.sync({ ...h.stamp, top: 0 }); h.flush()
+  assert.equal(h.scroller.scrollTop, 240)
+  delete h.scroller.dataset.searchViewportEditing
+  h.flush(); assert.equal(h.scroller.scrollTop, 240, 'The retired anchor is consumed')
+  h.callbacks.sync({ ...h.stamp, top: 0, target: 'project:p' }); h.flush()
+  assert.equal(h.scroller.scrollTop, 0, 'Deliberate navigation works after editing ends')
+  h.bridge.dispose()
+})
+
 for (const intent of ['focus', 'pointer', 'keyboard', 'navigation']) {
   test('delayed timeline card reveal retires after newer ' + intent + ' intent', () => {
     const h = harness(); h.callbacks.sync({ ...h.stamp, top: 0 }); h.flush()

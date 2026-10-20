@@ -84,7 +84,9 @@ Both Subject Tree and All Observations show **Subjects** above **Search observat
 Subjects narrows stored paths literally and case-sensitively, including wildcard
 characters. Search observations combines full-text and semantic matches when
 available; the status reports hybrid search or a full-text fallback. Both fields
-apply together. Clearing either returns to the top while retaining the other.
+apply together. Typing, composition and keyboard deletion keep the page viewport
+stationary. Each explicit clear button returns to the top while retaining the
+other filter.
 Matching ancestors remain visible in Subject Tree;
 counts include distinct observations. A path label selects and focuses it; its
 chevron, Enter or Space expands its children and file/glob observation lists.

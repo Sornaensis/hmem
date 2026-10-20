@@ -489,6 +489,7 @@ route msg model =
         GotObservationDiscovery _ _ -> Ok (Feature.Observation.update msg model)
 
         SetObservationSubjectQuery _ -> Ok (Feature.Observation.update msg model)
+        ClearObservationSearchText _ -> Ok (Feature.Observation.update msg model)
 
         ObservationFilterCompositionStart -> Ok (Feature.Observation.update msg model)
 

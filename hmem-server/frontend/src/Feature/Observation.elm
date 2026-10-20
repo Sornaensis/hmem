@@ -761,14 +761,31 @@ editSearchText : Bool -> Bool -> String -> Model -> ( Model, Cmd Msg )
 editSearchText subjects force value model =
     let
         previous = if subjects then model.observations.subjectQuery else model.observations.query
-        cleared = previous /= "" && value == ""
-        prepared = if cleared then updateObservation clearSearchViewport model else model
+        prepared = updateObservation preserveSearchViewport model
         edit state = if subjects then { state | subjectQuery = value, modeSubjectQueries = Dict.insert (modeKey state.requestMode) value state.modeSubjectQueries }
             else { state | query = value, modeQueries = Dict.insert (modeKey state.requestMode) value state.modeQueries }
         ( updated, command ) = if previous == value && not force then ( prepared, Cmd.none ) else editFilters (value /= "") edit prepared
-        reset = if cleared then Ports.resetObservationSearchViewport (Encode.object [ ( "stamp", Encode.string (observationSearchResetStamp (Maybe.withDefault "" updated.selectedWorkspaceId) updated.observations) ) ]) else Cmd.none
     in
-    ( updated, Cmd.batch [ command, reset ] )
+    ( updated, command )
+
+
+preserveSearchViewport : ObservationModel -> ObservationModel
+preserveSearchViewport state =
+    let viewport = state.viewport
+        tree = state.tree
+    in
+    { state | preferenceScroll = Nothing, pendingReturnNavigation = Nothing
+        , tree = { tree | focusPending = Nothing, revealFocus = False, revealTarget = Maybe.map (\target -> { target | focus = False }) tree.revealTarget }
+        , viewport = { viewport | preserveScroll = True, preserveExtent = Basics.max viewport.preserveExtent (HierarchyViewport.height viewport.index), origin = Nothing, restoring = False } }
+
+
+clearSearchText : Bool -> Model -> ( Model, Cmd Msg )
+clearSearchText subjects model =
+    let
+        ( updated, command ) = editSearchText subjects False "" model
+        cleared = updateObservation clearSearchViewport updated
+    in
+    ( cleared, Cmd.batch [ command, Ports.resetObservationSearchViewport (Encode.object [ ( "stamp", Encode.string (observationSearchResetStamp (Maybe.withDefault "" cleared.selectedWorkspaceId) cleared.observations) ) ]) ] )
 
 
 clearDiscoveryError : Model -> Model
@@ -1119,6 +1136,7 @@ update msg model =
             ApplyObservationFilters -> True
             SetObservationQuery _ -> True
             SetObservationSubjectQuery _ -> True
+            ClearObservationSearchText _ -> True
             ObservationFilterCompositionEnd _ _ -> True
             SetObservationSubjectKind _ -> True
             SetObservationSubject _ -> True
@@ -1223,8 +1241,11 @@ updateRaw msg model =
         SetObservationSubjectQuery value ->
             editSearchText True False value model
 
+        ClearObservationSearchText subjects ->
+            clearSearchText subjects model
+
         ObservationFilterCompositionStart ->
-            ( updateObservation (\state -> { state | filterComposing = True, filterDebounce = Nothing, nextFilterToken = state.nextFilterToken + 1 }) model, Cmd.none )
+            ( updateObservation (\state -> let preserved = preserveSearchViewport state in { preserved | filterComposing = True, filterDebounce = Nothing, nextFilterToken = state.nextFilterToken + 1 }) model, Cmd.none )
 
         ObservationFilterCompositionEnd subjects value ->
             let prepared = updateObservation (\state -> { state | filterComposing = False }) model in
@@ -4356,8 +4377,10 @@ refreshViewport previous ( incoming, command ) =
         state = model.observations
         lifetime = viewportLifetime model
         sameContext = lifetime.workspace /= "" && lifetime.workspace == old.viewport.stamp.workspace && lifetime.epoch == old.viewport.stamp.epoch
-        preserveScroll = sameContext && state.viewport.preserveScroll && List.member state.requestMode [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode ]
-            && (old.requestMode /= state.requestMode || lifetime.generation == old.viewport.stamp.generation)
+        searchEdit = old.query /= state.query || old.subjectQuery /= state.subjectQuery
+            || old.filterComposing || state.filterComposing || old.filterDebounce /= Nothing || state.filterDebounce /= Nothing
+        preserveScroll = sameContext && state.viewport.preserveScroll
+            && (old.requestMode /= state.requestMode || lifetime.generation == old.viewport.stamp.generation || searchEdit)
             && old.selectedId == state.selectedId && old.detailNavigationToken == state.detailNavigationToken
             && (old.requestMode /= state.requestMode || (old.expandedMatchGroups == state.expandedMatchGroups && old.expandedSubjects == state.expandedSubjects))
         currentViewport = state.viewport
@@ -4925,7 +4948,7 @@ viewFilterInputs state =
                     , input [ id "observation-subject-query", class "form-input observation-filter-input", type_ "search", placeholder "Literal subject path", value state.subjectQuery
                         , onInput SetObservationSubjectQuery, Html.Events.on "compositionstart" (Decode.succeed ObservationFilterCompositionStart)
                         , Html.Events.on "compositionend" (Decode.map (ObservationFilterCompositionEnd True) (Decode.at [ "target", "value" ] Decode.string)) ] []
-                    , if state.subjectQuery /= "" then button [ class "search-clear observation-query-clear", type_ "button", attribute "aria-label" "Clear Subjects", onClick (SetObservationSubjectQuery "") ] [text "×"] else text "" ]
+                    , if state.subjectQuery /= "" then button [ class "search-clear observation-query-clear", type_ "button", attribute "aria-label" "Clear Subjects", onClick (ClearObservationSearchText True) ] [text "×"] else text "" ]
               else text ""
             , div [ class "filter-group observation-filter-group observation-paired-content" ]
                 [ label [ class "filter-label", for "observation-query" ] [ text searchLabel ]
@@ -4940,7 +4963,7 @@ viewFilterInputs state =
                     , Html.Events.on "compositionend" (Decode.map (ObservationFilterCompositionEnd False) (Decode.at [ "target", "value" ] Decode.string))
                     ]
                     []
-                , if state.query /= "" then button [ class "search-clear observation-query-clear", type_ "button", attribute "aria-label" "Clear Search observations", onClick (SetObservationQuery "") ] [text "×"] else text ""
+                , if state.query /= "" then button [ class "search-clear observation-query-clear", type_ "button", attribute "aria-label" "Clear Search observations", onClick (ClearObservationSearchText False) ] [text "×"] else text ""
                 ]
             , button
                 [ id "observation-advanced-toggle"

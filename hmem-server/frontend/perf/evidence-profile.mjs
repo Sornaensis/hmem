@@ -27,6 +27,10 @@ export const SUBJECT_TREE_LIVE_FILTERS_BASE = 'cc4cc17468ad59c93c2c3e6f5d6b898aa
 export const SUBJECT_TREE_LIVE_FILTERS_TASK = '5ca20bf4-4752-463c-b01e-b44f787bdd97'
 export const SUBJECT_TREE_LIVE_FILTERS_PROJECT = 'f32849f1-a6f7-48c6-923f-f25c83369f20'
 export const SUBJECT_TREE_LIVE_FILTERS_REVISION = 'subject-tree-live-filters.v1'
+export const LIVE_OBSERVATION_SEARCH_BASE = 'b73d5d5d0b07f2f27c5e982764b1886d5cafc41a'
+export const LIVE_OBSERVATION_SEARCH_TASK = '707a9421-cc30-4d3c-9978-3ece14bd6d5e'
+export const LIVE_OBSERVATION_SEARCH_PROJECT = 'c32727d8-8d62-4e55-b6f7-62eacdaeced7'
+export const LIVE_OBSERVATION_SEARCH_REVISION = 'live-observation-search.v1'
 const legacyBase = '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83'
 const historicalTasks = new Map([
   ['04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6', { revision: 'v2', taskId: '2503e08f-ff82-4f2c-adff-24e14fec8299' }],
@@ -38,7 +42,8 @@ const historicalTasks = new Map([
   [DUE_REMOVAL_BASE, { revision: DUE_REMOVAL_REVISION, taskId: DUE_REMOVAL_TASK, projectId: DUE_REMOVAL_PROJECT }],
   [LOADING_EFFICIENCY_BASE, { revision: LOADING_EFFICIENCY_REVISION, taskId: LOADING_EFFICIENCY_TASK, projectId: LOADING_EFFICIENCY_PROJECT }],
   [FOCUSED_FILTERING_BASE, { revision: FOCUSED_FILTERING_REVISION, taskId: FOCUSED_FILTERING_TASK, projectId: FOCUSED_FILTERING_PROJECT }],
-  [SUBJECT_TREE_LIVE_FILTERS_BASE, { revision: SUBJECT_TREE_LIVE_FILTERS_REVISION, taskId: SUBJECT_TREE_LIVE_FILTERS_TASK, projectId: SUBJECT_TREE_LIVE_FILTERS_PROJECT }]
+  [SUBJECT_TREE_LIVE_FILTERS_BASE, { revision: SUBJECT_TREE_LIVE_FILTERS_REVISION, taskId: SUBJECT_TREE_LIVE_FILTERS_TASK, projectId: SUBJECT_TREE_LIVE_FILTERS_PROJECT }],
+  [LIVE_OBSERVATION_SEARCH_BASE, { revision: LIVE_OBSERVATION_SEARCH_REVISION, taskId: LIVE_OBSERVATION_SEARCH_TASK, projectId: LIVE_OBSERVATION_SEARCH_PROJECT }]
 ])
 
 export function evidenceProfile(baseCommit, frontendRoot, temporaryRoot) {
@@ -52,9 +57,10 @@ export function evidenceProfile(baseCommit, frontendRoot, temporaryRoot) {
   const loadingEfficiency = revision === LOADING_EFFICIENCY_REVISION
   const focusedFiltering = revision === FOCUSED_FILTERING_REVISION
   const subjectTreeLiveFilters = revision === SUBJECT_TREE_LIVE_FILTERS_REVISION
-  const strictSourceIdentity = dueRemoval || loadingEfficiency || focusedFiltering || subjectTreeLiveFilters
-  const isolatedEvidence = scaling || planningCounts || dueRemoval || loadingEfficiency || focusedFiltering || subjectTreeLiveFilters
-  const prefix = subjectTreeLiveFilters ? 'hmem-subject-tree-live-filters-' : focusedFiltering ? 'hmem-focused-filtering-' : loadingEfficiency ? 'hmem-loading-efficiency-' : dueRemoval ? 'hmem-due-removal-' : planningCounts ? 'hmem-planning-counts-' : rendering ? 'hmem-observation-rendering-' : 'hmem-observation-scaling-'
+  const liveObservationSearch = revision === LIVE_OBSERVATION_SEARCH_REVISION
+  const strictSourceIdentity = dueRemoval || loadingEfficiency || focusedFiltering || subjectTreeLiveFilters || liveObservationSearch
+  const isolatedEvidence = scaling || planningCounts || dueRemoval || loadingEfficiency || focusedFiltering || subjectTreeLiveFilters || liveObservationSearch
+  const prefix = liveObservationSearch ? 'hmem-live-observation-search-' : subjectTreeLiveFilters ? 'hmem-subject-tree-live-filters-' : focusedFiltering ? 'hmem-focused-filtering-' : loadingEfficiency ? 'hmem-loading-efficiency-' : dueRemoval ? 'hmem-due-removal-' : planningCounts ? 'hmem-planning-counts-' : rendering ? 'hmem-observation-rendering-' : 'hmem-observation-scaling-'
   const root = isolatedEvidence ? path.resolve(temporaryRoot, prefix + task.taskId) : path.join(frontendRoot, 'perf')
   const repositoryRoot = path.resolve(frontendRoot, '../..')
   const fromRepository = path.relative(repositoryRoot, root)
@@ -66,17 +72,28 @@ export function evidenceProfile(baseCommit, frontendRoot, temporaryRoot) {
     manifest: path.join(root, `final-working-tree.evidence-manifest.${revision}.json`),
     diff: path.join(root, isolatedEvidence || revision === 'expanded-hierarchy.v1' ? `final-working-tree.complete.${revision}.diff` : 'final-working-tree.complete.diff')
   }
-  return { baseCommit, task, revision, scaling, rendering, planningCounts, dueRemoval, loadingEfficiency, focusedFiltering, subjectTreeLiveFilters, strictSourceIdentity, isolatedEvidence, root, files,
+  return { baseCommit, task, revision, scaling, rendering, planningCounts, dueRemoval, loadingEfficiency, focusedFiltering, subjectTreeLiveFilters, liveObservationSearch, strictSourceIdentity, isolatedEvidence, root, files,
     qualifiedRetirement: isolatedEvidence || revision === 'expanded-hierarchy.v1',
-    trace: isolatedEvidence ? path.join(root, 'temporary', subjectTreeLiveFilters ? 'large-subject-tree-live-filters-trace.zip' : focusedFiltering ? 'large-focused-filtering-trace.zip' : loadingEfficiency ? 'large-loading-efficiency-trace.zip' : dueRemoval ? 'large-due-removal-trace.zip' : planningCounts ? 'large-planning-counts-trace.zip' : 'large-observation-trace.zip') : null,
-    retention: subjectTreeLiveFilters ? `Final verification task ${SUBJECT_TREE_LIVE_FILTERS_TASK}, project ${SUBJECT_TREE_LIVE_FILTERS_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; bound each receipt/archive to 64 MiB; verify/hash and remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : focusedFiltering ? `Final verification task ${FOCUSED_FILTERING_TASK}, project ${FOCUSED_FILTERING_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; bound each receipt/archive to 64 MiB; verify/hash and remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : loadingEfficiency ? `Final verification task ${LOADING_EFFICIENCY_TASK}, project ${LOADING_EFFICIENCY_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : dueRemoval ? `Final verification task ${DUE_REMOVAL_TASK}, project ${DUE_REMOVAL_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : planningCounts ? 'Frontend task owner; retain the five task artifacts until project closure plus 30 days, then dispose; remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure' : scaling ? 'Frontend owner; retain the five task artifacts until project closure plus 30 days; remove temporary trace before success' : null }
+    trace: isolatedEvidence ? path.join(root, 'temporary', liveObservationSearch ? 'large-live-observation-search-trace.zip' : subjectTreeLiveFilters ? 'large-subject-tree-live-filters-trace.zip' : focusedFiltering ? 'large-focused-filtering-trace.zip' : loadingEfficiency ? 'large-loading-efficiency-trace.zip' : dueRemoval ? 'large-due-removal-trace.zip' : planningCounts ? 'large-planning-counts-trace.zip' : 'large-observation-trace.zip') : null,
+    retention: liveObservationSearch ? `Final verification task ${LIVE_OBSERVATION_SEARCH_TASK}, project ${LIVE_OBSERVATION_SEARCH_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; bound each receipt/archive to 64 MiB; verify/hash and remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : subjectTreeLiveFilters ? `Final verification task ${SUBJECT_TREE_LIVE_FILTERS_TASK}, project ${SUBJECT_TREE_LIVE_FILTERS_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; bound each receipt/archive to 64 MiB; verify/hash and remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : focusedFiltering ? `Final verification task ${FOCUSED_FILTERING_TASK}, project ${FOCUSED_FILTERING_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; bound each receipt/archive to 64 MiB; verify/hash and remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : loadingEfficiency ? `Final verification task ${LOADING_EFFICIENCY_TASK}, project ${LOADING_EFFICIENCY_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : dueRemoval ? `Final verification task ${DUE_REMOVAL_TASK}, project ${DUE_REMOVAL_PROJECT}; retain the five task artifacts until project closure plus 30 days, then dispose; remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure` : planningCounts ? 'Frontend task owner; retain the five task artifacts until project closure plus 30 days, then dispose; remove temporary trace before success; targeted failure diagnostics expire at resolution or task closure' : scaling ? 'Frontend owner; retain the five task artifacts until project closure plus 30 days; remove temporary trace before success' : null }
 }
 
 export function evidenceOwnerFields(profile) {
-  return profile.subjectTreeLiveFilters ? { projectId: SUBJECT_TREE_LIVE_FILTERS_PROJECT } : profile.focusedFiltering ? { projectId: FOCUSED_FILTERING_PROJECT } : profile.loadingEfficiency ? { projectId: LOADING_EFFICIENCY_PROJECT } : profile.dueRemoval ? { projectId: DUE_REMOVAL_PROJECT } : {}
+  return profile.liveObservationSearch ? { projectId: LIVE_OBSERVATION_SEARCH_PROJECT } : profile.subjectTreeLiveFilters ? { projectId: SUBJECT_TREE_LIVE_FILTERS_PROJECT } : profile.focusedFiltering ? { projectId: FOCUSED_FILTERING_PROJECT } : profile.loadingEfficiency ? { projectId: LOADING_EFFICIENCY_PROJECT } : profile.dueRemoval ? { projectId: DUE_REMOVAL_PROJECT } : {}
 }
 
 function assertIsolatedProfile(profile) {
+  if (profile.liveObservationSearch || profile.baseCommit === LIVE_OBSERVATION_SEARCH_BASE || profile.revision === LIVE_OBSERVATION_SEARCH_REVISION) {
+    const names = { after: 'after', traceManifest: 'trace-manifest', validation: 'validation-record', manifest: 'evidence-manifest', diff: 'complete' }
+    if (!profile.liveObservationSearch || profile.baseCommit !== LIVE_OBSERVATION_SEARCH_BASE || profile.revision !== LIVE_OBSERVATION_SEARCH_REVISION
+      || ['scaling','rendering','planningCounts','dueRemoval','loadingEfficiency','focusedFiltering','subjectTreeLiveFilters'].some(k => profile[k])
+      || !profile.strictSourceIdentity || !profile.isolatedEvidence || !profile.qualifiedRetirement
+      || profile.task?.taskId !== LIVE_OBSERVATION_SEARCH_TASK || profile.task?.projectId !== LIVE_OBSERVATION_SEARCH_PROJECT
+      || path.basename(profile.root) !== 'hmem-live-observation-search-' + LIVE_OBSERVATION_SEARCH_TASK || Object.keys(profile.files).length !== 5
+      || Object.entries(names).some(([key,name]) => profile.files[key] !== path.join(profile.root,`final-working-tree.${name}.${LIVE_OBSERVATION_SEARCH_REVISION}.${key === 'diff' ? 'diff' : 'json'}`))
+      || profile.trace !== path.join(profile.root,'temporary','large-live-observation-search-trace.zip')) throw new Error('Live Observation search evidence profile owner/base/revision/root mismatch')
+    return
+  }
   if (profile.subjectTreeLiveFilters || profile.baseCommit === SUBJECT_TREE_LIVE_FILTERS_BASE || profile.revision === SUBJECT_TREE_LIVE_FILTERS_REVISION) {
     const names = { after: 'after', traceManifest: 'trace-manifest', validation: 'validation-record', manifest: 'evidence-manifest', diff: 'complete' }
     if (!profile.subjectTreeLiveFilters || profile.baseCommit !== SUBJECT_TREE_LIVE_FILTERS_BASE || profile.revision !== SUBJECT_TREE_LIVE_FILTERS_REVISION
@@ -134,6 +151,13 @@ export function assertEvidenceIdentity(profile, record) {
     || record?.sourceProvenance?.reviewBaseCommit !== profile.baseCommit
     || !/^[a-f0-9]{40}$/.test(record?.sourceProvenance?.headCommit || '')
     || (record.inputQualification && record.inputQualification.implementationCommit !== record.sourceProvenance.headCommit))) throw new Error('Task evidence project/source revision identity mismatch')
+  if (profile.liveObservationSearch) {
+    const inputs = record.inputQualification
+    if (!inputs || inputs.evidenceBaseCommit !== profile.baseCommit || inputs.implementationCommit !== record.sourceProvenance.headCommit
+      || ['source','productionAssets'].some(key => !Array.isArray(inputs[key]) || !inputs[key].length
+        || new Set(inputs[key].map(row => row.path)).size !== inputs[key].length
+        || inputs[key].some(row => !row.path || !/^[a-f0-9]{64}$/.test(row.sha256 || '')))) throw new Error('Live Observation search input identity mismatch')
+  }
 }
 
 const admittedScratch = new WeakMap()

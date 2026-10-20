@@ -2,11 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { openDiscovery } from './observation-discovery-fixture.mjs'
+import { openDiscovery, interceptDiscovery, discoverySelection } from './observation-discovery-fixture.mjs'
 import { paint } from './observation-viewport-fixture.mjs'
 import { fixtureObservationCounts, hierarchyFixture } from './hierarchy-fixture.mjs'
 
-const counts = h => h.receipts.filter(value => value.endpoint.endsWith('/count'))
+const counts = h => h.receipts.filter(value => (value.endpoint.endsWith('/count') || value.payload?.view==='count'))
 async function capture(h, name) {
   if (!process.env.HMEM_OBSERVATION_COUNT_SCREENSHOT_DIR) return
   await mkdir(process.env.HMEM_OBSERVATION_COUNT_SCREENSHOT_DIR, { recursive: true })
@@ -43,18 +43,18 @@ for (const width of [1440, 320]) test(`production ${width}: 200 pages and author
   const h = await openDiscovery({ width, height: 1000 }, values => [...values, ...Array.from({ length: 201 }, (_, i) => ({ ...values[3], id: 'extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${i}.md` }, { subject_kind: 'glob', subject: 'docs/**/*.md' }] }))])
   try {
     await h.start()
-    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '200')
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '50')
     assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '265 observations')
     assert.equal(await h.page.locator('.observation-mode-announcement').count(), 0)
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
-    const first = h.receipts.find(value => value.endpoint === '/api/v1/observations')
-    assert.equal(first.params.limit, '200'); assert.equal(first.response.items.length, 200); assert.equal(first.response.has_more, true)
+    const first = h.receipts.find(value => value.payload?.view==='list')
+    assert.equal(first.payload.limit, 50); assert.equal(first.response.page.items.length, 50); assert.equal(first.response.page.has_more, true)
     await capture(h, `observation-counts-unfiltered-${width === 320 ? 'narrow' : 'desktop'}`)
     const countRequests = counts(h).length
-    await h.page.getByRole('button', { name: 'Load more', exact: true }).click(); await h.idle()
+    while(Number(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'))<265) { await h.page.getByRole('button', { name: 'Load more', exact: true }).click(); await h.idle() }
     assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '265')
     assert.equal(counts(h).length, countRequests)
-    assert.equal(h.receipts.filter(value => value.endpoint === '/api/v1/observations').at(-1).params.offset, '200')
+    assert.equal(h.receipts.filter(value=>value.payload?.view==='list').at(-1).payload.offset, 250)
     await h.page.locator('#observation-query').fill('Cache')
     assert.equal(counts(h).length, countRequests); assert.equal(await h.page.locator('.observation-mode-announcement').count(), 0)
     await h.page.locator('#observation-query').press('Enter'); await h.idle()
@@ -92,21 +92,19 @@ test('production inactive workspace totals coalesce stale replies, count unloade
   let release
   try {
     await h.start()
-    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '200')
-    assert.ok(!h.receipts.find(value => value.endpoint === '/api/v1/observations').response.items.some(value => value.id === 'extra-0'), 'Deleted ID is outside the admitted 200-row cache')
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '50')
+    assert.ok(!h.receipts.find(value => value.payload?.view==='list').response.page.items.some(value => value.id === 'extra-0'), 'Deleted ID is outside the admitted 200-row cache')
     await h.page.getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
     assert.equal(await h.page.locator('#observation-panel').count(), 0)
     const requests = []; let held = true, fail = false, sequence = 0
-    await h.page.route('**/api/v1/observations/count**', async route => {
-      const query = route.request().postDataJSON()
-      if (new URL(route.request().url()).searchParams.has('query_scope')) {
-        await route.fulfill({ status: 200, json: fixtureObservationCounts(h.fixture, query) }); return
-      }
+    await interceptDiscovery(h,async(route,outcome)=>{
+      const query=route.request().postDataJSON()
+      if(query.view!=='count') return route.fallback()
       requests.push(query)
-      const body = fixtureObservationCounts(h.fixture, query)
-      if (held) { held = false; await new Promise(resolve => { release = resolve }); body.total_count = 999; body.match_count = 999 }
-      if (fail) { fail = false; await route.fulfill({ status: 503, body: '{}' }); return }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+      const body=outcome.body
+      if(held){held=false;await new Promise(resolve=>{release=resolve});body.page.counts.total_count=999;body.page.counts.match_count=999}
+      if(fail){fail=false;return route.fulfill({status:503,json:{error:'Controlled count failure'}})}
+      return route.fulfill({status:outcome.status,json:body})
     })
     const push = async (action = 'created', id = 'unloaded-observation') => h.page.evaluate(frame => window.pushHierarchyFrames([frame]), {
       schema_version: 1, type: 'change', event: { schema_version: 1, event_id: 'count-' + (++sequence), scope: 'workspace', workspace_id: h.fixture.workspace.id,
@@ -140,15 +138,12 @@ test('production held count success cannot survive live read revocation and a fr
         principal: { actor_type: 'user', actor_id: 'fixture-user', actor_label: 'Fixture User', authority: 'local', grant_user_id: null }, global_permissions: { create_workspace: false, superadmin: false },
         workspace: { workspace_id: h.fixture.workspace.id, role: canRead ? 'owner' : null, can_read: canRead, can_edit: canRead, can_admin: canRead } }) })
     })
-    await h.page.route('**/api/v1/observations/count**', async route => {
-      const body = fixtureObservationCounts(h.fixture, route.request().postDataJSON())
-      if (new URL(route.request().url()).searchParams.has('query_scope')) {
-        await route.fulfill({ status: 200, json: body }); return
-      }
-      if (hold) { hold = false; await new Promise(resolve => { release = resolve }); body.total_count = 999; body.match_count = 999 }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+    await interceptDiscovery(h,async(route,outcome)=>{
+      if(hold){hold=false;await new Promise(resolve=>{release=resolve});outcome.body.page.counts.total_count=999;outcome.body.page.counts.match_count=999}
+      await route.fallback()
     })
-    await h.start(); await h.bounded((async () => { while (!release) await h.page.waitForTimeout(20) })(), 5000, 'Count held before revocation')
+    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=observations')
+    await h.bounded((async()=>{while(!release)await h.page.waitForTimeout(20)})(),5000,'Discovery count envelope held before revocation')
     assert.match((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), /Loading Observation total/)
     canRead = false
     await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'access_revoked', workspace_id: workspace }]), h.fixture.workspace.id)
@@ -162,60 +157,50 @@ test('production held count success cannot survive live read revocation and a fr
 })
 
 
-for (const phase of ['Initial', 'HeaderOnly']) test(`production ${phase}: held workspace and stale browse counts settle after Tree entry and release bounded project demand`, { timeout: 60000 }, async () => {
-  const h = await openDiscovery()
-  const hierarchy = hierarchyFixture()
-  h.fixture.projects = hierarchy.projects
-  h.fixture.tasks = hierarchy.tasks
-  const releases = []
-  const requests = []
-  let hold = phase === 'Initial'
+for (const phase of ['Initial','HeaderOnly']) test(`production ${phase}: count owner and visible root share context without settling each other's work`,{timeout:60000},async()=>{
+  const h=await openDiscovery(), hierarchy=hierarchyFixture()
+  h.fixture.projects=hierarchy.projects;h.fixture.tasks=hierarchy.tasks
+  let releaseCount,releasePage,holding=phase==='Initial',holdPage=phase==='Initial'
+  const countRequests=[]
   try {
-    await h.page.route('**/api/v1/observations/count**', async route => {
-      const query = route.request().postDataJSON()
-      const scoped = new URL(route.request().url()).searchParams.has('query_scope')
-      const receipt = { query, scoped, done: false }
-      requests.push(receipt)
-      const body = fixtureObservationCounts(h.fixture, query)
-      if (hold) {
-        await new Promise(resolve => releases.push(resolve))
-        if (scoped) { body.total_count = 999; body.match_count = 999 }
-      }
-      await route.fulfill({ status: 200, json: body })
-      receipt.done = true
+    await interceptDiscovery(h,async(route,outcome)=>{
+      const payload=route.request().postDataJSON()
+      if(payload.view==='count') {
+        countRequests.push(payload)
+        if(holding){holding=false;await new Promise(resolve=>{releaseCount=resolve});if(phase==='HeaderOnly'){outcome.body.page.counts.total_count=999;outcome.body.page.counts.match_count=999}}
+      } else if(payload.view==='list'&&holdPage){holdPage=false;await new Promise(resolve=>{releasePage=resolve})}
+      await route.fallback()
     })
-    await h.start()
-    if (phase === 'HeaderOnly') {
-      assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
-      hold = true
-      await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'change', event: {
-        schema_version: 1, event_id: 'held-header-refresh', scope: 'workspace', workspace_id: workspace,
-        occurred_at: '2026-10-19T00:00:00Z', transaction: { id: 'held-header-tx', cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
-        entity: { type: 'observation', id: 'unloaded-observation', action: 'created' }, invalidations: [{ kind: 'collection', target: 'observations:' + workspace }]
-      } }]), h.fixture.workspace.id)
+    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects')
+    await h.page.locator('#entity-root-project').waitFor()
+    if(phase==='HeaderOnly') {
+      await h.idle();holding=true
+      await h.page.evaluate(workspace=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'header-owned',scope:'workspace',workspace_id:workspace,occurred_at:'2026-10-19T00:00:00Z',transaction:{id:'header-owned-tx',cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'observation',id:'unloaded',action:'created'},invalidations:[{kind:'collection',target:'observations:'+workspace}]}}]),h.fixture.workspace.id)
     }
-    await h.bounded((async () => { while (releases.length < 2) await h.page.waitForTimeout(20) })(), 5000, 'Both independent count lifetimes held')
-    const heldCount = requests.length
-    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click()
-    await h.bounded((async () => { while (!h.receipts.some(value => value.endpoint.endsWith('/subject-tree') && value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Tree root completed while counts held')
-    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), phase === 'Initial' ? /Loading Observation total/ : /Updating Observation total/)
-    await h.page.getByRole('button', { name: 'Projects', exact: true }).click()
-    await h.page.locator('#entity-root-project').waitFor({ timeout: 5000 })
-    await paint(h.page)
-    assert.equal(requests.length, heldCount, 'Mode changes neither retire nor replace the occupied workspace read')
-    if (phase === 'Initial') assert.ok(requests.length + h.requests.filter(value => value.path.endsWith('/planning-counts') || (value.kind && value.parent) || /\/api\/v1\/(projects|tasks)\/[^/]+$/.test(value.path)).length <= 6, 'Initial headers and ordinary owners share six startup credits')
-    hold = false
-    for (const release of releases.splice(0)) release()
+    await h.bounded((async()=>{while(!releaseCount)await h.page.waitForTimeout(20)})(),5000,'Shared count owner held')
+    await h.page.getByRole('button',{name:'Observations',exact:true}).click();await h.page.locator('#observation-panel').waitFor()
+    if(phase==='Initial') {
+      assert.equal(h.receipts.filter(r=>r.payload?.view==='list').length,0,'Initial page waits for the single count bootstrap token')
+      releaseCount();releaseCount=null
+      await h.bounded((async()=>{while(!releasePage)await h.page.waitForTimeout(20)})(),5000,'Distinct initial collection owner arrives after count')
+      assert.ok(!(await h.page.locator('.workspace-header .workspace-observation-total').innerText()).includes('999 observations'))
+      assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'),'0','Count completion cannot settle collection membership')
+      await h.page.getByRole('button',{name:'Projects',exact:true}).click();await h.page.locator('#entity-root-project').waitFor()
+      assert.ok(countRequests.length+h.requests.filter(r=>r.path.endsWith('/planning-counts')||(r.kind&&r.parent)||/\/api\/v1\/(projects|tasks)\/[^/]+$/.test(r.path)).length<=6,'Headers and ordinary startup owners retain their six-credit bound')
+      releasePage();releasePage=null
+    } else {
+      await h.bounded((async()=>{while(!h.receipts.some(r=>r.payload?.view==='list'&&r.done))await h.page.waitForTimeout(20)})(),5000,'Newer visible collection supplies counts')
+      assert.match(await h.page.locator('.workspace-header .workspace-observation-total').innerText(),/64 observations/)
+      releaseCount();releaseCount=null
+    }
     await h.idle()
-    await h.bounded((async () => { while (requests.some(value => !value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Exact count callbacks complete')
-    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
-    await h.bounded((async () => { while (!h.requests.some(value => value.parent === 'root-project' && value.kind === 'project' && value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Project branch progresses after header settlement')
-    assert.ok(h.requests.some(value => /\/api\/v1\/(projects|tasks)\/[^/]+$/.test(value.path) && value.done), 'Visible project/task details progress')
-    assert.ok(h.caps().maxBranches <= 4 && h.caps().maxDetails <= 6)
-    assert.ok(await h.page.locator('[data-hierarchy-key]').count() <= 28)
-    assert.ok(requests.filter(value => !value.scoped).length <= (phase === 'Initial' ? 2 : 3), 'At most one coalesced canonical invalidation follows the held workspace read')
-    assert.deepEqual(h.errors, [])
-  } finally { for (const release of releases) release(); await h.close() }
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').innerText(),/64 observations/)
+    assert.ok(!(await h.page.locator('body').innerText()).includes('999 observations'))
+    const list=h.receipts.find(r=>r.payload?.view==='list')
+    assert.ok(list.payload.context_token,'Visible page is a token-only continuation of the same discovery owner')
+    assert.equal(list.payload.filters,undefined)
+    assert.ok(h.caps().maxBranches<=4&&h.caps().maxDetails<=6)
+  } finally {releaseCount?.();releasePage?.();await h.close()}
 })
 
 
@@ -227,10 +212,10 @@ test('production direct Tree selection keeps workspace total independent of subj
     await h.page.locator('#observation-panel').waitFor(); await h.idle()
     assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
     assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
-    assert.ok(h.receipts.some(value => value.endpoint.endsWith('/subject-tree') && value.params.subject_query === 'src'))
+    assert.ok(h.receipts.some(value => value.payload?.view==='tree' && discoverySelection(h,value).subject_query==='src'))
     assert.ok(counts(h).every(value => Object.keys(value.payload).join() === 'workspace_id'), 'Header query excludes every Tree/selection filter')
     const before = counts(h).length
-    await h.page.locator('#observation-query').fill('docs'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
+    await h.page.locator('#observation-subject-query').fill('docs'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(counts(h).length, before, 'Subject search does not recount the workspace')
     await h.page.getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
     h.fixture.observations.push({ ...h.fixture.observations[0], id: 'new-unloaded', subjects: [{ subject_kind: 'file', subject: 'other/Unloaded.elm' }] })
@@ -262,7 +247,31 @@ test('production direct Tree selection keeps workspace total independent of subj
     assert.equal(await h.page.locator('#observation-panel').count(), 0)
     await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.idle()
     assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
-    assert.equal(await h.page.locator('#observation-query').inputValue(), 'docs')
+    assert.equal(await h.page.locator('#observation-subject-query').inputValue(), 'docs')
     assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /63 observations/)
   } finally { await h.close() }
+})
+
+
+test('failed hidden count stays paused and a new visible collection owns its normal recovery', {timeout:60000},async()=>{
+  const h=await openDiscovery()
+  try {
+    const count=h.gate(r=>r.payload?.view==='count',{error:429})
+    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects')
+    await h.bounded(count.arrived,5000,'Hidden count capacity failure');await h.idle()
+    const before=h.receipts.length
+    await h.page.waitForTimeout(350);assert.equal(h.receipts.length,before,'No event-driven retry loop')
+    const list=h.gate(r=>r.payload?.view==='list',{error:503})
+    await h.page.getByRole('button',{name:'Observations',exact:true}).click();await h.bounded(list.arrived,5000,'Visible entry owns a real list request');await h.page.locator('.observation-discovery-error').waitFor();await h.idle().catch(async error => {
+      const receipt = { phase: 'failed-visible-entry', loading: await h.page.locator('.loading-indicator').allTextContents(), requests: h.receipts.slice(-5).map(r => ({ payload: r.payload, status: r.status, done: r.done })), text: (await h.page.locator('#observation-panel').innerText()).slice(0,1000) }
+      throw new Error(error.message + ' ' + JSON.stringify(receipt))
+    })
+    const failed=h.receipts.filter(r=>r.payload?.view==='list').length
+    assert.equal(failed,1,'Matching URL echo does not duplicate the foreground request')
+    assert.equal(await h.page.locator('.loading-indicator').count(),0,'Failed page has settled')
+    await h.page.getByRole('button',{name:'Retry search',exact:true}).click();await h.idle()
+    assert.equal(h.receipts.filter(r=>r.payload?.view==='list').length,failed+1,'One owned recovery request')
+    assert.match(await h.page.locator('.workspace-header .workspace-observation-total').innerText(),/64 observations/)
+    assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'),'50')
+  } finally {await h.close()}
 })

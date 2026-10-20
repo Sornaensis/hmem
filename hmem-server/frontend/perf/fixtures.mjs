@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 
 export const FIXTURE_SCHEMA_VERSION = 2
 export const FIXTURE_SEED = 'hmem-large-workspace-v1'
@@ -7,6 +8,105 @@ export const TIMELINE_BROWSER_NOW = '2026-08-30T12:00:00Z'
 export const TIMELINE_DEFAULT_UI_QUERY = Object.freeze({ since: '2026-06-01T00:00:00Z', until: '2026-08-31T00:00:00Z', bucket: 'week' })
 export const TIMELINE_BUCKET_SQL_CAP = 367
 export const TIMELINE_BUCKET_RESPONSE_MAX = 366
+
+// Deterministic protocol fixture only: similarities are injected exact-space
+// membership scores, never measurements of a database or embedding provider.
+export function createObservationDiscoveryFixture(fixture, { now = () => Date.now(), mode = 'hybrid', reason = null,
+  similarities = () => ({}), token = randomUUID } = {}) {
+  const contexts = new Map()
+  const fail = (status, error) => ({ status, value: { error } })
+  const normalize = filters => Object.fromEntries(['subject_query','content_query','subject_kind','subject','git_sha','current_git_sha','history_git_sha']
+    .map(key => [key, typeof filters[key] === 'string'
+      ? (['subject_query','content_query'].includes(key) && filters[key] === '' ? null : filters[key]) : null]))
+  const tie = (a,b) => compareTimestampDesc(a.updated_at,b.updated_at) || compareText(b.id,a.id)
+  const subjectMatches = (s,f) => (!f.subject_kind || s.subject_kind === f.subject_kind)
+    && (!f.subject || s.subject === f.subject) && (!f.subject_query || s.subject.includes(f.subject_query))
+  const members = context => {
+    const f = context.filters
+    const eligible = fixture.observations.filter(o => o.workspace_id === context.workspace
+      && o.subjects.some(s => subjectMatches(s,f)) && (!f.git_sha || o.git_sha === f.git_sha)
+      && (!f.current_git_sha || o.current_provenance?.reviewed_git_sha === f.current_git_sha)
+      && (!f.history_git_sha || (o.revision_history || [{reviewed_git_sha:o.git_sha}]).some(e => e.reviewed_git_sha === f.history_git_sha)))
+    if (!f.content_query) return eligible.sort(tie)
+    const fts = observationSearch({ observations: eligible },f.content_query,'content').sort((a,b) => b.rank-a.rank || tie(a.observation,b.observation))
+    const semantic = context.mode === 'hybrid' ? eligible.filter(o => context.scores[o.id] >= 0.5)
+      .sort((a,b) => context.scores[b.id]-context.scores[a.id] || tie(a,b)) : []
+    const scores = new Map()
+    for (const component of [fts.map(x => x.observation),semantic]) component.forEach((o,i) => scores.set(o.id,(scores.get(o.id)||0)+1/(60+i+1)))
+    return eligible.filter(o => scores.has(o.id)).sort((a,b) => scores.get(b.id)-scores.get(a.id) || tie(a,b))
+  }
+  const page = (context,request) => {
+    const rows = members(context), offset = request.offset || 0, limit = request.limit || 50, view = request.view || 'list'
+    const counts = { workspace_id: context.workspace, total_count: fixture.observations.filter(o => o.workspace_id === context.workspace).length, match_count: rows.length }
+    const terminals = rows.flatMap(o => o.subjects.filter(s => subjectMatches(s,context.filters)).map(s => ({...s,id:o.id})))
+    let tree = null, items = [], hasMore = false
+    if (view === 'tree') {
+      const prefix = request.prefix || '', nodes = new Map()
+      for (const s of terminals) {
+        if (prefix && !s.subject.startsWith(prefix+'/')) continue
+        const segment = s.subject.slice(prefix ? prefix.length+1 : 0).split('/')[0]
+        const path = (prefix ? prefix+'/' : '')+segment
+        const node = nodes.get(path) || {path,segment,ids:new Set(),has_children:false}
+        node.ids.add(s.id); node.has_children ||= s.subject !== path; nodes.set(path,node)
+      }
+      const all = [...nodes.values()].sort((a,b) => compareText(a.path,b.path)).map(node => ({path:node.path,segment:node.segment,
+        observation_count:node.ids.size,has_children:node.has_children,terminals:[...new Set(terminals.filter(s => s.subject === node.path).map(s => s.subject_kind))].sort().map(kind => ({
+          subject_kind:kind,subject:node.path,observation_count:new Set(terminals.filter(s => s.subject === node.path && s.subject_kind === kind).map(s => s.id)).size}))}))
+      tree = {total_count:counts.total_count,match_count:counts.match_count,items:all.slice(offset,offset+limit),has_more:offset+limit<all.length}
+    } else if (view === 'list') {
+      const selected = request.terminal ? rows.filter(o => terminals.some(s => s.id === o.id && s.subject === request.terminal.subject && s.subject_kind === request.terminal.subject_kind)) : rows
+      items = selected.slice(offset,offset+limit); hasMore = offset+limit<selected.length
+    }
+    return {items,tree,counts,has_more:hasMore}
+  }
+  const retire = context => { if (context.session) context.retired = true; else contexts.delete(context.token) }
+  return {
+    retire(tokenValue,audience = 'fixture-reader') { const context = contexts.get(tokenValue); if (context?.audience === audience) retire(context) },
+    handle(request,audience = 'fixture-reader') {
+      const time = now()
+      for (const [key,value] of contexts) if (value.expires <= time) contexts.delete(key)
+      const allowed = ['workspace_id','context_token','replace_context_token','search_session','generation','filters','view','prefix','terminal','limit','offset']
+      if (!request || Object.keys(request).some(key => !allowed.includes(key)) || request.workspace_id !== fixture.workspace.id) return fail(400,'invalid discovery request')
+      if (!['list','tree','count'].includes(request.view || 'list') || !Number.isInteger(request.limit ?? 50) || (request.limit ?? 50)<1 || (request.limit ?? 50)>200
+        || !Number.isInteger(request.offset ?? 0) || (request.offset ?? 0)<0 || (request.offset ?? 0)>2147483647
+        || (request.terminal && (!['file','glob'].includes(request.terminal.subject_kind) || typeof request.terminal.subject !== 'string'))) return fail(400,'invalid discovery presentation')
+      let context
+      if (request.context_token) {
+        if (['filters','replace_context_token','search_session','generation'].some(key => key in request)) return fail(400,'continuation must be token-only')
+        context = contexts.get(request.context_token)
+        if (!context || context.retired || context.audience !== audience || context.workspace !== request.workspace_id) return fail(409,'discovery context unavailable')
+      } else {
+        if (!request.filters || Array.isArray(request.filters) || typeof request.filters !== 'object') return fail(400,'discovery filters required')
+        const filterKeys = ['subject_query','content_query','subject_kind','subject','git_sha','current_git_sha','history_git_sha']
+        if (Object.keys(request.filters).some(k => !filterKeys.includes(k) || (request.filters[k] != null && typeof request.filters[k] !== 'string'))
+          || ['subject_query','content_query'].some(k => Buffer.byteLength(request.filters[k] || '')>4096)
+          || (request.filters.subject_kind != null && !['file','glob'].includes(request.filters.subject_kind))) return fail(400,'invalid discovery filters')
+        const session = request.search_session
+        if ((session == null) !== (request.generation == null) || (session != null && (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(session)
+          || !Number.isInteger(request.generation) || request.generation<1 || request.generation>2147483647))) return fail(400,'invalid discovery generation')
+        const own = [...contexts.values()].filter(c => c.audience === audience && c.workspace === request.workspace_id)
+        const previous = session ? own.find(c => c.session === session) : null
+        if (previous && request.generation <= previous.generation) return fail(409,'discovery generation retired')
+        const replacement = request.replace_context_token && contexts.get(request.replace_context_token)
+        if (request.replace_context_token && (!replacement || replacement.audience !== audience || replacement.workspace !== request.workspace_id
+          || (replacement.session && replacement.session !== session))) return fail(409,'discovery replacement unavailable')
+        if (!previous && !replacement && (contexts.size>=64 || own.length>=8)) return fail(429,'discovery capacity')
+        if (previous) contexts.delete(previous.token)
+        if (replacement) retire(replacement)
+        const filters = normalize(request.filters)
+        const emptyQuery = !filters.content_query || !filters.content_query.trim()
+        const activeMode = emptyQuery ? 'fts_only' : (typeof mode === 'function' ? mode(filters) : mode)
+        if (!['hybrid','fts_only'].includes(activeMode)) return fail(400,'invalid discovery retrieval mode')
+        context = {token:token(),audience,workspace:request.workspace_id,session,generation:request.generation,filters,
+          expires:time+300000,mode:activeMode,reason:emptyQuery ? 'empty_query' : reason,
+          scores:activeMode === 'hybrid' ? {...similarities(filters)} : {}}
+        contexts.set(context.token,context)
+      }
+      return {status:200,value:{context_token:context.token,expires_at:new Date(context.expires).toISOString(),
+        retrieval:{mode:context.mode,reason:context.reason},complete:true,page:page(context,request)}}
+    }
+  }
+}
 
 const SCALES = Object.freeze({
   small: { projects: 10, projectLevels: 2, topTasks: 40, subtasks: 20, dependencies: 24, observations: 60, timelineEvents: 40, timelineBuckets: 20, liveFrames: 50 },

@@ -21,16 +21,17 @@ export function installObservationPreferences(app, { storage, schedule = callbac
       schedule(() => { if (sameOwner(owner, captured)) app.ports.observationPreferencesReceived.send({ owner: captured, value, available }) })
     } else if (command.operation === 'write' && sameOwner(owner, command.owner)) {
       try {
-        const value = { ...command.value, subjects: [...(command.value?.subjects || [])], groups: [...(command.value?.groups || [])], paths: [...(command.value?.paths || [])], queries: { ...(command.value?.queries || {}) } }
+        const value = { ...command.value, subjects: [...(command.value?.subjects || [])], groups: [...(command.value?.groups || [])], paths: [...(command.value?.paths || [])], queries: { ...(command.value?.queries || {}) }, subjectQueries: { ...(command.value?.subjectQueries || {}) } }
         if (!value || value.version !== 1 || value.workspaceId !== owner.workspaceId || value.actorId !== owner.actorId || value.authority !== owner.authority) return
         let text = JSON.stringify(value)
         // Sorted Elm preferences have deterministic eviction; retain detail first.
-        while (bytes(text) > MAX_BYTES && (value.groups.length || value.subjects.length || value.paths.length || value.fileInput || Object.keys(value.queries).length || value.context)) {
+        while (bytes(text) > MAX_BYTES && (value.groups.length || value.subjects.length || value.paths.length || value.fileInput || Object.keys(value.queries).length || Object.keys(value.subjectQueries).length || value.context)) {
           if (value.groups.length) value.groups.pop()
           else if (value.subjects.length) value.subjects.pop()
           else if (value.paths.length) value.paths.pop()
           else if (value.fileInput) value.fileInput = ''
           else if (Object.keys(value.queries).length) delete value.queries[Object.keys(value.queries).sort().at(-1)]
+          else if (Object.keys(value.subjectQueries).length) delete value.subjectQueries[Object.keys(value.subjectQueries).sort().at(-1)]
           else value.context = null
           text = JSON.stringify(value)
         }

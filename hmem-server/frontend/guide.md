@@ -8,8 +8,8 @@ Switching focus or choosing the same focus link keeps those selections and close
 previous search results. The focused target stays accessible even when excluded
 by the filters; its descendants follow the selected filters.
 The workspace toolbar keeps its own filters throughout. Editing it updates only
-your workspace preferences; submitting its search closes focus and searches the
-workspace. Closing focus or returning to its Timeline or Audit source uses those
+your workspace preferences. Global search has a separate input and keeps your
+focused view for return when cleared. Closing focus or returning to its Timeline or Audit source uses those
 workspace preferences. Focused changes never replace saved workspace filters.
 
 The workspace Timeline shows Create, Complete, Delete, Archive and Cancel events.
@@ -44,6 +44,22 @@ fields reuses it; **Refresh** replaces it. Check the loaded-at time and entity
 update time. Observed changes mark it stale; disconnection makes freshness
 unknown. A failed current read leaves the historical comparison usable.
 
+## Search all entities
+
+Type in **Search all entities** to search after a short pause. The **Search Entities**
+bar selects Projects, Tasks and, in repositories, Observations. Choices are saved
+for the signed-in actor and workspace, separately from hierarchy filters. Selecting
+no types pauses searching. The bar stays visible when you clear the query and
+return to your previous view. While updating or after a failure, the last completed
+results remain labelled with their query; use **Retry search** to try again.
+
+Results use compact previews with copyable IDs. **Jump To** opens the canonical
+project, task or Observation, including targets outside your current filters.
+Observation targets show their full content in a read-only detail view.
+**Back to search results** or browser Back restores the query, selected types,
+scroll position and Jump To control without changing your saved filters. If a
+target is deleted or access changes, the return control remains available.
+
 ## Observation drafts and search
 
 Keep one unsaved Observation draft while moving between rows, tabs or Back
@@ -60,13 +76,16 @@ draft. Workspace, subjects, creation SHA and creation time cannot be edited.
 Observation text filters update after a short pause. Clearing text, selecting a
 kind, and completing or clearing a SHA filter update immediately. Enter a full
 lowercase Git SHA; incomplete values stay local while the last completed results
-remain visible. Subject Tree, All Observations and Files remember separate search
-text. All Observations remains the initial mode.
+remain visible. Subject Tree and All Observations remember separate pairs of search fields; Files keeps its own search text. All Observations remains the initial mode.
 Advanced shows the number of active filters when closed. Kind, exact subject in
 All Observations, and creation/current/history SHA filters apply live; closing Advanced retains
 them. Incomplete SHAs show associated feedback until completed or cleared.
-All Observations searches content. Subject Tree searches stored subject paths literally and
-case-sensitively, including wildcard characters. Matching ancestors remain visible;
+Both Subject Tree and All Observations show **Subjects** above **Search observations**.
+Subjects narrows stored paths literally and case-sensitively, including wildcard
+characters. Search observations combines full-text and semantic matches when
+available; the status reports hybrid search or a full-text fallback. Both fields
+apply together. Clearing either returns to the top while retaining the other.
+Matching ancestors remain visible in Subject Tree;
 counts include distinct observations. A path label selects and focuses it; its
 chevron, Enter or Space expands its children and file/glob observation lists.
 Several branches can stay open. Closing a parent remembers its descendants and

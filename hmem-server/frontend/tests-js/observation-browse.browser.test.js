@@ -32,17 +32,9 @@ async function position(h, value) {
   return top(h)
 }
 async function gateFacets(h, empty = false, failure = false) {
-  let release, arrived
-  const wait = new Promise(resolve => { release = resolve }), arrival = new Promise(resolve => { arrived = resolve })
-  let used = false
-  await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
-    if (used) { await route.fallback(); return }
-    used = true; arrived(); await wait
-    if (failure) await route.fulfill({ status: 500, body: 'Controlled tree failure' })
-    else if (empty) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], has_more: false, total_count: 64, match_count: 0 }) })
-    else await route.fallback()
-  })
-  return { release, arrival }
+  const gate=h.gate(r=>r.payload?.view==='tree'&&(r.payload.prefix||'')==='',{hold:true,...(failure?{error:500}:{}),...(empty?{transform:value=>({...value,page:{...value.page,counts:{...value.page.counts,match_count:0},tree:{items:[],has_more:false,total_count:64,match_count:0}}})}:{})})
+  return {release:gate.release,arrival:gate.arrived}
+
 }
 async function screenshot(h, name) {
   if (!process.env.HMEM_BROWSE_SCREENSHOT_DIR) return
@@ -89,7 +81,7 @@ test('superseded mode/workspace replies cannot restore scroll and shorter result
     assert.ok(before > 1200, 'rapid replacement starts deeper than the viewport height')
     held = await gateFacets(h)
     await activate(h, 'Subject Tree'); await h.bounded(held.arrival, 5000, 'First Subject request arrival')
-    await activate(h, 'All Observations'); await h.idle(); await paint(h.page)
+    await activate(h, 'All Observations'); await h.page.waitForFunction(()=>document.querySelector('#observation-viewport')?.dataset.observationLoadedCount==='50'); await paint(h.page)
     const current = await top(h)
     assert.equal(current, before)
     held.release(); await h.idle(); await paint(h.page)
@@ -110,7 +102,7 @@ test('superseded mode/workspace replies cannot restore scroll and shorter result
     held = await gateFacets(h)
     await activate(h, 'Subject Tree'); await h.bounded(held.arrival, 5000, 'Old workspace Subject request arrival')
     await h.page.locator('a.sidebar-link[href="/workspace/browse-other"]').click({ timeout: 5000 })
-    await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.idle()
+    await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.page.waitForFunction(()=>document.querySelector('#observation-viewport')?.dataset.observationLoadedCount==='0')
     const switched = await top(h)
     held.release(); await h.idle(); await paint(h.page)
     assert.equal(await top(h), switched); assert.ok(h.page.url().includes('/workspace/browse-other'))

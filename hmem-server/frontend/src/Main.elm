@@ -2,6 +2,7 @@ module Main exposing (main, update)
 
 import Api exposing (..)
 import AppShell
+import Feature.Search
 import Feature.AuditDiff
 import Browser
 import Browser.Navigation as Nav
@@ -121,7 +122,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.AuditDiff.reconcile model |> Feature.TimestampDisplay.reconcile
+    updateCore msg model |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.TimestampDisplay.reconcile
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )
@@ -136,7 +137,7 @@ updateCore msg model =
                     handleUrlRequest urlRequest model
 
                 UpdateRouter.HandleUrlChange url ->
-                    handleUrlChange url model
+                    Feature.Search.routeChanged url model |> Maybe.withDefault (handleUrlChange url model)
 
                 UpdateRouter.HandleInAppShell ownedMsg ->
                     AppShell.prepareOwned ownedMsg model

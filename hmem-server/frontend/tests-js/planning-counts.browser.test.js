@@ -8,7 +8,7 @@ function fixture() {
   data.tasks = [
     ...Array.from({length:60}, (_,i)=>({...task,id:'task-'+String(i).padStart(3,'0'),title:'Task '+i,parent_id:null})),
     {...task,id:'nested',title:'Nested',parent_id:'task-000'},
-    {...task,id:'unassigned',title:'Unassigned',project_id:null,parent_id:null},
+    {...task,id:'unassigned',title:'Unassigned',description:'Unassigned work',project_id:null,parent_id:null},
     {...task,id:'done',title:'Done',status:'done',parent_id:null},
     {...task,id:'cancelled',title:'Cancelled',status:'cancelled',parent_id:null},
   ]
@@ -41,7 +41,14 @@ test('production headers include unloaded 60-task work and survive partial pages
     second.release();await h.idle()
     const reads=h.requests.filter(countRead).length
     await h.page.locator('#entity-root-project .tree-toggle').click();await h.idle()
-    await h.page.locator('.search-input').fill('Task');await h.page.waitForTimeout(400)
+    await h.page.locator('#entity-unassigned').waitFor()
+    const filtered=h.gate(request=>request.kind==='workspace_root'&&request.query==='Task')
+    await h.page.locator('.hierarchy-search-input').fill('Task')
+    await h.bounded(filtered.arrived,10000,'Hierarchy filter membership request');await h.idle()
+    assert.equal(filtered.receipt.status,200);assert.equal(filtered.receipt.done,true)
+    assert.equal(await h.page.locator('#entity-unassigned').count(),0,'Hierarchy query excludes unmatched membership')
+    assert.equal(await h.page.locator('.search-input').inputValue(),'','Hierarchy filtering does not activate global search')
+    assert.equal(await h.page.locator('.search-result-card').count(),0)
     await both(h,'2 open projects · 62 open tasks')
     assert.equal(h.requests.filter(countRead).length,reads,'Presentation changes do not refetch workspace totals')
     assert.ok(h.caps().maxBranches<=4);assert.ok(h.caps().maxDetails<=6)

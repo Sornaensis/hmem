@@ -301,6 +301,19 @@ instance ToSchema ObservationMatchRequest where declareNamedSchema _ = declareNa
 instance ToSchema ObservationCountRequest where declareNamedSchema _ = declareNamedSchema (Proxy @ObservationCountQuery)
 instance ToSchema ObservationCountQuery where
   declareNamedSchema _ = genericDeclareNamedSchema opts (Proxy @ObservationCountQuery)
+
+instance ToSchema ObservationDiscoveryFilter where
+  declareNamedSchema _ = genericDeclareNamedSchema
+    (opts { fieldLabelModifier = \name -> if name == "subjectsText" then "subject_query" else camelToSnake name }) (Proxy @ObservationDiscoveryFilter)
+instance ToSchema ObservationDiscoveryView where
+  declareNamedSchema _ = pure $ NamedSchema (Just "ObservationDiscoveryView") $
+    mempty & type_ ?~ OpenApiString & enum_ ?~ map String ["list","tree","count"]
+instance ToSchema ObservationDiscoveryRequest where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema
+      (opts { fieldLabelModifier = \field -> if field == "treePrefix" then "prefix" else camelToSnake field }) (Proxy @ObservationDiscoveryRequest)
+    pure $ NamedSchema name (schema & required .~ ["workspace_id"]
+      & properties . at "generation" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 2147483647))
 instance ToSchema ObservationCounts where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationCounts)

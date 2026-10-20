@@ -38,6 +38,40 @@ suite =
         , describe "cached complete viewport projection" observationProjectionTests
         , describe "receipt-owned Return lifecycle" observationReturnReceiptTests
         , describe "bounded applied URL context" observationUrlTests
+        , test "decoded detached detail survives excluded tree reconciliation while ordinary tree selection clears" <| \_ ->
+            let
+                initial = Feature.Observation.init
+                tree = ObservationTree.retire "excluded" ObservationTree.init
+                    |> treeAccept "" [ { path = "docs", segment = "docs", hasChildren = True, observationCount = 1, terminals = [] } ]
+                state = { initial | requestMode = ObservationFacetMode, query = "docs/", tree = tree }
+                base = editableModel state
+                source = Feature.Observation.refreshViewport base ( base, Cmd.none ) |> Tuple.first
+                selected = Feature.Observation.selectObservation "detached" source |> Tuple.first
+                selectedState = selected.observations
+                detached = { selected | observations = { selectedState | searchOriginDetail = True, treeSelectionPending = False, tree = tree } }
+                json = """{"id":"detached","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Full canonical detail","content_version":"10000000-0000-4000-8000-000000000001","latest_sequence":1,"current_provenance":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"""
+            in
+            case ( Decode.decodeString Api.observationDecoder json, detached.observations.activeDetailRequest ) of
+                ( Ok canonical, Just request ) ->
+                    let
+                        receive current = Feature.Observation.update (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Ok canonical)) current |> Tuple.first
+                        reconciled = receive detached |> (\received -> Feature.Observation.refreshViewport detached ( received, Cmd.none ) |> Tuple.first)
+                        normalState = detached.observations
+                        ordinary = { detached | observations = { normalState | searchOriginDetail = False } }
+                        ordinaryReconciled = receive ordinary |> (\received -> Feature.Observation.refreshViewport ordinary ( received, Cmd.none ) |> Tuple.first)
+                        foreign = { canonical | workspaceId = "other-workspace" }
+                        denied = Feature.Observation.update (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Ok foreign)) detached |> Tuple.first
+                    in
+                    Expect.all
+                        [ \_ -> ( canonical.workspaceId, canonical.content ) |> Expect.equal ( "workspace-1", "Full canonical detail" )
+                        , \_ -> ( reconciled.observations.selectedId, reconciled.observations.selectedDetail, reconciled.observations.searchOriginDetail ) |> Expect.equal ( Just "detached", Just canonical, True )
+                        , \_ -> ( reconciled.observations.tree.nodes, reconciled.observations.orderedIds, reconciled.observations.items ) |> Expect.equal ( tree.nodes, state.orderedIds, state.items )
+                        , \_ -> ( ( reconciled.observations.resultsStale, reconciled.observations.refreshPending ), ( reconciled.observations.workspaceCounts, reconciled.observations.counts ) ) |> Expect.equal ( ( detached.observations.resultsStale, detached.observations.refreshPending ), ( detached.observations.workspaceCounts, detached.observations.counts ) )
+                        , \_ -> ordinaryReconciled.observations.selectedId |> Expect.equal Nothing
+                        , \_ -> denied.observations.selectedDetail |> Expect.equal Nothing
+                        , \_ -> denied.observations.detailError |> Expect.equal (Just "Observation detail did not match this workspace.")
+                        ] ()
+                _ -> Expect.fail "Canonical detail JSON must decode and selection must issue a bound request"
         , test "Subject Tree labels unique path counts and explains overlapping children in both tree modes" <|
             \_ ->
                 let
@@ -640,7 +674,7 @@ suite =
                     , \_ -> editor |> Query.hasNot [ Selector.id "observation-edit" ]
                     , \_ -> editor |> Query.has [ Selector.text "Delete", Selector.text "Workspace ID", Selector.text "Subjects", Selector.text "Git SHA" ]
                     , \_ -> editor |> Query.findAll [ Selector.tag "textarea" ] |> Query.count (Expect.equal 1)
-                    , \_ -> editor |> Query.findAll [ Selector.tag "input" ] |> Query.count (Expect.equal 5)
+                    , \_ -> editor |> Query.findAll [ Selector.tag "input" ] |> Query.count (Expect.equal 6)
                     ]
                     ()
         , test "edit captures canonical base, validates UTF-8 bounds, and renders only a content draft" <|
@@ -1143,7 +1177,7 @@ suite =
                             , matchPathsInput = "src/Draft.elm"
                             , matchAppliedPaths = [ "src/A.elm" ]
                             , matchEvidence = Dict.fromList [ ( retained.id, evidence retained ), ( deleted.id, evidence deleted ) ]
-                            , browseReturn = Just { requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, query = "needle", gitSha = fullSha, currentGitSha = "", historyGitSha = "" }
+                            , browseReturn = Just { subjectQuery = "", requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, query = "needle", gitSha = fullSha, currentGitSha = "", historyGitSha = "" }
                             , requestGeneration = 11
                             , requestSessionEpoch = 3
                             , queryFingerprint = "pre-snapshot-results"
@@ -1972,7 +2006,7 @@ suite =
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.class "observation-search" ] |> Query.has [ Selector.class "filter-bar" ]
                     , \_ -> view |> Query.findAll [ Selector.class "observation-filters" ] |> Query.count (Expect.equal 3)
-                    , \_ -> view |> Query.find [ Selector.tag "label", Selector.attribute (Html.Attributes.for "observation-query") ] |> Query.has [ Selector.text "Search content" ]
+                    , \_ -> view |> Query.find [ Selector.tag "label", Selector.attribute (Html.Attributes.for "observation-query") ] |> Query.has [ Selector.text "Search observations" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
                     , \_ -> view |> Query.hasNot [ Selector.class "observation-filter-apply" ]
                     , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "btn-extras-toggle", Selector.class "observation-disclosure", Selector.class "observation-card", Selector.class "observation-card-selected" ]
@@ -4048,7 +4082,7 @@ observationUrlTests =
         |> List.concatMap (\mode ->
             [ test ("complete applied URL round-trips Unicode and reserved values in " ++ Debug.toString mode) <| \_ ->
                 let
-                    query = { requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
+                    query = { subjectQuery = "", requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
                     state = Helpers.restoreObservationQuery query Feature.Observation.init
                     draft = { state | query = "unapplied secret", matchPathsInput = "unapplied path" }
                     model = editableModel draft
@@ -4057,7 +4091,7 @@ observationUrlTests =
                 Expect.equal (Just query) (Maybe.map .query restored)
             , test ("authorized bootstrap preserves mode and closes initial loading accounting in " ++ Debug.toString mode) <| \_ ->
                 let
-                    query = { requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
+                    query = { subjectQuery = "", requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
                     original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
                     loading = original.dataLoading
                     initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 44 } }
@@ -4087,6 +4121,31 @@ observationUrlTests =
                     aboveQuery = { atQuery | query = atQuery.query ++ "a" }
                 in
                 Expect.equal ( True, True ) ( Helpers.completeObservationUrl at |> isOk, Helpers.completeObservationUrl { model | observations = Helpers.restoreObservationQuery aboveQuery model.observations } |> isErr )
+            , test "search navigation URLs validate markers and enforce the complete4096-byte budget" <| \_ ->
+                let
+                    initial = Feature.Observation.init
+                    model = editableModel { initial | selectedId = Just "target" }
+                    base = Helpers.observationSearchHistoryUrl 2147483647 model
+                    query = Helpers.defaultObservationQuery
+                    boundary = { query | query = String.repeat (4096 - Helpers.observationUrlBytes base) "a" }
+                    at = Helpers.observationSearchHistoryUrl 2147483647 { model | observations = Helpers.restoreObservationQuery boundary model.observations }
+                    above = Helpers.observationSearchHistoryUrl 2147483647 { model | observations = Helpers.restoreObservationQuery { boundary | query = boundary.query ++ "a" } model.observations }
+                    parse value = Url.fromString value |> Maybe.map Helpers.observationUrlContext
+                    valid value = Url.fromString value |> Maybe.map Helpers.isObservationSearchUrl |> Maybe.withDefault False
+                    prefix = Helpers.observationUrl model ("&ov=1&oq=" ++ Helpers.encodeObservationQuery query)
+                    invalid = List.map (\value -> prefix ++ "&search-jump=" ++ value) [ "0", "-1", "01", "2147483648", "invalid", "1&search-jump=2", "1&unknown=x" ]
+                    source = Url.fromString base |> Maybe.map (\url -> AppShell.initModel Nothing url (WorkspacePage "workspace-1") model.flags Nothing { tab = ObservationsTab, focus = Nothing, observationId = Nothing })
+                in
+                Expect.all
+                    [ \_ -> Helpers.observationUrlBytes at |> Expect.equal 4096
+                    , \_ -> parse at |> Maybe.map (\context -> ( context.query, context.fragment.observationId, context.notice )) |> Expect.equal (Just ( boundary, Just "target", Nothing ))
+                    , \_ -> valid at |> Expect.equal True
+                    , \_ -> Helpers.observationUrlBytes above <= 4096 |> Expect.equal True
+                    , \_ -> parse above |> Maybe.map .notice |> Expect.equal (Just (Just Helpers.excludedObservationNotice))
+                    , \_ -> invalid |> List.all (valid >> not) |> Expect.equal True
+                    , \_ -> invalid |> List.all (parse >> Maybe.map (\context -> context.fragment.observationId == Nothing && context.notice /= Nothing) >> Maybe.withDefault False) |> Expect.equal True
+                    , \_ -> source |> Maybe.map (\loaded -> ( loaded.observations.searchOriginDetail, loaded.search.returnReceipt )) |> Expect.equal (Just ( True, Nothing ))
+                    ] ()
             , test "shell refresh hydrates missing restored detail once and keeps its request ownership" <| \_ ->
                 let
                     state = Feature.Observation.init
@@ -4104,7 +4163,7 @@ observationUrlTests =
                 Expect.equal ( [ "src/Main.elm", "src/View.elm" ], Just "off&page", Just "off&page" ) (context.query.matchAppliedPaths, context.fragment.observationId, legacy.fragment.observationId)
             , test "oversized own replacement proof is consumed once and does not resurrect on Back or ABA" <| \_ ->
                 let
-                    query = { requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
+                    query = { subjectQuery = "", requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
                     original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
                     issued = Helpers.writeObservationHistory True original |> Tuple.first
                     url = issued.observations.pendingExcludedLink |> Maybe.andThen (.url >> Url.fromString) |> Maybe.withDefault original.url
@@ -4124,7 +4183,7 @@ observationUrlTests =
                     ] ()
             , test "same applied route preserves unapplied controls and unchanged request identity" <| \_ ->
                 let
-                    query = { requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
+                    query = { subjectQuery = "", requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
                     state = Helpers.restoreObservationQuery query Feature.Observation.init
                     model = editableModel { state | query = "unapplied", requestGeneration = 99, selectedId = Nothing }
                     url = Helpers.completeObservationUrl model |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault model.url
@@ -4137,7 +4196,7 @@ observationUrlTests =
                     selected = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
                     original = editableModel ({ initialState | selectedId = Just selected.id, selectedDetail = Just selected, items = Dict.singleton selected.id selected, orderedIds = [ selected.id ] }) |> Feature.Observation.update StartObservationEdit |> Tuple.first |> Feature.Observation.update (SetObservationDraft "protected URL draft") |> Tuple.first
                     old = Feature.Observation.update ApplyObservationFilters original |> Tuple.first
-                    query = { requestMode = ObservationFlatMode, query = "changed", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
+                    query = { subjectQuery = "", requestMode = ObservationFlatMode, query = "changed", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
                     target = Helpers.completeObservationUrl { old | observations = Helpers.restoreObservationQuery query old.observations } |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault old.url
                     after = Route.handleUrlChange target old |> Tuple.first
                     late = Feature.DataLoading.update (GotObservations "workspace-1" Nothing old.observations.requestGeneration old.observations.queryFingerprint 0 (Ok { items = [ fixtureObservation "old-row" "2026-01-01T00:00:00Z" ], hasMore = False })) after |> Tuple.first
@@ -4237,30 +4296,39 @@ observationUrlReviewTests =
                         ( model.dataLoading.pendingWorkspaceLoads, model.dataLoading.activeWorkspaceLoadToken, model.dataLoading.initialObservationLoad )
                 in
                 List.map (callback >> evidence) cases |> Expect.equal (List.map evidence cases)
-            , test "unified search Observation intent pushes changed selection/tab once and replaces oversized contexts" <| \_ ->
+            , test "search Observation capture retains selection context and bounded excluded URLs without changing filters" <| \_ ->
                 let
                     selected = fixtureObservation "a" "2026-01-01T00:00:00Z"
                     state = Feature.Observation.init
                     original = editableModel { state | selectedId = Just selected.id, selectedDetail = Just selected }
-                    unchanged = Feature.Search.update (NavigateToSearchResult "observation" selected.id) original |> Tuple.first
-                    fromTab = Feature.Search.update (NavigateToSearchResult "observation" selected.id) { original | activeTab = ProjectsTab } |> Tuple.first
-                    changed = Feature.Search.update (NavigateToSearchResult "observation" "b") original |> Tuple.first
+                    jump id source =
+                        let pending = Feature.Search.update (NavigateToSearchResult "observation" id) source |> Tuple.first in
+                        case pending.search.pendingJump of
+                            Just intent -> Feature.Search.update (SearchNavigationEvent (Encode.object [ ( "token", Encode.int intent.token ), ( "guard", Encode.string intent.guard ), ( "top", Encode.float 25 ) ])) pending |> Tuple.first
+                            Nothing -> pending
+                    unchanged = jump selected.id original
+                    fromTab = jump selected.id { original | activeTab = ProjectsTab }
+                    changed = jump "b" original
                     query = urlReviewQuery ObservationMatchMode
                     oversizedQuery = { query | matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
-                    oversized = Feature.Search.update (NavigateToSearchResult "observation" "b") { original | observations = Helpers.restoreObservationQuery oversizedQuery original.observations } |> Tuple.first
+                    oversizedInput = { original | observations = Helpers.restoreObservationQuery oversizedQuery original.observations }
+                    oversized = jump "b" oversizedInput
                 in
                 Expect.all
-                    [ \_ -> unchanged.observations.nextLinkToken |> Expect.equal original.observations.nextLinkToken
-                    , \_ -> fromTab.observations.nextLinkToken |> Expect.equal (original.observations.nextLinkToken + 1)
-                    , \_ -> changed.observations.nextLinkToken |> Expect.equal (original.observations.nextLinkToken + 1)
-                    , \_ -> oversized.observations.pendingExcludedLink /= Nothing |> Expect.equal True
+                    [ \_ -> unchanged.observations.selectedId |> Expect.equal (Just selected.id)
+                    , \_ -> fromTab.activeTab |> Expect.equal ObservationsTab
+                    , \_ -> changed.observations.selectedId |> Expect.equal (Just "b")
+                    , \_ -> changed.observations.searchOriginDetail |> Expect.equal True
+                    , \_ -> changed.observations.tree |> Expect.equal original.observations.tree
+                    , \_ -> Helpers.observationAppliedQuery oversized.observations |> Expect.equal (Helpers.observationAppliedQuery oversizedInput.observations)
+                    , \_ -> oversized.search.returnReceipt |> Maybe.map (\receipt -> Helpers.observationUrlBytes receipt.targetUrl <= 4096 && String.contains "&ox=" receipt.targetUrl && receipt.observationSelectedId == Just selected.id) |> Expect.equal (Just True)
                     ] ()
             ])
 
 
 urlReviewQuery : ObservationRequestMode -> Types.ObservationAppliedQuery
 urlReviewQuery mode =
-    { requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }
+    { subjectQuery = "", requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }
 
 
 returnReceipt : ObservationViewport.State -> Float -> String -> Maybe String -> Encode.Value

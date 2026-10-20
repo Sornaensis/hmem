@@ -93,6 +93,7 @@ test-suite hmem-core-test
       HMem.DB.BotIdentitySpec
       HMem.DB.ChangeStreamSpec
       HMem.DB.EmbeddingSpec
+      HMem.DB.ObservationDiscoverySpec
       HMem.DB.ObservationFixture
       HMem.DB.ObservationRevisionSpec
       HMem.DB.ObservationSpec

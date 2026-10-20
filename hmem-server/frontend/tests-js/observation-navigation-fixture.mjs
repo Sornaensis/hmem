@@ -25,6 +25,7 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
   let nextVersion = 100
   await h.page.route('**/api/v1/observations**', async route => {
     const request = route.request(), url = new URL(request.url()), endpoint = url.pathname
+    if (endpoint.endsWith('/discovery')) { await route.fallback(); return }
     const receipt = { endpoint, method: request.method(), offset: Number(url.searchParams.get('offset') || 0), done: false }
     receipts.push(receipt)
     try {
@@ -47,7 +48,8 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
           const update = request.postDataJSON(); assert.deepEqual(Object.keys(update).sort(), ['content', 'reviewed_git_sha'])
           assert.equal(request.headers()['if-match'], '"' + body.content_version + '"')
           body = { ...body, latest_sequence: body.latest_sequence + 1, current_provenance: { sequence: body.latest_sequence + 1, event_kind: 'update', reviewed_git_sha: update.reviewed_git_sha, content_version: null, content_digest: 'a'.repeat(64), recorded_at: '2026-01-02T00:00:00Z', actor_type: 'local', actor_id: null, actor_label: null }, content: update.content, content_version: '20000000-0000-4000-8000-' + String(nextVersion++).padStart(12, '0'), updated_at: '2026-01-02T00:00:00Z' }; body.current_provenance.content_version = body.content_version; values.set(id, body)
-        } else if (request.method() === 'DELETE') { values.delete(id); body = {} }
+          fixture.observations = fixture.observations.map(value => value.id === id ? body : value)
+        } else if (request.method() === 'DELETE') { values.delete(id); fixture.observations = fixture.observations.filter(value => value.id !== id); body = {} }
         else assert.equal(request.method(), 'GET')
       }
       const control = controls.find(value => !value.used && value.match(receipt))

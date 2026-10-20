@@ -396,3 +396,65 @@ performance. Historical hotspot ownership remains
 For a bounded visual smoke, build first, run `node perf/serve.mjs large`, and open
 the printed URL in a named Playwright CLI session. The deterministic server does
 not modify production assets. This smoke does not replace qualification.
+# Live Observation search protocol fixture
+
+The `live-observation-search.v1` evidence profile identifies project
+`c32727d8-8d62-4e55-b6f7-62eacdaeced7`, qualification task
+`707a9421-cc30-4d3c-9978-3ece14bd6d5e`, and original review base
+`b73d5d5d0b07f2f27c5e982764b1886d5cafc41a`. It uses a separate task-owned
+temporary directory, five bounded evidence files, and the existing trace
+retirement and retention rules. The original review base does not identify
+the implementation HEAD; source and production-asset hashes identify that input.
+
+`fixtureResponder` supports keyed POST `/api/v1/observations/discovery`
+creation and token-only continuation. One pinned membership drives list pages,
+counts, tree branches and typed leaves. Subject/provenance predicates apply
+before content FTS union injected semantic membership (threshold 0.5, RRF k=60).
+Generations retire older contexts; modes and semantic inputs remain pinned.
+This deterministic fixture establishes protocol and membership causality, not
+database, GPU or network latency. Physical accounting records each intercepted
+request body and serialized response body once, including failed fulfillment;
+receipt acceptance separately requires successful fulfillment.
+
+Pure checks (no browser, server, build, install or operator configuration):
+
+```sh
+node --test perf/live-observation-search.test.mjs
+node --test --test-name-pattern=discovery perf/fixtures.test.mjs
+node --test perf/subject-tree-live-filters.test.mjs
+```
+
+The current profile runs production Main through paired Subjects/body inputs in
+both modes, actual discovery pages of 50, typed leaves, delayed superseded
+responses, all four clears, explicit global entity types, no-type suppression,
+and exact canonical Jump To/return targets. The search fixture decorates only
+this profile with one shared whole lexeme; Observation hits carry a compact
+280-character preview. Subjects, body, global query, toggles and navigation
+record their own two-paint intervals and corresponding transport deltas. Whole
+workflow transport and settled load-more timing are separate measurements.
+Every physical receipt contributes once to the byte/count ledger. Non-discovery
+routes retain transport-time numeric counters, without independent retained raw
+body witnesses. Discovery acceptance additionally recomputes captured raw JSON
+byte lengths and validates context generation,
+selectors, authoritative backing IDs, counts and completeness.
+
+From the frontend directory in the supported task environment, set
+`HMEM_EVIDENCE_BASE_COMMIT=b73d5d5d0b07f2f27c5e982764b1886d5cafc41a`, then run:
+
+```sh
+npm run perf:self-check
+npm run perf:record-after
+npm run perf:check
+```
+
+The two latter scripts build production assets and execute the pinned browser
+workflow. Record/check capture implementation HEAD, source and asset hashes,
+environment, and workload identity. The new paired/global workflow has no
+comparable historical before sample; its discovery50 pagination differs from
+the historical small-fixture terminal page200. Existing absolute budgets and
+historical assertions remain unchanged. Fixture timings establish frontend and
+transport behavior, not live database or GPU latency. The five named task707
+receipts are bounded to 64 MiB each and owned by the project maintainer through
+project closure plus 30 days, followed by verified removal; temporary trace
+payloads are verified, hashed and retired by the existing workflow.
+

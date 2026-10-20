@@ -77,7 +77,7 @@ test('production native Tab mounts offscreen logical targets and retained detail
   try {
     await h.start()
     const initial = await h.page.locator('#observation-viewport').getAttribute('data-observation-logical-count')
-    assert.equal(initial, '200')
+    assert.equal(initial, '50')
     const last = h.page.locator('.observation-viewport-row').filter({ has: h.page.locator('.observation-result .copyable-value') }).last()
     const originKey = await last.getAttribute('data-observation-key')
     // Legacy fixtures have no reviewed-revision copy button. Enter through

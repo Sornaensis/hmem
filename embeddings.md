@@ -99,11 +99,58 @@ query vectors. A space label is a compatibility claim; relabeling an old vector
 does not convert it. When changing models, export with `--all` and regenerate
 the corpus in the new space before querying it.
 
-Generate query vectors externally, then call REST
-`POST /api/v1/observations/similar` or MCP `observation_similar`. There is no
-raw-text query embedding endpoint. Supply the matching `space_fingerprint`;
+For caller-produced vectors, call REST
+`POST /api/v1/observations/similar` or MCP `observation_similar`. Supply the matching `space_fingerprint`;
 omitting it searches only the legacy manual space. Explicit null is invalid.
 See [the API reference](api.md) for authentication and OpenAPI request details.
+
+Observation discovery can reuse the explicitly enabled, validated GPU provider
+to prepare a private query vector. It requires optional vector storage and at
+least one stored vector in the exact pinned space in the authorized repository
+workspace. `GET /api/v1/observation-discovery/capability?workspace_id=<uuid>`
+reports `hybrid` or `fts_only` and a fixed fallback reason without returning
+vectors, endpoints or configuration. It does not install or enable anything.
+
+Query preparation uses the provider's existing one-active/two-waiter admission
+gate, query instruction formatting and exact-space validation. The entire
+interactive preparation has a two-second deadline. Formatted query input plus
+EOS must fit the compact 2048-byte profile; longer inputs retain FTS. Disabled,
+missing, timed-out, invalid or retired providers and absent compatible vectors
+retain FTS with a safe reason. There is no CPU or cross-space fallback, and no
+public endpoint that returns generated query vectors. Provider withdrawal
+retires in-flight preparation before a replacement generation is published.
+
+The [prepared discovery API](api.md) generates the body-query vector once per
+accepted filter lifetime and reuses it for counts, branches, leaves and pages.
+It always combines FTS and qualified exact-space vectors when available,
+including queries with FTS hits. A completed context keeps that retrieval mode
+through provider outages; expired contexts and lost vector storage require an
+explicit restart. Semantic membership uses the full cosine >=0.5 set and
+deterministic reciprocal-rank fusion with FTS (k=60), without a top-K catalog.
+
+To qualify the already configured HTTP GPU provider against current-source
+discovery, set `HMEM_TEST_CONFIGURED_DISCOVERY=1` in the test process and run:
+
+```sh
+stack test hmem-server:test:hmem-server-test --test-arguments="--match=ConfiguredDiscovery"
+```
+
+The test captures the normal config path before the test sandbox redirects
+HOME; `HMEM_TEST_DISCOVERY_CONFIG` can select an explicit existing config file.
+It accepts only the validated HTTP GPU profile and exact pinned space, retaining
+the normal embedding mode/endpoint environment overrides. Without opt-in it
+skips before reading operator configuration or invoking the provider. With
+opt-in, missing or unusable configuration/provider fails qualification.
+
+Only the disposable PostgreSQL fixture is seeded. External test DB mode is
+refused; the test starts no embedding worker, model or operator service and
+writes no operator configuration/logs. It validates the provider, then checks
+authorized capability, a real hybrid query and context continuation through
+WAI, plus denied requests with zero provider calls. A 180-second overall
+deadline includes the usual two-second discovery bound; withdrawal/invalidation
+cleanup has its own two-second bound. Output contains safe assertion status
+and helper SHA256 only. This qualifies the isolated current-source path, not
+browser traffic or the operator database's vector coverage.
 
 Content writes, including same-text re-audits, clear an Observation's stored
 vector. It stays out of similarity results until a new vector is stored. A

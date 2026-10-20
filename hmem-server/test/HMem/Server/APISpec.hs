@@ -21,6 +21,7 @@ import Data.Text.Encoding qualified as Text
 import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
@@ -45,7 +46,9 @@ import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace, getAuditLogRows)
 import HMem.Server.AccessTracker (newAccessTracker)
-import HMem.Server.API (HMemAPI, navigationPageWhenRequested, navigationOwnerOutcomes, server)
+import HMem.Server.API (HMemAPI, navigationPageWhenRequested, navigationOwnerOutcomes, server, prepareObservationDiscovery)
+import HMem.Server.ObservationDiscovery qualified as Discovery
+import HMem.Server.Embedding.Provider qualified as Provider
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..), entityTypeToText)
 import HMem.Server.App (mkApp)
@@ -89,6 +92,15 @@ expectValidationError response = do
 jsonField :: T.Text -> Value -> Maybe Value
 jsonField fieldName (Object fields) = KeyMap.lookup (Key.fromText fieldName) fields
 jsonField _ _ = Nothing
+
+discoveryPage :: SResponse -> IO (UUID, ObservationDiscoveryPage)
+discoveryPage response = case decode (responseBody response) :: Maybe Value of
+  Just value | Just (String tokenText) <- jsonField "context_token" value
+    , Just token <- UUID.fromText tokenText
+    , Just page <- jsonField "page" value -> case Data.Aeson.fromJSON page of
+        Data.Aeson.Success result -> pure (token,result)
+        Data.Aeson.Error message -> expectationFailure message >> fail "invalid discovery page"
+  _ -> expectationFailure ("invalid discovery response: " <> show (responseBody response)) >> fail "invalid discovery response"
 
 jsonPath :: [T.Text] -> Value -> Maybe Value
 jsonPath fieldNames value = foldl (\current fieldName -> current >>= jsonField fieldName) (Just value) fieldNames
@@ -2243,6 +2255,93 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
 
   describe "Observation HTTP contract" $ do
+    it "reuses a discovery context across list tree count and typed leaf views without changing its filters" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "discovery-http"
+      row <- Observation.createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/A.hs",ObservationSubject SubjectGlob "src/*.hs"] (T.replicate 40 "a") "needle")
+      other <- Observation.createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/B.hs"] (T.replicate 40 "a") "needle")
+      _ <- Observation.createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "docs/Hidden.md"] (T.replicate 40 "a") "needle")
+      let path = "/api/v1/observations/discovery"
+          create = object ["workspace_id" .= workspace.id,"filters" .= object ["subject_query" .= ("src/" :: T.Text),"content_query" .= ("needle" :: T.Text)],"limit" .= (1 :: Int)]
+      created <- postJson app path create
+      responseStatus created `shouldBe` status200
+      (token,first) <- discoveryPage created
+      (first.counts,first.hasMore) `shouldBe` (ObservationCounts workspace.id 3 2,True)
+      let continue extra = postJson app path (object (["workspace_id" .= workspace.id,"context_token" .= token] <> extra))
+      next <- continue ["limit" .= (1 :: Int),"offset" .= (1 :: Int)]
+      (_,second) <- discoveryPage next
+      sort (map (.id) (first.items <> second.items)) `shouldBe` sort [row.id,other.id]
+      second.hasMore `shouldBe` False
+      counted <- continue ["view" .= ("count" :: T.Text)] >>= discoveryPage
+      (snd counted).counts `shouldBe` first.counts
+      tree <- continue ["view" .= ("tree" :: T.Text),"prefix" .= ("src" :: T.Text)] >>= discoveryPage
+      fmap (map (.path) . (.items)) (snd tree).tree `shouldBe` Just ["src/*.hs","src/A.hs","src/B.hs"]
+      leaf <- continue ["terminal" .= ObservationSubject SubjectGlob "src/*.hs"] >>= discoveryPage
+      map (.id) (snd leaf).items `shouldBe` [row.id]
+      changed <- continue ["filters" .= object ["content_query" .= ("other" :: T.Text)]]
+      responseStatus changed `shouldBe` status400
+      replaced <- postJson app path (object ["workspace_id" .= workspace.id,"replace_context_token" .= token,"filters" .= object []])
+      responseStatus replaced `shouldBe` status200
+      retired <- continue []
+      responseStatus retired `shouldBe` status409
+      (decode (responseBody retired) >>= jsonField "error") `shouldBe` Just (String "discovery_restart_required")
+      let keyed generation = postJson app path (object ["workspace_id" .= workspace.id,"filters" .= object [],"search_session" .= UUID.nil,"generation" .= (generation :: Int)])
+      keyedFirst <- keyed 1
+      (firstToken,_) <- discoveryPage keyedFirst
+      keyedSecond <- keyed 2
+      responseStatus keyedSecond `shouldBe` status200
+      superseded <- postJson app path (object ["workspace_id" .= workspace.id,"context_token" .= firstToken])
+      responseStatus superseded `shouldBe` status409
+      delayed <- keyed 1
+      responseStatus delayed `shouldBe` status409
+      malformedPair <- postJson app path (object ["workspace_id" .= workspace.id,"filters" .= object [],"search_session" .= UUID.nil])
+      responseStatus malformedPair `shouldBe` status400
+      oversized <- postJson app path (object ["workspace_id" .= workspace.id,"filters" .= object ["content_query" .= T.replicate 4097 "x"]])
+      responseStatus oversized `shouldBe` status400
+
+    it "reauthorizes discovery contexts and rejects other workspaces without disclosing tokens" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "discovery-grants"
+        other <- createTestWorkspace ctx.deployedEnv "discovery-other-grants"
+        user <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool other.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
+        token <- issueDeployedSandboxPAT ctx.deployedEnv user "discovery-reader"
+        let path = "/api/v1/observations/discovery"
+            send value = requestWithHeaders ctx.deployedApplication methodPost path [botIdentityHeader,("Authorization","Bearer " <> Text.encodeUtf8 token.rawToken)] (encode value)
+        created <- send (object ["workspace_id" .= workspace.id,"filters" .= object []])
+        responseStatus created `shouldBe` status200
+        (context,_) <- discoveryPage created
+        foreignUse <- send (object ["workspace_id" .= other.id,"context_token" .= context])
+        responseStatus foreignUse `shouldBe` status409
+        _ <- Auth.deleteWorkspaceMembership ctx.deployedEnv.pool workspace.id user
+        denied <- send (object ["workspace_id" .= workspace.id,"context_token" .= context])
+        responseStatus denied `shouldBe` status403
+
+    it "authorizes discovery before any provider work and retains the FTS fallback" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "discovery-authorization"
+      service <- Discovery.newObservationDiscovery True
+      calls <- newIORef (0 :: Int)
+      let provider = Provider.EmbeddingProvider
+            (modifyIORef' calls (+ 1) >> pure Provider.EmbeddingAvailable)
+            (\_ -> modifyIORef' calls (+ 1) >> pure (Left (Provider.EmbeddingFailure Provider.ProviderUnavailable True)))
+          prepare = prepareObservationDiscovery env.pool (Just service) workspace.id "query"
+      _ <- Discovery.publishDiscoveryProvider service provider
+      unauthenticated <- withPrincipalContext Nothing (runHandler prepare)
+      case unauthenticated of
+        Left failure -> errHTTPCode failure `shouldBe` 401
+        Right _ -> expectationFailure "discovery accepted no principal"
+      denied <- withPrincipalContext (Just (Principal ActorUser "unprivileged" "Unprivileged" PrincipalNoAuthority)) (runHandler prepare)
+      case denied of
+        Left failure -> errHTTPCode failure `shouldBe` 403
+        Right _ -> expectationFailure "discovery accepted no workspace grant"
+      readIORef calls `shouldReturn` 0
+      -- The compatibility application has no discovery producer and makes no
+      -- vector/database claim merely because pgvector is installed.
+      capability <- request app methodGet
+        ("/api/v1/observation-discovery/capability?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id))) ""
+      responseStatus capability `shouldBe` status200
+      decode (responseBody capability) `shouldBe` Just (object ["mode" .= ("fts_only" :: T.Text), "reason" .= ("disabled" :: T.Text)])
+
     it "returns bounded revision history and truthful deduplicated current projections for historical SHA queries" $ \(env, app) -> do
       original <- createVersionObservation env app "observation-history-http"
       let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
@@ -3021,6 +3120,19 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       entityTypeToText ETObservation `shouldBe` "observation"
 
   describe "OpenAPI" $ do
+    it "documents discovery public filter names and bounded live generations" $ \(_,app) -> do
+      response <- request app methodGet "/api/v1/openapi.json" ""
+      responseStatus response `shouldBe` status200
+      case decode (responseBody response) :: Maybe Value of
+        Nothing -> expectationFailure "missing OpenAPI document"
+        Just document -> do
+          jsonPath ["paths","/api/v1/observations/discovery","post"] document `shouldSatisfy` isJust
+          jsonPath ["components","schemas","ObservationDiscoveryFilter","properties","subject_query"] document `shouldSatisfy` isJust
+          jsonPath ["components","schemas","ObservationDiscoveryFilter","properties","subjects_text"] document `shouldBe` Nothing
+          jsonPath ["components","schemas","ObservationDiscoveryRequest","properties","prefix"] document `shouldSatisfy` isJust
+          jsonPath ["components","schemas","ObservationDiscoveryRequest","properties","generation","maximum"] document `shouldBe` Just (Number 2147483647)
+          jsonPath ["components","schemas","ObservationDiscoveryRequest","required"] document `shouldBe` Just (toJSON ["workspace_id" :: T.Text])
+
     it "omits due properties from every planning input and task read schema" $ \(_env, app) -> do
       response <- request app methodGet "/api/v1/openapi.json" ""
       responseStatus response `shouldBe` status200

@@ -4,6 +4,7 @@ import Api
 import AppShell
 import Dict
 import Expect
+import Json.Encode
 import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading as Loading
 import Main
@@ -120,12 +121,17 @@ tests =
                 base = ready
                 workspace = Dict.get "workspace-1" base.workspaces |> Maybe.map (\value -> { value | workspaceType = Api.Repository })
                 requested = { base | workspaces = workspace |> Maybe.map (Dict.singleton "workspace-1") |> Maybe.withDefault Dict.empty } |> sync
-                old = requested.observations.workspaceCounts.active |> Maybe.withDefault { workspaceId = "missing", sessionEpoch = -1, actor = "", token = -1, generation = -1, fingerprint = "" }
+                old = List.head requested.observations.discovery.physical
                 switched = { requested | sessionRequestEpoch = requested.sessionRequestEpoch + 1 } |> sync
-                released = Main.update (GotWorkspaceObservationCounts old (Ok { workspaceId = "workspace-1", totalCount = 99, matchCount = 99 })) switched |> Tuple.first
+                released = old |> Maybe.map (\request -> Main.update (GotObservationDiscovery request (Ok (discoveryCounts 99 request))) switched |> Tuple.first) |> Maybe.withDefault switched
+                retained = old |> Maybe.map (\request -> List.member request switched.observations.discovery.physical && Set.member (discoveryCountKey request) switched.dataLoading.startupAdmission.physical) |> Maybe.withDefault False
+                completed = old |> Maybe.map (\request -> not (List.member request released.observations.discovery.physical) && not (Set.member (discoveryCountKey request) released.dataLoading.startupAdmission.physical)) |> Maybe.withDefault False
             in
-            Expect.equal ( Nothing, Nothing, True )
-                ( switched.observations.workspaceCounts.active, released.observations.workspaceCounts.value, released.observations.workspaceCounts.active /= Nothing )
+            Expect.all
+                [ \_ -> Expect.equal ( Nothing, Nothing, True ) ( switched.observations.workspaceCounts.active, released.observations.workspaceCounts.value, released.observations.workspaceCounts.active /= Nothing )
+                , \_ -> Expect.equal (True,True,1) (retained,completed,List.length released.observations.discovery.physical)
+                , \_ -> Expect.equal requested.observations.orderedIds released.observations.orderedIds
+                , \_ -> Expect.equal requested.dataLoading.initialObservationLoad released.dataLoading.initialObservationLoad ] ()
         , test "actual session retirement retains physical count debt until exact stale callback" <| \_ ->
             let
                 requested = Loading.syncPlanningCounts ready |> Tuple.first
@@ -160,8 +166,7 @@ exhaustedRepository tab =
         workspace = Dict.get "workspace-1" base.workspaces |> Maybe.map (\value -> { value | workspaceType = Api.Repository })
         requested = { base | workspaces = workspace |> Maybe.map (Dict.singleton "workspace-1") |> Maybe.withDefault Dict.empty } |> sync
         planning = Main.update (GotWorkspacePlanningCounts (planningGuard requested) (Ok { openProjects = 1, openTasks = 2 })) requested |> Tuple.first
-        guard = planning.observations.workspaceCounts.active |> Maybe.withDefault { workspaceId = "missing", sessionEpoch = -1, actor = "", token = -1, generation = -1, fingerprint = "" }
-        accepted = Main.update (GotWorkspaceObservationCounts guard (Ok { workspaceId = "workspace-1", totalCount = 60, matchCount = 60 })) planning |> Tuple.first
+        accepted = List.head planning.observations.discovery.physical |> Maybe.map (\request -> Main.update (GotObservationDiscovery request (Ok (discoveryCounts 60 request))) planning |> Tuple.first) |> Maybe.withDefault planning
         loading = accepted.dataLoading
         counts = loading.planningCounts
         admission = loading.startupAdmission
@@ -222,6 +227,17 @@ ready =
         session = { authMode = "test", effectiveActor = Nothing, principal = { actorType = "user", actorId = "reader", actorLabel = "reader", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }, workspace = Just { workspaceId = "workspace-1", role = Just "edit", canRead = True, canEdit = True, canAdmin = False } }
         workspace = { id = "workspace-1", name = "Workspace", workspaceType = Api.Planning, ghOwner = Nothing, ghRepo = Nothing, createdAt = "now", updatedAt = "now" }
         loading = initial.dataLoading
+        observations = initial.observations
+        discovery = observations.discovery
     in
-    { initial | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just session, workspaces = Dict.singleton "workspace-1" workspace, dataLoading = { loading | activeWorkspaceLoadToken = Just 1 } }
+    { initial | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just session, workspaces = Dict.singleton "workspace-1" workspace, dataLoading = { loading | activeWorkspaceLoadToken = Just 1 }, observations = {observations | discovery = {discovery | sessionId = "10000000-0000-4000-8000-000000000001"}} }
         |> Loading.prepareRootNavigationRequest (Just "workspace-1")
+
+
+discoveryCounts total request =
+    {contextToken = Maybe.withDefault ("startup-context-" ++ String.fromInt request.generation) request.contextToken, expiresAt = "2099-01-01T00:00:00Z", retrieval = {mode = "fts_only", reason = Just "disabled"}, complete = True
+    , page = {items = [], tree = Nothing, hasMore = False, counts = {workspaceId = "workspace-1", totalCount = total, matchCount = total}}}
+
+
+discoveryCountKey request =
+    "discovery-count|" ++ Json.Encode.encode 0 (Json.Encode.list Json.Encode.string [request.owner,request.sessionId,String.fromInt request.generation,String.fromInt request.countGeneration,String.fromInt request.workspaceCountGeneration])

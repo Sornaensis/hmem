@@ -151,6 +151,8 @@ test('closed prerequisites recover subtask starts after a failed parent eligibil
     try {
       await h.start(focused ? 'tab=projects&focus=task:own-child' : 'tab=projects', focused ? 'own-child' : 'root-project')
       await h.idle()
+      if (!focused) await h.scrollTo('task:own-child')
+      await statusControl(h, 'own-child').locator('option[value="in_progress"]').waitFor({ state: 'attached' })
       assert.equal((await transitionAvailability(h, 'own-child')).in_progress, false)
       const failed = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('eligible-parent'), { error: 503 })
       h.fixture.tasks.find(task => task.id === 'prerequisite').status = closedStatus

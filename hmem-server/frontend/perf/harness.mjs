@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { assertQualificationEnvironment, createPhysicalRequestAccounting, observationDiscoveryReceipt, assertObservationDiscoveryReceipt, CURRENT_SEARCH_WORKLOAD } from './contracts.mjs'
+import { createObservationDiscoveryFixture } from './fixtures.mjs'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -198,6 +200,7 @@ export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write =
     if (manifest.qualificationPassed && manifest.traceArchive.available) throw new Error('Task qualification cannot retain the temporary trace archive')
     const validation = JSON.parse(io.readFileSync(validationRecordPath, 'utf8'))
     assertEvidenceIdentity(plan, validation)
+    manifest.inputQualification = validation.inputQualification
     if (validation.inputQualification?.implementationCommit !== manifest.sourceProvenance.headCommit) throw new Error('Task implementation revision changed before evidence finalization')
     assertEvidenceIdentity(plan, manifest)
   }
@@ -243,6 +246,7 @@ export function assertLinkedNavigationPage(tracker, page) {
 }
 
 export function fixtureResponder(fixture, tracker, options = {}) {
+  const discovery = options.discovery || createObservationDiscoveryFixture(fixture,options.discoveryOptions)
   const snapshots = options.snapshots || snapshotItems(fixture)
   const resyncGate = options.resyncGate || null
   const focusContinuationPause = options.focusContinuationPause || null
@@ -259,6 +263,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     receipt.status = status
     receipt.workspaceId ||= value?.workspace_id || null
     receipt.bytes = Buffer.byteLength(body)
+    if (key === 'observations:discovery') receipt.discovery = observationDiscoveryReceipt(receipt.requestBody,value,status,false,receipt.rawRequestBody,body)
     if (key === 'navigation:batch') receipt.batchResponse = value
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
     if (key === 'navigation:branch') { receipt.navigation = value; receipt.navigationStatus = status }
@@ -277,6 +282,8 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     } finally {
       tracker.liveDiagnostics?.fulfilled(receipt.requestId, performance.now(), fulfilled)
       receipt.fulfilled = fulfilled
+      tracker.physicalAccounting.finish(receipt.requestId,body,fulfilled)
+      if (receipt.discovery) receipt.discovery.fulfilled = fulfilled
       if (receipt.observationPage) receipt.observationPage.response.fulfilled = fulfilled
       if (receipt.timeline) receipt.timeline.response.fulfilled = fulfilled
       if (key === 'navigation:branch') receipt.navigationFulfilled = fulfilled
@@ -351,6 +358,15 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       workspaceId: pathname.match(/^\/api\/v1\/workspaces\/([^/]+)(?:\/|$)/)?.[1] || url.searchParams.get('workspace_id')
         || (key === 'observations:count' ? request.postDataJSON()?.workspace_id : null),
       key, metadataEpoch: tracker.metadataEpoch, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
+    const rawRequestBody = typeof request.postData === 'function' ? request.postData() || ''
+      : request.method() === 'POST' && typeof request.postDataJSON === 'function' ? JSON.stringify(request.postDataJSON()) : ''
+    tracker.physicalAccounting.begin(receipt.requestId,rawRequestBody)
+    receipt.requestBytes = Buffer.byteLength(rawRequestBody || '')
+    if (key === 'observations:discovery' || key === 'search:unified') {
+      receipt.rawRequestBody = rawRequestBody
+      receipt.requestBody = request.postDataJSON()
+      receipt.workspaceId = receipt.requestBody?.workspace_id || null
+    }
     if (tracker.navigationProof) {
       if (key === 'session' || key === 'change-stream:resync') receipt.paintReceiptId = tracker.paintRunId + '-' + tracker.requests.length
       if (key === 'session') { tracker.metadataEpoch++; tracker.navigationMetadata.clear(); receipt.metadataEpoch = tracker.metadataEpoch; receipt.proofSession = tracker.navigationProof.beginSession(); receipt.paintSession = tracker.paintReadiness.beginSession(receipt.at, receipt.paintReceiptId, request.url()) }
@@ -483,6 +499,16 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       if (url.searchParams.getAll('query_scope').length > 1) throw new Error('Duplicate Observation query scope')
       if (options.contentOnly) assertObservationContentScopeUrl(url.href)
     }
+    if (pathname === '/api/v1/observations/discovery' && request.method() === 'POST') {
+      const result = discovery.handle(receipt.requestBody,options.discoveryAudience || 'fixture-reader')
+      receipt.gate = tracker.discoveryGate?.(receipt) || null
+      return reply(route,request,result.value,result.status)
+    }
+    if (pathname === '/api/v1/search' && request.method() === 'POST') {
+      const body = request.postDataJSON(),outcome=currentUnifiedSearchFixture(fixture,body),value=outcome.value
+      receipt.search = {request:body,response:value}
+      return reply(route,request,value,outcome.status)
+    }
     if (pathname === '/api/v1/observations') return reply(route, request, queryObservations(fixture, {
       queryScope: url.searchParams.get('query_scope'), query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'),
       currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'),
@@ -538,6 +564,33 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     tracker.unhandledApiRoutes.push(exact)
     return reply(route, request, { error: `contracted but unimplemented perf API route: ${exact}` }, 501, `unimplemented:${request.method()}:${pathname}`)
   }
+}
+
+export const CURRENT_SEARCH_TOKEN='qualificationsearch'
+export function currentSearchFixture(fixture) {
+  return {...fixture,projects:fixture.projects.map((row,i)=>i===0?{...row,description:(row.description||'')+' '+CURRENT_SEARCH_TOKEN}:row),
+    tasks:fixture.tasks.map((row,i)=>i===0?{...row,description:(row.description||'')+' '+CURRENT_SEARCH_TOKEN}:row),
+    observations:fixture.observations.map((row,i)=>i===0?{...row,content:row.content+' '+CURRENT_SEARCH_TOKEN}:row)}
+}
+
+export function currentUnifiedSearchFixture(fixture,body) {
+  const limit=body.limit??10,offset=body.offset??0,types=body.entity_types??['project','task','observation']
+  if(body.workspace_id!==fixture.workspace.id||typeof body.query!=='string'||!body.query.trim()||!['simple',undefined,null].includes(body.search_language)||!Array.isArray(types)||types.some(type=>!['project','task','observation'].includes(type))
+    ||!Number.isInteger(limit)||limit<1||limit>200||!Number.isInteger(offset)||offset<0||offset>2147483647)return {status:400,value:{error:'Invalid search request'}}
+  const tokens=value=>String(value).toLowerCase().match(/[\p{L}\p{N}_]+/gu)||[],wanted=[...new Set(tokens(body.query))]
+  const matches=value=>{const document=tokens(value);return wanted.length>0&&wanted.every(token=>document.includes(token))}
+  const sort=(a,b)=>b.updated_at.localeCompare(a.updated_at)||b.id.localeCompare(a.id)
+  const all={project:fixture.projects.filter(row=>(!body.project_status||row.status===body.project_status)&&matches(row.name+' '+(row.description||''))).sort(sort),
+    task:fixture.tasks.filter(row=>(!body.task_status||row.status===body.task_status)&&(!body.project_id||row.project_id===body.project_id)&&(body.task_priority==null||row.priority===body.task_priority)&&matches(row.title+' '+(row.description||''))).sort(sort),
+    observation:Array.from({length:Math.ceil(fixture.observations.length/200)},(_,i)=>queryObservations(fixture,{query:body.query,subjectKind:body.subject_kind,subject:body.subject,gitSha:body.git_sha,currentGitSha:body.current_git_sha,historyGitSha:body.history_git_sha,limit:200,offset:i*200}).items).flat()}
+  const value={projects:[],tasks:[],observations:[],has_more:{},next_offset:{}}
+  for(const type of [...new Set(types)]){
+    const key=type==='project'?'projects':type==='task'?'tasks':'observations',rows=all[type],page=rows.slice(offset,offset+limit)
+    value[key]=type==='observation'?page.map(row=>Object.fromEntries(['id','workspace_id','subjects','subject_kind','subject','git_sha','updated_at','content_version','latest_sequence','current_provenance','provenance_match'].filter(key=>key in row).map(key=>[key,row[key]]).concat([['content_preview',[...row.content].slice(0,280).join('')]]))):page
+    value.has_more[key]=offset+limit<rows.length
+    if(value.has_more[key]){if(offset+page.length>2147483647)return {status:400,value:{error:'unified search continuation exceeds the supported offset range'}};value.next_offset[key]=offset+page.length}
+  }
+  return {status:200,value}
 }
 
 export async function staticServer() {
@@ -872,16 +925,17 @@ function rememberNavigationMetadata(tracker, receipt, value) {
   }
 }
 
-export function prepareLiveNavigationProof(tracker, fixture, frames) {
+export function prepareLiveNavigationProof(tracker, fixture, frames, {discoveryReads = false} = {}) {
   // The supported scenario has one delivery and no earlier canonical summary or
   // focus read in this tracker. Separate focus scenarios use separate trackers.
   // Enforce that prefix rather than approximating Elm's per-target read guards.
   if (tracker.liveNavigationPrepared) throw new Error('Live navigation proof delivery is one-shot')
   const root = tracker.requests.findLast(request => request.key === 'navigation:branch' && new URL(request.url).searchParams.get('parent_kind') === 'workspace_root')
   if (!root || !root.done || !root.navigationFulfilled || root.navigationStatus !== 200 || tracker.active !== 0 || !tracker.navigationProof?.ready()) throw new Error('Live navigation context is not settled')
+  const discoveryPrefix=discoveryReads&&tracker.requests.filter(request=>request.key==='observations:discovery').every(request=>request.method==='POST'&&request.discovery?.fulfilled&&request.discovery.status===200&&request.discovery.response.complete&&request.requestBody.limit===50)
   if ((tracker.counts['navigation:summaries'] || 0) !== 0 || (tracker.counts['navigation:focus'] || 0) !== 0
     || tracker.requests.some(request => request.method !== 'GET' && !(request.method === 'POST'
-      && ['change-stream:resync', 'change-stream:ticket', 'observations:count', 'observations:match', 'navigation:batch'].includes(request.key)))) throw new Error('Unsupported live navigation read/mutation prefix')
+      && (['change-stream:resync', 'change-stream:ticket', 'observations:count', 'observations:match', 'navigation:batch'].includes(request.key)||(discoveryPrefix&&request.key==='observations:discovery'))))) throw new Error('Unsupported live navigation read/mutation prefix')
   assertNoUnhandledApiRoutes(tracker)
   const owners = liveNavigationInvalidatedOwners(fixture, tracker.navigationMetadata, frames, new URL(root.url))
   tracker.liveNavigationPrepared = true
@@ -1184,15 +1238,15 @@ async function assertLiveStability(page, tracker, durationMs = 500) {
 }
 
 async function domMetrics(page) {
-  return page.evaluate(() => ({
+  return page.evaluate(current => ({
     nodes: document.querySelectorAll('*').length,
-    rows: document.querySelectorAll('.card-project,.card-task,.card-subtask,.observation-card,.timeline-event-card,.timeline-value-table tbody tr,.timeline-point-control').length,
+    rows: document.querySelectorAll('.card-project,.card-task,.card-subtask,.observation-card,.timeline-event-card,.timeline-value-table tbody tr,.timeline-point-control'+(current?',.search-result-card':'')).length,
     projects: document.querySelectorAll('.card-project').length,
     tasks: document.querySelectorAll('.card-task,.card-subtask').length,
     observations: document.querySelectorAll('.observation-card').length,
     timelineEvents: document.querySelectorAll('.timeline-event-card').length,
     timelineRows: document.querySelectorAll('.timeline-value-table tbody tr,.timeline-point-control').length
-  }))
+  }),evidencePlan.liveObservationSearch)
 }
 
 function requestSnapshot(tracker) {
@@ -1211,7 +1265,7 @@ function requestDelta(tracker, before) {
 
 export function observationPaginationSource() {
   const file = path.join(frontendRoot, 'src/Feature/Observation.elm')
-  const source = fs.readFileSync(file, 'utf8')
+  const source = fs.readFileSync(file, 'utf8').replace(/--[^\r\n]*/g, '')
   const pageSize = Number(source.match(/pageSize\s*:\s*Int\s+pageSize\s*=\s*(\d+)/)?.[1])
   if (pageSize !== OBSERVATION_PAGINATION_CONTRACT.pageSize) throw new Error('Observation pagination source contract changed')
   return { path: normalizedRepositoryPath(file), symbol: 'pageSize', pageSize, sha256: sha256File(file) }
@@ -1221,7 +1275,7 @@ export function liveObservationRefreshSource() {
   const files = ['src/Feature/Observation.elm', 'src/Feature/WebSocket.elm', 'src/Feature/DataLoading.elm']
   const observation = fs.readFileSync(path.join(frontendRoot, files[0]), 'utf8')
   const socket = fs.readFileSync(path.join(frontendRoot, files[1]), 'utf8')
-  if (!observation.includes('targetOffset = Basics.max pageSize') || !observation.includes('next < old.targetOffset')
+  if (!(observation.includes('targetOffset = Basics.max pageSize') || observation.includes('targetOffset = Basics.max (if state.requestMode == ObservationMatchMode then pageSize else 50)')) || !observation.includes('next < old.targetOffset')
     || !observation.includes('fetchRefreshPage 0 prepared') || !observation.includes('requestSessionEpoch = sessionEpoch')
     || !socket.includes('Observation.refreshActiveResults')) throw new Error('Live retained Observation refresh source changed')
   return files.map(relative => { const file = path.join(frontendRoot, relative); return { path: normalizedRepositoryPath(file), sha256: sha256File(file) } })
@@ -1484,7 +1538,7 @@ export function createTracker(fixture = null) {
   let paintDecision = null
   const coldDiagnostics = createColdDiagnostics()
   const navigationProof = fixture && contextualNavigationProof(fixture)
-  return { navigationProof, navigationMetadata: fixture && new Map(), metadataEpoch: 0, liveNavigationPrepared: false, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
+  return { physicalAccounting:createPhysicalRequestAccounting(), navigationProof, navigationMetadata: fixture && new Map(), metadataEpoch: 0, liveNavigationPrepared: false, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
     requests: [], arrivals: new WeakMap(), counts: {}, bytes: {}, active: 0, activeBranches: 0, activeExpandedBranches: 0, activeRootBranches: 0, activeDetails: 0, maxBranches: 0, maxExpandedBranches: 0, maxRootBranches: 0, maxDetails: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
     model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
   }
@@ -1831,6 +1885,140 @@ export async function waitObservationMembers(page, count, label = 'Observation m
   if (attemptState) attemptState.phase = previousPhase
 }
 
+export async function measureCurrentSearch(page, tracker, fixture, interactions, dom) {
+  const require = (condition, label) => { if (!condition) throw new Error('Current search qualification: ' + label) }
+  const reads = () => tracker.requests.filter(r => r.discovery)
+  const latest = () => reads().filter(r => r.done && r.status === 200).at(-1)
+  const idle = label => waitForTransportQuiescence(page,tracker,label)
+  let inputIndex=0
+  const filter = async (subjects,body,allowHeld = false) => {
+    const from=tracker.requests.length
+    const subjectBefore=requestSnapshot(tracker)
+    const subjectMs=await requiredLiveInputDoubleFrame(page,'#observation-subject-query',subjects)
+    interactions['subjectsInput'+inputIndex]={ms:subjectMs,...requestDelta(tracker,subjectBefore)}
+    const bodyBefore=requestSnapshot(tracker)
+    const ms = await requiredLiveInputDoubleFrame(page,'#observation-query',body)
+    interactions['bodyInput'+inputIndex++]={ms,...requestDelta(tracker,bodyBefore)}
+    await page.waitForTimeout(275)
+    if (allowHeld) {
+      const deadline=performance.now()+5000
+      while(!tracker.requests.slice(from).some(r=>r.discovery&&r.done&&r.status===200)) {if(performance.now()>deadline)throw new Error('Current paired response did not complete');await page.waitForTimeout(20)}
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+    } else await idle('paired discovery')
+    const result = latest()
+    require(result?.discovery.response.complete,'complete discovery envelope')
+    return {ms,receipt:result.discovery,index:result.requestIndex}
+  }
+  const before = requestSnapshot(tracker), start = performance.now()
+  await page.getByRole('button',{name:'Observations',exact:true}).first().click()
+  await waitObservationMembers(page,50,'current initial50');await idle('current initial50')
+  const initial = latest().discovery
+  require(initial.request.limit===50 && initial.response.page.items.length===50,'initial wire page50')
+  const tab = {ms:performance.now()-start,...requestDelta(tracker,before)}
+  const loadBefore=requestSnapshot(tracker),loadStart=performance.now()
+  await page.locator('.observation-load-more').click()
+  const loaded=Math.min(100,fixture.observations.length)
+  await waitObservationMembers(page,loaded,'current loadMore');await idle('current loadMore')
+  const loadMore={applicable:true,exercised:true,loaded,ms:performance.now()-loadStart,...requestDelta(tracker,loadBefore),receipt:latest().discovery}
+  require(loadMore.receipt.request.offset===50 && loadMore.receipt.request.limit===50,'actual continuation offset50')
+  const pair=await filter('src/feature-0/',OBSERVATION_MEASURED_QUERY)
+  const ids=pair.receipt.response.page.items.map(row=>row.id),expected=[fixture.observations[0].id,fixture.observations[25].id]
+  require(ids.length===2 && expected.every(id=>ids.includes(id)) && pair.receipt.response.page.counts.match_count===2 && pair.receipt.response.retrieval.mode==='hybrid','AND pair retains FTS-only plus semantic-only with DISTINCT2')
+  dom.push({tab:'paired-all',...await domMetrics(page)})
+  await page.getByRole('button',{name:'Subject Tree',exact:true}).click();await idle('tree entry')
+  const treePair=await filter('src/feature-0/',OBSERVATION_MEASURED_QUERY)
+  const token=treePair.receipt.response.context_token
+  for(const path of ['src','src/feature-0']) {await page.locator('[data-tree-path='+JSON.stringify(path)+'] .observation-tree-chevron').click();await idle('tree branch '+path)}
+  const subject=fixture.observations[0].subjects.find(subject=>subject.subject_kind==='file')
+  await page.locator('[data-tree-path='+JSON.stringify(subject.subject)+'] .observation-tree-chevron').click();await idle('typed leaf')
+  const leaf=latest().discovery
+  require(leaf.request.context_token===token && !('filters' in leaf.request) && leaf.request.terminal?.subject===subject.subject && leaf.response.page.items.length===1 && leaf.response.page.items[0].id===fixture.observations[0].id && leaf.response.page.counts.match_count===2,'token-only typed leaf retains complete pair')
+  let release,arrived
+  const held=new Promise(resolve=>{release=resolve}),arrival=new Promise(resolve=>{arrived=resolve})
+  tracker.discoveryGate=receipt=>receipt.requestBody?.filters?.content_query==='obsolete-unmatched-query' ? {used:false,signalPaused:arrived,waitForRelease:held}:null
+  const oldIndex=tracker.requests.length
+  try {
+    await requiredLiveInputDoubleFrame(page,'#observation-query','obsolete-unmatched-query')
+    await Promise.race([arrival,new Promise((_,reject)=>setTimeout(()=>reject(new Error('Held stale discovery did not arrive')),5000))])
+    await filter('src/feature-0/',OBSERVATION_MEASURED_QUERY,true)
+  } finally {release();tracker.discoveryGate=null}
+  await idle('stale discovery release')
+  const creates=tracker.requests.slice(oldIndex).filter(r=>r.requestBody?.filters)
+  require(creates.length===2 && creates[1].requestBody.search_session===creates[0].requestBody.search_session && creates[1].requestBody.generation>creates[0].requestBody.generation,'keyed tokenless supersession')
+  require(latest().discovery.response.page.counts.match_count===2 && await page.locator('#observation-query').inputValue()===OBSERVATION_MEASURED_QUERY,'stale response cannot restore membership')
+  for(const path of ['src','src/feature-0']) {const node=page.locator('[data-tree-path='+JSON.stringify(path)+']');await node.waitFor();if(await node.getAttribute('aria-expanded')!=='true'){await node.locator('.observation-tree-chevron').click();await idle('post-stale tree '+path)}}
+  const staleLeaf=page.locator('[data-tree-path='+JSON.stringify(subject.subject)+']');if(await staleLeaf.getAttribute('aria-expanded')!=='true'){await staleLeaf.locator('.observation-tree-chevron').click();await idle('post-stale leaf proof')}
+  const visibleIds=await page.locator('.observation-result[data-observation-id]').evaluateAll(rows=>rows.map(row=>row.dataset.observationId))
+  require(visibleIds.includes(fixture.observations[0].id)&&await page.locator('.observation-tree-path[data-tree-path="src"] .observation-loaded-count').innerText()==='2 unique observations','post-release current DOM membership/count')
+  const staleDom={ids:visibleIds,matchCount:2,contextToken:latest().discovery.response.context_token}
+  const clears=[]
+  for(const mode of ['Subject Tree','All Observations']) for(const field of ['subjects','body']) {
+    await page.getByRole('button',{name:mode,exact:true}).click();await idle('clear mode')
+    await filter('src/','Observation')
+    if(mode==='Subject Tree') {const root=page.locator('[data-tree-path="src"]');if(await root.getAttribute('aria-expanded')!=='true'){await root.locator('.observation-tree-chevron').click();await idle('clear tree expansion')}}
+    const prior=await page.locator('#main-content-scroll').evaluate(scroll=>{scroll.scrollTop=500;return scroll.scrollTop})
+    require(prior>100,'clear precondition scrollable '+mode)
+    const selector=field==='subjects'?'#observation-subject-query':'#observation-query',at=requestSnapshot(tracker)
+    const ms=await requiredLiveInputDoubleFrame(page,selector,'')
+    const paintTransport=requestDelta(tracker,at)
+    await page.waitForFunction(()=>document.getElementById('main-content-scroll').scrollTop===0)
+    await idle('clear '+mode+' '+field)
+    const other=await page.locator(field==='subjects'?'#observation-query':'#observation-subject-query').inputValue()
+    require(other===(field==='subjects'?'Observation':'src/'),'clear retains other predicate')
+    require(await page.locator('#main-content-scroll').evaluate(scroll=>scroll.scrollTop)===0,'actual clear top remains0')
+    clears.push({mode,field,prior,top:0,other,ms,...requestDelta(tracker,at)})
+    interactions['clear'+mode.replaceAll(' ','')+field]={ms,...paintTransport}
+  }
+  const resetBefore=requestSnapshot(tracker),reset=await filter('','')
+  await waitObservationMembers(page,50,'current reset50')
+  return {revision:'live-observation-search.production.v1',initial,loadMore,pair:pair.receipt,tree:treePair.receipt,leaf,stale:creates.map(r=>r.discovery),staleDom,clears,reset:reset.receipt,resetIndex:reset.index,tab,jumps:[],selectedTypes:[],noTypesRequests:0,
+    workloadComparability:{historicalBefore:false,reason:'Paired50 discovery/global live types/JumpTo have no matching historical before workload; fixture measurements exclude live DB/GPU latency'}}
+}
+
+
+export async function measureCurrentGlobalSearch(page,tracker,fixture,interactions,dom) {
+  const require=(condition,label)=>{if(!condition)throw new Error('Current global search: '+label)}
+  const idle=label=>waitForTransportQuiescence(page,tracker,label)
+  const globalBefore=requestSnapshot(tracker)
+  const globalMs=await requiredLiveInputDoubleFrame(page,'.search-input',CURRENT_SEARCH_TOKEN)
+  interactions.globalQueryInputMs={ms:globalMs,...requestDelta(tracker,globalBefore)}
+  await page.waitForSelector('.search-result-project');await page.waitForSelector('.search-result-task');await page.waitForSelector('.search-result-observation');await idle('global all types')
+  const bar=page.getByRole('group',{name:'Search Entities',exact:true})
+  const search=()=>tracker.requests.filter(r=>r.search)
+  const all=search().at(-1).search
+  require(JSON.stringify([...all.request.entity_types].sort())===JSON.stringify(['observation','project','task']),'selected all types explicit')
+  for(const label of ['Projects','Tasks','Observations']) {const at=requestSnapshot(tracker),ms=await requiredDoubleFrameByText(page,'.search-entities-filter-bar button',label);interactions['exclude'+label]={ms,...requestDelta(tracker,at)};await idle('type toggle '+label)}
+  const noneBefore=search().length
+  await requiredLiveInputDoubleFrame(page,'.search-input',CURRENT_SEARCH_TOKEN+'none');await page.waitForTimeout(300);await idle('no types')
+  require(search().length===noneBefore && await page.locator('.search-result-card').count()===0,'no types emits no request and no cards')
+  await requiredLiveInputDoubleFrame(page,'.search-input',CURRENT_SEARCH_TOKEN)
+  for(const label of ['Projects','Tasks','Observations']) {const at=requestSnapshot(tracker),ms=await requiredDoubleFrameByText(page,'.search-entities-filter-bar button',label);interactions['include'+label]={ms,...requestDelta(tracker,at)};await idle('type restore '+label)}
+  const jumps=[]
+  for(const type of ['project','task','observation']) {
+    const button=page.locator('.search-result-'+type+' .search-result-action').first()
+    await button.waitFor();const id=await button.getAttribute('id'),targetId=(await button.locator('xpath=ancestor::*[contains(@class,"search-result-card")]').getAttribute('id')).slice('search-result-'.length)
+    const at=requestSnapshot(tracker),ms=await requiredDoubleFrame(page,'#'+id)
+    interactions['jump'+type]={ms,...requestDelta(tracker,at)}
+    await page.getByRole('button',{name:'Back to search results',exact:true}).waitFor();await idle('canonical JumpTo '+type)
+    require(type==='observation'?await page.locator('#search-observation-detail .observation-detail-content').count()===1:await page.locator('.focus-breadcrumb-bar').count()===1,'canonical target mounted '+type)
+    require(decodeURIComponent(page.url()).includes(targetId),'canonical URL identifies clicked target '+targetId)
+    const target=type==='observation'?await page.locator('#search-observation-detail .observation-detail-content').textContent():await page.locator('#entity-'+targetId).count()
+    require(type==='observation'?target===fixture.observations.find(row=>row.id===targetId)?.content:target===1,'exact canonical target ID/content '+targetId)
+    const lookup=tracker.requests.filter(r=>r.key===(type==='observation'?'observations:entity:':type==='project'?'projects:entity:':'tasks:entity:')+targetId)
+    require(lookup.length>0&&lookup.at(-1).fulfilled&&lookup.at(-1).status===200,'canonical lookup for clicked ID '+targetId)
+    const returnBefore=requestSnapshot(tracker),returnMs=await requiredDoubleFrameByText(page,'.search-return-button','Back to search results')
+    interactions['return'+type]={ms:returnMs,...requestDelta(tracker,returnBefore)}
+    await page.locator('#'+id).waitFor();await idle('search return '+type)
+    await page.waitForFunction(id=>document.activeElement?.id===id,id)
+    require(await page.locator('.search-input').inputValue()===CURRENT_SEARCH_TOKEN,'return restores query')
+    jumps.push({type,targetId,canonicalLookup:lookup.at(-1).requestId,focus:id,query:CURRENT_SEARCH_TOKEN})
+  }
+  dom.push({tab:'search-entities',...await domMetrics(page)})
+  await requiredLiveInputDoubleFrame(page,'.search-input','');await idle('clear global')
+  require(await bar.count()===1,'Search Entities remains after clear')
+  return {jumps,selectedTypes:all.request.entity_types,noTypesRequests:0,workflowTransport:requestDelta(tracker,globalBefore)}
+}
+
 export async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns, liveDiagnostics = null) {
   const runPhase = attemptState?.phase || fixture.size + ' warmup'
   const stage = label => { if (attemptState) attemptState.phase = runPhase + ': ' + label }
@@ -1846,7 +2034,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const consoleErrors = []
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
   page.on('pageerror', error => consoleErrors.push(error.message))
-  await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { contentOnly: evidencePlan.subjectTreeLiveFilters }))
+  await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { contentOnly: evidencePlan.subjectTreeLiveFilters, discoveryOptions: evidencePlan.liveObservationSearch ? {similarities:filters=>filters.content_query===OBSERVATION_MEASURED_QUERY?{[fixture.observations[25].id]:0.9}:{}} : undefined }))
   const cdp = await context.newCDPSession(page)
   const blankHeap = (await cdp.send('Runtime.getHeapUsage')).usedSize
   const coldStart = performance.now()
@@ -1897,7 +2085,15 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   await waitForWorkspaceReady(page, tracker, fixture, anchors.first, 'All filter representative restore')
   interactions.taskFilterResetMs = { ms: taskFilterResetMs, ...requestDelta(tracker, taskFilterResetBefore) }
 
-  const observationsTabBefore = requestSnapshot(tracker)
+  let observationState
+  if (evidencePlan.liveObservationSearch) {
+    const currentSearch = await measureCurrentSearch(page,tracker,fixture,interactions,dom)
+    tabSwitches.observations = currentSearch.tab
+    filters.observations = interactions.observationFilterMs
+    filters.observationReset = interactions.observationFilterResetMs
+    observationState = {currentSearch,observationLoadMore:currentSearch.loadMore,initialObservationPage:currentSearch.initial,filteredObservationPage:currentSearch.pair,resetObservationPage:currentSearch.reset,
+      resetProof:{recipeCompleted:false,requestIndex:currentSearch.resetIndex},observationFilterSettledMs:null,observationFilterResetSettledMs:null}
+  } else {  const observationsTabBefore = requestSnapshot(tracker)
   const obsTabMs = await requiredDoubleFrame(page, '.tabs button:nth-child(2)')
   await page.waitForSelector('#observation-results')
   const observationPageSize = OBSERVATION_PAGINATION_CONTRACT.pageSize
@@ -1957,6 +2153,9 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   interactions.observationFilterResetMs = { ms: observationFilterResetMs, ...requestDelta(tracker, observationFilterResetBefore) }
   filters.observationReset = interactions.observationFilterResetMs
 
+    observationState = {observationLoadMore,initialObservationPage,filteredObservationPage,resetObservationPage,resetProof,observationFilterSettledMs,observationFilterResetSettledMs}
+  }
+  const {observationLoadMore,initialObservationPage,filteredObservationPage,resetObservationPage,resetProof,observationFilterSettledMs,observationFilterResetSettledMs} = observationState
   const observationScaling = fixture.observationScaling ? await measureObservationScaling(page, tracker, fixture, cdp, blankHeap, dom, interactions) : null
 
   const timelineTabBefore = requestSnapshot(tracker)
@@ -1987,7 +2186,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   stage('live batch')
   const liveStart = performance.now()
   if (liveDiagnostics) { tracker.liveDiagnostics = liveDiagnostics; liveDiagnostics.start(liveStart) }
-  const requiredNavigationOwners = prepareLiveNavigationProof(tracker, fixture, fixture.liveFrames)
+  const requiredNavigationOwners = prepareLiveNavigationProof(tracker, fixture, fixture.liveFrames, {discoveryReads:evidencePlan.liveObservationSearch})
   const pushedSockets = await page.evaluate(frames => window.__perfPushFrames(frames), fixture.liveFrames)
   liveDiagnostics?.dispatched(performance.now())
   if (pushedSockets !== 1) throw new Error(`live fixture expected one open socket, observed ${pushedSockets}`)
@@ -2013,7 +2212,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const entityRoutes = Object.entries(liveDelta.routes).filter(([key]) => key.includes(':entity:'))
   const duplicateRequests = entityRoutes.reduce((sum, [, count]) => sum + Math.max(0, count - 1), 0)
   const updatedObservationIds = [...new Set(fixture.liveFrames.filter(frame => frame.event.workspace_id === fixture.workspace.id && frame.event.entity.type === 'observation' && frame.event.entity.action === 'updated').map(frame => frame.event.entity.id))]
-  const hydration = classifyLiveObservationHydration({ queryScope: evidencePlan.subjectTreeLiveFilters ? 'content' : null, runId: tracker.paintRunId, workspaceId: fixture.workspace.id,
+  const hydration = evidencePlan.liveObservationSearch ? currentDiscoveryHydration(tracker,liveBefore,fixture) : classifyLiveObservationHydration({ queryScope: evidencePlan.subjectTreeLiveFilters ? 'content' : null, runId: tracker.paintRunId, workspaceId: fixture.workspace.id,
     total: fixture.observations.length, expectedPrefix: queryObservations(fixture, { offset: 0, limit: 200 }).items.map(item => item.id),
     updatedObservationIds,
     expectedObservationEntities: Object.fromEntries(fixture.observations.filter(value => updatedObservationIds.includes(value.id)).map(value => [value.id, { hash: hashJson(value), bytes: Buffer.byteLength(JSON.stringify(value)) }])),
@@ -2026,6 +2225,7 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   }
   dom.push({ tab: 'post-live-projects', ...(await domMetrics(page)) })
 
+  if(evidencePlan.liveObservationSearch) Object.assign(observationState.currentSearch,await measureCurrentGlobalSearch(page,tracker,fixture,interactions,dom))
   stage('Projects heap after garbage collection')
   await cdp.send('HeapProfiler.collectGarbage')
   const heap = await cdp.send('Runtime.getHeapUsage')
@@ -2037,6 +2237,8 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   const result = {
     fixture: fixture.size, measured, cold, background, lifetimeRender, tabSwitches, filters, interactions, observationLoadMore, observationScaling, directFocus, liveBatch, dom,
     ...(evidencePlan.subjectTreeLiveFilters ? { observationFilterSettlement: { filterMs: observationFilterSettledMs, resetMs: observationFilterResetSettledMs } } : {}),
+    currentSearch: observationState.currentSearch || null, ...(evidencePlan.liveObservationSearch?{physicalWitness:{discovery:'Raw request/response bodies retained; byte lengths and parsed DTOs recomputed by strict acceptance',otherRoutes:'Transport-time numeric byte/count ledger, not independently retained raw body witnesses'}}:{}), physicalAccounting: tracker.physicalAccounting.snapshot(),
+    ...(evidencePlan.liveObservationSearch?{physicalReceipts:tracker.requests.map(r=>({requestId:r.requestId,key:r.key,method:r.method,done:r.done,fulfilled:r.fulfilled,status:r.status,requestBytes:r.requestBytes,responseBytes:r.bytes,...(r.discovery?{discovery:r.discovery}:{})}))}:{}),
     observationPagination: { revision: OBSERVATION_PAGINATION_CONTRACT.revision, initial: initialObservationPage, filtered: filteredObservationPage, reset: resetObservationPage },
     timelineQualification: { revision: TIMELINE_CURRENT_CONTRACT.revision, ...timelineQualification },
     maxDomNodes: renderMaximums.nodes, maxCollectionRows: renderMaximums.rows,
@@ -2055,13 +2257,84 @@ export async function measureRun(browser, origin, fixture, measured, trace, diag
   return result
 }
 
+export function assertCurrentDiscoveryTransport(run) {
+  const reject=label=>{throw new Error('Current search qualification mismatch: '+label)}
+  const physical=run.physicalAccounting,receipts=run.physicalReceipts
+  if(!Array.isArray(receipts)||new Set(receipts.map(r=>r.requestId)).size!==receipts.length||receipts.some(r=>!r.done||!r.fulfilled||!Number.isSafeInteger(r.requestBytes)||!Number.isSafeInteger(r.responseBytes)))reject('physical completions/identity')
+  if(physical.requests!==receipts.length||physical.completed!==receipts.length||physical.requestBytes!==receipts.reduce((n,r)=>n+r.requestBytes,0)||physical.responseBytes!==receipts.reduce((n,r)=>n+r.responseBytes,0))reject('physical ledger bytes/count')
+  const fixture=currentSearchFixture(generateFixture(run.fixture)),reads=receipts.filter(r=>r.discovery),contexts=new Map()
+  for(const physical of reads){
+    const receipt=physical.discovery,request=receipt.request,response=receipt.response
+    if(physical.key!=='observations:discovery'||physical.status!==receipt.status||physical.fulfilled!==receipt.fulfilled||physical.requestBytes!==receipt.requestBytes||physical.responseBytes!==receipt.responseBytes)reject('physical/discovery linkage')
+    if(!request.context_token)contexts.set(response.context_token,receipt)
+    const creation=contexts.get(response.context_token)
+    if(!creation)reject('missing owning context')
+    const owner=creation.request,mode=creation.response.retrieval.mode,reason=creation.response.retrieval.reason
+    // A fresh oracle keeps this exact context available even when its delayed
+    // response arrives after a newer generation has legitimately retired it.
+    const oracle=createObservationDiscoveryFixture(fixture,{now:()=>0,token:()=>response.context_token,mode,reason,similarities:filters=>filters.content_query===OBSERVATION_MEASURED_QUERY?{[fixture.observations[25].id]:.9}:{}})
+    const created=oracle.handle({...owner,replace_context_token:undefined})
+    if(created.status!==200)reject('oracle creation')
+    const expectedOutcome=request.context_token?oracle.handle(request):created
+    if(expectedOutcome.status!==200)reject('oracle continuation ownership')
+    const expectedPage=expectedOutcome.value.page
+    assertObservationDiscoveryReceipt(receipt,{workspaceId:fixture.workspace.id,contextToken:response.context_token,currentContextToken:response.context_token,filters:owner.filters,mode,reason,
+      view:request.view||'list',searchSession:owner.search_session,generation:owner.generation,currentGeneration:owner.generation,limit:50,offset:request.offset||0,
+      prefix:request.prefix||'',terminal:request.terminal||null,hasMore:expectedPage.tree?.has_more??expectedPage.has_more,ids:expectedPage.items.map(o=>o.id),treePaths:expectedPage.tree?.items.map(o=>o.path),matchCount:expectedPage.counts.match_count})
+    if(response.page.counts.total_count!==fixture.observations.length)reject('workspace total')
+  }
+  return {fixture,reads,receipts}
+}
+
+export function assertCurrentSearchRun(run) {
+  const reject=label=>{throw new Error('Current search qualification mismatch: '+label)}
+  const proof=run.currentSearch,{fixture,reads,receipts}=assertCurrentDiscoveryTransport(run)
+  const linked=receipt=>{if(!reads.some(r=>hashJson(r.discovery)===hashJson(receipt)))reject('unlinked proof receipt');return receipt}
+  for(const receipt of [proof?.initial,proof?.loadMore?.receipt,proof?.pair,proof?.tree,proof?.leaf,proof?.reset,...(proof?.stale||[])])linked(receipt)
+  const pairIds=[fixture.observations[0].id,fixture.observations[25].id]
+  if(proof?.revision!==CURRENT_SEARCH_WORKLOAD.revision||proof.initial.request.limit!==50||proof.loadMore.receipt.request.offset!==50||proof.loadMore.loaded!==(run.fixture==='small'?60:100)
+    ||proof.pair.response.page.counts.match_count!==2||proof.pair.response.retrieval.mode!=='hybrid'||!pairIds.every(id=>proof.pair.response.page.items.some(o=>o.id===id))
+    ||proof.pair.request.filters?.subject_query!=='src/feature-0/'||proof.pair.request.filters?.content_query!==OBSERVATION_MEASURED_QUERY
+    ||proof.leaf.request.context_token!==proof.tree.response.context_token||proof.leaf.request.terminal?.subject_kind!=='file'||proof.leaf.request.terminal?.subject!==fixture.observations[0].subjects.find(s=>s.subject_kind==='file').subject||JSON.stringify(proof.leaf.response.page.items.map(o=>o.id))!==JSON.stringify([fixture.observations[0].id])
+    ||proof.stale.length!==2||proof.stale[0].request.generation>=proof.stale[1].request.generation||proof.stale[0].request.search_session!==proof.stale[1].request.search_session
+    ||proof.staleDom?.contextToken!==proof.stale[1].response.context_token||proof.staleDom.matchCount!==2||JSON.stringify(proof.staleDom.ids)!==JSON.stringify([fixture.observations[0].id])
+    ||proof.clears.length!==4||new Set(proof.clears.map(v=>v.mode+v.field)).size!==4||proof.clears.some(v=>v.top!==0||v.prior<=100||v.other!==(v.field==='subjects'?'Observation':'src/'))
+    ||proof.jumps.length!==3||new Set(proof.jumps.map(v=>v.type)).size!==3||proof.jumps.some(v=>!v.targetId||v.focus!=='search-jump-'+v.type+'-'+v.targetId||v.query!==CURRENT_SEARCH_TOKEN||!receipts.some(r=>r.requestId===v.canonicalLookup&&r.key===(v.type==='observation'?'observations':v.type==='project'?'projects':'tasks')+':entity:'+v.targetId&&r.status===200))
+    ||proof.noTypesRequests!==0||JSON.stringify([...proof.selectedTypes].sort())!==JSON.stringify(['observation','project','task']))reject('causal workflow')
+  return run
+}
+
+export function aggregateCurrentSearch(runs) {
+  if(runs.length!==5)throw new Error('Current search requires five measured samples')
+  runs.forEach(assertCurrentSearchRun)
+  const rawMs=assertFiveSamples(runs.map(run=>run.observationLoadMore.ms),'current discovery loadMore')
+  return {revision:'discovery50.v1',applicable:true,exercisedSamples:5,rawMs,p95Ms:nearestRankP95(rawMs),requestCounts:runs.map(run=>run.observationLoadMore.count),proofs:runs.map(run=>run.currentSearch)}
+}
+
+export function currentSearchMetrics(small,large,budget,comparable) {
+  const valid=value=>value?.revision==='discovery50.v1'&&value.exercisedSamples===5&&value.proofs.length===5
+  const requests=valid(large)?Math.max(...large.requestCounts):null,timing=valid(large)?large.p95Ms:null
+  return [
+    {name:'current paired/search causal samples',actual:valid(small)&&valid(large)?10:0,expected:10,pass:valid(small)&&valid(large),category:'exact'},
+    {name:'Observation discovery load-more requests',actual:requests,expected:budget.maxRequests,pass:requests!==null&&requests<=budget.maxRequests,category:'exact'},
+    {name:'Observation discovery load-more p95 ms',actual:timing,expected:budget.maxP95Ms,pass:timing!==null&&(!comparable||timing<=budget.maxP95Ms),category:comparable?'pinned-environment':'informational'}]
+}
+
+function currentDiscoveryHydration(tracker,before,fixture) {
+  const requests=tracker.requests.slice(before.index),discovery=requests.filter(r=>r.discovery),legacy=requests.filter(r=>['observations:list','observations:count'].includes(r.key))
+  const latest=discovery.at(-1)?.discovery
+  const passed=legacy.length===0&&discovery.length>0&&discovery.every(r=>r.done&&r.fulfilled&&r.status===200&&r.requestBody.view==='count')
+    &&latest.response.page.counts.total_count===fixture.observations.length&&latest.response.page.counts.match_count===fixture.observations.length
+  return {revision:'hidden-discovery-count.v1',passed,legacyRequests:legacy.length,requests:discovery.map(r=>r.discovery),membershipPaused:true}
+}
+
 function aggregates(runs) {
   if (runs.length !== SAMPLES) throw new Error(`aggregate requires exactly ${SAMPLES} measured runs`)
   const values = (key, label) => assertFiveSamples(runs.map(key), label)
   const cold = values(run => run.cold.ms, 'cold')
   const focus = values(run => run.directFocus.ms, 'direct focus')
   if (runs.some(run => run.fixture !== runs[0].fixture)) throw new Error('Observation pagination samples changed scale')
-  const observationLoadMore = aggregateObservationLoadMore(runs.map(run => run.observationLoadMore), runs[0].fixture, evidencePlan.subjectTreeLiveFilters ? 'content' : null)
+  const observationLoadMore = evidencePlan.liveObservationSearch ? aggregateCurrentSearch(runs) : aggregateObservationLoadMore(runs.map(run => run.observationLoadMore), runs[0].fixture, evidencePlan.subjectTreeLiveFilters ? 'content' : null)
   const live = values(run => run.liveBatch.ms, 'live batch')
   const interactionNames = Object.keys(runs[0].interactions).sort()
   if (interactionNames.length === 0) throw new Error('at least one named local interaction is required')
@@ -2108,7 +2381,7 @@ function aggregates(runs) {
       requestCounts: liveRequestDeltas.map(delta => delta.count), fixtureBytes: liveRequestDeltas.map(delta => delta.bytes),
       routeCounts: liveRequestDeltas.map(delta => delta.routes), routeBytes: liveRequestDeltas.map(delta => delta.routeBytes),
       duplicateRequests: runs.map(run => run.liveBatch.duplicateRequests), wholeWorkspaceReload: runs.some(run => run.liveBatch.wholeWorkspaceReload),
-      hydration: runs.map(run => run.liveBatch.hydration), hydrationPassed: aggregateLiveHydration(runs.map(run => run.liveBatch.hydration), evidencePlan.subjectTreeLiveFilters ? 'content' : null).passed
+      hydration: runs.map(run => run.liveBatch.hydration), ...(evidencePlan.liveObservationSearch ? {hydrationPassed:runs.every(run=>run.liveBatch.hydration.passed)} : {hydrationPassed: aggregateLiveHydration(runs.map(run => run.liveBatch.hydration), evidencePlan.subjectTreeLiveFilters ? 'content' : null).passed})
     },
     heap: { values: runs.map(run => run.attributableHeapBytes), maxAttributableBytes: Math.max(...runs.map(run => run.attributableHeapBytes)) },
     consoleErrors: runs.flatMap(run => run.consoleErrors)
@@ -2134,7 +2407,7 @@ function evaluate(result, comparableEnvironment = true) {
   add('direct focus requests', Math.max(...large.directFocus.requestCounts), target.directFocus.maxRequests, Math.max(...large.directFocus.requestCounts) <= target.directFocus.maxRequests)
   add('direct focus requested', large.directFocus.requested.every(Boolean), target.directFocus.requireRequested, large.directFocus.requested.every(Boolean) === target.directFocus.requireRequested)
   add('direct focus rendered', large.directFocus.rendered.every(Boolean), target.directFocus.requireRendered, large.directFocus.rendered.every(Boolean) === target.directFocus.requireRendered)
-  metrics.push(...observationPaginationMetrics(small.observationLoadMore, large.observationLoadMore, target.observationLoadMore, comparableEnvironment))
+  metrics.push(...(evidencePlan.liveObservationSearch ? currentSearchMetrics(small.observationLoadMore,large.observationLoadMore,target.observationLoadMore,comparableEnvironment) : observationPaginationMetrics(small.observationLoadMore, large.observationLoadMore, target.observationLoadMore, comparableEnvironment)))
   metrics.push(...observationScalingMetrics(large.observationScaling, target.observationLoadMore, comparableEnvironment))
   add('live follow-up requests', Math.max(...large.liveBatch.requestCounts), target.liveBatch.maxFollowUpRequests, Math.max(...large.liveBatch.requestCounts) <= target.liveBatch.maxFollowUpRequests)
   add('small live whole-workspace hydration', small.liveBatch.hydrationPassed, true, small.liveBatch.hydrationPassed === true)
@@ -2210,31 +2483,38 @@ function persistQualification(result, prerequisite, qualifiedInputs, command, re
   if (mode === 'check' && evidenceTask && !evidencePlan.qualifiedRetirement && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
 }
 
-function qualificationAttempt(command, qualifiedInputs, retirement, action, coldDiagnostics = []) {
-  if (!evidencePlan.qualifiedRetirement) return action()
+export function qualificationFailureIdentity(plan, inputs, provenance) {
+  return {taskId:plan.task.taskId,evidenceBaseCommit:plan.baseCommit,measurementRevision:plan.revision,
+    ...evidenceOwnerFields(plan),...(plan.strictSourceIdentity?{sourceProvenance:provenance}:{}),inputQualification:inputs}
+}
+
+export function qualificationAttempt(command, qualifiedInputs, retirement, action, coldDiagnostics = [], injected = {}) {
+  const plan=injected.plan||evidencePlan, provenance=injected.sourceProvenance||attemptState?.sourceProvenance
+  const writer=injected.write||writeEvidence, remover=injected.remove||(file=>evidenceOperations.remove(file)), verifier=injected.verify||evidenceOperations.verify
+  const digest=injected.sha256File||sha256File, artifactPath=injected.evidenceArtifactPath||evidenceArtifactPath
+  if (!plan.qualifiedRetirement) return action()
   return persistEvidenceAttempt({
-    write: writeEvidence,
-    remove: file => evidenceOperations.remove(file),
-    verify: evidenceOperations.verify,
-    manifestPath: evidenceManifestPath, validationPath: validationRecordPath,
-    failureValidation: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId,
-      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.strictSourceIdentity ? { sourceProvenance: attemptState.sourceProvenance } : {}),
-      evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
+    write: writer,
+    remove: remover,
+    verify: verifier,
+    manifestPath: plan.files.manifest, validationPath: plan.files.validation,
+    failureValidation: error => ({ schemaVersion: 1, parentTaskId: plan.task.parentTaskId,
+      ...qualificationFailureIdentity(plan,qualifiedInputs,provenance),
       commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
       ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
       ...(error.workspaceReadiness ? { workspaceReadiness: error.workspaceReadiness } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
-    failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
-      ...evidenceOwnerFields(evidencePlan), ...(evidencePlan.strictSourceIdentity ? { sourceProvenance: attemptState.sourceProvenance } : {}),
+    failureManifest: error => ({ schemaVersion: 1,
+      ...qualificationFailureIdentity(plan,qualifiedInputs,provenance),
       qualificationPassed: false, failure: error.message, retirement,
       ...(error.observationMembership ? { observationMembership: error.observationMembership } : {}),
       ...(error.timelineQualification ? { timelineQualification: error.timelineQualification } : {}),
       ...(error.navigationFeedback ? { navigationFeedback: error.navigationFeedback } : {}),
       ...(error.workspaceReadiness ? { workspaceReadiness: error.workspaceReadiness } : {}),
       ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}),
-      validationRecord: { path: evidenceArtifactPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
+      validationRecord: { path: artifactPath(plan.files.validation), sha256: digest(plan.files.validation) } })
   }, action)
 }
 
@@ -2259,13 +2539,14 @@ async function main() {
   const prerequisite = runTaskEvidencePrerequisites()
   if (!fs.existsSync(path.join(staticRoot, 'index.html'))) throw new Error(`production build missing at ${staticRoot}; run npm run build first`)
   const generate = evidencePlan.scaling ? generateObservationScalingFixture : generateFixture
-  const fixtures = { small: generate('small'), large: generate('large') }
+  const fixtures = Object.fromEntries(['small','large'].map(size=>[size,evidencePlan.liveObservationSearch?currentSearchFixture(generate(size)):generate(size)]))
   const qualifiedInputs = inputQualification()
   const qualifiedProvenance = sourceProvenance()
   attemptState.sourceProvenance = qualifiedProvenance
   const contracts = {
     budgetsHash: hashJson(budgets),
     ...(evidencePlan.subjectTreeLiveFilters ? { subjectTreeLiveFiltersContractHash: hashJson(SUBJECT_TREE_LIVE_FILTERS_CONTRACT) } : {}),
+    ...(evidencePlan.liveObservationSearch ? { currentSearchWorkloadHash:hashJson(CURRENT_SEARCH_WORKLOAD) } : {}),
     configurationHash: hashJson(HARNESS_CONFIGURATION),
     directFocusContractHash: hashJson(DIRECT_FOCUS_CONTRACT),
     observationPaginationContractHash: hashJson(OBSERVATION_PAGINATION_CONTRACT),
@@ -2333,6 +2614,7 @@ async function main() {
       ...toolVersions, chromium: browser.version(), viewport: `${HARNESS_CONFIGURATION.viewport.width}x${HARNESS_CONFIGURATION.viewport.height}`, headless: true
     }
     environment.fingerprint = hashJson(environment)
+    if (evidencePlan.liveObservationSearch) assertQualificationEnvironment(environment)
     attemptState.phase = 'deep-focus prerequisite'
     process.stdout.write('deep-focus continuation... ')
     const staleFocusContinuation = await verifyStaleDeepFocusContinuation(browser, server.origin)

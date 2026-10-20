@@ -19,9 +19,11 @@ module HMem.Server.API
   , navigationOwnerOutcomes
   , server
   , serverWithChangeStream
+  , serverWithDiscovery
+  , prepareObservationDiscovery
   ) where
 
-import Control.Exception (try)
+import Control.Exception (try, throwIO)
 import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
@@ -35,6 +37,7 @@ import Data.Maybe (isNothing, fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime, UTCTime(..), diffUTCTime, addUTCTime, addDays, addGregorianMonthsClip, toGregorian, fromGregorian, dayOfWeek, DayOfWeek(..))
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
@@ -62,6 +65,7 @@ import HMem.DB.Timeline qualified as Timeline
 import HMem.DB.Workspace qualified as Workspace
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.AccessTracker (AccessTracker, bufferSize)
+import HMem.Server.ObservationDiscovery qualified as Discovery
 import HMem.Server.WebSocket qualified as WS
 import HMem.Server.Snapshot (materializeSnapshotWithProfile)
 import HMem.Types
@@ -76,6 +80,12 @@ type HMemAPI = "api" :> "v1" :>
   :<|> "workspaces"   :> WorkspaceAPI
   :<|> "groups"       :> WorkspaceGroupAPI
   :<|> "observations" :> ObservationAPI
+  :<|> "observations" :> "discovery" :> ReqBody '[JSON] ObservationDiscoveryRequest
+         :> Description "Authorized prepared Observation discovery. Create with filters; continue with context_token and view selectors only. Contexts expire after five minutes and pin FTS/hybrid mode. Complete content-only FTS and exact-space cosine>=0.5 candidates are deduplicated, reciprocal-rank fused (k=60), then paged. No semantic top-K truncation."
+         :> Post '[JSON] Value
+  :<|> "observation-discovery" :> "capability" :> QueryParam' '[Required] "workspace_id" UUID
+         :> Description "Repository read authorization precedes optional provider/storage checks. Returns hybrid or fts_only with a fixed fallback reason; never returns vectors or provider configuration."
+         :> Get '[JSON] Value
   :<|> "projects"     :> ProjectAPI
   :<|> "tasks"        :> TaskAPI
   :<|> "search"       :> ReqBody '[JSON] UnifiedSearchQuery :> Post '[JSON] UnifiedSearchResults
@@ -429,12 +439,17 @@ server authConfig pool tracker wsState =
   serverWithChangeStream authConfig Config.defaultConfig.changeStream pool tracker wsState
 
 serverWithChangeStream :: Config.AuthConfig -> Config.ChangeStreamConfig -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
-serverWithChangeStream authConfig changeStreamConfig pool tracker wsState _ =
+serverWithChangeStream authConfig changeStreamConfig = serverWithDiscovery authConfig changeStreamConfig Nothing
+
+serverWithDiscovery :: Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe Discovery.ObservationDiscovery -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
+serverWithDiscovery authConfig changeStreamConfig discovery pool tracker wsState _ =
        health pool tracker
   :<|> session authConfig pool
   :<|> workspaces pool
   :<|> groups pool
   :<|> observations pool
+  :<|> discoveryH pool discovery
+  :<|> discoveryCapabilityH pool discovery
   :<|> projects pool
   :<|> tasks pool
   :<|> search pool
@@ -442,6 +457,70 @@ serverWithChangeStream authConfig changeStreamConfig pool tracker wsState _ =
   :<|> ticket pool wsState
   :<|> resync changeStreamConfig pool
   :<|> canonicalTicket changeStreamConfig pool wsState
+
+-- | Shared authorized boundary for the subsequent hybrid retrieval handlers.
+-- The query vector is private, and an FTS hit never suppresses preparation.
+prepareObservationDiscovery :: Pool Hasql.Connection -> Maybe Discovery.ObservationDiscovery -> UUID -> Text -> Handler Discovery.DiscoveryQuery
+prepareObservationDiscovery pool discovery workspace query = do
+  requireObservationWorkspace pool workspace Auth.WorkspaceRoleRead
+  case discovery of
+    Nothing -> pure (Discovery.DiscoveryFts Discovery.DiscoveryDisabled)
+    Just service -> liftIO $ Discovery.prepareDiscoveryQuery service (discoveryStorage pool workspace) query
+
+discoveryCapabilityH :: Pool Hasql.Connection -> Maybe Discovery.ObservationDiscovery -> UUID -> Handler Value
+discoveryCapabilityH pool discovery workspace = do
+  requireObservationWorkspace pool workspace Auth.WorkspaceRoleRead
+  case discovery of
+    Nothing -> pure $ toJSON (Discovery.DiscoveryCapability (Just Discovery.DiscoveryDisabled))
+    Just service -> toJSON <$> liftIO (Discovery.discoveryCapability service (discoveryStorage pool workspace))
+
+discoveryStorage :: Pool Hasql.Connection -> UUID -> IO (Maybe Bool)
+discoveryStorage pool workspace = case parseEmbeddingSpaceFingerprint Config.managedTeiSpaceFingerprint of
+  Nothing -> pure Nothing
+  Just space -> Observation.discoveryVectorAvailability pool workspace space
+
+discoveryH :: Pool Hasql.Connection -> Maybe Discovery.ObservationDiscovery -> ObservationDiscoveryRequest -> Handler Value
+discoveryH pool configured request = do
+  requireObservationWorkspace pool request.workspaceId Auth.WorkspaceRoleRead
+  reject (validateObservationDiscoveryRequest request)
+  service <- maybe (throwError err503 { errBody = Aeson.encode (object ["error" .= ("discovery_unavailable" :: Text)]) }) pure configured
+  principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
+  actor <- liftIO currentEffectiveActor
+  let audience = TE.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+        (actorTypeToText principal.actorType, principal.actorId, show principal.authority,
+         fmap (\a -> (actorTypeToText a.actorType,a.actorId,a.botIdentity)) actor)
+      resolve = case request.contextToken of
+        Just token -> Discovery.lookupDiscoveryContext service audience request.workspaceId token
+        Nothing -> case request.filters of
+          Nothing -> pure (Left Discovery.DiscoveryContextUnavailable)
+          Just raw -> let filters = normalizeObservationDiscoveryFilter raw in
+            Discovery.createDiscoveryContextInSession service audience request.workspaceId filters request.replaceContextToken
+              ((,) <$> request.searchSession <*> request.generation)
+              (Discovery.prepareDiscoveryQuery service (discoveryStorage pool request.workspaceId) (fromMaybe "" filters.contentQuery))
+  context <- liftIO resolve >>= either discoveryContextError pure
+  prepared <- maybe (discoveryContextError Discovery.DiscoveryContextUnavailable) pure context.preparedQuery
+  let semantic = case prepared of Discovery.DiscoveryFts _ -> Nothing; Discovery.DiscoveryHybrid vector space -> Just (vector,space)
+  attempted <- liftIO $ try (Observation.discoverObservations pool context.filterInputs request semantic)
+  result <- case attempted of
+    Right value -> pure value
+    Left (DBCapabilityUnavailable _) -> do
+      liftIO $ Discovery.retireDiscoveryContext service audience request.workspaceId context.token
+      discoveryContextError Discovery.DiscoveryContextUnavailable
+    Left failure -> handleDBErrors (throwIO failure)
+  -- A filter replacement can retire a context during SQL. Do not publish that
+  -- old page after the newer filter lifetime has taken ownership.
+  _ <- liftIO (Discovery.lookupDiscoveryContext service audience request.workspaceId context.token) >>= either discoveryContextError pure
+  pure $ object
+    [ "context_token" .= context.token, "expires_at" .= context.expiresAt
+    , "retrieval" .= Discovery.discoveryQueryCapability prepared
+    , "complete" .= True, "page" .= result ]
+
+discoveryContextError :: Discovery.DiscoveryContextError -> Handler a
+discoveryContextError failure = throwError $ case failure of
+  Discovery.DiscoveryContextCapacity -> err429
+    { errBody = Aeson.encode (object ["error" .= ("discovery_capacity" :: Text),"message" .= ("Discovery is busy; retry the current query." :: Text)]) }
+  Discovery.DiscoveryContextUnavailable -> err409
+    { errBody = Aeson.encode (object ["error" .= ("discovery_restart_required" :: Text),"message" .= ("Restart the current discovery query." :: Text)]) }
 
 session :: Config.AuthConfig -> Pool Hasql.Connection -> Maybe UUID -> Handler SessionContext
 session config pool selectedWorkspace = do

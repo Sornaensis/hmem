@@ -31,7 +31,7 @@ export function subjectTreePage(fixture, options) {
   return { items: items.slice(options.offset, options.offset + options.limit), has_more: options.offset + options.limit < items.length,
     total_count: new Set(fixture.observations.map(value => value.id)).size, match_count: new Set(terminals.map(value => value.id)).size }
 }
-export async function openDiscovery(viewport = { width: 1440, height: 900 }, transformObservations = values => values, additionalFixtures = []) {
+export async function openDiscovery(viewport = { width: 1440, height: 900 }, transformObservations = values => values, additionalFixtures = [], launchOptions = {}) {
   const fixture = hierarchyFixture()
   fixture.projects = []; fixture.tasks = []
   const sha = '0123456789abcdef0123456789abcdef01234567'
@@ -48,11 +48,12 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
     ...Array.from({ length: 61 }, (_, index) => observation('guide-' + index, 'docs/Guide-' + String(index).padStart(3, '0') + '.md', 'docs/**/*.md', 'Documentation guide ' + index, index + 4))
   ]
   fixture.observations = transformObservations(fixture.observations)
-  const h = await openHierarchy(fixture, additionalFixtures)
+  const h = await openHierarchy(fixture, additionalFixtures, null, {}, launchOptions)
   await h.page.setViewportSize(viewport)
-  const receipts = []
+  const receipts = h.discovery.receipts
   await h.page.route('**/api/v1/observations**', async route => {
     const request = route.request(), url = new URL(request.url())
+    if (url.pathname === '/api/v1/observations/discovery') { await route.fallback(); return }
     const scopedFixture = [fixture, ...additionalFixtures].find(value => value.workspace.id === url.searchParams.get('workspace_id')) || fixture
     const receipt = { endpoint: url.pathname, method: request.method(), params: Object.fromEntries(url.searchParams), done: false }
     receipts.push(receipt)
@@ -99,6 +100,32 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
   })
   return { ...h, receipts, sha,
     async start() { await h.page.goto(h.origin + '/workspace/' + fixture.workspace.id + '#tab=observations'); await h.page.locator('#observation-panel').waitFor(); await this.idle() },
-    async idle() { await h.idle(); await h.bounded((async () => { while (receipts.some(value => !value.done)) await h.page.waitForTimeout(20) })(), 10000, 'Discovery HTTP quiet'); assert.deepEqual(h.errors, []) }
+    async idle() { await h.page.waitForFunction(()=>!document.querySelector('.observation-filter-pending') || !!document.querySelector('#observation-filter-validation')); await h.idle(); await h.bounded((async () => { while (receipts.some(value => !value.done)) await h.page.waitForTimeout(20) })(), 10000, 'Discovery HTTP quiet'); assert.deepEqual(h.errors, []) }
   }
+}
+
+
+// Resolve the immutable accepted predicate separately from raw POST receipts.
+export function discoverySelection(h, receipt) {
+  const payload = receipt.payload || receipt
+  if (!payload || !('view' in payload)) return {}
+  const filters = payload.filters || h.discovery.contexts.get(payload.context_token)?.filters || {}
+  return {...filters, ...(payload.terminal || {}), prefix:payload.prefix || '', offset:payload.offset, limit:payload.limit, view:payload.view}
+}
+
+// Controlled route middleware owns a real discovery request/envelope. Reserve
+// its generation before any callback delay; fallback sends that prepared reply.
+export async function interceptDiscovery(h, handler) {
+  await h.page.route('**/api/v1/observations/discovery', async route => {
+    const outcome=h.discovery.handle(route.request().postDataJSON()), receipt=outcome.receipt
+    const send=async(options={})=>{
+      const status=options.status ?? outcome.status
+      const body=options.json ?? (options.body ? JSON.parse(options.body) : outcome.body)
+      receipt.status=status; receipt.response=body
+      await route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)})
+    }
+    try { await handler({request:()=>route.request(),fallback:()=>send(),fulfill:send,abort:()=>route.abort()},outcome) }
+    catch(error) {h.errors.push(error.message);await route.abort().catch(()=>{})}
+    finally {receipt.done=true}
+  })
 }

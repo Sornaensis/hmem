@@ -419,6 +419,8 @@ export function aggregateLiveHydration(values, queryScope = null) {
 export function perfApiRouteKey(input, method = 'GET') {
   const pathname = input instanceof URL ? input.pathname : new URL(input, 'http://perf.local').pathname
   const verb = method.toUpperCase()
+  if (verb === 'POST' && pathname === '/api/v1/search') return 'search:unified'
+  if (verb === 'POST' && pathname === '/api/v1/observations/discovery') return 'observations:discovery'
   if (verb === 'POST' && /^\/api\/v1\/workspaces\/[^/]+\/navigation\/batch$/.test(pathname)) return 'navigation:batch'
   const is = (allowed, pattern) => allowed.includes(verb) && pattern.test(pathname)
   if (is(['GET'], /^\/api\/v1\/session$/)) return 'session'
@@ -445,6 +447,106 @@ export function perfApiRouteKey(input, method = 'GET') {
   if (is(['GET'], /^\/api\/v1\/observations$/)) return 'observations:list'
   if (is(['GET'], /^\/api\/v1\/observations\/[^/]+$/)) return `observations:entity:${pathname.split('/')[4]}`
   return null
+}
+
+export const LIVE_OBSERVATION_SEARCH_CONTRACT = Object.freeze({
+  protocol:'POST observations/discovery', semanticThreshold:0.5, rrfK:60, contextTtlMs:300000,
+  maxContexts:64, maxAudienceContexts:8, maxPage:200,
+  membership:'subject/provenance AND (complete content FTS OR exact-space semantic membership)',
+  fixtureScope:'deterministic protocol/membership only; no database, GPU or network latency claim'
+})
+
+export const CURRENT_SEARCH_WORKLOAD = Object.freeze({revision:'live-observation-search.production.v1',discoveryPage:50,
+  modes:['All Observations','Subject Tree'],predicates:['subject_query','content_query'],clears:4,globalTypes:['project','task','observation'],
+  jumpAndReturns:3,stale:'held tokenless creation followed by same-session higher generation',
+  historicalBeforeComparable:false,scope:'intercepted production-Main frontend workflow; excludes live database/GPU/network latency'})
+
+export function assertQualificationEnvironment(environment) {
+  const {fingerprint,...inputs} = environment || {}
+  if (['os','cpu','browserControl','node','npm','elm','vite','playwright','chromium','viewport'].some(key => typeof inputs[key] !== 'string' || !inputs[key].trim())
+    || !Number.isFinite(inputs.ramBytes) || inputs.ramBytes<=0 || typeof inputs.headless !== 'boolean'
+    || fingerprint !== hashJson(inputs)) throw new Error('Qualification environment identity incomplete or changed')
+  return environment
+}
+
+// Physical bytes are encoded HTTP bodies, not logical count/tree/leaf work.
+// One admission and one completion per intercepted request, including failures.
+export function createPhysicalRequestAccounting() {
+  const requests = new Map()
+  return {
+    begin(id,body = '') {
+      if (requests.has(id)) throw new Error('Duplicate physical request admission')
+      requests.set(id,{requestBytes:Buffer.byteLength(body || ''),responseBytes:0,complete:false,fulfilled:false})
+    },
+    finish(id,body = '',fulfilled = true) {
+      const row = requests.get(id)
+      if (!row || row.complete) throw new Error('Missing or duplicate physical response accounting')
+      Object.assign(row,{responseBytes:Buffer.byteLength(body || ''),complete:true,fulfilled})
+    },
+    snapshot() { return {requests:requests.size,completed:[...requests.values()].filter(x => x.complete).length,
+      requestBytes:[...requests.values()].reduce((n,x) => n+x.requestBytes,0),
+      responseBytes:[...requests.values()].reduce((n,x) => n+x.responseBytes,0)} }
+  }
+}
+
+export function observationDiscoveryReceipt(request,response,status = 200,fulfilled = true,rawRequestBody = JSON.stringify(request),rawResponseBody = JSON.stringify(response)) {
+  return {request:structuredClone(request),response:structuredClone(response),status,fulfilled,
+    rawRequestBody,rawResponseBody,requestBytes:Buffer.byteLength(rawRequestBody),responseBytes:Buffer.byteLength(rawResponseBody)}
+}
+
+export function assertObservationDiscoveryReceipt(receipt,expected) {
+  const {request,response,status,fulfilled} = receipt || {}
+  const reject = () => { throw new Error('Observation discovery receipt identity/completeness mismatch') }
+  try {
+    if (hashJson(JSON.parse(receipt.rawRequestBody)) !== hashJson(request) || hashJson(JSON.parse(receipt.rawResponseBody)) !== hashJson(response)) reject()
+  } catch { reject() }
+  const limit = request?.limit ?? 50, offset = request?.offset ?? 0
+  if (!expected?.workspaceId || !expected.contextToken || !expected.filters || !expected.mode || !expected.view
+    || !['list','tree','count'].includes(expected.view) || typeof expected.hasMore !== 'boolean'
+    || !Number.isInteger(limit) || limit<1 || limit>200 || !Number.isInteger(offset) || offset<0 || offset>2147483647
+    || limit !== (expected.limit ?? 50) || offset !== (expected.offset ?? 0)
+    || !['hybrid','fts_only'].includes(expected.mode) || !['hybrid','fts_only'].includes(response?.retrieval?.mode)
+    || !expected.searchSession || !Number.isInteger(expected.generation) || expected.generation<1
+    || expected.currentGeneration !== expected.generation
+    || status !== 200 || !fulfilled || response?.complete !== true || response.context_token !== expected.contextToken
+    || request?.workspace_id !== expected.workspaceId || !Number.isFinite(Date.parse(response.expires_at))
+    || response.retrieval?.mode !== expected.mode || response.retrieval?.reason !== (expected.reason ?? null)
+    || (request.view || 'list') !== expected.view || !response.page || !Array.isArray(response.page.items)
+    || response.page.counts?.workspace_id !== expected.workspaceId || !Number.isSafeInteger(response.page.counts.match_count)
+    || response.page.counts.match_count < 0 || response.page.counts.total_count < response.page.counts.match_count
+    || !Number.isSafeInteger(response.page.counts.total_count)
+    || typeof response.page.has_more !== 'boolean'
+    || receipt.requestBytes !== Buffer.byteLength(receipt.rawRequestBody) || receipt.responseBytes !== Buffer.byteLength(receipt.rawResponseBody)) reject()
+  if (request.context_token) {
+    if (request.context_token !== expected.contextToken || ['filters','search_session','generation','replace_context_token'].some(k => k in request)
+      || expected.currentContextToken !== expected.contextToken) reject()
+  } else if (!request.filters || hashJson(request.filters) !== hashJson(expected.filters)
+    || request.search_session !== expected.searchSession || request.generation !== expected.generation
+    || (expected.currentGeneration != null && request.generation !== expected.currentGeneration)) reject()
+  if (expected.view === 'tree') {
+    if (!response.page.tree || !Array.isArray(response.page.tree.items) || typeof response.page.tree.has_more !== 'boolean'
+      || response.page.tree.match_count !== response.page.counts.match_count || response.page.tree.total_count !== response.page.counts.total_count
+      || response.page.items.length !== 0 || response.page.has_more || request.terminal
+      || response.page.tree.items.length>limit || response.page.tree.has_more !== expected.hasMore
+      || (expected.hasMore && response.page.tree.items.length !== limit)
+      || !Array.isArray(expected.treePaths) || JSON.stringify(response.page.tree.items.map(node => node.path)) !== JSON.stringify(expected.treePaths)
+      || response.page.tree.items.some(node => typeof node.path !== 'string' || !node.path || typeof node.segment !== 'string' || !node.segment
+        || !Number.isSafeInteger(node.observation_count) || node.observation_count<1 || node.observation_count>response.page.counts.match_count
+        || typeof node.has_children !== 'boolean' || !Array.isArray(node.terminals)
+        || node.terminals.some(terminal => !['file','glob'].includes(terminal.subject_kind) || terminal.subject !== node.path
+          || !Number.isSafeInteger(terminal.observation_count) || terminal.observation_count<1 || terminal.observation_count>node.observation_count))) reject()
+  } else if (response.page.tree !== null || (expected.view === 'count' && (response.page.items.length || response.page.has_more))) reject()
+  if (expected.view !== 'tree' && ((request.prefix || '') !== '' || response.page.has_more !== expected.hasMore)) reject()
+  if (expected.view === 'count' && request.terminal) reject()
+  if (expected.view === 'list' && (!Array.isArray(expected.ids) || response.page.items.length>limit
+    || (expected.hasMore && response.page.items.length !== limit)
+    || new Set(response.page.items.map(o => o.id)).size !== response.page.items.length
+    || response.page.items.some(o => !o.id || o.workspace_id !== expected.workspaceId)
+    || JSON.stringify(response.page.items.map(o => o.id)) !== JSON.stringify(expected.ids))) reject()
+  if (expected.matchCount != null && response.page.counts.match_count !== expected.matchCount) reject()
+  if (JSON.stringify(request.terminal || null) !== JSON.stringify(expected.terminal || null)
+    || (request.prefix || '') !== (expected.prefix || '') || (request.offset || 0) !== (expected.offset || 0)) reject()
+  return receipt
 }
 
 export function representativeReadiness({ modelComplete, activeRequests, loading, focused, anchorVisible }) {

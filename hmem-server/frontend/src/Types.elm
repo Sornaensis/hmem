@@ -387,13 +387,27 @@ type alias NavigationFocusRequest =
 type alias SearchRequest =
     { workspaceId : String
     , sessionEpoch : Int
+    , actor : String
     , token : Int
+    , generation : Int
     , query : String
+    , entityTypes : List String
+    , offset : Int
     }
 
 
 type alias SearchModel =
     { query : String
+    , globalQuery : String
+    , globalActivated : Bool
+    , globalComposing : Bool
+    , globalGeneration : Int
+    , entityTypes : Maybe (List String)
+    , entityTypesActor : Maybe String
+    , completedRequest : Maybe SearchRequest
+    , returnReceipt : Maybe SearchReturnReceipt
+    , pendingJump : Maybe SearchJumpIntent
+    , nextJumpToken : Int
     , submittedQuery : Maybe String
     , refreshPending : Bool
     , unifiedResults : Maybe Api.UnifiedSearchResults
@@ -412,6 +426,21 @@ type alias SearchModel =
     , filterMemoryPinned : Maybe Bool
     , filterMemoryActiveLinked : Bool
     , filterTags : List String
+    }
+
+
+type alias SearchJumpIntent =
+    { token : Int, entityType : String, entityId : String, guard : String }
+
+
+type alias SearchReturnReceipt =
+    { workspaceId : String, sessionEpoch : Int, actor : String, runtimeId : String, token : Int
+    , entityType : String, entityId : String, phase : String, invalidated : Bool, awaitingSource : Bool, scrollTop : Float, resultId : String
+    , sourceUrl : String, targetUrl : String, tab : WorkspaceTab, focus : FocusModel
+    , focusedFilters : Maybe FocusedFilterContext, hierarchy : HierarchyFilters
+    , observationSelectedId : Maybe String
+    , query : String, activated : Bool, entityTypes : Maybe (List String), entityTypesActor : Maybe String
+    , results : Maybe Api.UnifiedSearchResults, completedRequest : Maybe SearchRequest
     }
 
 
@@ -530,6 +559,7 @@ type alias ObservationModel =
     , nextPreferenceRequest : Int
     , error : Maybe String
     , query : String
+    , subjectQuery : String
     , subjectKind : Maybe Api.SubjectKind
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
@@ -542,6 +572,10 @@ type alias ObservationModel =
     , appliedQuery : Maybe ObservationAppliedQuery
     , completedQuery : Maybe ObservationAppliedQuery
     , modeQueries : Dict String String
+    , modeSubjectQueries : Dict String String
+    , filterComposing : Bool
+    , clearViewportToken : Int
+    , discovery : ObservationDiscoveryState
     , modeScrolls : Dict String Float
     , preferenceScroll : Maybe Float
     , filterDebounce : Maybe ObservationFilterDebounce
@@ -585,6 +619,7 @@ type alias ObservationModel =
     , nextDetailRequestToken : Int
     , detailNavigationEpoch : Int
     , detailNavigationToken : Int
+    , searchOriginDetail : Bool
     , detailReturnTarget : Maybe String
     , pendingReturnNavigation : Maybe ObservationReturnIntent
     , edit : Maybe ObservationEditState
@@ -594,12 +629,30 @@ type alias ObservationModel =
     }
 
 
+type ObservationDiscoveryDestination
+    = DiscoveryFlat (Maybe Int) Int String Int
+    | DiscoveryTree ObservationTree.Request
+    | DiscoveryCount ObservationCountGuard ObservationCountGuard
+
+
+type alias ObservationDiscoveryRequest =
+    { workspaceId : String, epoch : Int, owner : String, sessionId : String, generation : Int
+    , query : ObservationAppliedQuery, contextToken : Maybe String, destination : ObservationDiscoveryDestination
+    , countGeneration : Int, workspaceCountGeneration : Int }
+
+
+type alias ObservationDiscoveryState =
+    { sessionId : String, runtimeToken : Int, runtimePending : Bool, generation : Int, query : Maybe ObservationAppliedQuery, owner : String
+    , context : Maybe { token : String, expiresAt : String, retrieval : { mode : String, reason : Maybe String } }
+    , bootstrap : Maybe ObservationDiscoveryRequest, afterBootstrap : Maybe ObservationDiscoveryDestination, physical : List ObservationDiscoveryRequest, error : Maybe String, failedCount : Bool }
+
+
 type alias ObservationCountGuard =
     { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, generation : Int, fingerprint : String }
 
 
 type alias ObservationFilterDebounce =
-    { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, mode : ObservationRequestMode }
+    { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, mode : ObservationRequestMode, query : ObservationAppliedQuery }
 
 
 type alias ObservationCountState =
@@ -676,6 +729,7 @@ type alias ObservationBrowseReturn =
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
     , query : String
+    , subjectQuery : String
     , gitSha : String
     , currentGitSha : String
     , historyGitSha : String
@@ -685,6 +739,7 @@ type alias ObservationBrowseReturn =
 type alias ObservationAppliedQuery =
     { requestMode : ObservationRequestMode
     , query : String
+    , subjectQuery : String
     , subjectKind : Maybe Api.SubjectKind
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
@@ -1379,9 +1434,16 @@ type Msg
     | AutoDismissToast Int
     | SearchInput String
     | WorkspaceSearch Msg
+    | GlobalSearchInput String
+    | GlobalSearchCompositionStart
+    | GlobalSearchCompositionEnd String
+    | GlobalSearchReady SearchRequest
+    | ToggleSearchEntityType String
     | SubmitSearch
     | GotUnifiedSearchResults String Int Int String (Result Http.Error Api.UnifiedSearchResults)
     | NavigateToSearchResult String String
+    | SearchNavigationEvent Encode.Value
+    | ReturnSearchResults
     | SetFilterShowOnly FilterShowOnly
     | SetFilterShowEmptyProjects Bool
     | ToggleWorkspaceGroup String
@@ -1398,6 +1460,11 @@ type Msg
     | ToggleFilterMemoryActiveLinked Bool
     | ToggleFilterTag String
     | SetObservationQuery String
+    | SetObservationSubjectQuery String
+    | ObservationDiscoveryRuntimeReceived Encode.Value
+    | GotObservationDiscovery ObservationDiscoveryRequest (Result Http.Error Api.ObservationDiscoveryResponse)
+    | ObservationFilterCompositionStart
+    | ObservationFilterCompositionEnd Bool String
     | ObservationFiltersReady ObservationFilterDebounce
     | GotObservationTree ObservationTree.Request (Result Http.Error Api.ObservationSubjectTreePage)
     | GotObservationTreeTerminal ObservationTree.Request (Result Http.Error (Api.PaginatedResult Api.Observation))

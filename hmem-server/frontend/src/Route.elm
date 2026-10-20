@@ -4,6 +4,7 @@ import Api
 import Browser
 import Browser.Navigation as Nav
 import Dict
+import Feature.Search
 import Feature.DataLoading
 import Feature.Dependencies
 import Feature.Editing
@@ -198,13 +199,7 @@ handleUrlChangeWithoutProtectedExit url model =
 
                     updatedSearch =
                         if routeSupersedesSearch then
-                            { currentSearch
-                                | unifiedResults = Nothing
-                                , isSearching = False
-                                , searchError = Nothing
-                                , activeRequestQuery = Nothing
-                                , activeRequest = Nothing
-                            }
+                            Feature.Search.clearTransientSearchState currentSearch
 
                         else
                             currentSearch
@@ -232,7 +227,7 @@ handleUrlChangeWithoutProtectedExit url model =
                     ( queryModel, queryCmd ) =
                         let
                             targetState = if frag.observationId /= model.observations.selectedId then Feature.Observation.clearSelection routeState else routeState
-                            restored = { queryInput | observations = { targetState | linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
+                            restored = { queryInput | observations = { targetState | searchOriginDetail = Helpers.isObservationSearchUrl url, linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
                         in
                         if queryChanged then Feature.Observation.restoreRouteResults restored else ( restored, Cmd.none )
 
@@ -295,7 +290,7 @@ handleUrlChangeWithoutProtectedExit url model =
                             observations =
                                 Feature.Observation.retireSessionState model.observations
                         in
-                        Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice }
+                        Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice, searchOriginDetail = Helpers.isObservationSearchUrl url }
 
                     currentDataLoading =
                         model.dataLoading
@@ -375,6 +370,17 @@ handleUrlChangeWithoutProtectedExit url model =
                     updatedSearch =
                         { currentSearch
                             | query = ""
+                            , globalQuery = ""
+                            , globalActivated = False
+                            , globalComposing = False
+                            , globalGeneration = currentSearch.globalGeneration + 1
+                            , returnReceipt = Nothing
+                            , pendingJump = Nothing
+                            , entityTypes = Nothing
+                            , entityTypesActor = Nothing
+                            , completedRequest = Nothing
+                            , submittedQuery = Nothing
+                            , refreshPending = False
                             , unifiedResults = Nothing
                             , isSearching = False
                             , searchError = Nothing

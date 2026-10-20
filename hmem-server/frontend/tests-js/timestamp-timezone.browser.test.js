@@ -179,12 +179,22 @@ test('real formatting replies are presentation only and reload adopts a changed 
   await cdp.send('Emulation.setTimezoneOverride', { timezoneId: 'Europe/Copenhagen' })
   await h.page.addInitScript(() => {
     const schedule = window.queueMicrotask.bind(window)
-    window.timestampReplyJobs = []; window.holdTimestampReplies = true
-    window.queueMicrotask = callback => window.holdTimestampReplies ? window.timestampReplyJobs.push(callback) : schedule(callback)
+    window.timestampReplyJobs = []; window.holdTimestampReplies = true; window.timestampRuntimeRepliesPassed = 0
+    window.queueMicrotask = callback => {
+      const source = String(callback)
+      if (window.holdTimestampReplies && source.includes('timestampsFormatted')) window.timestampReplyJobs.push(callback)
+      else {
+        if (source.includes('observationSearchRuntimeReady')) window.timestampRuntimeRepliesPassed++
+        schedule(callback)
+      }
+    }
   })
   try {
     await h.start(); await h.idle()
     await h.page.waitForFunction(() => window.timestampReplyJobs.length > 0)
+    assert.ok(await h.page.evaluate(() => window.timestampRuntimeRepliesPassed > 0), 'Unrelated discovery runtime replies must pass while formatting is held')
+    assert.ok(await h.page.evaluate(() => window.timestampReplyJobs.every(callback => String(callback).includes('timestampsFormatted'))), 'Only actual timestamp replies are held')
+    assert.ok(h.requests.some(request => request.path === '/api/v1/observations/discovery' && request.method === 'POST' && request.done && request.status === 200), 'Discovery startup completes independently of held formatting')
     assert.ok((await h.page.locator('.workspace-details').textContent()).includes('…'))
     await h.page.waitForFunction(() => ['timezone-task', 'timezone-invalid'].every(id => document.querySelector('#entity-' + id + ' .card-meta-group')?.textContent.includes('Updated: …')))
     await h.idle()

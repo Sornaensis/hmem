@@ -1,6 +1,7 @@
 module HMem.Server.App
   ( mkApp
   , mkAppWithChangeStream
+  , mkAppWithDiscovery
   , mkAppWithOidcCodeExchange -- ^ Test-only seam; production callers should use 'mkApp'.
   , OidcCodeExchange -- ^ Test-only injected OIDC code exchange type.
   , requestIdMiddleware
@@ -51,7 +52,8 @@ import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, resolveEffectiveActor, withEffectiveActorContext, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
-import HMem.Server.API (HMemAPI, serverWithChangeStream)
+import HMem.Server.API (HMemAPI, serverWithDiscovery)
+import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
 import HMem.Server.OpenAPI (openApiSpec)
 import HMem.Server.Static (staticMiddleware)
 import HMem.Server.WebSocket (WSState, wsMiddleware)
@@ -65,6 +67,10 @@ mkApp = mkAppWithOidcCodeExchange defaultOidcCodeExchange
 mkAppWithChangeStream :: Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
 mkAppWithChangeStream = mkAppWithOidcCodeExchangeAndChangeStream defaultOidcCodeExchange
 
+-- | Production shares the lifecycle-owned validated provider with discovery.
+mkAppWithDiscovery :: ObservationDiscovery -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithDiscovery discovery = mkAppWithServices (Just discovery) defaultOidcCodeExchange
+
 type OidcCodeExchange = DeployedAuthConfig -> Text -> IO (Maybe Text)
 
 -- | Build the WAI Application with an injected OIDC code exchange.
@@ -76,7 +82,11 @@ mkAppWithOidcCodeExchange :: OidcCodeExchange -> Middleware -> AuthConfig -> Cor
 mkAppWithOidcCodeExchange oidcCodeExchange = mkAppWithOidcCodeExchangeAndChangeStream oidcCodeExchange Config.defaultConfig.changeStream
 
 mkAppWithOidcCodeExchangeAndChangeStream :: OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
-mkAppWithOidcCodeExchangeAndChangeStream oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
+mkAppWithOidcCodeExchangeAndChangeStream = mkAppWithServices Nothing
+
+mkAppWithServices :: Maybe ObservationDiscovery -> OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
+  discoveryService <- maybe (newObservationDiscovery False) pure discovery
   rateLimit <- rateLimitMiddleware rateLimitCfg
   jwksCache <- newIORef Nothing
   pure $ requestIdMiddleware
@@ -91,7 +101,7 @@ mkAppWithOidcCodeExchangeAndChangeStream oidcCodeExchange changeStreamConfig log
         $ authMiddleware authCfg
         $ openApiMiddleware
         $ normalizeObservationIfMatch
-         $ serve (Proxy @HMemAPI) (serverWithChangeStream authCfg changeStreamConfig pool tracker wsState pgvec)
+         $ serve (Proxy @HMemAPI) (serverWithDiscovery authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
 
 -- Servant's Header combinator selects the first physical header line. Join
 -- repeated content preconditions so the authorized handler rejects a tag list,

@@ -426,11 +426,30 @@ route msg model =
         WorkspaceSearch _ ->
             Ok (Feature.Search.update msg model)
 
+        GlobalSearchInput _ ->
+            Ok (Feature.Search.update msg model)
+
+        GlobalSearchCompositionStart ->
+            Ok (Feature.Search.update msg model)
+
+        GlobalSearchCompositionEnd _ ->
+            Ok (Feature.Search.update msg model)
+
+        GlobalSearchReady _ ->
+            Ok (Feature.Search.update msg model)
+
+        ToggleSearchEntityType _ ->
+            Ok (Feature.Search.update msg model)
+
         SubmitSearch ->
             Ok (Feature.Search.update msg model)
 
         GotUnifiedSearchResults _ _ _ _ _ ->
             Ok (Feature.Search.update msg model)
+
+        SearchNavigationEvent _ -> Ok (Feature.Search.update msg model)
+
+        ReturnSearchResults -> Ok (Feature.Search.update msg model)
 
         NavigateToSearchResult _ _ ->
             Ok (Feature.Search.update msg model)
@@ -464,6 +483,16 @@ route msg model =
 
         ToggleFilterTag _ ->
             Ok (Feature.Search.update msg model)
+
+        ObservationDiscoveryRuntimeReceived _ -> Ok (Feature.Observation.update msg model)
+
+        GotObservationDiscovery _ _ -> Ok (Feature.Observation.update msg model)
+
+        SetObservationSubjectQuery _ -> Ok (Feature.Observation.update msg model)
+
+        ObservationFilterCompositionStart -> Ok (Feature.Observation.update msg model)
+
+        ObservationFilterCompositionEnd _ _ -> Ok (Feature.Observation.update msg model)
 
         SetObservationQuery _ ->
             Ok (Feature.Observation.update msg model)

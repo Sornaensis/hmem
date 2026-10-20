@@ -119,7 +119,7 @@ viewReadableWorkspacePage wsId model ws =
                     Feature.Search.viewSearchBar model
                 , viewTabs model
                 , Feature.Search.viewFocusedSearchBar model
-                , if model.activeTab == AdministrationTab then
+                , Feature.Search.viewNavigation model (if model.activeTab == AdministrationTab then
                     viewTabContent wsId model
 
                   else if model.dataLoading.loadingWorkspaceData then
@@ -142,7 +142,7 @@ viewReadableWorkspacePage wsId model ws =
                                     Feature.Search.viewUnifiedSearchResults model results
 
                                 Nothing ->
-                                    viewTabContent wsId model
+                                    viewTabContent wsId model)
                 ]
         ]
 

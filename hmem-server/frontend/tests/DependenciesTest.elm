@@ -454,7 +454,7 @@ suite =
                                     , unifiedResults = Just { observations = [], projects = [], tasks = [] }
                                     , isSearching = True
                                     , activeRequestQuery = Just "selected query"
-                                    , activeRequest = Just { workspaceId = workspaceId, sessionEpoch = base.sessionRequestEpoch, token = 5, query = "selected query" }
+                                    , activeRequest = Just { workspaceId = workspaceId, sessionEpoch = base.sessionRequestEpoch, token = 5, generation = 0, actor = "", entityTypes = [ "project", "task" ], offset = 0, query = "selected query" }
                                     , nextRequestToken = 6
                                 }
                         }

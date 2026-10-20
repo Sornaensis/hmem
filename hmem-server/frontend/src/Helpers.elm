@@ -12,7 +12,7 @@ import Html.Attributes exposing (attribute, class, title, type_)
 import Html.Events exposing (stopPropagationOn)
 import Json.Decode as Decode
 import Json.Encode as Encode
-import Ports exposing (saveToLocalStorage)
+import Ports exposing (requestLocalStorage, saveToLocalStorage)
 import Permissions
 import Process
 import Set
@@ -239,23 +239,27 @@ replaceFragment model =
 
 defaultObservationQuery : ObservationAppliedQuery
 defaultObservationQuery =
-    { requestMode = ObservationFlatMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
+    { requestMode = ObservationFlatMode, query = "", subjectQuery = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
 
 
 observationAppliedQuery : ObservationModel -> ObservationAppliedQuery
 observationAppliedQuery state =
     Maybe.withDefault
-        { requestMode = state.requestMode, query = state.query, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha, matchAppliedPaths = if state.requestMode == ObservationMatchMode then state.matchAppliedPaths else [] }
+        { requestMode = state.requestMode, query = state.query, subjectQuery = state.subjectQuery, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha, matchAppliedPaths = if state.requestMode == ObservationMatchMode then state.matchAppliedPaths else [] }
         state.appliedQuery
 
 
 restoreObservationQuery : ObservationAppliedQuery -> ObservationModel -> ObservationModel
 restoreObservationQuery query state =
-    { state | requestMode = query.requestMode, query = query.query, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, currentGitSha = query.currentGitSha, historyGitSha = query.historyGitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = if query.requestMode == ObservationMatchMode then String.join "\n" query.matchAppliedPaths else state.matchPathsInput, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing
+    { state | requestMode = query.requestMode, query = query.query, subjectQuery = query.subjectQuery, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, currentGitSha = query.currentGitSha, historyGitSha = query.historyGitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = if query.requestMode == ObservationMatchMode then String.join "\n" query.matchAppliedPaths else state.matchPathsInput, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing
         , modeQueries = Dict.insert (case query.requestMode of
             ObservationFlatMode -> "flat"
             ObservationMatchMode -> "match"
             _ -> "tree") query.query state.modeQueries
+        , modeSubjectQueries = Dict.insert (case query.requestMode of
+            ObservationFlatMode -> "flat"
+            ObservationMatchMode -> "match"
+            _ -> "tree") query.subjectQuery state.modeSubjectQueries
         , filterDebounce = Nothing, nextFilterToken = state.nextFilterToken + 1, preferenceScroll = Nothing }
 
 
@@ -295,7 +299,7 @@ observationUrlContext url =
             List.map Tuple.first pairs
 
         versioned =
-            List.any (\key -> List.member key [ "ov", "ox", "oq" ]) keys
+            List.any (\key -> List.member key [ "ov", "ox", "oq", "search-jump" ]) keys
                 || List.any (\part -> String.startsWith "ov=" part || String.startsWith "ox=" part || String.startsWith "oq=" part) parts
 
         lookup key =
@@ -304,13 +308,14 @@ observationUrlContext url =
         validFields =
             List.length pairs == List.length parts
                 && List.length keys == Set.size (Set.fromList keys)
-                && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox" ]) keys
+                && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox", "search-jump" ]) keys
                 && (lookup "tab" |> Maybe.map (\tab -> List.member tab [ "projects", "observations", "timeline", "audit", "administration" ]) |> Maybe.withDefault True)
                 && (lookup "focus" |> Maybe.map (\focus -> case String.split ":" focus of
                         [ kind, entityId ] -> List.member kind [ "project", "task", "memory" ] && not (String.isEmpty entityId)
                         _ -> False
                     ) |> Maybe.withDefault True)
                 && (lookup "observation" |> Maybe.map (not << String.isEmpty) |> Maybe.withDefault True)
+                && (lookup "search-jump" |> Maybe.map validObservationSearchJump |> Maybe.withDefault True)
     in
     if observationUrlBytes (Url.toString url) > 4096 then
         fallback "This Observation URL exceeds the 4096-byte limit. No filters or selection were restored."
@@ -336,6 +341,26 @@ observationUrlContext url =
                 fallback "Invalid Observation link. No filters or selection were restored."
 
 
+validObservationSearchJump : String -> Bool
+validObservationSearchJump value =
+    String.toInt value |> Maybe.map (\token -> token > 0 && token <= 2147483647 && String.fromInt token == value) |> Maybe.withDefault False
+
+
+isObservationSearchUrl : Url.Url -> Bool
+isObservationSearchUrl url =
+    let
+        context = observationUrlContext url
+        marker = url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (\part -> case String.split "=" part of
+            [ key, value ] -> if Url.percentDecode key == Just "search-jump" then Url.percentDecode value else Nothing
+            _ -> Nothing)
+    in
+    (context.notice == Nothing || context.notice == Just excludedObservationNotice)
+        && context.fragment.tab == ObservationsTab && context.fragment.observationId /= Nothing
+        && (case marker of
+            [ value ] -> validObservationSearchJump value
+            _ -> False)
+
+
 observationQueryDecoder : Decode.Decoder ObservationAppliedQuery
 observationQueryDecoder =
     let
@@ -359,13 +384,16 @@ observationQueryDecoder =
 
         tuple =
             Decode.map8 (\requestMode query subjectKind subject gitSha facetKind facetSubject paths ->
-                ( { requestMode = requestMode, query = query, subjectKind = subjectKind, subject = subject, gitSha = gitSha, currentGitSha = "", historyGitSha = "", selectedFacet = Maybe.map2 (\k s -> { subjectKind = k, subject = s }) facetKind facetSubject, matchAppliedPaths = paths }, (facetKind == Nothing) == (facetSubject == Nothing) ))
+                ( { requestMode = requestMode, query = query, subjectQuery = "", subjectKind = subjectKind, subject = subject, gitSha = gitSha, currentGitSha = "", historyGitSha = "", selectedFacet = Maybe.map2 (\k s -> { subjectKind = k, subject = s }) facetKind facetSubject, matchAppliedPaths = paths }, (facetKind == Nothing) == (facetSubject == Nothing) ))
                 (Decode.index 0 mode) (Decode.index 1 Decode.string) (Decode.index 2 kind) (Decode.index 3 Decode.string) (Decode.index 4 Decode.string) (Decode.index 5 kind) (Decode.index 6 (Decode.nullable Decode.string)) (Decode.index 7 (Decode.list Decode.string))
     in
     Decode.list Decode.value |> Decode.andThen (\values ->
-        if not (List.member (List.length values) [ 8, 10 ]) then Decode.fail "Invalid query tuple" else
+        if not (List.member (List.length values) [ 8, 10, 11 ]) then Decode.fail "Invalid query tuple" else
         (if List.length values == 8 then tuple else
             Decode.map3 (\( query, paired ) current history -> ( { query | currentGitSha = current, historyGitSha = history }, paired )) tuple (Decode.index 8 Decode.string) (Decode.index 9 Decode.string))
+        |> Decode.andThen (\( query, paired ) ->
+            if List.length values == 11 then Decode.map (\subjects -> ( { query | subjectQuery = subjects }, paired )) (Decode.index 10 Decode.string)
+            else Decode.succeed ( if List.member query.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ] then { query | subjectQuery = query.query, query = "" } else query, paired ))
         |> Decode.andThen (\( query, pairedFacet ) ->
             if not pairedFacet || (query.requestMode == ObservationExactSubjectMode && query.selectedFacet == Nothing) then Decode.fail "Invalid exact facet" else
             if query.requestMode == ObservationMatchMode && not (List.isEmpty query.matchAppliedPaths) then
@@ -390,7 +418,7 @@ encodeObservationQuery query =
                 ObservationExactSubjectMode -> "exact"
                 ObservationMatchMode -> "match"
     in
-    Encode.list identity [ Encode.string mode, Encode.string query.query, kind query.subjectKind, Encode.string query.subject, Encode.string query.gitSha, kind (Maybe.map .subjectKind query.selectedFacet), query.selectedFacet |> Maybe.map (.subject >> Encode.string) |> Maybe.withDefault Encode.null, Encode.list Encode.string query.matchAppliedPaths, Encode.string query.currentGitSha, Encode.string query.historyGitSha ] |> Encode.encode 0 |> Url.percentEncode
+    Encode.list identity [ Encode.string mode, Encode.string query.query, kind query.subjectKind, Encode.string query.subject, Encode.string query.gitSha, kind (Maybe.map .subjectKind query.selectedFacet), query.selectedFacet |> Maybe.map (.subject >> Encode.string) |> Maybe.withDefault Encode.null, Encode.list Encode.string query.matchAppliedPaths, Encode.string query.currentGitSha, Encode.string query.historyGitSha, Encode.string query.subjectQuery ] |> Encode.encode 0 |> Url.percentEncode
 
 
 observationUrl : Model -> String -> String
@@ -417,6 +445,19 @@ observationHistoryUrl model =
         Err _ -> observationUrl model ("&ox=" ++ Url.percentEncode (model.flags.sessionId ++ "-" ++ String.fromInt model.sessionRequestEpoch ++ "-" ++ String.fromInt model.observations.nextLinkToken))
 
 
+{-| Include the navigation marker before enforcing the public URL budget.
+The bounded exclusion marker retains a truthful fallback for oversized filters.
+-}
+observationSearchHistoryUrl : Int -> Model -> String
+observationSearchHistoryUrl token model =
+    let
+        marker = "&search-jump=" ++ String.fromInt (Basics.clamp 1 2147483647 token)
+        complete = observationUrl model ("&ov=1&oq=" ++ encodeObservationQuery (observationAppliedQuery model.observations) ++ marker)
+    in
+    if observationUrlBytes complete <= 4096 then complete
+    else observationUrl model ("&ox=search-" ++ String.fromInt (Basics.clamp 1 2147483647 token) ++ marker)
+
+
 writeObservationHistory : Bool -> Model -> ( Model, Cmd Msg )
 writeObservationHistory intentional model =
     let
@@ -434,6 +475,54 @@ writeObservationHistory intentional model =
 localStorageKey : String -> String
 localStorageKey wsId =
     "hmem-ws-" ++ wsId
+
+
+globalSearchActor : Model -> String
+globalSearchActor model =
+    model.sessionContext |> Maybe.map (\session -> Encode.encode 0 (Encode.list Encode.string [ session.authMode, session.principal.actorType, session.principal.actorId, session.principal.authority, Maybe.withDefault "" session.principal.grantUserId ])) |> Maybe.withDefault ""
+
+
+entitySearchPreferenceKey : String -> Model -> String
+entitySearchPreferenceKey workspaceId model =
+    "hmem-entity-search-v1:" ++ Url.percentEncode workspaceId ++ ":" ++ Url.percentEncode (globalSearchActor model)
+
+
+loadEntitySearchPreferencesCmd : Model -> Cmd Msg
+loadEntitySearchPreferencesCmd model =
+    case model.selectedWorkspaceId of
+        Just workspaceId ->
+            if Permissions.canReadCurrentWorkspace model && not (String.isEmpty (globalSearchActor model)) then
+                requestLocalStorage (entitySearchPreferenceKey workspaceId model)
+            else Cmd.none
+        Nothing -> Cmd.none
+
+
+saveEntitySearchPreferencesCmd : Model -> Cmd Msg
+saveEntitySearchPreferencesCmd model =
+    case model.selectedWorkspaceId of
+        Just workspaceId ->
+            if Permissions.canReadCurrentWorkspace model && model.search.entityTypesActor == Just (globalSearchActor model) then
+                saveToLocalStorage (Encode.object
+                    [ ( "key", Encode.string (entitySearchPreferenceKey workspaceId model) )
+                    , ( "value", Encode.object
+                        [ ( "entitySearchPreference", Encode.bool True ), ( "workspaceId", Encode.string workspaceId )
+                        , ( "actor", Encode.string (globalSearchActor model) )
+                        , ( "types", Encode.list Encode.string (Maybe.withDefault [] model.search.entityTypes) ) ] ) ])
+            else Cmd.none
+        Nothing -> Cmd.none
+
+
+restoreEntitySearchPreferences : Encode.Value -> Model -> Model
+restoreEntitySearchPreferences json model =
+    if not (Permissions.canReadCurrentWorkspace model) || model.search.globalActivated
+        || (Decode.decodeValue (Decode.field "workspaceId" Decode.string) json |> Result.toMaybe) /= model.selectedWorkspaceId
+        || Decode.decodeValue (Decode.field "actor" Decode.string) json /= Ok (globalSearchActor model) then model
+    else
+        case Decode.decodeValue (Decode.field "types" (Decode.list Decode.string)) json of
+            Ok types ->
+                let state = model.search in
+                { model | search = { state | entityTypes = Just (List.filter (\kind -> List.member kind types) [ "project", "task", "observation" ]), entityTypesActor = Just (globalSearchActor model) } }
+            Err _ -> model
 
 
 encodeFilterState : Model -> Encode.Value
@@ -607,6 +696,9 @@ restoreTimelinePreferences json timeline =
 
 applyStoredFiltersIfCurrentWorkspace : Encode.Value -> Model -> Model
 applyStoredFiltersIfCurrentWorkspace json original =
+    if Decode.decodeValue (Decode.field "entitySearchPreference" Decode.bool) json == Ok True then
+        restoreEntitySearchPreferences json original
+    else
     let
         groups = original.groups
         model =

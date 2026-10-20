@@ -19,6 +19,8 @@ module HMem.DB.Observation
   , matchObservationsOverfetch
   , setObservationEmbedding
   , similarObservations
+  , discoveryVectorAvailability
+  , discoverObservations
   ) where
 
 import Control.Exception (throwIO)
@@ -575,6 +577,115 @@ requirePgvector :: Pool Hasql.Connection -> IO ()
 requirePgvector pool = do
   available <- runSession pool $ Session.statement () observationVectorCapabilityStatement
   if available then pure () else throwIO $ DBCapabilityUnavailable "pgvector embedding support is unavailable for observations"
+
+-- | Probe only after repository read authorization. Avoid preparing a reference
+-- to the optional column until both extension and column are present. No
+-- distance calculation, cast, or cross-space comparison is performed here.
+discoveryVectorAvailability :: Pool Hasql.Connection -> UUID -> EmbeddingSpaceFingerprint -> IO (Maybe Bool)
+discoveryVectorAvailability pool workspace space = do
+  available <- runSession pool $ Session.statement () observationVectorCapabilityStatement
+  if not available then pure Nothing else
+    Just <$> runSession pool (Session.statement (workspace, embeddingSpaceFingerprintText space) compatibleVectorStatement)
+
+compatibleVectorStatement :: Statement.Statement (UUID, Text) Bool
+compatibleVectorStatement = Statement.Statement
+  "SELECT EXISTS (SELECT 1 FROM observations WHERE workspace_id = $1 AND embedding IS NOT NULL AND embedding_space_fingerprint = $2)"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid))
+   <> contramap snd (Enc.param (Enc.nonNullable Enc.text)))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
+
+-- | Every view uses the same complete membership CTE in one statement snapshot.
+-- There is no semantic top-K catalog: exact cosine >= .5 qualifies all rows in
+-- the pinned space. Transport pagination happens after union/deduplication.
+discoverObservations :: Pool Hasql.Connection -> ObservationDiscoveryFilter -> ObservationDiscoveryRequest -> Maybe ([Double], Text) -> IO ObservationDiscoveryPage
+discoverObservations pool rawFilter request semantic = do
+  validateOrThrow $ validateObservationDiscoveryRequest request
+    { contextToken = Nothing, replaceContextToken = Nothing, searchSession = Nothing, generation = Nothing, filters = Just rawFilter }
+  let f = normalizeObservationDiscoveryFilter rawFilter
+      payload = Aeson.object
+        [ "filters" Aeson..= f, "view" Aeson..= request.view, "prefix" Aeson..= request.treePrefix
+        , "terminal" Aeson..= request.terminal
+        , "limit" Aeson..= fromMaybe 50 request.limit, "offset" Aeson..= fromMaybe 0 request.offset
+        , "workspace_id" Aeson..= request.workspaceId ]
+  case semantic of
+    Nothing -> pure ()
+    Just (vector, space) -> do
+      validateOrThrow ["discovery requires a finite 1536-dimensional vector and exact space" |
+        length vector /= observationEmbeddingDimensions || any (\v -> isNaN v || isInfinite v) vector
+          || parseEmbeddingSpaceFingerprint space == Nothing]
+      requirePgvector pool
+  result <- runSession pool $ Session.statement
+    (TE.decodeUtf8 (LBS.toStrict (Aeson.encode payload)), vecText . fst <$> semantic, snd <$> semantic)
+    (discoveryStatement (isJustSemantic semantic))
+  validateOrThrow ["Observation count exceeds the supported exact integer range" |
+    result.counts.totalCount > 9007199254740991 || result.counts.matchCount > 9007199254740991]
+  pure (result :: ObservationDiscoveryPage) { items = map (attachProvenanceMatch f.gitSha f.currentGitSha f.historyGitSha) result.items }
+  where isJustSemantic = maybe False (const True)
+
+discoveryStatement :: Bool -> Statement.Statement (Text, Maybe Text, Maybe Text) ObservationDiscoveryPage
+discoveryStatement hybrid = Statement.Statement (BS8.pack (unlines sql)) encoder decoder True
+  where
+    -- Both variants bind only ordinary text parameters. The FTS variant never
+    -- mentions vector types or the optional embedding column, even in dead SQL.
+    sql =
+      [ "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space),"
+      , "matching_subjects AS MATERIALIZED ("
+      , " SELECT s.observation_id AS id,s.subject_kind::text AS subject_kind,s.subject FROM observation_subjects s"
+      , " JOIN observations o ON o.id=s.observation_id CROSS JOIN args a"
+      , " WHERE o.workspace_id=(a.p->>'workspace_id')::uuid"
+      , " AND (a.p->'filters'->>'subject_kind' IS NULL OR s.subject_kind::text=a.p->'filters'->>'subject_kind')"
+      , " AND (a.p->'filters'->>'subject' IS NULL OR s.subject=a.p->'filters'->>'subject')"
+      , " AND (a.p->'filters'->>'subject_query' IS NULL OR position(a.p->'filters'->>'subject_query' IN s.subject)>0)"
+      , "), eligible AS MATERIALIZED ("
+      , " SELECT o.*,a.p->'filters'->>'content_query' AS body_query,"
+      , " to_tsvector('simple',o.content) @@ plainto_tsquery('simple',a.p->'filters'->>'content_query') AS fts_match,"
+      , " ts_rank(to_tsvector('simple',o.content),plainto_tsquery('simple',a.p->'filters'->>'content_query')) AS fts_score"
+      , " FROM observations o CROSS JOIN args a WHERE o.id IN (SELECT id FROM matching_subjects)"
+      , " AND (a.p->'filters'->>'git_sha' IS NULL OR o.git_sha=a.p->'filters'->>'git_sha')"
+      , " AND (a.p->'filters'->>'current_git_sha' IS NULL OR o.current_provenance->>'reviewed_git_sha'=a.p->'filters'->>'current_git_sha')"
+      , " AND (a.p->'filters'->>'history_git_sha' IS NULL OR EXISTS (SELECT 1 FROM observation_revision_events e WHERE e.observation_id=o.id AND e.reviewed_git_sha=a.p->'filters'->>'history_git_sha'))"
+      , "), fts_ranked AS (SELECT id,row_number() OVER (ORDER BY fts_score DESC,updated_at DESC,id DESC) AS rank FROM eligible WHERE fts_match),"
+      ] <> semanticSql <>
+      [ "membership AS MATERIALIZED ("
+      , " SELECT e.id,e.updated_at," <> scoreSql <> " AS rank FROM eligible e"
+      , " LEFT JOIN fts_ranked f ON f.id=e.id LEFT JOIN semantic_ranked s ON s.id=e.id"
+      , " WHERE e.body_query IS NULL OR f.id IS NOT NULL OR s.id IS NOT NULL"
+      , "), terminals AS MATERIALIZED (SELECT ms.* FROM matching_subjects ms JOIN membership m ON m.id=ms.id),"
+      , "list_page AS MATERIALIZED (SELECT m.* FROM membership m CROSS JOIN args a"
+      , " WHERE a.p->>'view'='list' AND ((a.p->>'terminal') IS NULL OR EXISTS (SELECT 1 FROM terminals t WHERE t.id=m.id AND t.subject=a.p->'terminal'->>'subject' AND t.subject_kind=a.p->'terminal'->>'subject_kind'))"
+      , " ORDER BY m.rank DESC,m.updated_at DESC,m.id DESC LIMIT ((SELECT (p->>'limit')::int FROM args)+1) OFFSET (SELECT (p->>'offset')::int FROM args)),"
+      , "descendants AS (SELECT t.*,CASE WHEN a.p->>'prefix'='' THEN split_part(t.subject,'/',1) ELSE a.p->>'prefix'||'/'||split_part(substr(t.subject,length(a.p->>'prefix')+2),'/',1) END AS path"
+      , " FROM terminals t CROSS JOIN args a WHERE a.p->>'view'='tree' AND (a.p->>'prefix'='' OR left(t.subject,length(a.p->>'prefix')+1)=a.p->>'prefix'||'/')),"
+      , "nodes AS (SELECT path,COUNT(DISTINCT id) AS observation_count,bool_or(subject<>path) AS has_children FROM descendants GROUP BY path),"
+      , "tree_page AS MATERIALIZED (SELECT * FROM nodes ORDER BY path COLLATE \"C\" LIMIT (SELECT (p->>'limit')::int FROM args) OFFSET (SELECT (p->>'offset')::int FROM args)),"
+      , "counts AS (SELECT (SELECT COUNT(*) FROM observations o CROSS JOIN args a WHERE o.workspace_id=(a.p->>'workspace_id')::uuid) AS total_count,(SELECT COUNT(*) FROM membership) AS match_count),"
+      , "tree_result AS (SELECT jsonb_build_object('total_count',c.total_count,'match_count',c.match_count,"
+      , " 'has_more',(SELECT COUNT(*) FROM nodes)>(a.p->>'offset')::bigint+(a.p->>'limit')::bigint,"
+      , " 'items',COALESCE((SELECT jsonb_agg(jsonb_build_object('path',p.path,'segment',CASE WHEN a.p->>'prefix'='' THEN p.path ELSE substr(p.path,length(a.p->>'prefix')+2) END,"
+      , " 'observation_count',p.observation_count,'has_children',p.has_children,'terminals',COALESCE((SELECT jsonb_agg(jsonb_build_object('subject_kind',ts.subject_kind,'subject',ts.subject,'observation_count',ts.n) ORDER BY ts.subject_kind COLLATE \"C\")"
+      , " FROM (SELECT subject_kind,subject,COUNT(DISTINCT id) AS n FROM terminals WHERE subject=p.path GROUP BY subject_kind,subject) ts),'[]'::jsonb)) ORDER BY p.path COLLATE \"C\") FROM tree_page p),'[]'::jsonb)) AS value FROM args a CROSS JOIN counts c)"
+      , "SELECT jsonb_build_object('counts',jsonb_build_object('workspace_id',a.p->>'workspace_id','total_count',c.total_count,'match_count',c.match_count),"
+      , " 'has_more',(SELECT COUNT(*) FROM list_page)>(a.p->>'limit')::int,"
+      , " 'tree',CASE WHEN a.p->>'view'='tree' THEN (SELECT value FROM tree_result) ELSE NULL END,"
+      , " 'items',COALESCE((SELECT jsonb_agg(row_data.value ORDER BY row_data.rank DESC,row_data.updated_at DESC,row_data.id DESC) FROM ("
+      , " SELECT lp.rank,lp.updated_at,lp.id,jsonb_build_object('id',o.id,'workspace_id',o.workspace_id,'git_sha',o.git_sha,'content',o.content,'created_at',o.created_at,'updated_at',o.updated_at,'content_version',o.content_version,'latest_sequence',o.latest_sequence,'current_provenance',o.current_provenance,"
+      , " 'subjects',(SELECT jsonb_agg(jsonb_build_object('subject_kind',s.subject_kind::text,'subject',s.subject) ORDER BY s.ordinal) FROM observation_subjects s WHERE s.observation_id=o.id)) AS value"
+      , " FROM list_page lp JOIN observations o ON o.id=lp.id ORDER BY lp.rank DESC,lp.updated_at DESC,lp.id DESC LIMIT (SELECT (p->>'limit')::int FROM args)) row_data),'[]'::jsonb)) FROM args a CROSS JOIN counts c"
+      ]
+    semanticSql
+      | hybrid =
+          [ "distances AS MATERIALIZED (SELECT e.id,e.updated_at,1-(e.embedding <=> a.vector_text::vector) AS similarity FROM eligible e CROSS JOIN args a WHERE e.embedding IS NOT NULL AND e.embedding_space_fingerprint=a.space),"
+          , "semantic_ranked AS (SELECT id,row_number() OVER (ORDER BY similarity DESC,updated_at DESC,id DESC) AS rank FROM distances WHERE similarity>=0.5)," ]
+      | otherwise = ["semantic_ranked AS (SELECT NULL::uuid AS id,NULL::bigint AS rank WHERE false),"]
+    scoreSql
+      | hybrid = "CASE WHEN e.body_query IS NULL THEN 0::float8 ELSE COALESCE(1.0::float8/(60+f.rank),0)+COALESCE(1.0::float8/(60+s.rank),0) END"
+      | otherwise = "COALESCE(e.fts_score,0)::float8"
+    encoder = contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nullable Enc.text))
+    decoder = Dec.singleRow $ Dec.column (Dec.nonNullable Dec.jsonb) >>= \value -> case Aeson.fromJSON value of
+      Aeson.Success result -> pure result
+      Aeson.Error message -> fail message
 
 -- The extension and column are both conditional migration artifacts.  Check
 -- both before preparing any vector-cast statement, including when pgvector was

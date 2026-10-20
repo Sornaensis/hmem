@@ -360,6 +360,77 @@ validated GPU provider and admission gate, exact space, and a two-second
 deadline; unavailable semantics preserve content FTS. It never returns input
 text, vectors, endpoints or provider configuration.
 
+Query preparation can additionally report `input_too_long` for the compact
+semantic input bound and `empty_query` when no body query needs preparation.
+Those are query outcome reasons, not capability probe reasons.
+
+`POST /api/v1/observations/discovery` composes the two Observation search
+fields. Create a context with `workspace_id` and `filters`:
+
+```json
+{"workspace_id":"<uuid>","filters":{"subject_query":"src/","content_query":"authorization"},"view":"list","limit":50}
+```
+
+Filters also accept `subject_kind`, exact `subject`, `git_sha`,
+`current_git_sha` and `history_git_sha`. Subject kind, exact subject and the
+case-sensitive literal substring must match the same stored subject row.
+Empty strings add no text predicate. Content FTS searches only content.
+Subject/content input is limited to 4096 UTF-8 bytes each; the smaller semantic
+input profile described in [embeddings](embeddings.md) falls back to FTS.
+
+The response contains `context_token`, absolute `expires_at`,
+`retrieval: {mode, reason}`, `complete: true`, and `page` with `items`,
+`has_more`, `counts: {workspace_id, total_count, match_count}` and optional
+`tree`. Total is the workspace Observation count; matches are distinct filtered
+Observations. Continue with the same workspace/token and presentation fields
+only: `view` (`list`, `tree`, `count`), `prefix` for a tree branch, typed
+`terminal: {subject_kind, subject}` for a list leaf, `limit` and `offset`.
+Defaults are list/empty prefix/50/0; limit is 1..200 and offset 0..2147483647.
+Tree pages retain only matching terminals and their ancestors. A multisubject
+Observation appears under each qualifying terminal and counts once globally.
+
+Membership and rank are evaluated before pagination in one statement snapshot
+per response. Hybrid membership is the complete union of content-FTS matches
+and same-space cosine similarity >=0.5. There is no semantic top-K candidate
+cap or approximate-index candidate truncation. Each component uses
+`row_number` ordered by its score descending, `updated_at DESC`, then `id DESC`.
+Fusion sums `1/(60 + component_rank)` for components containing the row; missing
+components contribute zero. Final ties use the same timestamp/ID order.
+FTS-only mode retains content `ts_rank` ordering with those ties. Subjects and
+every supplied provenance filter apply before component ranking. Query state
+is pinned, while content changes are read from the current database snapshot.
+
+Contexts last five minutes without sliding expiry, with at most 64 per server
+and eight per resolved principal/effective-actor audience. Pending preparation
+uses a slot too. Each use reauthorizes the active repository workspace and
+checks its owner. Contexts retain filters and one private prepared vector or
+FTS reason, never a result catalog. Provider changes do not change a completed
+context's mode. To change filters, create a new context with optional
+`replace_context_token`; retirement is atomic with admission. Continuations
+cannot supply filters or replace another context. Expired, retired or foreign
+tokens return nondisclosing 409 `discovery_restart_required`; loss of vector
+storage also requires restart instead of silently changing mode. Capacity
+returns 429 `discovery_capacity`; retry the current query. Missing grants still
+return normal authorization errors. Cookie requests require the usual CSRF.
+
+Live clients create a UUID `search_session` for each independent search view
+and send it with an increasing `generation` (1..2147483647) on every filter
+creation. The pair is optional for manual calls and must be supplied together.
+Admission retires the same audience/workspace/session's previous pending or
+completed context before preparation, even if its token has not reached the
+client. Older/equal generations are rejected before provider work. Rapid edits
+reuse one slot. Cancellation retains a five-minute generation tombstone in
+that slot to reject delayed older requests; a new generation replaces it.
+Continuations send only the returned context token and presentation selectors.
+Clients also retain their ordinary complete-query/session response guards.
+An unkeyed request or a different search session cannot replace a keyed
+context token: it returns the same nondisclosing restart error. Explicit keyed
+retirement drops the prepared query but preserves its original-expiry
+generation tombstone. A higher generation in that session can reuse the slot.
+
+Legacy list/tree/count/match/similarity and unified `/search` contracts retain
+their existing behavior.
+
 ## Deletion and errors
 
 Observation deletion is permanent, including its history. Workspace deletion

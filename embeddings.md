@@ -120,6 +120,14 @@ retain FTS with a safe reason. There is no CPU or cross-space fallback, and no
 public endpoint that returns generated query vectors. Provider withdrawal
 retires in-flight preparation before a replacement generation is published.
 
+The [prepared discovery API](api.md) generates the body-query vector once per
+accepted filter lifetime and reuses it for counts, branches, leaves and pages.
+It always combines FTS and qualified exact-space vectors when available,
+including queries with FTS hits. A completed context keeps that retrieval mode
+through provider outages; expired contexts and lost vector storage require an
+explicit restart. Semantic membership uses the full cosine >=0.5 set and
+deterministic reciprocal-rank fusion with FTS (k=60), without a top-K catalog.
+
 Content writes, including same-text re-audits, clear an Observation's stored
 vector. It stays out of similarity results until a new vector is stored. A
 changed-content import is stale and needs fresh export input; unchanged input

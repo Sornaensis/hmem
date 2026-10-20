@@ -53,7 +53,7 @@ import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), Pr
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
 import HMem.Server.API (HMemAPI, serverWithDiscovery)
-import HMem.Server.ObservationDiscovery (ObservationDiscovery)
+import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
 import HMem.Server.OpenAPI (openApiSpec)
 import HMem.Server.Static (staticMiddleware)
 import HMem.Server.WebSocket (WSState, wsMiddleware)
@@ -86,6 +86,7 @@ mkAppWithOidcCodeExchangeAndChangeStream = mkAppWithServices Nothing
 
 mkAppWithServices :: Maybe ObservationDiscovery -> OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
 mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
+  discoveryService <- maybe (newObservationDiscovery False) pure discovery
   rateLimit <- rateLimitMiddleware rateLimitCfg
   jwksCache <- newIORef Nothing
   pure $ requestIdMiddleware
@@ -100,7 +101,7 @@ mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg c
         $ authMiddleware authCfg
         $ openApiMiddleware
         $ normalizeObservationIfMatch
-         $ serve (Proxy @HMemAPI) (serverWithDiscovery authCfg changeStreamConfig discovery pool tracker wsState pgvec)
+         $ serve (Proxy @HMemAPI) (serverWithDiscovery authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
 
 -- Servant's Header combinator selects the first physical header line. Join
 -- repeated content preconditions so the authorized handler rejects a tag list,

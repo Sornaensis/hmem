@@ -7,6 +7,7 @@ module HMem.Types
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
   , ObservationEmbedding(..), EmbeddingSpaceFingerprint, embeddingSpaceFingerprintText, legacyManualEmbeddingSpace, parseEmbeddingSpaceFingerprint
   , ObservationCountQuery(..), ObservationCounts(..), validateObservationCountQuery
+  , ObservationDiscoveryFilter(..), ObservationDiscoveryView(..), ObservationDiscoveryRequest(..), ObservationDiscoveryPage(..), normalizeObservationDiscoveryFilter, validateObservationDiscoveryRequest
   , ObservationQueryScope(..), ObservationSubjectTreeQuery(..), ObservationSubjectTreeTerminal(..), ObservationSubjectTreeNode(..), ObservationSubjectTreePage(..), validateObservationSubjectTreeQuery
   , validateCreateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspacePlanningCounts(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
@@ -537,6 +538,77 @@ instance FromJSON CreateObservation where
 -- | Omission at public boundaries preserves the combined search contract.
 data ObservationQueryScope = ObservationCombined | ObservationContent
   deriving (Show, Eq, Generic)
+
+-- | Immutable membership inputs for a bounded discovery context. Presentation
+-- selectors (branch, typed leaf and page) never change these predicates.
+data ObservationDiscoveryFilter = ObservationDiscoveryFilter
+  { subjectsText :: Maybe Text, contentQuery :: Maybe Text
+  , subjectKind :: Maybe SubjectKind, subject :: Maybe Text
+  , gitSha :: Maybe Text, currentGitSha :: Maybe Text, historyGitSha :: Maybe Text
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationDiscoveryFilter where
+  toJSON f = object ["subject_query" .= f.subjectsText,"content_query" .= f.contentQuery,"subject_kind" .= f.subjectKind,"subject" .= f.subject,"git_sha" .= f.gitSha,"current_git_sha" .= f.currentGitSha,"history_git_sha" .= f.historyGitSha]
+instance FromJSON ObservationDiscoveryFilter where
+  parseJSON = withObject "ObservationDiscoveryFilter" $ \o -> ObservationDiscoveryFilter
+    <$> o .:? "subject_query" <*> o .:? "content_query" <*> o .:? "subject_kind" <*> o .:? "subject"
+    <*> o .:? "git_sha" <*> o .:? "current_git_sha" <*> o .:? "history_git_sha"
+
+data ObservationDiscoveryView = DiscoveryList | DiscoveryTree | DiscoveryCount
+  deriving (Show, Eq, Generic)
+instance ToJSON ObservationDiscoveryView where
+  toJSON = String . \case DiscoveryList -> "list"; DiscoveryTree -> "tree"; DiscoveryCount -> "count"
+instance FromJSON ObservationDiscoveryView where
+  parseJSON = withText "ObservationDiscoveryView" $ \case
+    "list" -> pure DiscoveryList
+    "tree" -> pure DiscoveryTree
+    "count" -> pure DiscoveryCount
+    _ -> fail "view must be list, tree or count"
+
+data ObservationDiscoveryRequest = ObservationDiscoveryRequest
+  { workspaceId :: UUID, contextToken :: Maybe UUID, replaceContextToken :: Maybe UUID
+  , searchSession :: Maybe UUID, generation :: Maybe Int
+  , filters :: Maybe ObservationDiscoveryFilter, view :: ObservationDiscoveryView
+  , treePrefix :: Text, terminal :: Maybe ObservationSubject, limit :: Maybe Int, offset :: Maybe Int
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationDiscoveryRequest where
+  toJSON r = object ["workspace_id" .= r.workspaceId,"context_token" .= r.contextToken,"replace_context_token" .= r.replaceContextToken,"search_session" .= r.searchSession,"generation" .= r.generation,"filters" .= r.filters,"view" .= r.view,"prefix" .= r.treePrefix,"terminal" .= r.terminal,"limit" .= r.limit,"offset" .= r.offset]
+instance FromJSON ObservationDiscoveryRequest where
+  parseJSON = withObject "ObservationDiscoveryRequest" $ \o -> ObservationDiscoveryRequest
+    <$> o .: "workspace_id" <*> o .:? "context_token" <*> o .:? "replace_context_token"
+    <*> o .:? "search_session" <*> o .:? "generation"
+    <*> o .:? "filters" <*> o .:? "view" .!= DiscoveryList
+    <*> o .:? "prefix" .!= "" <*> o .:? "terminal" <*> o .:? "limit" <*> o .:? "offset"
+
+data ObservationDiscoveryPage = ObservationDiscoveryPage
+  { items :: [Observation], tree :: Maybe ObservationSubjectTreePage
+  , counts :: ObservationCounts, hasMore :: Bool
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationDiscoveryPage where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationDiscoveryPage where parseJSON = genericParseJSON jsonOptions
+
+normalizeObservationDiscoveryFilter :: ObservationDiscoveryFilter -> ObservationDiscoveryFilter
+normalizeObservationDiscoveryFilter value = value
+  { subjectsText = nonempty value.subjectsText, contentQuery = nonempty value.contentQuery }
+  where nonempty = (>>= \t -> if T.null t then Nothing else Just t)
+
+validateObservationDiscoveryRequest :: ObservationDiscoveryRequest -> [Text]
+validateObservationDiscoveryRequest value =
+  ["filters are required when creating a context" | value.contextToken == Nothing && value.filters == Nothing]
+  <> ["context continuations cannot change filters, replace a context or change its generation" | isJust value.contextToken && (isJust value.filters || isJust value.replaceContextToken || isJust value.searchSession || isJust value.generation)]
+  <> ["search_session and generation must be supplied together" | isJust value.searchSession /= isJust value.generation]
+  <> ["generation must be between 1 and 2147483647" | Just g <- [value.generation],g < 1 || g > 2147483647]
+  <> maybe [] validateFilter value.filters
+  <> maybe [] (validateObservationSubjects . pure) value.terminal
+  <> ["terminal is only valid for list view" | isJust value.terminal && value.view /= DiscoveryList]
+  <> ["prefix is only valid for tree view" | not (T.null value.treePrefix) && value.view /= DiscoveryTree]
+  <> (if T.null value.treePrefix then [] else validateObservationSubjects
+       [ObservationSubject (if T.any (`elem` ['*','?']) value.treePrefix then SubjectGlob else SubjectFile) value.treePrefix])
+  <> validateObservationPagination value.limit Nothing <> validateUnifiedSearchOffset value.offset
+  where
+    validateFilter f = maybe [] (validateByteLength "subject_query" maxObservationSubjectBytes) f.subjectsText
+      <> maybe [] (validateByteLength "content_query" 4096) f.contentQuery
+      <> maybe [] validateObservationSubject f.subject
+      <> concatMap (maybe [] validateGitSha) [f.gitSha,f.currentGitSha,f.historyGitSha]
 
 instance ToJSON ObservationQueryScope where
   toJSON ObservationCombined = String "combined"

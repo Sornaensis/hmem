@@ -83,6 +83,7 @@ library
       HMem.Server.Exception
       HMem.Server.Logging
       HMem.Server.LogRotation
+      HMem.Server.ObservationDiscovery
       HMem.Server.OpenAPI
       HMem.Server.Snapshot
       HMem.Server.Static
@@ -475,6 +476,7 @@ test-suite hmem-server-test
       HMem.Server.KeycloakHarnessSpec
       HMem.Server.LocalSandboxSpec
       HMem.Server.LogRotationSpec
+      HMem.Server.ObservationDiscoverySpec
       HMem.Server.PgvectorEmbeddingWorkflowSpec
       HMem.Server.TestHarness
       SpecHook

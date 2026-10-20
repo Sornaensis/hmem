@@ -31,7 +31,8 @@ import HMem.DB.Pool qualified as Pool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
 import HMem.Types (parseEmbeddingSpaceFingerprint)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
-import HMem.Server.App (mkAppWithChangeStream)
+import HMem.Server.App (mkAppWithChangeStream, mkAppWithDiscovery)
+import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscoveryProvider)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.Embedding.ManagedTei
   ( defaultManagedTeiConfig, defaultManagedTeiDeps, managedTeiEventText
@@ -330,6 +331,7 @@ runNormalMode opts = do
       mTlsKey  = opts.optTlsKey  <|> cfg.tls.tlsKeyFile
 
   serverExecutable <- getExecutablePath
+  discovery <- newObservationDiscovery (cfg.embeddingProvider.mode /= Config.EmbeddingProviderDisabled)
   let helperPath = takeDirectory serverExecutable </> helperBasename
       helperBasename = "hmem-embedding-http-helper" <> if os == "mingw32" then ".exe" else ""
       policy = SessionPolicy
@@ -383,8 +385,9 @@ runNormalMode opts = do
                       `onException` (invalidate >> Embedding.disableEmbeddingTarget pool)
                     workerTask <- asyncWithUnmask (\unmask -> unmask (runEmbeddingWorker worker (\_ -> threadDelay 500000)))
                       `onException` (invalidate >> Embedding.disableEmbeddingTarget pool)
+                    withdrawDiscovery <- publishDiscoveryProvider discovery providerValue
                     let active = ManagedTeiActive
-                          { activeInvalidate = invalidate
+                          { activeInvalidate = withdrawDiscovery >> invalidate
                           , activeStopAndJoin = stopWorker workerTask
                           , activeDisableTarget = Embedding.disableEmbeddingTarget pool
                           , activeWorkerOutcome = void (waitCatch workerTask)
@@ -413,7 +416,7 @@ runNormalMode opts = do
         let originsAreLocal = not (null cfg.cors.allowedOrigins) && not (Config.corsAllowsRemoteOrigins cfg.cors)
         when (not (Config.serverHostIsLoopback cfg.server.host) && originsAreLocal) $
           logWarn logger $ "CORS allowedOrigins are localhost-only but server is bound to " <> cfg.server.host <> " — remote clients will be rejected by CORS"
-        app <- mkAppWithChangeStream cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
+        app <- mkAppWithDiscovery discovery cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
         let runServer = case (mTlsCert, mTlsKey) of
               (Just cert, Just key) -> logInfo logger ("TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key) >> runTLS (tlsSettings cert key) settings app
               (Just _, Nothing) -> logWarn logger "--tls-cert provided without --tls-key; running plain HTTP" >> runSettings settings app

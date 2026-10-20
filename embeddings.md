@@ -99,11 +99,26 @@ query vectors. A space label is a compatibility claim; relabeling an old vector
 does not convert it. When changing models, export with `--all` and regenerate
 the corpus in the new space before querying it.
 
-Generate query vectors externally, then call REST
-`POST /api/v1/observations/similar` or MCP `observation_similar`. There is no
-raw-text query embedding endpoint. Supply the matching `space_fingerprint`;
+For caller-produced vectors, call REST
+`POST /api/v1/observations/similar` or MCP `observation_similar`. Supply the matching `space_fingerprint`;
 omitting it searches only the legacy manual space. Explicit null is invalid.
 See [the API reference](api.md) for authentication and OpenAPI request details.
+
+Observation discovery can reuse the explicitly enabled, validated GPU provider
+to prepare a private query vector. It requires optional vector storage and at
+least one stored vector in the exact pinned space in the authorized repository
+workspace. `GET /api/v1/observation-discovery/capability?workspace_id=<uuid>`
+reports `hybrid` or `fts_only` and a fixed fallback reason without returning
+vectors, endpoints or configuration. It does not install or enable anything.
+
+Query preparation uses the provider's existing one-active/two-waiter admission
+gate, query instruction formatting and exact-space validation. The entire
+interactive preparation has a two-second deadline. Formatted query input plus
+EOS must fit the compact 2048-byte profile; longer inputs retain FTS. Disabled,
+missing, timed-out, invalid or retired providers and absent compatible vectors
+retain FTS with a safe reason. There is no CPU or cross-space fallback, and no
+public endpoint that returns generated query vectors. Provider withdrawal
+retires in-flight preparation before a replacement generation is published.
 
 Content writes, including same-text re-audits, clear an Observation's stored
 vector. It stays out of similarity results until a new vector is stored. A

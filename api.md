@@ -346,8 +346,19 @@ For similarity, supply an externally generated vector to
 `POST /api/v1/observations/similar` or MCP `observation_similar`.
 Store an individual vector with `PUT /api/v1/observations/{id}/embedding` or MCP
 `observation_set_embedding`. Vectors need 1536 finite numbers and matching
-embedding spaces. There is no raw-text query embedding endpoint. See
+embedding spaces. There is no public query-vector generation endpoint. See
 [embeddings](embeddings.md) for setup, request compatibility, and bulk import.
+
+`GET /api/v1/observation-discovery/capability?workspace_id=<uuid>` requires
+read access to an active repository workspace before checking optional storage
+or the configured provider. It returns `mode` (`hybrid` or `fts_only`) and
+nullable `reason`: `disabled`, `provider_unavailable`, `storage_unavailable`,
+`no_compatible_vectors`, `timed_out`, `invalid_response` or `retired`.
+Capability does not generate a query vector or promise that a later request
+will succeed. Discovery's private query preparation shares the existing
+validated GPU provider and admission gate, exact space, and a two-second
+deadline; unavailable semantics preserve content FTS. It never returns input
+text, vectors, endpoints or provider configuration.
 
 ## Deletion and errors
 

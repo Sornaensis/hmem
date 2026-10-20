@@ -19,6 +19,7 @@ module HMem.DB.Observation
   , matchObservationsOverfetch
   , setObservationEmbedding
   , similarObservations
+  , discoveryVectorAvailability
   ) where
 
 import Control.Exception (throwIO)
@@ -575,6 +576,22 @@ requirePgvector :: Pool Hasql.Connection -> IO ()
 requirePgvector pool = do
   available <- runSession pool $ Session.statement () observationVectorCapabilityStatement
   if available then pure () else throwIO $ DBCapabilityUnavailable "pgvector embedding support is unavailable for observations"
+
+-- | Probe only after repository read authorization. Avoid preparing a reference
+-- to the optional column until both extension and column are present. No
+-- distance calculation, cast, or cross-space comparison is performed here.
+discoveryVectorAvailability :: Pool Hasql.Connection -> UUID -> EmbeddingSpaceFingerprint -> IO (Maybe Bool)
+discoveryVectorAvailability pool workspace space = do
+  available <- runSession pool $ Session.statement () observationVectorCapabilityStatement
+  if not available then pure Nothing else
+    Just <$> runSession pool (Session.statement (workspace, embeddingSpaceFingerprintText space) compatibleVectorStatement)
+
+compatibleVectorStatement :: Statement.Statement (UUID, Text) Bool
+compatibleVectorStatement = Statement.Statement
+  "SELECT EXISTS (SELECT 1 FROM observations WHERE workspace_id = $1 AND embedding IS NOT NULL AND embedding_space_fingerprint = $2)"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid))
+   <> contramap snd (Enc.param (Enc.nonNullable Enc.text)))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
 
 -- The extension and column are both conditional migration artifacts.  Check
 -- both before preparing any vector-cast statement, including when pgvector was

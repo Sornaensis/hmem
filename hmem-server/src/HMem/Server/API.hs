@@ -19,6 +19,8 @@ module HMem.Server.API
   , navigationOwnerOutcomes
   , server
   , serverWithChangeStream
+  , serverWithDiscovery
+  , prepareObservationDiscovery
   ) where
 
 import Control.Exception (try)
@@ -62,6 +64,7 @@ import HMem.DB.Timeline qualified as Timeline
 import HMem.DB.Workspace qualified as Workspace
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.AccessTracker (AccessTracker, bufferSize)
+import HMem.Server.ObservationDiscovery qualified as Discovery
 import HMem.Server.WebSocket qualified as WS
 import HMem.Server.Snapshot (materializeSnapshotWithProfile)
 import HMem.Types
@@ -76,6 +79,9 @@ type HMemAPI = "api" :> "v1" :>
   :<|> "workspaces"   :> WorkspaceAPI
   :<|> "groups"       :> WorkspaceGroupAPI
   :<|> "observations" :> ObservationAPI
+  :<|> "observation-discovery" :> "capability" :> QueryParam' '[Required] "workspace_id" UUID
+         :> Description "Repository read authorization precedes optional provider/storage checks. Returns hybrid or fts_only with a fixed fallback reason; never returns vectors or provider configuration."
+         :> Get '[JSON] Value
   :<|> "projects"     :> ProjectAPI
   :<|> "tasks"        :> TaskAPI
   :<|> "search"       :> ReqBody '[JSON] UnifiedSearchQuery :> Post '[JSON] UnifiedSearchResults
@@ -429,12 +435,16 @@ server authConfig pool tracker wsState =
   serverWithChangeStream authConfig Config.defaultConfig.changeStream pool tracker wsState
 
 serverWithChangeStream :: Config.AuthConfig -> Config.ChangeStreamConfig -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
-serverWithChangeStream authConfig changeStreamConfig pool tracker wsState _ =
+serverWithChangeStream authConfig changeStreamConfig = serverWithDiscovery authConfig changeStreamConfig Nothing
+
+serverWithDiscovery :: Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe Discovery.ObservationDiscovery -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
+serverWithDiscovery authConfig changeStreamConfig discovery pool tracker wsState _ =
        health pool tracker
   :<|> session authConfig pool
   :<|> workspaces pool
   :<|> groups pool
   :<|> observations pool
+  :<|> discoveryCapabilityH pool discovery
   :<|> projects pool
   :<|> tasks pool
   :<|> search pool
@@ -442,6 +452,27 @@ serverWithChangeStream authConfig changeStreamConfig pool tracker wsState _ =
   :<|> ticket pool wsState
   :<|> resync changeStreamConfig pool
   :<|> canonicalTicket changeStreamConfig pool wsState
+
+-- | Shared authorized boundary for the subsequent hybrid retrieval handlers.
+-- The query vector is private, and an FTS hit never suppresses preparation.
+prepareObservationDiscovery :: Pool Hasql.Connection -> Maybe Discovery.ObservationDiscovery -> UUID -> Text -> Handler Discovery.DiscoveryQuery
+prepareObservationDiscovery pool discovery workspace query = do
+  requireObservationWorkspace pool workspace Auth.WorkspaceRoleRead
+  case discovery of
+    Nothing -> pure (Discovery.DiscoveryFts Discovery.DiscoveryDisabled)
+    Just service -> liftIO $ Discovery.prepareDiscoveryQuery service (discoveryStorage pool workspace) query
+
+discoveryCapabilityH :: Pool Hasql.Connection -> Maybe Discovery.ObservationDiscovery -> UUID -> Handler Value
+discoveryCapabilityH pool discovery workspace = do
+  requireObservationWorkspace pool workspace Auth.WorkspaceRoleRead
+  case discovery of
+    Nothing -> pure $ toJSON (Discovery.DiscoveryCapability (Just Discovery.DiscoveryDisabled))
+    Just service -> toJSON <$> liftIO (Discovery.discoveryCapability service (discoveryStorage pool workspace))
+
+discoveryStorage :: Pool Hasql.Connection -> UUID -> IO (Maybe Bool)
+discoveryStorage pool workspace = case parseEmbeddingSpaceFingerprint Config.managedTeiSpaceFingerprint of
+  Nothing -> pure Nothing
+  Just space -> Observation.discoveryVectorAvailability pool workspace space
 
 session :: Config.AuthConfig -> Pool Hasql.Connection -> Maybe UUID -> Handler SessionContext
 session config pool selectedWorkspace = do

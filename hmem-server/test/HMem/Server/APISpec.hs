@@ -45,7 +45,9 @@ import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace, getAuditLogRows)
 import HMem.Server.AccessTracker (newAccessTracker)
-import HMem.Server.API (HMemAPI, navigationPageWhenRequested, navigationOwnerOutcomes, server)
+import HMem.Server.API (HMemAPI, navigationPageWhenRequested, navigationOwnerOutcomes, server, prepareObservationDiscovery)
+import HMem.Server.ObservationDiscovery qualified as Discovery
+import HMem.Server.Embedding.Provider qualified as Provider
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..), entityTypeToText)
 import HMem.Server.App (mkApp)
@@ -2221,6 +2223,31 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
 
   describe "Observation HTTP contract" $ do
+    it "authorizes discovery before any provider work and retains the FTS fallback" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "discovery-authorization"
+      service <- Discovery.newObservationDiscovery True
+      calls <- newIORef (0 :: Int)
+      let provider = Provider.EmbeddingProvider
+            (modifyIORef' calls (+ 1) >> pure Provider.EmbeddingAvailable)
+            (\_ -> modifyIORef' calls (+ 1) >> pure (Left (Provider.EmbeddingFailure Provider.ProviderUnavailable True)))
+          prepare = prepareObservationDiscovery env.pool (Just service) workspace.id "query"
+      _ <- Discovery.publishDiscoveryProvider service provider
+      unauthenticated <- withPrincipalContext Nothing (runHandler prepare)
+      case unauthenticated of
+        Left failure -> errHTTPCode failure `shouldBe` 401
+        Right _ -> expectationFailure "discovery accepted no principal"
+      denied <- withPrincipalContext (Just (Principal ActorUser "unprivileged" "Unprivileged" PrincipalNoAuthority)) (runHandler prepare)
+      case denied of
+        Left failure -> errHTTPCode failure `shouldBe` 403
+        Right _ -> expectationFailure "discovery accepted no workspace grant"
+      readIORef calls `shouldReturn` 0
+      -- The compatibility application has no discovery producer and makes no
+      -- vector/database claim merely because pgvector is installed.
+      capability <- request app methodGet
+        ("/api/v1/observation-discovery/capability?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id))) ""
+      responseStatus capability `shouldBe` status200
+      decode (responseBody capability) `shouldBe` Just (object ["mode" .= ("fts_only" :: T.Text), "reason" .= ("disabled" :: T.Text)])
+
     it "returns bounded revision history and truthful deduplicated current projections for historical SHA queries" $ \(env, app) -> do
       original <- createVersionObservation env app "observation-history-http"
       let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))

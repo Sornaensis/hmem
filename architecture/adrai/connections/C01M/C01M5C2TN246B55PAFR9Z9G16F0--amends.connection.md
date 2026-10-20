@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5C2TN246B55PAFR9Z9G16F0"
+relation = "amends"
+from_record = "R01M5C2TN240ZGDQGHZYHEXG321"
+subject_adr = "A01M38ZM4YHAEMP41G8KFHWEG75"
+to_records = ["R01M3KDCBSX9DH5QBQHX3WV2BZP"]
++++
+
+Permit bounded opt-in authorized Observation discovery while preserving optional exact-space GPU semantics
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6ImI3M2Q1ZDVkMGIwN2YyZjI3YzVlOTgyNzY0YjE4ODZkNWNhZmM0MWEiLCJpIjoic2hhMjU2OlJFQVJuOVMyUzdOa3pDNFVYZTVWZkhYUlpKbkQ3RFlVVFNOU3hZLVZIQm8iLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTVDMlROMjQ2QjU1UEFGUjlaOUcxNkYwIiwib3AiOiJPMDFNNUMyVE4yNDBaR0RRR0haWUhFWEczMjEiLCJwIjpbIlIwMU0zS0RDQlNYOURINVFCUUhYM1dWMkJaUCJdLCJyIjoiY29kZXgvbGl2ZS1vYnNlcnZhdGlvbi1zZWFyY2giLCJzIjoic2hhMjU2Okh6d2pZaW1leWVSRWVDaUE4V09peEpBWEpMWHhodlVRWHpQaEM3MXczQkUiLCJ0IjoxNzkyNDgwNzI4MTMyLCJ2IjoxLCJ4IjoiYWRyYWkvMS4wLjAifQ -->

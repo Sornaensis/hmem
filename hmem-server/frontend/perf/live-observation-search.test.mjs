@@ -7,7 +7,7 @@ import { hashJson, assertQualificationEnvironment, createPhysicalRequestAccounti
 import { evidenceProfile, evidenceOwnerFields, assertEvidenceIdentity, assertEvidenceWrite, isolatedRecordOutputs,
   LIVE_OBSERVATION_SEARCH_BASE as BASE, LIVE_OBSERVATION_SEARCH_PROJECT as PROJECT, LIVE_OBSERVATION_SEARCH_TASK as TASK,
   SUBJECT_TREE_LIVE_FILTERS_BASE, SUBJECT_TREE_LIVE_FILTERS_TASK } from './evidence-profile.mjs'
-import { createTracker, fixtureResponder, inputQualification, assertQualifiedInputs } from './harness.mjs'
+import { createTracker, fixtureResponder, inputQualification, assertQualifiedInputs, assertCurrentDiscoveryTransport, assertCurrentSearchRun, finalWorkingTreeEvidence, qualificationFailureIdentity, qualificationAttempt, currentUnifiedSearchFixture, currentSearchFixture, CURRENT_SEARCH_TOKEN } from './harness.mjs'
 
 const session = '90000000-0000-4000-8000-000000000001'
 function fixture() {
@@ -240,4 +240,93 @@ test('discovery qualification input collector accepts injected sources/assets an
     const incomplete={...environment};delete incomplete[key]
     assert.throws(()=>assertQualificationEnvironment({...incomplete,fingerprint:hashJson(incomplete)}),/incomplete/)
   }
+})
+
+// Current-profile qualification preserves historical fixture bytes.
+test('current global fixture applies whole lexemes, independent pages and compact observation DTOs',()=>{
+  const f=currentSearchFixture(generateFixture('large')),query=body=>currentUnifiedSearchFixture(f,{workspace_id:f.workspace.id,query:CURRENT_SEARCH_TOKEN,...body})
+  const all=query({}).value
+  assert.deepEqual([all.projects.length,all.tasks.length,all.observations.length],[1,1,1])
+  assert.equal(all.observations[0].id,f.observations[0].id)
+  assert.ok(!('content' in all.observations[0])&&!('created_at' in all.observations[0]))
+  assert.equal([...all.observations[0].content_preview].length,Math.min(280,[...f.observations[0].content].length))
+  assert.deepEqual(query({query:'qualificationsearc'}).value.projects,[])
+  const broad=query({query:'Observation',entity_types:['observation'],limit:200,offset:200}).value
+  assert.equal(broad.observations.length,200);assert.equal(broad.has_more.observations,true);assert.equal(broad.next_offset.observations,400)
+  assert.deepEqual(query({entity_types:[]}).value,{projects:[],tasks:[],observations:[],has_more:{},next_offset:{}})
+  for(const body of [{limit:0},{limit:201},{offset:-1},{entity_types:['unknown']},{workspace_id:'foreign'}])assert.equal(query(body).status,400)
+})
+
+test('current aggregate validates actual physical bytes and strict owned discovery envelopes against backing IDs',()=>{
+  const f=currentSearchFixture(generateFixture('small')),service=createObservationDiscoveryFixture(f)
+  const first={workspace_id:f.workspace.id,filters:{},search_session:session,generation:1,view:'list',limit:50,offset:0}
+  const response=service.handle(first).value
+  const second={workspace_id:f.workspace.id,context_token:response.context_token,view:'list',limit:50,offset:50}
+  const receipts=[first,second].map((request,i)=>{const discovery=observationDiscoveryReceipt(request,i===0?response:service.handle(request).value);return {requestId:i+1,key:'observations:discovery',done:true,fulfilled:true,status:200,requestBytes:discovery.requestBytes,responseBytes:discovery.responseBytes,discovery}})
+  const run={fixture:'small',physicalReceipts:receipts,physicalAccounting:{requests:2,completed:2,requestBytes:receipts.reduce((n,r)=>n+r.requestBytes,0),responseBytes:receipts.reduce((n,r)=>n+r.responseBytes,0)}}
+  assert.doesNotThrow(()=>assertCurrentDiscoveryTransport(run))
+  const reject=mutate=>{const changed=structuredClone(run);mutate(changed);assert.throws(()=>assertCurrentDiscoveryTransport(changed),/mismatch/)}
+  reject(r=>r.physicalReceipts[1].requestId=1)
+  reject(r=>r.physicalAccounting.requestBytes++)
+  reject(r=>r.physicalReceipts[1].fulfilled=false)
+  // Reserialize tampering and repair its physical byte ledger: rejection must
+  // come from context/page ownership, rather than only a raw JSON mismatch.
+  const wireTamper=mutate=>reject(r=>{const p=r.physicalReceipts[1],d=p.discovery;mutate(d);d.rawRequestBody=JSON.stringify(d.request);d.rawResponseBody=JSON.stringify(d.response);d.requestBytes=Buffer.byteLength(d.rawRequestBody);d.responseBytes=Buffer.byteLength(d.rawResponseBody);p.requestBytes=d.requestBytes;p.responseBytes=d.responseBytes;r.physicalAccounting.requestBytes=r.physicalReceipts.reduce((n,x)=>n+x.requestBytes,0);r.physicalAccounting.responseBytes=r.physicalReceipts.reduce((n,x)=>n+x.responseBytes,0)})
+  wireTamper(d=>d.request.workspace_id='foreign')
+  wireTamper(d=>d.request.filters={content_query:'other'})
+  wireTamper(d=>d.request.generation=2)
+  wireTamper(d=>d.request.context_token='foreign')
+  wireTamper(d=>d.response.page.items[0].id=f.observations[0].id)
+  wireTamper(d=>d.response.page.has_more=true)
+  wireTamper(d=>d.response.complete=false)
+  wireTamper(d=>d.response.page.items.push(f.observations[0]))
+})
+
+test('current success/failure producers persist complete identities accepted by startup and check',()=>{
+  const frontend=path.resolve(import.meta.dirname,'..'),profile=evidenceProfile(BASE,frontend,os.tmpdir()),head='1'.repeat(40),baseline=Buffer.from('immutable baseline')
+  const inputs={evidenceBaseCommit:BASE,implementationCommit:head,source:[{path:'src/Main.elm',sha256:'a'.repeat(64)}],productionAssets:[{path:'static/app.js',sha256:'b'.repeat(64)}]}
+  const provenance={reviewBaseCommit:BASE,headCommit:head},identity=qualificationFailureIdentity(profile,inputs,provenance)
+  for(const fields of [{passed:false,failure:'controlled'},{qualificationPassed:false,failure:'controlled'}])assert.doesNotThrow(()=>assertEvidenceIdentity(profile,{...identity,...fields}))
+  const files=new Map(Object.values(profile.files).map(file=>[file,Buffer.from('{}')]))
+  const validation={...identity,passed:true};files.set(profile.files.validation,Buffer.from(JSON.stringify(validation)))
+  const io={existsSync:file=>files.has(file),readFileSync:(file,encoding)=>{const bytes=file===path.resolve('perf/baseline.v1.json')?baseline:files.get(file);assert.ok(bytes,'known virtual file '+file);return encoding?bytes.toString(encoding):bytes},statSync:file=>({size:files.get(file).length})}
+  const capture={read:args=>args[0]==='show'?baseline:args[0]==='rev-parse'?Buffer.from(head+'\n'):Buffer.alloc(0)}
+  const produce=()=>finalWorkingTreeEvidence({plan:profile,io,capture,write:(file,bytes)=>files.set(file,Buffer.from(bytes))})
+  produce();const manifest=JSON.parse(files.get(profile.files.manifest))
+  assert.deepEqual(manifest.inputQualification,inputs);assert.equal(manifest.qualificationPassed,true)
+  assert.doesNotThrow(()=>assertEvidenceIdentity(profile,manifest))
+  // The same strict consumer is used at startup and before check finalization.
+  for(const source of [manifest,validation,identity]){assert.doesNotThrow(()=>assertEvidenceIdentity(profile,source));const bad=structuredClone(source);delete bad.inputQualification;assert.throws(()=>assertEvidenceIdentity(profile,bad),/input identity/)}
+  const failure=new Error('controlled production failure')
+  assert.throws(()=>qualificationAttempt({command:'node perf/harness.mjs record',exitCode:2},inputs,{passed:true},()=>{throw failure},[],{plan:profile,sourceProvenance:provenance,write:(file,bytes)=>files.set(file,Buffer.from(bytes)),remove:file=>files.delete(file),verify:()=>{},sha256File:file=>hashJson(files.get(file).toString()),evidenceArtifactPath:file=>file}),/controlled production failure/)
+  const failedManifest=JSON.parse(files.get(profile.files.manifest)),failedValidation=JSON.parse(files.get(profile.files.validation))
+  assert.doesNotThrow(()=>assertEvidenceIdentity(profile,failedManifest));assert.doesNotThrow(()=>assertEvidenceIdentity(profile,failedValidation))
+  assert.equal(failedManifest.failure,failure.message);assert.equal(failedManifest.qualificationPassed,false);assert.equal(failedValidation.passed,false)
+  assert.equal(failedManifest.validationRecord.sha256,hashJson(files.get(profile.files.validation).toString()))
+  const missing=structuredClone(failedManifest);delete missing.inputQualification
+  assert.throws(()=>assertEvidenceIdentity(profile,missing),/input identity/)
+  const recovered={...missing,inputQualification:failedValidation.inputQualification};assert.doesNotThrow(()=>assertEvidenceIdentity(profile,recovered));assert.equal(recovered.failure,failure.message)
+  validation.inputQualification={...inputs,implementationCommit:'2'.repeat(40)};files.set(profile.files.validation,Buffer.from(JSON.stringify(validation)))
+  assert.throws(produce,/identity mismatch/)
+})
+
+function currentCausalRun(){
+  const f=currentSearchFixture(generateFixture('small')),service=createObservationDiscoveryFixture(f,{similarities:filters=>filters.content_query==='Observation 00001 evidence'?{[f.observations[25].id]:.9}:{}}),physical=[]
+  const send=request=>{const response=service.handle(request);assert.equal(response.status,200);const discovery=observationDiscoveryReceipt(request,response.value);physical.push({requestId:physical.length+1,key:'observations:discovery',status:200,done:true,fulfilled:true,requestBytes:discovery.requestBytes,responseBytes:discovery.responseBytes,discovery});return discovery}
+  const start=(generation,filters,view='list')=>send({workspace_id:f.workspace.id,search_session:session,generation,filters,view,limit:50,offset:0})
+  const initial=start(1,{}),loadMore=send({workspace_id:f.workspace.id,context_token:initial.response.context_token,view:'list',limit:50,offset:50})
+  const filters={subject_query:'src/feature-0/',content_query:'Observation 00001 evidence'},pair=start(2,filters),tree=start(3,filters,'tree'),terminal=f.observations[0].subjects.find(s=>s.subject_kind==='file')
+  const leaf=send({workspace_id:f.workspace.id,context_token:tree.response.context_token,view:'list',terminal,limit:50,offset:0}),old=start(4,{...filters,content_query:'obsolete-unmatched-query'},'tree'),fresh=start(5,filters,'tree'),reset=start(6,{})
+  const jumps=['project','task','observation'].map(type=>{const targetId=(type==='project'?f.projects:type==='task'?f.tasks:f.observations)[0].id,requestId=physical.length+1;physical.push({requestId,key:(type==='project'?'projects':type==='task'?'tasks':'observations')+':entity:'+targetId,status:200,done:true,fulfilled:true,requestBytes:0,responseBytes:1});return {type,targetId,canonicalLookup:requestId,focus:'search-jump-'+type+'-'+targetId,query:CURRENT_SEARCH_TOKEN}})
+  return {fixture:'small',physicalReceipts:physical,physicalAccounting:{requests:physical.length,completed:physical.length,requestBytes:physical.reduce((n,r)=>n+r.requestBytes,0),responseBytes:physical.reduce((n,r)=>n+r.responseBytes,0)},currentSearch:{revision:'live-observation-search.production.v1',initial,loadMore:{loaded:60,receipt:loadMore},pair,tree,leaf,stale:[old,fresh],staleDom:{ids:[f.observations[0].id],matchCount:2,contextToken:fresh.response.context_token},reset,clears:['Subject Tree','All Observations'].flatMap(mode=>['subjects','body'].map(field=>({mode,field,prior:500,top:0,other:field==='subjects'?'Observation':'src/'}))),jumps,selectedTypes:['project','task','observation'],noTypesRequests:0}}
+}
+
+test('current aggregate independently anchors exact FILE leaf and excludes obsolete post-release DOM membership',()=>{
+  const run=currentCausalRun();assert.doesNotThrow(()=>assertCurrentSearchRun(run))
+  const extra=structuredClone(run);extra.currentSearch.staleDom.ids.push('obsolete');assert.throws(()=>assertCurrentSearchRun(extra),/causal workflow/)
+  const changed=structuredClone(run),old=changed.currentSearch.leaf,request={...old.request,terminal:{...old.request.terminal,subject_kind:'glob'}},response={...old.response,page:{...old.response.page,items:[]}},replacement=observationDiscoveryReceipt(request,response)
+  const physical=changed.physicalReceipts.find(r=>r.discovery?.rawRequestBody===old.rawRequestBody);physical.discovery=replacement;physical.requestBytes=replacement.requestBytes;physical.responseBytes=replacement.responseBytes;changed.currentSearch.leaf=replacement
+  changed.physicalAccounting.requestBytes=changed.physicalReceipts.reduce((n,r)=>n+r.requestBytes,0);changed.physicalAccounting.responseBytes=changed.physicalReceipts.reduce((n,r)=>n+r.responseBytes,0)
+  assert.doesNotThrow(()=>assertCurrentDiscoveryTransport(changed),'the self-consistent glob envelope is valid transport')
+  assert.throws(()=>assertCurrentSearchRun(changed),/causal workflow/,'it cannot stand in for the clicked FILE leaf')
 })

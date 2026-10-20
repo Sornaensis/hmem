@@ -49,11 +49,21 @@ function navigationBranches(fixture) {
   return [{ parentKind: 'workspace_root' }, { parentKind: 'project', parentId: root.id }, { parentKind: 'task', parentId: subtask.parent_id }]
 }
 
+// The immutable producer predates the required direct-dependency DTO field.
+// Add precisely that current field in its wire position; all other bytes remain
+// compared against the unchanged historical producer for every page/filter.
+function currentReadinessDto(value,fixture) {
+  const tasks=new Map(fixture.tasks.map(task=>[task.id,task]))
+  return {...value,tasks:{...value.tasks,items:value.tasks.items.map(row=>({...row,readiness_rollup:Object.fromEntries(Object.entries(row.readiness_rollup).flatMap(([key,value])=>key==='open_dependency_count'
+    ? [[key,value],['own_open_dependency_count',fixture.dependencies.filter(edge=>edge.task_id===row.id&&tasks.has(edge.depends_on_id)&&!tasks.get(edge.depends_on_id).deleted_at&&['todo','in_progress','blocked'].includes(tasks.get(edge.depends_on_id).status)).length]]
+    : [[key,value]]))}))}}
+}
+
 for (const size of ['small', 'large']) {
-  test(`${size} navigation repair preserves exact pre-repair route/page/filter bytes`, async () => {
+  test(`${size} navigation repair preserves route/page/filter bytes with the required current readiness field`, async () => {
     const { before } = await navigationImplementations()
     const fixture = generateFixture(size)
-    const assertParity = options => assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(before.navigationBranchResponse(fixture, options)), JSON.stringify(options))
+    const assertParity = options => assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(currentReadinessDto(before.navigationBranchResponse(fixture, options),fixture)), JSON.stringify(options))
     const boundaries = [[undefined, undefined], [-20, -10], [0, 0], [1, 1], [2, 3], [99, 100], [101, 999], [100000, 1], [100001, Infinity], ['invalid', 'invalid'], [1.5, 2.5], ['2', '3']]
     const filters = [{}, { showOnly: 'projects' }, { showOnly: 'tasks' }, { showEmptyProjects: false },
       { projectStatuses: ['active', 'paused'], taskStatuses: ['todo', 'in_progress'] },
@@ -70,7 +80,7 @@ for (const size of ['small', 'large']) {
     }
   })
 
-  test(`${size} navigation repair preserves pre-repair bytes after live status/placement/deletion`, async () => {
+  test(`${size} navigation repair preserves current DTO bytes after live status/placement/deletion`, async () => {
     const { before } = await navigationImplementations()
     const original = generateFixture(size)
     const variants = [
@@ -80,7 +90,7 @@ for (const size of ['small', 'large']) {
     ]
     for (const fixture of variants) for (const branch of navigationBranches(fixture)) for (const filter of [{}, { showEmptyProjects: false }, { query: 'Task', taskStatuses: ['todo', 'in_progress'] }, { showOnly: 'projects', projectStatuses: ['active', 'paused'] }]) {
       const options = { ...branch, ...filter, projectLimit: 2, taskLimit: 2 }
-      assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(before.navigationBranchResponse(fixture, options)))
+      assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(currentReadinessDto(before.navigationBranchResponse(fixture, options),fixture)))
     }
   })
 
@@ -514,7 +524,7 @@ test('overview fixtures match decoder dependency schema and recursive readiness 
   }
   assert.deepEqual(taskReadinessRollup(fixture, 't0'), {
     open_subtask_count: 1, done_subtask_count: 0, cancelled_subtask_count: 0, blocked_subtask_count: 0,
-    dependency_blocked_task_count: 1, open_dependency_count: 1, completion_ready: false,
+    dependency_blocked_task_count: 1, open_dependency_count: 1, own_open_dependency_count: 0, completion_ready: false,
     in_progress_subtask_count: 0, can_start_subtasks: false
   })
   assert.equal(taskReadinessRollup(fixture, 't2').completion_ready, true)

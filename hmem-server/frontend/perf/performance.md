@@ -424,8 +424,37 @@ node --test --test-name-pattern=discovery perf/fixtures.test.mjs
 node --test perf/subject-tree-live-filters.test.mjs
 ```
 
-Production workflow execution, source/assets/environment capture and supported
-record-after/check qualification belong to the qualification task after the
-paired Observation UI stabilizes. Existing budgets and historical assertions
-remain required; these pure checks create no benchmark receipt.
+The current profile runs production Main through paired Subjects/body inputs in
+both modes, actual discovery pages of 50, typed leaves, delayed superseded
+responses, all four clears, explicit global entity types, no-type suppression,
+and exact canonical Jump To/return targets. The search fixture decorates only
+this profile with one shared whole lexeme; Observation hits carry a compact
+280-character preview. Subjects, body, global query, toggles and navigation
+record their own two-paint intervals and corresponding transport deltas. Whole
+workflow transport and settled load-more timing are separate measurements.
+Every physical receipt contributes once to the byte/count ledger. Non-discovery
+routes retain transport-time numeric counters, without independent retained raw
+body witnesses. Discovery acceptance additionally recomputes captured raw JSON
+byte lengths and validates context generation,
+selectors, authoritative backing IDs, counts and completeness.
+
+From the frontend directory in the supported task environment, set
+`HMEM_EVIDENCE_BASE_COMMIT=b73d5d5d0b07f2f27c5e982764b1886d5cafc41a`, then run:
+
+```sh
+npm run perf:self-check
+npm run perf:record-after
+npm run perf:check
+```
+
+The two latter scripts build production assets and execute the pinned browser
+workflow. Record/check capture implementation HEAD, source and asset hashes,
+environment, and workload identity. The new paired/global workflow has no
+comparable historical before sample; its discovery50 pagination differs from
+the historical small-fixture terminal page200. Existing absolute budgets and
+historical assertions remain unchanged. Fixture timings establish frontend and
+transport behavior, not live database or GPU latency. The five named task707
+receipts are bounded to 64 MiB each and owned by the project maintainer through
+project closure plus 30 days, followed by verified removal; temporary trace
+payloads are verified, hashed and retired by the existing workflow.
 

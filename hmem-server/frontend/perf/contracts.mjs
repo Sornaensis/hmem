@@ -419,6 +419,7 @@ export function aggregateLiveHydration(values, queryScope = null) {
 export function perfApiRouteKey(input, method = 'GET') {
   const pathname = input instanceof URL ? input.pathname : new URL(input, 'http://perf.local').pathname
   const verb = method.toUpperCase()
+  if (verb === 'POST' && pathname === '/api/v1/search') return 'search:unified'
   if (verb === 'POST' && pathname === '/api/v1/observations/discovery') return 'observations:discovery'
   if (verb === 'POST' && /^\/api\/v1\/workspaces\/[^/]+\/navigation\/batch$/.test(pathname)) return 'navigation:batch'
   const is = (allowed, pattern) => allowed.includes(verb) && pattern.test(pathname)
@@ -454,6 +455,11 @@ export const LIVE_OBSERVATION_SEARCH_CONTRACT = Object.freeze({
   membership:'subject/provenance AND (complete content FTS OR exact-space semantic membership)',
   fixtureScope:'deterministic protocol/membership only; no database, GPU or network latency claim'
 })
+
+export const CURRENT_SEARCH_WORKLOAD = Object.freeze({revision:'live-observation-search.production.v1',discoveryPage:50,
+  modes:['All Observations','Subject Tree'],predicates:['subject_query','content_query'],clears:4,globalTypes:['project','task','observation'],
+  jumpAndReturns:3,stale:'held tokenless creation followed by same-session higher generation',
+  historicalBeforeComparable:false,scope:'intercepted production-Main frontend workflow; excludes live database/GPU/network latency'})
 
 export function assertQualificationEnvironment(environment) {
   const {fingerprint,...inputs} = environment || {}

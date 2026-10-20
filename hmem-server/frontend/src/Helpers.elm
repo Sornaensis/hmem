@@ -12,7 +12,7 @@ import Html.Attributes exposing (attribute, class, title, type_)
 import Html.Events exposing (stopPropagationOn)
 import Json.Decode as Decode
 import Json.Encode as Encode
-import Ports exposing (saveToLocalStorage)
+import Ports exposing (requestLocalStorage, saveToLocalStorage)
 import Permissions
 import Process
 import Set
@@ -436,6 +436,54 @@ localStorageKey wsId =
     "hmem-ws-" ++ wsId
 
 
+globalSearchActor : Model -> String
+globalSearchActor model =
+    model.sessionContext |> Maybe.map (\session -> Encode.encode 0 (Encode.list Encode.string [ session.authMode, session.principal.actorType, session.principal.actorId, session.principal.authority, Maybe.withDefault "" session.principal.grantUserId ])) |> Maybe.withDefault ""
+
+
+entitySearchPreferenceKey : String -> Model -> String
+entitySearchPreferenceKey workspaceId model =
+    "hmem-entity-search-v1:" ++ Url.percentEncode workspaceId ++ ":" ++ Url.percentEncode (globalSearchActor model)
+
+
+loadEntitySearchPreferencesCmd : Model -> Cmd Msg
+loadEntitySearchPreferencesCmd model =
+    case model.selectedWorkspaceId of
+        Just workspaceId ->
+            if Permissions.canReadCurrentWorkspace model && not (String.isEmpty (globalSearchActor model)) then
+                requestLocalStorage (entitySearchPreferenceKey workspaceId model)
+            else Cmd.none
+        Nothing -> Cmd.none
+
+
+saveEntitySearchPreferencesCmd : Model -> Cmd Msg
+saveEntitySearchPreferencesCmd model =
+    case model.selectedWorkspaceId of
+        Just workspaceId ->
+            if Permissions.canReadCurrentWorkspace model && model.search.entityTypesActor == Just (globalSearchActor model) then
+                saveToLocalStorage (Encode.object
+                    [ ( "key", Encode.string (entitySearchPreferenceKey workspaceId model) )
+                    , ( "value", Encode.object
+                        [ ( "entitySearchPreference", Encode.bool True ), ( "workspaceId", Encode.string workspaceId )
+                        , ( "actor", Encode.string (globalSearchActor model) )
+                        , ( "types", Encode.list Encode.string (Maybe.withDefault [] model.search.entityTypes) ) ] ) ])
+            else Cmd.none
+        Nothing -> Cmd.none
+
+
+restoreEntitySearchPreferences : Encode.Value -> Model -> Model
+restoreEntitySearchPreferences json model =
+    if not (Permissions.canReadCurrentWorkspace model) || model.search.globalActivated
+        || (Decode.decodeValue (Decode.field "workspaceId" Decode.string) json |> Result.toMaybe) /= model.selectedWorkspaceId
+        || Decode.decodeValue (Decode.field "actor" Decode.string) json /= Ok (globalSearchActor model) then model
+    else
+        case Decode.decodeValue (Decode.field "types" (Decode.list Decode.string)) json of
+            Ok types ->
+                let state = model.search in
+                { model | search = { state | entityTypes = Just (List.filter (\kind -> List.member kind types) [ "project", "task", "observation" ]), entityTypesActor = Just (globalSearchActor model) } }
+            Err _ -> model
+
+
 encodeFilterState : Model -> Encode.Value
 encodeFilterState original =
     let
@@ -607,6 +655,9 @@ restoreTimelinePreferences json timeline =
 
 applyStoredFiltersIfCurrentWorkspace : Encode.Value -> Model -> Model
 applyStoredFiltersIfCurrentWorkspace json original =
+    if Decode.decodeValue (Decode.field "entitySearchPreference" Decode.bool) json == Ok True then
+        restoreEntitySearchPreferences json original
+    else
     let
         groups = original.groups
         model =

@@ -8,8 +8,8 @@ Switching focus or choosing the same focus link keeps those selections and close
 previous search results. The focused target stays accessible even when excluded
 by the filters; its descendants follow the selected filters.
 The workspace toolbar keeps its own filters throughout. Editing it updates only
-your workspace preferences; submitting its search closes focus and searches the
-workspace. Closing focus or returning to its Timeline or Audit source uses those
+your workspace preferences. Global search has a separate input and keeps your
+focused view for return when cleared. Closing focus or returning to its Timeline or Audit source uses those
 workspace preferences. Focused changes never replace saved workspace filters.
 
 The workspace Timeline shows Create, Complete, Delete, Archive and Cancel events.
@@ -43,6 +43,15 @@ entry collapsed, and closing returns focus to the original control.
 fields reuses it; **Refresh** replaces it. Check the loaded-at time and entity
 update time. Observed changes mark it stale; disconnection makes freshness
 unknown. A failed current read leaves the historical comparison usable.
+
+## Search all entities
+
+Type in **Search all entities** to search after a short pause. The **Search Entities**
+bar selects Projects, Tasks and, in repositories, Observations. Choices are saved
+for the signed-in actor and workspace, separately from hierarchy filters. Selecting
+no types pauses searching. The bar stays visible when you clear the query and
+return to your previous view. While updating or after a failure, the last completed
+results remain labelled with their query; use **Retry search** to try again.
 
 ## Observation drafts and search
 

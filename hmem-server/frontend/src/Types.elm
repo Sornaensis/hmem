@@ -387,13 +387,24 @@ type alias NavigationFocusRequest =
 type alias SearchRequest =
     { workspaceId : String
     , sessionEpoch : Int
+    , actor : String
     , token : Int
+    , generation : Int
     , query : String
+    , entityTypes : List String
+    , offset : Int
     }
 
 
 type alias SearchModel =
     { query : String
+    , globalQuery : String
+    , globalActivated : Bool
+    , globalComposing : Bool
+    , globalGeneration : Int
+    , entityTypes : Maybe (List String)
+    , entityTypesActor : Maybe String
+    , completedRequest : Maybe SearchRequest
     , submittedQuery : Maybe String
     , refreshPending : Bool
     , unifiedResults : Maybe Api.UnifiedSearchResults
@@ -1379,6 +1390,11 @@ type Msg
     | AutoDismissToast Int
     | SearchInput String
     | WorkspaceSearch Msg
+    | GlobalSearchInput String
+    | GlobalSearchCompositionStart
+    | GlobalSearchCompositionEnd String
+    | GlobalSearchReady SearchRequest
+    | ToggleSearchEntityType String
     | SubmitSearch
     | GotUnifiedSearchResults String Int Int String (Result Http.Error Api.UnifiedSearchResults)
     | NavigateToSearchResult String String

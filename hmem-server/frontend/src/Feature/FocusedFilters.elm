@@ -19,7 +19,7 @@ apply filters search =
 
 clearTransientSearchState : SearchModel -> SearchModel
 clearTransientSearchState search =
-    { search | unifiedResults = Nothing, isSearching = False, searchError = Nothing
+    { search | globalQuery = "", globalActivated = False, globalComposing = False, globalGeneration = search.globalGeneration + 1, completedRequest = Nothing, unifiedResults = Nothing, isSearching = False, searchError = Nothing
         , activeRequestQuery = Nothing, activeRequest = Nothing, submittedQuery = Nothing, refreshPending = False }
 
 

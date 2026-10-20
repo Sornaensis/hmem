@@ -243,7 +243,7 @@ suite =
                 parent = let value = task "timeline-target" Nothing in { value | projectId = Nothing }
                 seed = DataLoading.mergeNavigationSummaries [] [ parent ] (unfilteredSyncModel [])
                 search = seed.search
-                submitted = Main.update SubmitSearch { seed | search = { search | query = "normal" } } |> Tuple.first
+                submitted = Main.update SubmitSearch { seed | search = { search | globalQuery = "normal" } } |> Tuple.first
                 results = { projects = [], tasks = [ Api.taskFromCardSummary parent ], observations = [] }
                 accepted = case submitted.search.activeRequest of
                     Just request -> Main.update (GotUnifiedSearchResults workspaceId request.sessionEpoch request.token request.query (Ok results)) submitted |> Tuple.first
@@ -279,7 +279,7 @@ suite =
                 auditEntry = { id = "same-target-audit", workspaceId = Just workspaceId, entityType = "task", entityId = parent.id
                     , action = Api.AuditUpdate, oldValues = Nothing, newValues = Nothing, requestId = Nothing, actorType = Nothing
                     , actorId = Nothing, actorLabel = Nothing, botIdentity = Nothing, changedAt = "2026-10-16T00:00:00Z" }
-                submitted = Main.update SubmitSearch complete |> Tuple.first
+                submitted = Main.update (GlobalSearchInput "normal-base") complete |> Tuple.first |> Main.update SubmitSearch |> Tuple.first
                 results = { projects = [], tasks = [ Api.taskFromCardSummary parent ], observations = [] }
                 accepted = case submitted.search.activeRequest of
                     Just request -> Main.update (GotUnifiedSearchResults workspaceId request.sessionEpoch request.token request.query (Ok results)) submitted |> Tuple.first
@@ -309,7 +309,7 @@ suite =
                 search = model.search
                 focused = timelineFocusFrom "task" { model | search = { search | query = "normal-base" } }
                 focusedSearch = focused.search
-                submitted = Main.update SubmitSearch { focused | search = { focusedSearch | query = "focused-query" } } |> Tuple.first
+                submitted = Main.update SubmitSearch { focused | search = { focusedSearch | globalQuery = "focused-query" } } |> Tuple.first
                 echo = Main.update (UrlChanged { url | fragment = Just "tab=projects&focus=task:timeline-target" }) submitted |> Tuple.first
                 results = { projects = [], tasks = [], observations = [] }
                 accepted = case echo.search.activeRequest of
@@ -319,7 +319,7 @@ suite =
                 late = case submitted.search.activeRequest of
                     Just request -> Main.update (GotUnifiedSearchResults workspaceId request.sessionEpoch request.token request.query (Ok results)) exited |> Tuple.first
                     Nothing -> exited
-                resubmitted = Main.update SubmitSearch late |> Tuple.first
+                resubmitted = Main.update (GlobalSearchInput "normal-base") late |> Tuple.first |> Main.update SubmitSearch |> Tuple.first
             in
             Expect.equal { preserved = True, accepted = Just results, base = "normal-base", retired = Nothing, result = Nothing, newQuery = Just "normal-base" }
                 { preserved = echo.search.activeRequest == submitted.search.activeRequest && echo.search.submittedQuery == Just "focused-query" && echo.focusedFilters == submitted.focusedFilters
@@ -358,18 +358,18 @@ suite =
                 , base = Feature.FocusedFilters.capture (Feature.FocusedFilters.normalSearch switched)
                 , generation = edited.dataLoading.navigationGeneration
                 , restored = Feature.FocusedFilters.capture exited.search }
-        , test "workspace search submit exits focus with the workspace query and rejects late focused search results" <| \_ ->
+        , test "global search preserves focused hierarchy context and rejects the retired global draft" <| \_ ->
             let
                 search = model.search
                 focused = timelineFocusFrom "task" { model | search = { search | query = "workspace query" } }
-                focusedSearch = focused.search
-                pending = Main.update SubmitSearch { focused | search = { focusedSearch | query = "focused query" } } |> Tuple.first
-                submitted = Main.update (WorkspaceSearch SubmitSearch) pending |> Tuple.first
+                edited = Main.update (SearchInput "focused query") focused |> Tuple.first
+                pending = Main.update (GlobalSearchInput "old global") edited |> Tuple.first |> Main.update SubmitSearch |> Tuple.first
+                submitted = Main.update (GlobalSearchInput "workspace global") pending |> Tuple.first |> Main.update SubmitSearch |> Tuple.first
                 stale = case pending.search.activeRequest of
                     Just request -> Main.update (GotUnifiedSearchResults workspaceId request.sessionEpoch request.token request.query (Ok { projects = [], tasks = [], observations = [] })) submitted |> Tuple.first
                     Nothing -> submitted
             in
-            Expect.equal { focus = Nothing, context = Nothing, query = "workspace query", request = Just "workspace query", results = Nothing, searching = True }
+            Expect.equal { focus = focused.focus.focusedEntity, context = edited.focusedFilters, query = "focused query", request = Just "workspace global", results = Nothing, searching = True }
                 { focus = stale.focus.focusedEntity, context = stale.focusedFilters, query = stale.search.query
                 , request = stale.search.activeRequest |> Maybe.map .query, results = stale.search.unifiedResults, searching = stale.search.isSearching }
         , test "workspace and contextual focused search inputs show their own values" <| \_ ->
@@ -379,8 +379,8 @@ suite =
                 input label value view = view focused |> Query.fromHtml |> Query.find [ Selector.attribute (Attributes.placeholder label) ] |> Query.has [ Selector.attribute (Attributes.value value) ]
             in
             Expect.all
-                [ \_ -> input "Search all entities... (Enter to search)" "workspace query" Feature.Search.viewSearchBar
-                , \_ -> input "Filter focused view... (Enter to search workspace)" "workspace query" Feature.Search.viewFocusedSearchBar
+                [ \_ -> input "Filter project hierarchy..." "workspace query" Feature.Search.viewSearchBar
+                , \_ -> input "Filter focused view..." "workspace query" Feature.Search.viewFocusedSearchBar
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = TimelineTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = ObservationsTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
                 ] ()

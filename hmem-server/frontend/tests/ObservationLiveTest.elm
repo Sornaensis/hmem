@@ -942,7 +942,7 @@ suite = describe "automatic observation refresh and scoped preferences"
     , test "unified SearchInput retains accepted results and response ownership uses submitted query" <| \_ ->
         let
             search = model.search
-            base = { model | search = { search | query = "submitted" } }
+            base = { model | search = { search | globalQuery = "submitted" } }
             submitted = Search.update SubmitSearch base |> Tuple.first
             drafted = Search.update (SearchInput "different draft") submitted |> Tuple.first
             request = drafted.search.activeRequest |> Maybe.map .token |> Maybe.withDefault -1
@@ -1073,8 +1073,8 @@ suite = describe "automatic observation refresh and scoped preferences"
     , test "Search response from former actor epoch cannot match a reused workspace query token" <| \_ ->
         let
             search = model.search
-            first = Search.update SubmitSearch { model | search = { search | query = "same" } } |> Tuple.first
-            replacement = Search.update SubmitSearch { model | sessionRequestEpoch = 4, search = { search | query = "same" } } |> Tuple.first
+            first = Search.update SubmitSearch { model | search = { search | globalQuery = "same" } } |> Tuple.first
+            replacement = Search.update SubmitSearch { model | sessionRequestEpoch = 4, search = { search | globalQuery = "same" } } |> Tuple.first
             oldToken = Maybe.map .token first.search.activeRequest |> Maybe.withDefault -1
             result = { observations = [], projects = [], tasks = [] }
             late = Search.update (GotUnifiedSearchResults workspaceId 3 oldToken "same" (Ok result)) replacement |> Tuple.first

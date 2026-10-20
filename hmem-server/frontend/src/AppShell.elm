@@ -590,7 +590,7 @@ bootstrapAfterSession previous expectedWorkspace sessionContext model =
             else
                 [ disconnectWebSocket () ]
     in
-    Cmd.batch (globalCmds ++ globalStreamCmd ++ workspaceCmds ++ rootNavigationCmd ++ websocketCmds)
+    Cmd.batch (Helpers.loadEntitySearchPreferencesCmd model :: (globalCmds ++ globalStreamCmd ++ workspaceCmds ++ rootNavigationCmd ++ websocketCmds))
 
 
 sessionCanReadWorkspace : String -> Api.SessionContext -> Bool

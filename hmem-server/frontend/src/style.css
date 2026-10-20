@@ -924,8 +924,8 @@ a:hover {
     white-space: normal;
   }
 
-  .page:has(.workspace-header) .search-input {
-    min-width: 0;
+  .page:has(.workspace-header) .search-input,
+  .page:has(.workspace-header) .hierarchy-search-input {
     width: 100%;
   }
 
@@ -1660,7 +1660,9 @@ a:hover {
   position: relative;
 }
 
-.search-input {
+.search-input,
+.hierarchy-search-input {
+  min-width: 0;
   flex: 1;
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -1673,11 +1675,11 @@ a:hover {
   transition: border-color 0.15s;
 }
 
-.search-input:focus {
+.search-input:focus, .hierarchy-search-input:focus {
   border-color: var(--accent);
 }
 
-.search-input::placeholder {
+.search-input::placeholder, .hierarchy-search-input::placeholder {
   color: var(--text-muted);
 }
 
@@ -4647,3 +4649,14 @@ textarea.observation-edit-content {
 
 .observation-tree-page { flex-wrap: wrap; }
 .observation-tree-more { min-width: 0; max-width: 100%; padding-inline: .5rem; white-space: normal; overflow-wrap: anywhere; }
+
+/* Keep live global-search controls together while scrolling. */
+.workspace-search-filter-bar.entity-search-activated {
+  position: sticky;
+  top: 0;
+  z-index: 11;
+  background: var(--bg-surface);
+  padding: 0.5rem 0;
+}
+.search-entities-filter-bar { margin-bottom: 0.5rem; }
+.search-entities-filter-bar .filter-group { flex-wrap: wrap; }

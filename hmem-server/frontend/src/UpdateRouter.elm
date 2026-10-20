@@ -426,6 +426,21 @@ route msg model =
         WorkspaceSearch _ ->
             Ok (Feature.Search.update msg model)
 
+        GlobalSearchInput _ ->
+            Ok (Feature.Search.update msg model)
+
+        GlobalSearchCompositionStart ->
+            Ok (Feature.Search.update msg model)
+
+        GlobalSearchCompositionEnd _ ->
+            Ok (Feature.Search.update msg model)
+
+        GlobalSearchReady _ ->
+            Ok (Feature.Search.update msg model)
+
+        ToggleSearchEntityType _ ->
+            Ok (Feature.Search.update msg model)
+
         SubmitSearch ->
             Ok (Feature.Search.update msg model)
 

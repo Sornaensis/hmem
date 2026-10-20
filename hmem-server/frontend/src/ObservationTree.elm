@@ -68,7 +68,7 @@ begin prefix offset state =
             , branches = Dict.insert prefix { branch | request = Just request, error = Nothing
                 , stagedPaths = if offset == 0 && state.refreshing && branch.lifetime /= state.lifetime then Just [] else branch.stagedPaths
                 , stagedNodes = if offset == 0 && state.refreshing && branch.lifetime /= state.lifetime then Dict.empty else branch.stagedNodes
-                , targetOffset = if offset == 0 then Basics.max 200 (Basics.max branch.nextOffset branch.targetOffset) else branch.targetOffset } state.branches }, Just request )
+                , targetOffset = if offset == 0 then Basics.max 50 (Basics.max branch.nextOffset branch.targetOffset) else branch.targetOffset } state.branches }, Just request )
 
 
 beginTerminal : Api.ObservationSubject -> Int -> State -> ( State, Maybe Request )
@@ -81,7 +81,7 @@ beginTerminal subject offset state =
         let request = { lifetime = state.lifetime, token = state.nextToken, prefix = subject.subject, offset = offset, kind = Just subject.subjectKind } in
         ({state | nextToken = state.nextToken + 1, physical = request :: state.physical, lastOwner = Just (subject.subject, Just subject.subjectKind), terminals = Dict.insert key {terminal | request = Just request, error = Nothing
             , stagedItems = if offset == 0 && state.refreshing && terminal.lifetime /= state.lifetime then Just [] else terminal.stagedItems
-            , targetOffset = if offset == 0 then Basics.max 200 (Basics.max terminal.nextOffset terminal.targetOffset) else terminal.targetOffset} state.terminals}, Just request)
+            , targetOffset = if offset == 0 then Basics.max 50 (Basics.max terminal.nextOffset terminal.targetOffset) else terminal.targetOffset} state.terminals}, Just request)
 
 
 receiveTerminal : Request -> Result String (Api.PaginatedResult Api.Observation) -> State -> State
@@ -111,7 +111,7 @@ receiveTerminal request result state =
                                     completed = terminal.stagedItems == Nothing || not page.hasMore || (next >= terminal.targetOffset && not demandedMissing)
                                 in
                                 if List.length ids > 200 || Set.size (Set.fromList ids) /= List.length ids || not (List.all (\item -> List.member subject item.subjects) page.items)
-                                    || (page.hasMore && (List.length ids /= 200 || not (List.any (\identity -> request.offset == 0 || not (List.member identity prior)) ids))) then fail "Subject observations are incomplete: the page made no valid progress."
+                                    || (page.hasMore && (not (List.member (List.length ids) [ 50, 200 ]) || not (List.any (\identity -> request.offset == 0 || not (List.member identity prior)) ids))) then fail "Subject observations are incomplete: the page made no valid progress."
                                 else {settled | terminals = Dict.insert key {terminal | lifetime = if completed then request.lifetime else terminal.lifetime, items = if completed then items else terminal.items, stagedItems = if completed then Nothing else Just items, hasMore = page.hasMore, nextOffset = next, request = Nothing
                                     , error = if page.hasMore && next > 100000 then Just "Subject observations are incomplete: the supported offset range is exhausted." else Nothing} settled.terminals}
 
@@ -137,7 +137,7 @@ receive request result state =
                         && List.all (\terminal -> terminal.subject == node.path && terminal.observationCount > 0 && terminal.observationCount <= node.observationCount) node.terminals
                     next = request.offset + List.length paths
                     knownPaths = Maybe.withDefault branch.paths branch.stagedPaths
-                    progress = not page.hasMore || (List.length paths == 200 && List.any (\path -> request.offset == 0 || not (List.member path knownPaths)) paths)
+                    progress = not page.hasMore || (List.member (List.length paths) [ 50, 200 ] && List.any (\path -> request.offset == 0 || not (List.member path knownPaths)) paths)
                     newPaths = if request.offset == 0 then paths else knownPaths ++ List.filter (\path -> not (List.member path knownPaths)) paths
                     demandedChild = state.revealTarget |> Maybe.andThen (\target -> ancestors target.subject.subject |> List.filter (parent >> (==) request.prefix) |> List.head)
                     demandedMissing = demandedChild |> Maybe.map (\path -> not (List.member path newPaths)) |> Maybe.withDefault False

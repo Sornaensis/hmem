@@ -6,18 +6,9 @@ import { scanObservationRows } from './observation-viewport-fixture.mjs'
 test('production cached incremental failure retries the exact applied offset and live changed query replaces page zero', { timeout: 60000 }, async () => {
   const h = await openDiscovery(undefined, values => [...values, ...Array.from({ length: 200 }, (_, i) => ({ ...values[3], id: 'recovery-extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${i}.md` }] }))])
   try {
-    const observed = []
-    let failNext = true
-    await h.page.route('**/api/v1/observations?**', async route => {
-      const params = Object.fromEntries(new URL(route.request().url()).searchParams)
-      observed.push(params)
-      if (params.offset === '200' && failNext) {
-        failNext = false
-        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Controlled incremental failure' }) })
-      } else await route.fallback()
-    })
+    const failure = h.gate(r=>r.payload?.offset===50,{error:503})
     await h.start()
-    try { assert.equal((await scanObservationRows(h.page)).cards.size, 200) } catch (error) {
+    try { assert.equal((await scanObservationRows(h.page)).cards.size, 50) } catch (error) {
       console.log('Bounded initial recovery scan receipt', await h.page.evaluate(() => ({
         context: document.getElementById('observation-panel')?.dataset.observationContext,
         viewport: { ...document.getElementById('observation-viewport')?.dataset },
@@ -29,18 +20,20 @@ test('production cached incremental failure retries the exact applied offset and
     }
     await h.page.getByRole('button', { name: 'Load more', exact: true }).click()
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).waitFor({ timeout: 5000 })
-    assert.equal((await scanObservationRows(h.page)).cards.size, 200)
+    assert.equal((await scanObservationRows(h.page)).cards.size, 50)
     assert.match(await h.page.locator('.observation-state-error').innerText(), /loaded results|cached|Retry results/i)
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).click(); await h.idle()
-    assert.equal((await scanObservationRows(h.page)).cards.size, 264)
-    assert.deepEqual(observed.filter(value => value.offset === '200').map(value => ({ query: value.query || '', offset: value.offset, limit: value.limit })), [
-      { query: '', offset: '200', limit: '200' }, { query: '', offset: '200', limit: '200' }
-    ])
+    assert.equal((await scanObservationRows(h.page)).cards.size, 100)
+    while(Number(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'))<264) { await h.page.getByRole('button',{name:'Load more',exact:true}).click(); await h.idle() }
+    assert.equal((await scanObservationRows(h.page)).cards.size,264)
+    const observed = h.receipts.filter(r=>r.endpoint.endsWith('/discovery'))
+    assert.deepEqual(observed.filter(r=>r.payload.offset===50).map(r=>({offset:r.payload.offset,limit:r.payload.limit,token:r.payload.context_token})),[
+      {offset:50,limit:50,token:observed[0].response.context_token},{offset:50,limit:50,token:observed[0].response.context_token}])
     await h.page.locator('#observation-query').fill('Cache evidence')
     await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(await h.page.locator('.observation-card').count(), 2)
-    assert.equal(observed.at(-1).offset, '0')
-    assert.equal(observed.at(-1).query, 'Cache evidence')
+    assert.equal(h.receipts.at(-1).payload.offset,0)
+    assert.equal(h.receipts.at(-1).payload.filters.content_query,'Cache evidence')
   } finally { await h.close() }
 })
 

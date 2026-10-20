@@ -559,6 +559,7 @@ type alias ObservationModel =
     , nextPreferenceRequest : Int
     , error : Maybe String
     , query : String
+    , subjectQuery : String
     , subjectKind : Maybe Api.SubjectKind
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
@@ -571,6 +572,10 @@ type alias ObservationModel =
     , appliedQuery : Maybe ObservationAppliedQuery
     , completedQuery : Maybe ObservationAppliedQuery
     , modeQueries : Dict String String
+    , modeSubjectQueries : Dict String String
+    , filterComposing : Bool
+    , clearViewportToken : Int
+    , discovery : ObservationDiscoveryState
     , modeScrolls : Dict String Float
     , preferenceScroll : Maybe Float
     , filterDebounce : Maybe ObservationFilterDebounce
@@ -624,12 +629,30 @@ type alias ObservationModel =
     }
 
 
+type ObservationDiscoveryDestination
+    = DiscoveryFlat (Maybe Int) Int String Int
+    | DiscoveryTree ObservationTree.Request
+    | DiscoveryCount ObservationCountGuard ObservationCountGuard
+
+
+type alias ObservationDiscoveryRequest =
+    { workspaceId : String, epoch : Int, owner : String, sessionId : String, generation : Int
+    , query : ObservationAppliedQuery, contextToken : Maybe String, destination : ObservationDiscoveryDestination
+    , countGeneration : Int, workspaceCountGeneration : Int }
+
+
+type alias ObservationDiscoveryState =
+    { sessionId : String, runtimeToken : Int, runtimePending : Bool, generation : Int, query : Maybe ObservationAppliedQuery, owner : String
+    , context : Maybe { token : String, expiresAt : String, retrieval : { mode : String, reason : Maybe String } }
+    , bootstrap : Maybe ObservationDiscoveryRequest, afterBootstrap : Maybe ObservationDiscoveryDestination, physical : List ObservationDiscoveryRequest, error : Maybe String, failedCount : Bool }
+
+
 type alias ObservationCountGuard =
     { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, generation : Int, fingerprint : String }
 
 
 type alias ObservationFilterDebounce =
-    { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, mode : ObservationRequestMode }
+    { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, mode : ObservationRequestMode, query : ObservationAppliedQuery }
 
 
 type alias ObservationCountState =
@@ -706,6 +729,7 @@ type alias ObservationBrowseReturn =
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
     , query : String
+    , subjectQuery : String
     , gitSha : String
     , currentGitSha : String
     , historyGitSha : String
@@ -715,6 +739,7 @@ type alias ObservationBrowseReturn =
 type alias ObservationAppliedQuery =
     { requestMode : ObservationRequestMode
     , query : String
+    , subjectQuery : String
     , subjectKind : Maybe Api.SubjectKind
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
@@ -1435,6 +1460,11 @@ type Msg
     | ToggleFilterMemoryActiveLinked Bool
     | ToggleFilterTag String
     | SetObservationQuery String
+    | SetObservationSubjectQuery String
+    | ObservationDiscoveryRuntimeReceived Encode.Value
+    | GotObservationDiscovery ObservationDiscoveryRequest (Result Http.Error Api.ObservationDiscoveryResponse)
+    | ObservationFilterCompositionStart
+    | ObservationFilterCompositionEnd Bool String
     | ObservationFiltersReady ObservationFilterDebounce
     | GotObservationTree ObservationTree.Request (Result Http.Error Api.ObservationSubjectTreePage)
     | GotObservationTreeTerminal ObservationTree.Request (Result Http.Error (Api.PaginatedResult Api.Observation))

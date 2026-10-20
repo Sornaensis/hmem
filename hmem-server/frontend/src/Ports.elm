@@ -120,3 +120,12 @@ port searchNavigationCommand : Encode.Value -> Cmd msg
 
 
 port searchNavigationEvent : (Encode.Value -> msg) -> Sub msg
+
+
+port observationSearchRuntime : Encode.Value -> Cmd msg
+
+
+port observationSearchRuntimeReady : (Encode.Value -> msg) -> Sub msg
+
+
+port resetObservationSearchViewport : Encode.Value -> Cmd msg

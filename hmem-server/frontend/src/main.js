@@ -1,4 +1,5 @@
 import { installSearchNavigation } from './search-navigation.js'
+import { installObservationSearch } from './observation-search.js'
 import { installHierarchyViewport } from './hierarchy-viewport.js'
 import { installObservationNavigation } from './observation-navigation.js'
 import { installObservationViewport } from './observation-viewport.js'
@@ -708,5 +709,6 @@ installHierarchyViewport(app)
 const observationViewport = installObservationViewport(app)
 installObservationNavigation(app, { viewport: observationViewport })
 installSearchNavigation(app)
+installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)

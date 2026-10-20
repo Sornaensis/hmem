@@ -239,23 +239,27 @@ replaceFragment model =
 
 defaultObservationQuery : ObservationAppliedQuery
 defaultObservationQuery =
-    { requestMode = ObservationFlatMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
+    { requestMode = ObservationFlatMode, query = "", subjectQuery = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
 
 
 observationAppliedQuery : ObservationModel -> ObservationAppliedQuery
 observationAppliedQuery state =
     Maybe.withDefault
-        { requestMode = state.requestMode, query = state.query, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha, matchAppliedPaths = if state.requestMode == ObservationMatchMode then state.matchAppliedPaths else [] }
+        { requestMode = state.requestMode, query = state.query, subjectQuery = state.subjectQuery, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha, matchAppliedPaths = if state.requestMode == ObservationMatchMode then state.matchAppliedPaths else [] }
         state.appliedQuery
 
 
 restoreObservationQuery : ObservationAppliedQuery -> ObservationModel -> ObservationModel
 restoreObservationQuery query state =
-    { state | requestMode = query.requestMode, query = query.query, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, currentGitSha = query.currentGitSha, historyGitSha = query.historyGitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = if query.requestMode == ObservationMatchMode then String.join "\n" query.matchAppliedPaths else state.matchPathsInput, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing
+    { state | requestMode = query.requestMode, query = query.query, subjectQuery = query.subjectQuery, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, currentGitSha = query.currentGitSha, historyGitSha = query.historyGitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = if query.requestMode == ObservationMatchMode then String.join "\n" query.matchAppliedPaths else state.matchPathsInput, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing
         , modeQueries = Dict.insert (case query.requestMode of
             ObservationFlatMode -> "flat"
             ObservationMatchMode -> "match"
             _ -> "tree") query.query state.modeQueries
+        , modeSubjectQueries = Dict.insert (case query.requestMode of
+            ObservationFlatMode -> "flat"
+            ObservationMatchMode -> "match"
+            _ -> "tree") query.subjectQuery state.modeSubjectQueries
         , filterDebounce = Nothing, nextFilterToken = state.nextFilterToken + 1, preferenceScroll = Nothing }
 
 
@@ -380,13 +384,16 @@ observationQueryDecoder =
 
         tuple =
             Decode.map8 (\requestMode query subjectKind subject gitSha facetKind facetSubject paths ->
-                ( { requestMode = requestMode, query = query, subjectKind = subjectKind, subject = subject, gitSha = gitSha, currentGitSha = "", historyGitSha = "", selectedFacet = Maybe.map2 (\k s -> { subjectKind = k, subject = s }) facetKind facetSubject, matchAppliedPaths = paths }, (facetKind == Nothing) == (facetSubject == Nothing) ))
+                ( { requestMode = requestMode, query = query, subjectQuery = "", subjectKind = subjectKind, subject = subject, gitSha = gitSha, currentGitSha = "", historyGitSha = "", selectedFacet = Maybe.map2 (\k s -> { subjectKind = k, subject = s }) facetKind facetSubject, matchAppliedPaths = paths }, (facetKind == Nothing) == (facetSubject == Nothing) ))
                 (Decode.index 0 mode) (Decode.index 1 Decode.string) (Decode.index 2 kind) (Decode.index 3 Decode.string) (Decode.index 4 Decode.string) (Decode.index 5 kind) (Decode.index 6 (Decode.nullable Decode.string)) (Decode.index 7 (Decode.list Decode.string))
     in
     Decode.list Decode.value |> Decode.andThen (\values ->
-        if not (List.member (List.length values) [ 8, 10 ]) then Decode.fail "Invalid query tuple" else
+        if not (List.member (List.length values) [ 8, 10, 11 ]) then Decode.fail "Invalid query tuple" else
         (if List.length values == 8 then tuple else
             Decode.map3 (\( query, paired ) current history -> ( { query | currentGitSha = current, historyGitSha = history }, paired )) tuple (Decode.index 8 Decode.string) (Decode.index 9 Decode.string))
+        |> Decode.andThen (\( query, paired ) ->
+            if List.length values == 11 then Decode.map (\subjects -> ( { query | subjectQuery = subjects }, paired )) (Decode.index 10 Decode.string)
+            else Decode.succeed ( if List.member query.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ] then { query | subjectQuery = query.query, query = "" } else query, paired ))
         |> Decode.andThen (\( query, pairedFacet ) ->
             if not pairedFacet || (query.requestMode == ObservationExactSubjectMode && query.selectedFacet == Nothing) then Decode.fail "Invalid exact facet" else
             if query.requestMode == ObservationMatchMode && not (List.isEmpty query.matchAppliedPaths) then
@@ -411,7 +418,7 @@ encodeObservationQuery query =
                 ObservationExactSubjectMode -> "exact"
                 ObservationMatchMode -> "match"
     in
-    Encode.list identity [ Encode.string mode, Encode.string query.query, kind query.subjectKind, Encode.string query.subject, Encode.string query.gitSha, kind (Maybe.map .subjectKind query.selectedFacet), query.selectedFacet |> Maybe.map (.subject >> Encode.string) |> Maybe.withDefault Encode.null, Encode.list Encode.string query.matchAppliedPaths, Encode.string query.currentGitSha, Encode.string query.historyGitSha ] |> Encode.encode 0 |> Url.percentEncode
+    Encode.list identity [ Encode.string mode, Encode.string query.query, kind query.subjectKind, Encode.string query.subject, Encode.string query.gitSha, kind (Maybe.map .subjectKind query.selectedFacet), query.selectedFacet |> Maybe.map (.subject >> Encode.string) |> Maybe.withDefault Encode.null, Encode.list Encode.string query.matchAppliedPaths, Encode.string query.currentGitSha, Encode.string query.historyGitSha, Encode.string query.subjectQuery ] |> Encode.encode 0 |> Url.percentEncode
 
 
 observationUrl : Model -> String -> String

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createObservationDiscoveryAdapter } from './support/observation-discovery-adapter.mjs'
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { resolve, sep } from 'node:path'
@@ -115,7 +116,7 @@ const socketScript = () => {
   new MutationObserver(() => { window.hierarchyMaximum = Math.max(window.hierarchyMaximum, document.querySelectorAll('[data-hierarchy-key]').length) }).observe(document, { childList: true, subtree: true })
 }
 
-export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = [], authority = null, pageOptions = {}) {
+export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = [], authority = null, pageOptions = {}, launchOptions = {}) {
   const fixtures = [fixture, ...additionalFixtures]
   const staticRoot = resolve(process.cwd(), '../static')
   const server = createServer(async (request, response) => {
@@ -131,6 +132,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
   let browser, browserServer
   const held = new Set(), controls = [], requests = [], errors = [], unhandled = []
   let principalId = 'fixture-user'
+  const discovery = createObservationDiscoveryAdapter(fixtures, { allObservations: allFixtureObservations, actor: () => principalId })
   let activeBranches = 0, activeDetails = 0, maxBranches = 0, maxDetails = 0
   async function retire() {
     for (const release of held) release()
@@ -144,7 +146,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
     }
   }
   try {
-    browserServer = await chromium.launchServer({ headless: true })
+    browserServer = await chromium.launchServer({ headless: true, ...launchOptions })
     browser = await chromium.connect(browserServer.wsEndpoint())
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', ...pageOptions })
     page.on('pageerror', error => errors.push(error.message))
@@ -240,6 +242,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
             else { assert.deepEqual(Object.keys(update).sort(), ['request_id','title']); value.title = update.title }
           }
         }
+        else if (path === '/api/v1/observations/discovery') { receipt.payload = request.postDataJSON(); const outcome = discovery.handle(receipt.payload); value = outcome.body; status = outcome.status; receipt.discovery = outcome.receipt }
         else if (path === '/api/v1/observations/count') value = fixtureObservationCounts(fixture, request.postDataJSON())
         else if (path === '/api/v1/observations' || path.endsWith('/subject-facets')) value = { items: [], has_more: false }
         else { unhandled.push(request.method() + ' ' + path); status = 501; value = { error: 'Unhandled controlled route' } }
@@ -247,6 +250,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         if (control) { control.used = true; control.receipt = receipt; if (control.error) { status = control.error; value = { error: 'Controlled failure' } }; if (control.transform) value = control.transform(value) }
         if (navigation && status < 400) { receipt.projectIds = value.projects.items.map(item => item.id); receipt.taskIds = value.tasks.items.map(item => item.id); receipt.projectHasMore = value.projects.has_more; receipt.taskHasMore = value.tasks.has_more }
         receipt.status = status
+        if (receipt.discovery) { receipt.discovery.status = status; receipt.discovery.response = value }
         const responseBody = JSON.stringify(value)
         receipt.bytes = Buffer.byteLength(responseBody)
         for (const ownerControl of ownerControls) { ownerControl.arrivedResolve(ownerControl.receipt); if (ownerControl.hold) held.add(ownerControl.release) }
@@ -255,11 +259,11 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
         await route.fulfill({ status, contentType: 'application/json', body: responseBody })
         if (authority && request.method() === 'PUT' && path.includes('/projects/')) await authority.broadcast()
       } catch (error) { errors.push(error.message); await route.abort().catch(() => {}) }
-      finally { receipt.done = true; for (const logical of logicalPages) logical.done = true; activeBranches -= logicalPages.length; if (navigation) activeBranches--; if (detail) activeDetails-- }
+      finally { receipt.done = true; if (receipt.discovery) receipt.discovery.done = true; for (const logical of logicalPages) logical.done = true; activeBranches -= logicalPages.length; if (navigation) activeBranches--; if (detail) activeDetails-- }
     })
     const settleScroll = () => page.evaluate(async () => { const scroll = document.getElementById('main-content-scroll'); let previous = null, stable = 0; const deadline = performance.now() + 1000; while (performance.now() < deadline && stable < 3) { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); const geometry = [scroll.scrollTop, scroll.scrollHeight].join(':'); stable = geometry === previous ? stable + 1 : 0; previous = geometry }; if (stable < 3) throw new Error('Scroll geometry did not settle before complete logical scan');  })
     const origin = 'http://127.0.0.1:' + server.address().port
-    return { page, fixture, requests, errors, unhandled, origin, bounded, setPrincipal(id) { principalId = id },
+    return { page, fixture, discovery, requests, errors, unhandled, origin, bounded, setPrincipal(id) { principalId = id },
       gate(match, options = {}) { let release, arrivedResolve; const wait = new Promise(resolveRelease => { release = resolveRelease }); const arrived = new Promise(resolveArrival => { arrivedResolve = resolveArrival }); const control = { match, ...options, wait, release, arrived, arrivedResolve, used: false }; controls.push(control); return control },
       async start(fragment = 'tab=projects', anchor = 'root-project') { await page.goto(origin + '/workspace/' + fixture.workspace.id + '#' + fragment); try { await page.locator('#entity-' + anchor).waitFor({ timeout: 10000 }) } catch (error) { throw new Error(error.message + '\n' + JSON.stringify({ errors, navigation: requests.filter(r=>r.kind).slice(0,8), geometry:await page.evaluate(()=>({top:document.getElementById('main-content-scroll')?.scrollTop,keys:[...document.querySelectorAll('[data-hierarchy-key]')].slice(0,4).map(row=>row.dataset.hierarchyKey)})), text: (await page.locator('body').innerText()).slice(0, 1200) })) } },
       async idle() { await page.waitForFunction(() => !document.querySelector('.loading-indicator')); const deadline = Date.now() + 10000; let quiet = 0, count = requests.length; while (Date.now() < deadline) { if (!activeBranches && !activeDetails && requests.every(r => r.done) && requests.length === count) { quiet++; if (quiet >= 5) break } else quiet = 0; count = requests.length; await page.waitForTimeout(20) }; assert.ok(quiet >= 5 && activeBranches === 0 && activeDetails === 0 && requests.every(r => r.done), 'Controlled routes must reach stable quiet: ' + JSON.stringify({ quiet, activeBranches, activeDetails, unfinished: requests.filter(r => !r.done).slice(-8) })); assert.deepEqual(errors, []); assert.deepEqual(unhandled, []) },

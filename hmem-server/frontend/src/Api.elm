@@ -34,6 +34,12 @@ module Api exposing
     , fetchProjectNextTaskPage
     , Observation
     , ObservationCounts
+    , ObservationDiscoveryFilters
+    , ObservationDiscoveryQuery
+    , ObservationDiscoveryResponse
+    , observationDiscoveryBody
+    , observationDiscoveryDecoder
+    , fetchObservationDiscovery
     , ObservationCountQuery
     , observationCountsDecoder
     , fetchObservationCounts
@@ -591,6 +597,55 @@ type alias ObservationMatchQuery =
     , limit : Int
     , offset : Int
     }
+
+
+type alias ObservationDiscoveryFilters =
+    { subjectQuery : String, contentQuery : String, subjectKind : Maybe SubjectKind, subject : Maybe String
+    , gitSha : Maybe String, currentGitSha : Maybe String, historyGitSha : Maybe String }
+
+
+type alias ObservationDiscoveryQuery =
+    { workspaceId : String, searchSession : String, generation : Int, contextToken : Maybe String
+    , filters : ObservationDiscoveryFilters, view : String, prefix : String, terminal : Maybe ObservationSubject, limit : Int, offset : Int }
+
+
+type alias ObservationDiscoveryResponse =
+    { contextToken : String, expiresAt : String, retrieval : { mode : String, reason : Maybe String }
+    , complete : Bool, page : { items : List Observation, tree : Maybe ObservationSubjectTreePage, counts : ObservationCounts, hasMore : Bool } }
+
+
+observationDiscoveryBody : ObservationDiscoveryQuery -> E.Value
+observationDiscoveryBody query =
+    let
+        optional name value = value |> Maybe.map (\v -> ( name, E.string v )) |> Maybe.map List.singleton |> Maybe.withDefault []
+        filters = query.filters
+        creation = case query.contextToken of
+            Just token -> [ ( "context_token", E.string token ) ]
+            Nothing ->
+                [ ( "search_session", E.string query.searchSession ), ( "generation", E.int query.generation )
+                , ( "filters", E.object
+                    ([ ( "subject_query", E.string filters.subjectQuery ), ( "content_query", E.string filters.contentQuery ) ]
+                        ++ optional "subject_kind" (Maybe.map subjectKindToString filters.subjectKind) ++ optional "subject" filters.subject
+                        ++ optional "git_sha" filters.gitSha ++ optional "current_git_sha" filters.currentGitSha ++ optional "history_git_sha" filters.historyGitSha)) ]
+    in
+    E.object ([ ( "workspace_id", E.string query.workspaceId ), ( "view", E.string query.view ), ( "limit", E.int query.limit ), ( "offset", E.int query.offset ) ]
+        ++ creation ++ (if query.view == "tree" then [ ( "prefix", E.string query.prefix ) ] else [])
+        ++ (query.terminal |> Maybe.map (\terminal -> [ ( "terminal", E.object [ ( "subject_kind", E.string (subjectKindToString terminal.subjectKind) ), ( "subject", E.string terminal.subject ) ] ) ]) |> Maybe.withDefault []))
+
+
+observationDiscoveryDecoder : Decoder ObservationDiscoveryResponse
+observationDiscoveryDecoder =
+    D.map5 ObservationDiscoveryResponse (D.field "context_token" D.string) (D.field "expires_at" D.string)
+        (D.field "retrieval" (D.map2 (\mode reason -> { mode = mode, reason = reason }) (D.field "mode" D.string) (D.field "reason" (D.nullable D.string))))
+        (D.field "complete" D.bool)
+        (D.field "page" (D.map4 (\items tree counts more -> { items = items, tree = tree, counts = counts, hasMore = more })
+            (D.field "items" (D.list observationDecoder)) (D.field "tree" (D.nullable observationSubjectTreeDecoder)) (D.field "counts" observationCountsDecoder) (D.field "has_more" D.bool)))
+        |> D.andThen (\response -> if response.complete && response.contextToken /= "" && List.member response.retrieval.mode [ "hybrid", "fts_only" ] && List.length response.page.items <= 50 && (response.page.tree |> Maybe.map (\tree -> List.length tree.items <= 50) |> Maybe.withDefault True) then D.succeed response else D.fail "Invalid discovery response")
+
+
+fetchObservationDiscovery : String -> ObservationDiscoveryQuery -> (Result Http.Error ObservationDiscoveryResponse -> msg) -> Cmd msg
+fetchObservationDiscovery apiUrl query toMsg =
+    Http.post { url = apiUrl ++ "/api/v1/observations/discovery", body = Http.jsonBody (observationDiscoveryBody query), expect = Http.expectJson toMsg observationDiscoveryDecoder }
 
 
 type alias ObservationSubjectTreeNode =

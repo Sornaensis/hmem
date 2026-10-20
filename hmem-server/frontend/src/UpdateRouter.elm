@@ -484,6 +484,16 @@ route msg model =
         ToggleFilterTag _ ->
             Ok (Feature.Search.update msg model)
 
+        ObservationDiscoveryRuntimeReceived _ -> Ok (Feature.Observation.update msg model)
+
+        GotObservationDiscovery _ _ -> Ok (Feature.Observation.update msg model)
+
+        SetObservationSubjectQuery _ -> Ok (Feature.Observation.update msg model)
+
+        ObservationFilterCompositionStart -> Ok (Feature.Observation.update msg model)
+
+        ObservationFilterCompositionEnd _ _ -> Ok (Feature.Observation.update msg model)
+
         SetObservationQuery _ ->
             Ok (Feature.Observation.update msg model)
 

@@ -76,13 +76,16 @@ draft. Workspace, subjects, creation SHA and creation time cannot be edited.
 Observation text filters update after a short pause. Clearing text, selecting a
 kind, and completing or clearing a SHA filter update immediately. Enter a full
 lowercase Git SHA; incomplete values stay local while the last completed results
-remain visible. Subject Tree, All Observations and Files remember separate search
-text. All Observations remains the initial mode.
+remain visible. Subject Tree and All Observations remember separate pairs of search fields; Files keeps its own search text. All Observations remains the initial mode.
 Advanced shows the number of active filters when closed. Kind, exact subject in
 All Observations, and creation/current/history SHA filters apply live; closing Advanced retains
 them. Incomplete SHAs show associated feedback until completed or cleared.
-All Observations searches content. Subject Tree searches stored subject paths literally and
-case-sensitively, including wildcard characters. Matching ancestors remain visible;
+Both Subject Tree and All Observations show **Subjects** above **Search observations**.
+Subjects narrows stored paths literally and case-sensitively, including wildcard
+characters. Search observations combines full-text and semantic matches when
+available; the status reports hybrid search or a full-text fallback. Both fields
+apply together. Clearing either returns to the top while retaining the other.
+Matching ancestors remain visible in Subject Tree;
 counts include distinct observations. A path label selects and focuses it; its
 chevron, Enter or Space expands its children and file/glob observation lists.
 Several branches can stay open. Closing a parent remembers its descendants and

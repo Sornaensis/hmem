@@ -4677,3 +4677,9 @@ textarea.observation-edit-content {
   .search-result-condensed .search-result-actions { align-self: flex-start; }
   .search-result-condensed .search-result-topline { flex-wrap: wrap; }
 }
+
+
+.observation-search .observation-paired-subjects,
+.observation-search .observation-paired-content { flex: 1 1 100%; position: relative; }
+.observation-search .observation-query-clear { position: absolute; right: 0.5rem; bottom: 0.45rem; }
+.observation-search .observation-filter-input[type="search"] { padding-right: 2.5rem; }

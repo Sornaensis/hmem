@@ -674,7 +674,7 @@ suite =
                     , \_ -> editor |> Query.hasNot [ Selector.id "observation-edit" ]
                     , \_ -> editor |> Query.has [ Selector.text "Delete", Selector.text "Workspace ID", Selector.text "Subjects", Selector.text "Git SHA" ]
                     , \_ -> editor |> Query.findAll [ Selector.tag "textarea" ] |> Query.count (Expect.equal 1)
-                    , \_ -> editor |> Query.findAll [ Selector.tag "input" ] |> Query.count (Expect.equal 5)
+                    , \_ -> editor |> Query.findAll [ Selector.tag "input" ] |> Query.count (Expect.equal 6)
                     ]
                     ()
         , test "edit captures canonical base, validates UTF-8 bounds, and renders only a content draft" <|
@@ -1177,7 +1177,7 @@ suite =
                             , matchPathsInput = "src/Draft.elm"
                             , matchAppliedPaths = [ "src/A.elm" ]
                             , matchEvidence = Dict.fromList [ ( retained.id, evidence retained ), ( deleted.id, evidence deleted ) ]
-                            , browseReturn = Just { requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, query = "needle", gitSha = fullSha, currentGitSha = "", historyGitSha = "" }
+                            , browseReturn = Just { subjectQuery = "", requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, query = "needle", gitSha = fullSha, currentGitSha = "", historyGitSha = "" }
                             , requestGeneration = 11
                             , requestSessionEpoch = 3
                             , queryFingerprint = "pre-snapshot-results"
@@ -2006,7 +2006,7 @@ suite =
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.class "observation-search" ] |> Query.has [ Selector.class "filter-bar" ]
                     , \_ -> view |> Query.findAll [ Selector.class "observation-filters" ] |> Query.count (Expect.equal 3)
-                    , \_ -> view |> Query.find [ Selector.tag "label", Selector.attribute (Html.Attributes.for "observation-query") ] |> Query.has [ Selector.text "Search content" ]
+                    , \_ -> view |> Query.find [ Selector.tag "label", Selector.attribute (Html.Attributes.for "observation-query") ] |> Query.has [ Selector.text "Search observations" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
                     , \_ -> view |> Query.hasNot [ Selector.class "observation-filter-apply" ]
                     , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "btn-extras-toggle", Selector.class "observation-disclosure", Selector.class "observation-card", Selector.class "observation-card-selected" ]
@@ -4082,7 +4082,7 @@ observationUrlTests =
         |> List.concatMap (\mode ->
             [ test ("complete applied URL round-trips Unicode and reserved values in " ++ Debug.toString mode) <| \_ ->
                 let
-                    query = { requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
+                    query = { subjectQuery = "", requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
                     state = Helpers.restoreObservationQuery query Feature.Observation.init
                     draft = { state | query = "unapplied secret", matchPathsInput = "unapplied path" }
                     model = editableModel draft
@@ -4091,7 +4091,7 @@ observationUrlTests =
                 Expect.equal (Just query) (Maybe.map .query restored)
             , test ("authorized bootstrap preserves mode and closes initial loading accounting in " ++ Debug.toString mode) <| \_ ->
                 let
-                    query = { requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
+                    query = { subjectQuery = "", requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
                     original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
                     loading = original.dataLoading
                     initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 44 } }
@@ -4163,7 +4163,7 @@ observationUrlTests =
                 Expect.equal ( [ "src/Main.elm", "src/View.elm" ], Just "off&page", Just "off&page" ) (context.query.matchAppliedPaths, context.fragment.observationId, legacy.fragment.observationId)
             , test "oversized own replacement proof is consumed once and does not resurrect on Back or ABA" <| \_ ->
                 let
-                    query = { requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
+                    query = { subjectQuery = "", requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
                     original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
                     issued = Helpers.writeObservationHistory True original |> Tuple.first
                     url = issued.observations.pendingExcludedLink |> Maybe.andThen (.url >> Url.fromString) |> Maybe.withDefault original.url
@@ -4183,7 +4183,7 @@ observationUrlTests =
                     ] ()
             , test "same applied route preserves unapplied controls and unchanged request identity" <| \_ ->
                 let
-                    query = { requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
+                    query = { subjectQuery = "", requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
                     state = Helpers.restoreObservationQuery query Feature.Observation.init
                     model = editableModel { state | query = "unapplied", requestGeneration = 99, selectedId = Nothing }
                     url = Helpers.completeObservationUrl model |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault model.url
@@ -4196,7 +4196,7 @@ observationUrlTests =
                     selected = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
                     original = editableModel ({ initialState | selectedId = Just selected.id, selectedDetail = Just selected, items = Dict.singleton selected.id selected, orderedIds = [ selected.id ] }) |> Feature.Observation.update StartObservationEdit |> Tuple.first |> Feature.Observation.update (SetObservationDraft "protected URL draft") |> Tuple.first
                     old = Feature.Observation.update ApplyObservationFilters original |> Tuple.first
-                    query = { requestMode = ObservationFlatMode, query = "changed", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
+                    query = { subjectQuery = "", requestMode = ObservationFlatMode, query = "changed", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
                     target = Helpers.completeObservationUrl { old | observations = Helpers.restoreObservationQuery query old.observations } |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault old.url
                     after = Route.handleUrlChange target old |> Tuple.first
                     late = Feature.DataLoading.update (GotObservations "workspace-1" Nothing old.observations.requestGeneration old.observations.queryFingerprint 0 (Ok { items = [ fixtureObservation "old-row" "2026-01-01T00:00:00Z" ], hasMore = False })) after |> Tuple.first
@@ -4328,7 +4328,7 @@ observationUrlReviewTests =
 
 urlReviewQuery : ObservationRequestMode -> Types.ObservationAppliedQuery
 urlReviewQuery mode =
-    { requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }
+    { subjectQuery = "", requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }
 
 
 returnReceipt : ObservationViewport.State -> Float -> String -> Maybe String -> Encode.Value

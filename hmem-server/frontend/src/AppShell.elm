@@ -230,10 +230,13 @@ handleOwnedRaw ownedMsg model =
                         , observations = if pendingEntry then { state | preferenceEntryHistory = Just (Helpers.observationHistoryUrl preferredModel) } else if tab /= ObservationsTab then { state | preferenceEntryHistory = Nothing } else state }
             in
             let
+                ( foregroundModel, foregroundCmd ) =
+                    if tab == ObservationsTab && model.activeTab /= ObservationsTab then Feature.Observation.resumeForegroundResults finalModel else ( finalModel, Cmd.none )
+
                 ( linked, linkCmd ) =
-                    if tab == model.activeTab then ( finalModel, Cmd.none ) else Helpers.writeObservationHistory True finalModel
+                    if tab == model.activeTab then ( foregroundModel, Cmd.none ) else Helpers.writeObservationHistory True foregroundModel
             in
-            ( linked, Cmd.batch [ preferenceCmd, linkCmd, auditCmd, timelineCmd, adminCmd ] )
+            ( linked, Cmd.batch [ preferenceCmd, linkCmd, auditCmd, timelineCmd, adminCmd, foregroundCmd ] )
 
         SessionContextLoadedMsg epoch expectedWorkspace result ->
             if sessionEpochMatches epoch model.sessionRequestEpoch && sessionContextResponseMatches expectedWorkspace model then
@@ -989,6 +992,7 @@ subscriptions =
         , authSessionError AuthSessionError
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))
         , localStorageReceived LocalStorageLoaded
+        , Ports.observationSearchRuntimeReady ObservationDiscoveryRuntimeReceived
         , Ports.searchNavigationEvent SearchNavigationEvent
         , Ports.onHierarchyViewport HierarchyViewportChanged
         , Ports.onObservationViewport ObservationViewportChanged

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { openDiscovery, subjectTreePage } from './observation-discovery-fixture.mjs'
+import { openDiscovery, subjectTreePage, discoverySelection, interceptDiscovery } from './observation-discovery-fixture.mjs'
 import { hierarchyFixture } from './hierarchy-fixture.mjs'
 import { paint, revealObservationRow } from './observation-viewport-fixture.mjs'
 
@@ -18,35 +18,35 @@ const examples = values => {
     make('literal', [file('src/auth%_literal.elm')])]
 }
 const pathRow = (h, path) => h.page.locator('[data-tree-path=' + JSON.stringify(path) + ']')
-const rootReads = h => h.receipts.filter(value => value.endpoint.endsWith('/subject-tree') && value.params.prefix === '')
+const rootReads = h => h.receipts.filter(value => value.payload?.view==='tree' && discoverySelection(h,value).prefix === '')
 async function tree(h) { await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle(); await pathRow(h, 'src').waitFor() }
-async function toggle(h, path) { await revealObservationRow(h.page, pathRow(h, path)); await pathRow(h, path).locator('.observation-tree-chevron').click(); await h.idle(); await paint(h.page) }
-async function search(h, value) { await h.page.locator('#observation-query').fill(value); await h.page.locator('#observation-query').press('Enter'); await h.idle(); await paint(h.page) }
+async function toggle(h, path, quiet = true) { await revealObservationRow(h.page, pathRow(h, path)); await pathRow(h, path).locator('.observation-tree-chevron').click(); if(quiet) await h.idle(); await paint(h.page) }
+async function search(h, value) { await h.page.locator('#observation-subject-query').fill(value); await h.page.locator('#observation-subject-query').press('Enter'); await h.idle(); await paint(h.page) }
 
 test('authoritative literal subject search retains ancestors, deduplicates counts and omits unrelated/content-only terminals', { timeout: 60000 }, async () => {
   const h = await openDiscovery(undefined, examples)
   try {
     await tree(h); await search(h, 'src/auth')
-    assert.equal(rootReads(h).at(-1).params.subject_query, 'src/auth')
-    assert.equal(rootReads(h).at(-1).params.query, undefined)
-    assert.deepEqual(rootReads(h).at(-1).response.items.map(value => [value.path, value.observation_count]), [['src', 4]])
-    assert.equal(rootReads(h).at(-1).response.total_count, 5)
-    assert.equal(rootReads(h).at(-1).response.match_count, 4)
+    assert.equal(discoverySelection(h,rootReads(h).at(-1)).subject_query, 'src/auth')
+    assert.equal(discoverySelection(h,rootReads(h).at(-1)).content_query, '')
+    assert.deepEqual(rootReads(h).at(-1).response.page.tree.items.map(value => [value.path, value.observation_count]), [['src', 4]])
+    assert.equal(rootReads(h).at(-1).response.page.counts.total_count, 5)
+    assert.equal(rootReads(h).at(-1).response.page.counts.match_count, 4)
     await toggle(h, 'src'); await toggle(h, 'src/auth')
     assert.equal(await pathRow(h, 'docs').count(), 0)
     assert.equal(await pathRow(h, 'src/**').count(), 0)
     assert.equal(await pathRow(h, 'src/auth/main.elm').count(), 1)
-    const lists = h.receipts.filter(value => value.endpoint === '/api/v1/observations' && value.params.subject === 'src/auth')
-    assert.deepEqual(lists.map(value => value.params.subject_kind).sort(), ['file', 'glob'])
-    assert.ok(lists.every(value => value.params.query === undefined && value.response.items.length === 1))
+    const lists = h.receipts.filter(value => value.payload?.view==='list' && discoverySelection(h,value).subject === 'src/auth')
+    assert.deepEqual(lists.map(value => discoverySelection(h,value).subject_kind).sort(), ['file', 'glob'])
+    assert.ok(lists.every(value => discoverySelection(h,value).content_query === '' && value.response.page.items.length === 1))
     assert.equal(await h.page.locator('.observation-detail').count(), 0)
     assert.match(await h.page.locator('.observation-mode-announcement').innerText(), /4 matching observations.*5 in workspace/)
     await search(h, 'docs')
-    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true, 'Membership focus recovery cannot override newer filter input focus')
-    await search(h, 'src/Auth'); assert.equal(rootReads(h).at(-1).response.match_count, 0)
-    await h.page.getByRole('button', { name: 'All Observations', exact: true }).click(); await h.idle(); await search(h, 'src/auth')
-    const all = h.receipts.filter(value => value.endpoint === '/api/v1/observations' && !value.params.subject).at(-1)
-    assert.equal(all.params.query_scope, 'content'); assert.deepEqual(all.response.items.map(value => value.id), ['content-only'])
+    assert.equal(await h.page.locator('#observation-subject-query').evaluate(element => document.activeElement === element), true, 'Membership focus recovery cannot override newer filter input focus')
+    await search(h, 'src/Auth'); assert.equal(rootReads(h).at(-1).response.page.counts.match_count, 0)
+    await h.page.getByRole('button', { name: 'All Observations', exact: true }).click(); await h.idle(); await h.page.locator('#observation-query').fill('src/auth'); await h.idle()
+    const all = h.receipts.filter(value => value.payload?.view==='list' && !discoverySelection(h,value).subject).at(-1)
+    assert.equal(discoverySelection(h,all).content_query,'src/auth'); assert.deepEqual(all.response.page.items.map(value => value.id), ['content-only'])
     await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle(); await search(h, '**')
     if (await pathRow(h, 'src').getAttribute('aria-expanded') === 'false') await toggle(h, 'src')
     await pathRow(h, 'src/**').waitFor()
@@ -111,7 +111,7 @@ test('classic path labels, chevrons, card controls and every path key keep indep
     await search(h, 'docs')
     assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, null, 'An authoritative filtered catalog retires a removed card selection')
     assert.equal(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).has('observation'), false)
-    assert.equal(await h.page.locator('#observation-query').inputValue(), 'docs')
+    assert.equal(await h.page.locator('#observation-subject-query').inputValue(), 'docs')
   } finally { await h.close() }
 })
 
@@ -127,9 +127,9 @@ test('wide continuation lazily reveals a direct observation beyond the first chi
     await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=deep-target')
     await h.page.waitForFunction(() => document.querySelector('.observation-detail-content')?.textContent.includes('Evidence'), null, { timeout: 10000 })
     await h.idle(); await paint(h.page)
-    assert.ok(h.receipts.some(value => value.params.prefix === 'wide' && value.params.offset === '200'))
-    assert.ok(h.receipts.some(value => value.params.prefix === 'wide/branch-224/deep/auth'))
-    assert.ok(!h.receipts.some(value => value.params.prefix === 'wide/branch-000'))
+    assert.ok(h.receipts.some(value => discoverySelection(h,value).prefix === 'wide' && discoverySelection(h,value).offset === 50))
+    assert.ok(h.receipts.some(value => discoverySelection(h,value).prefix === 'wide/branch-224/deep/auth'))
+    assert.ok(!h.receipts.some(value => discoverySelection(h,value).prefix === 'wide/branch-000'))
     assert.equal(await h.page.locator('.observation-detail').count(), 1)
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
     assert.ok(Number(await h.page.locator('#observation-viewport').getAttribute('data-observation-logical-count')) > 225)
@@ -142,24 +142,24 @@ test('branch errors retry and stale prior-filter root replies cannot revive reti
   let release, arrived
   try {
     let fail = true
-    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
-      const url = new URL(route.request().url())
-      if (url.searchParams.get('prefix') === 'src' && fail) { fail = false; return route.fulfill({status: 503, body: '{}'}) }
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON()))
+      if (params.get('prefix') === 'src' && fail) { fail = false; return route.fulfill({status: 503, body: '{}'}) }
       return route.fallback()
     })
     await tree(h); await toggle(h, 'src')
     await h.page.getByRole('button', { name: 'Retry paths', exact: true }).click(); await h.idle()
     await pathRow(h, 'src/auth').waitFor()
     const held = new Promise(resolve => { release = resolve }), arrival = new Promise(resolve => { arrived = resolve })
-    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
-      const url = new URL(route.request().url())
-      if (url.searchParams.get('subject_query') !== 'src/auth' || url.searchParams.get('prefix') !== '') return route.fallback()
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON()))
+      if (params.get('subject_query') !== 'src/auth' || params.get('prefix') !== '') return route.fallback()
       arrived(); await held
-      return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(subjectTreePage(h.fixture, {prefix: '', subjectQuery: 'src/auth', offset: 0, limit: 200}))})
+      return route.fulfill({status: 200, contentType: 'application/json', json: {...outcome.body,page:{...outcome.body.page,tree:subjectTreePage(h.fixture,{prefix:'',subjectQuery:'src/auth',offset:0,limit:50})}}})
     })
-    await h.page.locator('#observation-query').fill('src/auth'); await h.page.locator('#observation-query').press('Enter')
+    await h.page.locator('#observation-subject-query').fill('src/auth'); await h.page.locator('#observation-subject-query').press('Enter')
     await h.bounded(arrival, 5000, 'Old literal subject read admitted')
-    await search(h, 'docs'); release(); await h.idle(); await paint(h.page)
+    await h.page.locator('#observation-subject-query').fill('docs'); await h.page.waitForFunction(()=>document.querySelector('[data-tree-path="docs"]')); release(); await h.idle(); await paint(h.page)
     assert.equal(await pathRow(h, 'src').count(), 0)
     assert.equal(await pathRow(h, 'docs').count(), 1)
   } finally { release?.(); await h.close() }
@@ -173,14 +173,14 @@ test('terminal continuation and canonical replacement retain a demanded off-page
     await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + '&observation=many-000')
     await h.page.waitForFunction(() => document.querySelector('#observation-viewport')?.dataset.observationLoadedCount === '205', null, {timeout: 10000})
     await h.idle()
-    assert.ok(h.receipts.some(value => value.params.subject === 'src/auth/main.elm' && value.params.offset === '200'))
+    assert.ok(h.receipts.some(value => discoverySelection(h,value).subject === 'src/auth/main.elm' && discoverySelection(h,value).offset === 50))
     assert.equal(await h.page.locator('.observation-detail').count(), 1)
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
     let arrived
     const arrival = new Promise(resolve => { arrived = resolve }), held = new Promise(resolve => { release = resolve })
-    await h.page.route('**/api/v1/observations?**', async route => {
-      const url = new URL(route.request().url())
-      if (url.searchParams.get('subject') !== 'src/auth/main.elm' || url.searchParams.get('offset') !== '200') return route.fallback()
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON()))
+      if (params.get('subject') !== 'src/auth/main.elm' || params.get('offset') !== '50') return route.fallback()
       arrived(); await held; return route.fallback()
     })
     h.fixture.observations = h.fixture.observations.filter(value => value.id !== 'many-204')
@@ -190,7 +190,7 @@ test('terminal continuation and canonical replacement retain a demanded off-page
     assert.equal(await h.page.locator('.observation-detail').count(), 1)
     release(); await h.idle()
     await h.page.waitForFunction(() => document.querySelector('#observation-viewport')?.dataset.observationLoadedCount === '204', null, {timeout: 10000})
-    assert.equal(rootReads(h).at(-1).response.match_count, 204)
+    assert.equal(rootReads(h).at(-1).response.page.counts.match_count, 204)
     assert.equal(await h.page.locator('.observation-detail').count(), 1)
   } finally { release?.(); await h.close() }
 })
@@ -201,18 +201,18 @@ test('five expanded branches share four physical slots through collapse and stal
   const releases = new Map(), arrivals = [], active = new Set()
   let maximum = 0
   try {
-    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
-      const url = new URL(route.request().url()), prefix = url.searchParams.get('prefix')
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON())), prefix = params.get('prefix')
       if (!['a', 'b', 'c', 'd', 'e'].includes(prefix)) return route.fallback()
       arrivals.push(prefix); active.add(prefix); maximum = Math.max(maximum, active.size)
       await new Promise(resolve => releases.set(prefix, resolve))
       active.delete(prefix)
-      await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(subjectTreePage(h.fixture, {prefix, offset: 0, limit: 200}))})
+      await route.fulfill({status: 200, contentType: 'application/json', json: {...outcome.body,page:{...outcome.body.page,tree:subjectTreePage(h.fixture,{prefix,offset:0,limit:50})}}})
     })
     await tree(h)
-    for (const prefix of ['a', 'b', 'c', 'd', 'e']) await toggle(h, prefix)
+    for (const prefix of ['a', 'b', 'c', 'd', 'e']) await toggle(h, prefix, false)
     assert.deepEqual(arrivals, ['a', 'b', 'c', 'd'])
-    await toggle(h, 'a'); await paint(h.page)
+    await toggle(h, 'a', false); await paint(h.page)
     assert.deepEqual(arrivals, ['a', 'b', 'c', 'd'], 'collapse does not refund an outstanding transport')
     releases.get('a')()
     await h.bounded((async () => { while (!releases.has('e')) await h.page.waitForTimeout(20) })(), 5000, 'Queued fifth branch after exact callback')
@@ -241,10 +241,10 @@ test('late detail membership and mode return preserve a newer path selection and
     await pathRow(h, 'docs').waitFor()
     await pathRow(h, 'docs').locator('.observation-tree-label').click(); await paint(h.page)
     assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'true')
-    await h.page.locator('#observation-query').focus(); await paint(h.page)
+    await h.page.locator('#observation-subject-query').focus(); await paint(h.page)
     release(); await h.idle()
     await h.page.locator('.observation-detail-content').waitFor({timeout: 5000}); await paint(h.page)
-    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
+    assert.equal(await h.page.locator('#observation-subject-query').evaluate(element => document.activeElement === element), true)
     assert.equal(await pathRow(h, 'src/auth/main.elm').getAttribute('aria-expanded'), 'true')
     assert.equal(await h.page.locator('.observation-detail').count(), 1)
     assert.equal(await pathRow(h, 'docs').getAttribute('aria-selected'), 'true')
@@ -304,29 +304,29 @@ for (const boundary of ['root', 'terminal']) test('live ' + boundary + ' boundar
     }
     let arrived
     const arrival = new Promise(resolve => {arrived = resolve}), held = new Promise(resolve => {release = resolve})
-    await h.page.route(boundary === 'root' ? '**/api/v1/observations/subject-tree?**' : '**/api/v1/observations?**', async route => {
-      const params = new URL(route.request().url()).searchParams
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON()))
       if (params.get('offset') !== '200' || (boundary === 'root' ? params.get('prefix') !== '' : params.get('subject') !== targetPath)) return route.fallback()
       arrived(); await held; return route.fallback()
     })
     const base = h.fixture.observations[0], insertedPath = boundary === 'root' ? 'earlier' : targetPath
     h.fixture.observations.push({...base, id: 'zz-inserted', subjects: [file(insertedPath)], subject: insertedPath})
-    await h.page.locator('#observation-query').focus(); await paint(h.page)
+    await h.page.locator('#observation-subject-query').focus(); await paint(h.page)
     await invalidateTree(h, 'shift-' + boundary)
     await h.bounded(arrival, 10000, 'Selected card continuation admitted after live boundary insertion')
     assert.equal(await h.page.locator('.observation-detail').count(), 1, 'The old demanded card stays displayed before offset200 returns')
     assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, targetId)
-    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
+    assert.equal(await h.page.locator('#observation-subject-query').evaluate(element => document.activeElement === element), true)
     if (boundary === 'terminal') assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '200')
     release(); await h.idle(); await paint(h.page)
     assert.equal(await h.page.locator('.observation-detail').count(), 1)
     assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, targetId)
-    assert.equal(await h.page.locator('#observation-query').evaluate(element => document.activeElement === element), true)
+    assert.equal(await h.page.locator('#observation-subject-query').evaluate(element => document.activeElement === element), true)
     if (boundary === 'root') {
       await revealObservationRow(h.page, pathRow(h, 'root-000'))
       assert.equal(await pathRow(h, 'root-000').getAttribute('aria-expanded'), 'true')
       assert.equal(await pathRow(h, 'root-000').getAttribute('aria-setsize'), '202')
-      assert.ok(!h.receipts.some(value => value.params.subject === 'root-198'), 'Other terminal cards are not eagerly fetched')
+      assert.ok(!h.receipts.some(value => discoverySelection(h,value).subject === 'root-198'), 'Other terminal cards are not eagerly fetched')
     }
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
   } finally { release?.(); await h.close() }
@@ -349,7 +349,7 @@ test('a settled terminal-only link preserves newer parent collapse and native fo
     assert.equal(await h.page.locator('.observation-detail').count(), 0)
     const context = JSON.parse(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('oq'))
     assert.equal(context[0], 'exact'); assert.equal(context[5], 'glob'); assert.equal(context[6], 'src/**/*.elm')
-    assert.ok(!h.receipts.slice(reads).some(value => value.params.prefix === 'src' || value.params.subject), 'Collapsed selection does not admit hidden subtree or terminal refresh')
+    assert.ok(!h.receipts.slice(reads).some(value => discoverySelection(h,value).prefix === 'src' || discoverySelection(h,value).subject), 'Collapsed selection does not admit hidden subtree or terminal refresh')
   } finally { await h.close() }
 })
 
@@ -379,7 +379,7 @@ test('scaffold and dual-kind label selection stays separate from focus expansion
     await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations'); await h.idle(); await paint(h.page)
     assert.equal(await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).getAttribute('aria-pressed'), 'true')
     assert.equal(await pathRow(h, 'src').getAttribute('aria-expanded'), 'false')
-    assert.ok(!h.receipts.slice(before).some(value => value.params.prefix === 'src' || value.params.subject === 'src/auth'), 'Saved selection does not reveal or read its hidden ancestry')
+    assert.ok(!h.receipts.slice(before).some(value => discoverySelection(h,value).prefix === 'src' || discoverySelection(h,value).subject === 'src/auth'), 'Saved selection does not reveal or read its hidden ancestry')
     await toggle(h, 'src')
     assert.equal(await pathRow(h, 'src/auth').getAttribute('aria-selected'), 'true')
     assert.equal(await pathRow(h, 'src').getAttribute('aria-selected'), 'false')
@@ -447,7 +447,8 @@ test('eighteen-segment paths keep path terminal card copy and continuation contr
     await indented(more.locator('..'), 'Continuation indentation')
     await snapshot('deep-continuation', more)
     await more.click(); await h.idle(); await paint(h.page)
-    assert.ok(h.receipts.some(value => value.params.subject === deep && value.params.offset === '200'))
+    assert.ok(h.receipts.some(value => discoverySelection(h,value).subject === deep && discoverySelection(h,value).offset === 50))
+    while(Number(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'))<205){await h.page.getByRole('button',{name:'Load more observations',exact:true}).click();await h.idle()}
     assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '205')
     assert.equal(await h.page.locator('#observation-panel').evaluate(element => JSON.parse(element.dataset.observationContext).selectedId), 'deep-204')
     assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
@@ -467,27 +468,27 @@ test('hidden ordinary Tree branch and terminal callbacks drain four slots withou
   const requests = [], held = []
   let holding = true, active = 0, maximum = 0
   try {
-    await h.page.route('**/api/v1/observations**', async route => {
-      const url = new URL(route.request().url())
-      const branch = url.pathname.endsWith('/subject-tree')
-      const terminal = url.pathname === '/api/v1/observations' && url.searchParams.has('subject')
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON()))
+      const branch = route.request().postDataJSON().view==='tree'
+      const terminal = !!route.request().postDataJSON().terminal
       if (!branch && !terminal) return route.fallback()
-      const receipt = {prefix: url.searchParams.get(branch ? 'prefix' : 'subject'), kind: terminal ? url.searchParams.get('subject_kind') : null, offset: Number(url.searchParams.get('offset')), done: false}
+      const receipt = {prefix: params.get(branch ? 'prefix' : 'subject'), kind: terminal ? params.get('subject_kind') : null, offset: Number(params.get('offset')), done: false}
       requests.push(receipt); active++; maximum = Math.max(maximum, active)
       if (holding && receipt.prefix) await new Promise(resolve => held.push({release: resolve, receipt}))
       await route.fallback(); receipt.done = true; active--
     })
     await h.start(); await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle()
-    for (const path of ['a', 'b', 'c', 'd']) await toggle(h, path)
+    for (const path of ['a', 'b', 'c', 'd']) await toggle(h, path, false)
     await h.bounded((async () => { while (held.length < 4) await h.page.waitForTimeout(20) })(), 5000, 'Four held Tree owners')
     assert.equal(held.filter(value => value.receipt.kind).length, 1, 'A typed terminal shares the four physical slots')
     await pathRow(h, 'd').locator('.observation-tree-label').click(); await paint(h.page)
-    await h.page.getByRole('button', {name: 'Projects', exact: true}).click(); await h.idle()
+    await h.page.getByRole('button', {name: 'Projects', exact: true}).click(); await h.page.locator('#entity-root-project').waitFor(); await paint(h.page)
     const hiddenAt = requests.length
     for (const gate of held) {
       gate.release()
       await h.bounded((async () => { while (!gate.receipt.done) await h.page.waitForTimeout(20) })(), 5000, 'Exact hidden Tree callback')
-      await h.idle(); await paint(h.page)
+      await paint(h.page); await paint(h.page)
       assert.equal(requests.length, hiddenAt, 'A hidden completion must not replace its physical slot')
     }
     assert.equal(active, 0)
@@ -496,7 +497,7 @@ test('hidden ordinary Tree branch and terminal callbacks drain four slots withou
     assert.ok(h.caps().maxBranches <= 4 && h.caps().maxDetails <= 6)
     holding = false
     await h.page.getByRole('button', {name: 'Observations', exact: true}).click(); await h.idle()
-    await h.bounded((async () => { while (!requests.slice(hiddenAt).some(value => value.prefix === 'a' && value.kind === null && value.offset === 200 && value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Visible branch continuation resumes')
+    await h.bounded((async () => { while (!requests.slice(hiddenAt).some(value => value.prefix === 'a' && value.kind === null && value.offset === 50 && value.done)) await h.page.waitForTimeout(20) })(), 5000, 'Visible branch continuation resumes')
     assert.ok(requests.slice(hiddenAt).some(value => value.prefix === 'd' && value.done), 'Previously queued expansion resumes')
     await revealObservationRow(h.page, pathRow(h, 'd'))
     assert.equal(await pathRow(h, 'd').getAttribute('aria-expanded'), 'true')
@@ -515,13 +516,13 @@ test('hidden staged terminal refresh pauses continuation and retains scroll, sel
     await h.start(); await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle(); await toggle(h, 'a')
     const more = h.page.getByRole('button', {name: 'Load more observations', exact: true})
     await revealObservationRow(h.page, more); await more.click(); await h.idle()
-    assert.ok(h.receipts.some(value => value.params.subject === 'a' && value.params.offset === '200'))
+    assert.ok(h.receipts.some(value => discoverySelection(h,value).subject === 'a' && discoverySelection(h,value).offset === 50))
     await revealObservationRow(h.page, pathRow(h, 'a')); await pathRow(h, 'a').locator('.observation-tree-label').click()
     await h.page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 600 }); await paint(h.page)
-    await h.page.route('**/api/v1/observations?**', async route => {
-      const url = new URL(route.request().url())
-      if (url.searchParams.get('subject') !== 'a') return route.fallback()
-      const receipt = {offset: Number(url.searchParams.get('offset')), done: false}; requests.push(receipt)
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON()))
+      if (params.get('subject') !== 'a') return route.fallback()
+      const receipt = {offset: Number(params.get('offset')), done: false}; requests.push(receipt)
       if (!held) { held = true; await new Promise(resolve => { release = resolve }) }
       await route.fallback(); receipt.done = true
     })
@@ -537,16 +538,16 @@ test('hidden staged terminal refresh pauses continuation and retains scroll, sel
       const row = [...document.querySelectorAll('[data-observation-key]')].find(element => element.getBoundingClientRect().bottom > edge)
       return {key: row.dataset.observationKey, offset: edge - row.getBoundingClientRect().top}
     })
-    await h.page.getByRole('button', {name: 'Projects', exact: true}).click(); await h.idle()
+    await h.page.getByRole('button', {name: 'Projects', exact: true}).click(); await paint(h.page)
     release(); release = null; await h.idle(); await paint(h.page)
     assert.deepEqual(requests.map(value => value.offset), [0], 'Hidden staged success does not fetch terminal page two')
-    const treeBefore = h.receipts.filter(value => value.endpoint.endsWith('/subject-tree')).length
+    const treeBefore = h.receipts.filter(value => value.payload?.view==='tree').length
     await h.page.evaluate(() => window.pushHierarchyFrames([{schema_version: 1, type: 'resync_required'}])); await h.idle()
-    assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/subject-tree')).length, treeBefore, 'Hidden canonical invalidation defers ordinary root work')
+    assert.equal(h.receipts.filter(value => value.payload?.view==='tree').length, treeBefore, 'Hidden canonical invalidation defers ordinary root work')
     assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /405 observations/)
     const resumedAt = requests.length
     await h.page.getByRole('button', {name: 'Observations', exact: true}).click(); await h.idle(); await paint(h.page)
-    assert.ok(requests.slice(resumedAt).some(value => value.offset === 200 && value.done), 'Return resumes current staged terminal span')
+    assert.ok(requests.slice(resumedAt).some(value => value.offset === 50 && value.done), 'Return resumes current staged terminal span')
     const restoredScroll = await h.page.locator('#main-content-scroll').evaluate(element => element.scrollTop)
     const restoredAnchor = await h.page.locator('[data-observation-key=' + JSON.stringify(savedAnchor.key) + ']').evaluate(element => ({key: element.dataset.observationKey, offset: document.getElementById('main-content-scroll').getBoundingClientRect().top + 12 - element.getBoundingClientRect().top}))
     assert.ok(Math.abs(restoredAnchor.offset - savedAnchor.offset) < 3, 'Explorer row and intrarow scroll survive the hidden refresh: ' + JSON.stringify({savedScroll, restoredScroll, savedAnchor, restoredAnchor}))
@@ -611,15 +612,15 @@ test('connector virtual gaps clip parent-owned rails across roots and preserve u
   let release, waiting
   try {
     await h.start(); await h.page.getByRole('button', {name: 'Subject Tree', exact: true}).click(); await h.idle()
-    await h.page.route('**/api/v1/observations/subject-tree?**', async route => {
-      const url = new URL(route.request().url())
-      if (url.searchParams.get('prefix') !== 'alpha' || url.searchParams.get('offset') !== '200' || waiting) return route.fallback()
+    await interceptDiscovery(h, async (route,outcome) => {
+      const params = new URLSearchParams(discoverySelection(h,route.request().postDataJSON()))
+      if (params.get('prefix') !== 'alpha' || params.get('offset') !== '50' || waiting) return route.fallback()
       waiting = true; await new Promise(resolve => {release = resolve}); await route.fallback()
     })
-    await toggle(h, 'alpha')
+    await toggle(h, 'alpha', false)
     await h.bounded((async () => {while (!release) await h.page.waitForTimeout(20)})(), 5000, 'Unknown second branch page held')
-    await revealObservationRow(h.page, pathRow(h, 'alpha/child-199').locator('.observation-tree-copy'))
-    const last = pathRow(h, 'alpha/child-199').locator('..').locator('..')
+    await revealObservationRow(h.page, pathRow(h, 'alpha/child-049').locator('.observation-tree-copy'))
+    const last = pathRow(h, 'alpha/child-049').locator('..').locator('..')
     assert.equal(await last.getAttribute('data-tree-following'), 'unknown')
     assert.equal(await last.locator('.tree-rail-following').evaluate(element => getComputedStyle(element).borderLeftStyle), 'dashed')
     release(); release = null; await h.idle()

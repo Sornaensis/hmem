@@ -50,6 +50,7 @@ module Feature.Observation exposing
     , continueAutomaticRefresh
     , completeSupersededRead
     , restoreRouteResults
+    , resumeForegroundResults
     , restorePendingPreferences
     , bootstrapObservation
     , refuseContextExit
@@ -126,6 +127,7 @@ init =
     , nextPreferenceRequest = 1
     , error = Nothing
     , query = ""
+    , subjectQuery = ""
     , subjectKind = Nothing
     , subject = ""
     , selectedFacet = Nothing
@@ -138,6 +140,10 @@ init =
     , appliedQuery = Nothing
     , completedQuery = Nothing
     , modeQueries = Dict.empty
+    , modeSubjectQueries = Dict.empty
+    , filterComposing = False
+    , clearViewportToken = 0
+    , discovery = { sessionId = "", runtimeToken = 1, runtimePending = False, generation = 0, query = Nothing, owner = "", context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, physical = [], error = Nothing, failedCount = False }
     , modeScrolls = Dict.empty
     , preferenceScroll = Nothing
     , filterDebounce = Nothing
@@ -193,7 +199,241 @@ init =
 
 pageSize : Int
 pageSize =
+    -- Files and legacy direct-page callers retain their historical bound.
+    -- Discovery transport is independently capped at 50 in its encoder/decoder.
     200
+
+
+-- A selected typed terminal chooses a view inside the accepted context; it is
+-- not a new predicate. Inactive manual All fields likewise cannot filter Tree.
+discoveryQuery : ObservationAppliedQuery -> ObservationAppliedQuery
+discoveryQuery query =
+    if treeMode query.requestMode then { query | requestMode = ObservationFacetMode, selectedFacet = Nothing, subject = "" }
+    else query
+
+
+discoveryFilters : ObservationAppliedQuery -> Api.ObservationDiscoveryFilters
+discoveryFilters query =
+    { subjectQuery = query.subjectQuery, contentQuery = query.query
+    , subjectKind = query.subjectKind
+    , subject = if query.requestMode == ObservationFlatMode then nonEmpty query.subject else Nothing
+    , gitSha = nonEmpty query.gitSha, currentGitSha = nonEmpty query.currentGitSha, historyGitSha = nonEmpty query.historyGitSha }
+
+
+discoveryWireQuery : ObservationDiscoveryRequest -> Api.ObservationDiscoveryQuery
+discoveryWireQuery request =
+    let
+        selection = case request.destination of
+            DiscoveryFlat _ _ _ value -> { view = "list", prefix = "", terminal = Nothing, offset = value }
+            DiscoveryCount _ _ -> { view = "count", prefix = "", terminal = Nothing, offset = 0 }
+            DiscoveryTree tree -> case tree.kind of
+                Nothing -> { view = "tree", prefix = tree.prefix, terminal = Nothing, offset = tree.offset }
+                Just kind -> { view = "list", prefix = "", terminal = Just { subjectKind = kind, subject = tree.prefix }, offset = tree.offset }
+    in
+    { workspaceId = request.workspaceId, searchSession = request.sessionId, generation = request.generation, contextToken = request.contextToken
+    , filters = discoveryFilters request.query, view = selection.view, prefix = selection.prefix, terminal = selection.terminal, limit = 50, offset = selection.offset }
+
+
+retireDiscoveryDraft : ObservationModel -> ObservationModel
+retireDiscoveryDraft state =
+    let discovery = state.discovery
+        query = discoveryQuery (draftQuery state)
+    in
+    if discovery.query == Just query then state
+    else { state | discovery = { discovery | query = Just query, generation = discovery.generation + 1, context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing } }
+
+
+discoveryCountKey : ObservationDiscoveryRequest -> String
+discoveryCountKey request =
+    "discovery-count|" ++ Encode.encode 0 (Encode.list Encode.string [request.owner, request.sessionId, String.fromInt request.generation, String.fromInt request.countGeneration, String.fromInt request.workspaceCountGeneration])
+
+
+sendDiscovery : ObservationDiscoveryRequest -> Model -> ( Model, Cmd Msg )
+sendDiscovery request model =
+    let state = model.observations
+        discovery = state.discovery
+        loading = model.dataLoading
+        admitted = case request.destination of
+            DiscoveryCount _ _ -> StartupAdmission.admit (discoveryCountKey request) (StartupAdmission.reconcile (Just {workspaceId = request.workspaceId, sessionEpoch = request.epoch, audience = countActor model}) loading.startupAdmission)
+            _ -> Just loading.startupAdmission
+    in
+    if List.member request discovery.physical || List.length discovery.physical >= 4 then ( model, Cmd.none )
+    else case admitted of
+        Nothing -> ( model, Cmd.none )
+        Just admission ->
+            let activate guard counts = {counts | active = Just guard, nextToken = Basics.max counts.nextToken (guard.token + 1), pending = False}
+                started = case request.destination of
+                    DiscoveryCount scoped workspace -> {state | counts = activate scoped state.counts, workspaceCounts = activate workspace state.workspaceCounts}
+                    _ -> state
+            in
+            ( { model | observations = { started | discovery = { discovery | physical = request :: discovery.physical } }, dataLoading = {loading | startupAdmission = admission} }
+            , Api.fetchObservationDiscovery model.flags.apiUrl (discoveryWireQuery request) (GotObservationDiscovery request) )
+
+
+pumpDiscovery : Model -> ( Model, Cmd Msg )
+pumpDiscovery model =
+    let discovery = model.observations.discovery in
+    case discovery.bootstrap of
+        Just request ->
+            if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model && model.workspaceAdmin.authorizationPending == Nothing && not (filtersPending model.observations) && discovery.sessionId /= "" && request.owner == treeOwner model && request.generation == discovery.generation then sendDiscovery request model else ( model, Cmd.none )
+        Nothing -> ( model, Cmd.none )
+
+
+requestDiscovery : ObservationDiscoveryDestination -> Model -> ( Model, Cmd Msg )
+requestDiscovery destination model =
+    let
+        state = model.observations
+        old = state.discovery
+        query = discoveryQuery (querySnapshot state)
+        owner = treeOwner model
+        matching = old.owner == owner && old.query == Just query
+        current = if matching then old else { old | owner = owner, query = Just query, generation = old.generation + 1, context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing }
+        guarded = { model | observations = { state | discovery = current } }
+        base = { workspaceId = Maybe.withDefault "" model.selectedWorkspaceId, epoch = model.sessionRequestEpoch, owner = owner, sessionId = current.sessionId
+            , generation = current.generation, query = query, contextToken = Maybe.map .token current.context, destination = destination
+            , countGeneration = state.counts.generation, workspaceCountGeneration = state.workspaceCounts.generation }
+    in
+    if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || filtersPending state || current.error /= Nothing then ( guarded, Cmd.none )
+    else case current.context of
+        Just _ -> sendDiscovery base guarded
+        Nothing -> case current.bootstrap of
+            Just bootstrapRequest ->
+                case ( bootstrapRequest.destination, destination ) of
+                    ( DiscoveryCount _ _, DiscoveryCount _ _ ) -> pumpDiscovery guarded
+                    ( DiscoveryCount _ _, _ ) -> pumpDiscovery (updateObservation (\currentState -> let d = currentState.discovery in {currentState | discovery = {d | afterBootstrap = Just destination}}) guarded)
+                    ( DiscoveryFlat _ _ _ offset, DiscoveryFlat _ _ _ nextOffset ) ->
+                        if offset == nextOffset && bootstrapRequest.destination /= destination then
+                            pumpDiscovery (updateObservation (\currentState -> let d = currentState.discovery in {currentState | discovery = {d | afterBootstrap = Just destination}}) guarded)
+                        else pumpDiscovery guarded
+                    _ -> pumpDiscovery guarded
+            Nothing ->
+                let
+                    rollover = current.generation >= 2147483647
+                    generation = if rollover then 1 else Basics.max 1 current.generation
+                    session = if rollover then "" else current.sessionId
+                    request = { base | generation = generation, sessionId = session, contextToken = Nothing }
+                    discovery = { current | generation = generation, sessionId = session, bootstrap = Just request, runtimeToken = if rollover then current.runtimeToken + 1 else current.runtimeToken, runtimePending = if rollover then False else current.runtimePending }
+                    prepareCount counts = if counts.current then counts else { counts | pending = True, error = Nothing }
+                    prepared = { model | observations = { state | discovery = discovery, counts = prepareCount state.counts, workspaceCounts = prepareCount state.workspaceCounts } }
+                in
+                if session == "" then
+                    if discovery.runtimePending then ( prepared, Cmd.none )
+                    else
+                        ( { prepared | observations = { state | discovery = { discovery | runtimePending = True } } }
+                        , Ports.observationSearchRuntime (Encode.object [ ( "runtime", Encode.string model.flags.sessionId ), ( "token", Encode.int discovery.runtimeToken ) ]) )
+                else sendDiscovery request prepared
+
+
+acceptDiscoveryRuntime : Encode.Value -> Model -> ( Model, Cmd Msg )
+acceptDiscoveryRuntime payload model =
+    let discovery = model.observations.discovery
+        decoder = Decode.map3 (\runtime token uuid -> ( runtime, token, uuid )) (Decode.field "runtime" Decode.string) (Decode.field "token" Decode.int) (Decode.field "uuid" Decode.string)
+    in case Decode.decodeValue decoder payload of
+        Ok ( runtime, token, uuid ) ->
+            if runtime /= model.flags.sessionId || token /= discovery.runtimeToken || not discovery.runtimePending || not (Preferences.uuid uuid) then ( model, Cmd.none )
+            else
+                let state = model.observations
+                    ready = { discovery | sessionId = uuid, runtimePending = False, bootstrap = Maybe.map (\request -> { request | sessionId = uuid }) discovery.bootstrap }
+                in pumpDiscovery { model | observations = { state | discovery = ready } }
+        Err _ -> ( model, Cmd.none )
+
+
+settleDiscoveryPage : ObservationDiscoveryRequest -> Result Http.Error Api.ObservationDiscoveryResponse -> Model -> ( Model, Cmd Msg )
+settleDiscoveryPage request result model =
+    case request.destination of
+        DiscoveryCount _ _ -> ( model, Cmd.none )
+        DiscoveryTree tree ->
+            if tree.kind == Nothing then updateRaw (GotObservationTree tree (result |> Result.andThen (\value -> value.page.tree |> Maybe.map Ok |> Maybe.withDefault (Err (Http.BadBody "Missing discovery tree"))))) model
+            else updateRaw (GotObservationTreeTerminal tree (Result.map (\value -> { items = value.page.items, hasMore = value.page.hasMore }) result)) model
+        DiscoveryFlat token generation fingerprint offset ->
+            ( model, Task.perform identity (Task.succeed (GotObservations request.workspaceId token generation fingerprint offset (Result.map (\value -> { items = value.page.items, hasMore = value.page.hasMore }) result))) )
+
+
+settleDiscoveryDestinations request latest result model =
+    let (settled, command) = settleDiscoveryPage request result model in
+    case (request.destination, latest) of
+        (DiscoveryFlat _ _ _ offset, Just (DiscoveryFlat token generation fingerprint nextOffset)) ->
+            if offset == nextOffset then
+                let (_, currentCommand) = settleDiscoveryPage {request | destination = DiscoveryFlat token generation fingerprint nextOffset} result settled in
+                (settled, Cmd.batch [command, currentCommand])
+            else (settled, command)
+        _ -> (settled, command)
+
+
+acceptDiscovery : ObservationDiscoveryRequest -> Result Http.Error Api.ObservationDiscoveryResponse -> Model -> ( Model, Cmd Msg )
+acceptDiscovery request result incoming =
+    let
+        state = incoming.observations
+        current = state.discovery
+        discovery = { current | physical = List.filter ((/=) request) current.physical }
+        loading = incoming.dataLoading
+        releaseCount guard counts = if counts.active == Just guard then {counts | active = Nothing} else counts
+        releasedState = case request.destination of
+            DiscoveryCount scoped workspace -> {state | counts = releaseCount scoped state.counts, workspaceCounts = releaseCount workspace state.workspaceCounts}
+            _ -> state
+        model = { incoming | observations = { releasedState | discovery = discovery }, dataLoading = case request.destination of
+            DiscoveryCount _ _ -> {loading | startupAdmission = StartupAdmission.complete (discoveryCountKey request) loading.startupAdmission}
+            _ -> loading }
+        owned = incoming.auth.status == AuthReady && Permissions.canReadCurrentWorkspace incoming && incoming.selectedWorkspaceId == Just request.workspaceId && incoming.sessionRequestEpoch == request.epoch
+            && request.owner == treeOwner incoming && discovery.owner == request.owner && discovery.sessionId == request.sessionId && discovery.generation == request.generation && discovery.query == Just request.query
+            && (case request.contextToken of
+                Nothing -> discovery.bootstrap == Just request
+                Just token -> Maybe.map .token discovery.context == Just token)
+            && (case request.destination of
+                DiscoveryCount scoped workspace -> state.counts.active == Just scoped || state.workspaceCounts.active == Just workspace
+                _ -> True)
+    in
+    if not owned then
+        case request.destination of
+            DiscoveryTree treeRequest ->
+                let tree = model.observations.tree in
+                ( updateObservation (\currentState -> { currentState | tree = { tree | physical = List.filter ((/=) treeRequest) tree.physical } }) model, Cmd.none )
+            _ -> settleDiscoveryPage request (Err Http.NetworkError) model
+    else case result of
+        Err (Http.BadStatus 409) ->
+            case request.destination of
+                DiscoveryCount _ _ ->
+                    let reset = {discovery | context = Nothing, bootstrap = Nothing, generation = discovery.generation + 1, error = Nothing}
+                        pending counts = {counts | active = Nothing, current = False, pending = True, error = Nothing}
+                    in syncDiscoveryCounts {model | observations = {releasedState | discovery = reset, counts = pending releasedState.counts, workspaceCounts = pending releasedState.workspaceCounts, resultsStale = True}}
+                _ -> restartDiscoveryPage request discovery state model
+        Err error ->
+            let message = if error == Http.BadStatus 429 then "Search capacity is busy. Retry the current filters." else "Observation search failed. Retry the current filters."
+                failed = { discovery | bootstrap = Nothing, afterBootstrap = case request.destination of
+                    DiscoveryCount _ _ -> discovery.afterBootstrap
+                    _ -> Nothing
+                    , generation = if request.contextToken == Nothing then discovery.generation + 1 else discovery.generation, error = Just message, failedCount = case request.destination of
+                    DiscoveryCount _ _ -> True
+                    _ -> False }
+                settleCount counts = if counts.current then counts else { counts | pending = False, active = Nothing, error = Just "Observation search did not complete. Retry the current filters." }
+            in settleDiscoveryDestinations request discovery.afterBootstrap (Err error) { model | observations = { state | discovery = failed, counts = settleCount releasedState.counts, workspaceCounts = settleCount releasedState.workspaceCounts } }
+        Ok response ->
+            if List.length response.page.items > 50 || (response.page.tree |> Maybe.map (\tree -> List.length tree.items > 50) |> Maybe.withDefault False) || response.page.counts.workspaceId /= request.workspaceId || (request.contextToken /= Nothing && request.contextToken /= Just response.contextToken) then
+                acceptDiscovery request (Err (Http.BadBody "Discovery response did not match this workspace or context")) incoming
+            else
+                let
+                    settled = { discovery | bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing, context = Just { token = response.contextToken, expiresAt = response.expiresAt, retrieval = response.retrieval } }
+                    scoped = state.counts
+                    workspace = state.workspaceCounts
+                    countOwner = Just { workspaceId = request.workspaceId, sessionEpoch = request.epoch, actor = countActor incoming, token = 0, generation = 0, fingerprint = "" }
+                    counts = if request.countGeneration /= scoped.generation then releasedState.counts else { scoped | owner = countOwner, value = Just response.page.counts, valueFingerprint = countFingerprint request.workspaceId state, settledFingerprint = countFingerprint request.workspaceId state, current = True, pending = False, error = Nothing, active = Nothing }
+                    totals = response.page.counts
+                    workspaceCounts = if request.workspaceCountGeneration /= workspace.generation then releasedState.workspaceCounts else { workspace | owner = countOwner, value = Just { totals | matchCount = totals.totalCount }, valueFingerprint = "workspace:" ++ request.workspaceId, settledFingerprint = "workspace:" ++ request.workspaceId, current = True, pending = False, error = Nothing, active = Nothing }
+                    accepted = { model | observations = { releasedState | discovery = {settled | afterBootstrap = Nothing}, counts = counts, workspaceCounts = workspaceCounts } }
+                in case (request.destination, discovery.afterBootstrap) of
+                    (DiscoveryCount _ _, Just destination) -> requestDiscovery destination accepted
+                    _ -> settleDiscoveryDestinations request discovery.afterBootstrap (Ok response) accepted
+
+
+restartDiscoveryPage request discovery state model =
+    let
+        retired = { discovery | context = Nothing, bootstrap = Nothing, generation = discovery.generation + 1, error = Nothing }
+        tree = state.tree
+        reset = { state | discovery = retired, loading = False, facetLoading = False, refreshPass = Nothing, refreshPending = False, refreshError = Nothing, nextFilterToken = state.nextFilterToken + 1
+            , requestGeneration = state.requestGeneration + 1, facetRequestGeneration = state.facetRequestGeneration + 1, tree = ObservationTree.retire ("discovery-restart-" ++ String.fromInt retired.generation) tree }
+        ( released, releaseCmd ) = settleDiscoveryPage request (Err Http.NetworkError) { model | observations = reset }
+        ( restarted, restartCmd ) = if treeMode reset.requestMode then startTree True released else refreshActiveResultsRaw released
+    in ( restarted, Cmd.batch [ releaseCmd, restartCmd ] )
 
 
 treeMode : ObservationRequestMode -> Bool
@@ -240,14 +480,16 @@ loadTreeTerminal subject offset model =
     case repositoryWorkspaceId model of
         Nothing -> (model, Cmd.none)
         Just workspaceId ->
-            if not (treeDemandAllowed subject.subject (Just subject.subjectKind) model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (treeMode model.observations.requestMode) then (model, Cmd.none)
+            if model.observations.discovery.context == Nothing || List.length model.observations.discovery.physical >= 4 || not (treeDemandAllowed subject.subject (Just subject.subjectKind) model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (treeMode model.observations.requestMode) then (model, Cmd.none)
             else
                 let state = model.observations
                     owned = if state.tree.lifetime == treeLifetime model then state.tree else ObservationTree.retire (treeLifetime model) state.tree
                     (tree, request) = ObservationTree.beginTerminal subject offset owned
                     query = listQuery workspaceId offset state
                     exact = {query | subjectKind = Just subject.subjectKind, subject = Just subject.subject, query = Nothing}
-                in ({model | observations = {state | tree = tree}}, request |> Maybe.map (\guard -> Api.fetchObservations model.flags.apiUrl exact (GotObservationTreeTerminal guard)) |> Maybe.withDefault Cmd.none)
+                in case request of
+                    Just guard -> requestDiscovery (DiscoveryTree guard) { model | observations = { state | tree = tree } }
+                    Nothing -> ( model, Cmd.none )
 
 
 startTree : Bool -> Model -> (Model, Cmd Msg)
@@ -405,13 +647,13 @@ treeKey path key model =
 validPage : Int -> Bool -> List String -> List String -> Bool
 validPage offset hasMore received existing =
     List.length received <= pageSize
-        && (not hasMore || (List.length received == pageSize && List.any (\key -> offset == 0 || not (List.member key existing)) received))
+        && (not hasMore || (List.member (List.length received) [ 50, pageSize ] && List.any (\key -> offset == 0 || not (List.member key existing)) received))
 
 
 treeQuery : String -> String -> Int -> ObservationModel -> Api.ObservationSubjectTreeQuery
 treeQuery workspaceId prefix offset input =
     let state = appliedState input in
-    { workspaceId = workspaceId, prefix = prefix, subjectQuery = nonEmpty state.query, subjectKind = state.subjectKind
+    { workspaceId = workspaceId, prefix = prefix, subjectQuery = nonEmpty state.subjectQuery, subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha, currentGitSha = nonEmpty state.currentGitSha, historyGitSha = nonEmpty state.historyGitSha
     , limit = pageSize, offset = offset }
 
@@ -425,7 +667,7 @@ treeLifetime : Model -> String
 treeLifetime model =
     Encode.encode 0 (Encode.list Encode.string
         [ Maybe.withDefault "" model.selectedWorkspaceId, String.fromInt model.sessionRequestEpoch, countActor model
-        , String.fromInt model.observations.nextFilterToken, modeKey model.observations.requestMode
+        , String.fromInt model.observations.nextFilterToken, modeKey model.observations.requestMode, Helpers.encodeObservationQuery (discoveryQuery (querySnapshot model.observations))
         , Api.observationSubjectTreeUrl "" (treeQuery (Maybe.withDefault "" model.selectedWorkspaceId) "" 0 model.observations) ])
 
 
@@ -434,15 +676,16 @@ loadTreeBranch prefix offset model =
     case repositoryWorkspaceId model of
         Nothing -> ( model, Cmd.none )
         Just workspaceId ->
-            if not (treeDemandAllowed prefix Nothing model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (List.member model.observations.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then ( model, Cmd.none )
+            if (prefix /= "" && model.observations.discovery.context == Nothing) || List.length model.observations.discovery.physical >= 4 || not (treeDemandAllowed prefix Nothing model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (List.member model.observations.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then ( model, Cmd.none )
             else
                 let
                     state = model.observations
                     owned = if state.tree.lifetime == treeLifetime model then state.tree else ObservationTree.retire (treeLifetime model) state.tree
                     ( tree, request ) = ObservationTree.begin prefix offset owned
                 in
-                ( { model | observations = { state | tree = tree } }
-                , request |> Maybe.map (\guard -> Api.fetchObservationSubjectTree model.flags.apiUrl (treeQuery workspaceId prefix offset state) (GotObservationTree guard)) |> Maybe.withDefault Cmd.none )
+                case request of
+                    Just guard -> requestDiscovery (DiscoveryTree guard) { model | observations = { state | tree = tree } }
+                    Nothing -> ( model, Cmd.none )
 
 
 revealTreeSelection : Api.Observation -> ObservationModel -> ObservationModel
@@ -472,19 +715,23 @@ filterValidationError : ObservationModel -> Maybe String
 filterValidationError state =
     if List.any (\value -> value /= "" && (String.length value /= 40 || not (String.all (\c -> String.contains (String.fromChar c) "0123456789abcdef") value))) [ state.gitSha, state.currentGitSha, state.historyGitSha ] then
         Just "Enter a full lowercase 40-character Git SHA, or clear the field."
+    else if state.requestMode /= ObservationMatchMode && List.any (Helpers.observationUrlBytes >> (\size -> size > 4096)) [ state.query, state.subjectQuery ] then
+        Just "Each search field supports at most 4096 UTF-8 bytes."
     else
         Nothing
 
 
 filtersPending : ObservationModel -> Bool
 filtersPending state =
-    state.filterDebounce /= Nothing || filterValidationError state /= Nothing || hasUnappliedFilters state
+    state.filterComposing || state.filterDebounce /= Nothing || filterValidationError state /= Nothing || hasUnappliedFilters state
 
 
 retireFilterReads : ObservationModel -> ObservationModel
 retireFilterReads state =
-    let counts = state.counts in
-    { state | requestGeneration = state.requestGeneration + 1, facetRequestGeneration = state.facetRequestGeneration + 1
+    let counts = state.counts
+        retired = retireDiscoveryDraft state
+    in
+    { retired | requestGeneration = state.requestGeneration + 1, facetRequestGeneration = state.facetRequestGeneration + 1
         , completedQuery = if state.completedQuery == Nothing && (not (List.isEmpty state.orderedIds) || not (List.isEmpty state.facetKeys)) then state.appliedQuery else state.completedQuery
         , loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing
         , refreshPass = Nothing, refreshPending = False, refreshError = Nothing, failedRequest = Nothing
@@ -492,6 +739,54 @@ retireFilterReads state =
         , tree = ObservationTree.retire ("retired-" ++ String.fromInt state.nextFilterToken) state.tree
         , counts = { counts | generation = counts.generation + 1, pending = True, current = False, error = Nothing }
         , history = Maybe.map (\history -> { history | active = Nothing, loading = False }) state.history }
+
+
+observationSearchResetStamp : String -> ObservationModel -> String
+observationSearchResetStamp workspaceId state =
+    Encode.encode 0 (Encode.list Encode.string [ workspaceId, state.discovery.owner, String.fromInt state.clearViewportToken, Helpers.encodeObservationQuery (draftQuery state) ])
+
+
+clearSearchViewport : ObservationModel -> ObservationModel
+clearSearchViewport state =
+    let viewport = state.viewport
+        tree = state.tree
+    in
+    { state | clearViewportToken = state.clearViewportToken + 1, preferenceScroll = Nothing, detailReturnTarget = Nothing, pendingReturnNavigation = Nothing, detailNavigationToken = state.detailNavigationToken + 1
+        , treeSelectionPending = False, tree = { tree | revealTarget = Nothing, revealFocus = False, focusPending = Nothing }
+        , modeScrolls = Dict.insert (modeKey state.requestMode) 0 state.modeScrolls
+        , viewport = { viewport | top = 0, focus = Nothing, returnPin = Nothing, origin = Nothing, restoring = False, preserveScroll = False, preserveExtent = 0 } }
+
+
+editSearchText : Bool -> Bool -> String -> Model -> ( Model, Cmd Msg )
+editSearchText subjects force value model =
+    let
+        previous = if subjects then model.observations.subjectQuery else model.observations.query
+        cleared = previous /= "" && value == ""
+        prepared = if cleared then updateObservation clearSearchViewport model else model
+        edit state = if subjects then { state | subjectQuery = value, modeSubjectQueries = Dict.insert (modeKey state.requestMode) value state.modeSubjectQueries }
+            else { state | query = value, modeQueries = Dict.insert (modeKey state.requestMode) value state.modeQueries }
+        ( updated, command ) = if previous == value && not force then ( prepared, Cmd.none ) else editFilters (value /= "") edit prepared
+        reset = if cleared then Ports.resetObservationSearchViewport (Encode.object [ ( "stamp", Encode.string (observationSearchResetStamp (Maybe.withDefault "" updated.selectedWorkspaceId) updated.observations) ) ]) else Cmd.none
+    in
+    ( updated, Cmd.batch [ command, reset ] )
+
+
+clearDiscoveryError : Model -> Model
+clearDiscoveryError model =
+    updateObservation (\state -> let discovery = state.discovery in { state | discovery = { discovery | error = Nothing, failedCount = False } }) model
+
+
+retryDiscoveryCounts : Model -> ( Model, Cmd Msg )
+retryDiscoveryCounts model =
+    let
+        retry counts = { counts | pending = True, current = False, error = Nothing }
+        prepared = updateObservation (\state -> { state | counts = retry state.counts, workspaceCounts = retry state.workspaceCounts }) (clearDiscoveryError model)
+        discovery = prepared.observations.discovery
+    in
+    if model.activeTab == ObservationsTab && discovery.context == Nothing && discovery.afterBootstrap == Nothing then
+        if treeMode prepared.observations.requestMode then startTree True prepared else retryResults prepared
+    else
+        syncDiscoveryCounts prepared
 
 
 editFilters : Bool -> (ObservationModel -> ObservationModel) -> Model -> ( Model, Cmd Msg )
@@ -502,8 +797,10 @@ editFilters debounce edit model =
     in
     if filterValidationError state /= Nothing then
         ( prepared, Cmd.none )
+    else if state.filterComposing then
+        ( prepared, Cmd.none )
     else if debounce then
-        let stamp = { workspaceId = Maybe.withDefault "" model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch, actor = countActor model, token = state.nextFilterToken, mode = state.requestMode } in
+        let stamp = { workspaceId = Maybe.withDefault "" model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch, actor = countActor model, token = state.nextFilterToken, mode = state.requestMode, query = querySnapshot { state | appliedQuery = Nothing } } in
         ( { prepared | observations = { state | filterDebounce = Just stamp } }
         , Process.sleep 250 |> Task.perform (\_ -> ObservationFiltersReady stamp) )
     else
@@ -512,7 +809,7 @@ editFilters debounce edit model =
 
 applyLiveFilters : Model -> ( Model, Cmd Msg )
 applyLiveFilters model =
-    if filterValidationError model.observations /= Nothing then ( model, Cmd.none )
+    if model.observations.filterComposing || filterValidationError model.observations /= Nothing then ( model, Cmd.none )
     else if model.observations.requestMode == ObservationMatchMode && List.isEmpty model.observations.matchAppliedPaths then
         ( updateObservation (\state -> commitAppliedQuery { state | filterDebounce = Nothing }) model, Cmd.none )
     else
@@ -535,13 +832,13 @@ countQuery workspaceId state =
 countFingerprint : String -> ObservationModel -> String
 countFingerprint workspaceId state =
     let value = countQuery workspaceId state in
-    Encode.encode 0 (Encode.list Encode.string [ modeKey state.requestMode, workspaceId, Maybe.withDefault "" (Maybe.map Api.subjectKindToString value.subjectKind), Maybe.withDefault "" value.subject, Maybe.withDefault "" value.gitSha, Maybe.withDefault "" value.currentGitSha, Maybe.withDefault "" value.historyGitSha, Maybe.withDefault "" value.query, Encode.encode 0 (Encode.list Encode.string (Maybe.withDefault [] value.paths)) ])
+    Encode.encode 0 (Encode.list Encode.string [ modeKey state.requestMode, workspaceId, (appliedState state).subjectQuery, Maybe.withDefault "" (Maybe.map Api.subjectKindToString value.subjectKind), Maybe.withDefault "" value.subject, Maybe.withDefault "" value.gitSha, Maybe.withDefault "" value.currentGitSha, Maybe.withDefault "" value.historyGitSha, Maybe.withDefault "" value.query, Encode.encode 0 (Encode.list Encode.string (Maybe.withDefault [] value.paths)) ])
 
 
 hasAppliedCountFilter : ObservationModel -> Bool
 hasAppliedCountFilter state =
     let value = countQuery "" state in
-    value.subjectKind /= Nothing || value.subject /= Nothing || value.gitSha /= Nothing || value.currentGitSha /= Nothing || value.historyGitSha /= Nothing || value.query /= Nothing || not (List.isEmpty (Maybe.withDefault [] value.paths))
+    (appliedState state).subjectQuery /= "" || value.subjectKind /= Nothing || value.subject /= Nothing || value.gitSha /= Nothing || value.currentGitSha /= Nothing || value.historyGitSha /= Nothing || value.query /= Nothing || not (List.isEmpty (Maybe.withDefault [] value.paths))
 
 
 countActor : Model -> String
@@ -559,11 +856,40 @@ invalidateCounts state =
 
 syncCounts : Model -> ( Model, Cmd Msg )
 syncCounts model =
+    if model.observations.requestMode /= ObservationMatchMode then syncDiscoveryCounts model else
     let
         ( workspace, workspaceCommand ) = syncCount True model
         ( scoped, scopedCommand ) = syncCount False workspace
     in
     ( scoped, Cmd.batch [ workspaceCommand, scopedCommand ] )
+
+
+syncDiscoveryCounts : Model -> ( Model, Cmd Msg )
+syncDiscoveryCounts incoming =
+    let previous = incoming.observations
+        old = previous.discovery
+        changedOwner = old.owner /= "" && old.owner /= treeOwner incoming
+        retire counts = { counts | owner = Nothing, active = Nothing, pending = True, current = False, error = Nothing }
+        state = if changedOwner then
+            { previous | discovery = {old | owner = treeOwner incoming, query = Just (discoveryQuery (querySnapshot previous)), context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, generation = old.generation + 1, error = Nothing, failedCount = False}
+                , counts = retire previous.counts, workspaceCounts = retire previous.workspaceCounts }
+            else previous
+        model = { incoming | observations = state }
+        d = state.discovery
+        needs counts = not counts.current && counts.error == Nothing
+        ownsRead request = request.owner == treeOwner model && request.generation == d.generation
+        countInFlight request = case request.destination of
+            DiscoveryCount _ _ -> True
+            _ -> False
+        available = d.bootstrap == Nothing && not (List.any (\request -> ownsRead request || countInFlight request) d.physical)
+        settlingVisiblePage = model.activeTab == ObservationsTab && not (treeMode state.requestMode) && (state.loading || state.expectedOffset /= Nothing || state.refreshPass /= Nothing) && d.afterBootstrap == Nothing
+    in
+    if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending state || not available || settlingVisiblePage || d.error /= Nothing || (model.activeTab == ObservationsTab && d.context == Nothing && d.afterBootstrap == Nothing && not state.resultsStale) || not (needs state.workspaceCounts || (state.counts.pending && needs state.counts)) then (model, Cmd.none)
+    else case repositoryWorkspaceId model of
+        Nothing -> (model, Cmd.none)
+        Just workspaceId ->
+            let guard counts fingerprint = {workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, actor = countActor model, token = counts.nextToken, generation = counts.generation, fingerprint = fingerprint}
+            in requestDiscovery (DiscoveryCount (guard state.counts (countFingerprint workspaceId state)) (guard state.workspaceCounts ("workspace:" ++ workspaceId))) model
 
 
 countState : Bool -> ObservationModel -> ObservationCountState
@@ -678,6 +1004,7 @@ retireSessionState previous =
         , nextLinkToken = previous.nextLinkToken + 1
         , nextPreferenceRequest = previous.nextPreferenceRequest + 1
         , nextFilterToken = previous.nextFilterToken + 1
+        , discovery = let discovery = previous.discovery in { discovery | context = Nothing, bootstrap = Nothing, owner = "", query = Nothing, generation = discovery.generation + 1, error = Nothing }
         , tree = let fresh = ObservationTree.init in { fresh | physical = previous.tree.physical, nextToken = previous.tree.nextToken + 1 }
     }
 
@@ -791,6 +1118,8 @@ update msg model =
             ObservationFiltersReady _ -> rawUpdated.observations /= model.observations
             ApplyObservationFilters -> True
             SetObservationQuery _ -> True
+            SetObservationSubjectQuery _ -> True
+            ObservationFilterCompositionEnd _ _ -> True
             SetObservationSubjectKind _ -> True
             SetObservationSubject _ -> True
             SetObservationGitSha _ -> True
@@ -819,6 +1148,10 @@ update msg model =
 updateRaw : Msg -> Model -> ( Model, Cmd Msg )
 updateRaw msg model =
     case msg of
+        ObservationDiscoveryRuntimeReceived payload -> acceptDiscoveryRuntime payload model
+
+        GotObservationDiscovery request result -> acceptDiscovery request result model
+
         GotWorkspaceObservationCounts guard result ->
             acceptCounts True guard result model
 
@@ -866,27 +1199,39 @@ updateRaw msg model =
                 Nothing ->
                     let branch = Dict.get prefix state.tree.branches
                         offset = branch |> Maybe.map (\value -> if value.lifetime == state.tree.lifetime then value.nextOffset else 0) |> Maybe.withDefault 0
-                    in loadTreeBranch prefix offset model
+                    in loadTreeBranch prefix offset (clearDiscoveryError model)
                 Just value ->
                     let subject = {subjectKind = value, subject = prefix}
                         offset = Dict.get (ObservationTree.terminalKey subject) state.tree.terminals |> Maybe.map (\terminal -> if terminal.lifetime == state.tree.lifetime then terminal.nextOffset else 0) |> Maybe.withDefault 0
-                    in loadTreeTerminal subject offset model
+                    in loadTreeTerminal subject offset (clearDiscoveryError model)
 
         RetryWorkspaceObservationCounts ->
             let counts = model.observations.workspaceCounts in
-            syncCounts (updateObservation (setCountState True { counts | error = Nothing, pending = True }) model)
+            if model.observations.requestMode /= ObservationMatchMode then retryDiscoveryCounts model
+            else syncCounts (updateObservation (setCountState True { counts | error = Nothing, pending = True, current = False }) (clearDiscoveryError model))
 
         RetryObservationCounts ->
-            syncCounts (updateObservation (\state -> let counts = state.counts in { state | counts = { counts | error = Nothing, pending = True } }) model)
+            if model.observations.requestMode /= ObservationMatchMode then retryDiscoveryCounts model
+            else syncCounts (updateObservation (\state -> let counts = state.counts in { state | counts = { counts | error = Nothing, pending = True, current = False } }) (clearDiscoveryError model))
 
         ObservationPreferencesReceived payload ->
             hydratePreferences payload model
 
         SetObservationQuery value ->
-            editFilters (not (String.isEmpty value)) (\state -> { state | query = value, modeQueries = Dict.insert (modeKey state.requestMode) value state.modeQueries }) model
+            editSearchText False False value model
+
+        SetObservationSubjectQuery value ->
+            editSearchText True False value model
+
+        ObservationFilterCompositionStart ->
+            ( updateObservation (\state -> { state | filterComposing = True, filterDebounce = Nothing, nextFilterToken = state.nextFilterToken + 1 }) model, Cmd.none )
+
+        ObservationFilterCompositionEnd subjects value ->
+            let prepared = updateObservation (\state -> { state | filterComposing = False }) model in
+            editSearchText subjects True value prepared
 
         ObservationFiltersReady stamp ->
-            if model.observations.filterDebounce == Just stamp && model.selectedWorkspaceId == Just stamp.workspaceId && model.sessionRequestEpoch == stamp.sessionEpoch && countActor model == stamp.actor && model.observations.requestMode == stamp.mode then
+            if model.observations.filterDebounce == Just stamp && model.selectedWorkspaceId == Just stamp.workspaceId && model.sessionRequestEpoch == stamp.sessionEpoch && countActor model == stamp.actor && model.observations.requestMode == stamp.mode && stamp.query == draftQuery model.observations then
                 applyLiveFilters (updateObservation (\state -> { state | filterDebounce = Nothing }) model)
             else
                 ( model, Cmd.none )
@@ -916,7 +1261,9 @@ updateRaw msg model =
             refreshActiveResults model
 
         RetryObservationResults ->
-            retryResults model
+            if model.observations.discovery.failedCount then
+                retryDiscoveryCounts model
+            else if treeMode model.observations.requestMode then startTree True (clearDiscoveryError model) else retryResults (clearDiscoveryError model)
 
         RetryObservationDetail ->
             case model.observations.selectedId of
@@ -1927,9 +2274,10 @@ switchBrowseMode mode model =
     let
         previous = model.observations
         queries = Dict.insert (modeKey previous.requestMode) previous.query previous.modeQueries
+        subjects = Dict.insert (modeKey previous.requestMode) previous.subjectQuery previous.modeSubjectQueries
         scrolls = Dict.insert (modeKey previous.requestMode) (Maybe.withDefault previous.viewport.top previous.preferenceScroll) previous.modeScrolls
         prepared = updateObservation (\state -> retireFilterReads
-            { state | requestMode = mode, query = Dict.get (modeKey mode) queries |> Maybe.withDefault "", modeQueries = queries, modeScrolls = scrolls
+            { state | requestMode = mode, query = Dict.get (modeKey mode) queries |> Maybe.withDefault "", subjectQuery = Dict.get (modeKey mode) subjects |> Maybe.withDefault "", modeQueries = queries, modeSubjectQueries = subjects, modeScrolls = scrolls
                 , selectedFacet = if mode == ObservationExactSubjectMode then state.selectedFacet else Nothing
                 , matchValidationError = Nothing, browseReturn = Nothing }) model
         preserve ( updated, command ) =
@@ -1991,6 +2339,7 @@ restoreBrowseAfterMatch model =
                         , subject = model.observations.subject
                         , selectedFacet = model.observations.selectedFacet
                         , query = model.observations.query
+                        , subjectQuery = model.observations.subjectQuery
                         , gitSha = model.observations.gitSha
                         , currentGitSha = model.observations.currentGitSha
                         , historyGitSha = model.observations.historyGitSha
@@ -2005,6 +2354,7 @@ restoreBrowseAfterMatch model =
                             , subject = restored.subject
                             , selectedFacet = restored.selectedFacet
                             , query = restored.query
+                            , subjectQuery = restored.subjectQuery
                             , gitSha = restored.gitSha, currentGitSha = restored.currentGitSha, historyGitSha = restored.historyGitSha
                             , matchPathsInput = ""
                             , matchAppliedPaths = []
@@ -2080,7 +2430,9 @@ refreshActiveResultsRaw model =
     let
         state = model.observations
     in
-    if treeMode state.requestMode && state.filterDebounce == Nothing && filterValidationError state == Nothing then
+    if model.activeTab /= ObservationsTab && state.requestMode == ObservationFlatMode then
+        (updateObservation (\current -> {current | resultsStale = True, refreshPending = True, refreshPass = Maybe.map (\pass -> {pass | invalidated = True}) current.refreshPass}) model, Cmd.none)
+    else if treeMode state.requestMode && state.filterDebounce == Nothing && filterValidationError state == Nothing then
         if List.any (\request -> request.lifetime == state.tree.lifetime) state.tree.physical then
             (updateObservation (\current -> {current | refreshPending = True}) model, Cmd.none)
         else startTree True model
@@ -2097,7 +2449,7 @@ refreshActiveResultsRaw model =
                 else
                     let
                         facets = state.requestMode == ObservationFacetMode
-                        pass = { query = querySnapshot state, targetOffset = Basics.max pageSize (if facets then state.facetNextOffset else state.nextOffset), items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, facets = Dict.empty, facetKeys = [], invalidated = False }
+                        pass = { query = querySnapshot state, targetOffset = Basics.max (if state.requestMode == ObservationMatchMode then pageSize else 50) (if facets then state.facetNextOffset else state.nextOffset), items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, facets = Dict.empty, facetKeys = [], invalidated = False }
                         started = if facets then startFacetRefresh model.sessionRequestEpoch workspaceId state
                             else if state.requestMode == ObservationMatchMode then startMatchRefresh model.sessionRequestEpoch workspaceId state
                             else startResultRefresh state.requestMode model.sessionRequestEpoch workspaceId state
@@ -2157,7 +2509,7 @@ acceptRefreshChunk offset hasMore count merge model =
                     next = offset + count
                     fail message = ( updateObservation (\current -> { current | refreshPass = Nothing, refreshPending = False, refreshError = Just message, loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing }) model, Cmd.none )
                 in
-                if count > pageSize || (hasMore && (count /= pageSize || after <= before)) then fail "Automatic refresh is incomplete: the page made no valid progress."
+                if count > pageSize || (hasMore && (not (List.member count [ 50, pageSize ]) || after <= before)) then fail "Automatic refresh is incomplete: the page made no valid progress."
                 else if hasMore && next >= 10000 && next < old.targetOffset then fail "Automatic refresh is incomplete: the bounded offset limit was reached."
                 else if hasMore && next < old.targetOffset then
                     fetchRefreshPage next (updateObservation (\current -> { current | refreshPass = Just pass }) model)
@@ -2263,11 +2615,7 @@ fetchPage offset model =
                 updated =
                     updateObservation (\current -> { current | loading = True, error = Nothing, expectedOffset = Just offset }) model
             in
-            ( updated
-            , (if state.requestMode == ObservationFlatMode then Api.fetchContentObservations else Api.fetchObservations) model.flags.apiUrl
-                (listQuery workspaceId offset state)
-                (GotObservations workspaceId Nothing state.requestGeneration state.queryFingerprint offset)
-            )
+            requestDiscovery (DiscoveryFlat Nothing state.requestGeneration state.queryFingerprint offset) updated
 
         Nothing ->
             ( model, Cmd.none )
@@ -2478,6 +2826,7 @@ startMatchReload sessionEpoch workspaceId paths draftState =
                     , subject = previous.subject
                     , selectedFacet = previous.selectedFacet
                     , query = previous.query
+                    , subjectQuery = previous.subjectQuery
                     , gitSha = previous.gitSha, currentGitSha = previous.currentGitSha, historyGitSha = previous.historyGitSha
                     }
     in
@@ -2524,6 +2873,7 @@ resultFingerprint mode sessionEpoch workspaceId state =
         [ modeName mode
         , String.fromInt sessionEpoch
         , queryFingerprint (listQuery workspaceId 0 { state | requestMode = mode })
+        , state.subjectQuery
         ]
 
 
@@ -2605,6 +2955,10 @@ commitAppliedQuery state =
     { scoped | appliedQuery = Just query, failedRequest = Nothing }
 
 
+draftQuery : ObservationModel -> ObservationAppliedQuery
+draftQuery state = querySnapshot { state | appliedQuery = Nothing }
+
+
 querySnapshot : ObservationModel -> ObservationAppliedQuery
 querySnapshot input =
     let
@@ -2613,6 +2967,7 @@ querySnapshot input =
     in
     { requestMode = state.requestMode
     , query = state.query
+    , subjectQuery = state.subjectQuery
     , subjectKind = state.subjectKind
     , subject = state.subject
     , selectedFacet = state.selectedFacet
@@ -2720,6 +3075,7 @@ appliedState state =
             { state
                 | requestMode = applied.requestMode
                 , query = applied.query
+                , subjectQuery = applied.subjectQuery
                 , subjectKind = applied.subjectKind
                 , subject = applied.subject
                 , selectedFacet = applied.selectedFacet
@@ -2759,7 +3115,7 @@ revertFilters state =
         applied =
             appliedState state
     in
-    { state | query = applied.query, subjectKind = applied.subjectKind, subject = applied.subject, gitSha = applied.gitSha, currentGitSha = applied.currentGitSha, historyGitSha = applied.historyGitSha }
+    { state | query = applied.query, subjectQuery = applied.subjectQuery, subjectKind = applied.subjectKind, subject = applied.subject, gitSha = applied.gitSha, currentGitSha = applied.currentGitSha, historyGitSha = applied.historyGitSha }
 
 
 activeFingerprint : String -> ObservationModel -> String
@@ -3993,7 +4349,8 @@ for a draft keystroke. Transport caches and their counts remain untouched.
 refreshViewport : Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
 refreshViewport previous ( incoming, command ) =
     let
-        (revealed, revealCmd) = finishTreeReveal incoming
+        (discovered, discoveryCmd) = pumpDiscovery incoming
+        (revealed, revealCmd) = finishTreeReveal discovered
         ( model, preferenceCmd ) = syncPreferences previous revealed
         old = previous.observations
         state = model.observations
@@ -4038,7 +4395,7 @@ refreshViewport previous ( incoming, command ) =
         ( pumped, treeCmd ) = pumpTree automatic
         ( counted, countsCmd ) = syncCounts pumped
     in
-    ( counted, Cmd.batch [ command, revealCmd, preferenceCmd, automaticCmd, treeCmd, countsCmd, if synchronize || treeTarget /= Nothing then Ports.syncObservationViewport (ObservationViewport.sync changed 0 (treeTarget |> Maybe.map (\key -> (key, "first"))) viewport) else Cmd.none ] )
+    ( counted, Cmd.batch [ command, discoveryCmd, revealCmd, preferenceCmd, automaticCmd, treeCmd, countsCmd, if synchronize || treeTarget /= Nothing then Ports.syncObservationViewport (ObservationViewport.sync changed 0 (treeTarget |> Maybe.map (\key -> (key, "first"))) viewport) else Cmd.none ] )
 
 
 preferenceMode : ObservationRequestMode -> String
@@ -4063,7 +4420,7 @@ rememberPreferences model =
             , groups = Dict.toList state.expandedMatchGroups |> List.filter Tuple.second |> List.map Tuple.first
             , paths = Set.toList state.tree.expanded, focusedPath = state.tree.focused, selectedPath = state.tree.selectedPath
             , context = Just (Helpers.encodeObservationQuery (Helpers.observationAppliedQuery state))
-            , queries = Dict.insert (modeKey state.requestMode) state.query state.modeQueries, scrolls = Dict.insert (modeKey state.requestMode) state.viewport.top state.modeScrolls, fileInput = state.matchPathsInput }
+            , queries = Dict.insert (modeKey state.requestMode) state.query state.modeQueries, subjectQueries = Dict.insert (modeKey state.requestMode) state.subjectQuery state.modeSubjectQueries, scrolls = Dict.insert (modeKey state.requestMode) state.viewport.top state.modeScrolls, fileInput = state.matchPathsInput }
         }) model
 
 
@@ -4134,6 +4491,7 @@ hydratePreferences payload model =
                         hydrated = { accepted | preferenceValue = {prefs | selectedPath = restoredTree.selectedPath}, preferencePendingDetail = prefs.detail /= Nothing, preferenceEntryHistory = if prefs.detail == Nothing then Nothing else accepted.preferenceEntryHistory, expandedSubjects = Dict.fromList (List.map (\key -> ( key, True )) prefs.subjects)
                             , expandedMatchGroups = Dict.fromList (List.map (\key -> ( key, True )) prefs.groups)
                             , modeQueries = if explicit then Dict.union accepted.modeQueries prefs.queries else Dict.union prefs.queries accepted.modeQueries
+                            , modeSubjectQueries = if explicit then Dict.union accepted.modeSubjectQueries prefs.subjectQueries else Dict.union prefs.subjectQueries accepted.modeSubjectQueries
                             , modeScrolls = Dict.union accepted.modeScrolls prefs.scrolls
                             , matchPathsInput = if accepted.matchPathsInput == "" then prefs.fileInput else accepted.matchPathsInput
                             , tree = restoredTree }
@@ -4141,7 +4499,9 @@ hydratePreferences payload model =
                         explicit = model.url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (String.split "=" >> List.head >> Maybe.andThen Url.percentDecode)
                             |> List.any (\key -> List.member key [ "ov", "oq", "ox", "observation" ])
                         restored = if explicit || context.notice /= Nothing then Nothing else prefs.context |> Maybe.andThen Url.percentDecode |> Maybe.andThen (Decode.decodeString Helpers.observationQueryDecoder >> Result.toMaybe)
-                        queryState = restored |> Maybe.map (\query -> Helpers.restoreObservationQuery query hydrated |> retireFilterReads) |> Maybe.withDefault hydrated
+                        queryState = restored |> Maybe.map (\query ->
+                            let restoredState = Helpers.restoreObservationQuery query hydrated in
+                            if query == Helpers.observationAppliedQuery hydrated then restoredState else retireFilterReads restoredState) |> Maybe.withDefault hydrated
                         savedTop = if queryState.selectedId /= Nothing || context.fragment.observationId /= Nothing || prefs.detail /= Nothing then Nothing else Dict.get (modeKey queryState.requestMode) prefs.scrolls
                         viewport = queryState.viewport
                         ready = { model | observations = { queryState | preferenceScroll = savedTop, viewport = { viewport | top = Maybe.withDefault viewport.top savedTop } } }
@@ -4481,7 +4841,7 @@ viewObservationsStateWithPermission display canEdit workspace state =
             ]
 
     else
-        div [ id "observation-panel", class "observations-panel", attribute "data-observation-context" (Encode.encode 0 (navigationStamp workspace.id state)) ]
+        div [ id "observation-panel", class "observations-panel", attribute "data-observation-context" (Encode.encode 0 (navigationStamp workspace.id state)), attribute "data-observation-search-reset" (observationSearchResetStamp workspace.id state) ]
             [ div
                 ([ class "observation-curation-background" ]
                     ++ (if canEdit && state.deleteConfirmation /= Nothing then
@@ -4549,9 +4909,9 @@ viewFilterInputs : ObservationModel -> Html Msg
 viewFilterInputs state =
     let
         searchLabel = case state.requestMode of
-            ObservationFlatMode -> "Search content"
+            ObservationFlatMode -> "Search observations"
             ObservationMatchMode -> "Search file matches"
-            _ -> "Search subjects"
+            _ -> "Search observations"
         active = List.length (List.filter identity
             [ state.subjectKind /= Nothing, if state.requestMode == ObservationFlatMode then state.subject /= "" else state.requestMode == ObservationExactSubjectMode && state.selectedFacet /= Nothing
             , state.gitSha /= "", state.currentGitSha /= "", state.historyGitSha /= "" ])
@@ -4559,17 +4919,28 @@ viewFilterInputs state =
     in
     div [ class "observation-discovery-controls" ]
         [ Html.form [ class "filter-bar observation-filters observation-search", onSubmit ApplyObservationFilters ]
-            [ div [ class "filter-group observation-filter-group" ]
+            [ if state.requestMode /= ObservationMatchMode then
+                div [ class "filter-group observation-filter-group observation-paired-subjects" ]
+                    [ label [ class "filter-label", for "observation-subject-query" ] [ text "Subjects" ]
+                    , input [ id "observation-subject-query", class "form-input observation-filter-input", type_ "search", placeholder "Literal subject path", value state.subjectQuery
+                        , onInput SetObservationSubjectQuery, Html.Events.on "compositionstart" (Decode.succeed ObservationFilterCompositionStart)
+                        , Html.Events.on "compositionend" (Decode.map (ObservationFilterCompositionEnd True) (Decode.at [ "target", "value" ] Decode.string)) ] []
+                    , if state.subjectQuery /= "" then button [ class "search-clear observation-query-clear", type_ "button", attribute "aria-label" "Clear Subjects", onClick (SetObservationSubjectQuery "") ] [text "×"] else text "" ]
+              else text ""
+            , div [ class "filter-group observation-filter-group observation-paired-content" ]
                 [ label [ class "filter-label", for "observation-query" ] [ text searchLabel ]
                 , input
                     [ id "observation-query"
                     , class "form-input observation-filter-input"
                     , type_ "search"
-                    , placeholder (if treeMode state.requestMode then "Literal subject path" else "Search observations")
+                    , placeholder "Search observation content"
                     , value state.query
                     , onInput SetObservationQuery
+                    , Html.Events.on "compositionstart" (Decode.succeed ObservationFilterCompositionStart)
+                    , Html.Events.on "compositionend" (Decode.map (ObservationFilterCompositionEnd False) (Decode.at [ "target", "value" ] Decode.string))
                     ]
                     []
+                , if state.query /= "" then button [ class "search-clear observation-query-clear", type_ "button", attribute "aria-label" "Clear Search observations", onClick (SetObservationQuery "") ] [text "×"] else text ""
                 ]
             , button
                 [ id "observation-advanced-toggle"
@@ -4659,11 +5030,28 @@ viewFileComposer state =
         ]
 
 
+retrievalFallbackLabel : Maybe String -> String
+retrievalFallbackLabel reason =
+    case reason of
+        Just "disabled" -> "vector search disabled"
+        Just "no_compatible_vectors" -> "no compatible vectors"
+        Just "empty_query" -> "no content query"
+        _ -> "vector search unavailable"
+
+
 viewAppliedFilters : ObservationModel -> Html Msg
 viewAppliedFilters state =
     div [ class "observation-applied-filters", attribute "role" "status" ]
         [ case filterValidationError state of
             Just message -> p [ id "observation-filter-validation", class "form-error", attribute "role" "alert" ] [ text message ]
+            Nothing -> text ""
+        , if state.requestMode /= ObservationMatchMode then
+            case state.discovery.context of
+                Just context -> p [class "form-help observation-retrieval-mode"] [text (if context.retrieval.mode == "hybrid" then "Hybrid content search" else if state.query == "" then "Showing matching subjects" else "Full-text search · " ++ retrievalFallbackLabel context.retrieval.reason)]
+                Nothing -> text ""
+          else text ""
+        , case state.discovery.error of
+            Just message -> div [class "observation-discovery-error", attribute "role" "alert"] [p [] [text message], button [class "btn btn-secondary", type_ "button", onClick RetryObservationResults] [text "Retry search"]]
             Nothing -> text ""
         , if filtersPending state then
             p [ class "form-help observation-filter-pending" ] [ text (if state.completedQuery == Nothing && List.isEmpty state.orderedIds && List.isEmpty state.facetKeys then "Editing filters." else "Editing filters. Showing the last completed results.") ]
@@ -5399,7 +5787,7 @@ armTreeRoute model =
 
 restoreRouteResults : Model -> ( Model, Cmd Msg )
 restoreRouteResults incoming =
-    let model = armTreeRoute incoming in
+    let model = armTreeRoute (prepareForegroundResults incoming) in
     (if filterValidationError model.observations /= Nothing then ( model, Cmd.none ) else
         case model.observations.requestMode of
             ObservationFacetMode -> reloadFacets model
@@ -5407,6 +5795,21 @@ restoreRouteResults incoming =
             ObservationMatchMode -> reloadAppliedMatch model
             mode -> reloadResultMode mode model)
         |> migrateLegacySubjectLink
+
+
+prepareForegroundResults : Model -> Model
+prepareForegroundResults model =
+    if model.observations.discovery.failedCount then clearDiscoveryError model else model
+
+
+resumeForegroundResults : Model -> ( Model, Cmd Msg )
+resumeForegroundResults model =
+    if model.activeTab /= ObservationsTab || not model.observations.discovery.failedCount then
+        ( model, Cmd.none )
+    else if model.observations.discovery.afterBootstrap /= Nothing then
+        retryDiscoveryCounts model
+    else
+        restoreRouteResults model
 
 
 migrateLegacySubjectLink : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
@@ -5424,7 +5827,7 @@ migrateLegacySubjectLink ( model, command ) =
 
 bootstrapObservation : Int -> Model -> ( Model, Cmd Msg )
 bootstrapObservation token model =
-    bootstrapObservationRaw token model |> migrateLegacySubjectLink
+    bootstrapObservationRaw token (prepareForegroundResults model) |> migrateLegacySubjectLink
 
 
 bootstrapObservationRaw : Int -> Model -> ( Model, Cmd Msg )
@@ -5441,7 +5844,7 @@ bootstrapObservationRaw token incoming =
                     let
                         state = startResultReload mode model.sessionRequestEpoch workspaceId model.observations
                     in
-                    ( { model | observations = state }, (if mode == ObservationFlatMode then Api.fetchContentObservations else Api.fetchObservations) model.flags.apiUrl (listQuery workspaceId 0 state) (GotObservations workspaceId (Just token) state.requestGeneration state.queryFingerprint 0) )
+                    requestDiscovery (DiscoveryFlat (Just token) state.requestGeneration state.queryFingerprint 0) { model | observations = state }
         Nothing -> ( model, Cmd.none )
 
 

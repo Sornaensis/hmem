@@ -71,7 +71,8 @@ test('canonical prerequisite authority gates hierarchy and focused task/subtask 
       assert.deepEqual(await transitionAvailability(h, target), { todo: false, in_progress: false, blocked: true, done: false, cancelled: true })
       assert.equal(await statusControl(h, target).inputValue(), 'blocked')
       assert.equal(await statusControl(h, target).locator('option[value="done"]').innerText(), 'completed')
-      assert.match(await h.page.locator('#entity-' + target).innerText(), /open prerequisite/)
+      assert.doesNotMatch(await h.page.locator('#entity-' + target).innerText(), /Finish or cancel \d+ open prerequisite/)
+      assert.match(await statusControl(h, target).locator('option[value="in_progress"]').getAttribute('title'), /open prerequisite/)
       assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview') || r.path === '/api/v1/tasks/prerequisite'), false)
     } finally { detail.release(); await h.close() }
   }
@@ -86,6 +87,8 @@ test('canonical prerequisite authority gates hierarchy and focused task/subtask 
     for (const id of ['own', 'own-child']) {
       await h.page.locator('#entity-' + id).waitFor()
       assert.deepEqual(await transitionAvailability(h, id), { todo: false, in_progress: false, blocked: true, done: false, cancelled: true })
+      assert.doesNotMatch(await h.page.locator('#entity-' + id).innerText(), /Finish or cancel \d+ open prerequisite/)
+      assert.match(await statusControl(h, id).locator('option[value="in_progress"]').getAttribute('title'), /open prerequisite/)
     }
     assert.equal(await h.page.locator('#entity-prerequisite').count(), 0)
     assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview')), false)
@@ -111,11 +114,13 @@ test('legacy unknown eligibility retries bounded summaries and delayed ready rep
     await h.bounded(detail.arrived, 5000, 'Legacy detail request')
     assert.ok(legacy.used)
     assert.equal((await transitionAvailability(h, 'own')).in_progress, false)
+    assert.match(await h.page.locator('#entity-own .card-filter-context-note').innerText(), /Prerequisite eligibility is unavailable\. Refresh to retry\./)
     const retry = h.page.locator('#entity-own').getByRole('button', { name: 'Refresh eligibility' })
     const failed = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('own'), { error: 503 })
     await retry.click(); await h.bounded(failed.arrived, 5000, 'Failed eligibility retry')
     await h.page.waitForTimeout(50)
     assert.equal((await transitionAvailability(h, 'own')).done, false)
+    assert.match(await h.page.locator('#entity-own .card-filter-context-note').innerText(), /Prerequisite eligibility is unavailable\. Refresh to retry\./)
     const ready = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('own'), { hold: true, transform(value) { value.tasks.find(task => task.id === 'own').readiness_rollup.own_open_dependency_count = 0; return value } })
     await retry.click(); await h.bounded(ready.arrived, 5000, 'Delayed ready summary')
     const current = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('own'), { hold: true })

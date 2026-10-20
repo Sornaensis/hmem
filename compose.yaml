@@ -3,6 +3,8 @@
 # Quick start:
 #   1. Copy .env.example to .env and set POSTGRES_PASSWORD/port/image values.
 #   2. Copy config/compose.env.example to config/compose.env for hmem runtime env.
+#      Set its auth profile/token, or set HMEM_ENV_FILE=.env to use root .env
+#      runtime values documented in .env.example instead.
 #   3. Run: docker compose up --build
 #
 # Official postgres is the default. To enable pgvector-backed embedding similarity,

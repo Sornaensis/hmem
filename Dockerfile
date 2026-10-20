@@ -22,6 +22,7 @@ RUN npm ci
 
 COPY hmem-server/frontend/index.html hmem-server/frontend/vite.config.js ./
 COPY hmem-server/frontend/src ./src
+COPY hmem-server/frontend/public ./public
 RUN npm run build
 
 FROM ${HASKELL_BUILDER_IMAGE} AS haskell-builder

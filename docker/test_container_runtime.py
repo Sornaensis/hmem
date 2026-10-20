@@ -8,6 +8,7 @@ owns one uniquely named disposable container with a bounded private HOME tmpfs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -319,6 +320,14 @@ class BuiltImageTest(unittest.TestCase):
         js = docker("exec", self.cid, "cat", "/run/hmem/static/hmem-runtime-config.js")
         self.assertIn("window.HMEM_CONFIG", js)
         self.assertNotIn(secret, js)
+        for asset in (ROOT / "hmem-server/frontend/public").rglob("*"):
+            if asset.is_file():
+                relative = asset.relative_to(ROOT / "hmem-server/frontend/public").as_posix()
+                packaged = docker("exec", self.cid, "sha256sum", f"/opt/hmem/static/{relative}")
+                self.assertEqual(packaged.split()[0], hashlib.sha256(asset.read_bytes()).hexdigest())
+                if relative != "hmem-runtime-config.js":
+                    docker("exec", self.cid, "cmp", f"/opt/hmem/static/{relative}",
+                           f"/run/hmem/static/{relative}")
         self.assertEqual(docker("exec", self.cid, "id", "-u"), "10001")
         self.assertEqual(docker("exec", self.cid, "stat", "-c", "%a", "/var/lib/hmem/.hmem/logs"), "700")
         record = json.loads(docker("inspect", self.cid))[0]

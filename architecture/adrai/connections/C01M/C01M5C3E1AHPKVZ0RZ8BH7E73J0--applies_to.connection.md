@@ -1,0 +1,15 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5C3E1AHPKVZ0RZ8BH7E73J0"
+relation = "applies_to"
+added = ["hmem-server/frontend/guide.md", "hmem-server/frontend/tests-js/task-status.browser.test.js", "hmem-server/migrations/V040__task_dependency_scopes.sql", "task-dependencies.md"]
+applies_to = ["api.md", "docker.md", "hmem-core/src/HMem/DB/Overview.hs", "hmem-core/src/HMem/DB/Pool.hs", "hmem-core/src/HMem/DB/Project.hs", "hmem-core/src/HMem/DB/Task.hs", "hmem-core/src/HMem/Types.hs", "hmem-core/test/HMem/DB/ChangeStreamSpec.hs", "hmem-core/test/HMem/DB/OverviewSpec.hs", "hmem-core/test/HMem/DB/ProjectSpec.hs", "hmem-core/test/HMem/DB/TaskSpec.hs", "hmem-core/test/HMem/DB/TestHarnessSpec.hs", "hmem-core/test/HMem/TypesSpec.hs", "hmem-mcp/src/HMem/MCP/Tools.hs", "hmem-mcp/test/HMem/MCP/ToolsSpec.hs", "hmem-server/frontend/README.md", "hmem-server/frontend/guide.md", "hmem-server/frontend/package.json", "hmem-server/frontend/src/Api.elm", "hmem-server/frontend/src/AppShell.elm", "hmem-server/frontend/src/Feature/Cards.elm", "hmem-server/frontend/src/Feature/Dependencies.elm", "hmem-server/frontend/src/Feature/DragDrop.elm", "hmem-server/frontend/src/Feature/Editing.elm", "hmem-server/frontend/src/Feature/Mutations.elm", "hmem-server/frontend/src/Feature/WebSocket.elm", "hmem-server/frontend/src/Helpers.elm", "hmem-server/frontend/src/Types.elm", "hmem-server/frontend/src/UpdateRouter.elm", "hmem-server/frontend/tests-js/hierarchy-fixture.mjs", "hmem-server/frontend/tests-js/project-pause.browser.test.js", "hmem-server/frontend/tests-js/task-status.browser.test.js", "hmem-server/frontend/tests/DataLoadingTest.elm", "hmem-server/frontend/tests/DependenciesTest.elm", "hmem-server/frontend/tests/LifecycleBlockersTest.elm", "hmem-server/hmem-server.cabal", "hmem-server/migrations/V017__flat_subtask_lifecycle_rules.sql", "hmem-server/migrations/V027__bounded_task_dependency_cycle_check.sql", "hmem-server/migrations/V029__cascade_archive_and_cancel.sql", "hmem-server/migrations/V034__subtask_parent_auto_blocking.sql", "hmem-server/migrations/V035__project_pause_lifecycle.sql", "hmem-server/migrations/V036__normalize_project_pause.sql", "hmem-server/migrations/V037__project_pause_audit_provenance.sql", "hmem-server/migrations/V040__task_dependency_scopes.sql", "hmem-server/src/HMem/Server/API.hs", "hmem-server/src/HMem/Server/OpenAPI.hs", "hmem-server/test/HMem/Server/APISpec.hs", "task-dependencies.md"]
+change = "expand"
+parent_connections = ["C01M4QXFYFJM8Y5NGPNYKVRW61J"]
+removed = []
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
++++
+
+Root-and-sibling-prerequisite-enforcement-and-upgrade-reference
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6ImIwZjIyYTc1YmUzODRlMzkyMzhhZGM1OWU0NGIyNzBmNjQwNTMzMGYiLCJrIjoic2NvcGUuZXhwYW5kIiwibyI6IkMwMU01QzNFMUFIUEtWWjBSWjhCSDdFNzNKMCIsIm9wIjoiTzAxTTVDM0UxQUhQS1ZaMFJaOEJIN0U3M0owIiwicCI6WyJDMDFNNFFYRllGSk04WTVOR1BOWUtWUlc2MUoiXSwiciI6Im1hc3RlciIsInMiOiJzaGEyNTY6RUliSFQwdTh4eG5kbks2b3MwT0hiSVBJLUs4M1pCZldSSEdwc1lOUzJibyIsInQiOjE3OTI0ODEzNjMyODEsInYiOjEsIngiOiJhZHJhaS8xLjAuMCJ9 -->

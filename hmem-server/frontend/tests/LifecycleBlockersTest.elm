@@ -958,6 +958,30 @@ suite =
                 , Helpers.taskStatusDisabledReason recursiveOnly own Api.Done
                 , Helpers.taskStatusDisabledReason (statusEligibilityModel Nothing) { own | status = Api.Todo } Api.Todo
                 ]
+        , test "subtask starts require current parent authority and retain recovery after own prerequisites close" <| \_ ->
+            let
+                base = statusEligibilityModel (Just 0)
+                child = Dict.get "own-child" base.tasks |> Maybe.withDefault (task "own-child" (Just "eligible-parent") (Just "project-a"))
+                parentAuthority rollup source = Helpers.applyTaskReadiness (source.dataLoading.nextNavigationSummaryRevision + 1) "eligible-parent" rollup source
+                unknown = parentAuthority { statusEligibilityRollup | ownOpenDependencyCount = Nothing } base
+                retry = Feature.WebSocket.update (RefreshTaskStatusEligibility unknown.selectedWorkspaceId unknown.sessionRequestEpoch child.id) unknown |> Tuple.first
+                stale = Helpers.applyTaskReadiness 0 "eligible-parent" statusEligibilityRollup retry
+                ownReady = Helpers.applyTaskReadiness (stale.dataLoading.nextNavigationSummaryRevision + 1) child.id statusEligibilityRollup stale
+                ready = parentAuthority statusEligibilityRollup ownReady
+                blocked = parentAuthority { statusEligibilityRollup | canStartSubtasks = False } ready
+                missing = { ready | tasks = Dict.remove "eligible-parent" ready.tasks }
+                closed = { ready | tasks = Dict.update "eligible-parent" (Maybe.map (\parent -> { parent | status = Api.Done })) ready.tasks }
+                ownBlocked = Helpers.applyTaskReadiness (ready.dataLoading.nextNavigationSummaryRevision + 1) child.id { statusEligibilityRollup | ownOpenDependencyCount = Just 1 } ready
+                dispatches source = (Feature.Editing.update (ChangeTaskStatus child.id Api.InProgress) source |> Tuple.first |> .mutations |> .nextRequestId) > source.mutations.nextRequestId
+            in
+            Expect.all
+                [ \_ -> List.map (\source -> Helpers.taskStatusDisabledReason source child Api.InProgress /= Nothing) [ unknown, retry, stale, ownReady, blocked, missing, closed, ownBlocked ] |> Expect.equal (List.repeat 8 True)
+                , \_ -> List.map dispatches [ unknown, retry, stale, ownReady, blocked, missing, closed, ownBlocked, ready ] |> Expect.equal (List.repeat 8 False ++ [ True ])
+                , \_ -> Helpers.taskStatusDisabledReason ready child Api.InProgress |> Expect.equal Nothing
+                , \_ -> Helpers.taskOwnOpenDependencyCount stale "eligible-parent" |> Expect.equal Nothing
+                , \_ -> Helpers.taskStatusEligibilityUnavailableReason ownReady child |> Expect.equal (Just "Parent eligibility is unavailable. Refresh to retry.")
+                , \_ -> Helpers.taskStatusEligibilityUnavailableReason blocked child |> Expect.equal Nothing
+                ] ()
         , test "unknown readiness blocks transitions and explicit retry retires zero before failure and recovery" <| \_ ->
             let
                 model = statusEligibilityModel (Just 0)

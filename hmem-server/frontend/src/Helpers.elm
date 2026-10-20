@@ -1038,6 +1038,24 @@ taskPrerequisiteBlockerReason model taskId =
         Nothing -> Just "Prerequisite eligibility is unavailable. Refresh to retry."
 
 
+taskParentEligibilityUnavailable : Model -> Api.Task -> Bool
+taskParentEligibilityUnavailable model task =
+    case task.parentId of
+        Nothing -> False
+        Just parentId ->
+            not (Dict.member parentId model.tasks)
+                || taskOwnOpenDependencyCount model parentId == Nothing
+
+
+taskStatusEligibilityUnavailableReason : Model -> Api.Task -> Maybe String
+taskStatusEligibilityUnavailableReason model task =
+    if taskOwnOpenDependencyCount model task.id == Nothing then
+        taskPrerequisiteBlockerReason model task.id
+    else if taskParentEligibilityUnavailable model task then
+        Just "Parent eligibility is unavailable. Refresh to retry."
+    else Nothing
+
+
 taskStatusDisabledReason : Model -> Api.Task -> Api.TaskStatus -> Maybe String
 taskStatusDisabledReason model task status =
     let
@@ -1068,6 +1086,8 @@ taskStatusDisabledReason model task status =
         Just "Reopen the parent task before reopening this subtask."
     else if List.member status [ Api.Todo, Api.InProgress, Api.Done ] && taskPrerequisiteBlockerReason model task.id /= Nothing then
         taskPrerequisiteBlockerReason model task.id
+    else if status == Api.InProgress && taskParentEligibilityUnavailable model task then
+        Just "Parent eligibility is unavailable. Refresh to retry."
     else if isOpenTaskCardStatus status && (closedTaskAncestor Set.empty task.parentId || closedProjectAncestor Set.empty task.projectId) then
         Just "Reopen the closed parent task or project before reopening this task."
     else if status == Api.Done && openSubtasks > 0 then

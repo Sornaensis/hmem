@@ -89,7 +89,11 @@ updateRaw msg model =
             if workspace /= model.selectedWorkspaceId || epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspace) |> Maybe.withDefault False) then
                 ( model, Cmd.none )
             else case workspace of
-                Just workspaceId -> requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) [ ( "task", taskId ) ] model
+                Just workspaceId ->
+                    let
+                        parent = Dict.get taskId model.tasks |> Maybe.andThen .parentId |> Maybe.map (\id -> [ ( "task", id ) ]) |> Maybe.withDefault []
+                    in
+                    requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) (( "task", taskId ) :: parent) model
                 Nothing -> ( model, Cmd.none )
 
         WsConnectingMsg ->

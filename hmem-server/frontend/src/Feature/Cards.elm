@@ -2348,13 +2348,13 @@ viewTaskCardBody descendants projection showProject model task =
 
           else
             div [ class "card-summary" ] [ text (String.join " · " summaryParts) ]
-        , case ( Helpers.taskOwnOpenDependencyCount model task.id, Helpers.taskPrerequisiteBlockerReason model task.id ) of
-            ( Nothing, Just reason ) ->
+        , case Helpers.taskStatusEligibilityUnavailableReason model task of
+            Just reason ->
                 div [ class "card-filter-context-note" ]
                     [ text reason
                     , button [ class "btn-inline-create", onClick (RefreshTaskStatusEligibility model.selectedWorkspaceId model.sessionRequestEpoch task.id) ] [ text "Refresh eligibility" ]
                     ]
-            _ -> text ""
+            Nothing -> text ""
         , if shownForMatchingSubtask then
             div [ class "card-filter-context-note" ] [ text "Shown because a subtask matches the current filters." ]
 

@@ -3,7 +3,7 @@ import test from 'node:test'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
-import { projectReadinessRollup } from '../perf/fixtures.mjs'
+import { projectReadinessRollup, taskReadinessRollup } from '../perf/fixtures.mjs'
 
 const paint = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 const statuses = ['todo', 'in_progress', 'blocked', 'done', 'cancelled']
@@ -134,6 +134,49 @@ test('legacy unknown eligibility retries bounded summaries and delayed ready rep
     assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview')), false)
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
   } finally { detail.release(); await h.close() }
+})
+
+test('closed prerequisites recover subtask starts after a failed parent eligibility refresh', { timeout: 60000 }, async () => {
+  for (const closedStatus of ['done', 'cancelled']) for (const focused of [false, true]) {
+    const data = prerequisiteFixture()
+    data.tasks = data.tasks.filter(task => ['eligible-parent', 'own-child', 'prerequisite'].includes(task.id))
+    data.dependencies = ['eligible-parent', 'own-child'].map(task_id => ({ task_id, depends_on_id: 'prerequisite' }))
+    const authority = { updateTask(fixture, id, update) {
+      assert.equal(update.status, 'in_progress')
+      assert.equal(taskReadinessRollup(fixture, id).own_open_dependency_count, 0)
+      assert.equal(taskReadinessRollup(fixture, 'eligible-parent').can_start_subtasks, true)
+      const task = fixture.tasks.find(value => value.id === id); task.status = update.status; return task
+    } }
+    const h = await openHierarchy(data, [], authority)
+    try {
+      await h.start(focused ? 'tab=projects&focus=task:own-child' : 'tab=projects', focused ? 'own-child' : 'root-project')
+      await h.idle()
+      assert.equal((await transitionAvailability(h, 'own-child')).in_progress, false)
+      const failed = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('eligible-parent'), { error: 503 })
+      h.fixture.tasks.find(task => task.id === 'prerequisite').status = closedStatus
+      const frame = prerequisiteFrame(h.fixture.workspace.id, 'parent-recovery-' + closedStatus)
+      frame.event.invalidations = frame.event.invalidations.filter(value => ['task:prerequisite', 'task:own-child', 'task:eligible-parent'].includes(value.target))
+      await h.page.evaluate(value => window.pushHierarchyFrames([value]), frame)
+      await h.bounded(failed.arrived, 5000, 'Failed parent eligibility refresh'); await h.idle()
+      assert.equal((await transitionAvailability(h, 'own-child')).in_progress, false)
+      assert.doesNotMatch(await statusControl(h, 'own-child').locator('option[value="in_progress"]').getAttribute('title'), /open prerequisite/)
+      const retry = h.page.locator('#entity-own-child').getByRole('button', { name: 'Refresh eligibility' })
+      assert.equal(await retry.count(), 1, 'closed own prerequisites must retain recovery for unavailable parent authority')
+      const recovered = h.gate(r => r.path.endsWith('/navigation/summaries') && r.taskIds.includes('own-child'), {})
+      await retry.click(); await h.bounded(recovered.arrived, 5000, 'Subtask eligibility recovery'); await h.idle()
+      assert.equal((await transitionAvailability(h, 'own-child')).in_progress, true,
+        'closed own prerequisites must become startable after recovery: ' + JSON.stringify({ retryTaskIds: recovered.receipt.taskIds,
+          reason: await statusControl(h, 'own-child').locator('option[value="in_progress"]').getAttribute('title'),
+          recoveryButtons: await retry.count() }))
+      assert.ok(recovered.receipt.taskIds.includes('eligible-parent'), 'retry must refresh canonical parent eligibility with the child')
+      assert.equal(await retry.count(), 0)
+      await statusControl(h, 'own-child').selectOption('in_progress'); await h.idle()
+      assert.equal(h.requests.filter(r => r.path === '/api/v1/tasks/own-child' && r.method === 'PUT').length, 1)
+      assert.equal(await statusControl(h, 'own-child').inputValue(), 'in_progress')
+      assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview')), false)
+      assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    } finally { await h.close() }
+  }
 })
 
 test('five task statuses and mixed subtasks retain independent palette, neutral blocked semantics and single opacity', { timeout: 60000 }, async () => {

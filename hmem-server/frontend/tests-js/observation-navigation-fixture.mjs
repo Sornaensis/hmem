@@ -68,7 +68,8 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
       return { release, arrived }
     },
     async start(fragment = 'tab=observations') {
-      await h.page.goto(h.origin + '/workspace/' + fixture.workspace.id + '#' + fragment)
+      // These scenarios navigate Flat result cards, including off-page details.
+      await h.page.goto(h.origin + '/workspace/' + fixture.workspace.id + '#' + fragment + '&ov=1&oq=' + encodeURIComponent(JSON.stringify(['flat', '', null, '', '', null, null, [], '', ''])))
       await h.page.locator('#observation-panel').waitFor()
       await this.idle()
     },

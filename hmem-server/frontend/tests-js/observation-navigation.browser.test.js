@@ -175,7 +175,7 @@ test('production tab unmount and direct-link remount retire the completed activa
     const selected = JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId
     await h.page.evaluate(() => { location.hash = 'tab=projects' })
     await h.page.waitForFunction(() => !document.getElementById('observation-panel'))
-    await h.page.evaluate(id => { location.hash = 'tab=observations&observation=' + id }, selected)
+    await h.page.evaluate(id => { location.hash = 'tab=observations&observation=' + id + '&ov=1&oq=' + encodeURIComponent(JSON.stringify(['flat', '', null, '', '', null, null, [], '', ''])) }, selected)
     await h.page.locator('#observation-detail').waitFor(); await h.idle()
     await returnToResults(h.page)
     await h.page.waitForFunction(() => document.activeElement?.id === 'observation-results')

@@ -25,15 +25,15 @@ async function assertReachable(page, target) {
   })
   assert.ok(geometry.visible && geometry.unobscured && geometry.width > 0, JSON.stringify(geometry))
 }
-for (const width of [1440, 320]) test(`production ${width} mode DOM visual and native Tab order preserves the All Observations default`, { timeout: 60000 }, async () => {
+for (const width of [1440, 320]) test(`production ${width} mode DOM visual and native Tab order preserves the Subject Tree default`, { timeout: 60000 }, async () => {
   const h = await openDiscovery({ width, height: 800 })
   try {
-    await h.start()
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations'); await h.idle()
     if (width === 320) { await h.page.addStyleTag({ content: 'html { font-size: 200%; }' }); await paint(h.page) }
     const labels = ['Subject Tree', 'All Observations', 'Files']
     const buttons = h.page.getByRole('group', { name: 'Observation browse mode', exact: true }).getByRole('button')
     assert.deepEqual(await buttons.allTextContents(), labels)
-    assert.deepEqual(await buttons.evaluateAll(elements => elements.map(element => element.getAttribute('aria-pressed'))), ['false', 'true', 'false'])
+    assert.deepEqual(await buttons.evaluateAll(elements => elements.map(element => element.getAttribute('aria-pressed'))), ['true', 'false', 'false'])
     assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).count(), 0)
     const boxes = await buttons.evaluateAll(elements => elements.map(element => element.getBoundingClientRect().toJSON()))
     for (let index = 1; index < boxes.length; index++) {
@@ -47,9 +47,9 @@ for (const width of [1440, 320]) test(`production ${width} mode DOM visual and n
     }
     await h.page.keyboard.press('Shift+Tab')
     assert.equal(await h.page.locator(':focus').textContent(), 'All Observations')
-    assert.deepEqual(await buttons.evaluateAll(elements => elements.map(element => element.getAttribute('aria-pressed'))), ['false', 'true', 'false'], 'Focus order does not select Subject Tree')
-    assert.ok(h.receipts.some(value => value.endpoint === '/api/v1/observations'))
-    assert.equal(h.receipts.some(value => value.endpoint.endsWith('/subject-tree')), false, 'First visual mode does not replace the initial flat read')
+    assert.deepEqual(await buttons.evaluateAll(elements => elements.map(element => element.getAttribute('aria-pressed'))), ['true', 'false', 'false'], 'Focus order retains Subject Tree')
+    assert.ok(h.receipts.some(value => value.endpoint.endsWith('/subject-tree')))
+    assert.equal(h.receipts.some(value => value.endpoint === '/api/v1/observations'), false, 'Fresh entry reads the Subject Tree')
     assert.deepEqual(h.errors, [])
   } finally { await h.close() }
 })

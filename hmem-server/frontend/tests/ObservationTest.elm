@@ -29,6 +29,13 @@ import Types exposing (AuthStatus(..), Flags, Model, Msg(..), ObservationModel, 
 import Url
 
 
+-- Flat result and detail scenarios select their browse mode explicitly.
+flatObservationState : ObservationModel
+flatObservationState =
+    let initial = Feature.Observation.init in
+    { initial | requestMode = ObservationFlatMode }
+
+
 suite : Test
 suite =
     describe "observation API boundary"
@@ -1845,7 +1852,7 @@ suite =
             \_ ->
                 let
                     empty =
-                        Feature.Observation.init
+                        flatObservationState
 
                     repository =
                         observationWorkspace Api.Repository
@@ -1903,7 +1910,7 @@ suite =
             \_ ->
                 let
                     empty =
-                        Feature.Observation.init
+                        flatObservationState
 
                     observation =
                         fixtureObservation "selected" "2026-01-01T00:00:00Z"
@@ -2041,7 +2048,7 @@ suite =
             \_ ->
                 let
                     empty =
-                        Feature.Observation.init
+                        flatObservationState
 
                     repository =
                         observationWorkspace Api.Repository
@@ -2770,6 +2777,21 @@ suite =
                     , \_ -> List.map .prefix restoredFacet.observations.tree.physical |> Expect.equal [ "" ]
                     ]
                     ()
+        , test "origin-less Files clearing restores the default Tree query independently of Files text" <|
+            \_ ->
+                let
+                    initial = Feature.Observation.init
+                    files queries = editableModel { initial | requestMode = ObservationMatchMode, query = "Files content", matchAppliedPaths = [ "src/Main.elm" ], modeQueries = queries }
+                    cleared queries = Feature.Observation.update ClearObservationMatch (files queries) |> Tuple.first |> .observations
+                    saved = cleared (Dict.fromList [ ( "tree", "src/auth" ), ( "flat", "Flat content" ), ( "match", "Files content" ) ])
+                    empty = cleared Dict.empty
+                in
+                Expect.all
+                    [ \_ -> ( saved.requestMode, saved.query, saved.matchAppliedPaths ) |> Expect.equal ( ObservationFacetMode, "src/auth", [] )
+                    , \_ -> ( empty.requestMode, empty.query ) |> Expect.equal ( ObservationFacetMode, "" )
+                    , \_ -> (Feature.Observation.treeQuery "workspace-1" "" 0 saved).subjectQuery |> Expect.equal (Just "src/auth")
+                    , \_ -> List.map .prefix saved.tree.physical |> Expect.equal [ "" ]
+                    ] ()
         , test "path grouping follows caller and canonical subject order, keeps empty paths, and dedupes only inside a group" <|
             \_ ->
                 let
@@ -3225,7 +3247,7 @@ suite =
             \_ ->
                 let
                     selected =
-                        Feature.Observation.selectObservation "off-page" (editableModel Feature.Observation.init) |> Tuple.first
+                        Feature.Observation.selectObservation "off-page" (editableModel flatObservationState) |> Tuple.first
                 in
                 case selected.observations.activeDetailRequest of
                     Nothing -> Expect.fail "Expected initial linked detail request"
@@ -3294,7 +3316,7 @@ suite =
             \_ ->
                 let
                     model =
-                        editableModel Feature.Observation.init
+                        editableModel flatObservationState
 
                     requested =
                         Feature.Observation.update RefreshObservationResults model |> Tuple.first
@@ -3718,7 +3740,7 @@ selectedObservationState : Api.Observation -> ObservationModel
 selectedObservationState observation =
     let
         initial =
-            Feature.Observation.init
+            flatObservationState
     in
     { initial
         | items = Dict.singleton observation.id observation
@@ -4233,7 +4255,7 @@ pendingReturnModel : Model
 pendingReturnModel =
     let
         value = fixtureObservation "curated" "2026-01-01T00:00:00Z"
-        initial = Feature.Observation.init
+        initial = flatObservationState
         before = editableModel initial
         loaded = editableModel { initial | items = Dict.singleton value.id value, orderedIds = [ value.id ] }
         projected = Feature.Observation.refreshViewport before ( loaded, Cmd.none ) |> Tuple.first
@@ -4414,7 +4436,7 @@ observationProjectionTests =
         let
             observations = List.range 0 149 |> List.map (\number -> fixtureObservation (String.fromInt number) "2026-01-01T00:00:00Z")
             ids = List.map .id observations
-            initial = Feature.Observation.init
+            initial = flatObservationState
             loaded = { initial | items = observations |> List.map (\value -> ( value.id, value )) |> Dict.fromList, orderedIds = ids }
             cardIds state = Feature.Observation.projectResultRows state |> Array.toList |> List.filterMap (\row -> case row of
                 ObservationCardRow _ value -> Just value.id

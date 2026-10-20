@@ -203,6 +203,7 @@ liveFilterTests =
             , \_ -> hydrated.observations.tree.expanded |> Expect.equal Set.empty
             , \_ -> hydrated.observations.tree.physical |> Expect.equal initial.observations.tree.physical
             , \_ -> explicit.observations.tree.selectedPath |> Expect.equal (Just "explicit/path")
+            , \_ -> explicit.observations.tree.expanded |> Expect.equal intended.observations.tree.expanded
             , \_ -> proven.observations.tree.selectedPath |> Expect.equal Nothing
             , \_ -> proven.observations.preferenceValue.selectedPath |> Expect.equal Nothing
             , \_ -> proven.observations.tree.physical |> Expect.equal [] ] ()
@@ -530,7 +531,7 @@ liveFilterTests =
             [ \_ -> List.length next.observations.tree.physical |> Expect.equal 1
             , \_ -> List.length settled.observations.tree.physical |> Expect.equal 0
             , \_ -> settled.observations.tree.totals |> Expect.equal Nothing
-            , \_ -> next.observations.modeQueries |> Expect.equal (Dict.singleton "flat" "") ] ()
+            , \_ -> next.observations.modeQueries |> Expect.equal (Dict.singleton "tree" "") ] ()
     , test "mode scroll positions and bounded legacy Subject preferences migrate independently" <| \_ ->
         let
             original = model.observations
@@ -994,22 +995,23 @@ suite = describe "automatic observation refresh and scoped preferences"
     , test "late tagged read after early tab entry ignores only its exact owned history and external URL still wins" <| \_ ->
         let
             url = model.url
-            projects = { model | activeTab = ProjectsTab, url = { url | fragment = Just "tab=projects" } }
+            projects = { model | activeTab = ProjectsTab, url = { url | fragment = Just "tab=projects" }, observations = Helpers.restoreObservationQuery Helpers.defaultObservationQuery model.observations }
             initial = project projects projects
             owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
-            prefs = { preferenceDefaults | detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [], groups = [] }
+            prefs = { preferenceDefaults | context = Just (Helpers.encodeObservationQuery (Helpers.observationAppliedQuery model.observations)), detail = Just { id = observationId, occurrence = Nothing, mode = "flat" }, subjects = [], groups = [] }
             payload = E.object [ ( "owner", P.ownerValue owner ), ( "value", P.encode owner prefs ) ]
             entered = AppShell.handleOwned (AppShell.SwitchTabMsg ObservationsTab) initial |> Tuple.first
             ownUrl = entered.observations.preferenceEntryHistory |> Maybe.andThen Url.fromString |> Maybe.withDefault url
-            afterHistory = { entered | url = ownUrl }
+            afterHistory = Route.handleUrlChange ownUrl entered |> Tuple.first |> project entered
             beforeHistory = O.update (ObservationPreferencesReceived payload) entered |> Tuple.first
-            settled = project beforeHistory { beforeHistory | url = ownUrl }
+            settled = Route.handleUrlChange ownUrl beforeHistory |> Tuple.first |> project beforeHistory
             late = O.update (ObservationPreferencesReceived payload) afterHistory |> Tuple.first
             external = O.update (ObservationPreferencesReceived payload) { afterHistory | url = { ownUrl | fragment = Just "tab=observations&oq=invalid" } } |> Tuple.first
             touched = O.update (ToggleObservationSubjects observationId) afterHistory |> Tuple.first
             superseded = O.update (ObservationPreferencesReceived payload) touched |> Tuple.first
         in Expect.all
             [ \_ -> late.observations.selectedId |> Expect.equal (Just observationId)
+            , \_ -> late.observations.requestMode |> Expect.equal ObservationFlatMode
             , \_ -> beforeHistory.observations.selectedId |> Expect.equal Nothing
             , \_ -> beforeHistory.observations.preferencePendingDetail |> Expect.equal True
             , \_ -> settled.observations.selectedId |> Expect.equal (Just observationId)
@@ -1017,6 +1019,41 @@ suite = describe "automatic observation refresh and scoped preferences"
             , \_ -> external.observations.selectedId |> Expect.equal Nothing
             , \_ -> superseded.observations.selectedId |> Expect.equal Nothing
             , \_ -> superseded.observations.preferenceEntryHistory |> Expect.equal Nothing ] ()
+    , describe "saved mode restoration owns only the current internal entry echo"
+        (List.concatMap (\detail -> List.map (\beforeEcho ->
+            test ((if detail == Nothing then "mode only" else "selected detail") ++ (if beforeEcho then " before echo" else " after echo")) <| \_ ->
+                let
+                    url = model.url
+                    projects = { model | activeTab = ProjectsTab, url = { url | fragment = Just "tab=projects" }, observations = Helpers.restoreObservationQuery Helpers.defaultObservationQuery model.observations }
+                    initial = project projects projects
+                    owner = initial.observations.preferenceOwner |> Maybe.withDefault { workspaceId = "", actorId = "", authority = "", runtimeId = "", epoch = 0, requestId = 0, touch = 0 }
+                    flatQuery = Helpers.observationAppliedQuery model.observations
+                    savedQuery = { flatQuery | query = "saved content" }
+                    prefs = { preferenceDefaults | context = Just (Helpers.encodeObservationQuery savedQuery), detail = detail, scrolls = Dict.fromList [ ( "flat", 275 ), ( "tree", 800 ) ] }
+                    payload = E.object [ ( "owner", P.ownerValue owner ), ( "value", P.encode owner prefs ) ]
+                    entered = AppShell.handleOwned (AppShell.SwitchTabMsg ObservationsTab) initial |> Tuple.first
+                    ownUrl = entered.observations.preferenceEntryHistory |> Maybe.andThen Url.fromString |> Maybe.withDefault url
+                    route target current = Route.handleUrlChange target current |> Tuple.first |> project current
+                    hydrate current = O.update (ObservationPreferencesReceived payload) current |> Tuple.first |> project current
+                    restored = if beforeEcho then route ownUrl (hydrate entered) else hydrate (route ownUrl entered)
+                    canonicalUrl = Helpers.observationHistoryUrl restored |> Url.fromString |> Maybe.withDefault url
+                    settled = route canonicalUrl restored
+                    completed = page 0 [ row observationId ] False settled |> project settled
+                    otherQuery = Helpers.defaultObservationQuery
+                    supersedingUrl = { ownUrl | fragment = Just ("tab=observations&ov=1&oq=" ++ Helpers.encodeObservationQuery { otherQuery | query = "external subjects" }) }
+                    superseded = if beforeEcho then hydrate entered |> route supersedingUrl |> route ownUrl else entered |> route supersedingUrl |> route ownUrl |> hydrate
+                    external = entered |> route supersedingUrl |> hydrate
+                in Expect.all
+                    [ \_ -> ( settled.observations.requestMode, settled.observations.query ) |> Expect.equal ( ObservationFlatMode, "saved content" )
+                    , \_ -> (Helpers.observationUrlContext settled.url).query |> Expect.equal savedQuery
+                    , \_ -> settled.observations.selectedId |> Expect.equal (Maybe.map .id detail)
+                    , \_ -> settled.observations.preferenceEntryHistory |> Expect.equal Nothing
+                    , \_ -> if detail == Nothing then settled.observations.preferenceScroll |> Expect.equal (Just 275) else Expect.pass
+                    , \_ -> if detail == Nothing then ( completed.observations.viewport.top, completed.observations.preferenceScroll ) |> Expect.equal ( 275, Nothing ) else Expect.pass
+                    , \_ -> ( superseded.observations.requestMode, superseded.observations.query ) |> Expect.equal ( ObservationFacetMode, "" )
+                    , \_ -> superseded.observations.preferenceEntryHistory |> Expect.equal Nothing
+                    , \_ -> external.observations.requestMode |> Expect.equal ObservationFacetMode
+                    ] ()) [ True, False ]) [ Nothing, Just { id = observationId, occurrence = Nothing, mode = "flat" } ])
     , test "pending off-tab detail is superseded by explicit URL, local preference intent and session retirement" <| \_ ->
         let
             url = model.url

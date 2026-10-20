@@ -14,6 +14,76 @@ async function ready(h) { await h.page.locator('#observation-panel').waitFor(); 
 async function history(h, direction) { await h.page.evaluate(direction => window.history[direction](), direction); await ready(h) }
 async function navigate(h, query, id) { await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + fragment(query, id)); await ready(h) }
 
+test('fresh direct and Projects entry default to collapsed Subject Tree without saved context', { timeout: 60000 }, async () => {
+  for (const projectsEntry of [false, true]) {
+    const h = await openDiscovery()
+    try {
+      await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + (projectsEntry ? '#tab=projects' : '#tab=observations'))
+      await h.idle()
+      if (projectsEntry) {
+        assert.equal(resultReceipts(h).length, 0)
+        await h.page.getByRole('button', { name: 'Observations', exact: true }).click()
+      }
+      await ready(h)
+      assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
+      assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).getAttribute('aria-pressed'), 'false')
+      assert.ok(resultReceipts(h).length > 0)
+      assert.ok(resultReceipts(h).every(value => value.endpoint.endsWith('/subject-tree') && value.params.prefix === ''))
+      assert.ok((await h.page.locator('.observation-tree-chevron').count()) > 0)
+      assert.ok((await h.page.locator('[data-tree-path]').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-expanded')))).every(value => value === 'false'))
+      assert.match(await h.page.locator('.workspace-header .workspace-observation-total').textContent(), /64 observations/)
+    } finally { await h.close() }
+  }
+})
+
+test('invalid saved mode falls back to Subject Tree while a saved Flat context still restores', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start()
+    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await ready(h)
+    await h.page.getByRole('button', { name: 'All Observations', exact: true }).click(); await ready(h)
+    await h.page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('hmem.observation-ui.v1:') && JSON.parse(decodeURIComponent(JSON.parse(localStorage.getItem(key)).context || 'null'))?.[0] === 'flat'))
+    const bare = h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations'
+    await h.page.goto(bare); await h.page.reload(); await ready(h)
+    assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).getAttribute('aria-pressed'), 'true')
+    await h.page.evaluate(() => {
+      for (const key of Object.keys(localStorage).filter(key => key.startsWith('hmem.observation-ui.v1:'))) {
+        const value = JSON.parse(localStorage.getItem(key)); value.context = encodeURIComponent(JSON.stringify(['unsupported', '', null, '', '', null, null, [], '', '']))
+        localStorage.setItem(key, JSON.stringify(value))
+      }
+    })
+    await h.page.goto(bare); await h.page.reload(); await ready(h)
+    assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await h.page.locator('#observation-query').inputValue(), '')
+  } finally { await h.close() }
+})
+
+test('late mode-only preferences replace the owned Tree entry URL and survive reload', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start()
+    await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
+    await h.page.waitForFunction(() => Object.values(localStorage).some(value => { try { const prefs = JSON.parse(value); return prefs.detail === null && prefs.context && JSON.parse(decodeURIComponent(prefs.context))[1] === 'Cache evidence' } catch { return false } }))
+    await h.page.addInitScript(() => {
+      const getItem = Storage.prototype.getItem, frame = window.requestAnimationFrame.bind(window)
+      let hold = false
+      Storage.prototype.getItem = function (key) { const value = getItem.call(this, key); if (location.hash === '#tab=projects' && key.startsWith('hmem.observation-ui.v1:')) hold = true; return value }
+      window.requestAnimationFrame = callback => { if (hold) { hold = false; window.releaseModePreference = () => frame(callback); return -1 } return frame(callback) }
+    })
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=projects'); await h.page.reload()
+    await h.page.waitForFunction(() => typeof window.releaseModePreference === 'function')
+    await h.page.getByRole('button', { name: 'Observations', exact: true }).click()
+    await h.page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('oq')?.startsWith('["tree"'))
+    await h.page.evaluate(() => window.releaseModePreference()); await ready(h)
+    await h.page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('oq')?.startsWith('["flat","Cache evidence"'))
+    assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await h.page.locator('.observation-detail').count(), 0)
+    await h.page.reload(); await ready(h)
+    assert.equal(await h.page.locator('#observation-query').inputValue(), 'Cache evidence')
+    assert.equal(await h.page.getByRole('button', { name: 'All Observations', exact: true }).getAttribute('aria-pressed'), 'true')
+  } finally { await h.close() }
+})
+
 test('live debounce coalesces input, replaces one history entry, and All sends consistent content scope', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
@@ -268,8 +338,11 @@ test('production malformed and oversized links restore atomically with an explic
       await h.page.goto(h.origin + '/'); await h.idle()
       const count = resultReceipts(h).length
       await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + suffix); await ready(h)
-      assert.equal(resultReceipts(h).length, count + 1)
-      assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
+      const reads = resultReceipts(h).slice(count)
+      assert.ok(reads.length >= 1 && reads.length <= 2, 'Only bounded Tree bootstrap and pending revalidation reads')
+      assert.ok(reads.every(value => value.endpoint.endsWith('/subject-tree') && value.params.prefix === '' && value.params.offset === '0'))
+      assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-tree')
+      assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
       assert.equal(resultReceipts(h).at(-1).params.query, undefined)
       assert.equal(await h.page.locator('.observation-detail').count(), 0)
       assert.match(await h.page.locator('.observation-url-notice').innerText(), /No filters or selection were restored/)
@@ -311,11 +384,13 @@ test('production valid oversized queries remain active, replace bounded markers,
     await h.page.locator('#observation-match-paths').fill('src/Main.elm')
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await ready(h)
     assert.equal(await h.page.evaluate(() => history.length), initialHistory + 1)
+    const beforeBack = resultReceipts(h).length
     await history(h, 'back'); assert.equal(h.page.url(), marker)
-    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
+    assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.ok(resultReceipts(h).slice(beforeBack).every(value => value.endpoint.endsWith('/subject-tree') || (value.endpoint === '/api/v1/observations' && value.params.subject && value.params.query === undefined)))
     assert.match(await h.page.locator('.observation-url-notice').innerText(), /not restored by Back, reload/)
     await h.page.reload(); await ready(h)
-    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
+    assert.equal(await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(await h.page.locator('#observation-query').inputValue(), '')
     const overflow = await h.page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
     assert.ok(overflow <= 1, String(overflow))

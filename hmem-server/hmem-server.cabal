@@ -460,6 +460,7 @@ test-suite hmem-server-test
       HMem.Server.AuthUsersSpec
       HMem.Server.BotIdentitySpec
       HMem.Server.ChangeStreamSpec
+      HMem.Server.ConfiguredObservationDiscoverySpec
       HMem.Server.CtlEmbeddingsCliSpec
       HMem.Server.CtlEmbeddingsSpec
       HMem.Server.CtlMigrateSpec

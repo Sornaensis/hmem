@@ -128,6 +128,30 @@ through provider outages; expired contexts and lost vector storage require an
 explicit restart. Semantic membership uses the full cosine >=0.5 set and
 deterministic reciprocal-rank fusion with FTS (k=60), without a top-K catalog.
 
+To qualify the already configured HTTP GPU provider against current-source
+discovery, set `HMEM_TEST_CONFIGURED_DISCOVERY=1` in the test process and run:
+
+```sh
+stack test hmem-server:test:hmem-server-test --test-arguments="--match=ConfiguredDiscovery"
+```
+
+The test captures the normal config path before the test sandbox redirects
+HOME; `HMEM_TEST_DISCOVERY_CONFIG` can select an explicit existing config file.
+It accepts only the validated HTTP GPU profile and exact pinned space, retaining
+the normal embedding mode/endpoint environment overrides. Without opt-in it
+skips before reading operator configuration or invoking the provider. With
+opt-in, missing or unusable configuration/provider fails qualification.
+
+Only the disposable PostgreSQL fixture is seeded. External test DB mode is
+refused; the test starts no embedding worker, model or operator service and
+writes no operator configuration/logs. It validates the provider, then checks
+authorized capability, a real hybrid query and context continuation through
+WAI, plus denied requests with zero provider calls. A 180-second overall
+deadline includes the usual two-second discovery bound; withdrawal/invalidation
+cleanup has its own two-second bound. Output contains safe assertion status
+and helper SHA256 only. This qualifies the isolated current-source path, not
+browser traffic or the operator database's vector coverage.
+
 Content writes, including same-text re-audits, clear an Observation's stored
 vector. It stays out of similarity results until a new vector is stored. A
 changed-content import is stale and needs fresh export input; unchanged input

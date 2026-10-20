@@ -299,7 +299,7 @@ suite =
             [ timelineFocusFrom "task", \source -> Main.update (FocusEntity "task" parent.id) source |> Tuple.first
             , \source -> Main.update (FocusEntityKeepForward "task" parent.id) source |> Tuple.first
             , \source -> Main.update (FocusBreadcrumbNav source.focus.historyIndex) source |> Tuple.first
-            , \source -> Main.update (NavigateToSearchResult "task" parent.id) source |> Tuple.first
+            , \source -> captureSearchJump "task" parent.id source
             , \source -> Main.update (NavigateToAuditEntity auditEntry) source |> Tuple.first ]
                 |> List.map check
                 |> Expect.equal (List.repeat 6 { base = Just "normal-base", query = "normal-base", show = Types.ShowProjectsOnly, submitted = Nothing, results = Nothing
@@ -4535,3 +4535,11 @@ establishedShell source =
         established = { source | webSocket = { websocket | streams = Dict.insert ("workspace:" ++ workspaceId) { state | snapshotApplied = True } websocket.streams } }
     in
     WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) established |> Tuple.first
+
+
+captureSearchJump : String -> String -> Model -> Model
+captureSearchJump kind entityId source =
+    let pending = Main.update (NavigateToSearchResult kind entityId) source |> Tuple.first in
+    case pending.search.pendingJump of
+        Just intent -> Main.update (SearchNavigationEvent (Encode.object [ ( "token", Encode.int intent.token ), ( "guard", Encode.string intent.guard ), ( "top", Encode.float 0 ) ])) pending |> Tuple.first
+        Nothing -> pending

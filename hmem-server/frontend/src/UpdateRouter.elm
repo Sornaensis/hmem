@@ -447,6 +447,10 @@ route msg model =
         GotUnifiedSearchResults _ _ _ _ _ ->
             Ok (Feature.Search.update msg model)
 
+        SearchNavigationEvent _ -> Ok (Feature.Search.update msg model)
+
+        ReturnSearchResults -> Ok (Feature.Search.update msg model)
+
         NavigateToSearchResult _ _ ->
             Ok (Feature.Search.update msg model)
 

@@ -405,6 +405,9 @@ type alias SearchModel =
     , entityTypes : Maybe (List String)
     , entityTypesActor : Maybe String
     , completedRequest : Maybe SearchRequest
+    , returnReceipt : Maybe SearchReturnReceipt
+    , pendingJump : Maybe SearchJumpIntent
+    , nextJumpToken : Int
     , submittedQuery : Maybe String
     , refreshPending : Bool
     , unifiedResults : Maybe Api.UnifiedSearchResults
@@ -423,6 +426,21 @@ type alias SearchModel =
     , filterMemoryPinned : Maybe Bool
     , filterMemoryActiveLinked : Bool
     , filterTags : List String
+    }
+
+
+type alias SearchJumpIntent =
+    { token : Int, entityType : String, entityId : String, guard : String }
+
+
+type alias SearchReturnReceipt =
+    { workspaceId : String, sessionEpoch : Int, actor : String, runtimeId : String, token : Int
+    , entityType : String, entityId : String, phase : String, invalidated : Bool, awaitingSource : Bool, scrollTop : Float, resultId : String
+    , sourceUrl : String, targetUrl : String, tab : WorkspaceTab, focus : FocusModel
+    , focusedFilters : Maybe FocusedFilterContext, hierarchy : HierarchyFilters
+    , observationSelectedId : Maybe String
+    , query : String, activated : Bool, entityTypes : Maybe (List String), entityTypesActor : Maybe String
+    , results : Maybe Api.UnifiedSearchResults, completedRequest : Maybe SearchRequest
     }
 
 
@@ -596,6 +614,7 @@ type alias ObservationModel =
     , nextDetailRequestToken : Int
     , detailNavigationEpoch : Int
     , detailNavigationToken : Int
+    , searchOriginDetail : Bool
     , detailReturnTarget : Maybe String
     , pendingReturnNavigation : Maybe ObservationReturnIntent
     , edit : Maybe ObservationEditState
@@ -1398,6 +1417,8 @@ type Msg
     | SubmitSearch
     | GotUnifiedSearchResults String Int Int String (Result Http.Error Api.UnifiedSearchResults)
     | NavigateToSearchResult String String
+    | SearchNavigationEvent Encode.Value
+    | ReturnSearchResults
     | SetFilterShowOnly FilterShowOnly
     | SetFilterShowEmptyProjects Bool
     | ToggleWorkspaceGroup String

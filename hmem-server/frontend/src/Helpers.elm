@@ -295,7 +295,7 @@ observationUrlContext url =
             List.map Tuple.first pairs
 
         versioned =
-            List.any (\key -> List.member key [ "ov", "ox", "oq" ]) keys
+            List.any (\key -> List.member key [ "ov", "ox", "oq", "search-jump" ]) keys
                 || List.any (\part -> String.startsWith "ov=" part || String.startsWith "ox=" part || String.startsWith "oq=" part) parts
 
         lookup key =
@@ -304,13 +304,14 @@ observationUrlContext url =
         validFields =
             List.length pairs == List.length parts
                 && List.length keys == Set.size (Set.fromList keys)
-                && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox" ]) keys
+                && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox", "search-jump" ]) keys
                 && (lookup "tab" |> Maybe.map (\tab -> List.member tab [ "projects", "observations", "timeline", "audit", "administration" ]) |> Maybe.withDefault True)
                 && (lookup "focus" |> Maybe.map (\focus -> case String.split ":" focus of
                         [ kind, entityId ] -> List.member kind [ "project", "task", "memory" ] && not (String.isEmpty entityId)
                         _ -> False
                     ) |> Maybe.withDefault True)
                 && (lookup "observation" |> Maybe.map (not << String.isEmpty) |> Maybe.withDefault True)
+                && (lookup "search-jump" |> Maybe.map validObservationSearchJump |> Maybe.withDefault True)
     in
     if observationUrlBytes (Url.toString url) > 4096 then
         fallback "This Observation URL exceeds the 4096-byte limit. No filters or selection were restored."
@@ -334,6 +335,26 @@ observationUrlContext url =
 
             _ ->
                 fallback "Invalid Observation link. No filters or selection were restored."
+
+
+validObservationSearchJump : String -> Bool
+validObservationSearchJump value =
+    String.toInt value |> Maybe.map (\token -> token > 0 && token <= 2147483647 && String.fromInt token == value) |> Maybe.withDefault False
+
+
+isObservationSearchUrl : Url.Url -> Bool
+isObservationSearchUrl url =
+    let
+        context = observationUrlContext url
+        marker = url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (\part -> case String.split "=" part of
+            [ key, value ] -> if Url.percentDecode key == Just "search-jump" then Url.percentDecode value else Nothing
+            _ -> Nothing)
+    in
+    (context.notice == Nothing || context.notice == Just excludedObservationNotice)
+        && context.fragment.tab == ObservationsTab && context.fragment.observationId /= Nothing
+        && (case marker of
+            [ value ] -> validObservationSearchJump value
+            _ -> False)
 
 
 observationQueryDecoder : Decode.Decoder ObservationAppliedQuery
@@ -415,6 +436,19 @@ observationHistoryUrl model =
     case completeObservationUrl model of
         Ok url -> url
         Err _ -> observationUrl model ("&ox=" ++ Url.percentEncode (model.flags.sessionId ++ "-" ++ String.fromInt model.sessionRequestEpoch ++ "-" ++ String.fromInt model.observations.nextLinkToken))
+
+
+{-| Include the navigation marker before enforcing the public URL budget.
+The bounded exclusion marker retains a truthful fallback for oversized filters.
+-}
+observationSearchHistoryUrl : Int -> Model -> String
+observationSearchHistoryUrl token model =
+    let
+        marker = "&search-jump=" ++ String.fromInt (Basics.clamp 1 2147483647 token)
+        complete = observationUrl model ("&ov=1&oq=" ++ encodeObservationQuery (observationAppliedQuery model.observations) ++ marker)
+    in
+    if observationUrlBytes complete <= 4096 then complete
+    else observationUrl model ("&ox=search-" ++ String.fromInt (Basics.clamp 1 2147483647 token) ++ marker)
 
 
 writeObservationHistory : Bool -> Model -> ( Model, Cmd Msg )

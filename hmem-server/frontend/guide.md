@@ -53,6 +53,13 @@ no types pauses searching. The bar stays visible when you clear the query and
 return to your previous view. While updating or after a failure, the last completed
 results remain labelled with their query; use **Retry search** to try again.
 
+Results use compact previews with copyable IDs. **Jump To** opens the canonical
+project, task or Observation, including targets outside your current filters.
+Observation targets show their full content in a read-only detail view.
+**Back to search results** or browser Back restores the query, selected types,
+scroll position and Jump To control without changing your saved filters. If a
+target is deleted or access changes, the return control remains available.
+
 ## Observation drafts and search
 
 Keep one unsaved Observation draft while moving between rows, tabs or Back

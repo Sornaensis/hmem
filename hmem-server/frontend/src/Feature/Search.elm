@@ -2,6 +2,9 @@ module Feature.Search exposing
     ( LinkedMemoryPresentation
     , SearchResultBadge
     , SearchResultPresentation
+    , viewNavigation
+    , routeChanged
+    , reconcileNavigation
     , selectedEntityTypes
     , requestIdentity
     , clearTransientSearchState
@@ -20,6 +23,10 @@ module Feature.Search exposing
     )
 
 import Api
+import Browser.Navigation as Nav
+import Json.Encode as Encode
+import Ports
+import Url
 import Feature.DataLoading
 import Feature.FocusedFilters
 import Feature.Focus
@@ -28,6 +35,7 @@ import Dict
 import Permissions
 import Helpers exposing (replaceFragment, saveFiltersCmd, scrollToElement, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
 import Html exposing (..)
+import Html.Keyed as Keyed
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Types exposing (..)
@@ -46,6 +54,9 @@ init =
     , entityTypes = Nothing
     , entityTypesActor = Nothing
     , completedRequest = Nothing
+    , returnReceipt = Nothing
+    , pendingJump = Nothing
+    , nextJumpToken = 1
     , submittedQuery = Nothing
     , refreshPending = False
     , unifiedResults = Nothing
@@ -198,12 +209,43 @@ updateOther msg model =
             else
                 case result of
                     Ok results ->
-                        ( { model | search = { state | unifiedResults = Just results, completedRequest = state.activeRequest, isSearching = False, searchError = Nothing, activeRequestQuery = Nothing, activeRequest = Nothing } }, Cmd.none )
+                        ( { model | search = { state | unifiedResults = Just results, completedRequest = state.activeRequest, isSearching = False, searchError = Nothing, activeRequestQuery = Nothing, activeRequest = Nothing
+                            , returnReceipt = state.returnReceipt |> Maybe.map (\receipt -> if receipt.phase == "returned" && receiptMatches model receipt && String.trim receipt.query == requestedQuery then { receipt | invalidated = False, results = Just results, completedRequest = state.activeRequest } else receipt) } }, Cmd.none )
                     Err _ ->
                         ( { model | search = { state | isSearching = False, searchError = Just "Search failed. Retry to update results.", activeRequestQuery = Nothing, activeRequest = Nothing } }, Cmd.none )
 
         NavigateToSearchResult entityType entityId ->
-            navigateToSearchResult entityType entityId model
+            if not (Permissions.canReadCurrentWorkspace model) || not (List.member entityType [ "project", "task", "observation" ]) then ( model, Cmd.none ) else
+            let
+                state = model.search
+                intent = { token = state.nextJumpToken, entityType = entityType, entityId = entityId, guard = navigationGuard model }
+            in
+            ( { model | search = { state | pendingJump = Just intent, nextJumpToken = intent.token + 1 } }
+            , Ports.searchNavigationCommand (Encode.object [ ( "token", Encode.int intent.token ), ( "guard", Encode.string intent.guard ), ( "resultId", Encode.string (jumpButtonId entityType entityId) ) ]) )
+
+        SearchNavigationEvent value ->
+            case Decode.decodeValue (Decode.map3 (\token guard top -> ( token, guard, top )) (Decode.field "token" Decode.int) (Decode.field "guard" Decode.string) (Decode.field "top" Decode.float)) value of
+                Ok ( token, guard, top ) ->
+                    case model.search.pendingJump of
+                        Just intent ->
+                            if intent.token == token && intent.guard == guard && guard == navigationGuard model then
+                                navigateToSearchResult intent (Basics.max 0 top) model
+                            else ( model, Cmd.none )
+                        Nothing -> ( model, Cmd.none )
+                Err _ -> ( model, Cmd.none )
+
+        ReturnSearchResults ->
+            case model.search.returnReceipt of
+                Just receipt ->
+                    if receiptMatches model receipt then
+                        let
+                            ( restored, command ) = restoreSearch receipt model
+                            state = restored.search
+                            awaiting = { restored | search = { state | returnReceipt = Maybe.map (\value -> { value | awaitingSource = True }) state.returnReceipt } }
+                        in
+                        ( awaiting, Cmd.batch [ command, model.key |> Maybe.map (\key -> Nav.back key 1) |> Maybe.withDefault Cmd.none ] )
+                    else ( model, Cmd.none )
+                Nothing -> ( model, Cmd.none )
 
         ToggleFilterMemoryType mtype ->
             let
@@ -313,7 +355,7 @@ changeGlobalQuery immediate query model =
     let
         state = model.search
         empty = String.isEmpty (String.trim query)
-        updated = { model | search = { state | globalQuery = query, globalActivated = state.globalActivated || not empty, globalGeneration = state.globalGeneration + 1
+        updated = { model | search = { state | returnReceipt = Nothing, pendingJump = Nothing, globalQuery = query, globalActivated = state.globalActivated || not empty, globalGeneration = state.globalGeneration + 1
             , activeRequest = Nothing, activeRequestQuery = Nothing, refreshPending = False, submittedQuery = Nothing, searchError = Nothing
             , isSearching = not empty, unifiedResults = if empty then Nothing else state.unifiedResults
             , completedRequest = if empty then Nothing else state.completedRequest } }
@@ -360,98 +402,155 @@ clearUnifiedSearchState =
     clearTransientSearchState
 
 
-navigateToSearchResult : String -> String -> Model -> ( Model, Cmd Msg )
-navigateToSearchResult entityType entityId model =
+navigationGuard : Model -> String
+navigationGuard model =
+    Encode.encode 0 (Encode.list Encode.string
+        [ model.flags.sessionId, Maybe.withDefault "" model.selectedWorkspaceId, Helpers.globalSearchActor model, String.fromInt model.sessionRequestEpoch
+        , String.fromInt model.search.globalGeneration, model.search.globalQuery, String.join "," (selectedEntityTypes model)
+        , model.search.completedRequest |> Maybe.map (.token >> String.fromInt) |> Maybe.withDefault "" ])
+
+
+jumpButtonId : String -> String -> String
+jumpButtonId kind entityId =
+    "search-jump-" ++ kind ++ "-" ++ entityId
+
+
+receiptMatches : Model -> SearchReturnReceipt -> Bool
+receiptMatches model receipt =
+    model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model
+        && model.selectedWorkspaceId == Just receipt.workspaceId && model.sessionRequestEpoch == receipt.sessionEpoch
+        && Helpers.globalSearchActor model == receipt.actor && model.flags.sessionId == receipt.runtimeId
+
+
+navigateToSearchResult : SearchJumpIntent -> Float -> Model -> ( Model, Cmd Msg )
+navigateToSearchResult intent top model =
     let
-        baseClearedSearch =
-            clearUnifiedSearchState model.search
-
-        clearedSearch =
-            if entityType == "observation" then
-                { baseClearedSearch
-                    | query = ""
-                    , filterMemoryTypes = []
-                    , filterImportance = AnyPriority
-                    , filterMemoryPinned = Nothing
-                    , filterMemoryActiveLinked = False
-                    , filterTags = []
-                }
-
-            else
-                baseClearedSearch
-
-        isFocusableEntity =
-            entityType == "project" || entityType == "task"
-
-        focusEntry =
-            ( entityType, entityId )
-
-        currentFocus =
-            model.focus
-
-        focusedHistory =
-            List.take (currentFocus.historyIndex + 1) currentFocus.history ++ [ focusEntry ]
-
-        updatedFocus =
-            if isFocusableEntity then
-                { currentFocus
-                    | focusedEntity = Just focusEntry
-                    , breadcrumbAnchor = Just focusEntry
-                    , history = focusedHistory
-                    , historyIndex = List.length focusedHistory - 1
-                    , returnContext = Nothing
-                }
-
-            else
-                { currentFocus
-                    | focusedEntity = Nothing
-                    , breadcrumbAnchor = Nothing
-                    , history = []
-                    , historyIndex = 0
-                    , returnContext = Nothing
-                }
-
-        targetTab =
-            if entityType == "observation" then
-                ObservationsTab
-
-            else
-                ProjectsTab
-
-        nextModel =
-            { model
-                | activeTab = targetTab
-                , search = clearedSearch
-                , focus = updatedFocus
-            }
-                |> (if isFocusableEntity then Feature.FocusedFilters.enter else identity)
+        state = model.search
+        receipt = { workspaceId = Maybe.withDefault "" model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch, actor = Helpers.globalSearchActor model, runtimeId = model.flags.sessionId
+            , token = intent.token, entityType = intent.entityType, entityId = intent.entityId, phase = "target", invalidated = False, awaitingSource = False, scrollTop = top, resultId = jumpButtonId intent.entityType intent.entityId
+            , sourceUrl = Url.toString model.url, targetUrl = "", tab = model.activeTab, focus = model.focus, focusedFilters = model.focusedFilters, hierarchy = Feature.FocusedFilters.capture state
+            , observationSelectedId = model.observations.selectedId, query = state.globalQuery, activated = state.globalActivated, entityTypes = state.entityTypes, entityTypesActor = state.entityTypesActor
+            , results = state.unifiedResults, completedRequest = state.completedRequest }
     in
-    if entityType == "observation" then
-        let
-            ( detailModel, detailCmd ) =
-                Feature.Observation.selectObservation entityId nextModel
+    openCanonicalTarget receipt model
 
-            ( linkedModel, linkCmd ) =
-                if detailModel.observations.selectedId /= model.observations.selectedId || detailModel.activeTab /= model.activeTab then
-                    Helpers.writeObservationHistory True detailModel
-                else
-                    ( detailModel, Cmd.none )
-        in
-        ( linkedModel
-        , Cmd.batch
-            [ linkCmd
-            , detailCmd
-            , scrollToElement "observation-detail"
-            ]
-        )
 
-    else
-        ( nextModel
-        , Cmd.batch
-            [ replaceFragment nextModel
-            , scrollToElement ("entity-" ++ entityId)
-            ]
-        )
+openCanonicalTarget : SearchReturnReceipt -> Model -> ( Model, Cmd Msg )
+openCanonicalTarget receipt model =
+    let
+        state = model.search
+        cleared = { model | key = Nothing, search = clearUnifiedSearchState { state | pendingJump = Nothing, returnReceipt = Nothing } }
+        ( requested, requestCommand ) =
+            if receipt.entityType == "observation" then
+                let
+                    observationInput = { cleared | activeTab = ObservationsTab }
+                    ( selected, selectionCommand ) = Feature.Observation.selectObservation receipt.entityId observationInput
+                    observations = selected.observations
+                in
+                ( { selected | observations = { observations | searchOriginDetail = True, treeSelectionPending = False, tree = model.observations.tree } }, selectionCommand )
+            else
+                Feature.Focus.update (FocusEntity receipt.entityType receipt.entityId) { cleared | activeTab = ProjectsTab }
+        currentUrl = model.url
+        targetUrl =
+            if receipt.entityType == "observation" then Helpers.observationSearchHistoryUrl receipt.token requested
+            else Url.toString { currentUrl | fragment = Just (Helpers.buildFragment ProjectsTab requested.focus.focusedEntity Nothing) } ++ "&search-jump=" ++ String.fromInt receipt.token
+        next = requested.search
+        installed = { requested | key = model.key, search = { next | returnReceipt = Just { receipt | phase = "target", targetUrl = targetUrl } } }
+    in
+    ( installed, Cmd.batch [ requestCommand, Helpers.pushUrl model.key targetUrl ] )
+
+
+restoreSearch : SearchReturnReceipt -> Model -> ( Model, Cmd Msg )
+restoreSearch receipt model =
+    let
+        state = model.search
+        observations = Feature.Observation.clearSelection model.observations
+        completedMatches = not receipt.invalidated && receipt.results /= Nothing && Maybe.map .query receipt.completedRequest == Just (String.trim receipt.query)
+        restored = { model | activeTab = receipt.tab, focus = receipt.focus, focusedFilters = receipt.focusedFilters
+            , observations = observations
+            , search = Feature.FocusedFilters.apply receipt.hierarchy
+                { state | globalQuery = receipt.query, globalActivated = receipt.activated, entityTypes = receipt.entityTypes, entityTypesActor = receipt.entityTypesActor
+                , unifiedResults = receipt.results, completedRequest = receipt.completedRequest, isSearching = False, searchError = Nothing
+                , activeRequest = Nothing, activeRequestQuery = Nothing, pendingJump = Nothing, submittedQuery = if completedMatches then Just (String.trim receipt.query) else Nothing, refreshPending = False
+                , globalGeneration = state.globalGeneration + 1, returnReceipt = Just { receipt | phase = "returned", awaitingSource = False } } }
+        ( selected, selectionCommand ) =
+            receipt.observationSelectedId |> Maybe.map (\id -> Feature.Observation.selectObservation id restored) |> Maybe.withDefault ( restored, Cmd.none )
+        ( refreshed, refreshCommand ) = if completedMatches then ( selected, Cmd.none ) else startGlobalSearch selected
+    in
+    ( refreshed, Cmd.batch [ selectionCommand, refreshCommand ] )
+
+
+routeChanged : Url.Url -> Model -> Maybe ( Model, Cmd Msg )
+routeChanged url model =
+    model.search.returnReceipt |> Maybe.andThen (\receipt ->
+        if not (receiptMatches model receipt) then Nothing
+        else if Url.toString url == receipt.sourceUrl then
+            if receipt.phase == "target" then Just (restoreSearch receipt { model | url = url })
+            else
+                let state = model.search in
+                Just ( { model | url = url, search = { state | returnReceipt = Just { receipt | awaitingSource = False } } }, Cmd.none )
+        else if Url.toString url == receipt.targetUrl then
+            -- Browser.Navigation.back reports the current URL immediately before
+            -- popstate acknowledges the source. It is not a Forward activation.
+            if receipt.awaitingSource then Just ( { model | url = url }, Cmd.none )
+            else if receipt.phase == "returned" then
+                -- Forward reuses the source receipt, with fresh canonical target reads.
+                let
+                    currentReceipt = { receipt | results = model.search.unifiedResults, completedRequest = model.search.completedRequest }
+                    ( opened, command ) = openCanonicalTarget currentReceipt { model | url = url, key = Nothing }
+                in
+                Just ( { opened | key = model.key }, command )
+            else Just ( { model | url = url }, Cmd.none )
+        else Nothing)
+
+
+reconcileNavigation : Msg -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+reconcileNavigation message _ ( model, command ) =
+    case model.search.returnReceipt of
+        Just receipt ->
+            let
+                targetStillOwned = message /= ClearFocus && (receipt.phase /= "target" || (if receipt.entityType == "observation" then model.activeTab == ObservationsTab && (model.observations.searchOriginDetail || model.observations.selectedId == Nothing) else model.activeTab == ProjectsTab && (model.focus.focusedEntity == Just ( receipt.entityType, receipt.entityId ) || model.focus.focusedEntity == Nothing && not (if receipt.entityType == "project" then Dict.member receipt.entityId model.projects else Dict.member receipt.entityId model.tasks))))
+                state = model.search
+            in
+            if receiptMatches model receipt && targetStillOwned then ( model, command )
+            else ( { model | search = { state | returnReceipt = Nothing, pendingJump = Nothing } }, command )
+        Nothing -> ( model, command )
+
+
+viewNavigation : Model -> Html Msg -> Html Msg
+viewNavigation model content =
+    let
+        receipt = model.search.returnReceipt |> Maybe.andThen (\value -> if receiptMatches model value then Just value else Nothing)
+        target = receipt |> Maybe.map (\value -> value.phase == "target") |> Maybe.withDefault False
+        targetId value = if value.entityType == "observation" then "search-observation-detail" else "entity-" ++ value.entityId
+        available value =
+            if value.entityType == "observation" then model.observations.selectedId == Just value.entityId && model.observations.selectedDetail /= Nothing
+            else if value.entityType == "project" then Dict.member value.entityId model.dataLoading.projectCardSummaries
+            else Dict.member value.entityId model.dataLoading.taskCardSummaries
+        failed value =
+            if value.entityType == "observation" then not model.observations.detailLoading && (model.observations.detailError /= Nothing || model.observations.selectedId /= Just value.entityId)
+            else Dict.get (value.entityType ++ ":" ++ value.entityId) model.dataLoading.navigationFocuses |> Maybe.map (\request -> not request.inFlight && (not request.succeeded || not (available value))) |> Maybe.withDefault (not (available value) && model.dataLoading.activeNavigationFocus == Nothing)
+        config = Encode.object
+            ([ ( "guard", Encode.string (navigationGuard model) )
+             , ( "phase", Encode.string (receipt |> Maybe.map (\value -> if value.phase == "target" then "target" else "return") |> Maybe.withDefault "source") ) ]
+             ++ (receipt |> Maybe.map (\value ->
+                [ ( "stamp", Encode.string (value.runtimeId ++ ":" ++ value.workspaceId ++ ":" ++ String.fromInt value.sessionEpoch ++ ":" ++ String.fromInt value.token ++ ":" ++ value.phase) )
+                , ( "ready", Encode.bool (value.phase /= "target" || available value || failed value) )
+                , ( "target", Encode.string (if value.phase /= "target" then value.resultId else if failed value then "search-jump-unavailable" else targetId value) )
+                , ( "label", Encode.string ("Selected " ++ value.entityType) ), ( "top", Encode.float value.scrollTop ) ]) |> Maybe.withDefault []))
+        targetContent =
+            case receipt of
+                Just value ->
+                    if target then
+                        div [ class "search-jump-target" ]
+                            [ button [ class "btn btn-secondary search-return-button", type_ "button", onClick ReturnSearchResults ] [ text "Back to search results" ]
+                            , if failed value then div [ id "search-jump-unavailable", tabindex -1, attribute "role" "alert" ] [ text "This target is unavailable or access has changed. You can return to search results." ]
+                              else if value.entityType == "observation" then Feature.Observation.viewSearchDetail model
+                              else content ]
+                    else content
+                Nothing -> content
+    in
+    div [ attribute "data-search-navigation" (Encode.encode 0 config) ] [ targetContent ]
 
 
 viewSearchBar : Model -> Html Msg
@@ -860,8 +959,8 @@ viewSearchSection label items toPresentation =
         div [ class "search-results-section" ]
             [ h3 [ class "search-section-title" ]
                 [ text (label ++ " (" ++ String.fromInt (List.length items) ++ ")") ]
-            , div [ class "search-result-list" ]
-                (List.map (toPresentation >> viewSearchResultCard) items)
+            , Keyed.node "div" [ class "search-result-list" ]
+                (List.map (\item -> let result = toPresentation item in ( result.entityType ++ ":" ++ result.entityId, viewSearchResultCard result )) items)
             ]
 
 
@@ -875,7 +974,7 @@ viewEmptySearchResults model =
 
 viewSearchResultCard : SearchResultPresentation -> Html Msg
 viewSearchResultCard result =
-    div [ class ("search-result-card search-result-" ++ result.entityType), id ("search-result-" ++ result.entityId) ]
+    div [ class ("search-result-card search-result-condensed search-result-" ++ result.entityType), id ("search-result-" ++ result.entityId) ]
         [ div [ class "search-result-main" ]
             [ div [ class "search-result-topline" ]
                 ([ span [ class ("entity-type-label " ++ result.entityTypeClass), title result.entityType ] [ text result.entityTypeLabel ]
@@ -886,16 +985,18 @@ viewSearchResultCard result =
                     ++ List.map viewSearchResultBadge result.badges
                 )
             , div [ class "search-result-summary" ] [ text result.summary ]
-            , viewSearchResultTags result.tags
-            , viewLinkedMemorySummaries result.linkedMemories
+            , Helpers.copyableValue "search-result-id" (result.entityType ++ " ID") result.entityId (shortId result.entityId)
             ]
         , div [ class "search-result-actions" ]
             [ button
                 [ class "btn-small search-result-action"
+                , id (jumpButtonId result.entityType result.entityId)
+                , type_ "button"
+                , attribute "aria-label" ("Jump To " ++ result.entityType ++ ": " ++ result.title)
                 , onClick (NavigateToSearchResult result.entityType result.entityId)
                 , title (result.actionLabel ++ " " ++ result.entityType)
                 ]
-                [ text result.actionLabel ]
+                [ text "Jump To" ]
             ]
         ]
 
@@ -948,8 +1049,8 @@ projectResultPresentation project =
     , entityTypeClass = "entity-type-project"
     , entityId = project.id
     , titleCopyValue = if String.isEmpty (String.trim project.name) then Just project.id else Nothing
-    , title = nonBlankString project.name ("Project " ++ shortId project.id)
-    , summary = nonBlankMaybe project.description "No description"
+    , title = Helpers.plainTextExcerpt 120 (nonBlankString project.name ("Project " ++ shortId project.id))
+    , summary = Helpers.plainTextExcerpt 240 (nonBlankMaybe project.description "No description")
     , badges =
         [ { label = humanizeToken (Api.projectStatusToString project.status)
           , className = "badge badge-" ++ Api.projectStatusToString project.status
@@ -959,7 +1060,7 @@ projectResultPresentation project =
         ]
     , tags = []
     , linkedMemories = []
-    , actionLabel = "Focus project"
+    , actionLabel = "Jump To"
     }
 
 
@@ -980,8 +1081,8 @@ taskResultPresentation task =
             "entity-type-subtask"
     , entityId = task.id
     , titleCopyValue = if String.isEmpty (String.trim task.title) then Just task.id else Nothing
-    , title = nonBlankString task.title ("Task " ++ shortId task.id)
-    , summary = nonBlankMaybe task.description "No description"
+    , title = Helpers.plainTextExcerpt 120 (nonBlankString task.title ("Task " ++ shortId task.id))
+    , summary = Helpers.plainTextExcerpt 240 (nonBlankMaybe task.description "No description")
     , badges =
         [ { label = humanizeToken (taskStatusDisplayText task.status)
           , className = taskStatusBadgeClass task.status
@@ -991,7 +1092,7 @@ taskResultPresentation task =
         ]
     , tags = []
     , linkedMemories = []
-    , actionLabel = "Focus task"
+    , actionLabel = "Jump To"
     }
 
 
@@ -1002,8 +1103,8 @@ observationResultPresentation observation =
     , entityTypeClass = "entity-type-observation"
     , entityId = observation.id
     , titleCopyValue = Just observation.subject
-    , title = observation.subject
-    , summary = (observation.currentProvenance |> Maybe.map (\provenance -> "Reviewed at " ++ String.left 12 provenance.reviewedGitSha ++ " · ") |> Maybe.withDefault "Current binding unknown · ") ++ nonBlankString observation.contentPreview "No observation content"
+    , title = Helpers.plainTextExcerpt 120 observation.subject
+    , summary = Helpers.plainTextExcerpt 240 ((observation.currentProvenance |> Maybe.map (\provenance -> "Reviewed at " ++ String.left 12 provenance.reviewedGitSha ++ " · ") |> Maybe.withDefault "Current binding unknown · ") ++ nonBlankString observation.contentPreview "No observation content")
     , badges =
         [ { label = subjectKindLabel observation.subjectKind
           , className = "badge badge-observation"
@@ -1012,7 +1113,7 @@ observationResultPresentation observation =
         ]
     , tags = []
     , linkedMemories = []
-    , actionLabel = "Open observation"
+    , actionLabel = "Jump To"
     }
 
 
@@ -1107,9 +1208,15 @@ capitalizeWord word =
 
 
 refreshAcceptedSearch : Model -> ( Model, Cmd Msg )
-refreshAcceptedSearch model =
-    let state = model.search in
-    if String.isEmpty (String.trim state.globalQuery) || List.isEmpty (selectedEntityTypes model) || state.globalComposing then
+refreshAcceptedSearch incoming =
+    let
+        initial = incoming.search
+        state = { initial | returnReceipt = initial.returnReceipt |> Maybe.map (\receipt -> if receiptMatches incoming receipt then { receipt | invalidated = True } else receipt) }
+        model = { incoming | search = state }
+    in
+    if state.returnReceipt |> Maybe.map (\receipt -> receipt.phase == "target" && receiptMatches model receipt) |> Maybe.withDefault False then
+        ( model, Cmd.none )
+    else if String.isEmpty (String.trim state.globalQuery) || List.isEmpty (selectedEntityTypes model) || state.globalComposing then
         ( model, Cmd.none )
     else if state.activeRequest /= Nothing then
         ( { model | search = { state | refreshPending = True } }, Cmd.none )

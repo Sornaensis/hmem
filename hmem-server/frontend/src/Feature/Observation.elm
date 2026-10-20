@@ -61,6 +61,7 @@ module Feature.Observation exposing
     , startReload
     , startReloadForSession
     , update
+    , viewSearchDetail
     , viewObservations
     , viewObservationsState
     , viewObservationsStateWithPermission
@@ -180,6 +181,7 @@ init =
     , treeSelectionPending = False
     , detailNavigationEpoch = 0
     , detailNavigationToken = 0
+    , searchOriginDetail = False
     , detailReturnTarget = Nothing
     , pendingReturnNavigation = Nothing
     , edit = Nothing
@@ -337,6 +339,9 @@ selectTreePath path model =
 
 finishTreeReveal : Model -> (Model, Cmd Msg)
 finishTreeReveal model =
+    if model.observations.searchOriginDetail then
+        ( model, Cmd.none )
+    else
     let state = model.observations
         tree = state.tree
         subject = case state.selectedFacet of
@@ -442,7 +447,7 @@ loadTreeBranch prefix offset model =
 
 revealTreeSelection : Api.Observation -> ObservationModel -> ObservationModel
 revealTreeSelection observation state =
-    if state.selectedId /= Just observation.id || state.detailReturnTarget /= Nothing || not (List.member state.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then state
+    if state.selectedId /= Just observation.id || state.searchOriginDetail || state.detailReturnTarget /= Nothing || not (List.member state.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then state
     else
         let subject = state.selectedFacet |> Maybe.withDefault { subjectKind = observation.subjectKind, subject = observation.subject } in
         -- Only the current guarded detail reply may consume deferred route selection.
@@ -694,6 +699,7 @@ clearSelection state =
         , activeDetailRequest = Nothing
         , treeSelectionPending = False
         , detailNavigationToken = state.detailNavigationToken + 1
+        , searchOriginDetail = False
         , detailReturnTarget = Nothing
         , pendingReturnNavigation = Nothing
         , viewport = { viewport | origin = Nothing, restoring = False, returnPin = Nothing, focus = Nothing }
@@ -1116,7 +1122,7 @@ updateRaw msg model =
                     Ok observation ->
                         if observation.id == observationId && observation.workspaceId == workspaceId then
                             ( updateObservation
-                                (applyCanonicalObservation observation
+                                (acceptFetchedDetail observation
                                     >> revealTreeSelection observation
                                     >> (\state -> { state | detailLoading = False, detailError = Nothing, activeDetailRequest = Nothing })
                                 )
@@ -2968,6 +2974,7 @@ selectDifferentObservation observationId model =
                         (\current ->
                             { current
                                 | selectedId = Just observationId
+                                , searchOriginDetail = Helpers.isObservationSearchUrl model.url && (Helpers.observationUrlContext model.url).fragment.observationId == Just observationId
                                 , tree = let tree = current.tree in {tree | revealFocus = True}
                                 , treeSelectionPending = current.treeSelectionPending && current.selectedId == Just observationId
                                 , history = Nothing
@@ -3297,6 +3304,21 @@ withRetainedCanonical observationId state existing =
 
         Nothing ->
             existing
+
+
+{-| A detached search read proves this detail only, not membership changes in
+saved tree/list results. Actual mutation and invalidation paths retain their
+normal refresh behavior.
+-}
+acceptFetchedDetail : Api.Observation -> ObservationModel -> ObservationModel
+acceptFetchedDetail observation state =
+    let accepted = applyCanonicalObservation observation state in
+    if state.searchOriginDetail then
+        { accepted | items = state.items, matchEvidence = state.matchEvidence
+            , resultsStale = state.resultsStale, workspaceCounts = state.workspaceCounts, counts = state.counts
+            , refreshPending = state.refreshPending, refreshPass = state.refreshPass }
+    else
+        accepted
 
 
 applyCanonicalObservation : Api.Observation -> ObservationModel -> ObservationModel
@@ -4477,7 +4499,9 @@ viewObservationsStateWithPermission display canEdit workspace state =
                         , ( "observation-layout-with-detail", state.selectedId /= Nothing )
                         ]
                     ]
-                    [ if state.selectedId /= Nothing && selectedOwner state == Nothing && not (treeMode state.requestMode) then
+                    [ if state.searchOriginDetail && state.selectedId /= Nothing then
+                        viewSearchDetailState display state
+                      else if state.selectedId /= Nothing && selectedOwner state == Nothing && not (treeMode state.requestMode) then
                         div [ class "card observation-result observation-detached", attribute "data-observation-detached" "true" ]
                             [ p [ class "form-help", attribute "role" "status" ] [ text "Selected observation is outside the displayed result rows. Loaded counts and file-match evidence are unchanged." ]
                             , case state.selectedDetail of
@@ -5024,6 +5048,18 @@ resolveSelectedOwner rows viewport state =
                     Array.toList rows |> List.filterMap (\row -> case rowContent row of
                         ObservationCardRow context observation -> if observation.id == selected then Just (observationCardDomId context observation.id) else Nothing
                         _ -> Nothing) |> List.head
+
+
+viewSearchDetail : Model -> Html Msg
+viewSearchDetail model =
+    viewSearchDetailState model.timestamps model.observations
+
+
+viewSearchDetailState : TimestampDisplay.State -> ObservationModel -> Html Msg
+viewSearchDetailState display state =
+    div [ id "search-observation-detail", class "card observation-detached search-observation-detail", tabindex -1, attribute "role" "region", attribute "aria-label" "Observation detail", attribute "data-observation-detached" "true" ]
+        [ p [ class "form-help" ] [ text "Opened from entity search. Saved Observation filters and loaded counts are unchanged." ]
+        , viewDetail display False state ]
 
 
 viewDetail : TimestampDisplay.State -> Bool -> ObservationModel -> Html Msg

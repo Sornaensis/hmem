@@ -114,3 +114,9 @@ port onObservationViewport : (Encode.Value -> msg) -> Sub msg
 
 
 port syncObservationViewport : Encode.Value -> Cmd msg
+
+
+port searchNavigationCommand : Encode.Value -> Cmd msg
+
+
+port searchNavigationEvent : (Encode.Value -> msg) -> Sub msg

@@ -227,7 +227,7 @@ handleUrlChangeWithoutProtectedExit url model =
                     ( queryModel, queryCmd ) =
                         let
                             targetState = if frag.observationId /= model.observations.selectedId then Feature.Observation.clearSelection routeState else routeState
-                            restored = { queryInput | observations = { targetState | linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
+                            restored = { queryInput | observations = { targetState | searchOriginDetail = Helpers.isObservationSearchUrl url, linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
                         in
                         if queryChanged then Feature.Observation.restoreRouteResults restored else ( restored, Cmd.none )
 
@@ -290,7 +290,7 @@ handleUrlChangeWithoutProtectedExit url model =
                             observations =
                                 Feature.Observation.retireSessionState model.observations
                         in
-                        Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice }
+                        Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice, searchOriginDetail = Helpers.isObservationSearchUrl url }
 
                     currentDataLoading =
                         model.dataLoading
@@ -374,6 +374,8 @@ handleUrlChangeWithoutProtectedExit url model =
                             , globalActivated = False
                             , globalComposing = False
                             , globalGeneration = currentSearch.globalGeneration + 1
+                            , returnReceipt = Nothing
+                            , pendingJump = Nothing
                             , entityTypes = Nothing
                             , entityTypesActor = Nothing
                             , completedRequest = Nothing

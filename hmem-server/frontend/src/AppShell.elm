@@ -72,7 +72,7 @@ initModel key url page flags storedFilters legacyFrag =
                 observations =
                     Feature.Observation.init
             in
-            Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice }
+            Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice, searchOriginDetail = Helpers.isObservationSearchUrl url }
 
         baseModel =
             { key = key
@@ -709,7 +709,7 @@ restoreObservationUrlOnAdmission previous expectedWorkspace sessionContext model
                         Feature.Observation.retireSessionState model.observations
                 in
                 { model
-                    | observations = Helpers.restoreObservationQuery context.query { state | selectedId = context.fragment.observationId, linkNotice = context.notice }
+                    | observations = Helpers.restoreObservationQuery context.query { state | selectedId = context.fragment.observationId, linkNotice = context.notice, searchOriginDetail = Helpers.isObservationSearchUrl model.url }
                     , activeTab = if model.url.fragment == Nothing then model.activeTab else context.fragment.tab
                     , focus = if model.url.fragment == Nothing then model.focus else Feature.Focus.init context.fragment.focus
                 }
@@ -989,6 +989,7 @@ subscriptions =
         , authSessionError AuthSessionError
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))
         , localStorageReceived LocalStorageLoaded
+        , Ports.searchNavigationEvent SearchNavigationEvent
         , Ports.onHierarchyViewport HierarchyViewportChanged
         , Ports.onObservationViewport ObservationViewportChanged
         , Ports.observationPreferencesReceived ObservationPreferencesReceived

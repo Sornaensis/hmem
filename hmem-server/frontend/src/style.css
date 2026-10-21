@@ -825,13 +825,13 @@ a:hover {
   position: sticky;
   top: 0;
   z-index: 10;
-  background: var(--bg-surface);
+  background: transparent;
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
   border-bottom: 1px solid transparent;
-  margin: 0 -2rem 1rem;
-  padding: 0.5rem 1.25rem;
+  margin: 0 0 1rem;
+  padding: 0.5rem 0;
 }
 
 .sticky-workspace-bar--visible {
@@ -898,11 +898,6 @@ a:hover {
 
   .page {
     padding: 1rem;
-  }
-
-  .sticky-workspace-bar {
-    margin: 0 -1rem 1rem;
-    padding-inline: 1rem;
   }
 
   .workspace-header-top,

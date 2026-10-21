@@ -362,7 +362,7 @@ handleMethod mgr serverUrl mApiKey wsContext workspaceSnapshot req = case req.re
               Nothing -> atomically $ readTVar wsContext
             case capturedWorkspace of
               Nothing -> pure $ Just $ jsonRpcResponse req.reqId $
-                if mToolName == Just "search" then searchContextError else object
+                if mToolName `elem` [Just "search", Just "observation_discovery"] then searchContextError else object
                   [ "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Call set_workspace with workspace_id and identity before using ordinary tools" :: Text)]]
                   , "isError" .= True
                   ]

@@ -16,7 +16,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, managerIdleConnectionCount, newManager)
-import Network.HTTP.Types (Status, methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status500, statusCode)
+import Network.HTTP.Types (Status, methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status429, status500, statusCode)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import System.Directory (doesFileExist)
@@ -43,7 +43,7 @@ spec = do
     it "advertises scoped overrides, nonempty selection and callable language and priority filters" $ do
       all (`elem` schemaProperties "search") ["workspace_id", "search_language", "task_priority"] `shouldBe` True
       (schemaProperty "search" "entity_types" >>= jsonField "minItems") `shouldBe` Just (Number 1)
-      [name | Object tool <- toolDefinitions, Just (String name) <- [KM.lookup "name" tool], KM.member "outputSchema" tool] `shouldBe` ["search"]
+      [name | Object tool <- toolDefinitions, Just (String name) <- [KM.lookup "name" tool], KM.member "outputSchema" tool] `shouldBe` ["search", "observation_discovery"]
 
     it "returns schema-valid all/default/subset results with complete legacy JSON text" $ do
       requests <- newTVarIO []
@@ -137,7 +137,7 @@ spec = do
     it "returns schema-valid parser, validation and predeclaration errors before HTTP" $ do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
-        forM_ [(object ["limit" .= ("bad" :: Text)], "invalid_arguments", "limit"), (object ["entity_types" .= ([] :: [Text])], "validation_error", "entity_types"), (object ["query" .= (" " :: Text)], "validation_error", "query")] $ \(arguments, code, errorField) -> do
+        forM_ [(object ["limit" .= ("bad" :: Text)], "invalid_arguments", "limit"), (object ["task_priority" .= ("bad" :: Text)], "invalid_arguments", "task_priority"), (object ["entity_types" .= ([] :: [Text])], "validation_error", "entity_types"), (object ["query" .= (" " :: Text)], "validation_error", "query")] $ \(arguments, code, errorField) -> do
           let Object fields = arguments
           response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("search" :: Text), "arguments" .= Object (KM.insert "workspace_id" (String workspaceId) fields)])
           expectSearchStructured response
@@ -189,6 +189,175 @@ spec = do
         expectSearchStructured ambiguous
         jsonPath ["structuredContent", "error", "field"] ambiguous `shouldBe` Just Null
       (length <$> readTVarIO requests) `shouldReturn` 0
+
+  describe "Raw-text Observation discovery adapter" $ do
+    it "advertises raw filters, context/session lifecycle and presentation without provider inputs" $ do
+      all (`elem` schemaProperties "observation_discovery") ["workspace_id", "filters", "context_token", "replace_context_token", "search_session", "generation", "view", "prefix", "terminal", "limit", "offset"] `shouldBe` True
+      schemaProperties "observation_discovery" `shouldNotContain` ["embedding", "provider", "endpoint"]
+      forM_ ["server-owned", "five minutes", "discovery_restart_required", "discovery_capacity"] $ \phrase ->
+        toolDescription "observation_discovery" `shouldSatisfy` maybe False (T.isInfixOf phrase)
+
+    it "forwards one authorized creation and executes a workspace-pinned continuation without creation fields" $ do
+      requests <- newTVarIO []
+      withEnvironment "HMEM_MCP_PROVENANCE_TOKEN" "discovery-test-provenance" $
+        withMock requests $ \manager base -> do
+          initialized <- newTVarIO True
+          context <- newTVarIO (Just (MCPContext (Just (read (T.unpack workspaceId))) testIdentity))
+          response <- jsonRpcToolCall manager base initialized context "observation_discovery" (object
+            ["filters" .= object ["subject_query" .= ("src/" :: Text), "content_query" .= ("authorization" :: Text)]
+            , "replace_context_token" .= workspaceId, "search_session" .= observationId, "generation" .= (2 :: Int), "limit" .= (1 :: Int)])
+          let Just result = response >>= jsonField "result"
+              Just next = jsonPath ["structuredContent", "next_request"] result
+              Just arguments = jsonField "arguments" next
+          expectToolStructured "observation_discovery" result
+          jsonField "structuredContent" result `shouldBe` decodeMcpJSON result
+          jsonField "offset" arguments `shouldBe` Just (Number 1)
+          forM_ ["filters", "replace_context_token", "search_session", "generation"] $ \key -> jsonField key arguments `shouldBe` Nothing
+          atomically $ modifyTVar' context (const (Just (MCPContext (Just (read (T.unpack observationId))) testIdentity)))
+          continued <- jsonRpcToolCall manager base initialized context "observation_discovery" arguments
+          let Just continuedResult = continued >>= jsonField "result"
+          expectToolStructured "observation_discovery" continuedResult
+          jsonPath ["structuredContent", "workspace_id"] continuedResult `shouldBe` Just (String workspaceId)
+      observed <- readTVarIO requests
+      length observed `shouldBe` 2
+      forM_ observed $ \request -> do
+        request.requestMethod `shouldBe` methodPost
+        request.requestPath `shouldBe` "/api/v1/observations/discovery"
+        request.requestIdentityHeaders `shouldBe` [BL.toStrict (encode testIdentity)]
+        request.requestChangeCause `shouldBe` Just "mcp"
+        request.requestMcpProvenance `shouldBe` Just "discovery-test-provenance"
+      let [Just created, Just continued] = map (decode . (.requestBody)) observed :: [Maybe Value]
+      jsonPath ["filters", "content_query"] created `shouldBe` Just (String "authorization")
+      jsonField "replace_context_token" created `shouldBe` Just (String workspaceId)
+      jsonField "search_session" created `shouldBe` Just (String observationId)
+      jsonField "generation" created `shouldBe` Just (Number 2)
+      continued `shouldBe` object ["workspace_id" .= workspaceId, "context_token" .= observationId, "view" .= ("list" :: Text), "prefix" .= ("" :: Text), "limit" .= (1 :: Int), "offset" .= (1 :: Int)]
+
+    it "preserves FTS and hybrid metadata and compacts content without exposing private preparation" $ do
+      forM_ ["fts_only", "hybrid"] $ \mode -> do
+        let Object fields = discoveryFixture mode "list" False
+            payload = Object (KM.insert "embedding" (toJSON ([0.1, 0.2] :: [Double]))
+              (KM.insert "retrieval" (object ["mode" .= mode, "reason" .= (if mode == "hybrid" then Null else String "provider_unavailable"), "endpoint" .= ("private-endpoint" :: Text)]) fields))
+        withSearchResponse status200 (encode payload) $ \manager base -> do
+          response <- handleToolCall manager base (Just "discovery-credential") testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= discoveryArguments])
+          expectToolStructured "observation_discovery" response
+          jsonField "structuredContent" response `shouldBe` decodeMcpJSON response
+          jsonPath ["structuredContent", "retrieval", "mode"] response `shouldBe` Just (String mode)
+          jsonPath ["structuredContent", "retrieval", "reason"] response `shouldBe` Just (if mode == "hybrid" then Null else String "provider_unavailable")
+          response `shouldNotSatisfy` contains "private-endpoint"
+          jsonPath ["structuredContent", "embedding"] response `shouldBe` Nothing
+          jsonPath ["structuredContent", "page", "items"] response `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "content" row == Nothing && jsonField "id" row == Just (String observationId) && jsonField "subjects" row == Just (toJSON observationSubjects)))
+          jsonPath ["structuredContent", "next_request"] response `shouldBe` Nothing
+
+    it "preserves tree/count metadata and forwards branch and typed leaf selectors" $ do
+      golden <- compactFixtures
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        tree <- handleToolCall manager base (Just "discovery-credential") testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= object
+          ["workspace_id" .= workspaceId, "context_token" .= observationId, "view" .= ("tree" :: Text), "prefix" .= ("src" :: Text), "offset" .= (5 :: Int), "limit" .= (2 :: Int)]])
+        expectToolStructured "observation_discovery" tree
+        jsonPath ["structuredContent", "page", "tree"] tree `shouldBe` jsonPath ["page", "tree"] (discoveryFixture "fts_only" "tree" True)
+        jsonPath ["structuredContent", "next_request", "arguments", "offset"] tree `shouldBe` Just (Number 7)
+        jsonPath ["structuredContent", "next_request", "arguments", "prefix"] tree `shouldBe` Just (String "src")
+        leaf <- call manager base "observation_discovery" (object ["workspace_id" .= workspaceId, "context_token" .= observationId, "terminal" .= ObservationSubject SubjectGlob "src/*.hs"])
+        jsonPath ["next_request", "arguments", "terminal"] leaf `shouldBe` Just (toJSON (ObservationSubject SubjectGlob "src/*.hs"))
+        count <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= object
+          ["workspace_id" .= workspaceId, "context_token" .= observationId, "view" .= ("count" :: Text)]])
+        expectToolStructured "observation_discovery" count
+        jsonPath ["structuredContent", "page", "counts"] count `shouldBe` Just discoveryCounts
+        jsonPath ["structuredContent", "next_request"] count `shouldBe` Nothing
+        decodeMcpJSON count `shouldBe` Just (fixturePayload golden "observation_discovery_count")
+      [treeRequest, leafRequest, countRequest] <- readTVarIO requests
+      treeRequest.authorization `shouldBe` Just "Bearer discovery-credential"
+      let Just treeBody = decode treeRequest.requestBody :: Maybe Value
+          Just leafBody = decode leafRequest.requestBody :: Maybe Value
+          Just countBody = decode countRequest.requestBody :: Maybe Value
+      jsonField "prefix" treeBody `shouldBe` Just (String "src")
+      jsonField "terminal" leafBody `shouldBe` Just (toJSON (ObservationSubject SubjectGlob "src/*.hs"))
+      jsonField "view" countBody `shouldBe` Just (String "count")
+
+    it "never invents count/final/empty continuation and reports list/tree offset exhaustion" $ do
+      forM_ ["list", "tree"] $ \view -> do
+        withSearchResponse status200 (encode (discoveryFixture "fts_only" view True)) $ \manager base -> do
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= object
+            ["workspace_id" .= workspaceId, "context_token" .= observationId, "view" .= view, "offset" .= (2147483647 :: Int)]])
+          expectToolStructured "observation_discovery" response
+          jsonPath ["structuredContent", "continuation_error", "code"] response `shouldBe` Just (String "continuation_limit")
+          jsonPath ["structuredContent", "next_request"] response `shouldBe` Nothing
+          jsonPath ["structuredContent", "page", "counts"] response `shouldBe` Just discoveryCounts
+        withSearchResponse status200 (encode (discoveryFixture "fts_only" view False)) $ \manager base -> do
+          result <- call manager base "observation_discovery" (object ["workspace_id" .= workspaceId, "context_token" .= observationId, "view" .= view])
+          jsonField "next_request" result `shouldBe` Nothing
+      let empty = object ["context_token" .= observationId, "expires_at" .= ("2026-10-21T10:05:00Z" :: Text), "retrieval" .= object ["mode" .= ("fts_only" :: Text), "reason" .= ("disabled" :: Text)], "complete" .= True
+            , "page" .= object ["items" .= ([] :: [Value]), "has_more" .= False, "counts" .= discoveryCounts]]
+      withSearchResponse status200 (encode empty) $ \manager base -> do
+        result <- call manager base "observation_discovery" discoveryArguments
+        jsonField "next_request" result `shouldBe` Nothing
+      let brokenTree = object ["context_token" .= observationId, "expires_at" .= ("2026-10-21T10:05:00Z" :: Text), "retrieval" .= object ["mode" .= ("fts_only" :: Text), "reason" .= ("disabled" :: Text)], "complete" .= True
+            , "page" .= object ["items" .= ([] :: [Value]), "has_more" .= False, "counts" .= discoveryCounts
+                , "tree" .= object ["items" .= ([] :: [Value]), "has_more" .= True, "total_count" .= (100 :: Int), "match_count" .= (7 :: Int)]]]
+      withSearchResponse status200 (encode brokenTree) $ \manager base -> do
+        response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "context_token" .= observationId, "view" .= ("tree" :: Text)]])
+        expectToolStructured "observation_discovery" response
+        jsonPath ["structuredContent", "continuation_error", "field"] response `shouldBe` Just (String "page.tree.items")
+        jsonPath ["structuredContent", "next_request"] response `shouldBe` Nothing
+        jsonPath ["structuredContent", "page", "tree"] response `shouldBe` jsonPath ["page", "tree"] brokenTree
+      forM_ [("list", 2147483646), ("tree", 2147483645)] $ \(view, offset) ->
+        withSearchResponse status200 (encode (discoveryFixture "fts_only" view True)) $ \manager base -> do
+          result <- call manager base "observation_discovery" (object ["workspace_id" .= workspaceId, "context_token" .= observationId, "view" .= view, "offset" .= (offset :: Int)])
+          jsonPath ["next_request", "arguments", "offset"] result `shouldBe` Just (Number 2147483647)
+
+    it "rejects malformed creation/continuation/session/presentation and accurately labels nested SHA selectors" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        let root extra = object (["workspace_id" .= workspaceId] <> extra)
+        forM_ [ (root [], "filters")
+              , (root ["filters" .= object [], "context_token" .= observationId], "context_token")
+              , (root ["filters" .= object [], "search_session" .= observationId], "generation")
+              , (root ["filters" .= object ["content_query" .= T.replicate 4097 "x"]], "filters.content_query")
+              , (root ["context_token" .= ("BAD" :: Text)], "context_token")
+              , (root ["context_token" .= (5 :: Int)], "context_token")
+              , (root ["filters" .= object [], "replace_context_token" .= ("BAD" :: Text)], "replace_context_token")
+              , (root ["filters" .= object ["subject_kind" .= ("BAD" :: Text)]], "filters.subject_kind")
+              , (root ["context_token" .= observationId, "view" .= ("tree" :: Text), "terminal" .= ObservationSubject SubjectFile "src/A.hs"], "terminal")
+              , (root ["context_token" .= observationId, "prefix" .= ("src" :: Text)], "prefix")
+              , (root ["filters" .= object ["current_git_sha" .= (5 :: Int)]], "filters.current_git_sha")
+              ] $ \(arguments, errorField) -> do
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= arguments])
+          expectToolStructured "observation_discovery" response
+          response `shouldSatisfy` isMcpError
+          jsonPath ["structuredContent", "error", "field"] response `shouldBe` Just (String errorField)
+        forM_ [("git_sha", "current_git_sha"), ("current_git_sha", "history_git_sha"), ("history_git_sha", "git_sha")] $ \(bad, valid) -> do
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= root
+            ["filters" .= object [Key.fromText bad .= ("BAD" :: Text), Key.fromText valid .= gitSha]]])
+          expectToolStructured "observation_discovery" response
+          jsonPath ["structuredContent", "error", "field"] response `shouldBe` Just (String ("filters." <> bad))
+        ambiguous <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= root
+          ["filters" .= object ["current_git_sha" .= ("BAD" :: Text), "history_git_sha" .= ("BAD" :: Text)]]])
+        jsonPath ["structuredContent", "error", "field"] ambiguous `shouldBe` Just Null
+        initialized <- newTVarIO True
+        context <- newTVarIO Nothing
+        predeclared <- jsonRpcToolCall manager base initialized context "observation_discovery" discoveryArguments
+        let Just result = predeclared >>= jsonField "result"
+        expectToolStructured "observation_discovery" result
+        jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "context_required")
+      (length <$> readTVarIO requests) `shouldReturn` 0
+
+    it "preserves restart/capacity/authorization failures without automatic replacement or retry" $ do
+      forM_ [(status409, "discovery_restart_required"), (status429, "discovery_capacity"), (status403, "forbidden")] $ \(status, code) -> do
+        requests <- newTVarIO []
+        let details = object ["error" .= code, "message" .= ("Retry or restart explicitly." :: Text)]
+        testWithApplication (pure (\request respond -> do
+          _ <- Wai.strictRequestBody request
+          atomically $ modifyTVar' requests (<> [request.rawPathInfo])
+          respond (Wai.responseLBS status [("Content-Type", "application/json")] (encode details)))) $ \port ->
+          bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager -> do
+            response <- handleToolCall manager ("http://127.0.0.1:" <> show port) Nothing testIdentity (object ["name" .= ("observation_discovery" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "context_token" .= observationId]])
+            expectToolStructured "observation_discovery" response
+            jsonPath ["structuredContent", "error", "code"] response `shouldBe` Just (String code)
+            jsonPath ["structuredContent", "error", "http_status"] response `shouldBe` Just (Number (fromIntegral (statusCode status)))
+            jsonPath ["structuredContent", "error", "server_details"] response `shouldBe` Just details
+        readTVarIO requests `shouldReturn` ["/api/v1/observations/discovery"]
 
   describe "Declared identity forwarding" $ do
     it "adds exactly one accepted identity on JSON, conditional and no-content helpers without changing credentials or provenance" $ do
@@ -1251,6 +1420,27 @@ observationMatchArguments = object
   , "offset" .= (0 :: Int)
   ]
 
+discoveryArguments :: Value
+discoveryArguments = object ["workspace_id" .= workspaceId, "filters" .= object []]
+
+discoveryCounts :: Value
+discoveryCounts = object ["workspace_id" .= workspaceId, "total_count" .= (100 :: Int), "match_count" .= (7 :: Int)]
+
+discoveryFixture :: Text -> Text -> Bool -> Value
+discoveryFixture mode view more = object
+  [ "context_token" .= observationId, "expires_at" .= ("2026-10-21T10:05:00Z" :: Text)
+  , "retrieval" .= object ["mode" .= mode, "reason" .= (if mode == "hybrid" then Null else String "disabled")]
+  , "complete" .= True
+  , "page" .= object
+      (["items" .= (if view == "list" then [responseFor methodGet "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "" ""] else [])
+       , "has_more" .= (view == "list" && more), "counts" .= discoveryCounts]
+       <> ["tree" .= object ["has_more" .= more, "total_count" .= (100 :: Int), "match_count" .= (7 :: Int)
+             , "items" .= [node "src/A.hs" "A.hs", node "src/B.hs" "B.hs"]] | view == "tree"])
+  ]
+  where
+    node path segment = object ["path" .= (path :: Text), "segment" .= (segment :: Text), "has_children" .= False, "observation_count" .= (5 :: Int)
+      , "terminals" .= [object ["subject_kind" .= ("file" :: Text), "subject" .= path, "observation_count" .= (3 :: Int)]]]
+
 withOffset :: Value -> Int -> Value
 withOffset (Object values) value = Object (KM.insert "offset" (toJSON value) values)
 withOffset arguments _ = arguments
@@ -1290,6 +1480,7 @@ toolSamples =
   , ("workspace_register", object ["name" .= ("Repository" :: Text)])
   , ("workspace_update", object ["workspace_id" .= workspaceId, "name" .= ("Renamed workspace" :: Text)])
   , ("search", object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "offset" .= (0 :: Int)])
+  , ("observation_discovery", discoveryArguments)
   , ("observation_create", observationArguments)
   , ("observation_get", object ["observation_id" .= observationId])
   , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= observationId])
@@ -1454,8 +1645,11 @@ decodeMcpJSON response = do
   decodeStrict' (TE.encodeUtf8 text)
 
 expectSearchStructured :: Value -> Expectation
-expectSearchStructured response = do
-  let [outputSchema] = [value | Object tool <- toolDefinitions, KM.lookup "name" tool == Just (String "search"), Just value <- [KM.lookup "outputSchema" tool]]
+expectSearchStructured = expectToolStructured "search"
+
+expectToolStructured :: Text -> Value -> Expectation
+expectToolStructured name response = do
+  let [outputSchema] = [value | Object tool <- toolDefinitions, KM.lookup "name" tool == Just (String name), Just value <- [KM.lookup "outputSchema" tool]]
   case jsonField "structuredContent" response of
     Nothing -> expectationFailure ("Missing structured search result: " <> show response)
     Just structured -> do
@@ -1786,6 +1980,7 @@ statusApp requests request respond = do
 
 responseFor :: ByteString -> ByteString -> ByteString -> BL.ByteString -> Value
 responseFor method path rawQuery body
+  | path == "/api/v1/observations/discovery" = discoveryFixture "fts_only" (case decode body >>= jsonField "view" of Just (String view) -> view; _ -> "list") True
   | path == "/api/v1/search" = object
       [ "observations" .= (if requested "observation" then [observation] else [])
       , "projects" .= (if requested "project" then [project] else [])

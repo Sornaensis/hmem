@@ -88,7 +88,8 @@ type's applicable filters, including `search_language` for Projects/Tasks and
 Offset pages use the current result set; concurrent changes can alter membership
 or order. A required offset beyond 2147483647 returns `continuation_limit`.
 
-Search advertises `outputSchema` and returns `structuredContent` as optional hmem
+Search and Observation discovery advertise `outputSchema` and return
+`structuredContent` as optional hmem
 backport extensions. Initialization retains protocol version `2024-11-05`, including
 fallback from newer requested versions, and advertises experimental capability
 `hmem/structured-tool-output` version 1. This does not claim newer protocol
@@ -97,3 +98,46 @@ structured content encode the same payload. Errors retain readable text and
 `isError: true`, with `error.code`, nullable `error.field`, and `error.message` in
 structured content. HTTP errors also include status and bounded server details;
 `details_truncated` reports truncation. Other tools retain their existing shapes.
+
+## Raw-text Observation discovery
+
+`observation_discovery` sends one request to the authorized server's existing
+discovery endpoint. Create a context with raw text and provenance filters:
+
+```json
+{"filters":{"subject_query":"src/","content_query":"authorization"},"view":"list","limit":20}
+```
+
+An empty `filters` object browses. The server chooses hybrid retrieval when its
+optional semantic provider is usable, or content FTS with a safe fallback reason.
+MCP does not generate vectors, enable providers, or cache search contexts. This
+does not change unified `search` semantics.
+
+Results retain `context_token`, absolute `expires_at`, `retrieval.mode`/`reason`,
+`complete`, and `page` with compact Observation `items`, `counts`, `has_more` and
+optional `tree`. Counts describe distinct Observations; tree nodes and typed
+terminals retain their own counts. Use `observation_get` for full content.
+
+Continue with the same workspace/context and presentation selectors only:
+`view` (`list`, `tree`, `count`), tree `prefix`, list-leaf
+`terminal: {subject_kind, subject}`, `limit` and `offset`. Defaults are list,
+empty prefix, 50 and 0. Execute `next_request` when supplied: it pins the workspace
+and token, omits creation fields, and advances by actual list rows or tree
+children, never Observation totals. Count and final/empty pages have no next
+request. If a successful page has more rows but its successor exceeds
+2147483647, the data remains available with typed
+`continuation_error.code: "continuation_limit"` and no unusable request. A server
+page claiming more rows while returning none similarly reports
+`invalid_continuation`; tree failures identify `page.tree.items`.
+
+Contexts expire after five minutes without sliding expiry and remain bound to
+their server, workspace and resolved audience. Each use reauthorizes access.
+To change filters, explicitly create a context with optional
+`replace_context_token`. Optional caller-owned `search_session` and increasing
+`generation` (1..2147483647) must be paired on creation; continuations omit both.
+MCP synthesizes no session state and never replaces an expired context
+automatically. A 409 `discovery_restart_required` requires a fresh query; a 429
+`discovery_capacity` preserves the current query for retry. Both retain structured
+HTTP status/details. Nested SHA validation errors identify the actual
+`filters.git_sha`, `filters.current_git_sha`, or `filters.history_git_sha`, with
+null attribution when several are invalid.

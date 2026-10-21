@@ -40,6 +40,24 @@
       }
     }
   },
+  "observation_discovery_count": {
+    "payload": {
+      "workspace_id": "11111111-2222-3333-4444-555555555555",
+      "context_token": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "expires_at": "2026-10-21T10:05:00Z",
+      "retrieval": { "mode": "fts_only", "reason": "disabled" },
+      "complete": true,
+      "page": {
+        "items": [],
+        "has_more": false,
+        "counts": {
+          "workspace_id": "11111111-2222-3333-4444-555555555555",
+          "total_count": 100,
+          "match_count": 7
+        }
+      }
+    }
+  },
   "unified_search": {
     "payload": {
       "observations": [

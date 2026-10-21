@@ -70,6 +70,27 @@ toolDefinitions =
       , "limit" .= prop "integer" "Maximum results per entity type (default 10, 1..200)"
       , "offset" .= prop "integer" "Result offset per entity type (0..2147483647)"
       ] [])
+  , tool "observation_discovery" "Discover stored Observations using raw text through the authorized server. Create with filters (an empty object browses); content_query uses server-owned hybrid retrieval when available and content FTS with a safe reason otherwise. No query embeddings or provider setup are needed. Continue with context_token and presentation fields only. Contexts expire after five minutes without sliding expiry and belong to their workspace and audience. To change filters, create with optional replace_context_token; optional search_session/generation orders creations within a caller-owned search view. Never send filters, replacement, session or generation on continuation. Views: list, tree, count. Results preserve counts, tree, retrieval mode/reason, expiry and provenance with compact Observation previews. Execute next_request when present; count/final pages have none. Offset exhaustion is reported in continuation_error. A 409 discovery_restart_required requires an explicit fresh query; 429 discovery_capacity preserves the current query for retry. Use observation_get for full content; unified search remains lexical." (schema
+      [ "workspace_id" .= prop "string" "Optional workspace UUID overriding the active workspace; still requires identity declaration"
+      , "filters" .= schema
+          [ "subject_query" .= prop "string" "Case-sensitive literal subject substring; ANDed with other filters on the same subject row (up to 4096 UTF-8 bytes)"
+          , "content_query" .= prop "string" "Raw content query (up to 4096 UTF-8 bytes); server-owned hybrid retrieval or content FTS fallback; empty text adds no predicate"
+          , "subject_kind" .= enumProp "Exact subject kind" ["file", "glob"]
+          , "subject" .= prop "string" "Exact repository-relative subject"
+          , "git_sha" .= prop "string" "Exact creation SHA; a staleness-audit sentinel"
+          , "current_git_sha" .= prop "string" "Exact SHA bound to the current assertion"
+          , "history_git_sha" .= prop "string" "Exact SHA of any recorded assertion; returns current content"
+          ] []
+      , "context_token" .= prop "string" "Returned context UUID for continuation; omit all create-only fields"
+      , "replace_context_token" .= prop "string" "Context UUID to retire atomically with a new filter creation; never automatic on expiry"
+      , "search_session" .= prop "string" "Optional caller-owned search-view UUID; create only, paired with generation"
+      , "generation" .= object ["type" .= ("integer" :: Text), "minimum" .= (1 :: Int), "maximum" .= (2147483647 :: Int), "description" .= ("Increasing creation generation in search_session; create only" :: Text)]
+      , "view" .= enumProp "Presentation (default list)" ["list", "tree", "count"]
+      , "prefix" .= prop "string" "Tree branch only; empty/default selects the root"
+      , "terminal" .= schema ["subject_kind" .= enumProp "Typed list-leaf subject kind" ["file", "glob"], "subject" .= prop "string" "Exact typed list-leaf subject; list view only"] ["subject_kind", "subject"]
+      , "limit" .= object ["type" .= ("integer" :: Text), "minimum" .= (1 :: Int), "maximum" .= (200 :: Int), "description" .= ("Presentation rows per page (default 50)" :: Text)]
+      , "offset" .= object ["type" .= ("integer" :: Text), "minimum" .= (0 :: Int), "maximum" .= maxUnifiedSearchOffset, "description" .= ("Presentation-row offset (default 0)" :: Text)]
+      ] [])
   , tool "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)." (schema
       [ "subjects" .= object ["type" .= ("array" :: Text), "description" .= ("One to " <> T.pack (show maxObservationSubjects) <> " ordered repository-relative file or glob subjects tied to this durable insight; duplicate entries are removed in first-occurrence order"), "minItems" .= (1 :: Int), "maxItems" .= maxObservationSubjects, "items" .= object ["type" .= ("object" :: Text), "properties" .= object ["subject_kind" .= enumProp "Kind of repository subject tied to this durable insight" ["file", "glob"], "subject" .= prop "string" "Canonical repository-relative path or safe glob tied to this durable insight"], "required" .= (["subject_kind", "subject"] :: [Text])]]
       , "git_sha" .= prop "string" "Lowercase 40-character Git SHA for the repository state where this insight was established; a staleness-audit sentinel, not timeless proof"
@@ -164,6 +185,7 @@ toolDefinitions =
     tool name description inputSchema = object $
       ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]
       <> ["outputSchema" .= searchOutputSchema | name == "search"]
+      <> ["outputSchema" .= discoveryOutputSchema | name == "observation_discovery"]
     schema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text])]
     strictSchema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text]), "additionalProperties" .= False]
     prop typ description = object ["type" .= (typ :: Text), "description" .= (description :: Text)]
@@ -196,32 +218,11 @@ searchOutputSchema = object
       , "next_requests" .= typesMap nextRequest
       , "ignored_filters" .= outputArray (outputType "string")
       ] ["workspace_id", "observations", "projects", "tasks", "has_more", "next_offset", "next_requests", "ignored_filters"]
-    failure = outputObject
-      [ "error" .= outputObject
-          [ "code" .= outputType "string", "field" .= outputNullable (outputType "string")
-          , "message" .= outputType "string", "http_status" .= outputType "integer"
-          , "server_details" .= object [], "details_truncated" .= outputType "boolean"
-          ] ["code", "field", "message"]
-      ] ["error"]
+    failure = structuredErrorOutputSchema
     planning label extra = outputObject
       (["id" .= outputType "string", Key.fromText label .= outputType "string", "status" .= outputType "string"
        , "priority" .= outputType "integer", "parent_id" .= outputNullable (outputType "string")] <> extra) ["id", label, "status", "priority"]
-    observation = outputObject
-      [ "id" .= outputType "string"
-      , "subjects" .= outputArray (outputObject ["subject_kind" .= outputType "string", "subject" .= outputType "string"] ["subject_kind", "subject"])
-      , "subject_kind" .= outputType "string", "subject" .= outputType "string"
-      , "git_sha" .= outputType "string", "content_preview" .= outputType "string"
-      , "content_version" .= outputType "string", "latest_sequence" .= outputType "integer"
-      , "current_provenance" .= outputNullable provenance
-      , "provenance_match" .= outputObject [Key.fromText key .= outputType "string" | key <- ["original_git_sha", "current_git_sha", "history_git_sha"]] []
-      ] ["id", "subjects", "git_sha", "content_preview", "content_version", "latest_sequence", "current_provenance"]
-    provenance = outputObject
-      [ "sequence" .= outputType "integer", "event_kind" .= outputType "string", "reviewed_git_sha" .= outputType "string"
-      , "content_version" .= outputNullable (outputType "string"), "content_digest" .= outputNullable (outputType "string")
-      , "recorded_at" .= outputType "string", "actor_type" .= outputNullable (outputType "string")
-      , "actor_id" .= outputNullable (outputType "string"), "actor_label" .= outputNullable (outputType "string")
-      , "bot_identity" .= outputObject ["role" .= outputType "string", "model-id" .= outputType "string"] ["role", "model-id"]
-      ] ["sequence", "event_kind", "reviewed_git_sha", "content_version", "content_digest", "recorded_at", "actor_type", "actor_id", "actor_label"]
+    observation = observationOutputSchema
     typesMap valueSchema = outputObject [Key.fromText key .= valueSchema | key <- ["observations", "projects", "tasks"]] []
     nextRequest = outputObject
       [ "name" .= object ["type" .= ("string" :: Text), "enum" .= (["search"] :: [Text])]
@@ -231,6 +232,66 @@ searchOutputSchema = object
               , "entity_types" .= object ["type" .= ("array" :: Text), "minItems" .= (1 :: Int), "maxItems" .= (1 :: Int), "items" .= object ["type" .= ("string" :: Text), "enum" .= (["observation", "project", "task"] :: [Text])]]])
           ["workspace_id", "limit", "offset", "entity_types"]
       ] ["name", "arguments"]
+
+structuredErrorValueSchema :: Value
+structuredErrorValueSchema = outputObject
+  [ "code" .= outputType "string", "field" .= outputNullable (outputType "string")
+  , "message" .= outputType "string", "http_status" .= outputType "integer"
+  , "server_details" .= object [], "details_truncated" .= outputType "boolean"
+  ] ["code", "field", "message"]
+
+structuredErrorOutputSchema :: Value
+structuredErrorOutputSchema = outputObject ["error" .= structuredErrorValueSchema] ["error"]
+
+observationOutputSchema :: Value
+observationOutputSchema = outputObject
+  [ "id" .= outputType "string", "subjects" .= outputArray subjectOutputSchema
+  , "subject_kind" .= outputType "string", "subject" .= outputType "string"
+  , "git_sha" .= outputType "string", "content_preview" .= outputType "string"
+  , "content_version" .= outputType "string", "latest_sequence" .= outputType "integer"
+  , "current_provenance" .= outputNullable provenance
+  , "provenance_match" .= outputObject [Key.fromText key .= outputType "string" | key <- ["original_git_sha", "current_git_sha", "history_git_sha"]] []
+  ] ["id", "subjects", "git_sha", "content_preview", "content_version", "latest_sequence", "current_provenance"]
+  where
+    provenance = outputObject
+      [ "sequence" .= outputType "integer", "event_kind" .= outputType "string", "reviewed_git_sha" .= outputType "string"
+      , "content_version" .= outputNullable (outputType "string"), "content_digest" .= outputNullable (outputType "string")
+      , "recorded_at" .= outputType "string", "actor_type" .= outputNullable (outputType "string")
+      , "actor_id" .= outputNullable (outputType "string"), "actor_label" .= outputNullable (outputType "string")
+      , "bot_identity" .= outputObject ["role" .= outputType "string", "model-id" .= outputType "string"] ["role", "model-id"]
+      ] ["sequence", "event_kind", "reviewed_git_sha", "content_version", "content_digest", "recorded_at", "actor_type", "actor_id", "actor_label"]
+
+subjectOutputSchema :: Value
+subjectOutputSchema = outputObject ["subject_kind" .= outputType "string", "subject" .= outputType "string"] ["subject_kind", "subject"]
+
+discoveryOutputSchema :: Value
+discoveryOutputSchema = object ["type" .= ("object" :: Text), "anyOf" .= [success, structuredErrorOutputSchema]]
+  where
+    success = outputObject
+      [ "workspace_id" .= outputType "string", "context_token" .= outputType "string", "expires_at" .= outputType "string"
+      , "retrieval" .= outputObject ["mode" .= object ["type" .= ("string" :: Text), "enum" .= (["fts_only", "hybrid"] :: [Text])], "reason" .= outputNullable (outputType "string")] ["mode", "reason"]
+      , "complete" .= outputType "boolean"
+      , "page" .= outputObject
+          [ "items" .= outputArray observationOutputSchema, "has_more" .= outputType "boolean"
+          , "counts" .= outputObject ["workspace_id" .= outputType "string", "total_count" .= outputType "integer", "match_count" .= outputType "integer"] ["workspace_id", "total_count", "match_count"]
+          , "tree" .= outputNullable tree
+          ] ["items", "has_more", "counts"]
+      , "next_request" .= outputObject
+          [ "name" .= object ["type" .= ("string" :: Text), "enum" .= (["observation_discovery"] :: [Text])]
+          , "arguments" .= outputObject
+              [ "workspace_id" .= outputType "string", "context_token" .= outputType "string", "view" .= outputType "string"
+              , "prefix" .= outputType "string", "terminal" .= subjectOutputSchema, "limit" .= outputType "integer", "offset" .= outputType "integer"
+              ] ["workspace_id", "context_token", "view", "limit", "offset"]
+          ] ["name", "arguments"]
+      , "continuation_error" .= structuredErrorValueSchema
+      ] ["workspace_id", "context_token", "expires_at", "retrieval", "complete", "page"]
+    tree = outputObject
+      [ "has_more" .= outputType "boolean", "total_count" .= outputType "integer", "match_count" .= outputType "integer"
+      , "items" .= outputArray (outputObject
+          [ "path" .= outputType "string", "segment" .= outputType "string", "has_children" .= outputType "boolean", "observation_count" .= outputType "integer"
+          , "terminals" .= outputArray (outputObject ["subject_kind" .= outputType "string", "subject" .= outputType "string", "observation_count" .= outputType "integer"] ["subject_kind", "subject", "observation_count"])
+          ] ["path", "segment", "has_children", "observation_count", "terminals"])
+      ] ["items", "has_more", "total_count", "match_count"]
 
 outputObject :: [Pair] -> [Text] -> Value
 outputObject properties required = object
@@ -253,6 +314,7 @@ data ToolCall
   | ObservationHistory UUID (Maybe Int) (Maybe Int)
   | ObservationList ObservationQuery
   | ObservationMatchCall ObservationMatchQuery
+  | ObservationDiscoveryCall ObservationDiscoveryRequest
   | ObservationDelete UUID
   | ObservationSetEmbedding UUID ObservationEmbedding
   | ObservationSimilar SimilarObservationQuery
@@ -291,6 +353,7 @@ parseToolCall name args = do
     "observation_history" -> ObservationHistory <$> required "observation_id" <*> optional "limit" <*> optional "offset"
     "observation_list" -> ObservationList <$> parse args
     "observation_match" -> ObservationMatchCall <$> parse args
+    "observation_discovery" -> ObservationDiscoveryCall <$> parse args
     "observation_delete" -> ObservationDelete <$> required "observation_id"
     "observation_set_embedding" -> ObservationSetEmbedding <$> required "observation_id" <*> (ObservationEmbedding <$> required "embedding" <*> optionalFingerprint args)
     "observation_similar" -> ObservationSimilar <$> parse args
@@ -369,6 +432,7 @@ validateToolCall call = case call of
   ObservationHistory _ limit offset -> checked (validateObservationQuery (ObservationQuery UUID.nil Nothing Nothing Nothing Nothing limit offset Nothing Nothing)) call
   ObservationList input -> checked (validateObservationQuery input) call
   ObservationMatchCall input -> checked (validateObservationMatchQuery input) call
+  ObservationDiscoveryCall input -> checked (validateObservationDiscoveryRequest input) call
   ObservationSetEmbedding _ (ObservationEmbedding values _) -> checked (validateEmbedding values) call
   ObservationSimilar input -> checked (validateSimilarObservationQuery input) call
   WorkspaceRegister input -> checked (validateCreateWorkspaceInput input) call
@@ -406,10 +470,12 @@ handleToolCall manager base token identity params = case parseParams params of
     Right parsed -> case validateToolCall parsed of
       Left err -> pure $ case parsed of
         UnifiedSearch input -> searchError "validation_error" (searchValidationField input (T.pack err)) (T.pack err) []
+        ObservationDiscoveryCall input -> searchError "validation_error" (discoveryValidationField input (T.pack err)) (T.pack err) []
         _ -> mcpError (T.pack err)
       Right call -> execute manager base (ForwardingContext token identity) call
   where
     localError "search" code message = searchError code (searchErrorField message) message []
+    localError "observation_discovery" code message = searchError code (discoveryErrorField message) message []
     localError _ _ message = mcpError message
 
 parseParams :: Value -> Either String (Text, Value)
@@ -423,6 +489,9 @@ execute manager base apiKey = \case
   ObservationHistory oid limit offset -> request manager base apiKey "GET" ("/api/v1/observations/" <> uuidPath oid <> "/history" <> query [("limit", show <$> limit), ("offset", show <$> offset)]) Nothing (compactObservationHistory (fromMaybe 0 offset))
   ObservationList input -> request manager base apiKey "GET" (observationListPath input) Nothing (compactObservationList (fromMaybe 0 input.offset))
   ObservationMatchCall input -> request manager base apiKey "POST" "/api/v1/observations/match" (Just (encode input)) (compactObservationMatches (fromMaybe 0 input.offset))
+  ObservationDiscoveryCall input -> do
+    result <- rawRequestOutcome manager base apiKey "POST" "/api/v1/observations/discovery" (Just (encode (discoveryRequestBody input))) []
+    pure $ either searchRequestError (mcpStructuredJSON . discoveryResult input) result
   ObservationDelete oid -> noContentRequest manager base apiKey "DELETE" ("/api/v1/observations/" <> uuidPath oid) Nothing (statusAck "deleted" "observation" oid)
   ObservationSetEmbedding oid embeddingValue -> noContentRequest manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid <> "/embedding") (Just (encode embeddingValue)) (statusAck "embedding_set" "observation" oid)
   ObservationSimilar input -> request manager base apiKey "POST" "/api/v1/observations/similar" (Just (encode input)) (compactSimilarObservations (fromMaybe 50 input.limit) (fromMaybe 0 input.offset))
@@ -718,6 +787,44 @@ searchFilterOwners =
   , ("task_priority", [SearchTask]), ("task_status", [SearchTask])
   ]
 
+-- Core owns creation/continuation validation. Its REST encoder emits nulls for
+-- absent options; omit those at this boundary so continuations contain only
+-- the context and presentation selectors, never create-only placeholders.
+discoveryRequestBody :: ObservationDiscoveryRequest -> Value
+discoveryRequestBody input = case toJSON input of
+  Object fields -> Object (KM.filter (/= Null) fields)
+  value -> value
+
+discoveryResult :: ObservationDiscoveryRequest -> Value -> Value
+discoveryResult input value = object $
+  ["workspace_id" .= input.workspaceId]
+  <> copies ["context_token", "expires_at", "complete"] value
+  <> ["retrieval" .= object (copies ["mode", "reason"] (fromMaybe Null (field "retrieval" value)))
+     ,"page" .= compactPage]
+  <> continuation
+  where
+    copies keys source = catMaybes [fmap (Key.fromText key .=) (field key source) | key <- keys]
+    page = fromMaybe Null (field "page" value)
+    compactPage = object $ ["items" .= mapField "items" compactObservationSummary page]
+      <> copies ["has_more", "counts", "tree"] page
+    presented = case input.view of
+      DiscoveryList -> page
+      DiscoveryTree -> fromMaybe Null (field "tree" page)
+      DiscoveryCount -> Null
+    rows = case field "items" presented of Just (Array items) -> length items; _ -> 0
+    next = toInteger (fromMaybe 0 input.offset) + toInteger rows
+    continuation
+      | field "has_more" presented /= Just (Bool True) = []
+      | rows == 0 = ["continuation_error" .= object ["code" .= ("invalid_continuation" :: Text), "field" .= (if input.view == DiscoveryTree then "page.tree.items" else "page.items" :: Text), "message" .= ("The server reported more rows without returning a presentation row." :: Text)]]
+      | next > toInteger maxUnifiedSearchOffset = ["continuation_error" .= object ["code" .= ("continuation_limit" :: Text), "field" .= ("offset" :: Text), "message" .= ("The page succeeded, but its next offset exceeds 2147483647." :: Text)]]
+      | Just token <- textField "context_token" value =
+          ["next_request" .= object ["name" .= ("observation_discovery" :: Text), "arguments" .= object
+            (["workspace_id" .= input.workspaceId, "context_token" .= token, "view" .= input.view
+             , "limit" .= fromMaybe 50 input.limit, "offset" .= next]
+             <> ["prefix" .= input.treePrefix | not (T.null input.treePrefix)]
+             <> maybe [] (\terminal -> ["terminal" .= terminal]) input.terminal)]]
+      | otherwise = []
+
 compactProjectOverview :: Value -> Value
 compactProjectOverview value = object
   [ "project" .= maybe Null compactProjectSummary (field "project" value)
@@ -855,10 +962,27 @@ searchContextError = searchError "context_required" (Just "identity")
   "Call set_workspace with workspace_id and identity before using ordinary tools" []
 
 searchErrorField :: Text -> Maybe Text
-searchErrorField message = case
-  [key | key <- ["workspace_id", "entity_types", "query", "search_language", "limit", "offset", "subject_kind", "subject", "current_git_sha", "history_git_sha", "git_sha", "project_status", "task_status", "task_priority", "project_id"], key `T.isInfixOf` message] of
-  key : _ -> Just key
-  _ -> Nothing
+searchErrorField = retrievalErrorField
+  ["workspace_id", "entity_types", "query", "search_language", "limit", "offset", "subject_kind", "subject", "current_git_sha", "history_git_sha", "git_sha", "project_status", "task_status", "task_priority", "project_id"]
+
+-- Prefer the actual Aeson path over words in a diagnostic/value. Outside a
+-- parser path, accept a single named validation prefix or missing-key report.
+retrievalErrorField :: [Text] -> Text -> Maybe Text
+retrievalErrorField keys message = case T.stripPrefix "Error in $" message of
+  Just suffix | not (T.null (parserPath suffix)) ->
+    let key = parserPath suffix
+    in if key `elem` keys then Just key else Nothing
+  _ -> case [key | key <- keys, (key <> " ") `T.isPrefixOf` message
+                || ("invalid " <> key) `T.isPrefixOf` message
+                || message == ("Error in $: key \"" <> key <> "\" not found")] of
+    [key] -> Just key
+    _ -> Nothing
+  where
+    parserPath = T.dropWhile (== '.')
+      . T.takeWhile (\c -> c /= '[' && c /= ' ' && c /= '\n')
+      . T.replace "\"]" "" . T.replace "[\"" "."
+      . T.replace "']" "" . T.replace "['" "."
+      . T.takeWhile (/= ':')
 
 -- Core SHA validation intentionally shares one message across selectors. Use
 -- the parsed input to avoid attributing a current/history failure to creation.
@@ -873,6 +997,29 @@ searchValidationField input message = case searchErrorField (T.takeWhile (/= ';'
     invalidSelectors =
       [selector | (selector, Just sha) <- [("git_sha", input.gitSha), ("current_git_sha", input.currentGitSha), ("history_git_sha", input.historyGitSha)]
                 , not (null (validateObservationQuery (ObservationQuery UUID.nil Nothing Nothing (Just sha) Nothing Nothing Nothing Nothing Nothing)))]
+
+discoveryErrorField :: Text -> Maybe Text
+discoveryErrorField = retrievalErrorField
+  (["workspace_id", "replace_context_token", "context_token", "search_session", "generation", "filters", "view", "prefix", "terminal", "terminal.subject_kind", "terminal.subject", "limit", "offset"]
+   <> map ("filters." <>) ["subject_query", "content_query", "subject_kind", "subject", "current_git_sha", "history_git_sha", "git_sha"])
+
+discoveryValidationField :: ObservationDiscoveryRequest -> Text -> Maybe Text
+discoveryValidationField input message
+  | "git_sha" `T.isPrefixOf` firstIssue = case invalidSelectors of [selector] -> Just selector; _ -> Nothing
+  | "subject_query" `T.isPrefixOf` firstIssue = Just "filters.subject_query"
+  | "content_query" `T.isPrefixOf` firstIssue = Just "filters.content_query"
+  | "context continuations" `T.isPrefixOf` firstIssue = Just "context_token"
+  | "search_session and generation" `T.isPrefixOf` firstIssue =
+      if input.searchSession == Nothing then Just "search_session" else Just "generation"
+  | otherwise = discoveryErrorField firstIssue
+  where
+    firstIssue = T.takeWhile (/= ';') message
+    invalidSelectors = case input.filters of
+      Nothing -> []
+      Just filters ->
+        [ "filters." <> selector
+        | (selector, Just sha) <- [("git_sha", filters.gitSha), ("current_git_sha", filters.currentGitSha), ("history_git_sha", filters.historyGitSha)]
+        , not (null (validateObservationQuery (ObservationQuery UUID.nil Nothing Nothing (Just sha) Nothing Nothing Nothing Nothing Nothing)))]
 
 searchRequestError :: RequestFailure -> Value
 searchRequestError (InvalidResponse message) = searchError "invalid_response" Nothing message []

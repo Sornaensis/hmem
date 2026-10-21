@@ -38,20 +38,26 @@ test('clearing a global query hides entity options and restores saved choices on
   } finally { await h.close() }
 })
 
-test('hierarchy controls belong to the sticky header and retain native focus while global search scrolls away', { timeout: 30000 }, async () => {
+for (const focused of [false, true]) test((focused ? 'Focused' : 'Normal') + ' hierarchy controls belong to the sticky header and retain native focus while global search scrolls away', { timeout: 30000 }, async () => {
   const fixture = hierarchyFixture()
   fixture.projects = fixture.projects.slice(0, 25).map(project => ({ ...project, parent_id: null }))
   fixture.projects[0].name = '000 root'
+  if (focused) fixture.projects.slice(1).forEach(project => { project.parent_id = fixture.projects[0].id })
   fixture.tasks = []
   const h = await openHierarchy(fixture)
   try {
-    await h.start(); await h.idle()
-    const hierarchy = h.page.getByPlaceholder('Filter project hierarchy...')
+    await h.start(focused ? 'tab=projects&focus=project:' + fixture.projects[0].id : ''); await h.idle()
+    const hierarchy = h.page.getByPlaceholder(focused ? 'Filter focused view...' : 'Filter project hierarchy...')
+    assert.equal(await h.page.locator('.hierarchy-search-input').count(), 1)
+    if (focused) assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 0)
     assert.equal(await hierarchy.evaluate(element => !!element.closest('.sticky-workspace-bar')), true)
     const element = await hierarchy.elementHandle()
     for (const width of [1440, 390]) {
       await h.page.setViewportSize({ width, height: 700 })
       await hierarchy.focus()
+      await h.page.keyboard.type(' '); await h.idle()
+      await h.page.keyboard.press('Backspace'); await h.idle()
+      assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
       await h.page.locator('#main-content-scroll').evaluate(host => { host.scrollTop = 1000 })
       await h.page.waitForTimeout(300)
       assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)

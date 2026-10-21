@@ -372,17 +372,21 @@ suite =
             Expect.equal { focus = focused.focus.focusedEntity, context = edited.focusedFilters, query = "focused query", request = Just "workspace global", results = Nothing, searching = True }
                 { focus = stale.focus.focusedEntity, context = stale.focusedFilters, query = stale.search.query
                 , request = stale.search.activeRequest |> Maybe.map .query, results = stale.search.unifiedResults, searching = stale.search.isSearching }
-        , test "workspace and contextual focused search inputs show their own values" <| \_ ->
+        , test "focused controls replace the workspace input and restore it on exit" <| \_ ->
             let
                 search = model.search
-                focused = timelineFocusFrom "task" { model | search = { search | query = "workspace query" } }
-                input label value view = view focused |> Query.fromHtml |> Query.find [ Selector.attribute (Attributes.placeholder label) ] |> Query.has [ Selector.attribute (Attributes.value value) ]
+                focused = timelineFocusFrom "task" { model | search = { search | query = "workspace query" } } |> Main.update (SearchInput "focused query") |> Tuple.first
+                input label value source = Feature.Search.viewWorkspaceSearchBar source |> Query.fromHtml |> Query.find [ Selector.attribute (Attributes.placeholder label) ] |> Query.has [ Selector.attribute (Attributes.value value) ]
+                hidden source = Feature.Search.viewWorkspaceSearchBar source |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
             in
             Expect.all
-                [ \_ -> input "Filter project hierarchy..." "workspace query" Feature.Search.viewWorkspaceSearchBar
-                , \_ -> input "Filter focused view..." "workspace query" Feature.Search.viewFocusedSearchBar
-                , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = TimelineTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
-                , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = ObservationsTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
+                [ \_ -> input "Filter focused view..." "focused query" focused
+                , \_ -> Feature.Search.viewWorkspaceSearchBar focused |> Query.fromHtml |> Query.findAll [ Selector.class "hierarchy-search-input" ] |> Query.count (Expect.equal 1)
+                , \_ -> Feature.Search.viewWorkspaceSearchBar focused |> Query.fromHtml |> Query.hasNot [ Selector.attribute (Attributes.placeholder "Filter project hierarchy...") ]
+                , \_ -> input "Filter project hierarchy..." "workspace query" (Main.update ClearFocus focused |> Tuple.first)
+                , \_ -> hidden { focused | activeTab = TimelineTab }
+                , \_ -> hidden { focused | activeTab = ObservationsTab }
+                , \_ -> hidden (Main.update (GlobalSearchInput "global query") focused |> Tuple.first)
                 ] ()
         , test "cold focused URLs inherit late stored base until deliberate focused edits" <| \_ ->
             let

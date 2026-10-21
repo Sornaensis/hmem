@@ -573,7 +573,10 @@ viewWorkspaceSearchBar model =
     let normal = { model | search = Feature.FocusedFilters.normalSearch model } in
     div [ class "workspace-search-filter-bar" ]
         [ if model.activeTab == ProjectsTab && String.isEmpty (String.trim model.search.globalQuery) then
-            viewSearchControls "Filter project hierarchy..." normal |> Html.map WorkspaceSearch
+            if model.focusedFilters /= Nothing then
+                viewFocusedSearchBar model
+            else
+                viewSearchControls "Filter project hierarchy..." normal |> Html.map WorkspaceSearch
           else text "" ]
 
 

@@ -7,10 +7,10 @@ text. Its contextual controls let you adjust these filters while exploring.
 Switching focus or choosing the same focus link keeps those selections and closes
 previous search results. The focused target stays accessible even when excluded
 by the filters; its descendants follow the selected filters.
-The workspace toolbar keeps its own filters throughout. Editing it updates only
-your workspace preferences. Global search has a separate input and keeps your
-focused view for return when cleared. Closing focus or returning to its Timeline or Audit source uses those
-workspace preferences. Focused changes never replace saved workspace filters.
+Focused controls replace the workspace filters in the sticky header. Global
+search has a separate input and keeps your focused view for return when cleared.
+Closing focus or returning to its Timeline or Audit source restores your saved
+workspace filters. Focused changes never replace those preferences.
 
 The workspace Timeline shows Create, Complete, Delete, Archive and Cancel events.
 Choose an entity, time window and bucket size; these choices persist per workspace.

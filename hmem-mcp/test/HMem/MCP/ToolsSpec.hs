@@ -652,45 +652,48 @@ spec = do
         ["Done requires closing open descendants", "cancels non-done subtasks", "preserving done subtasks and dependency links", "Reopening does not reopen descendants"])
       toolDescription "task_update" `shouldSatisfy` maybe False (T.isInfixOf "Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it")
 
-    it "guides durable project and task descriptions, status, and atomic subtasks" $ do
-      toolDescriptionIs "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state."
-      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates. Pausing requires no running descendant tasks or subtasks and cascades inherited pause/blocking. Resuming returns eligible automatically blocked tasks to todo and retains independent or ancestor pauses; acknowledgements include bounded pause effects. Completing requires closed descendants. Archiving also archives all descendant projects, including completed projects, and cancels non-done tasks while preserving done tasks."
-      toolDescriptionIs "project_spec" "Atomically create a project and 1 to 50 initial atomic tasks in one request. Validation, authorization, or database rejection creates nothing. If the connection or response fails, the outcome is uncertain; check the workspace's projects before retrying. Returns the project ID and task IDs in input order. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks."
-      toolDescriptionIs "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks. Reopen a cancelled or done parent before adding unfinished subtasks."
-      toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks. Cancelling also cancels non-done subtasks while preserving done subtasks. Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it. Reopening does not reopen descendants."
+    it "guides concise project goals, deliverable tasks, checklist subtasks, and separate execution state" $ do
+      toolDescriptionIs "project_create" "Create a project grouping tasks and subprojects in a hierarchy for long-running or short-lived work. Its description is a concise durable specification of goals and domain, excluding information already encoded in hmem's dependency graph; status records execution state."
+      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are concise durable specifications of goals and domain, excluding information already encoded in hmem's dependency graph; not logs of progress or updates. Pausing requires no running descendant tasks or subtasks and cascades inherited pause/blocking. Resuming returns eligible automatically blocked tasks to todo and retains independent or ancestor pauses; acknowledgements include bounded pause effects. Completing requires closed descendants. Archiving also archives all descendant projects, including completed projects, and cancels non-done tasks while preserving done tasks."
+      toolDescriptionIs "project_spec" "Atomically create a project and 1 to 50 initial atomic tasks in one request. Validation, authorization, or database rejection creates nothing. If the connection or response fails, the outcome is uncertain; check the workspace's projects before retrying. Returns the project ID and task IDs in input order. Projects group tasks and subprojects hierarchically for long-running or short-lived work. Tasks generally deliver a complete unit of work on its own; complex work can use subtasks as a directed checklist. Descriptions are concise durable specifications: project goals and domain, task steps and completion criteria, excluding information already encoded in hmem's dependency graph. Status records execution state. Create later-discovered atomic work as subtasks."
+      toolDescriptionIs "task_create" "Create a task, generally a complete unit of work deliverable on its own. Complex work can use subtasks as a directed checklist. Its description is a concise durable specification of steps and completion criteria, excluding information already encoded in hmem's dependency graph; status records execution state. Create later-discovered atomic work as subtasks. Reopen a cancelled or done parent before adding unfinished subtasks."
+      toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are concise durable specifications of steps and completion criteria, excluding information already encoded in hmem's dependency graph; not logs of progress or updates. Use subtasks as a directed checklist for complex work; create later-discovered atomic work as subtasks. Cancelling also cancels non-done subtasks while preserving done subtasks. Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it. Reopening does not reopen descendants."
       toolDescriptionIs "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates."
       toolDescriptionIs "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress."
       toolDescriptionIs "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation. Done requires closing open descendants. Cancelled also cancels non-done subtasks while preserving done subtasks and dependency links; unrelated dependent tasks are not cancelled. Reopening does not reopen descendants."
-      schemaPropertyDescriptionIs "project_create" "description" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+      schemaPropertyDescriptionIs "project_create" "description" "Optional concise durable project specification: goals and domain; omit information already encoded in hmem's dependency graph; not a log of progress or updates"
       schemaPropertyDescriptionIs "project_update" "project_id" "Project UUID; the only required field"
-      schemaPropertyDescriptionIs "project_update" "description" "Durable project specification: aims, scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates"
+      schemaPropertyDescriptionIs "project_update" "description" "Concise durable project specification: goals and domain; omit information already encoded in hmem's dependency graph; omit this field to keep the existing description or use null to clear it; not a log of progress or updates"
       schemaPropertyDescriptionIs "project_update" "parent_id" "Parent project UUID for hierarchy; omit to keep the existing parent or use null to clear it"
       schemaPropertyDescriptionIs "project_update" "status" "Execution state; record progress here, not in the description"
-      schemaPropertyDescriptionIs "project_spec" "description" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
-      schemaPropertyDescriptionIs "task_create" "description" "Optional durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
-      schemaPropertyDescriptionIs "task_create" "parent_id" "Optional parent task UUID; use it to create a subtask for later-discovered atomic work"
+      schemaPropertyDescriptionIs "project_spec" "description" "Optional concise durable project specification: goals and domain; omit information already encoded in hmem's dependency graph; not a log of progress or updates"
+      schemaPropertyDescriptionIs "task_create" "description" "Optional concise durable task specification: steps and completion criteria; omit information already encoded in hmem's dependency graph; not a log of progress or updates"
+      schemaPropertyDescriptionIs "task_create" "parent_id" "Optional parent task UUID; subtasks can form a directed checklist for complex work or capture later-discovered atomic work"
       schemaPropertyDescriptionIs "task_update" "task_id" "Task UUID; the only required field"
-      schemaPropertyDescriptionIs "task_update" "description" "Durable task specification: scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates"
+      schemaPropertyDescriptionIs "task_update" "description" "Concise durable task specification: steps and completion criteria; omit information already encoded in hmem's dependency graph; omit this field to keep the existing description or use null to clear it; not a log of progress or updates"
       schemaPropertyDescriptionIs "task_update" "project_id" "Project UUID; omit to keep the existing project or use null to clear it"
-      schemaPropertyDescriptionIs "task_update" "parent_id" "Parent task UUID to make this an atomic subtask for later-discovered work; omit to keep the existing parent or use null to clear it"
+      schemaPropertyDescriptionIs "task_update" "parent_id" "Parent task UUID; subtasks can form a directed checklist for complex work or capture later-discovered atomic work; omit to keep the existing parent or use null to clear it"
       schemaPropertyDescriptionIs "task_update" "status" "Execution state; record progress here, not in the description"
-      schemaPropertyDescriptionIs "project_spec" "tasks" "One to 50 initial atomic tasks, created in input order; later-discovered atomic work must be created as subtasks, not appended to a parent description"
-      projectSpecTaskPropertyDescriptionIs "title" "Atomic task title"
-      projectSpecTaskPropertyDescriptionIs "description" "Durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+      schemaPropertyDescriptionIs "project_spec" "tasks" "One to 50 initial tasks, generally complete units deliverable on their own, created in input order; use subtasks as a directed checklist for complex work and later-discovered atomic work, not a parent description"
+      projectSpecTaskPropertyDescriptionIs "title" "Title for a complete unit of work generally deliverable on its own"
+      projectSpecTaskPropertyDescriptionIs "description" "Concise durable task specification: steps and completion criteria; omit information already encoded in hmem's dependency graph; not a log of progress or updates"
       projectSpecTaskPropertyDescriptionIs "priority" "Task priority"
       (schemaProperty "project_spec" "tasks" >>= jsonField "items" >>= jsonField "required") `shouldBe` Just (toJSON (["title"] :: [Text]))
       planningGuidance `shouldSatisfy` planningGuidanceContract
       T.replace "durable specification" "progress log" planningGuidance `shouldNotSatisfy` planningGuidanceContract
       T.replace "atomic work as subtasks" "parent description" planningGuidance `shouldNotSatisfy` planningGuidanceContract
 
-    it "guides Observations as durable repository insights and treats Git SHAs as staleness sentinels" $ do
+    it "guides repository notes to double-check when used and treats Git SHAs as staleness sentinels" $ do
       forM_ ["all-term lexical", "ignored_filters", "next_requests", "directly in that project"] $ \phrase -> toolDescription "search" `shouldSatisfy` maybe False (T.isInfixOf phrase)
-      toolDescriptionIs "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)."
-      toolDescriptionIs "observation_update" "Assert current content at reviewed_git_sha with the expected_content_version returned by a read. Repeated SHA/text assertions are accepted and advance version/history. Subjects and creation git_sha remain immutable; conflicts preserve latest canonical content."
-      toolDescriptionIs "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page."
-      toolDescriptionIs "observation_match" "Find durable, non-obvious repository insights whose stored file subjects or safe glob subjects match any concrete repository-relative path supplied in paths. Paths are ORed; do not pass globs here and no repository filesystem is read. Optional filters compose with matching. git_sha is a staleness-audit sentinel, not timeless proof. Continue with next_offset until has_more is false."
-      toolDescriptionIs "observation_similar" "Find semantically similar durable, non-obvious repository insights. Subject and git_sha filters are exact provenance filters; git_sha is a staleness-audit sentinel, not timeless proof. To continue, add returned_count to offset and repeat until returned_count is less than limit or zero."
-      schemaPropertyDescriptionIs "observation_create" "content" "Durable, non-obvious repository insight about its subjects; not a progress update or routine fact"
+      forM_ ["search", "observation_discovery", "observation_create", "observation_get", "observation_update", "observation_list", "observation_match", "observation_similar"] $ \name ->
+        toolDescription name `shouldSatisfy` maybe False (\description -> all (`T.isInfixOf` description)
+          ["notes about specific areas or files in a repository workspace", "double-check them against the repository when used"])
+      toolDescriptionIs "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java). Observations are notes about specific areas or files in a repository workspace; double-check them against the repository when used."
+      toolDescriptionIs "observation_update" "Assert current content at reviewed_git_sha with the expected_content_version returned by a read. Repeated SHA/text assertions are accepted and advance version/history. Subjects and creation git_sha remain immutable; conflicts preserve latest canonical content. Observations are notes about specific areas or files in a repository workspace; double-check them against the repository when used."
+      toolDescriptionIs "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page. Observations are notes about specific areas or files in a repository workspace; double-check them against the repository when used."
+      toolDescriptionIs "observation_match" "Find durable, non-obvious repository insights whose stored file subjects or safe glob subjects match any concrete repository-relative path supplied in paths. Paths are ORed; do not pass globs here and no repository filesystem is read. Optional filters compose with matching. git_sha is a staleness-audit sentinel, not timeless proof. Continue with next_offset until has_more is false. Observations are notes about specific areas or files in a repository workspace; double-check them against the repository when used."
+      toolDescriptionIs "observation_similar" "Find semantically similar durable, non-obvious repository insights. Subject and git_sha filters are exact provenance filters; git_sha is a staleness-audit sentinel, not timeless proof. To continue, add returned_count to offset and repeat until returned_count is less than limit or zero. Observations are notes about specific areas or files in a repository workspace; double-check them against the repository when used."
+      schemaPropertyDescriptionIs "observation_create" "content" "Durable, non-obvious note about specific areas or files in a repository workspace; double-check against the repository when used; not a progress update or routine fact"
       schemaPropertyDescriptionIs "observation_create" "git_sha" "Lowercase 40-character Git SHA for the repository state where this insight was established; a staleness-audit sentinel, not timeless proof"
       schemaPropertyDescriptionIs "observation_update" "content" "Reviewed current content"
       schemaPropertyDescriptionIs "observation_match" "paths" "One to 256 concrete repository-relative files to match against stored Observation subjects; globs are rejected"
@@ -1550,12 +1553,19 @@ planningGuidanceContract text =
     , "not logs of progress or updates"
     , "status records"
     , "atomic work as subtasks"
+    , "complete unit of work deliverable on its own"
+    , "directed checklist"
+    , "tasks and subprojects in a hierarchy"
+    , "long-running or short-lived work"
+    , "goals and domain"
+    , "steps and completion criteria"
+    , "excluding information already encoded in hmem's dependency graph"
     ]
 
 observationGuidance :: Text
 observationGuidance = T.intercalate "\n" $
   [ toolDescription name
-  | name <- ["search", "observation_create", "observation_update", "observation_list", "observation_match", "observation_similar"]
+  | name <- ["search", "observation_discovery", "observation_create", "observation_get", "observation_update", "observation_list", "observation_match", "observation_similar"]
   ] >>= maybe [] pure
 
 observationGuidanceContract :: Text -> Bool
@@ -1567,6 +1577,8 @@ observationGuidanceContract text =
     , "creation git_sha remain immutable"
     , "staleness-audit sentinel"
     , "not timeless proof"
+    , "notes about specific areas or files in a repository workspace"
+    , "double-check them against the repository when used"
     ]
 
 schemaProperty :: Text -> Text -> Maybe Value

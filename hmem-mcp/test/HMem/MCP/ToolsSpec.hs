@@ -39,6 +39,157 @@ import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), Observation
 
 spec :: Spec
 spec = do
+  describe "Typed unified search contract" $ do
+    it "advertises scoped overrides, nonempty selection and callable language and priority filters" $ do
+      all (`elem` schemaProperties "search") ["workspace_id", "search_language", "task_priority"] `shouldBe` True
+      (schemaProperty "search" "entity_types" >>= jsonField "minItems") `shouldBe` Just (Number 1)
+      [name | Object tool <- toolDefinitions, Just (String name) <- [KM.lookup "name" tool], KM.member "outputSchema" tool] `shouldBe` ["search"]
+
+    it "returns schema-valid all/default/subset results with complete legacy JSON text" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base ->
+        forM_ [[], ["entity_types" .= (["observation"] :: [Text])], ["entity_types" .= (["project", "task"] :: [Text])]] $ \selection -> do
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("search" :: Text), "arguments" .= object (["workspace_id" .= workspaceId] <> selection)])
+          expectSearchStructured response
+          jsonField "structuredContent" response `shouldBe` decodeMcpJSON response
+          jsonPath ["structuredContent", "workspace_id"] response `shouldBe` Just (String workspaceId)
+
+    it "reports only filters unused by the selection, preserving compatible mixed filters" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        let filters = ["workspace_id" .= workspaceId, "task_status" .= ("done" :: Text), "project_id" .= workspaceId, "subject" .= ("src/HMem/Types.hs" :: Text), "search_language" .= ("simple" :: Text), "task_priority" .= (7 :: Int)]
+        projects <- call manager base "search" (object (filters <> ["entity_types" .= (["project"] :: [Text])]))
+        jsonField "ignored_filters" projects `shouldBe` Just (toJSON (["project_id", "subject", "task_priority", "task_status"] :: [Text]))
+        mixed <- call manager base "search" (object (filters <> ["entity_types" .= (["project", "task"] :: [Text])]))
+        jsonField "ignored_filters" mixed `shouldBe` Just (toJSON (["subject"] :: [Text]))
+        allTypes <- call manager base "search" (object filters)
+        jsonField "ignored_filters" allTypes `shouldBe` Just (toJSON ([] :: [Text]))
+
+    it "preserves full current provenance, exact selector evidence and full identifiers" $ do
+      let provenance = object ["sequence" .= (3 :: Int), "event_kind" .= ("update" :: Text), "reviewed_git_sha" .= gitSha
+            , "content_version" .= observationId, "content_digest" .= T.replicate 64 "a", "recorded_at" .= ("2026-10-21T00:00:00Z" :: Text)
+            , "actor_type" .= ("bot" :: Text), "actor_id" .= workspaceId, "actor_label" .= Null, "bot_identity" .= testIdentity]
+          evidence = object ["current_git_sha" .= gitSha, "history_git_sha" .= gitSha]
+          observation = object ["id" .= observationId, "subjects" .= observationSubjects, "git_sha" .= gitSha, "content_version" .= observationId
+            , "latest_sequence" .= (3 :: Int), "content_preview" .= ("bounded insight" :: Text), "current_provenance" .= provenance, "provenance_match" .= evidence]
+          payload = object ["observations" .= [observation], "projects" .= ([] :: [Value]), "tasks" .= ([] :: [Value])
+            , "has_more" .= object ["observations" .= False], "next_offset" .= object []]
+      withSearchResponse status200 (encode payload) $ \manager base -> do
+        response <- rawSearch manager base
+        expectSearchStructured response
+        jsonPath ["structuredContent", "observations"] response `shouldBe` Just (toJSON [observation])
+        jsonField "structuredContent" response `shouldBe` decodeMcpJSON response
+
+    it "executes narrowed continuations after a workspace switch without carrying irrelevant filters" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        context <- newTVarIO (Just (MCPContext (Just (read (T.unpack workspaceId))) testIdentity))
+        response <- jsonRpcToolCall manager base initialized context "search" (object
+          ["query" .= ("needle" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha
+          , "project_status" .= ("archived" :: Text), "task_status" .= ("done" :: Text), "project_id" .= observationId
+          , "search_language" .= ("simple" :: Text), "task_priority" .= (7 :: Int), "limit" .= (2 :: Int)])
+        let Just result = response >>= jsonField "result"
+            Just observationNext = jsonPath ["structuredContent", "next_requests", "observations"] result
+            Just projectNext = jsonPath ["structuredContent", "next_requests", "projects"] result
+        expectSearchStructured result
+        jsonPath ["structuredContent", "next_requests", "tasks"] result `shouldBe` Nothing
+        atomically $ modifyTVar' context (const (Just (MCPContext (Just (read (T.unpack observationId))) testIdentity)))
+        forM_ [observationNext, projectNext] $ \next -> do
+          let Just (String name) = jsonField "name" next
+              Just arguments = jsonField "arguments" next
+          (parseToolCall name arguments >>= validateToolCall) `shouldSatisfy` isRight
+          continued <- jsonRpcToolCall manager base initialized context name arguments
+          let Just continuedResult = continued >>= jsonField "result"
+          expectSearchStructured continuedResult
+          jsonPath ["structuredContent", "workspace_id"] continuedResult `shouldBe` Just (String workspaceId)
+        observed <- readTVarIO requests
+        let payloads = [value | request <- observed, Just value <- [decode request.requestBody]]
+        map (jsonField "workspace_id") payloads `shouldBe` replicate 3 (Just (String workspaceId))
+        let [_, observationPage, projectPage] = payloads
+        jsonField "subject" observationPage `shouldBe` Just (String "src/HMem/Types.hs")
+        jsonField "project_status" observationPage `shouldBe` Nothing
+        jsonField "search_language" observationPage `shouldBe` Nothing
+        jsonField "project_id" projectPage `shouldBe` Nothing
+        jsonField "task_priority" projectPage `shouldBe` Nothing
+        jsonField "search_language" projectPage `shouldBe` Just (String "simple")
+        jsonField "query" projectPage `shouldBe` Just (String "needle")
+        jsonField "limit" projectPage `shouldBe` Just (Number 2)
+
+    it "preserves task language and priority in executable task continuations and emits no final requests" $ do
+      let response = object ["observations" .= ([] :: [Value]), "projects" .= ([] :: [Value]), "tasks" .= ([] :: [Value]), "has_more" .= object ["tasks" .= True], "next_offset" .= object ["tasks" .= (4 :: Int)]]
+      withSearchResponse status200 (encode response) $ \manager base -> do
+        result <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("search" :: Text), "arguments" .= object
+          ["workspace_id" .= workspaceId, "entity_types" .= (["task"] :: [Text]), "task_priority" .= (7 :: Int), "search_language" .= ("simple" :: Text), "project_status" .= ("active" :: Text)]])
+        expectSearchStructured result
+        let Just next = jsonPath ["structuredContent", "next_requests", "tasks", "arguments"] result
+        jsonField "task_priority" next `shouldBe` Just (Number 7)
+        jsonField "search_language" next `shouldBe` Just (String "simple")
+        jsonField "project_status" next `shouldBe` Nothing
+        (parseToolCall "search" next >>= validateToolCall) `shouldSatisfy` isRight
+        repeated <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("search" :: Text), "arguments" .= next])
+        expectSearchStructured repeated
+      let final = object ["observations" .= ([] :: [Value]), "projects" .= ([] :: [Value]), "tasks" .= ([] :: [Value]), "has_more" .= object ["tasks" .= False], "next_offset" .= object []]
+      withSearchResponse status200 (encode final) $ \manager base -> do
+        result <- call manager base "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["task"] :: [Text])])
+        jsonField "next_requests" result `shouldBe` Just (object [])
+
+    it "returns schema-valid parser, validation and predeclaration errors before HTTP" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        forM_ [(object ["limit" .= ("bad" :: Text)], "invalid_arguments", "limit"), (object ["entity_types" .= ([] :: [Text])], "validation_error", "entity_types"), (object ["query" .= (" " :: Text)], "validation_error", "query")] $ \(arguments, code, errorField) -> do
+          let Object fields = arguments
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("search" :: Text), "arguments" .= Object (KM.insert "workspace_id" (String workspaceId) fields)])
+          expectSearchStructured response
+          response `shouldSatisfy` isMcpError
+          jsonPath ["structuredContent", "error", "code"] response `shouldBe` Just (String code)
+          jsonPath ["structuredContent", "error", "field"] response `shouldBe` Just (String errorField)
+        initialized <- newTVarIO True
+        context <- newTVarIO Nothing
+        response <- jsonRpcToolCall manager base initialized context "search" (object ["workspace_id" .= workspaceId])
+        let Just result = response >>= jsonField "result"
+        expectSearchStructured result
+        jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "context_required")
+      (length <$> readTVarIO requests) `shouldReturn` 0
+
+    it "preserves bounded HTTP details and classifies invalid JSON and transport errors" $ do
+      let details = object ["error" .= ("continuation_limit" :: Text), "message" .= ("Cannot continue" :: Text), "field" .= ("offset" :: Text), "detail" .= object ["max_offset" .= (2147483647 :: Int)]]
+      withSearchResponse status400 (encode details) $ \manager base -> do
+        response <- rawSearch manager base
+        expectSearchStructured response
+        jsonPath ["structuredContent", "error", "code"] response `shouldBe` Just (String "continuation_limit")
+        jsonPath ["structuredContent", "error", "http_status"] response `shouldBe` Just (Number 400)
+        jsonPath ["structuredContent", "error", "server_details"] response `shouldBe` Just details
+      withSearchResponse status500 (encode (object ["detail" .= T.replicate 20000 "x"])) $ \manager base -> do
+        response <- rawSearch manager base
+        expectSearchStructured response
+        jsonPath ["structuredContent", "error", "details_truncated"] response `shouldBe` Just (Bool True)
+        BL.length (encode response) `shouldSatisfy` (< 16000)
+      forM_ [(status401, "not json", "HTTP_401"), (status200, "not json", "invalid_response")] $ \(status, body, code) ->
+        withSearchResponse status body $ \manager base -> do
+          response <- rawSearch manager base
+          expectSearchStructured response
+          jsonPath ["structuredContent", "error", "code"] response `shouldBe` Just (String code)
+      bracket (newManager defaultManagerSettings) closeManager $ \manager -> do
+        response <- rawSearch manager "invalid URI"
+        expectSearchStructured response
+        jsonPath ["structuredContent", "error", "code"] response `shouldBe` Just (String "transport_error")
+
+    it "attributes invalid SHA values to their actual selector and leaves ambiguous failures unassigned" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        forM_ [("git_sha", "current_git_sha"), ("current_git_sha", "history_git_sha"), ("history_git_sha", "git_sha")] $ \(invalidSelector, validSelector) -> do
+          response <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("search" :: Text), "arguments" .= object
+            ["workspace_id" .= workspaceId, Key.fromText invalidSelector .= ("BAD" :: Text), Key.fromText validSelector .= gitSha]])
+          expectSearchStructured response
+          jsonPath ["structuredContent", "error", "code"] response `shouldBe` Just (String "validation_error")
+          jsonPath ["structuredContent", "error", "field"] response `shouldBe` Just (String invalidSelector)
+        ambiguous <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("search" :: Text), "arguments" .= object
+          ["workspace_id" .= workspaceId, "current_git_sha" .= ("BAD" :: Text), "history_git_sha" .= ("BAD" :: Text)]])
+        expectSearchStructured ambiguous
+        jsonPath ["structuredContent", "error", "field"] ambiguous `shouldBe` Just Null
+      (length <$> readTVarIO requests) `shouldReturn` 0
+
   describe "Declared identity forwarding" $ do
     it "adds exactly one accepted identity on JSON, conditional and no-content helpers without changing credentials or provenance" $ do
       requests <- newTVarIO []
@@ -364,7 +515,7 @@ spec = do
       T.replace "atomic work as subtasks" "parent description" planningGuidance `shouldNotSatisfy` planningGuidanceContract
 
     it "guides Observations as durable repository insights and treats Git SHAs as staleness sentinels" $ do
-      toolDescriptionIs "search" "Search observations, projects, and tasks (default 10 per type, limit 1..200, offset 0..2147483647). An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters. has_more reports each requested type; next_offset contains only types with another page. To continue one type, repeat with entity_types set to that type and offset set to its next_offset, keeping workspace_id, query, and filters unchanged. If a further page would exceed the offset range, the server returns a continuation_limit error."
+      forM_ ["all-term lexical", "ignored_filters", "next_requests", "directly in that project"] $ \phrase -> toolDescription "search" `shouldSatisfy` maybe False (T.isInfixOf phrase)
       toolDescriptionIs "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)."
       toolDescriptionIs "observation_update" "Assert current content at reviewed_git_sha with the expected_content_version returned by a read. Repeated SHA/text assertions are accepted and advance version/history. Subjects and creation git_sha remain immutable; conflicts preserve latest canonical content."
       toolDescriptionIs "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page."
@@ -1285,6 +1436,65 @@ arrayFirst _ _ = False
 
 call :: Manager -> String -> Text -> Value -> IO Value
 call manager base = callWithKey manager base Nothing
+
+rawSearch :: Manager -> String -> IO Value
+rawSearch manager base = handleToolCall manager base Nothing testIdentity
+  (object ["name" .= ("search" :: Text), "arguments" .= object ["workspace_id" .= workspaceId]])
+
+withSearchResponse :: Status -> BL.ByteString -> (Manager -> String -> IO a) -> IO a
+withSearchResponse status body action =
+  testWithApplication (pure (\_ respond -> respond (Wai.responseLBS status [("Content-Type", "application/json")] body))) $ \port ->
+    bracket (newManager defaultManagerSettings { managerIdleConnectionCount = 0 }) closeManager $ \manager -> action manager ("http://127.0.0.1:" <> show port)
+
+decodeMcpJSON :: Value -> Maybe Value
+decodeMcpJSON response = do
+  Array contents <- jsonField "content" response
+  first : _ <- pure (toList contents)
+  String text <- jsonField "text" first
+  decodeStrict' (TE.encodeUtf8 text)
+
+expectSearchStructured :: Value -> Expectation
+expectSearchStructured response = do
+  let [outputSchema] = [value | Object tool <- toolDefinitions, KM.lookup "name" tool == Just (String "search"), Just value <- [KM.lookup "outputSchema" tool]]
+  case jsonField "structuredContent" response of
+    Nothing -> expectationFailure ("Missing structured search result: " <> show response)
+    Just structured -> do
+      schemaAccepts outputSchema structured `shouldBe` True
+      -- Negative controls ensure the validator checks required properties and
+      -- nested types, rather than merely accepting any object-shaped envelope.
+      schemaAccepts outputSchema (object []) `shouldBe` False
+      schemaAccepts outputSchema (object ["error" .= object ["code" .= (2 :: Int), "field" .= Null, "message" .= ("bad" :: Text)]]) `shouldBe` False
+
+-- Independent interpreter for the JSON Schema vocabulary used by this output
+-- contract. It checks every nested property, including additionalProperties,
+-- and does not import the result projection or its implementation helpers.
+schemaAccepts :: Value -> Value -> Bool
+schemaAccepts (Object rules) value = all id
+  [ maybe True (\case Array choices -> any (\choice -> schemaAccepts choice value) choices; _ -> False) (KM.lookup "anyOf" rules)
+  , maybe True (\case String typ -> hasType typ value; _ -> False) (KM.lookup "type" rules)
+  , maybe True (\case Array choices -> value `elem` choices; _ -> False) (KM.lookup "enum" rules)
+  , case value of
+      Object fields ->
+        let properties = case KM.lookup "properties" rules of Just (Object entries) -> entries; _ -> KM.empty
+            required = case KM.lookup "required" rules of Just (Array keys) -> [Key.fromText key | String key <- toList keys]; _ -> []
+        in all (`KM.member` fields) required
+          && all (\(key, item) -> case KM.lookup key properties of
+              Just property -> schemaAccepts property item
+              Nothing -> KM.lookup "additionalProperties" rules /= Just (Bool False)) (KM.toList fields)
+      Array items -> maybe True (\itemSchema -> all (schemaAccepts itemSchema) items) (KM.lookup "items" rules)
+        && maybe True (\case Number lower -> fromIntegral (length items) >= lower; _ -> False) (KM.lookup "minItems" rules)
+        && maybe True (\case Number upper -> fromIntegral (length items) <= upper; _ -> False) (KM.lookup "maxItems" rules)
+      _ -> True
+  ]
+  where
+    hasType "object" (Object _) = True
+    hasType "array" (Array _) = True
+    hasType "string" (String _) = True
+    hasType "boolean" (Bool _) = True
+    hasType "null" Null = True
+    hasType "integer" (Number number) = number == fromInteger (round number)
+    hasType _ _ = False
+schemaAccepts _ _ = False
 
 callWithKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
 callWithKey manager base apiKey name arguments = do

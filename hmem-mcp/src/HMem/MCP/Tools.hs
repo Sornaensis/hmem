@@ -14,13 +14,14 @@ module HMem.MCP.Tools
   , compactTaskSummary
   , mcpProvenanceHeadersFor
   , mcpResultWith
+  , searchContextError
   ) where
 
 import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
-import Data.Aeson.Types (parseEither)
+import Data.Aeson.Types (Pair, parseEither)
 import HMem.BotIdentity (BotIdentity)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
@@ -52,9 +53,10 @@ toolDefinitions =
   , tool "workspace_list" "List registered workspaces." (schema ["limit" .= prop "integer" "Maximum results (default 50)"] [])
   , tool "workspace_register" "Register a workspace." (schema ["name" .= prop "string" "Workspace name", "workspace_type" .= enumProp "Workspace type" ["repository", "planning", "personal", "organization"]] ["name"])
   , tool "workspace_update" "Rename a workspace. Only its display name is mutable." (strictSchema ["workspace_id" .= prop "string" "Workspace UUID", "name" .= prop "string" "New workspace display name"] ["workspace_id", "name"])
-  , tool "search" "Search observations, projects, and tasks (default 10 per type, limit 1..200, offset 0..2147483647). An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters. has_more reports each requested type; next_offset contains only types with another page. To continue one type, repeat with entity_types set to that type and offset set to its next_offset, keeping workspace_id, query, and filters unchanged. If a further page would exceed the offset range, the server returns a continuation_limit error." (schema
-      [ "query" .= prop "string" "Optional full-text query"
-      , "entity_types" .= arrayEnum "Entity types (default: observation, project, task)" ["observation", "project", "task"]
+  , tool "search" "Search stored workspace observations, projects, and tasks with all-term lexical matching; this does not search repository files. Omit query to browse; blank queries are invalid. Projects/tasks default to English stemming, observations use simple tokenization; OR and phrase syntax are unsupported. Defaults: all types, limit 10 per type (1..200), offset 0 (0..2147483647). Entity-specific filters affect only their type; ignored_filters lists supplied filters consumed by no requested type. project_id selects tasks directly in that project, excluding descendant projects. Results preserve compact summaries, full IDs and Observation provenance. Execute each next_requests entry to continue that type in the resolved workspace; has_more/next_offset remain available. Pages use the current result set, not a snapshot; continuation_limit reports offsets beyond the supported range. Use observation_match for concrete paths and detail/get tools for full content." (schema
+      [ "workspace_id" .= prop "string" "Optional workspace UUID; explicit value overrides the active workspace, but still requires set_workspace identity declaration"
+      , "query" .= prop "string" "Optional all-term lexical query; omit to browse; blank, OR and phrase syntax are not supported"
+      , "entity_types" .= object ["type" .= ("array" :: Text), "minItems" .= (1 :: Int), "description" .= ("Nonempty entity selection; omitted means observation, project, task" :: Text), "items" .= object ["type" .= ("string" :: Text), "enum" .= (["observation", "project", "task"] :: [Text])]]
       , "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
       , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
       , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
@@ -62,7 +64,9 @@ toolDefinitions =
       , "history_git_sha" .= prop "string" "Exact SHA of any recorded assertion, including unbound legacy creation claims; returns current content once"
       , "project_status" .= enumProp "Project status" ["active", "paused", "completed", "archived"]
       , "task_status" .= enumProp "Task status" ["todo", "in_progress", "blocked", "done", "cancelled"]
-      , "project_id" .= prop "string" "Filter tasks by project UUID"
+      , "project_id" .= prop "string" "Exact direct project UUID for tasks only; excludes descendant projects and does not filter projects or observations"
+      , "search_language" .= prop "string" "Optional PostgreSQL text-search configuration for projects and tasks only (default english); observations always use simple"
+      , "task_priority" .= object ["type" .= ("integer" :: Text), "minimum" .= (1 :: Int), "maximum" .= (10 :: Int), "description" .= ("Exact priority for tasks only (1..10)" :: Text)]
       , "limit" .= prop "integer" "Maximum results per entity type (default 10, 1..200)"
       , "offset" .= prop "integer" "Result offset per entity type (0..2147483647)"
       ] [])
@@ -157,7 +161,9 @@ toolDefinitions =
   , tool "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation. Done requires closing open descendants. Cancelled also cancels non-done subtasks while preserving done subtasks and dependency links; unrelated dependent tasks are not cancelled. Reopening does not reopen descendants." (schema ["task_id" .= prop "string" "Task UUID", "status" .= enumProp "Final execution state" ["done", "blocked", "cancelled"]] ["task_id", "status"])
   ]
   where
-    tool name description inputSchema = object ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]
+    tool name description inputSchema = object $
+      ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]
+      <> ["outputSchema" .= searchOutputSchema | name == "search"]
     schema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text])]
     strictSchema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text]), "additionalProperties" .= False]
     prop typ description = object ["type" .= (typ :: Text), "description" .= (description :: Text)]
@@ -170,6 +176,74 @@ toolDefinitions =
     nullableProp description = object ["description" .= (description :: Text), "anyOf" .= [object ["type" .= ("string" :: Text)], object ["type" .= ("null" :: Text)]]]
     enumProp description choices = object ["type" .= ("string" :: Text), "description" .= (description :: Text), "enum" .= (choices :: [Text])]
     arrayEnum description choices = object ["type" .= ("array" :: Text), "description" .= (description :: Text), "items" .= object ["type" .= ("string" :: Text), "enum" .= (choices :: [Text])]]
+
+-- Search has an operation-specific structured contract. Core identity and
+-- summary fields are required; optional hierarchy and legacy provenance values
+-- retain the presence/nullability of the existing compact projections.
+searchOutputSchema :: Value
+searchOutputSchema = object
+  [ "type" .= ("object" :: Text)
+  , "anyOf" .= [success, failure]
+  ]
+  where
+    success = outputObject
+      [ "workspace_id" .= outputType "string"
+      , "observations" .= outputArray observation
+      , "projects" .= outputArray (planning "name" [])
+      , "tasks" .= outputArray (planning "title" ["project_id" .= outputNullable (outputType "string")])
+      , "has_more" .= typesMap (outputType "boolean")
+      , "next_offset" .= typesMap (outputType "integer")
+      , "next_requests" .= typesMap nextRequest
+      , "ignored_filters" .= outputArray (outputType "string")
+      ] ["workspace_id", "observations", "projects", "tasks", "has_more", "next_offset", "next_requests", "ignored_filters"]
+    failure = outputObject
+      [ "error" .= outputObject
+          [ "code" .= outputType "string", "field" .= outputNullable (outputType "string")
+          , "message" .= outputType "string", "http_status" .= outputType "integer"
+          , "server_details" .= object [], "details_truncated" .= outputType "boolean"
+          ] ["code", "field", "message"]
+      ] ["error"]
+    planning label extra = outputObject
+      (["id" .= outputType "string", Key.fromText label .= outputType "string", "status" .= outputType "string"
+       , "priority" .= outputType "integer", "parent_id" .= outputNullable (outputType "string")] <> extra) ["id", label, "status", "priority"]
+    observation = outputObject
+      [ "id" .= outputType "string"
+      , "subjects" .= outputArray (outputObject ["subject_kind" .= outputType "string", "subject" .= outputType "string"] ["subject_kind", "subject"])
+      , "subject_kind" .= outputType "string", "subject" .= outputType "string"
+      , "git_sha" .= outputType "string", "content_preview" .= outputType "string"
+      , "content_version" .= outputType "string", "latest_sequence" .= outputType "integer"
+      , "current_provenance" .= outputNullable provenance
+      , "provenance_match" .= outputObject [Key.fromText key .= outputType "string" | key <- ["original_git_sha", "current_git_sha", "history_git_sha"]] []
+      ] ["id", "subjects", "git_sha", "content_preview", "content_version", "latest_sequence", "current_provenance"]
+    provenance = outputObject
+      [ "sequence" .= outputType "integer", "event_kind" .= outputType "string", "reviewed_git_sha" .= outputType "string"
+      , "content_version" .= outputNullable (outputType "string"), "content_digest" .= outputNullable (outputType "string")
+      , "recorded_at" .= outputType "string", "actor_type" .= outputNullable (outputType "string")
+      , "actor_id" .= outputNullable (outputType "string"), "actor_label" .= outputNullable (outputType "string")
+      , "bot_identity" .= outputObject ["role" .= outputType "string", "model-id" .= outputType "string"] ["role", "model-id"]
+      ] ["sequence", "event_kind", "reviewed_git_sha", "content_version", "content_digest", "recorded_at", "actor_type", "actor_id", "actor_label"]
+    typesMap valueSchema = outputObject [Key.fromText key .= valueSchema | key <- ["observations", "projects", "tasks"]] []
+    nextRequest = outputObject
+      [ "name" .= object ["type" .= ("string" :: Text), "enum" .= (["search"] :: [Text])]
+      , "arguments" .= outputObject
+          ([Key.fromText key .= outputType "string" | key <- ["workspace_id", "query", "search_language", "subject_kind", "subject", "git_sha", "current_git_sha", "history_git_sha", "project_status", "task_status", "project_id"]]
+           <> ["limit" .= outputType "integer", "offset" .= outputType "integer", "task_priority" .= outputType "integer"
+              , "entity_types" .= object ["type" .= ("array" :: Text), "minItems" .= (1 :: Int), "maxItems" .= (1 :: Int), "items" .= object ["type" .= ("string" :: Text), "enum" .= (["observation", "project", "task"] :: [Text])]]])
+          ["workspace_id", "limit", "offset", "entity_types"]
+      ] ["name", "arguments"]
+
+outputObject :: [Pair] -> [Text] -> Value
+outputObject properties required = object
+  ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= required, "additionalProperties" .= False]
+
+outputType :: Text -> Value
+outputType typ = object ["type" .= typ]
+
+outputArray :: Value -> Value
+outputArray items = object ["type" .= ("array" :: Text), "items" .= items]
+
+outputNullable :: Value -> Value
+outputNullable value = object ["anyOf" .= [value, outputType "null"]]
 
 -- Parsed calls retain current core DTOs; no compatibility aliases exist.
 data ToolCall
@@ -325,9 +399,18 @@ validateToolCall call = case call of
 data ForwardingContext = ForwardingContext (Maybe Text) BotIdentity
 
 handleToolCall :: Manager -> String -> Maybe Text -> BotIdentity -> Value -> IO Value
-handleToolCall manager base token identity params = case parseParams params >>= uncurry parseToolCall >>= validateToolCall of
+handleToolCall manager base token identity params = case parseParams params of
   Left err -> pure (mcpError (T.pack err))
-  Right call -> execute manager base (ForwardingContext token identity) call
+  Right (name, args) -> case parseToolCall name args of
+    Left err -> pure (localError name "invalid_arguments" (T.pack err))
+    Right parsed -> case validateToolCall parsed of
+      Left err -> pure $ case parsed of
+        UnifiedSearch input -> searchError "validation_error" (searchValidationField input (T.pack err)) (T.pack err) []
+        _ -> mcpError (T.pack err)
+      Right call -> execute manager base (ForwardingContext token identity) call
+  where
+    localError "search" code message = searchError code (searchErrorField message) message []
+    localError _ _ message = mcpError message
 
 parseParams :: Value -> Either String (Text, Value)
 parseParams = parseEither $ withObject "params" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []
@@ -346,7 +429,9 @@ execute manager base apiKey = \case
   WorkspaceList limit -> request manager base apiKey "GET" ("/api/v1/workspaces" <> query [("limit", show <$> limit)]) Nothing compactWorkspaceList
   WorkspaceRegister input -> request manager base apiKey "POST" "/api/v1/workspaces" (Just (encode input)) (mutationAck "created" "workspace" . compactWorkspaceSummary)
   WorkspaceUpdate workspaceId input -> request manager base apiKey "PUT" ("/api/v1/workspaces/" <> uuidPath workspaceId) (Just (encode input)) (mutationAck "updated" "workspace" . compactWorkspaceSummary)
-  UnifiedSearch input -> request manager base apiKey "POST" "/api/v1/search" (Just (encode input)) compactSearchResults
+  UnifiedSearch input -> do
+    result <- rawRequestOutcome manager base apiKey "POST" "/api/v1/search" (Just (encode input)) []
+    pure $ either searchRequestError (mcpStructuredJSON . searchResult input) result
   ProjectCreate input -> request manager base apiKey "POST" "/api/v1/projects" (Just (encode input)) (mutationAck "created" "project" . compactProjectSummary)
   ProjectUpdate pid input -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode input)) (projectMutationAck "updated")
   ProjectDetail pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid) Nothing fullProjectDetail
@@ -447,6 +532,17 @@ rawRequest manager base apiKey method path body = rawRequestWithHeaders manager 
 
 rawRequestWithHeaders :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> IO (Either Value Value)
 rawRequestWithHeaders manager base apiKey method path body extraHeaders = do
+  result <- rawRequestOutcome manager base apiKey method path body extraHeaders
+  pure $ case result of
+    Right value -> Right value
+    Left (InvalidResponse message) -> Left (mcpError message)
+    Left (HttpFailure code responseBody) -> Left (httpError code responseBody)
+    Left TransportFailure -> Left (mcpError "Could not connect to hmem-server")
+
+data RequestFailure = InvalidResponse Text | HttpFailure Int BL.ByteString | TransportFailure
+
+rawRequestOutcome :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> IO (Either RequestFailure Value)
+rawRequestOutcome manager base apiKey method path body extraHeaders = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
     provenance <- mcpProvenanceHeaders
@@ -459,13 +555,13 @@ rawRequestWithHeaders manager base apiKey method path body extraHeaders = do
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then case eitherDecode (responseBody response) of
         Right value -> pure (Right value)
-        Left err -> pure (Left (mcpError ("Invalid JSON response: " <> T.pack err)))
-      else pure (Left (httpError (statusCode (responseStatus response)) (responseBody response)))
+        Left err -> pure (Left (InvalidResponse ("Invalid JSON response: " <> T.pack err)))
+      else pure (Left (HttpFailure (statusCode (responseStatus response)) (responseBody response)))
   case outcome of
     Right value -> pure value
     Left (exception :: SomeException) -> do
       case fromException exception :: Maybe SomeAsyncException of Just _ -> throwIO exception; Nothing -> pure ()
-      pure (Left (mcpError "Could not connect to hmem-server"))
+      pure (Left TransportFailure)
 
 -- | Forwarded user authorization is not provenance.  The bridge adds this
 -- independently configured private credential only when one is available.
@@ -592,6 +688,36 @@ compactSearchResults value = object
   , "next_offset" .= fromMaybe (object []) (field "next_offset" value)
   ]
 
+-- Continuations carry the resolved workspace even if the caller originally
+-- relied on session injection. Filter ownership is shared with ignored_filters.
+searchResult :: UnifiedSearchQuery -> Value -> Value
+searchResult input value = case compactSearchResults value of
+  Object result -> Object $ KM.insert "workspace_id" (toJSON input.workspaceId)
+    $ KM.insert "ignored_filters" (toJSON ignored)
+    $ KM.insert "next_requests" (object continuations) result
+  other -> other
+  where
+    selected = fromMaybe [SearchObservation, SearchProject, SearchTask] input.entityTypes
+    supplied = case toJSON input of Object fields -> fields; _ -> KM.empty
+    ignored = [Key.toText key | (key, owners) <- searchFilterOwners, KM.member key supplied, not (any (`elem` selected) owners)]
+    continuations =
+      [ Key.fromText plural .= object ["name" .= ("search" :: Text), "arguments" .= object
+          ([ "workspace_id" .= input.workspaceId, "entity_types" .= [entity]
+           , "limit" .= fromMaybe 10 input.limit, "offset" .= next ]
+           <> [key .= item | (key, item) <- KM.toList supplied, key == "query" || maybe False (entity `elem`) (lookup key searchFilterOwners)])]
+      | (entity, plural) <- [(SearchObservation, "observations"), (SearchProject, "projects"), (SearchTask, "tasks")]
+      , entity `elem` selected
+      , Just next <- [field "next_offset" value >>= field plural]
+      ]
+
+searchFilterOwners :: [(Key.Key, [EntitySearchType])]
+searchFilterOwners =
+  [ ("current_git_sha", [SearchObservation]), ("git_sha", [SearchObservation]), ("history_git_sha", [SearchObservation])
+  , ("project_id", [SearchTask]), ("project_status", [SearchProject])
+  , ("search_language", [SearchProject, SearchTask]), ("subject", [SearchObservation]), ("subject_kind", [SearchObservation])
+  , ("task_priority", [SearchTask]), ("task_status", [SearchTask])
+  ]
+
 compactProjectOverview :: Value -> Value
 compactProjectOverview value = object
   [ "project" .= maybe Null compactProjectSummary (field "project" value)
@@ -708,6 +834,64 @@ mcpResultWith shape body = case eitherDecode body of Right value -> mcpJSON (sha
 
 mcpJSON :: Value -> Value
 mcpJSON value = object ["content" .= [object ["type" .= ("text" :: Text), "text" .= TE.decodeUtf8 (BL.toStrict (encode value))]]]
+
+mcpStructuredJSON :: Value -> Value
+mcpStructuredJSON value = case mcpJSON value of
+  Object result -> Object (KM.insert "structuredContent" value result)
+  result -> result
+
+-- Keep the existing human-readable text on failures, with a bounded typed
+-- envelope alongside it. Ordinary tools retain their existing wire shape.
+searchError :: Text -> Maybe Text -> Text -> [Pair] -> Value
+searchError code errorField message extra = object
+  [ "content" .= [object ["type" .= ("text" :: Text), "text" .= message]]
+  , "isError" .= True
+  , "structuredContent" .= object ["error" .= object
+      (["code" .= code, "field" .= errorField, "message" .= T.take 2000 message] <> extra)]
+  ]
+
+searchContextError :: Value
+searchContextError = searchError "context_required" (Just "identity")
+  "Call set_workspace with workspace_id and identity before using ordinary tools" []
+
+searchErrorField :: Text -> Maybe Text
+searchErrorField message = case
+  [key | key <- ["workspace_id", "entity_types", "query", "search_language", "limit", "offset", "subject_kind", "subject", "current_git_sha", "history_git_sha", "git_sha", "project_status", "task_status", "task_priority", "project_id"], key `T.isInfixOf` message] of
+  key : _ -> Just key
+  _ -> Nothing
+
+-- Core SHA validation intentionally shares one message across selectors. Use
+-- the parsed input to avoid attributing a current/history failure to creation.
+-- Multiple invalid selectors have no single truthful field attribution.
+searchValidationField :: UnifiedSearchQuery -> Text -> Maybe Text
+searchValidationField input message = case searchErrorField (T.takeWhile (/= ';') message) of
+  Just "git_sha" -> case invalidSelectors of
+    [selector] -> Just selector
+    _ -> Nothing
+  inferred -> inferred
+  where
+    invalidSelectors =
+      [selector | (selector, Just sha) <- [("git_sha", input.gitSha), ("current_git_sha", input.currentGitSha), ("history_git_sha", input.historyGitSha)]
+                , not (null (validateObservationQuery (ObservationQuery UUID.nil Nothing Nothing (Just sha) Nothing Nothing Nothing Nothing Nothing)))]
+
+searchRequestError :: RequestFailure -> Value
+searchRequestError (InvalidResponse message) = searchError "invalid_response" Nothing message []
+searchRequestError TransportFailure = searchError "transport_error" Nothing "Could not connect to hmem-server" []
+searchRequestError (HttpFailure status body) = searchError code errorField legacyText
+  ["http_status" .= status, "server_details" .= details, "details_truncated" .= truncated]
+  where
+    decoded = eitherDecode body :: Either String Value
+    payload = either (const Nothing) Just decoded
+    code = fromMaybe ("HTTP_" <> T.pack (show status)) (payload >>= \value -> textField "code" value `orElse` textField "error" value)
+    errorField = payload >>= textField "field"
+    rawText = TE.decodeUtf8With (\_ _ -> Just '?') (BL.toStrict (BL.take 8192 body))
+    truncated = BL.length body > 8192
+    details = if truncated then String (T.take 4096 rawText) else fromMaybe (String rawText) payload
+    message = T.take 2000 (fromMaybe rawText (payload >>= textField "message"))
+    legacyText = "[HTTP_" <> T.pack (show status) <> "] " <> message
+      <> maybe "" (const ("\n" <> TE.decodeUtf8 (BL.toStrict (encode details)))) payload
+    orElse (Just value) _ = Just value
+    orElse Nothing alternative = alternative
 
 mcpError :: Text -> Value
 mcpError message = object ["content" .= [object ["type" .= ("text" :: Text), "text" .= message]], "isError" .= True]

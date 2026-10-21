@@ -29,6 +29,18 @@ import HMem.MCP.Tools (toolDefinitions)
 spec :: Spec
 spec = do
   describe "stdio JSON-RPC line handling" $ do
+    it "keeps legacy version fallback and advertises the optional structured-output backport" $
+      withStdioState $ \mgr initialized context -> do
+        atomically $ modifyTVar' context (const (Just (MCPContext (Just (read (T.unpack workspaceA))) testIdentity)))
+        mapM_ (\version -> do
+          response <- handleStdioLine mgr unusedServerUrl Nothing initialized context $ jsonLine $ object
+            ["jsonrpc" .= ("2.0" :: Text), "id" .= version, "method" .= ("initialize" :: Text), "params" .= object ["protocolVersion" .= version]]
+          (response >>= jsonField "result" >>= jsonField "protocolVersion") `shouldBe` Just (String "2024-11-05")
+          (response >>= jsonField "result" >>= jsonField "capabilities" >>= jsonField "experimental" >>= jsonField "hmem/structured-tool-output")
+            `shouldBe` Just (object ["version" .= (1 :: Int)])
+          readTVarIO context `shouldReturn` Just (MCPContext (Just (read (T.unpack workspaceA))) testIdentity)
+          ) (["2024-11-05", "2025-06-18"] :: [Text])
+
     it "returns parse errors for invalid JSON lines" $
       withStdioState $ \mgr initialized wsContext -> do
         mResponse <- handleStdioLine mgr unusedServerUrl Nothing initialized wsContext "not json"

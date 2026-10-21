@@ -34,7 +34,7 @@ import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, respons
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.IO (Handle, hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
 import HMem.BotIdentity (BotIdentity)
-import HMem.MCP.Tools (handleToolCall, toolDefinitions)
+import HMem.MCP.Tools (handleToolCall, searchContextError, toolDefinitions)
 
 ------------------------------------------------------------------------
 -- JSON-RPC types
@@ -308,7 +308,8 @@ handleRequestWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext w
     pure $ Just $ jsonRpcResponse req.reqId $ object
       [ "protocolVersion" .= ("2024-11-05" :: Text)
       , "capabilities"    .= object
-          [ "tools" .= object
+          [ "experimental" .= object ["hmem/structured-tool-output" .= object ["version" .= (1 :: Int)]]
+          , "tools" .= object
               [ "listChanged" .= False
               ]
           ]
@@ -360,10 +361,11 @@ handleMethod mgr serverUrl mApiKey wsContext workspaceSnapshot req = case req.re
               Just captured -> pure captured
               Nothing -> atomically $ readTVar wsContext
             case capturedWorkspace of
-              Nothing -> pure $ Just $ jsonRpcResponse req.reqId $ object
-                [ "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Call set_workspace with workspace_id and identity before using ordinary tools" :: Text)]]
-                , "isError" .= True
-                ]
+              Nothing -> pure $ Just $ jsonRpcResponse req.reqId $
+                if mToolName == Just "search" then searchContextError else object
+                  [ "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Call set_workspace with workspace_id and identity before using ordinary tools" :: Text)]]
+                  , "isError" .= True
+                  ]
               Just accepted -> do
                 let params' = injectWorkspaceContextValue capturedWorkspace params
                 result <- handleToolCall mgr serverUrl mApiKey accepted.identity params'

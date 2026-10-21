@@ -7,6 +7,7 @@ import Data.Either (isLeft)
 import Data.Text qualified as T
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 import Test.Hspec
 
 import HMem.Types
@@ -164,6 +165,12 @@ spec = do
       let counts = TimelineBucketSeriesCounts 1 2 3 4 5
       eitherDecode (encode counts) `shouldBe` Right counts
   describe "Unified observation search validation" $ do
+    it "rejects explicit empty selections but accepts omitted and nonempty selections" $ do
+      let scoped :: UnifiedSearchQuery
+          scoped = observationSearch { workspaceId = Just UUID.nil }
+      validateUnifiedSearchQuery scoped { entityTypes = Just [] } `shouldBe` ["entity_types must contain at least one entity type"]
+      validateUnifiedSearchQuery scoped { entityTypes = Nothing } `shouldBe` []
+      validateUnifiedSearchQuery scoped { entityTypes = Just [SearchTask] } `shouldBe` []
     it "requires a workspace for every entity selection" $
       validateUnifiedSearchQuery observationSearch `shouldBe` ["workspace_id is required for unified search"]
     it "rejects project-only searches without a workspace" $

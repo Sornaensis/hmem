@@ -65,3 +65,35 @@ The server derives a local persona only for implicit local bootstrap: the same
 canonical role/model pair groups across sessions and workspaces. Credential bot
 IDs, human identities, permissions, and stream audiences remain unchanged. New
 records expose optional `bot_identity`; no historical attribution is inferred.
+
+## Unified search
+
+`search` retrieves stored workspace records with all-term lexical matching. Omit
+`query` to browse; blank queries are invalid. Boolean `OR` and phrase operators
+are not interpreted. Projects and tasks use English stemming by default;
+Observations use simple tokenization. Use `rg` for repository source text,
+`observation_match` for concrete paths, and detail/get tools for complete content.
+
+Omitted `entity_types` selects all three types; an explicit array must be nonempty.
+Observation provenance filters affect only Observations, `project_status` only
+Projects, and `task_status`/`project_id` only Tasks. `project_id` uses exact direct
+project membership and excludes descendant projects. Mixed filters are valid;
+`ignored_filters` lists supplied filters that no selected type consumes.
+
+Every success includes the resolved `workspace_id`, compact arrays, `has_more`,
+`next_offset`, and `next_requests`. Execute each `next_requests` entry as a
+`tools/call` params object. It pins the original workspace and retains only that
+type's applicable filters, including `search_language` for Projects/Tasks and
+`task_priority` for Tasks when supplied. No entry means no further page for that type.
+Offset pages use the current result set; concurrent changes can alter membership
+or order. A required offset beyond 2147483647 returns `continuation_limit`.
+
+Search advertises `outputSchema` and returns `structuredContent` as optional hmem
+backport extensions. Initialization retains protocol version `2024-11-05`, including
+fallback from newer requested versions, and advertises experimental capability
+`hmem/structured-tool-output` version 1. This does not claim newer protocol
+conformance; older clients may ignore the extensions. Successful JSON text and
+structured content encode the same payload. Errors retain readable text and
+`isError: true`, with `error.code`, nullable `error.field`, and `error.message` in
+structured content. HTTP errors also include status and bounded server details;
+`details_truncated` reports truncation. Other tools retain their existing shapes.

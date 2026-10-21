@@ -2564,6 +2564,7 @@ validateUnifiedSearchOffset mOffset =
 validateUnifiedSearchQuery :: UnifiedSearchQuery -> [Text]
 validateUnifiedSearchQuery usq =
   ["query must not be empty" | maybe False (T.null . T.strip) usq.query]
+  <> ["entity_types must contain at least one entity type" | usq.entityTypes == Just []]
   <> ["workspace_id is required for unified search" | usq.workspaceId == Nothing]
   <> ["invalid search_language" | not (validFtsLanguage usq.searchLanguage)]
   <> maybe [] validateObservationSubject usq.subject

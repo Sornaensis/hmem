@@ -61,7 +61,20 @@
       "projects": [],
       "tasks": [],
       "has_more": { "observations": true },
-      "next_offset": { "observations": 1 }
+        "next_offset": { "observations": 1 },
+        "workspace_id": "11111111-2222-3333-4444-555555555555",
+        "ignored_filters": [],
+        "next_requests": {
+          "observations": {
+            "name": "search",
+            "arguments": {
+              "workspace_id": "11111111-2222-3333-4444-555555555555",
+              "entity_types": ["observation"],
+              "limit": 10,
+              "offset": 1
+            }
+          }
+        }
     }
   },
   "observation_list": {

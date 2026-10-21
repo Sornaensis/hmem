@@ -699,6 +699,12 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       map (jsonPath ["transaction", "id"] . (.outboxEnvelope)) reverts `shouldSatisfy` (\case [Just a, Just b, Just c] -> a == b && b == c; _ -> False)
 
   describe "unified search continuation HTTP contract" $ do
+    it "rejects explicit empty entity selections through the shared validator" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-unified-search-empty-types"
+      response <- postJson app "/api/v1/search" (object ["workspace_id" .= workspace.id, "entity_types" .= ([] :: [T.Text])])
+      responseStatus response `shouldBe` status400
+      let Just payload = decode (responseBody response) :: Maybe Value
+      jsonField "error" payload `shouldBe` Just (String "validation_error")
     it "returns independent page metadata and stable filtered pages" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-unified-search-pages"
       observations <- forM [1 .. 3 :: Int] $ \index -> do
@@ -3279,6 +3285,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       hasSchemaProperty "UnifiedSearchResults" "has_more" `shouldBe` True
       hasSchemaProperty "UnifiedSearchResults" "next_offset" `shouldBe` True
       (schema "UnifiedSearchQuery" >>= jsonField "properties" >>= jsonField "offset" >>= jsonField "maximum") `shouldBe` Just (Number 2147483647)
+      (schema "UnifiedSearchQuery" >>= jsonField "properties" >>= jsonField "entity_types" >>= jsonField "minItems") `shouldBe` Just (Number 1)
       operationDescription "/api/v1/search" "post" `shouldSatisfy` maybe False (T.isInfixOf "continuation_limit" . \case String value -> value; _ -> "")
       schema "ObservationSubject" `shouldSatisfy` isJust
       schema "ObservationSubjectFacet" `shouldSatisfy` isJust

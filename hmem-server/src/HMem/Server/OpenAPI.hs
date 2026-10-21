@@ -678,6 +678,9 @@ instance ToSchema UnifiedSearchQuery where
   declareNamedSchema _ = do
     NamedSchema searchName searchSchema <- genericDeclareNamedSchema opts (Proxy @UnifiedSearchQuery)
     pure $ NamedSchema searchName $ searchSchema
+      & properties . at "entity_types" . _Just %~ \case
+          Inline entitySchema -> Inline (entitySchema & minItems ?~ 1)
+          reference -> reference
       & properties . at "limit" ?~ Inline (mempty & type_ ?~ OpenApiInteger & nullable ?~ True & minimum_ ?~ 1 & maximum_ ?~ 200)
       & properties . at "offset" ?~ Inline (mempty & type_ ?~ OpenApiInteger & nullable ?~ True & minimum_ ?~ 0 & maximum_ ?~ fromIntegral maxUnifiedSearchOffset)
 instance ToSchema UnifiedSearchResults where declareNamedSchema = genericDeclareNamedSchema opts

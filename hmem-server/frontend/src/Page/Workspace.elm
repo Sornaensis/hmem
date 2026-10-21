@@ -46,8 +46,7 @@ viewReadableWorkspacePage wsId model ws =
                 model.dataLoading.planningCounts
     in
     div [ class "page" ]
-        [ viewStickyWorkspaceBar model ws summaryParts
-        , div [ class "workspace-header" ]
+        [ div [ class "workspace-header" ]
             [ div [ class "workspace-header-top" ]
                 [ div [ class "workspace-header-title" ]
                     [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
@@ -107,17 +106,17 @@ viewReadableWorkspacePage wsId model ws =
                     ]
                 ]
             ]
+        , if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab then
+            text ""
+          else
+            Feature.Search.viewSearchBar model
+        , viewStickyWorkspaceBar model ws summaryParts
         , if not (Permissions.canReadCurrentWorkspace model) then
             viewUnauthorizedWorkspace model
 
           else
             div []
-                [ if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab then
-                    text ""
-
-                  else
-                    Feature.Search.viewSearchBar model
-                , viewTabs model
+                [ viewTabs model
                 , Feature.Search.viewFocusedSearchBar model
                 , Feature.Search.viewNavigation model (if model.activeTab == AdministrationTab then
                     viewTabContent wsId model
@@ -222,6 +221,7 @@ viewStickyWorkspaceBar model ws summaryParts =
                         , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
                   else text "" ]
             ]
+        , Feature.Search.viewWorkspaceSearchBar model
         ]
 
 

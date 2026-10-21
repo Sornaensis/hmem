@@ -13,7 +13,105 @@ const waitFor = async (h, predicate) => {
 }
 const respond = (route, body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 
-test('global search is live, independent, sticky and persistent through pending/error/empty/clear, with actor preferences', { timeout: 60000 }, async () => {
+test('clearing a global query hides entity options and restores saved choices on the next query', { timeout: 30000 }, async () => {
+  const h = await openHierarchy(), requests = []
+  await h.page.route('**/api/v1/search', route => { requests.push(route.request().postDataJSON()); return respond(route, empty) })
+  try {
+    await h.start(); await h.idle()
+    await input(h).fill('first'); await h.page.locator('.search-results-title').waitFor()
+    await toggle(h, 'Tasks').click(); await waitFor(h, () => requests.length === 2)
+    await input(h).focus(); await h.page.keyboard.press('ControlOrMeta+A'); await h.page.keyboard.press('Backspace')
+    await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
+    assert.equal(await bar(h).count(), 0, 'Keyboard deletion hides entity options')
+    const count = requests.length
+    await input(h).fill('   '); await h.page.waitForTimeout(300)
+    assert.equal(await bar(h).count(), 0, 'Whitespace is an empty query')
+    assert.equal(requests.length, count)
+    await input(h).fill('second'); await h.page.locator('.search-results-title').waitFor()
+    assert.equal(await toggle(h, 'Tasks').getAttribute('aria-pressed'), 'false')
+    assert.deepEqual(requests.at(-1).entity_types, ['project', 'observation'])
+    await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
+    await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
+    assert.equal(await bar(h).count(), 0, 'Explicit clear hides entity options')
+    assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 1)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('hierarchy controls belong to the sticky header and retain native focus while global search scrolls away', { timeout: 30000 }, async () => {
+  const fixture = hierarchyFixture()
+  fixture.projects = fixture.projects.slice(0, 25).map(project => ({ ...project, parent_id: null }))
+  fixture.projects[0].name = '000 root'
+  fixture.tasks = []
+  const h = await openHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    const hierarchy = h.page.getByPlaceholder('Filter project hierarchy...')
+    assert.equal(await hierarchy.evaluate(element => !!element.closest('.sticky-workspace-bar')), true)
+    const element = await hierarchy.elementHandle()
+    for (const width of [1440, 390]) {
+      await h.page.setViewportSize({ width, height: 700 })
+      await hierarchy.focus()
+      await h.page.locator('#main-content-scroll').evaluate(host => { host.scrollTop = 1000 })
+      await h.page.waitForTimeout(300)
+      assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
+      const geometry = await h.page.evaluate(() => {
+        const host = document.getElementById('main-content-scroll').getBoundingClientRect()
+        const widget = document.querySelector('.sticky-workspace-bar').getBoundingClientRect()
+        const title = document.querySelector('.sticky-workspace-bar__header').getBoundingClientRect()
+        const hierarchy = document.querySelector('.hierarchy-search-input').getBoundingClientRect()
+        const global = document.querySelector('.search-input').getBoundingClientRect()
+        const controls = [...document.querySelectorAll('.sticky-workspace-bar input, .sticky-workspace-bar select, .sticky-workspace-bar button')].map(e => e.getBoundingClientRect())
+        return { host: host.toJSON(), widget: widget.toJSON(), title: title.toJSON(), hierarchy: hierarchy.toJSON(), global: global.toJSON(), fits: controls.every(r => r.left >= widget.left - 1 && r.right <= widget.right + 1 && r.bottom <= widget.bottom + 1) }
+      })
+      assert.ok(Math.abs(geometry.widget.top - geometry.host.top) < 2, JSON.stringify(geometry))
+      assert.ok(geometry.hierarchy.top >= geometry.title.bottom - 1, JSON.stringify(geometry))
+      assert.ok(geometry.global.bottom <= geometry.widget.top, 'Global search scrolls out of the header: ' + JSON.stringify(geometry))
+      assert.ok(geometry.widget.bottom < geometry.host.bottom - 60, 'Header leaves room to browse content: ' + JSON.stringify(geometry))
+      assert.ok(geometry.fits, 'All hierarchy controls fit at width ' + width)
+      await h.page.locator('#main-content-scroll').evaluate(host => { host.scrollTop = 0 })
+      await h.page.waitForTimeout(300)
+      assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
+    }
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('global input position and focus stay stable on the first character and keyboard clear', { timeout: 30000 }, async () => {
+  const fixture = hierarchyFixture()
+  fixture.projects = fixture.projects.slice(0, 10).map(project => ({ ...project, parent_id: null }))
+  fixture.projects[0].name = '000 root'; fixture.tasks = []
+  const h = await openHierarchy(fixture)
+  await h.page.route('**/api/v1/search', route => respond(route, empty))
+  try {
+    await h.start(); await h.idle()
+    for (const width of [1440, 390]) for (const top of [0, 120]) {
+      await h.page.setViewportSize({ width, height: 700 })
+      await h.page.locator('#main-content-scroll').evaluate((host, top) => { host.scrollTop = top }, top)
+      await h.page.waitForTimeout(300)
+      await input(h).click()
+      const element = await input(h).elementHandle()
+      const measure = () => element.evaluate(element => {
+        const r = element.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), bounds = host.getBoundingClientRect()
+        return { top: r.top, bottom: r.bottom, scroll: host.scrollTop, focused: element === document.activeElement, connected: element.isConnected, visible: r.top >= bounds.top && r.bottom <= bounds.bottom }
+      })
+      const before = await measure()
+      assert.equal(before.visible, true, JSON.stringify({ width, top, before }))
+      assert.ok(Math.abs(before.scroll - top) <= 1, 'Input is usable at the requested scroll position')
+      await h.page.keyboard.type('z'); await h.page.waitForTimeout(400); await h.idle()
+      const typed = await measure()
+      await h.page.keyboard.press('ControlOrMeta+A'); await h.page.keyboard.press('Backspace'); await h.idle()
+      const cleared = await measure()
+      for (const after of [typed, cleared]) {
+        assert.ok(after.focused && after.connected && after.visible, JSON.stringify({ width, top, before, after }))
+        assert.ok(Math.abs(after.top - before.top) <= 1 && Math.abs(after.bottom - before.bottom) <= 1 && Math.abs(after.scroll - before.scroll) <= 1, JSON.stringify({ width, top, before, after }))
+      }
+    }
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('global search is live and independent with persistent actor preferences through pending/error/empty/clear', { timeout: 60000 }, async () => {
   const fixture = hierarchyFixture(), h = await openHierarchy(fixture), requests = []
   let releasePending, retry = false
   const pending = new Promise(resolve => { releasePending = resolve })
@@ -38,11 +136,7 @@ test('global search is live, independent, sticky and persistent through pending/
     await h.page.setViewportSize({ width: 390, height: 700 })
     await h.page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 700 })
     await h.page.waitForTimeout(150)
-    const geometry = await h.page.locator('.workspace-search-filter-bar').evaluate(element => {
-      const parent = document.getElementById('main-content-scroll'), r = element.getBoundingClientRect(), p = parent.getBoundingClientRect()
-      return { sticky: getComputedStyle(element).position, top: r.top, scrollTop: p.top, right: r.right, parentRight: p.right }
-    })
-    assert.equal(geometry.sticky, 'sticky'); assert.ok(Math.abs(geometry.top - geometry.scrollTop) < 3, JSON.stringify(geometry)); assert.ok(geometry.right <= geometry.parentRight + 1)
+    assert.equal(await input(h).evaluate(element => !!element.closest('.sticky-workspace-bar')), false)
     await input(h).fill('pending')
     await waitFor(h, () => requests.length === 3)
     assert.match(await h.page.locator('.search-results-state').innerText(), /Searching/)
@@ -60,7 +154,7 @@ test('global search is live, independent, sticky and persistent through pending/
     await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
     assert.equal(await input(h).inputValue(), '')
     assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').inputValue(), 'root')
-    assert.equal(await bar(h).count(), 1)
+    assert.equal(await bar(h).count(), 0)
     assert.deepEqual(await h.page.evaluate(id => JSON.parse(localStorage.getItem('hmem-ws-' + id)), fixture.workspace.id), hierarchyState)
     await h.page.setViewportSize({ width: 1440, height: 1000 })
     await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle()
@@ -74,8 +168,13 @@ test('global search is live, independent, sticky and persistent through pending/
     assert.equal(requests.length, count, 'Explicit none must not become a default-all request')
     assert.match(await bar(h).innerText(), /Select at least one/)
     await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
+    await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
+    assert.equal(await bar(h).count(), 0)
+    await h.page.waitForTimeout(300); assert.equal(requests.length, count, 'Empty query must not search')
+    await input(h).fill('none selected')
+    await h.page.waitForTimeout(300); assert.equal(requests.length, count, 'The next query preserves explicit none')
     await toggle(h, 'Tasks').click()
-    await h.page.waitForTimeout(300); assert.equal(requests.length, count, 'Empty query toggles must not search')
+    await waitFor(h, () => requests.length === count + 1)
     h.setPrincipal('other-user')
     await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle()
     await input(h).fill('other actor'); await h.page.locator('.search-results-title').waitFor()
@@ -128,7 +227,7 @@ test('composition suppresses intermediate searches; late query and type replies 
     await input(h).fill('')
     held.shift()(); await h.page.waitForTimeout(350)
     assert.equal(await h.page.locator('.unified-search-results').count(), 0)
-    assert.equal(await bar(h).count(), 1)
+    assert.equal(await bar(h).count(), 0)
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
   } finally { for (const release of held) release(); await h.close() }
 })

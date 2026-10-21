@@ -16,6 +16,7 @@ module Feature.Search exposing
     , update
     , refreshAcceptedSearch
     , viewSearchBar
+    , viewWorkspaceSearchBar
     , viewFocusedSearchBar
     , viewUnifiedSearchError
     , viewUnifiedSearchLoading
@@ -555,8 +556,7 @@ viewNavigation model content =
 
 viewSearchBar : Model -> Html Msg
 viewSearchBar model =
-    let normal = { model | search = Feature.FocusedFilters.normalSearch model } in
-    div [ class ("workspace-search-filter-bar" ++ (if model.search.globalActivated then " entity-search-activated" else "")) ]
+    div [ class "global-search-bar" ]
         [ div [ class "search-bar" ]
             [ input [ class "search-input", type_ "search", placeholder "Search all entities...", attribute "aria-label" "Search all entities", value model.search.globalQuery
                 , onInput GlobalSearchInput
@@ -565,8 +565,14 @@ viewSearchBar model =
             , if not (String.isEmpty model.search.globalQuery) then
                 button [ class "search-clear", type_ "button", attribute "aria-label" "Clear all entities search", onClick (GlobalSearchInput "") ] [ text "✕" ]
               else text "" ]
-        , if model.search.globalActivated then viewEntityTypeFilters model else text ""
-        , if model.activeTab == ProjectsTab && String.isEmpty (String.trim model.search.globalQuery) then
+        , if String.isEmpty (String.trim model.search.globalQuery) then text "" else viewEntityTypeFilters model ]
+
+
+viewWorkspaceSearchBar : Model -> Html Msg
+viewWorkspaceSearchBar model =
+    let normal = { model | search = Feature.FocusedFilters.normalSearch model } in
+    div [ class "workspace-search-filter-bar" ]
+        [ if model.activeTab == ProjectsTab && String.isEmpty (String.trim model.search.globalQuery) then
             viewSearchControls "Filter project hierarchy..." normal |> Html.map WorkspaceSearch
           else text "" ]
 

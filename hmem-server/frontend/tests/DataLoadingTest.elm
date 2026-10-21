@@ -379,7 +379,7 @@ suite =
                 input label value view = view focused |> Query.fromHtml |> Query.find [ Selector.attribute (Attributes.placeholder label) ] |> Query.has [ Selector.attribute (Attributes.value value) ]
             in
             Expect.all
-                [ \_ -> input "Filter project hierarchy..." "workspace query" Feature.Search.viewSearchBar
+                [ \_ -> input "Filter project hierarchy..." "workspace query" Feature.Search.viewWorkspaceSearchBar
                 , \_ -> input "Filter focused view..." "workspace query" Feature.Search.viewFocusedSearchBar
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = TimelineTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
                 , \_ -> Feature.Search.viewFocusedSearchBar { focused | activeTab = ObservationsTab } |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]

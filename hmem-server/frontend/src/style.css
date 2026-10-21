@@ -830,21 +830,11 @@ a:hover {
   flex-direction: column;
   gap: 0.25rem;
   border-bottom: 1px solid transparent;
-  margin: -2rem -2rem 0 -2rem;
-  max-height: 0;
-  overflow: hidden;
-  padding: 0 1.25rem;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-height 0.2s, opacity 0.15s, padding 0.2s, border-color 0.15s, box-shadow 0.15s, margin-bottom 0.2s;
+  margin: 0 -2rem 1rem;
+  padding: 0.5rem 1.25rem;
 }
 
 .sticky-workspace-bar--visible {
-  max-height: 16rem;
-  opacity: 1;
-  pointer-events: auto;
-  padding: 0.5rem 1.25rem;
-  padding-top: 0.625rem;
   border-bottom-color: var(--border);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
   margin-bottom: 1rem;
@@ -855,6 +845,14 @@ a:hover {
   align-items: center;
   gap: 0.75rem;
   flex-wrap: wrap;
+  max-height: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+
+.sticky-workspace-bar--visible .sticky-workspace-bar__header {
+  max-height: none;
+  visibility: visible;
 }
 
 .sticky-workspace-bar .search-filter-bar {
@@ -903,7 +901,8 @@ a:hover {
   }
 
   .sticky-workspace-bar {
-    margin: -1rem -1rem 0;
+    margin: 0 -1rem 1rem;
+    padding-inline: 1rem;
   }
 
   .workspace-header-top,
@@ -4650,14 +4649,6 @@ textarea.observation-edit-content {
 .observation-tree-page { flex-wrap: wrap; }
 .observation-tree-more { min-width: 0; max-width: 100%; padding-inline: .5rem; white-space: normal; overflow-wrap: anywhere; }
 
-/* Keep live global-search controls together while scrolling. */
-.workspace-search-filter-bar.entity-search-activated {
-  position: sticky;
-  top: 0;
-  z-index: 11;
-  background: var(--bg-surface);
-  padding: 0.5rem 0;
-}
 .search-entities-filter-bar { margin-bottom: 0.5rem; }
 .search-entities-filter-bar .filter-group { flex-wrap: wrap; }
 

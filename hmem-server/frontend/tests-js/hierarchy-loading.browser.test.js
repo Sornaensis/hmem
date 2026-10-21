@@ -91,7 +91,7 @@ test('global live search while focused preserves its context and clears back to 
     await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
     assert.equal(await h.page.getByPlaceholder('Filter focused view...').inputValue(), 'focused query')
     assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').inputValue(), 'workspace query')
-    assert.equal(await h.page.getByRole('group', { name: 'Search Entities', exact: true }).count(), 1)
+    assert.equal(await h.page.getByRole('group', { name: 'Search Entities', exact: true }).count(), 0)
   } finally { await h.close() }
 })
 

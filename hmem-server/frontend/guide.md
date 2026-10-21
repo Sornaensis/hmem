@@ -49,8 +49,10 @@ unknown. A failed current read leaves the historical comparison usable.
 Type in **Search all entities** to search after a short pause. The **Search Entities**
 bar selects Projects, Tasks and, in repositories, Observations. Choices are saved
 for the signed-in actor and workspace, separately from hierarchy filters. Selecting
-no types pauses searching. The bar stays visible when you clear the query and
-return to your previous view. While updating or after a failure, the last completed
+no types pauses searching. Clearing the query hides the options and returns to
+your previous view; your choices apply to the next query. The project hierarchy
+filter moves with the workspace header, while Search all entities scrolls with
+the page. While updating or after a failure, the last completed
 results remain labelled with their query; use **Retry search** to try again.
 
 Results use compact previews with copyable IDs. **Jump To** opens the canonical

@@ -1161,6 +1161,10 @@ a:hover {
   outline: none;
 }
 
+.status-select option:disabled {
+  color: var(--text-muted);
+}
+
 .priority-select {
   appearance: none;
   -webkit-appearance: none;

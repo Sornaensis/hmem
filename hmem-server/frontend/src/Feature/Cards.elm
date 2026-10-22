@@ -2216,7 +2216,7 @@ viewTaskCardBody descendants projection showProject model task =
                 |> Maybe.withDefault 0
 
         taskStatusOptions =
-            taskStatusOptionsForTask (Helpers.taskProjectPaused model task) task
+            Api.allTaskStatuses
 
         query =
             String.toLower (String.trim model.search.query)

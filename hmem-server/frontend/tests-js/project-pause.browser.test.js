@@ -49,7 +49,7 @@ function pauseAuthority(data) {
 
 const paint = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 
-test('blocked task menus allow only blocked and cancelled under direct or inherited pause and restore active choices on resume', { timeout:60000 }, async () => {
+test('blocked task menus show all statuses with only blocked and cancelled enabled under direct or inherited pause and restore active choices on resume', { timeout:60000 }, async () => {
   for (const inherited of [false, true]) {
     const data = hierarchyFixture(), root = { ...data.projects[0], status:'paused' }, base = data.tasks[0]
     data.projects = [root, ...(inherited ? [{ ...root, id:'child-project', parent_id:root.id, status:'active' }] : [])]
@@ -79,7 +79,14 @@ test('blocked task menus allow only blocked and cancelled under direct or inheri
       for (const id of ['cancel-work', 'resume-work']) {
         await h.scrollTo('task:' + id)
         assert.equal(await control(id).inputValue(), 'blocked')
-        assert.deepEqual(await options(id), [{ value:'blocked', disabled:false }, { value:'cancelled', disabled:false }], inherited ? 'ancestor pause' : 'direct pause')
+        assert.deepEqual(await options(id), ['todo', 'in_progress', 'blocked', 'done', 'cancelled'].map(value => ({ value, disabled:['todo', 'in_progress', 'done'].includes(value) })), inherited ? 'ancestor pause' : 'direct pause')
+        assert.deepEqual(await control(id).locator('option').allTextContents(), ['todo', 'in progress', 'blocked', 'done', 'cancelled'])
+        const appearance = await control(id).locator('option').evaluateAll(values => values.map(option => ({ disabled:option.disabled, color:getComputedStyle(option).color, title:option.title })))
+        for (const option of appearance.filter(value => value.disabled)) {
+          assert.match(option.title, /Resume the paused project or ancestor/)
+          assert.equal(option.color, 'rgb(148, 163, 184)', 'disabled options use the existing muted grey color')
+          assert.notEqual(option.color, appearance[2].color)
+        }
       }
       await control('cancel-work').selectOption('cancelled'); await h.idle()
       assert.equal(await control('cancel-work').inputValue(), 'cancelled')

@@ -943,10 +943,13 @@ suite =
                 [ \_ -> [ direct, inherited ] |> List.concatMap (\source -> List.map (Helpers.taskStatusDisabledReason source own) [ Api.Todo, Api.InProgress, Api.Done ]) |> List.all ((/=) Nothing) |> Expect.equal True
                 , \_ -> [ direct, inherited ] |> List.concatMap (\source -> List.map (dispatch source own.id) [ Api.Todo, Api.InProgress, Api.Done, Api.Blocked ]) |> Expect.equal (List.repeat 8 active.mutations.nextRequestId)
                 , \_ -> [ direct, inherited ] |> List.map (\source -> dispatch source own.id Api.Cancelled > source.mutations.nextRequestId) |> Expect.equal [ True, True ]
-                , \_ -> options direct "own" |> Query.count (Expect.equal 2)
-                , \_ -> options inherited "own-child" |> Query.count (Expect.equal 2)
-                , \_ -> options direct "own" |> Query.first |> Query.has [ Selector.attribute (Attributes.value "blocked"), Selector.attribute (Attributes.selected True) ]
-                , \_ -> options inherited "own-child" |> Query.index 1 |> Query.has [ Selector.attribute (Attributes.value "cancelled") ]
+                , \_ -> options direct "own" |> Query.count (Expect.equal 5)
+                , \_ -> options inherited "own-child" |> Query.count (Expect.equal 5)
+                , \_ -> options direct "own" |> Query.index 2 |> Query.has [ Selector.attribute (Attributes.value "blocked"), Selector.attribute (Attributes.selected True) ]
+                , \_ -> options inherited "own-child" |> Query.index 4 |> Query.has [ Selector.attribute (Attributes.value "cancelled") ]
+                , \_ -> [ direct, inherited ] |> List.concatMap (\source -> List.indexedMap (\index label -> \_ -> options source "own" |> Query.index index |> Query.has [ Selector.text label ]) [ "todo", "in progress", "blocked", "done", "cancelled" ]) |> (\checks -> Expect.all checks ())
+                , \_ -> [ direct, inherited ] |> List.concatMap (\source -> List.map (\index -> \_ -> options source "own" |> Query.index index |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.attribute (Attributes.title "Resume the paused project or ancestor before changing this task to todo, in progress or completed.") ]) [ 0, 1, 3 ]) |> (\checks -> Expect.all checks ())
+                , \_ -> [ direct, inherited ] |> List.concatMap (\source -> List.map (\index -> \_ -> options source "own" |> Query.index index |> Query.hasNot [ Selector.attribute (Attributes.disabled True) ]) [ 2, 4 ]) |> (\checks -> Expect.all checks ())
                 , \_ -> options active "own" |> Query.count (Expect.equal 5)
                 , \_ -> List.map (dispatch active own.id) [ Api.Todo, Api.InProgress, Api.Done ] |> List.all ((<) active.mutations.nextRequestId) |> Expect.equal True
                 , \_ -> Helpers.taskStatusDisabledReason direct { own | status = Api.Done } Api.Done |> Expect.equal Nothing

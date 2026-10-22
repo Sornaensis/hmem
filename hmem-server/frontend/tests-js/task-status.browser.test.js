@@ -61,6 +61,47 @@ function prerequisiteFrame(workspace, eventId) {
     ] } }
 }
 
+for (const focused of [false, true]) for (const subtask of [false, true]) {
+  test(`done label and value survive ${focused ? 'focused' : 'hierarchy'} ${subtask ? 'subtask' : 'task'} status changes`, { timeout: 60000 }, async () => {
+    const data = hierarchyFixture(), base = data.tasks[0], target = subtask ? 'done-child' : 'done-task'
+    data.projects = [data.projects[0]]
+    data.tasks = [
+      { ...base, id: 'parent', status: 'blocked', auto_blocked: true },
+      { ...base, id: 'done-task', status: 'done' },
+      { ...base, id: 'done-child', parent_id: 'parent', status: 'done' },
+      { ...base, id: 'open-child', parent_id: 'parent', status: 'todo' },
+    ]
+    const h = await openHierarchy(data, [], { updateTask(fixture, id, update) {
+      assert.equal(id, target)
+      assert.ok(['todo', 'done'].includes(update.status))
+      const task = fixture.tasks.find(task => task.id === id)
+      task.status = update.status
+      return task
+    } })
+    try {
+      await h.page.addInitScript(({ id, statuses }) => localStorage.setItem('hmem-ws-' + id, JSON.stringify({ filterTaskStatuses: statuses })), { id: data.workspace.id, statuses })
+      await h.start(focused ? 'tab=projects&focus=task:' + target : 'tab=projects', focused ? target : 'root-project')
+      await h.idle(); await h.scrollTo('task:' + target)
+      const control = statusControl(h, target)
+      assert.equal(await control.inputValue(), 'done')
+      assert.equal(await control.locator('option:checked').innerText(), 'done')
+      assert.deepEqual(await control.locator('option').allTextContents(), ['todo', 'in progress', 'blocked', 'done', 'cancelled'])
+      await control.selectOption('todo'); await h.idle()
+      await control.selectOption({ label: 'done' }); await h.idle()
+      assert.deepEqual(h.requests.filter(r => r.path === '/api/v1/tasks/' + target && r.method === 'PUT').map(r => r.update.status), ['todo', 'done'])
+      assert.equal(await control.inputValue(), 'done')
+      assert.equal(await control.locator('option:checked').innerText(), 'done')
+      if (!focused) {
+        await h.scrollTo('project:root-project')
+        const project = h.page.locator('#entity-root-project .card-project .status-select').first()
+        assert.equal(await project.inputValue(), 'active')
+        assert.equal(await project.locator('option[value="completed"]').innerText(), 'completed')
+        assert.equal(await project.locator('option[value="done"]').count(), 0)
+      }
+    } finally { await h.close() }
+  })
+}
+
 test('canonical prerequisite authority gates hierarchy and focused task/subtask controls before detail or dependency disclosure', { timeout: 60000 }, async () => {
   for (const target of ['own', 'own-child']) {
     const h = await openHierarchy(prerequisiteFixture())
@@ -70,7 +111,7 @@ test('canonical prerequisite authority gates hierarchy and focused task/subtask 
       await h.bounded(detail.arrived, 5000, 'Focused detail request')
       assert.deepEqual(await transitionAvailability(h, target), { todo: false, in_progress: false, blocked: true, done: false, cancelled: true })
       assert.equal(await statusControl(h, target).inputValue(), 'blocked')
-      assert.equal(await statusControl(h, target).locator('option[value="done"]').innerText(), 'completed')
+      assert.equal(await statusControl(h, target).locator('option[value="done"]').innerText(), 'done')
       assert.doesNotMatch(await h.page.locator('#entity-' + target).innerText(), /Finish or cancel \d+ open prerequisite/)
       assert.match(await statusControl(h, target).locator('option[value="in_progress"]').getAttribute('title'), /open prerequisite/)
       assert.equal(h.requests.some(r => r.path.endsWith('/dependencies') || r.path.endsWith('/overview') || r.path === '/api/v1/tasks/prerequisite'), false)

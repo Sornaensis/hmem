@@ -1025,7 +1025,7 @@ viewStatusSelectWithDisabled model entityType entityId currentStr allValues toSt
                                     []
                            )
                     )
-                    [ text (if entityType == "task" && str == "done" then "completed" else str |> String.replace "_" " ") ]
+                    [ text (str |> String.replace "_" " ") ]
             )
             allValues
         )

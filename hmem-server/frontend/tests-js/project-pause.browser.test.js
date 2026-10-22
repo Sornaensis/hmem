@@ -49,6 +49,55 @@ function pauseAuthority(data) {
 
 const paint = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 
+test('blocked task menus allow only blocked and cancelled under direct or inherited pause and restore active choices on resume', { timeout:60000 }, async () => {
+  for (const inherited of [false, true]) {
+    const data = hierarchyFixture(), root = { ...data.projects[0], status:'paused' }, base = data.tasks[0]
+    data.projects = [root, ...(inherited ? [{ ...root, id:'child-project', parent_id:root.id, status:'active' }] : [])]
+    const projectId = inherited ? 'child-project' : root.id
+    data.tasks = ['cancel-work', 'resume-work'].map(id => ({ ...base, id, title:id, project_id:projectId, status:'blocked', auto_blocked:false }))
+    const updates = []
+    const h = await openHierarchy(data, [], {
+      updateTask(fixture, id, update) {
+        updates.push(update.status)
+        const task = fixture.tasks.find(value => value.id === id)
+        task.status = update.status
+        return task
+      },
+      updateProject(fixture, id, update) {
+        assert.equal(id, root.id); assert.equal(update.status, 'active')
+        const project = fixture.projects.find(value => value.id === id)
+        project.status = update.status
+        return project
+      },
+      async broadcast() {}
+    })
+    const control = id => h.page.locator('#entity-' + id + ' select').first()
+    const options = id => control(id).locator('option').evaluateAll(values => values.map(option => ({ value:option.value, disabled:option.disabled })))
+    try {
+      await h.page.addInitScript(id => localStorage.setItem('hmem-ws-' + id, JSON.stringify({ filterTaskStatuses:['todo', 'in_progress', 'blocked', 'done', 'cancelled'] })), data.workspace.id)
+      await h.start(); await h.idle()
+      for (const id of ['cancel-work', 'resume-work']) {
+        await h.scrollTo('task:' + id)
+        assert.equal(await control(id).inputValue(), 'blocked')
+        assert.deepEqual(await options(id), [{ value:'blocked', disabled:false }, { value:'cancelled', disabled:false }], inherited ? 'ancestor pause' : 'direct pause')
+      }
+      await control('cancel-work').selectOption('cancelled'); await h.idle()
+      assert.equal(await control('cancel-work').inputValue(), 'cancelled')
+      assert.deepEqual(updates, ['cancelled'])
+      await h.scrollTo('project:' + root.id)
+      await h.page.locator('#entity-' + root.id + ' .card-project select').first().selectOption('active'); await h.idle()
+      await h.scrollTo('task:resume-work')
+      assert.equal(await control('resume-work').inputValue(), 'blocked', 'resume preserves a manual block')
+      assert.deepEqual(await options('resume-work'), ['todo', 'in_progress', 'blocked', 'done', 'cancelled'].map(value => ({ value, disabled:false })))
+      await control('resume-work').selectOption('in_progress'); await h.idle()
+      assert.equal(await control('resume-work').inputValue(), 'in_progress')
+      assert.deepEqual(updates, ['cancelled', 'in_progress'])
+      assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+      assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    } finally { await h.close() }
+  }
+})
+
 test('two independent clients converge after canonical pause/resume, including collapsed, offscreen and unchanged blocked causes', { timeout:90000 }, async () => {
   const data = pauseFixture(), authority = pauseAuthority(data)
   const a = await openHierarchy(data, [], authority), b = await openHierarchy(data, [], authority)

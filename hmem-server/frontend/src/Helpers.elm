@@ -1148,6 +1148,25 @@ taskStatusEligibilityUnavailableReason model task =
     else Nothing
 
 
+taskProjectPaused : Model -> Api.Task -> Bool
+taskProjectPaused model task =
+    let
+        visit seen maybeId =
+            case maybeId of
+                Nothing -> False
+                Just id ->
+                    if Set.member id seen then False
+                    else case Dict.get id model.projects of
+                        Just project ->
+                            case project.status of
+                                Api.ProjPaused -> True
+                                Api.ProjActive -> visit (Set.insert id seen) project.parentId
+                                _ -> False
+                        Nothing -> False
+    in
+    visit Set.empty task.projectId
+
+
 taskStatusDisabledReason : Model -> Api.Task -> Api.TaskStatus -> Maybe String
 taskStatusDisabledReason model task status =
     let
@@ -1172,6 +1191,8 @@ taskStatusDisabledReason model task status =
                         Nothing -> True
     in
     if status == task.status || status == Api.Cancelled then Nothing
+    else if List.member status [ Api.Todo, Api.InProgress, Api.Done ] && taskProjectPaused model task then
+        Just "Resume the paused project or ancestor before changing this task to todo, in progress or completed."
     else if isOpenTaskCardStatus status && (parent |> Maybe.map .status) == Just Api.Cancelled then
         Just "Reopen the cancelled parent task before reopening this subtask."
     else if isOpenTaskCardStatus status && (parent |> Maybe.map .status) == Just Api.Done then

@@ -930,6 +930,36 @@ suite =
                         , Api.allTaskStatuses
                         , [ Api.Todo, Api.Blocked, Api.Cancelled ]
                         ]
+        , test "direct and inherited project pause restrict production controls and shared dispatch until resume" <| \_ ->
+            let
+                active = statusEligibilityModel (Just 0)
+                direct = { active | projects = Dict.singleton "project-a" (projectWithStatus "project-a" Nothing Api.ProjPaused) }
+                inherited = { active | projects = Dict.fromList [ ( "project-a", project "project-a" (Just "ancestor") ), ( "ancestor", projectWithStatus "ancestor" Nothing Api.ProjPaused ) ] }
+                own = Dict.get "own" active.tasks |> Maybe.withDefault (task "own" Nothing Nothing)
+                options source id = Feature.Cards.viewProjectsTree "workspace-a" source |> Query.fromHtml |> Query.find [ Selector.id ("entity-" ++ id) ] |> Query.find [ Selector.class "status-select" ] |> Query.findAll [ Selector.tag "option" ]
+                dispatch source id target = Feature.Editing.update (ChangeTaskStatus id target) source |> Tuple.first |> .mutations |> .nextRequestId
+            in
+            Expect.all
+                [ \_ -> [ direct, inherited ] |> List.concatMap (\source -> List.map (Helpers.taskStatusDisabledReason source own) [ Api.Todo, Api.InProgress, Api.Done ]) |> List.all ((/=) Nothing) |> Expect.equal True
+                , \_ -> [ direct, inherited ] |> List.concatMap (\source -> List.map (dispatch source own.id) [ Api.Todo, Api.InProgress, Api.Done, Api.Blocked ]) |> Expect.equal (List.repeat 8 active.mutations.nextRequestId)
+                , \_ -> [ direct, inherited ] |> List.map (\source -> dispatch source own.id Api.Cancelled > source.mutations.nextRequestId) |> Expect.equal [ True, True ]
+                , \_ -> options direct "own" |> Query.count (Expect.equal 2)
+                , \_ -> options inherited "own-child" |> Query.count (Expect.equal 2)
+                , \_ -> options direct "own" |> Query.first |> Query.has [ Selector.attribute (Attributes.value "blocked"), Selector.attribute (Attributes.selected True) ]
+                , \_ -> options inherited "own-child" |> Query.index 1 |> Query.has [ Selector.attribute (Attributes.value "cancelled") ]
+                , \_ -> options active "own" |> Query.count (Expect.equal 5)
+                , \_ -> List.map (dispatch active own.id) [ Api.Todo, Api.InProgress, Api.Done ] |> List.all ((<) active.mutations.nextRequestId) |> Expect.equal True
+                , \_ -> Helpers.taskStatusDisabledReason direct { own | status = Api.Done } Api.Done |> Expect.equal Nothing
+                , \_ -> Helpers.taskStatusDisabledReason direct { own | status = Api.Cancelled } Api.Cancelled |> Expect.equal Nothing
+                ] ()
+        , test "project pause traversal stops at closed branches and tolerates sparse or cyclic project caches" <| \_ ->
+            let
+                base = statusEligibilityModel (Just 0)
+                own = Dict.get "own" base.tasks |> Maybe.withDefault (task "own" Nothing Nothing)
+                source status = { base | projects = Dict.fromList [ ( "project-a", projectWithStatus "project-a" (Just "ancestor") status ), ( "ancestor", projectWithStatus "ancestor" (Just "project-a") Api.ProjPaused ) ] }
+                cycle = { base | projects = Dict.singleton "project-a" (project "project-a" (Just "project-a")) }
+            in
+            List.map (\model -> Helpers.taskProjectPaused model own) [ source Api.ProjCompleted, source Api.ProjArchived, cycle, { base | projects = Dict.empty } ] |> Expect.equal [ False, False, False, False ]
         , test "canonical own prerequisite gates top-level and subtask controls and dispatch with sparse caches" <| \_ ->
             let
                 model = statusEligibilityModel (Just 1)
@@ -941,7 +971,7 @@ suite =
                 [ \_ -> [ "own", "own-child" ] |> List.concatMap (\id -> List.map (blocked id) [ Api.Todo, Api.InProgress, Api.Done ]) |> Expect.equal (List.repeat 6 True)
                 , \_ -> [ "own", "own-child" ] |> List.concatMap (\id -> List.map (blocked id) [ Api.Blocked, Api.Cancelled ]) |> Expect.equal (List.repeat 4 False)
                 , \_ -> [ "own", "own-child" ] |> List.concatMap (\id -> List.map (dispatch id >> .mutations >> .nextRequestId) [ Api.Todo, Api.InProgress, Api.Done ]) |> Expect.equal (List.repeat 6 model.mutations.nextRequestId)
-                , \_ -> card "own" |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "done") ] |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.text "completed" ]
+                , \_ -> card "own" |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "done") ] |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.text "done" ]
                 , \_ -> card "own-child" |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "in_progress") ] |> Query.has [ Selector.attribute (Attributes.disabled True) ]
                 , \_ -> model.dependencies.taskDependencyLinks |> Expect.equal []
                 ] ()

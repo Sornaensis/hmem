@@ -3,7 +3,7 @@
 The shared Audit/History text comparison is covered by pure Elm tests in
 `tests/AuditDiffTest.elm` and production Main browser tests in
 `tests-js/audit-diff.browser.test.js`. Both run in `npm test`; for a targeted run
-use `npx elm-test tests/AuditDiffTest.elm`, then `npm run build` and
+use `npx elm-test-rs tests/AuditDiffTest.elm`, then `npm run build` and
 `node --test tests-js/audit-diff.browser.test.js` from the frontend directory.
 The browser fixture intercepts authorized full-record reads and accepted
 canonical transport to exercise frozen snapshots, refresh/retirement races,

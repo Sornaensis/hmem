@@ -1,7 +1,7 @@
 # Frontend development
 
 Use a supported Node.js LTS release that meets [package.json](package.json)
-(Node.js >=20). Run these commands from `hmem-server/frontend`:
+(Node.js 20.x or >=22). Run these commands from `hmem-server/frontend`:
 
 ```sh
 npm ci
@@ -23,6 +23,13 @@ The build replaces `hmem-server/static`. Use the
 [live integration reference](tests-js/testing.md) for an isolated API and the
 [performance reference](perf/performance.md) for qualification commands and evidence rules.
 Focused browser scripts are listed in [package.json](package.json).
+
+Elm assertions run with `elm-test-rs`; pass Elm file paths to select a suite (for
+example, `npx elm-test-rs tests/AuditDiffTest.elm`). This replaces `elm-test` to
+remove its unpatched `braces` dependency. Vite stays on the patched 6.4 release
+line to retain the current Node and browser requirements. A scoped npm override
+updates `node-elm-compiler`'s pinned `cross-spawn` to the compatible 6.0.6 security
+patch; retain it until the compiler dependency includes that fix.
 
 `npm run test:observation-state` checks live query ownership and explorer state;
 `npm run test:observation-state-browser` checks URL, preferences and navigation

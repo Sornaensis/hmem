@@ -24,10 +24,12 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair, parseEither)
 import HMem.BotIdentity (BotIdentity)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (toList)
 import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe)
+import Data.Int (Int64)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -42,10 +44,11 @@ import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Types.URI (urlEncode)
 
 import HMem.Types
+import HMem.AgentSession qualified as AgentSession
+import HMem.AgentSession.Transport qualified as SessionWire
 
--- The MCP surface deliberately mirrors the Observation-only public API.  The
--- workspace id is supplied by the MCP session context rather than advertised
--- on every scoped tool.
+-- The MCP surface adapts the authorized HTTP API. The accepted context supplies
+-- workspace IDs when callers omit explicit overrides.
 toolDefinitions :: [Value]
 toolDefinitions =
   [ tool "set_workspace" "Declare workspace and bot identity before ordinary tools. Explicit null clears workspace and accepts identity; initialize preserves both. Identity lasts until process exit. Invalid declarations change neither value." (strictSchema ["workspace_id" .= nullableProp "Workspace UUID (explicit null clears workspace while accepting identity)", "identity" .= strictSchema ["role" .= prop "string" "Declared role (1..128 UTF-8 bytes)", "model-id" .= prop "string" "harness:model:reasoning (1..256 UTF-8 bytes)"] ["role", "model-id"]] ["workspace_id", "identity"])
@@ -180,7 +183,7 @@ toolDefinitions =
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation. Done requires closing open descendants. Cancelled also cancels non-done subtasks while preserving done subtasks and dependency links; unrelated dependent tasks are not cancelled. Reopening does not reopen descendants." (schema ["task_id" .= prop "string" "Task UUID", "status" .= enumProp "Final execution state" ["done", "blocked", "cancelled"]] ["task_id", "status"])
-  ]
+  ] <> sessionToolDefinitions
   where
     tool name description inputSchema = object $
       ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]
@@ -306,9 +309,96 @@ outputArray items = object ["type" .= ("array" :: Text), "items" .= items]
 outputNullable :: Value -> Value
 outputNullable value = object ["anyOf" .= [value, outputType "null"]]
 
--- Parsed calls retain current core DTOs; no compatibility aliases exist.
+-- Session ingestion remains HTTP-only. These tools manage explicit server
+-- identities and download bounded byte ranges; no local uploader state exists here.
+isSessionTool :: Text -> Bool
+isSessionTool name = name `elem`
+  ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence"]
+
+sessionToolDefinitions :: [Value]
+sessionToolDefinitions =
+  [ define "session_create" "Create session metadata with a caller-owned UUID; exact retries are idempotent. Returns a compact receipt without transcript content."
+      ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)"] ["session_id", "format_label"]
+  , define "session_list" "List compact session metadata, optionally for a visible same-workspace task. Descending immutable created_at/UUID keyset; execute next_request to continue in the resolved workspace."
+      ["task_id" .= uuid, "limit" .= pageLimit, "before_created_at" .= string "Returned keyset timestamp, paired with before_id", "before_id" .= uuid] []
+  , define "session_detail" "Get session metadata including creator attribution, committed cursor and final receipt; never returns transcript bytes."
+      ["session_id" .= uuid] ["session_id"]
+  , define "session_tasks" "List visible tasks associated with a session, including terminated sessions. Execute next_request to continue by task UUID."
+      ["session_id" .= uuid, "limit" .= pageLimit, "after_task_id" .= uuid] ["session_id"]
+  , define "session_associate" "Idempotently associate a same-workspace task with an explicit session UUID, including after termination."
+      ["session_id" .= uuid, "task_id" .= uuid] ["session_id", "task_id"]
+  , define "session_terminate" "Explicitly seal the already committed server prefix using its expected offset/revision and final byte count/SHA-256. Independent of task state, uploader/file access, stop, flush, EOF or process loss. Exact retries use the original pre-seal revision. No transcript is echoed."
+      ["session_id" .= uuid, "expected_offset" .= nonnegative, "expected_revision" .= nonnegative, "final_bytes" .= nonnegative
+      , "final_sha256" .= object ["type" .= ("string" :: Text), "pattern" .= ("^[0-9a-f]{64}$" :: Text)]]
+      ["session_id", "expected_offset", "expected_revision", "final_bytes", "final_sha256"]
+  , range "session_read" "Read active transcript bytes"
+  , range "session_evidence" "Read immutable terminated evidence bytes and final byte count/SHA-256"
+  ]
+  where
+    string description = object ["type" .= ("string" :: Text), "description" .= (description :: Text)]
+    uuid = string "UUID"
+    nonnegative = object ["type" .= ("integer" :: Text), "minimum" .= (0 :: Int), "maximum" .= (maxBound :: Int64)]
+    pageLimit = object ["type" .= ("integer" :: Text), "minimum" .= (1 :: Int), "maximum" .= (100 :: Int), "default" .= (50 :: Int)]
+    define name description properties required = object
+      ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= object
+        ["type" .= ("object" :: Text), "properties" .= object
+          ("workspace_id" .= string "Optional workspace UUID overriding the accepted workspace; identity declaration still required" : properties)
+        , "required" .= (required :: [Text]), "additionalProperties" .= False]]
+    range name description = define name
+      (description <> ". Returns canonical padded base64 preserving exact bytes; default 4096 bytes, max 1 MiB. Execute next_request to reconstruct all bytes. HTTP responses are capped at 2 MiB; overflow is an explicit error.")
+      ["session_id" .= uuid, "offset" .= nonnegative
+      , "limit" .= object ["type" .= ("integer" :: Text), "minimum" .= (1 :: Int), "maximum" .= (1048576 :: Int), "default" .= (4096 :: Int)]] ["session_id"]
+
+data SessionToolCall
+  = SessionCreate UUID SessionWire.CreateSessionRequest
+  | SessionList UUID (Maybe UUID) Int (Maybe AgentSession.SessionPageCursor)
+  | SessionDetail UUID UUID
+  | SessionTasks UUID UUID Int (Maybe UUID)
+  | SessionAssociate UUID UUID UUID
+  | SessionTerminate UUID UUID SessionWire.TerminateSessionRequest
+  | SessionRead UUID UUID Bool Int64 Int
+  deriving (Show, Eq)
+
+parseSessionTool :: Text -> Value -> Either String SessionToolCall
+parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
+  let allowed = "workspace_id" : case name of
+        "session_create" -> ["session_id", "format_label"]
+        "session_list" -> ["task_id", "limit", "before_created_at", "before_id"]
+        "session_detail" -> ["session_id"]
+        "session_tasks" -> ["session_id", "limit", "after_task_id"]
+        "session_associate" -> ["session_id", "task_id"]
+        "session_terminate" -> ["session_id", "expected_offset", "expected_revision", "final_bytes", "final_sha256"]
+        _ -> ["session_id", "offset", "limit"]
+      bounded key fallback maximumValue = do
+        n <- o .:? key .!= fallback
+        if n >= 1 && n <= maximumValue then pure n else fail "Invalid session limit"
+      nonnegative key fallback = do
+        n <- o .:? key .!= fallback
+        if n >= (0 :: Int64) then pure n else fail "Invalid session cursor"
+  if all (`elem` allowed) (KM.keys o) then pure () else fail "Unsupported session fields"
+  workspace <- o .: "workspace_id"
+  case name of
+    "session_create" -> SessionCreate workspace <$> (SessionWire.CreateSessionRequest <$> o .: "session_id" <*> o .: "format_label")
+    "session_list" -> do
+      timestamp <- o .:? "before_created_at"
+      identifier <- o .:? "before_id"
+      cursor <- case (timestamp, identifier) of
+        (Nothing, Nothing) -> pure Nothing
+        (Just t, Just i) -> pure (Just (AgentSession.SessionPageCursor t i))
+        _ -> fail "Incomplete session cursor"
+      SessionList workspace <$> o .:? "task_id" <*> bounded "limit" 50 100 <*> pure cursor
+    "session_detail" -> SessionDetail workspace <$> o .: "session_id"
+    "session_tasks" -> SessionTasks workspace <$> o .: "session_id" <*> bounded "limit" 50 100 <*> o .:? "after_task_id"
+    "session_associate" -> SessionAssociate workspace <$> o .: "session_id" <*> o .: "task_id"
+    "session_terminate" -> do
+      input <- SessionWire.TerminateSessionRequest <$> o .: "expected_offset" <*> o .: "expected_revision" <*> o .: "final_bytes" <*> o .: "final_sha256"
+      if input.expectedOffset < 0 || input.expectedRevision < 0 || input.finalBytes < 0 then fail "Invalid session receipt" else pure ()
+      SessionTerminate workspace <$> o .: "session_id" <*> pure input
+    _ -> SessionRead workspace <$> o .: "session_id" <*> pure (name == "session_evidence") <*> nonnegative "offset" 0 <*> bounded "limit" 4096 1048576
+
 data ToolCall
-  = ObservationCreate CreateObservation
+  = SessionCall SessionToolCall
+  | ObservationCreate CreateObservation
   | ObservationGet UUID
   | ObservationUpdate UUID UUID ReviewedObservationUpdate
   | ObservationHistory UUID (Maybe Int) (Maybe Int)
@@ -347,6 +437,7 @@ parseToolCall name args = do
     then parseEither (withObject "planning arguments" rejectPlanningDueFields) args
     else pure ()
   case name of
+    _ | isSessionTool name -> SessionCall <$> parseSessionTool name args
     "observation_create" -> ObservationCreate <$> parseCreateObservation args
     "observation_get" -> ObservationGet <$> required "observation_id"
     "observation_update" -> ObservationUpdate <$> required "observation_id" <*> required "expected_content_version" <*> parseReviewedObservationUpdate args
@@ -476,6 +567,7 @@ handleToolCall manager base token identity params = case parseParams params of
   where
     localError "search" code message = searchError code (searchErrorField message) message []
     localError "observation_discovery" code message = searchError code (discoveryErrorField message) message []
+    localError name _ _ | isSessionTool name = sessionToolError "invalid_arguments" Nothing "Invalid session tool arguments"
     localError _ _ message = mcpError message
 
 parseParams :: Value -> Either String (Text, Value)
@@ -483,6 +575,7 @@ parseParams = parseEither $ withObject "params" $ \o -> (,) <$> o .: "name" <*> 
 
 execute :: Manager -> String -> ForwardingContext -> ToolCall -> IO Value
 execute manager base apiKey = \case
+  SessionCall call -> executeSessionTool manager base apiKey call
   ObservationCreate input -> request manager base apiKey "POST" "/api/v1/observations" (Just (encode input)) (mutationAck "created" "observation" . compactObservationSummary)
   ObservationGet oid -> request manager base apiKey "GET" ("/api/v1/observations/" <> uuidPath oid) Nothing compactObservationDetail
   ObservationUpdate oid expected input -> requestWithHeaders manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid) (Just (encode input)) [("If-Match", TE.encodeUtf8 ("\"" <> UUID.toText expected <> "\""))] (mutationAck "updated" "observation" . compactObservationSummary)
@@ -523,6 +616,128 @@ execute manager base apiKey = \case
   TaskDependency tid depId "remove" -> request manager base apiKey "DELETE" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/" <> uuidPath depId) Nothing compactTaskDependencyMutation
   TaskStart tid -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= ("in_progress" :: Text)]))) (taskMutationAck "started")
   TaskFinish tid status -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= status]))) (taskMutationAck "finished")
+
+executeSessionTool :: Manager -> String -> ForwardingContext -> SessionToolCall -> IO Value
+executeSessionTool manager base credentials call = case call of
+  SessionCreate workspace input -> run "POST" (root workspace) (Just (toJSON input)) $ metadata workspace (Just input.id) (Just "created") False
+  SessionDetail workspace sid -> run "GET" (path workspace sid) Nothing $ metadata workspace (Just sid) Nothing True
+  SessionTerminate workspace sid input -> run "POST" (path workspace sid <> "/terminate") (Just (toJSON input)) $ metadata workspace (Just sid) (Just "terminated") False
+  SessionAssociate workspace sid tid -> run "PUT" (path workspace sid <> "/tasks/" <> show tid) Nothing $ \value ->
+    if value == Null then Right (object ["action" .= ("associated" :: Text), "workspace_id" .= workspace, "session_id" .= sid, "task_id" .= tid]) else invalid
+  SessionList workspace task limit cursor ->
+    let target = maybe (root workspace) (\tid -> workspacePath workspace <> "/tasks/" <> show tid <> "/sessions") task
+        params = [("limit", Just (show limit)), ("before_created_at", cursor >>= (jsonString . toJSON . (.createdAt))), ("before_id", show . (.id) <$> cursor)]
+    in run "GET" (target <> query params) Nothing $ \value -> do
+      page <- decodeTyped value :: Either Value SessionWire.SessionPageResponse
+      mapM_ (checkSession workspace Nothing) page.items
+      let next = (page :: SessionWire.SessionPageResponse).nextCursor
+          args = ["workspace_id" .= workspace, "limit" .= limit] <> maybe [] (\tid -> ["task_id" .= tid]) task
+      Right $ object (["workspace_id" .= workspace, "items" .= map sessionSummary page.items, "has_more" .= maybe False (const True) next]
+        <> maybe [] (\c -> ["next_request" .= nextRequest "session_list" (args <> ["before_created_at" .= c.createdAt, "before_id" .= c.id])]) next)
+  SessionTasks workspace sid limit after -> run "GET"
+    (path workspace sid <> "/tasks" <> query [("limit", Just (show limit)), ("after_task_id", show <$> after)]) Nothing $ \value -> do
+      page <- decodeTyped value :: Either Value SessionWire.SessionTaskPageResponse
+      let next = (page :: SessionWire.SessionTaskPageResponse).nextTaskId
+      Right $ object (["workspace_id" .= workspace, "session_id" .= sid, "items" .= page.items, "has_more" .= maybe False (const True) next]
+        <> maybe [] (\tid -> ["next_request" .= nextRequest "session_tasks" ["workspace_id" .= workspace, "session_id" .= sid, "limit" .= limit, "after_task_id" .= tid]]) next)
+  SessionRead workspace sid evidence offset limit -> run "GET"
+    (path workspace sid <> (if evidence then "/evidence" else "/transcript") <> query [("offset", Just (show offset)), ("limit", Just (show limit))]) Nothing $ \value -> do
+      response <- decodeTyped value
+      let result = response :: SessionWire.SessionRangeResponse
+      checkSession workspace (Just sid) result.session
+      bytes <- either (const invalid) Right (SessionWire.decodeSessionBytes result.dataBase64)
+      if result.offset /= offset || result.nextOffset - offset /= fromIntegral (BS.length bytes)
+         || BS.length bytes > limit || result.nextOffset > result.session.committedBytes
+         || result.nextOffset < offset || result.hasMore /= (result.nextOffset < result.session.committedBytes)
+         || (result.hasMore && BS.null bytes)
+         || result.session.state /= (if evidence then AgentSession.Terminated else AgentSession.Active)
+        then invalid else Right $ object
+          (["session" .= sessionSummary result.session, "offset" .= result.offset, "data_base64" .= result.dataBase64
+           , "next_offset" .= result.nextOffset, "has_more" .= result.hasMore]
+           <> ["next_request" .= nextRequest (if evidence then "session_evidence" else "session_read")
+                ["workspace_id" .= workspace, "session_id" .= sid, "offset" .= result.nextOffset, "limit" .= limit] | result.hasMore])
+  where
+    workspacePath workspace = "/api/v1/workspaces/" <> show workspace
+    root workspace = workspacePath workspace <> "/sessions"
+    path workspace sid = root workspace <> "/" <> show sid
+    nextRequest name arguments = object ["name" .= (name :: Text), "arguments" .= object arguments]
+    jsonString (String value) = Just (queryText value)
+    jsonString _ = Nothing
+    invalid = Left (sessionToolError "invalid_response" Nothing "Invalid session response")
+    decodeTyped :: FromJSON a => Value -> Either Value a
+    decodeTyped value = either (const invalid) Right (parseEither parseJSON value)
+    checkSession :: UUID -> Maybe UUID -> AgentSession.AgentSession -> Either Value ()
+    checkSession workspace expected session
+      | session.workspaceId == workspace && maybe True (== session.id) expected = Right ()
+      | otherwise = Left (sessionToolError "workspace_mismatch" Nothing "Session response does not match the resolved workspace or session")
+    metadata :: UUID -> Maybe UUID -> Maybe Text -> Bool -> Value -> Either Value Value
+    metadata workspace sid action detail value = do
+      session <- decodeTyped value
+      checkSession workspace sid session
+      Right $ case action of
+        Nothing -> if detail then toJSON (session :: AgentSession.AgentSession) else sessionSummary session
+        Just verb -> object ["action" .= (verb :: Text), "entity_type" .= ("session" :: Text), "session_id" .= session.id, "summary" .= sessionSummary session]
+    run :: String -> String -> Maybe Value -> (Value -> Either Value Value) -> IO Value
+    run method target body shape = do
+      result <- sessionRequest manager base credentials method target (encode <$> body)
+      pure $ either id (either id mcpStructuredJSON . shape) result
+
+sessionSummary :: AgentSession.AgentSession -> Value
+sessionSummary session = case toJSON session of
+  Object fields -> Object $ foldr KM.delete fields (map Key.fromText ["creator_actor_type", "creator_actor_id", "creator_actor_label", "creator_bot_identity"])
+  _ -> Null
+
+sessionToolError :: Text -> Maybe Int -> Text -> Value
+sessionToolError code status message = searchError code Nothing message (maybe [] (\n -> ["http_status" .= n]) status)
+
+-- Both success and failure bodies are bounded before JSON decoding. Never
+-- include request data, response bodies, parser diagnostics or exceptions in errors.
+sessionRequest :: Manager -> String -> ForwardingContext -> String -> String -> Maybe BL.ByteString -> IO (Either Value Value)
+sessionRequest manager base credentials verb target body = do
+  outcome <- try $ do
+    initial <- parseRequest (base <> target)
+    provenance <- mcpProvenanceHeaders
+    rid <- UUIDv4.nextRandom
+    let ForwardingContext credential identity = credentials
+        headers = [("Content-Type", "application/json"), ("X-Request-Id", TE.encodeUtf8 (UUID.toText rid)), ("X-HMem-Bot-Identity", BL.toStrict (encode identity))]
+          <> provenance <> maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) credential
+        requestValue = initial {method = fromString verb, requestHeaders = headers, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body}
+    withResponse requestValue manager $ \response -> do
+      bounded <- readBounded (responseBody response) 2097152 []
+      pure $ case bounded of
+        Nothing -> Left (sessionToolError "response_too_large" Nothing "Session HTTP response exceeds 2 MiB")
+        Just bytes ->
+          let status = statusCode (responseStatus response)
+          in if status >= 200 && status < 300
+            then if BL.null bytes then Right Null
+                 else either (const $ Left (sessionToolError "invalid_response" Nothing "Invalid session response JSON")) Right (eitherDecode bytes)
+            else Left (safeHttpError status bytes)
+  case outcome of
+    Right result -> pure result
+    Left (exception :: SomeException) -> case fromException exception :: Maybe SomeAsyncException of
+      Just _ -> throwIO exception
+      Nothing -> pure $ Left (sessionToolError "transport_error" Nothing "Could not connect to hmem-server")
+  where
+    readBounded :: BodyReader -> Int -> [BL.ByteString] -> IO (Maybe BL.ByteString)
+    readBounded reader remaining chunks = do
+      chunk <- brReadSome reader (min 32768 (remaining + 1))
+      if BL.null chunk then pure (Just (BL.concat (reverse chunks)))
+      else if BL.length chunk > fromIntegral remaining then pure Nothing
+      else readBounded reader (remaining - fromIntegral (BL.length chunk)) (chunk : chunks)
+    safeHttpError status bytes = sessionToolError code (Just status) message
+      where
+        payload = decode bytes :: Maybe Value
+        reported = payload >>= textField "error"
+        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required"]
+        code = case reported of Just known | known `elem` allowed -> known; _ -> "HTTP_" <> T.pack (show status)
+        message = case status of
+          400 -> "Invalid session request"
+          401 -> "Authentication required"
+          403 -> "Workspace permission required"
+          404 -> "Session, task or workspace not found"
+          409 -> "Session cursor, receipt, metadata or state conflicts"
+          413 -> "Session request exceeds the supported limit"
+          _ -> "Session HTTP operation failed"
 
 dispatchBatchMove :: Manager -> String -> ForwardingContext -> BatchMoveTasksRequest -> IO Value
 dispatchBatchMove manager base apiKey input =

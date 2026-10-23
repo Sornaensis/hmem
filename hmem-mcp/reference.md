@@ -66,6 +66,60 @@ canonical role/model pair groups across sessions and workspaces. Credential bot
 IDs, human identities, permissions, and stream audiences remain unchanged. New
 records expose optional `bot_identity`; no historical attribution is inferred.
 
+## Agent sessions
+
+Session tools use the accepted workspace and identity. An explicit `workspace_id`
+overrides the selected workspace; the HTTP server still checks permissions and
+requires the session and task to belong to that resolved workspace. Reads require
+read access; creation, association and termination require edit access.
+
+| Tool | Arguments beyond optional `workspace_id` | Result |
+| --- | --- | --- |
+| `session_create` | Caller-owned `session_id`, `format_label` | Idempotent metadata acknowledgement |
+| `session_list` | Optional `task_id`, `limit`, paired `before_created_at` / `before_id` | Compact workspace or task sessions |
+| `session_detail` | `session_id` | Metadata including creator attribution |
+| `session_tasks` | `session_id`, optional `limit`, `after_task_id` | Visible associated tasks |
+| `session_associate` | `session_id`, `task_id` | Idempotent link acknowledgement, also after sealing |
+| `session_terminate` | `session_id`, `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Explicit immutable seal receipt |
+| `session_read` | `session_id`, optional `offset`, `limit` | Active transcript byte range |
+| `session_evidence` | `session_id`, optional `offset`, `limit` | Terminated evidence byte range |
+
+Lists default to 50 rows and accept 1..100. Session lists retain the server's
+descending immutable `(created_at, id)` keyset; task links continue by UUID.
+Execute a returned `next_request` unchanged: it pins the resolved workspace and
+task/session identity, so changing the selected workspace does not retarget it.
+Final pages, including empty pages, omit `next_request`. Pages reflect current
+visibility and additive associations rather than a frozen snapshot.
+
+Metadata and mutation acknowledgements never include transcript bytes. Compact
+metadata retains full IDs, format, state, timestamps, committed bytes/records,
+revision, newline status and any final byte count/SHA-256. `session_detail` also
+returns creator attribution. All new session results include `structuredContent`.
+
+Range reads default to 4096 bytes, accept 1..1048576, and return `session`,
+`offset`, canonical padded `data_base64`, `next_offset` and `has_more`. Decode each
+range as bytes and concatenate in offset order; a range may split a UTF-8
+character or CRLF pair. Execute `next_request` until absent to reconstruct the
+entire original JSONL, then compare its byte count and SHA-256 with the sealed
+receipt. Active reads describe the committed prefix at that read. Unsupported
+windows fail validation; no bytes are silently clipped. Each HTTP response,
+including errors, is capped at 2 MiB before JSON decoding. Overflow returns
+`response_too_large`; request a smaller range or list window where applicable.
+Errors carry a safe code and optional HTTP status, without raw response content,
+parser diagnostics or credentials.
+
+Termination seals only the already committed server prefix. Supply its expected
+offset/revision and final byte count/SHA-256; the server verifies them atomically.
+An exact retry uses the original pre-seal revision. Only an explicit
+`session_terminate` requests this transition: task completion, upload start,
+flush, stop, EOF, caught-up state and process loss never imply termination.
+The usual management sequence is to stop/flush an uploader, inspect its receipt,
+then explicitly terminate that committed prefix. Direct termination also works
+without a local file or live uploader, in any uploader state; later ingestion is
+refused while task association remains available. The normal tools above do not
+start uploaders or read local files. HTTP ingestion is described in the
+[session API reference](../api.md#agent-sessions).
+
 ## Unified search
 
 `search` retrieves stored workspace records with all-term lexical matching. Omit

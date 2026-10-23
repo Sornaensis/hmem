@@ -16,7 +16,8 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, managerIdleConnectionCount, newManager)
-import Network.HTTP.Types (Status, methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status429, status500, statusCode)
+import Network.HTTP.Client qualified as Client
+import Network.HTTP.Types (Status, methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status413, status429, status500, statusCode)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import System.Directory (doesFileExist)
@@ -24,6 +25,8 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
 import HMem.Config qualified as Config
+import HMem.AgentSession qualified as AgentSession
+import HMem.AgentSession.Transport qualified as SessionWire
 import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
@@ -39,6 +42,196 @@ import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), Observation
 
 spec :: Spec
 spec = do
+  describe "Agent session MCP" $ do
+    it "advertises strict explicit management tools and bounded range/list windows without ingestion or local file controls" $ do
+      let names = [name | Object definition <- toolDefinitions, Just (String name) <- [KM.lookup "name" definition], "session_" `T.isPrefixOf` name]
+      sort names `shouldBe` sort ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence"]
+      forM_ names $ \name -> do
+        let [definition] = [value | value <- toolDefinitions, jsonField "name" value == Just (String name)]
+        jsonPath ["inputSchema", "additionalProperties"] definition `shouldBe` Just (Bool False)
+        jsonPath ["inputSchema", "properties", "workspace_id", "type"] definition `shouldBe` Just (String "string")
+      let [range] = [value | value <- toolDefinitions, jsonField "name" value == Just (String "session_read")]
+      jsonPath ["inputSchema", "properties", "limit", "default"] range `shouldBe` Just (Number 4096)
+      jsonPath ["inputSchema", "properties", "limit", "maximum"] range `shouldBe` Just (Number 1048576)
+
+    it "rejects strict input, unsupported bounds and missing workspace with fixed errors before forwarding" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> forM_
+        [("session_detail", object ["session_id" .= observationId])
+        ,("session_detail", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "transcript-secret" .= ("secret-data" :: Text)])
+        ,("session_read", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "limit" .= (1048577 :: Int)])
+        ,("session_read", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "offset" .= (-1 :: Int)])
+        ,("session_list", object ["workspace_id" .= workspaceId, "limit" .= (101 :: Int)])
+        ,("session_list", object ["workspace_id" .= workspaceId, "before_id" .= observationId])
+        ,("session_terminate", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "expected_offset" .= ("secret-value" :: Text)])] $ \(name,args) -> do
+          result <- handleToolCall manager base Nothing testIdentity (object ["name" .= (name :: Text), "arguments" .= args])
+          jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "invalid_arguments")
+          result `shouldSatisfy` (not . contains "secret")
+      (length <$> readTVarIO requests) `shouldReturn` 0
+
+    it "forwards one identity, authorization, provenance and exact terminate/create bodies without transcript echoes" $ do
+      requests <- newTVarIO []
+      withEnvironment "HMEM_MCP_PROVENANCE_TOKEN" "session-test-provenance" $
+        withSessionMock requests $ \manager base -> do
+          created <- callWithKey manager base (Just "session-credential") "session_create"
+            (object ["workspace_id" .= workspaceId, "session_id" .= observationId, "format_label" .= ("provider-jsonl" :: Text)])
+          jsonField "action" created `shouldBe` Just (String "created")
+          created `shouldSatisfy` (not . contains "creator_actor_label")
+          _ <- callWithKey manager base (Just "session-credential") "session_terminate" sessionTerminateArguments
+          _ <- callWithKey manager base Nothing "session_associate" (object ["workspace_id" .= workspaceId, "session_id" .= observationId, "task_id" .= workspaceId])
+          pure ()
+      observed <- readTVarIO requests
+      map (.requestMethod) observed `shouldBe` [methodPost,methodPost,methodPut]
+      map (.requestIdentityHeaders) observed `shouldBe` replicate 3 [BL.toStrict (encode testIdentity)]
+      map (.authorization) observed `shouldBe` [Just "Bearer session-credential",Just "Bearer session-credential",Nothing]
+      map (.requestChangeCause) observed `shouldBe` replicate 3 (Just "mcp")
+      map (.requestMcpProvenance) observed `shouldBe` replicate 3 (Just "session-test-provenance")
+      map (.requestId) observed `shouldSatisfy` all (/= Nothing)
+      decode (head observed).requestBody `shouldBe` Just (object ["id" .= observationId, "format_label" .= ("provider-jsonl" :: Text)])
+      decode (observed !! 1).requestBody `shouldBe` Just (object ["expected_offset" .= (0 :: Int), "expected_revision" .= (0 :: Int), "final_bytes" .= (0 :: Int), "final_sha256" .= AgentSession.sessionSha256 ""])
+
+    it "projects HTTP status and allowlisted codes without arbitrary error messages or content" $
+      forM_ [status400,status401,status403,status404,status409,status413,status500] $ \status ->
+        withSearchResponse status (encode (object ["error" .= ("session_conflict" :: Text), "message" .= ("sensitive-bytea" :: Text), "data_base64" .= ("private-payload" :: Text)])) $ \manager base -> do
+          result <- handleToolCall manager base (Just "private-token") testIdentity (object ["name" .= ("session_detail" :: Text), "arguments" .= sessionDetailArguments])
+          jsonPath ["structuredContent", "error", "http_status"] result `shouldBe` Just (Number (fromIntegral (statusCode status)))
+          jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "session_conflict")
+          mapM_ (\secret -> result `shouldSatisfy` (not . contains secret)) ["sensitive-bytea", "private-payload", "private-token"]
+
+    it "rejects oversized known and chunked responses, invalid JSON, invalid base64 and foreign metadata without raw diagnostics" $ do
+      forM_ [status200,status500] $ \status -> forM_ [False,True] $ \known -> do
+        let bytes = BL.replicate 2097153 120
+            headers = [("Content-Length", "2097153") | known]
+            app _ respond = respond (Wai.responseLBS status headers bytes)
+        testWithApplication (pure app) $ \port -> bracket (newManager defaultManagerSettings {managerIdleConnectionCount = 0}) closeManager $ \manager -> do
+          result <- handleToolCall manager ("http://127.0.0.1:" <> show port) Nothing testIdentity (object ["name" .= ("session_detail" :: Text), "arguments" .= sessionDetailArguments])
+          jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "response_too_large")
+          BL.length (encode result) `shouldSatisfy` (< 1000)
+      forM_ ["sensitive-invalid-json", encode (setField "workspace_id" (String observationId) sessionMetadata)] $ \body ->
+        withSearchResponse status200 body $ \manager base -> do
+          result <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_detail" :: Text), "arguments" .= sessionDetailArguments])
+          result `shouldSatisfy` isMcpError
+          result `shouldSatisfy` (not . contains "sensitive-invalid-json")
+      withSearchResponse status200 (encode (object ["session" .= sessionMetadata, "offset" .= (0 :: Int), "next_offset" .= (0 :: Int), "has_more" .= False, "data_base64" .= ("%%%private-base64" :: Text)])) $ \manager base -> do
+        result <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_read" :: Text), "arguments" .= sessionDetailArguments])
+        jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "invalid_response")
+        result `shouldSatisfy` (not . contains "private-base64")
+
+    it "returns the exact maximum 1 MiB range without clipping or a spurious continuation" $ do
+      let bytes = BS.replicate 1048576 97
+          metadata = setField "committed_bytes" (Number 1048576) sessionMetadata
+          body = object ["session" .= metadata, "offset" .= (0 :: Int), "data_base64" .= SessionWire.encodeSessionBytes bytes, "next_offset" .= (1048576 :: Int), "has_more" .= False]
+      withSearchResponse status200 (encode body) $ \manager base -> do
+        result <- call manager base "session_read" (setField "limit" (Number 1048576) sessionDetailArguments)
+        jsonField "data_base64" result `shouldBe` Just (String (SessionWire.encodeSessionBytes bytes))
+        jsonField "next_offset" result `shouldBe` Just (Number 1048576)
+        jsonField "next_request" result `shouldBe` Nothing
+
+    it "pins list and task continuations to resolved workspace and omits next_request on final empty pages" $ do
+      requests <- newTVarIO []
+      withSessionMock requests $ \manager base -> do
+        listed <- call manager base "session_list" (object ["workspace_id" .= workspaceId, "task_id" .= observationId, "limit" .= (1 :: Int)])
+        let Just next = jsonPath ["next_request", "arguments"] listed
+        jsonField "workspace_id" next `shouldBe` Just (String workspaceId)
+        jsonField "task_id" next `shouldBe` Just (String observationId)
+        jsonField "before_id" next `shouldBe` Just (String observationId)
+        done <- call manager base "session_list" next
+        jsonField "items" done `shouldBe` Just (toJSON ([] :: [Value]))
+        jsonField "next_request" done `shouldBe` Nothing
+        tasks <- call manager base "session_tasks" sessionDetailArguments
+        let Just taskNext = jsonPath ["next_request", "arguments"] tasks
+        jsonField "session_id" taskNext `shouldBe` Just (String observationId)
+        finalTasks <- call manager base "session_tasks" taskNext
+        jsonField "next_request" finalTasks `shouldBe` Nothing
+      observed <- readTVarIO requests
+      map (.requestQuery) observed `shouldSatisfy` any (BS.isInfixOf "before_created_at=2026-01-01T00%3A00%3A00Z")
+
+    it "requires identity, accepts explicit workspace overrides and preserves a continuation across context changes" $ do
+      requests <- newTVarIO []
+      withSessionMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        context <- newTVarIO Nothing
+        absent <- jsonRpcToolCall manager base initialized context "session_list" (object ["workspace_id" .= workspaceId])
+        (absent >>= jsonPath ["result", "structuredContent", "error", "code"]) `shouldBe` Just (String "context_required")
+        atomically $ writeTVar context (Just (MCPContext (Just (read (T.unpack observationId))) testIdentity))
+        response <- jsonRpcToolCall manager base initialized context "session_list" (object ["workspace_id" .= workspaceId, "limit" .= (1 :: Int)])
+        let Just next = response >>= jsonPath ["result", "structuredContent", "next_request", "arguments"]
+        atomically $ writeTVar context (Just (MCPContext Nothing testIdentity))
+        continued <- jsonRpcToolCall manager base initialized context "session_list" next
+        (continued >>= jsonPath ["result", "structuredContent", "workspace_id"]) `shouldBe` Just (String workspaceId)
+        missing <- jsonRpcToolCall manager base initialized context "session_detail" (object ["session_id" .= observationId])
+        (missing >>= jsonPath ["result", "structuredContent", "error", "code"]) `shouldBe` Just (String "invalid_arguments")
+      observed <- readTVarIO requests
+      length observed `shouldBe` 2
+      map (.requestPath) observed `shouldBe` replicate 2 ("/api/v1/workspaces/" <> T.unpack workspaceId <> "/sessions")
+
+    it "reconstructs exact UTF-8 CRLF evidence through actual HTTP, retries an explicit seal, rejects later ingestion and allows later task links" $
+      withSessionProxyApp $ \workspace manager base -> do
+        let sid = read (T.unpack observationId) :: UUID
+            arguments = object ["workspace_id" .= workspace, "session_id" .= sid]
+            invoke name args = call manager base name args
+            bytes = TE.encodeUtf8 "{\"provider\":\"雪\",\"event\":{\"x\":[1,true,null]}}\r\n{\"raw\":2}"
+        _ <- invoke "session_create" (object ["workspace_id" .= workspace, "session_id" .= sid, "format_label" .= ("unknown-provider" :: Text)])
+        appended <- sessionHTTP manager base workspace sid "/append" (toJSON (SessionWire.AppendSessionRequest 0 0 (SessionWire.encodeSessionBytes bytes) True))
+        statusCode (Client.responseStatus appended) `shouldBe` 200
+        let Just receipt = decode (Client.responseBody appended) :: Maybe SessionWire.AppendSessionResponse
+            terminateArgs = object ["workspace_id" .= workspace, "session_id" .= sid, "expected_offset" .= receipt.session.committedBytes, "expected_revision" .= receipt.session.revision
+              , "final_bytes" .= BS.length bytes, "final_sha256" .= AgentSession.sessionSha256 bytes]
+        active <- downloadSession invoke "session_read" (setField "limit" (Number 3) arguments)
+        active `shouldBe` bytes
+        sealed <- invoke "session_terminate" terminateArgs
+        jsonPath ["summary", "final_sha256"] sealed `shouldBe` Just (String (AgentSession.sessionSha256 bytes))
+        retried <- invoke "session_terminate" terminateArgs
+        retried `shouldBe` sealed
+        evidence <- downloadSession invoke "session_evidence" (setField "limit" (Number 3) arguments)
+        evidence `shouldBe` bytes
+        AgentSession.sessionSha256 evidence `shouldBe` AgentSession.sessionSha256 bytes
+        wrongState <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_read" :: Text), "arguments" .= arguments])
+        jsonPath ["structuredContent", "error", "http_status"] wrongState `shouldBe` Just (Number 409)
+        stale <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_terminate" :: Text), "arguments" .= setField "expected_revision" (Number 99) terminateArgs])
+        jsonPath ["structuredContent", "error", "http_status"] stale `shouldBe` Just (Number 409)
+        later <- sessionHTTP manager base workspace sid "/append" (toJSON (SessionWire.AppendSessionRequest (fromIntegral (BS.length bytes)) (receipt.session.revision+1) (SessionWire.encodeSessionBytes "\n{}\n") False))
+        statusCode (Client.responseStatus later) `shouldBe` 409
+        task <- invoke "task_create" (object ["workspace_id" .= workspace, "title" .= ("Later task" :: Text)])
+        let Just tid = jsonPath ["summary", "id"] task
+        linked <- invoke "session_associate" (object ["workspace_id" .= workspace, "session_id" .= sid, "task_id" .= tid])
+        jsonField "action" linked `shouldBe` Just (String "associated")
+        _ <- invoke "session_associate" (object ["workspace_id" .= workspace, "session_id" .= sid, "task_id" .= tid])
+        tasks <- invoke "session_tasks" arguments
+        jsonField "items" tasks `shouldSatisfy` maybe False (contains "Later task")
+        byTask <- invoke "session_list" (object ["workspace_id" .= workspace, "task_id" .= tid])
+        jsonField "items" byTask `shouldSatisfy` maybe False (contains observationId)
+        detail <- invoke "session_detail" arguments
+        jsonField "creator_bot_identity" detail `shouldBe` Just (toJSON testIdentity)
+        let emptySid = read (T.unpack workspaceId) :: UUID
+            emptyArgs = object ["workspace_id" .= workspace, "session_id" .= emptySid]
+            emptyTerminate = object ["workspace_id" .= workspace, "session_id" .= emptySid, "expected_offset" .= (0 :: Int), "expected_revision" .= (0 :: Int), "final_bytes" .= (0 :: Int), "final_sha256" .= AgentSession.sessionSha256 ""]
+        _ <- invoke "session_create" (setField "format_label" (String "empty-session") emptyArgs)
+        _ <- invoke "session_associate" (setField "task_id" tid emptyArgs)
+        _ <- invoke "task_start" (object ["task_id" .= tid])
+        _ <- invoke "task_finish" (object ["task_id" .= tid, "status" .= ("done" :: Text)])
+        stillActive <- invoke "session_detail" emptyArgs
+        jsonField "state" stillActive `shouldBe` Just (String "active")
+        _ <- invoke "session_terminate" emptyTerminate
+        emptyEvidence <- invoke "session_evidence" emptyArgs
+        jsonField "data_base64" emptyEvidence `shouldBe` Just (String "")
+        jsonField "next_request" emptyEvidence `shouldBe` Nothing
+        foreignWorkspace <- invoke "workspace_register" (object ["name" .= ("Foreign session scope" :: Text)])
+        let Just foreignId = jsonPath ["summary", "id"] foreignWorkspace
+        foreignResult <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_detail" :: Text), "arguments" .= setField "workspace_id" foreignId arguments])
+        jsonPath ["structuredContent", "error", "http_status"] foreignResult `shouldBe` Just (Number 404)
+        foreignTask <- invoke "task_create" (object ["workspace_id" .= foreignId, "title" .= ("Foreign task" :: Text)])
+        let Just foreignTaskId = jsonPath ["summary", "id"] foreignTask
+        mismatch <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_associate" :: Text), "arguments" .= setField "task_id" foreignTaskId arguments])
+        jsonPath ["structuredContent", "error", "http_status"] mismatch `shouldBe` Just (Number 404)
+
+    it "retains actual deployed workspace permission refusals through the session adapter" $
+      withRenameProxyApp renameUnprivileged $ \workspace manager base -> do
+        forM_ ["session_list", "session_create"] $ \name -> do
+          let args = if name == "session_create" then object ["workspace_id" .= workspace, "session_id" .= observationId, "format_label" .= ("jsonl" :: Text)] else object ["workspace_id" .= workspace]
+          result <- handleToolCall manager base Nothing testIdentity (object ["name" .= (name :: Text), "arguments" .= args])
+          jsonPath ["structuredContent", "error", "http_status"] result `shouldBe` Just (Number 403)
+
   describe "Typed unified search contract" $ do
     it "advertises scoped overrides, nonempty selection and callable language and priority filters" $ do
       all (`elem` schemaProperties "search") ["workspace_id", "search_language", "task_priority"] `shouldBe` True
@@ -1394,6 +1587,65 @@ spec = do
               fetched <- callWithKey manager base (Just localMcpBotToken) "project_detail"
                 (object ["project_id" .= projectId])
               jsonField "id" fetched `shouldBe` Just (String projectId)
+
+sessionDetailArguments, sessionTerminateArguments, sessionMetadata :: Value
+sessionDetailArguments = object ["workspace_id" .= workspaceId, "session_id" .= observationId]
+sessionTerminateArguments = object ["workspace_id" .= workspaceId, "session_id" .= observationId
+  , "expected_offset" .= (0 :: Int), "expected_revision" .= (0 :: Int), "final_bytes" .= (0 :: Int), "final_sha256" .= AgentSession.sessionSha256 ""]
+sessionMetadata = object
+  ["id" .= observationId, "workspace_id" .= workspaceId, "format_label" .= ("provider-jsonl" :: Text), "state" .= ("active" :: Text)
+  , "creator_actor_type" .= ("bot" :: Text), "creator_actor_id" .= ("actor-id" :: Text), "creator_actor_label" .= ("MCP actor" :: Text), "creator_bot_identity" .= testIdentity
+  , "created_at" .= ("2026-01-01T00:00:00Z" :: Text), "last_seen_at" .= ("2026-01-01T00:00:00Z" :: Text)
+  , "committed_bytes" .= (0 :: Int), "committed_records" .= (0 :: Int), "revision" .= (0 :: Int), "ends_with_newline" .= True
+  , "terminated_at" .= Null, "final_bytes" .= Null, "final_sha256" .= Null]
+
+setField :: Text -> Value -> Value -> Value
+setField name value (Object fields) = Object (KM.insert (Key.fromText name) value fields)
+setField _ _ value = value
+
+withSessionMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
+withSessionMock requests action = testWithApplication (pure app) $ \port ->
+  bracket (newManager defaultManagerSettings {managerIdleConnectionCount = 0}) closeManager $ \manager -> action manager ("http://127.0.0.1:" <> show port)
+  where
+    app request respond = do
+      body <- Wai.strictRequestBody request
+      atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"] (lookup "X-Request-Id" request.requestHeaders)])
+      let isTaskList = "/tasks" `BS.isSuffixOf` request.rawPathInfo
+          isList = "/sessions" `BS.isSuffixOf` request.rawPathInfo && request.requestMethod == methodGet
+          later = any (`BS.isInfixOf` request.rawQueryString) ["before_id=", "after_task_id="]
+          items = if later then [] else [if isTaskList then object ["id" .= workspaceId, "title" .= ("Linked task" :: Text), "status" .= ("todo" :: Text)] else sessionMetadata]
+          value
+            | isTaskList && request.requestMethod == methodGet = object ["items" .= items, "next_task_id" .= (if later then Null else String workspaceId)]
+            | isList = object ["items" .= items, "next_cursor" .= (if later then Null else object ["created_at" .= ("2026-01-01T00:00:00Z" :: Text), "id" .= observationId])]
+            | "/terminate" `BS.isSuffixOf` request.rawPathInfo = setField "state" (String "terminated") sessionMetadata
+            | otherwise = sessionMetadata
+      respond $ if request.requestMethod == methodPut then Wai.responseLBS status204 [] ""
+        else Wai.responseLBS status200 [("Content-Type", "application/json")] (encode value)
+
+withSessionProxyApp :: (UUID -> Manager -> String -> IO a) -> IO a
+withSessionProxyApp = withRenameProxyApp renameSuperadmin
+
+sessionHTTP :: Manager -> String -> UUID -> UUID -> String -> Value -> IO (Client.Response BL.ByteString)
+sessionHTTP manager base workspace sid suffix body = do
+  initial <- Client.parseRequest (base <> "/api/v1/workspaces/" <> show workspace <> "/sessions/" <> show sid <> suffix)
+  Client.httpLbs initial {Client.method = methodPost, Client.requestHeaders = [("Content-Type", "application/json"), ("X-HMem-Bot-Identity", BL.toStrict (encode testIdentity))], Client.requestBody = Client.RequestBodyLBS (encode body)} manager
+
+downloadSession :: (Text -> Value -> IO Value) -> Text -> Value -> IO ByteString
+downloadSession invoke name = go 0 []
+  where
+    go count chunks arguments
+      | count > (1000 :: Int) = expectationFailure "Session download did not complete" >> pure BS.empty
+      | otherwise = do
+          result <- invoke name arguments
+          let Just (String encoded) = jsonField "data_base64" result
+          bytes <- case SessionWire.decodeSessionBytes encoded of
+            Right value -> pure value
+            Left _ -> expectationFailure "Noncanonical session bytes" >> pure BS.empty
+          case jsonPath ["next_request", "arguments"] result of
+            Nothing -> do
+              jsonField "has_more" result `shouldBe` Just (Bool False)
+              pure (BS.concat (reverse (bytes:chunks)))
+            Just next -> go (count+1) (bytes:chunks) next
 
 workspaceId, observationId, gitSha :: Text
 workspaceId = "11111111-2222-3333-4444-555555555555"

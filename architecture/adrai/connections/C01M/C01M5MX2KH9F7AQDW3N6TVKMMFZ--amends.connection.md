@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5MX2KH9F7AQDW3N6TVKMMFZ"
+relation = "amends"
+from_record = "R01M5MX2KH95T5B3RR541NQF01T"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M4ZAYD5ET5V53XW8M6RSNJFH"]
++++
+
+Define bounded process-owned file followers outside ordinary request epoch drains while retaining explicit session sealing
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiY29kZXg6Z3B0LTYuMS1zb2w6aGlnaCJ9LCJiIjoiZjhhZDUzZDk3MjcwNWM0MmE2NDI4Y2YzZThiN2ZkYmYwM2YzZjM0NCIsImkiOiJzaGEyNTY6c1hQOHFMTEZrQmZOUFZPWFRxekp1SDRfSWpLWlZzSWEwd1ZTLXMzVm9XMCIsImsiOiJjb25uZWN0aW9uLmFtZW5kcyIsIm8iOiJDMDFNNU1YMktIOUY3QVFEVzNONlRWS01NRloiLCJvcCI6Ik8wMU01TVgyS0g5NVQ1QjNSUjU0MU5RRjAxVCIsInAiOlsiUjAxTTRaQVlENUVUNVY1M1hXOE02UlNOSkZIIl0sInIiOiJtYXN0ZXIiLCJzIjoic2hhMjU2OnhsY1lUeUxxTXFjcndRcEtBa29MS1dXRm44RUxXVWRrWHVsUmVOSFJjSlkiLCJ0IjoxNzkyNzc2Njg3MTQ1LCJ2IjoxLCJ4IjoiYWRyYWkvMS4wLjAifQ -->

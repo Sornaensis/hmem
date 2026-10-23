@@ -1,5 +1,38 @@
 # Upgrade reference
 
+## Agent sessions (V041 and V042)
+
+Deploy matching server, `hmem-ctl`, MCP and frontend artifacts. Stop old writers
+and process-owned followers, take the operator-owned verified backup described
+below, and run the normal ordered migration chain before serving this release.
+V041 creates immutable session/chunk evidence and additive task links; V042 adds
+compact attributed audit and durable change delivery. Require both migrations
+to succeed before exposing session routes or the Sessions tab. Do not run old
+writers alongside the new session contract. The existing maintenance migration
+command and failure/backup rules below still apply.
+
+No workspace snapshot profile or item shape changes for sessions. Session
+transcripts remain available only through authorized bounded HTTP/MCP reads;
+stream and audit payloads contain metadata invalidations. Existing workspace
+read/edit permissions, cookie CSRF and bearer/declaration rules remain the
+authority. There is no uploader-owned seal or new creator-only permission.
+
+Follower registries belong to one MCP process and are not durable jobs. Restart
+loses their local controls and receipts; explicit start with the same UUID/file
+verifies the entire committed prefix before resume. Process loss leaves active
+sessions active and eventually stale. Stop/flush receipts describe a finite
+captured boundary; a managing agent separately terminates the verified committed
+prefix. Later producer output is outside the evidence. Refresh MCP discovery
+and reload matching browser assets after rollout. See the
+[capture workflow](../guides/agent-sessions.md#capture-a-local-producer-with-mcp).
+
+For rollback, preserve the original database and restore the compatible backup
+into a new empty replacement database using the
+[recovery procedure](../../docker.md#persistence-backups-and-recovery). Select
+the matching previous release before serving it. An older archive restored in
+place against the upgraded schema can conflict with the new session foreign
+keys; do not bypass evidence guards to force that restore.
+
 ## Upgrading across V038
 
 V038 removes task/subtask deadlines from storage and current REST, MCP and

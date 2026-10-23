@@ -5,11 +5,12 @@ import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 import { createServer } from 'node:net'
 import { promisify } from 'node:util'
-import { access, readFile, readdir, realpath } from 'node:fs/promises'
+import { access, readFile, readdir, realpath, writeFile, appendFile } from 'node:fs/promises'
 import { join, resolve, relative, delimiter } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { chromium, request } from '@playwright/test'
+import { startSessionMcp, closeSessionMcps } from './support/session-mcp.js'
 
 const repo = resolve(import.meta.dirname, '../../..')
 const frontend = resolve(import.meta.dirname, '..')
@@ -36,11 +37,13 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 test('production Sessions uses canonical authenticated resources and direct task links', { timeout: 240000 }, async () => {
   let harness, harnessClosed, build, buildClosed, browser, context, api, sandbox, postgresPid, page
   let failed
+  const mcpClients=[]
   const reads = [];let sessionReadCount=0
   try {
     const { stdout } = await promisify(execFile)('stack', ['path', '--local-install-root'], { cwd: repo, windowsHide: true, timeout: 30000 })
     const executable = join(stdout.trim(), 'bin', process.platform === 'win32' ? 'hmem-test-harness.exe' : 'hmem-test-harness')
     const executableHash = sha(await readFile(executable))
+    const mcpExecutable=join(stdout.trim(),'bin',process.platform==='win32'?'hmem-mcp.exe':'hmem-mcp'),mcpHash=sha(await readFile(mcpExecutable))
     const number = await port(), origin = 'http://127.0.0.1:' + number
     const coordinates = {}
     harness = spawn(executable, ['deployed', '--interactive', '--port', String(number)], { cwd: repo, env: process.env, windowsHide: true, stdio: ['pipe','pipe','pipe'] })
@@ -48,6 +51,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     createInterface({ input: harness.stdout }).on('line', line => {
       for (const [label,key] of [['Sandbox root:','root'],['Static dir  :','static'],['Server URL  :','url']]) if (line.startsWith(label)) coordinates[key] = line.slice(label.length).trim()
       if (line.startsWith('Press Enter')) coordinates.ready = true
+      if (line.startsWith('Bearer PAT:')) coordinates.token=line.slice('Bearer PAT:'.length).trim()
     })
     await until(() => coordinates.ready || harness.exitCode !== null, 'sandbox startup', 120000)
     assert.equal(harness.exitCode, null); assert.equal(coordinates.url, origin)
@@ -74,11 +78,30 @@ test('production Sessions uses canonical authenticated resources and direct task
     }
     const workspace = await call('/api/v1/workspaces','POST',{name:'Sessions browser fixture',workspace_type:'repository'})
     const id = randomUUID(), base = '/api/v1/workspaces/'+workspace.id+'/sessions'
-    await call(base,'POST',{id,format_label:'Provider-neutral JSONL'})
+    const identity={role:'Session workflow qualification','model-id':'test:production:default'}
+    async function connectMcp(){
+      assert.ok(coordinates.token,'sandbox seeded PAT available privately')
+      const client=await startSessionMcp({executable:mcpExecutable,origin,token:coordinates.token,workspace:workspace.id,identity})
+      mcpClients.push(client);return client
+    }
+    let uploader=await connectMcp()
+    const managing=await connectMcp(),source=join(sandbox,'producer.jsonl')
     const bytes = Buffer.from('{"type":"message","role":"assistant","text":"Hello from a real session λ"}\r\n["unknown",42]\n','utf8')
-    await call(base+'/'+id+'/append','POST',{expected_offset:0,expected_revision:0,data_base64:bytes.toString('base64'),allow_final_record:false})
+    await writeFile(source,bytes)
+    const started=await uploader.tool('session_upload_start',{session_id:id,path:source,format_label:'Provider-neutral JSONL'})
+    assert.equal(started.status,'validating')
+    async function uploaded(client,sid,offset){await until(async()=>{const status=await client.tool('session_upload_status',{session_id:sid});assert.notEqual(status.status,'failed','follower must not fail');return status.committed_offset===offset},'follower canonical committed offset',30000)}
+    async function receipt(client,sid,control){
+      const accepted=await client.tool(control,{session_id:sid});let result
+      await until(async()=>{const state=await client.tool('session_upload_status',{session_id:sid});const operation=state.operation;assert.notEqual(state.status,'failed');if(operation?.id===accepted.requested_operation.id&&!operation.pending){result=operation.receipt;return true}return false},'finite verified capture receipt',30000)
+      assert.equal(result.source_verified,true);return result
+    }
+    await uploaded(uploader,id,bytes.length)
     const task = await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Inspect session evidence'})
-    await call(base+'/'+id+'/tasks/'+task.id,'PUT')
+    const secondTask=await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Review shared capture'})
+    await managing.tool('session_associate',{session_id:id,task_id:task.id})
+    await managing.tool('session_associate',{session_id:id,task_id:secondTask.id})
+    const taskStatus=(await call('/api/v1/tasks/'+task.id)).status
     browser = await chromium.launch({headless:true})
     context = await browser.newContext({viewport:{width:1440,height:1000}})
     const sockets=[];let invalidResume=false,resyncs=0,ticketConflicts=0
@@ -149,15 +172,47 @@ test('production Sessions uses canonical authenticated resources and direct task
     assert.equal(await page.locator('.session-record-text').first().innerText(),'Hello from a real session λ')
     await page.getByRole('button',{name:'Pause',exact:true}).click()
     const extra=Buffer.from('{"text":"Arrived while paused"}\n','utf8')
-    const before=await call(base+'/'+id)
-    await call(base+'/'+id+'/append','POST',{expected_offset:before.committed_bytes,expected_revision:before.revision,data_base64:extra.toString('base64'),allow_final_record:false})
+    await Promise.all([appendFile(source,extra),uploader.tool('task_detail',{task_id:task.id})])
+    await uploaded(uploader,id,bytes.length+extra.length)
     await page.getByText(extra.length+' new bytes',{exact:false}).waitFor()
     assert.equal(await page.locator('.session-record').count(),2,'pause preserves the readable window')
     await page.getByRole('button',{name:'Follow tail',exact:true}).click()
     await until(async()=>await page.locator('.session-record').count()===3,'follow catches up without duplicate records')
     assert.equal(await page.locator('.session-record-text').last().innerText(),'Arrived while paused')
-    const original=Buffer.concat([bytes,extra]), head=await call(base+'/'+id)
-    await call(base+'/'+id+'/terminate','POST',{expected_offset:head.committed_bytes,expected_revision:head.revision,final_bytes:original.length,final_sha256:sha(original)})
+    await uploader.close({hard:true})
+    assert.equal((await call(base+'/'+id)).state,'active','actual process loss never seals')
+    const eof=Buffer.from('{"text":"Finite EOF 雪"}')
+    await appendFile(source,eof)
+    uploader=await connectMcp()
+    await uploader.tool('session_upload_start',{session_id:id,path:source,format_label:'Provider-neutral JSONL'})
+    await uploaded(uploader,id,bytes.length+extra.length)
+    const flushed=await receipt(uploader,id,'session_upload_flush')
+    assert.equal(flushed.committed_offset,bytes.length+extra.length+eof.length)
+    assert.equal((await call(base+'/'+id)).state,'active','finite newline-free flush never seals')
+    const separator=Buffer.from('\r\ntrue\n')
+    await appendFile(source,separator)
+    await uploaded(uploader,id,bytes.length+extra.length+eof.length+separator.length)
+    const stopped=await receipt(uploader,id,'session_upload_stop')
+    assert.equal((await call(base+'/'+id)).state,'active','stop never seals')
+    const original=Buffer.concat([bytes,extra,eof,separator])
+    assert.equal(stopped.committed_offset,original.length);assert.equal(stopped.sha256,sha(original))
+    await appendFile(source,Buffer.from('{"text":"Later producer output is outside captured evidence"}\n'))
+    await managing.tool('session_terminate',{session_id:id,expected_offset:stopped.committed_offset,expected_revision:stopped.revision,final_bytes:stopped.committed_offset,final_sha256:stopped.sha256})
+    await managing.tool('session_terminate',{session_id:id,expected_offset:stopped.committed_offset,expected_revision:stopped.revision,final_bytes:stopped.committed_offset,final_sha256:stopped.sha256})
+    const lateTask=await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Later evidence association'})
+    await managing.tool('session_associate',{session_id:id,task_id:lateTask.id})
+    assert.equal((await call('/api/v1/tasks/'+task.id)).status,taskStatus,'capturing and sealing do not change task status')
+    async function evidence(sid,expectedBytes,expectedHash){
+      let next={name:'session_evidence',arguments:{session_id:sid,limit:65536}},offset=0;const hash=createHash('sha256')
+      for(let pages=0;next;pages++){
+        assert.ok(pages<256,'bounded evidence continuation count')
+        const value=await managing.tool(next.name,next.arguments),part=Buffer.from(value.data_base64,'base64')
+        assert.equal(value.offset,offset);assert.equal(value.next_offset,offset+part.length);assert.ok(part.length<=65536)
+        hash.update(part);offset+=part.length;next=value.next_request
+      }
+      assert.equal(offset,expectedBytes);assert.equal(hash.digest('hex'),expectedHash)
+    }
+    await evidence(id,original.length,sha(original))
     await page.getByRole('button',{name:'Save original evidence',exact:true}).waitFor()
     await page.getByRole('button',{name:'Save original evidence',exact:true}).click()
     await page.getByText('Saved '+original.length+' original bytes. SHA-256 verified.',{exact:true}).waitFor()
@@ -180,6 +235,9 @@ test('production Sessions uses canonical authenticated resources and direct task
     // must become readable through the bounded older-window boundary.
     const largeId=randomUUID(),parts=[],hash=createHash('sha256');let count=0,revision=0
     await call(base,'POST',{id:largeId,format_label:'Large arbitrary JSONL'})
+    await managing.tool('session_associate',{session_id:largeId,task_id:task.id})
+    assert.equal((await managing.tool('session_list',{task_id:task.id})).items.length,2,'many sessions link to one task')
+    assert.equal((await managing.tool('session_tasks',{session_id:id})).items.length,3,'one session links to several tasks including a late link')
     async function appendPart(part){
       parts.push({offset:count,length:part.length});hash.update(part)
       const value=await call(base+'/'+largeId+'/append','POST',{expected_offset:count,expected_revision:revision,data_base64:part.toString('base64'),allow_final_record:false})
@@ -229,6 +287,7 @@ test('production Sessions uses canonical authenticated resources and direct task
       independent.update(Buffer.from(part));largeSavedBytes+=part.length
     }
     assert.equal(largeSavedBytes,count);assert.equal(independent.digest('hex'),largeHash)
+    await evidence(largeId,count,largeHash)
     console.log(JSON.stringify({phase:'large-older-window-and-verified-save',largeSavedBytes,largeHash,largeRecordBytes:largeRecord.length}))
     await page.screenshot({path:join(tmpdir(),'sessions-large-desktop.png'),fullPage:true})
     await page.setViewportSize({width:430,height:900})
@@ -283,8 +342,20 @@ test('production Sessions uses canonical authenticated resources and direct task
     await pause(1200)
     assert.equal(sessionReadCount,hiddenReads,'hidden tab performs no session refresh')
     await completeDocument('empty-workspace-and-hidden-tab')
+    // Independently seal through the ordinary managing client while a real
+    // uploader is still alive and caught up; later source output is refused.
+    const liveId=randomUUID(),livePath=join(sandbox,'live-producer.jsonl'),liveBytes=Buffer.from('null\r\n')
+    await writeFile(livePath,liveBytes)
+    await uploader.tool('session_upload_start',{session_id:liveId,path:livePath,format_label:'Live independent seal'})
+    await uploaded(uploader,liveId,liveBytes.length)
+    const live=await managing.tool('session_detail',{session_id:liveId})
+    const liveSession=live.session??live
+    await managing.tool('session_terminate',{session_id:liveId,expected_offset:liveSession.committed_bytes,expected_revision:liveSession.revision,final_bytes:liveBytes.length,final_sha256:sha(liveBytes)})
+    await appendFile(livePath,Buffer.from('false\n'))
+    await until(async()=>(await uploader.tool('session_upload_status',{session_id:liveId})).status==='terminated','live follower discovers normal MCP termination',30000)
+    assert.equal((await call(base+'/'+liveId)).committed_bytes,liveBytes.length)
     assert.deepEqual(errors,[])
-    console.log(JSON.stringify({harness:executableHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'viewer-live-pause-resync-older-navigation-filters-and-exact-streaming-save',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,chooser:'OPFS-handle-only',nativeChooserTested:false}))
+    console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,chooser:'OPFS-handle-only',nativeChooserTested:false}))
   } catch (error) {
     if(page) {
       console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-save [role=status]').allTextContents()).slice(0,2)}))
@@ -297,6 +368,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     async function finish(action) { try { await action() } catch(error) { failures.push(error.message) } }
     await finish(async () => { if(context) await bounded(context.close(),10000,'context close'); if(browser) await bounded(browser.close(),10000,'browser close') })
     await finish(async () => { if(api) await api.dispose() })
+    await finish(async () => { await closeSessionMcps(mcpClients) })
     await finish(async () => { if(build && build.exitCode === null) { build.kill(); await bounded(buildClosed,10000,'build join') } })
     await finish(async () => { if(harness && harness.exitCode === null) { harness.stdin.end('\n'); await bounded(harnessClosed,30000,'sandbox cleanup') } })
     await finish(async () => { if(sandbox) { let remains=true; try { await access(sandbox) } catch(error) { if(error.code==='ENOENT') remains=false; else throw error } assert.equal(remains,false,'owned sandbox removed') } })

@@ -17,6 +17,7 @@ import Feature.DataLoading
 import Feature.Dependencies as Dependencies
 import Feature.Observation as Observation
 import Feature.Search
+import Feature.SessionDelivery as SessionDelivery
 import Feature.Timeline as Timeline
 import Feature.WorkspaceAdmin
 import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload, replaceFragment)
@@ -78,13 +79,42 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     let
         ( next, command ) = updateRaw msg model
+        ( refreshed, refreshCommand ) = pumpSessionResources (Helpers.retireProjectOperations next)
     in
-    ( Helpers.retireProjectOperations next, command )
+    ( refreshed, Cmd.batch [ command, refreshCommand ] )
 
 
 updateRaw : Msg -> Model -> ( Model, Cmd Msg )
 updateRaw msg model =
     case msg of
+        DemandSessionResource workspace target ->
+            if model.selectedWorkspaceId == Just workspace && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                ( { model | sessionDelivery = SessionDelivery.demand workspace target model.sessionDelivery }, Cmd.none )
+            else ( model, Cmd.none )
+
+        RemoveSessionResource workspace target ->
+            ( { model | sessionDelivery = SessionDelivery.removeDemand workspace target model.sessionDelivery }, Cmd.none )
+
+        SessionResourceFetched id guard result ->
+            let
+                current = workspaceGuardIsCurrent guard model && Permissions.canReadCurrentWorkspace model
+                    && (request |> Maybe.map (\owned -> guard.scopeKey == ChangeStream.scopeKey (ChangeStream.Workspace owned.workspace) && guard.routeWorkspace == Just owned.workspace && guard.targetKey == "session-resource:" ++ owned.key) |> Maybe.withDefault False)
+                request = Dict.get id model.sessionDelivery.physical
+                released = { model | sessionDelivery = SessionDelivery.settle id current result model.sessionDelivery }
+            in
+            if not current then ( released, Cmd.none )
+            else case result of
+                Err (Http.BadStatus 401) ->
+                    canonicalHttpFailure guard (Http.BadStatus 401) { released | sessionDelivery = SessionDelivery.retireAll released.sessionDelivery }
+                Err (Http.BadStatus 403) ->
+                    canonicalHttpFailure guard (Http.BadStatus 403) { released | sessionDelivery = SessionDelivery.retireAll released.sessionDelivery }
+                Err (Http.BadStatus 409) ->
+                    case request |> Maybe.map .target of
+                        Just (SessionDelivery.SessionBytes session _ _) ->
+                            ( { released | sessionDelivery = SessionDelivery.invalidateSession (Maybe.withDefault "" guard.routeWorkspace) session released.sessionDelivery }, Cmd.none )
+                        _ -> ( released, Cmd.none )
+                _ -> ( released, Cmd.none )
+
         RefreshTaskStatusEligibility workspace epoch taskId ->
             if workspace /= model.selectedWorkspaceId || epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspace) |> Maybe.withDefault False) then
                 ( model, Cmd.none )
@@ -994,10 +1024,12 @@ invalidateScopeRequests scope model =
         (\webSocket ->
             { webSocket
                 | streams = Dict.update (ChangeStream.scopeKey scope) (Maybe.map (\stream -> { stream | live = False, resumeToken = Nothing, failure = Nothing })) webSocket.streams
-                , targetGenerations = Dict.map (\target generation -> if String.startsWith prefix target then generation + 1 else generation) webSocket.targetGenerations
+                , targetGenerations = Dict.map (\target generation -> if String.startsWith prefix target || (scope == ChangeStream.Global && String.contains "|session-resource:" target) then generation + 1 else generation) webSocket.targetGenerations
             }
         )
-        model
+        (case scope of
+            ChangeStream.Workspace workspace -> { model | sessionDelivery = SessionDelivery.invalidateWorkspace workspace model.sessionDelivery }
+            ChangeStream.Global -> { model | sessionDelivery = SessionDelivery.invalidateAll model.sessionDelivery })
 
 
 scopePortValue : Maybe Api.SessionContext -> ChangeStream.Scope -> Encode.Value
@@ -1093,6 +1125,21 @@ applyAction scope action ( model, accumulated ) =
             ( nextModel, Cmd.batch [ accumulated, command ] )
     in
     case action of
+        ChangeStream.RefreshAgentSession workspace id ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                ( { model | sessionDelivery = SessionDelivery.invalidateSession workspace id model.sessionDelivery }, accumulated )
+            else ( model, accumulated )
+
+        ChangeStream.RefreshAgentSessionList workspace ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                ( { model | sessionDelivery = SessionDelivery.invalidateLists workspace model.sessionDelivery }, accumulated )
+            else ( model, accumulated )
+
+        ChangeStream.RefreshTaskSessions workspace task ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                ( { model | sessionDelivery = SessionDelivery.invalidateTask workspace task model.sessionDelivery }, accumulated )
+            else ( model, accumulated )
+
         ChangeStream.RefetchEntity entity identity ->
             requestEntity scope entity identity accumulated model
 
@@ -1259,6 +1306,7 @@ applyAction scope action ( model, accumulated ) =
                         , dependencies = Dependencies.resetCache model.dependencies
                         , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
                         , sessionRequestEpoch = model.sessionRequestEpoch + 1
+                        , sessionDelivery = SessionDelivery.retireWorkspace workspaceId model.sessionDelivery
                         , timeline = Timeline.reset (model.sessionRequestEpoch + 1)
                         , webSocket =
                             scopedWebSocket
@@ -1268,7 +1316,7 @@ applyAction scope action ( model, accumulated ) =
                 append scopeCommand cleared
 
             else
-                append scopeCommand { model | workspaces = Dict.remove workspaceId model.workspaces, webSocket = scopedWebSocket }
+                append scopeCommand { model | workspaces = Dict.remove workspaceId model.workspaces, webSocket = scopedWebSocket, sessionDelivery = SessionDelivery.retireWorkspace workspaceId model.sessionDelivery }
 
         ChangeStream.RefreshTimeline ->
             let
@@ -2279,3 +2327,25 @@ refreshTaskPlacement taskId oldParent source destination model =
                 ( summaries, summaryCmd ) = requestNavigationSummaryBatches (ChangeStream.Workspace workspaceId) targets (invalidateCascadeRequests (ChangeStream.Workspace workspaceId) targets navigation)
             in
             ( summaries, Cmd.batch [ navigationCmd, summaryCmd, refreshProjectNextTaskCaches summaries ] )
+
+
+pumpSessionResources : Model -> ( Model, Cmd Msg )
+pumpSessionResources model =
+    case model.selectedWorkspaceId of
+        Just workspace ->
+            if model.auth.status == AuthReady && model.page == WorkspacePage workspace && Permissions.canReadCurrentWorkspace model && scopeAuthority (ChangeStream.Workspace workspace) model /= Nothing then
+                let
+                    ( admitted, requests ) = SessionDelivery.admit workspace model.sessionDelivery
+                    issue request ( current, pendingCommands ) =
+                        case prepareCanonicalRequest (ChangeStream.Workspace workspace) ("session-resource:" ++ request.key) current of
+                            Just ( guard, guarded ) ->
+                                ( guarded, SessionDelivery.fetch model.flags.apiUrl request (SessionResourceFetched request.id guard) :: pendingCommands )
+                            Nothing ->
+                                ( { current | sessionDelivery = SessionDelivery.settle request.id False (Err (Http.BadBody "Retired session authority")) current.sessionDelivery }, pendingCommands )
+                    ( updated, commands ) = List.foldl issue ( { model | sessionDelivery = admitted }, [] ) requests
+                in
+                ( updated, Cmd.batch commands )
+            else
+                ( model, Cmd.none )
+        Nothing ->
+            ( model, Cmd.none )

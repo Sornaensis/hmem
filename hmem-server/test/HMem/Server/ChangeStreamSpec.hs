@@ -17,6 +17,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
 import Data.Time (getCurrentTime)
 import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUIDV4
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
@@ -35,6 +36,9 @@ import Test.Hspec
 import HMem.Config qualified as Config
 import HMem.BotIdentity (BotIdentity, mkBotIdentity, localDeclaredBotId)
 import HMem.DB.Auth qualified as Auth
+import HMem.AgentSession qualified as Agent
+import HMem.AgentSession.Transport qualified as AgentWire
+import HMem.DB.Task qualified as TaskDB
 import HMem.DB.ChangeStream
 import HMem.DB.Pool (runSession)
 import HMem.DB.Pool qualified as DBPool
@@ -46,12 +50,128 @@ import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppContext)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker)
-import HMem.Server.Snapshot (materializeSnapshot)
+import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
 import HMem.Server.WebSocket (createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure)
-import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateWorkspaceGroup(..), Project(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
+import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
 spec :: Spec
 spec = describe "canonical change-stream loopback" $ do
+  it "delivers session metadata through replay and live HTTP without evidence bytes, duplicate effects or cross-workspace leakage" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "session-stream"
+      other <- createTestWorkspace ctx.deployedEnv "session-stream-other"
+      user <- createDeployedSandboxUser ctx.deployedEnv False False
+      outsider <- createDeployedSandboxUser ctx.deployedEnv False False
+      forM_ [workspace.id,other.id] $ \id -> do
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleEdit) Nothing
+        pure ()
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool other.id (Auth.UpsertWorkspaceMembership outsider Auth.WorkspaceRoleRead) Nothing
+      token <- issueDeployedSandboxPAT ctx.deployedEnv user "session writer"
+      outsideToken <- issueDeployedSandboxPAT ctx.deployedEnv outsider "other scope"
+      identifier <- UUIDV4.nextRandom
+      let scope = WorkspaceScope workspace.id
+          audience = AuthenticatedAudience (UUID.toText user) user
+          headers = authHeaders token.rawToken
+          root = "/api/v1/workspaces/" <> Text.encodeUtf8 (UUID.toText workspace.id) <> "/sessions"
+          path = root <> "/" <> Text.encodeUtf8 (UUID.toText identifier)
+          sentinel = "SESSION_WEBSOCKET_PRIVATE_SENTINEL"
+          bytes = Text.encodeUtf8 ("{\"message\":\"" <> sentinel <> " æ雪\"}\r\n")
+          post target value = apiRequest ctx.deployedApplication methodPost target headers (encode value)
+          sessionRecords = filter (\record -> (jsonField "entity" record.outboxEnvelope >>= jsonField "type") `elem` [Just (String "agent_session"),Just (String "task_session")])
+          noEvidence value = T.isInfixOf sentinel (Text.decodeUtf8 (LBS.toStrict (encode value))) `shouldBe` False
+      resume <- terminalResume ctx scope audience
+      issued <- createCanonicalTicket ctx.deployedWSState (grantPrincipal user) scope resume
+      otherTicket <- canonicalTicketFor ctx (grantPrincipal outsider) (WorkspaceScope other.id) (AuthenticatedAudience (UUID.toText outsider) outsider)
+      testWithApplication (pure ctx.deployedApplication) $ \port ->
+        bracket (startOneFrameClient port otherTicket.ticket) (\client -> joinClient "session other-scope client" client.clientWorker) $ \otherClient -> do
+          frameType <$> awaitFrame otherClient.clientInitial `shouldReturn` Just "checkpoint"
+          response <- post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl"))
+          responseStatus response `shouldBe` status200
+          created <- decodeResponse response :: IO Agent.AgentSession
+          responseStatus <$> post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl")) `shouldReturn` status200
+          uploadedResponse <- post (path<>"/append") (toJSON (AgentWire.AppendSessionRequest 0 0 (AgentWire.encodeSessionBytes bytes) False))
+          responseStatus uploadedResponse `shouldBe` status200
+          uploaded <- decodeResponse uploadedResponse :: IO AgentWire.AppendSessionResponse
+          responseStatus <$> post (path<>"/append") (toJSON (AgentWire.AppendSessionRequest 0 0 (AgentWire.encodeSessionBytes bytes) False)) `shouldReturn` status200
+          before <- sessionRecords <$> listOutboxAfter ctx.deployedEnv.pool scope 0 100
+          length before `shouldBe` 2
+          forM_ [FullV1,WorkspaceShellV1] $ \profile -> do
+            items <- runSession ctx.deployedEnv.pool (materializeSnapshotWithProfile profile scope)
+            map (jsonField "kind") items `shouldSatisfy` all (`notElem` [Just (String "agent_session"),Just (String "task_session"),Just (String "session_chunks")])
+            noEvidence (toJSON items)
+          frames <- newChan
+          let receive = declaredPhase "session frame" (readChan frames >>= decodeFrame)
+              client count ticket = asyncWithUnmask $ \unmask -> unmask $
+                (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket) $ \conn -> do
+                  replicateM_ count (WS.receiveData conn >>= writeChan frames)
+                  WS.sendClose conn ("session scenario complete" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
+          beat <- withDeclaredClient (client 4 issued.ticket) $ \_ -> do
+            first <- receive; second <- receive; checkpoint <- receive
+            map frameType [first,second,checkpoint] `shouldBe` [Just "change",Just "change",Just "checkpoint"]
+            mapM_ noEvidence [first,second,checkpoint]
+            map (\frame -> jsonField "event" frame >>= jsonField "entity" >>= jsonField "type") [first,second] `shouldBe` replicate 2 (Just (String "agent_session"))
+            responseBeat <- apiRequest ctx.deployedApplication methodPost (path<>"/heartbeat") headers ""
+            responseStatus responseBeat `shouldBe` status200
+            canonical <- decodeResponse responseBeat :: IO Agent.AgentSession
+            records <- listOutboxAfter ctx.deployedEnv.pool scope 0 100
+            dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState records
+            live <- receive
+            frameType live `shouldBe` Just "change"
+            noEvidence live
+            LBS.length (encode live) `shouldSatisfy` (< 2048)
+            pure canonical
+          task <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask workspace.id Nothing Nothing "late association" Nothing Nothing Nothing)
+          reconnect <- terminalResume ctx scope audience
+          let receipt = AgentWire.TerminateSessionRequest uploaded.session.committedBytes beat.revision uploaded.session.committedBytes (Agent.sessionSha256 bytes)
+          sealedResponse <- post (path<>"/terminate") (toJSON receipt)
+          responseStatus sealedResponse `shouldBe` status200
+          sealed <- decodeResponse sealedResponse :: IO Agent.AgentSession
+          sealed.state `shouldBe` Agent.Terminated
+          sealed.lastSeenAt `shouldBe` beat.lastSeenAt
+          sealed.creatorActorId `shouldBe` created.creatorActorId
+          responseStatus <$> post (path<>"/terminate") (toJSON receipt) `shouldReturn` status200
+          let linkPath = path<>"/tasks/"<>Text.encodeUtf8 (UUID.toText task.id)
+          forM_ [1,2 :: Int] $ \_ -> responseStatus <$> apiRequest ctx.deployedApplication HTTP.methodPut linkPath headers "" `shouldReturn` status200
+          lateTicket <- createCanonicalTicket ctx.deployedWSState (grantPrincipal user) scope reconnect
+          withDeclaredClient (client 3 lateTicket.ticket) $ \_ -> do
+            seal <- receive; association <- receive; checkpoint <- receive
+            map frameType [seal,association,checkpoint] `shouldBe` [Just "change",Just "change",Just "checkpoint"]
+            (jsonField "event" association >>= jsonField "entity" >>= jsonField "id") `shouldBe` Just (String (UUID.toText identifier<>":"<>UUID.toText task.id))
+            mapM_ noEvidence [seal,association,checkpoint]
+          effects <- sessionRecords <$> listOutboxAfter ctx.deployedEnv.pool scope 0 100
+          length effects `shouldBe` 5
+          mapM_ (noEvidence . (.outboxEnvelope)) effects
+          metadata <- apiRequest ctx.deployedApplication methodGet path headers ""
+          responseStatus metadata `shouldBe` status200
+          value <- decodeResponse metadata :: IO Value
+          jsonField "committed_bytes" value `shouldBe` Just (toJSON sealed.committedBytes)
+          noEvidence value
+          responseStatus <$> apiRequest ctx.deployedApplication methodGet path (authHeaders outsideToken.rawToken) "" `shouldReturn` HTTP.status403
+          let foreignPath = "/api/v1/workspaces/"<>Text.encodeUtf8 (UUID.toText other.id)<>"/sessions/"<>Text.encodeUtf8 (UUID.toText identifier)
+          responseStatus <$> apiRequest ctx.deployedApplication methodGet foreignPath headers "" `shouldReturn` HTTP.status404
+          revokeTicket <- canonicalTicketFor ctx (grantPrincipal user) scope audience
+          initial <- newEmptyMVar; revoked <- newEmptyMVar; closed <- newEmptyMVar
+          let revokeClient = asyncWithUnmask $ \unmask -> unmask $
+                (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket revokeTicket.ticket) $ \conn -> do
+                  WS.receiveData conn >>= putMVar initial
+                  WS.receiveData conn >>= putMVar revoked
+                  ended <- try @WS.ConnectionException (WS.receiveData conn :: IO Text)
+                  putMVar closed (either (const True) (const False) ended)) `catch` \(_ :: WS.ConnectionException) -> pure ()
+          withDeclaredClient revokeClient $ \_ -> do
+            frameType <$> awaitFrame initial `shouldReturn` Just "checkpoint"
+            Auth.deleteWorkspaceMembership ctx.deployedEnv.pool workspace.id user `shouldReturn` True
+            revokedRecord <- latestOutbox ctx scope
+            dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [revokedRecord]
+            frameType <$> awaitFrame revoked `shouldReturn` Just "access_revoked"
+            declaredPhase "session revoked socket close" (takeMVar closed) `shouldReturn` True
+          responseStatus <$> apiRequest ctx.deployedApplication methodGet path headers "" `shouldReturn` HTTP.status403
+          foreignProject <- Project.createProject ctx.deployedEnv.pool (CreateProject other.id Nothing "other client wake" Nothing Nothing Nothing)
+          foreignRecord <- latestOutbox ctx (WorkspaceScope other.id)
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [foreignRecord]
+          observed <- awaitFrame otherClient.clientObserved
+          assertChangeIdentity foreignRecord foreignProject.id observed
+          wait otherClient.clientWorker
+
   it "keeps declared HTTP and WebSocket audiences stable while replaying bot metadata and genuine system work" $
     withLocalSandboxAppContext $ \ctx -> boundedDeclaredScenario $ do
       workspace <- declaredPhase "workspace setup" (createTestWorkspace ctx.localEnv "declared-stream-audience")

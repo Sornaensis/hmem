@@ -79,6 +79,16 @@ continue at `next_offset`, concatenate the original bytes, then verify metadata'
 `final_bytes` and lowercase `final_sha256`. Never treat a response window as the
 whole transcript when `has_more=true`.
 
+Session changes use the existing durable workspace stream as compact
+`agent_session` and `task_session` invalidations. Link IDs are
+`session_id:task_id`. Create/append/seal replays and duplicate links add no event;
+append and heartbeat targets never fan out across linked tasks. Audit values,
+stream events and both snapshot profiles exclude transcript bytes. Snapshot item
+allowlists and existing bearer compatibility are unchanged. After reconnect or
+resync, refresh demanded metadata/lists through these bounded HTTP routes, then
+read only missing byte windows from the returned canonical cursor. Heartbeat
+freshness uses `last_seen_at` independently of active/terminated lifecycle.
+
 Only explicit `/terminate` seals already committed server bytes. It atomically
 compares the expected cursor/revision, final size and server-computed SHA-256.
 It uploads nothing, requires no live uploader, and changes no task status. Live,

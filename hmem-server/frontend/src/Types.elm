@@ -6,6 +6,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict exposing (Dict)
 import Feature.ChangeStream
+import Feature.SessionDelivery
 import HierarchyViewport
 import Array exposing (Array)
 import ObservationViewport
@@ -48,6 +49,7 @@ type alias Model =
     , auth : AuthModel
     , sessionContext : Maybe Api.SessionContext
     , sessionRequestEpoch : Int
+    , sessionDelivery : Feature.SessionDelivery.State
     , timestamps : TimestampDisplay.State
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
@@ -1344,6 +1346,9 @@ type Msg
     | WsDisconnectedMsg
     | WsConnectionFailed String
     | WsMessageReceived String
+    | DemandSessionResource String Feature.SessionDelivery.Target
+    | RemoveSessionResource String Feature.SessionDelivery.Target
+    | SessionResourceFetched Int CanonicalRequestGuard (Result Http.Error Feature.SessionDelivery.Payload)
     | CanonicalWorkspaceFetched CanonicalRequestGuard String (Result Http.Error Api.Workspace)
     | CanonicalProjectFetched CanonicalRequestGuard String (Result Http.Error Api.Project)
     | CanonicalTaskFetched CanonicalRequestGuard String (Result Http.Error Api.Task)

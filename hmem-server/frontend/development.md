@@ -220,3 +220,39 @@ and complete UUID/path/glob/SHA values.
 Shared links exceeding 4096 UTF-8 bytes use a bounded marker while keeping the
 query active. Restoring markers or malformed versioned links uses defaults with a
 notice. Offset pagination does not provide a snapshot of concurrent writes.
+
+## Session change delivery
+
+`Feature.SessionDelivery` owns canonical session resource demand; widgets do not
+subscribe to transcript-bearing events. `DemandSessionResource` explicitly admits
+workspace/keyset pages, task session panels, metadata, linked-task pages or a
+focused byte range. The ceiling is 16 distinct resource targets; a focus requires
+both metadata and range targets and is rejected atomically with `demand_limit`
+when they do not fit. Repeating existing demand does not add queue entries.
+Closing focus removes its implicitly owned metadata demand. A separately
+demanded metadata target remains owned by that consumer.
+
+A fair queue admits at most two physical HTTP requests, independently of planning
+loaders. List/link pages contain at most 50 rows. Focus reads use 64 KiB windows
+and retain the latest four base64 windows. Validate canonical padding/zero pad
+bits, exact decoded length, byte cursors and `has_more` before advancing. Metadata
+refresh decides whether more committed bytes are missing and whether the range
+uses active `/transcript` or sealed `/evidence`; no widget action seals a session.
+Heartbeat freshness is derived from `last_seen_at`, separately from lifecycle.
+
+Dedicated session/link actions coalesce invalidations. A dirty version and the
+existing workspace/session/audience/target-generation guard fence each callback.
+Invalidation during a read preserves both its physical admission and a later
+refresh obligation. Only that exact callback releases its slot, even after
+closing demand, changing workspace/principal or revoking permission. Errors
+pause a target for explicit demand/retry or a newer invalidation; 401/403 retire
+demand and follow the existing authorization path.
+
+Every accepted workspace snapshot, including old/default full and root-only
+full/shell profiles, retires session generations and dirties demanded resources.
+Accepted empty global snapshots do the same only for session resources. Existing
+workspace-root validation and snapshot item allowlists remain intact. With no
+current authorized demand, this module sends no HTTP requests. Session reset
+clears demand/cache while retaining outstanding physical slots and monotonic IDs
+until their callbacks arrive. These are delivery primitives; session widgets and
+route/filter presentation are separate consumers.

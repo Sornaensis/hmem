@@ -1,5 +1,33 @@
 # Schema reference
 
+## Agent session change delivery (V042)
+
+`V042__agent_session_change_delivery.sql` installs dedicated audit/outbox triggers
+and its ledger entry in one transaction. A ledger failure rolls back installation;
+registered reruns do not repeat effects. It neither backfills historical events
+nor retires existing full/shell snapshots or resume bearers.
+
+Actual session creates, append counter updates, active heartbeats and termination
+write one `agent_session` audit and workspace event. Exact create/append/seal
+retries and unchanged raw updates emit nothing. The explicit audit projection
+contains identity, format, state, timestamps, committed byte/record counts,
+revision, newline state and final receipt. No complete row or chunk is serialized.
+Audit request/actor/declaration fields and outbox cause/actor retain the existing
+transaction context semantics.
+
+Each additive link emits one `task_session` audit/event, identified by
+`session_id:task_id`; its audit projection contains only workspace/session/task
+IDs and creation time. A duplicate link emits nothing, including after sealing.
+Session events invalidate one metadata resource and the workspace session
+collection. Link events additionally identify the link and its one task panel.
+These fixed targets do not grow with transcript length or the number of links.
+No event contains transcript bytes, and `session_chunks` has no audit/outbox hook.
+
+The `full_v1` and `workspace_shell_v1` item allowlists stay unchanged. Session
+metadata, links and byte windows remain separate bounded authorized HTTP reads.
+Clients retire session response generations on accepted snapshots/resync and
+reload demanded resources, including when a valid snapshot has no session items.
+
 ## Agent session evidence (V041)
 
 `V041__agent_sessions.sql` adds `sessions`, ordered `session_chunks`, and the

@@ -5,7 +5,9 @@ import AppShell
 import Dict
 import Expect
 import Feature.ChangeStream as ChangeStream
+import Feature.SessionDelivery as Delivery
 import Feature.WebSocket as WebSocket
+import Http
 import Json.Encode as Encode
 import Test exposing (Test, describe, test)
 import Types exposing (AuthStatus(..), Model, Msg(..), Page(..), WSState(..), WorkspaceTab(..))
@@ -15,7 +17,147 @@ import Url
 suite : Test
 suite =
     describe "canonical change stream policy"
-        [ test "only a valid accepted snapshot marks its scoped handoff complete" <|
+        [ test "session wire names decode and duplicated out-of-order metadata/link events coalesce into dedicated scoped refreshes" <|
+            \_ ->
+                let
+                    linked = sessionEvent True
+                    metadata = sessionEvent False
+                    actions = ChangeStream.reduceFrames
+                        [ Api.CanonicalChange linked, Api.CanonicalChange metadata, Api.CanonicalChange linked ] (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+                    wire event = canonicalWire event.entityAction (List.map (\item -> ( item.kind, item.target )) event.invalidations)
+                        |> String.replace "\"type\":\"task\"" ("\"type\":\"" ++ event.entityType ++ "\"")
+                        |> String.replace "\"id\":\"t\"" ("\"id\":\"" ++ event.entityId ++ "\"")
+                in
+                Expect.equal
+                    { decoded = [True,True], actions = [ ChangeStream.RefreshAgentSession "w" agentId, ChangeStream.RefreshTaskSessions "w" linkedTaskId, ChangeStream.RefreshAgentSessionList "w" ] }
+                    { decoded = List.map (wire >> Api.decodeCanonicalFrame >> (/=) Nothing) [linked,metadata], actions = actions }
+        , test "session composites, invalidation ownership and global scope fail closed without generic entity reads" <|
+            \_ ->
+                let
+                    original = sessionEvent True
+                    bad = [ { original | entityId = original.entityId ++ ":extra" }
+                        , { original | entityId = "not-a-uuid:" ++ linkedTaskId }
+                        , { original | invalidations = List.map (\item -> if item.target == "sessions:w" then { item | target = "sessions:other" } else item) original.invalidations }
+                        , { original | scope = Api.GlobalScope, workspaceId = Nothing } ]
+                    reduced event = ChangeStream.reduceFrame (Api.CanonicalChange event) (ChangeStream.init (if event.scope == Api.GlobalScope then ChangeStream.Global else ChangeStream.Workspace "w") []) |> Tuple.second
+                in
+                Expect.equal (List.repeat 4 [ChangeStream.BeginResync]) (List.map reduced bad)
+        , test "new demand enters the fair queue once and an invalidation cannot release or satisfy an in-flight read" <|
+            \_ ->
+                let
+                    target = Delivery.WorkspaceSessions Nothing
+                    wanted = Delivery.init |> Delivery.demand "w" target |> Delivery.demand "w" target
+                    ( admitted, requests ) = Delivery.admit "w" wanted
+                in
+                case requests of
+                    [request] ->
+                        let
+                            dirty = Delivery.invalidateLists "w" admitted
+                            ( blocked, duplicates ) = Delivery.admit "w" dirty
+                            released = Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) blocked
+                            ( fresh, refreshed ) = Delivery.admit "w" released
+                        in
+                        Expect.equal { queued = 1, occupied = 1, duplicateReads = 0, cached = Nothing, refreshes = 1, remaining = 1 }
+                            { queued = List.length wanted.order, occupied = Dict.size blocked.physical, duplicateReads = List.length duplicates
+                            , cached = Dict.get request.key released.resources |> Maybe.andThen .data
+                            , refreshes = List.length refreshed, remaining = Dict.size fresh.physical }
+                    _ -> Expect.fail "Initial demand did not admit exactly one bounded request"
+        , test "focus ceiling rejects atomically and scope retirement retains both physical slots until exact late callbacks" <|
+            \_ ->
+                let
+                    fifteen = List.range 1 15 |> List.foldl (\id -> Delivery.demand "w" (Delivery.SessionMetadata (String.fromInt id))) Delivery.init
+                    rejected = Delivery.demand "w" (Delivery.SessionBytes agentId 0 False) fifteen
+                    ( busy, old ) = Delivery.admit "w" rejected
+                    switched = Delivery.retireAll busy |> Delivery.demand "other" (Delivery.WorkspaceSessions Nothing)
+                    ( blocked, none ) = Delivery.admit "other" switched
+                    drained = List.foldl (\request -> Delivery.settle request.id False (Err Http.Timeout)) blocked old
+                    repeated = List.foldl (\request -> Delivery.settle request.id False (Err Http.Timeout)) drained old
+                    ( fresh, requests ) = Delivery.admit "other" repeated
+                in
+                Expect.equal { rejected = Just "demand_limit", targets = 15, occupied = 2, premature = 0, drained = 0, fresh = 1, monotonic = True }
+                    { rejected = rejected.admissionError, targets = Dict.size rejected.resources, occupied = Dict.size blocked.physical
+                    , premature = List.length none, drained = Dict.size repeated.physical, fresh = List.length requests
+                    , monotonic = fresh.nextId > busy.nextId }
+        , test "focused reads follow only missing byte offsets and preserve bounded exact base64 windows" <|
+            \_ ->
+                let
+                    start = Delivery.demand "w" (Delivery.SessionBytes agentId 0 False) Delivery.init
+                    withMetadata = deliverOne (Delivery.Metadata (agentMetadata 6)) start
+                    first = deliverOne (Delivery.Bytes {session=agentMetadata 6,offset=0,dataBase64="e30K",nextOffset=3,hasMore=True}) withMetadata
+                    caughtUp = deliverOne (Delivery.Bytes {session=agentMetadata 6,offset=3,dataBase64="W10K",nextOffset=6,hasMore=False}) first
+                    changed = Delivery.invalidateSession "w" agentId caughtUp |> deliverOne (Delivery.Metadata (agentMetadata 9))
+                    ( _, missing ) = Delivery.admit "w" changed
+                    range = Dict.get (Delivery.key "w" (Delivery.SessionBytes agentId 0 False)) caughtUp.resources
+                in
+                Expect.equal { target = [Delivery.SessionBytes agentId 6 False], windows = Just ["W10K","e30K"], settled = Just True }
+                    { target = List.map .target missing, windows = Maybe.map (.ranges >> List.map .dataBase64) range
+                    , settled = Maybe.map (\resource -> resource.dirty == resource.settled) range }
+        , test "malformed, short, noncanonical, empty-advance and false-final ranges never advance the evidence cursor" <|
+            \_ ->
+                let
+                    prepared = Delivery.demand "w" (Delivery.SessionBytes agentId 0 False) Delivery.init |> deliverOne (Delivery.Metadata (agentMetadata 65536))
+                    invalid = [ {session=agentMetadata 65536,offset=0,dataBase64="",nextOffset=65536,hasMore=False}
+                        , {session=agentMetadata 65536,offset=0,dataBase64="e30K",nextOffset=4,hasMore=True}
+                        , {session=agentMetadata 65536,offset=0,dataBase64="AB==",nextOffset=1,hasMore=True}
+                        , {session=agentMetadata 65536,offset=0,dataBase64="e30K",nextOffset=3,hasMore=False}
+                        , {session=agentMetadata 65536,offset=0,dataBase64="e30K\n",nextOffset=3,hasMore=True} ]
+                    rejected range = prepared |> deliverOne (Delivery.Bytes range) |> .resources |> Dict.get (Delivery.key "w" (Delivery.SessionBytes agentId 0 False))
+                        |> Maybe.map (\resource -> resource.target == Delivery.SessionBytes agentId 0 False && resource.error == Just "invalid_response" && List.isEmpty resource.ranges) |> Maybe.withDefault False
+                    valid = prepared |> deliverOne (Delivery.Bytes {session=agentMetadata 65536,offset=0,dataBase64="8J+Y",nextOffset=3,hasMore=True})
+                        |> .resources |> Dict.get (Delivery.key "w" (Delivery.SessionBytes agentId 0 False)) |> Maybe.map .target
+                in
+                Expect.equal ( List.repeat 5 True, Just (Delivery.SessionBytes agentId 3 False) ) ( List.map rejected invalid, valid )
+        , test "accepted old full, root-only full/shell and empty global snapshots retire session responses while keeping admission" <|
+            \_ ->
+                let
+                    source = WebSocket.update (DemandSessionResource "a" (Delivery.WorkspaceSessions Nothing)) streamModel |> Tuple.first
+                    requests = Dict.values source.sessionDelivery.physical
+                    root = Encode.object [("schema_version",Encode.int 1),("kind",Encode.string "workspace"),("data",(workspaceItem "a").data)]
+                    snapshot scope profile = receiveTransport
+                        ([ ("transport",Encode.string "snapshot"),("scope",scopeValue scope)
+                         , ("items",Encode.list identity (if scope == "global" then [] else [root])),("resume_token",Encode.string "old-valid-token") ]
+                            ++ (profile |> Maybe.map (\name -> [("snapshot_profile",Encode.string name)]) |> Maybe.withDefault [])) source
+                    accepted = [snapshot "workspace" Nothing,snapshot "workspace" (Just "full_v1"),snapshot "workspace" (Just "workspace_shell_v1"),snapshot "global" (Just "full_v1")]
+                    check after = case requests of
+                        [request] ->
+                            let
+                                late = WebSocket.update (SessionResourceFetched request.id (sessionGuard source request) (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing}))) after |> Tuple.first
+                            in
+                            Dict.size after.sessionDelivery.physical == 1 && Dict.size late.sessionDelivery.physical == 1
+                                && late.sessionDelivery.nextId > after.sessionDelivery.nextId
+                                && (Dict.get request.key late.sessionDelivery.resources |> Maybe.andThen .data) == Nothing
+                        _ -> False
+                in
+                Expect.equal (List.repeat 4 True) (List.map check accepted)
+        , test "closed and unauthorized session demand releases stale callbacks without scheduling refresh" <|
+            \_ ->
+                let
+                    target = Delivery.WorkspaceSessions Nothing
+                    source = WebSocket.update (DemandSessionResource "a" target) streamModel |> Tuple.first
+                in
+                case Dict.values source.sessionDelivery.physical of
+                    [request] ->
+                        let
+                            closed = WebSocket.update (RemoveSessionResource "a" target) source |> Tuple.first
+                            unauthorized = { source | auth = {status=AuthRequired,mode=Nothing} }
+                            finish model = WebSocket.update (SessionResourceFetched request.id (sessionGuard source request) (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing}))) model |> Tuple.first
+                            done = finish closed
+                            refused = finish unauthorized
+                        in
+                        Expect.equal (0,0,Nothing) (Dict.size done.sessionDelivery.physical,Dict.size refused.sessionDelivery.physical,Dict.get request.key refused.sessionDelivery.resources |> Maybe.andThen .data)
+                    _ -> Expect.fail "Expected one current request"
+        , test "closing focus retires its implicit metadata but preserves a separately demanded detail owner" <|
+            \_ ->
+                let
+                    focus = Delivery.SessionBytes agentId 0 False
+                    source = Delivery.demand "w" focus Delivery.init
+                    ( busy, requests ) = Delivery.admit "w" source
+                    closed = Delivery.removeDemand "w" focus busy
+                    completed = List.foldl (\request -> Delivery.settle request.id False (Ok (Delivery.Metadata (agentMetadata 3)))) closed requests
+                    explicit = source |> Delivery.demand "w" (Delivery.SessionMetadata agentId) |> Delivery.removeDemand "w" focus
+                in
+                Expect.equal (0,0,1) (Dict.size completed.resources,Dict.size completed.physical,Dict.size explicit.resources)
+        , test "only a valid accepted snapshot marks its scoped handoff complete" <|
             \_ ->
                 let
                     accepted = receiveMarkerSnapshot "global" [] streamModel
@@ -759,3 +901,44 @@ receiveTransport : List ( String, Encode.Value ) -> Model -> Model
 receiveTransport fields model =
     WebSocket.update (WsMessageReceived (Encode.encode 0 (Encode.object (( "schema_version", Encode.int 1 ) :: fields)))) model
         |> Tuple.first
+
+
+agentId : String
+agentId = "11111111-1111-4111-8111-111111111111"
+
+
+linkedTaskId : String
+linkedTaskId = "22222222-2222-4222-8222-222222222222"
+
+
+agentMetadata : Int -> Api.AgentSession
+agentMetadata bytes =
+    { id=agentId, workspaceId="w", formatLabel="jsonl", state=Api.SessionActive
+    , creator={actorType=Nothing,actorId=Nothing,actorLabel=Nothing,botIdentity=Nothing}
+    , createdAt="2026-01-01T00:00:00Z",lastSeenAt="2026-01-01T00:00:00Z",committedBytes=bytes,committedRecords=2,revision=2,endsWithNewline=True
+    , terminatedAt=Nothing,finalBytes=Nothing,finalSha256=Nothing }
+
+
+sessionEvent : Bool -> Api.CanonicalEnvelope
+sessionEvent linked =
+    { actor={actorType=Nothing,actorId=Nothing,actorLabel=Nothing,botIdentity=Nothing},eventId=if linked then "linked" else "metadata"
+    , scope=Api.WorkspaceScope "w",workspaceId=Just "w",entityType=if linked then "task_session" else "agent_session"
+    , entityId=if linked then agentId ++ ":" ++ linkedTaskId else agentId,entityAction=if linked then "created" else "updated",requestId=Nothing
+    , invalidations=(if linked then [{kind="entity",target="task_session:" ++ agentId ++ ":" ++ linkedTaskId}] else [])
+        ++ [{kind="entity",target="agent_session:" ++ agentId},{kind="collection",target="sessions:w"}]
+        ++ (if linked then [{kind="collection",target="task_sessions:" ++ linkedTaskId}] else []) }
+
+
+deliverOne : Delivery.Payload -> Delivery.State -> Delivery.State
+deliverOne payload state =
+    let ( admitted, requests ) = Delivery.admit "w" state in
+    case requests of
+        [request] -> Delivery.settle request.id True (Ok payload) admitted
+        _ -> state
+
+
+sessionGuard : Model -> Delivery.Request -> Types.CanonicalRequestGuard
+sessionGuard model request =
+    let target = "session-resource:" ++ request.key in
+    { scopeKey="workspace:a",targetKey=target,targetGeneration=Dict.get ("workspace:a|" ++ target) model.webSocket.targetGenerations |> Maybe.withDefault -1
+    , sessionEpoch=model.sessionRequestEpoch,routeWorkspace=Just "a",audienceId="actor" }

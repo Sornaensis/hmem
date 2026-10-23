@@ -1,13 +1,15 @@
 module HMem.DB.ChangeStreamSpec (spec) where
 
-import Data.Aeson (Value(..), object, toJSON, (.=))
+import Data.Aeson (Value(..), encode, object, toJSON, (.=))
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString (ByteString)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
 import Control.Concurrent.Async (async, concurrently, link, wait, withAsync)
 import Control.Exception (SomeException, bracket, bracket_, finally, try)
-import Control.Monad (void)
+import Control.Monad (void, forM_, replicateM)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Either (isLeft, isRight)
 import Data.Functor.Contravariant (contramap)
@@ -30,6 +32,10 @@ import System.IO (hPutStrLn, stderr)
 import Text.Read (readMaybe)
 
 import HMem.DB.Auth qualified as Auth
+import HMem.AgentSession qualified as Agent
+import HMem.BotIdentity (mkBotIdentity)
+import HMem.DB.AgentSession qualified as AgentDB
+import HMem.DB.RequestContext
 import HMem.DB.ChangeStream
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool (DBException(..), checkPgvector, createPool, runSession, runTransaction, withConn)
@@ -46,6 +52,132 @@ import HMem.Types
 -- ephemeral PostgreSQL sandbox is still discarded by SpecHook after the run.
 spec :: Spec
 spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
+  it "agent session metadata emits compact attributed effects once, independent of transcript bytes and link count" $ \env -> do
+    workspace <- createTestWorkspace env "session-change-values"
+    identifier <- UUIDV4.nextRandom
+    identity <- either (fail . T.unpack) pure (mkBotIdentity "developer" "codex:live-test:high")
+    let actor = EffectiveActor ActorBot "session-live-bot" "Session writer" (Just identity)
+        attributed :: IO a -> IO a
+        attributed action = withEffectiveActorContext (Just actor) $ withRequestIdContext (Just "session-live-request") $ withChangeCauseContext (Just ChangeCauseMcp) action
+        input = Agent.CreateSession identifier workspace.id "jsonl"
+        sentinel = "SESSION_PRIVATE_PAYLOAD_SENTINEL"
+        body = "\"" <> TE.encodeUtf8 sentinel <> BS.replicate 131072 97 <> "\"\r\n"
+        records = filter (\row -> envelopeEntityField "type" row `elem` [Just (String "agent_session"),Just (String "task_session")])
+    row <- attributed $ AgentDB.createSession env.pool input
+    attributed (AgentDB.createSession env.pool input) `shouldReturn` row
+    first <- attributed $ AgentDB.appendSession env.pool workspace.id identifier (Agent.AppendSession 0 0 body False)
+    replay <- attributed $ AgentDB.appendSession env.pool workspace.id identifier (Agent.AppendSession 0 0 body False)
+    replay.replayed `shouldBe` True
+    before <- records <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 1000
+    length before `shouldBe` 2
+    tasks <- replicateM 20 $ Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "associated" Nothing Nothing Nothing)
+    forM_ tasks $ \task -> attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier task.id
+    beat <- attributed $ AgentDB.heartbeatSession env.pool workspace.id identifier
+    let receipt = Agent.TerminateSession beat.committedBytes beat.revision beat.committedBytes (Agent.sessionSha256 body)
+    sealed <- attributed $ AgentDB.terminateSession env.pool workspace.id identifier receipt
+    attributed (AgentDB.terminateSession env.pool workspace.id identifier receipt) `shouldReturn` sealed
+    later <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "after seal" Nothing Nothing Nothing)
+    attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier later.id
+    attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier later.id
+    effects <- records <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 1000
+    let metadata = filter ((== Just (String "agent_session")) . envelopeEntityField "type") effects
+        links = filter ((== Just (String "task_session")) . envelopeEntityField "type") effects
+    length metadata `shouldBe` 4
+    length links `shouldBe` 21
+    forM_ metadata $ \event -> envelopeField "invalidations" event `shouldBe` Just (toJSON
+      [object ["kind" .= ("entity" :: T.Text),"target" .= ("agent_session:" <> T.pack (show identifier))]
+      ,object ["kind" .= ("collection" :: T.Text),"target" .= ("sessions:" <> T.pack (show workspace.id))]])
+    forM_ effects $ \event -> do
+      envelopeField "actor" event `shouldBe` Just (object ["type" .= ("service" :: T.Text),"id" .= ("session-live-bot" :: T.Text),"bot_identity" .= identity])
+      case envelopeField "transaction" event of
+        Just (Object tx) -> do
+          KeyMap.lookup "cause" tx `shouldBe` Just (String "mcp")
+          KeyMap.lookup "request_id" tx `shouldBe` Just (String "session-live-request")
+        _ -> expectationFailure "Missing transaction attribution"
+      BS.length (BL.toStrict (encode event.outboxEnvelope)) `shouldSatisfy` (< 2048)
+    let lastLink = T.pack (show identifier) <> ":" <> T.pack (show later.id)
+    map (envelopeEntityField "id") links `shouldSatisfy` elem (Just (String lastLink))
+    audits <- getAuditLogRows env.pool "agent_session" (T.pack (show identifier))
+    length audits `shouldBe` 4
+    map (.actorId) audits `shouldBe` replicate 4 (Just "session-live-bot")
+    map (.requestId) audits `shouldBe` replicate 4 (Just "session-live-request")
+    any (T.isInfixOf sentinel . T.pack . show) audits `shouldBe` False
+    any (T.isInfixOf sentinel . T.pack . show . (.outboxEnvelope)) effects `shouldBe` False
+    first.session.committedBytes `shouldBe` fromIntegral (BS.length body)
+
+  it "agent session metadata migration preserves old empty snapshot lineages and rolls back failed installation" $ \env -> do
+    workspace <- createTestWorkspace env "session-change-upgrade"
+    runSession env.pool $ Session.sql "DROP TRIGGER trg_agent_session_change ON sessions; DROP TRIGGER trg_task_session_change ON task_sessions; DROP FUNCTION hmem_agent_session_change(); DROP FUNCTION hmem_task_session_change(); DROP FUNCTION hmem_agent_session_audit_value(sessions); DELETE FROM schema_migrations WHERE version=42"
+    identifier <- UUIDV4.nextRandom
+    _ <- AgentDB.createSession env.pool (Agent.CreateSession identifier workspace.id "jsonl")
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "session-change-upgrade"
+        unwrap = either (fail . show) pure
+    old <- mapM (\(key,profile) -> do
+      begun <- beginResyncWithStartKeyAndProfile env.pool 60 scope audience key 1 profile (pure []) >>= unwrap
+      page <- readSnapshotPageWithStoredTtls env.pool 60 600 scope audience begun.snapshotToken >>= unwrap
+      pure (begun,page)) [("session-full-before-upgrade",FullV1),("session-shell-before-upgrade",WorkspaceShellV1)]
+    bracket_
+      (runSession env.pool $ Session.sql "CREATE FUNCTION session_upgrade_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=42 THEN RAISE EXCEPTION 'session migration ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER session_upgrade_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION session_upgrade_ledger_failure()")
+      (runSession env.pool $ Session.sql "DROP TRIGGER session_upgrade_ledger_failure ON schema_migrations; DROP FUNCTION session_upgrade_ledger_failure()") $ do
+        refused <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+        refused.failed `shouldSatisfy` maybe False (const True)
+        absent <- runSession env.pool $ Session.statement () $ Statement.Statement "SELECT to_regprocedure('hmem_agent_session_change()') IS NULL" Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) False
+        absent `shouldBe` True
+    upgraded <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    upgraded.failed `shouldBe` Nothing
+    upgraded.applied `shouldBe` ["V042__agent_session_change_delivery.sql"]
+    stable <- runSession env.pool $ Session.statement () $ Statement.Statement
+      "SELECT provolatile = 's' FROM pg_proc WHERE oid = 'hmem_agent_session_audit_value(sessions)'::regprocedure"
+      Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) False
+    stable `shouldBe` True
+    let renderedCreation = Session.statement identifier $ Statement.Statement
+          "SELECT hmem_agent_session_audit_value(s)->>'created_at' FROM sessions s WHERE id=$1"
+          (Enc.param (Enc.nonNullable Enc.uuid)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) False
+    (utcCreation, localCreation) <- runTransaction env.pool $ do
+      Session.sql "SET LOCAL TIME ZONE 'UTC'"
+      utc <- renderedCreation
+      Session.sql "SET LOCAL TIME ZONE 'Pacific/Auckland'"
+      local <- renderedCreation
+      pure (utc, local)
+    utcCreation `shouldNotBe` localCreation
+    getAuditLogRows env.pool "agent_session" (T.pack (show identifier)) `shouldReturn` []
+    listOutboxAfter env.pool scope 0 100 `shouldReturn` []
+    forM_ old $ \(begun,page) -> do
+      readSnapshotPageWithStoredTtls env.pool 60 600 scope audience begun.snapshotToken `shouldReturn` Right page
+      token <- maybe (fail "Empty snapshot omitted resume bearer") pure page.snapshotResumeToken
+      replay <- replayUnacknowledgedResumeToken env.pool scope audience token 100 >>= unwrap
+      replay.replayPageRecords `shouldBe` []
+    _ <- AgentDB.heartbeatSession env.pool workspace.id identifier
+    effects <- listOutboxAfter env.pool scope 0 100
+    length effects `shouldBe` 1
+    repeated <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    repeated.applied `shouldBe` []
+    listOutboxAfter env.pool scope 0 100 `shouldReturn` effects
+
+  it "agent session metadata is invisible cross-connection before commit and disappears with rollback" $ \env -> do
+    workspace <- createTestWorkspace env "session-change-commit"
+    identifier <- UUIDV4.nextRandom
+    bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \peer -> do
+      let visible = filter ((== Just (String "agent_session")) . envelopeEntityField "type") <$> listOutboxAfter peer (WorkspaceScope workspace.id) 0 100
+          insert = Statement.Statement "INSERT INTO sessions(id,workspace_id,format_label) VALUES($1,$2,'jsonl')"
+            (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+      withConn env.pool $ \connection -> flip finally (void (Session.run (Session.sql "ROLLBACK") connection)) $ do
+        Session.run (Session.sql "BEGIN") connection >>= either (fail . show) pure
+        Session.run (Session.statement (identifier,workspace.id) insert) connection >>= either (fail . show) pure
+        visible `shouldReturn` []
+        getAuditLogRows peer "agent_session" (T.pack (show identifier)) `shouldReturn` []
+        Session.run (Session.sql "COMMIT") connection >>= either (fail . show) pure
+      committed <- visible
+      length committed `shouldBe` 1
+      another <- UUIDV4.nextRandom
+      rolledBack <- try @SomeException $ runTransaction env.pool $ do
+        Session.statement (another,workspace.id) insert
+        Session.sql "SELECT 1 / 0"
+      rolledBack `shouldSatisfy` isLeft
+      visible `shouldReturn` committed
+      getAuditLogRows peer "agent_session" (T.pack (show another)) `shouldReturn` []
+
   it "project pause serializes raw starts, inserts and project moves before tuple locks" $ \_ -> withTestEnv $ \env -> do
     workspace <- createTestWorkspace env "pause-raw-races"
     root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)

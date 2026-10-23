@@ -1,5 +1,18 @@
 module Api exposing
     ( ApiError
+    , AgentSession
+    , AgentSessionState(..)
+    , SessionCursor
+    , SessionPage
+    , SessionTaskPage
+    , SessionRange
+    , agentSessionDecoder
+    , sessionPageDecoder
+    , sessionRangeDecoder
+    , fetchAgentSession
+    , fetchAgentSessions
+    , fetchSessionTasks
+    , fetchSessionRange
     , AuditAction(..)
     , AuditLogEntry
     , CanonicalEnvelope
@@ -2584,7 +2597,7 @@ canonicalEntityTypeDecoder =
     nonEmptyStringDecoder
         |> D.andThen
             (\entityType ->
-                if List.member entityType [ "workspace", "workspace_group", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership" ] then
+                if List.member entityType [ "workspace", "workspace_group", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership", "agent_session", "task_session" ] then
                     D.succeed entityType
 
                 else
@@ -4365,3 +4378,124 @@ decodeEncodedString encoded =
 fetchObservationHistory : String -> String -> Int -> (Result Http.Error (PaginatedResult ObservationRevision) -> msg) -> Cmd msg
 fetchObservationHistory apiUrl observationId offset toMsg =
     Http.get { url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId ++ "/history?limit=25&offset=" ++ String.fromInt offset, expect = Http.expectJson toMsg (paginatedDecoder observationRevisionDecoder) }
+
+
+-- Agent evidence is a separate bounded HTTP resource, never a snapshot item.
+type AgentSessionState
+    = SessionActive
+    | SessionTerminated
+
+
+type alias AgentSession =
+    { id : String, workspaceId : String, formatLabel : String, state : AgentSessionState
+    , creator : ActorAttribution.Actor, createdAt : String, lastSeenAt : String
+    , committedBytes : Int, committedRecords : Int, revision : Int, endsWithNewline : Bool
+    , terminatedAt : Maybe String, finalBytes : Maybe Int, finalSha256 : Maybe String
+    }
+
+
+type alias SessionCursor =
+    { createdAt : String, id : String }
+
+
+type alias SessionPage =
+    { items : List AgentSession, nextCursor : Maybe SessionCursor }
+
+
+type alias SessionTaskPage =
+    { items : List { id : String, title : String, status : String }, nextTaskId : Maybe String }
+
+
+type alias SessionRange =
+    { session : AgentSession, offset : Int, dataBase64 : String, nextOffset : Int, hasMore : Bool }
+
+
+agentSessionDecoder : Decoder AgentSession
+agentSessionDecoder =
+    D.succeed AgentSession
+        |> required "id" D.string
+        |> required "workspace_id" D.string
+        |> required "format_label" D.string
+        |> required "state" (D.string |> D.andThen (\state -> case state of
+            "active" -> D.succeed SessionActive
+            "terminated" -> D.succeed SessionTerminated
+            _ -> D.fail "Invalid agent session state"))
+        |> custom (D.map4 ActorAttribution.Actor
+            (D.field "creator_actor_type" (D.nullable D.string))
+            (D.field "creator_actor_id" (D.nullable D.string))
+            (D.field "creator_actor_label" (D.nullable D.string))
+            (D.field "creator_bot_identity" (D.nullable ActorAttribution.botIdentityDecoder)))
+        |> required "created_at" D.string
+        |> required "last_seen_at" D.string
+        |> required "committed_bytes" D.int
+        |> required "committed_records" D.int
+        |> required "revision" D.int
+        |> required "ends_with_newline" D.bool
+        |> required "terminated_at" (D.nullable D.string)
+        |> required "final_bytes" (D.nullable D.int)
+        |> required "final_sha256" (D.nullable D.string)
+
+
+sessionPageDecoder : Decoder SessionPage
+sessionPageDecoder =
+    D.map2 SessionPage (D.field "items" (D.list agentSessionDecoder))
+        (D.field "next_cursor" (D.nullable (D.map2 SessionCursor (D.field "created_at" D.string) (D.field "id" D.string))))
+
+
+sessionRangeDecoder : Decoder SessionRange
+sessionRangeDecoder =
+    D.map5 SessionRange (D.field "session" agentSessionDecoder) (D.field "offset" D.int)
+        (D.field "data_base64" D.string) (D.field "next_offset" D.int) (D.field "has_more" D.bool)
+
+
+sessionResourceUrl : String -> String -> String
+sessionResourceUrl apiUrl workspace =
+    apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode workspace ++ "/sessions"
+
+
+sessionGet : String -> Decoder a -> (Result Http.Error a -> msg) -> Cmd msg
+sessionGet url decoder toMsg =
+    Http.request { method = "GET", headers = [], url = url, body = Http.emptyBody
+        , expect = Http.expectJson toMsg decoder, timeout = Just 20000, tracker = Nothing }
+
+
+fetchAgentSession : String -> String -> String -> (Result Http.Error AgentSession -> msg) -> Cmd msg
+fetchAgentSession apiUrl workspace id =
+    sessionGet (sessionResourceUrl apiUrl workspace ++ "/" ++ Url.percentEncode id) agentSessionDecoder
+
+
+fetchAgentSessions : String -> String -> Maybe String -> Maybe SessionCursor -> Int -> (Result Http.Error SessionPage -> msg) -> Cmd msg
+fetchAgentSessions apiUrl workspace task cursor limit toMsg =
+    if limit < 1 || limit > 100 then
+        Task.succeed (Err (Http.BadBody "Session page limit must be 1..100")) |> Task.perform toMsg
+    else
+        let
+            path = case task of
+                Just id -> apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode workspace ++ "/tasks/" ++ Url.percentEncode id ++ "/sessions"
+                Nothing -> sessionResourceUrl apiUrl workspace
+            after = cursor |> Maybe.map (\key -> "&before_created_at=" ++ Url.percentEncode key.createdAt ++ "&before_id=" ++ Url.percentEncode key.id) |> Maybe.withDefault ""
+        in
+        sessionGet (path ++ "?limit=" ++ String.fromInt limit ++ after) sessionPageDecoder toMsg
+
+
+fetchSessionTasks : String -> String -> String -> Maybe String -> Int -> (Result Http.Error SessionTaskPage -> msg) -> Cmd msg
+fetchSessionTasks apiUrl workspace id after limit toMsg =
+    if limit < 1 || limit > 100 then
+        Task.succeed (Err (Http.BadBody "Session page limit must be 1..100")) |> Task.perform toMsg
+    else
+        sessionGet (sessionResourceUrl apiUrl workspace ++ "/" ++ Url.percentEncode id ++ "/tasks?limit=" ++ String.fromInt limit
+            ++ (after |> Maybe.map (\key -> "&after_task_id=" ++ Url.percentEncode key) |> Maybe.withDefault ""))
+            (D.map2 SessionTaskPage
+                (D.field "items" (D.list (D.map3 (\taskId title status -> { id = taskId, title = title, status = status })
+                    (D.field "id" D.string) (D.field "title" D.string) (D.field "status" D.string))))
+                (D.field "next_task_id" (D.nullable D.string))) toMsg
+
+
+fetchSessionRange : String -> String -> String -> Bool -> Int -> Int -> (Result Http.Error SessionRange -> msg) -> Cmd msg
+fetchSessionRange apiUrl workspace id sealed offset limit toMsg =
+    if offset < 0 || limit < 1 || limit > 1048576 then
+        Task.succeed (Err (Http.BadBody "Session range must be nonnegative and 1..1048576 bytes")) |> Task.perform toMsg
+    else
+        sessionGet (sessionResourceUrl apiUrl workspace ++ "/" ++ Url.percentEncode id
+            ++ (if sealed then "/evidence" else "/transcript")
+            ++ "?offset=" ++ String.fromInt offset ++ "&limit=" ++ String.fromInt limit) sessionRangeDecoder toMsg

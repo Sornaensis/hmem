@@ -7,6 +7,7 @@ import Expect
 import Feature.Cards as Cards
 import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading as DataLoading
+import Feature.SessionDelivery as Delivery
 import Feature.WebSocket as WebSocket
 import Http
 import Json.Encode as Encode
@@ -58,7 +59,34 @@ suite =
                     ]
                 )
         )
-            ++ [ test "downgrade retains readable workspace stream but retires global projection and guard" <|
+            ++ [ test "session authority replacement retires demand while exact late callbacks retain physical occupancy" <|
+                    \_ ->
+                        let
+                            base = populated (WorkspacePage "a")
+                            source = WebSocket.update (DemandSessionResource "a" (Delivery.WorkspaceSessions Nothing)) base |> Tuple.first
+                            previousPrincipal = superadmin.principal
+                            changed = refresh { superadmin | principal = { previousPrincipal | actorId = "another-actor" } } source
+                            request = Dict.values source.sessionDelivery.physical |> List.head
+                            callback model owned = WebSocket.update (SessionResourceFetched owned.id
+                                {scopeKey="workspace:a",targetKey="session-resource:" ++ owned.key,targetGeneration=1,sessionEpoch=source.sessionRequestEpoch,routeWorkspace=Just "a",audienceId="actor"}
+                                (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing}))) model |> Tuple.first
+                            completed = request |> Maybe.map (callback changed) |> Maybe.withDefault changed
+                        in
+                        Expect.equal (0,1,0) (Dict.size changed.sessionDelivery.resources,Dict.size changed.sessionDelivery.physical,Dict.size completed.sessionDelivery.physical)
+               , test "workspace permission revocation clears session demand even when the principal epoch is unchanged" <|
+                    \_ ->
+                        let
+                            base = populated (WorkspacePage "a")
+                            source = WebSocket.update (DemandSessionResource "a" (Delivery.WorkspaceSessions Nothing)) base |> Tuple.first
+                            denied = {reader | workspace=Just {workspaceId="a",role=Nothing,canRead=False,canEdit=False,canAdmin=False}}
+                            revoked = refresh denied source
+                            restored = refresh reader revoked
+                            unchanged = refresh superadmin source
+                        in
+                        Expect.equal { revoked=0, restored=0, retainedPhysical=1, stable=True }
+                            { revoked=Dict.size revoked.sessionDelivery.resources,restored=Dict.size restored.sessionDelivery.resources
+                            , retainedPhysical=Dict.size restored.sessionDelivery.physical,stable=unchanged.sessionDelivery == source.sessionDelivery }
+               , test "downgrade retains readable workspace stream but retires global projection and guard" <|
                     \_ ->
                         let
                             after =

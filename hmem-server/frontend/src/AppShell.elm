@@ -20,6 +20,7 @@ import Feature.Groups
 import Feature.Mutations
 import Feature.Observation
 import Feature.Search
+import Feature.SessionDelivery
 import Feature.Timeline
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
@@ -82,6 +83,7 @@ initModel key url page flags storedFilters legacyFrag =
             , auth = { status = AuthBooting, mode = Nothing }
             , sessionContext = Nothing
             , sessionRequestEpoch = 0
+            , sessionDelivery = Feature.SessionDelivery.init
             , timestamps = TimestampDisplay.empty
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
@@ -873,7 +875,8 @@ updateLoadingAfterSession previous expectedWorkspace sessionContext model =
                         Nothing
             }
     in
-    { scopedModel | dataLoading = updatedLoading, webSocket = nextWebSocket, workspaces = if keepGlobal then previous.workspaces else Dict.empty, groups = nextGroups }
+    { scopedModel | dataLoading = updatedLoading, webSocket = nextWebSocket, workspaces = if keepGlobal then previous.workspaces else Dict.empty, groups = nextGroups
+        , sessionDelivery = if not clearScopedData && expectedWorkspace == previous.selectedWorkspaceId && scopedModel.sessionRequestEpoch == previous.sessionRequestEpoch then previous.sessionDelivery else Feature.SessionDelivery.retireAll previous.sessionDelivery }
 
 
 {-| Retired scope counters are tombstones within a session lifetime. Removing
@@ -948,6 +951,7 @@ clearSessionScopedState model =
         , tasks = Dict.empty
         , memories = Dict.empty
         , observations = Feature.Observation.retireSessionState model.observations
+        , sessionDelivery = Feature.SessionDelivery.retireAll model.sessionDelivery
         , dataLoading = stopAllLoading model.dataLoading
         , search = Feature.Search.init
         , focusedFilters = Nothing

@@ -108,6 +108,15 @@ route msg model =
             Ok (Feature.Cards.updateViewport payload model)
 
         -- WebSocket
+        DemandSessionResource _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        RemoveSessionResource _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        SessionResourceFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
         RefreshTaskStatusEligibility _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 

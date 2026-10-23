@@ -354,3 +354,12 @@ classDiagram
   note for task_flatten_migration_report "UNIQUE (task_id, issue)"
   note for delete_cascade_migration_report "UNIQUE (entity_type, entity_id, issue)"
 ```
+
+V042 adds session metadata and association audit/outbox triggers without changing
+these tables or relationships. `agent_session` audit values use an explicit
+metadata allowlist; `task_session` identity is `session_id:task_id`. Each row
+transition emits one attributed workspace event in its transaction. Metadata
+updates have two fixed invalidations, links four; neither scans linked tasks.
+`session_chunks` remains outside audit, outbox and snapshot materialization.
+Existing snapshot items, versions and retained bearers are unchanged. See the
+[schema reference](docs/reference/schema.md#agent-session-change-delivery-v042).

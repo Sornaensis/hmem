@@ -62,6 +62,9 @@ type Action
     | RefreshGroupMembers String
     | RefreshMemberships String
     | RefreshSessionAuthorization
+    | RefreshAgentSession String String
+    | RefreshAgentSessionList String
+    | RefreshTaskSessions String String
     | AccessGranted String
     | ClearWorkspace String
     | RefreshTimeline
@@ -235,7 +238,7 @@ validEnvelope envelope =
         entityMatches =
             case envelope.scope of
                 Api.WorkspaceScope _ ->
-                    List.member envelope.entityType [ "workspace", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership" ]
+                    List.member envelope.entityType [ "workspace", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership", "agent_session", "task_session" ]
 
                 Api.GlobalScope ->
                     List.member envelope.entityType [ "workspace", "workspace_group" ]
@@ -248,7 +251,30 @@ validEnvelope envelope =
                 )
                 envelope.invalidations
     in
-    scopeMatches && entityMatches && invalidationsValid && not (String.isEmpty envelope.eventId) && not (String.isEmpty envelope.entityId) && not (List.isEmpty envelope.invalidations)
+    scopeMatches && entityMatches && validSessionEnvelope envelope && invalidationsValid && not (String.isEmpty envelope.eventId) && not (String.isEmpty envelope.entityId) && not (List.isEmpty envelope.invalidations)
+
+
+validSessionEnvelope : Api.CanonicalEnvelope -> Bool
+validSessionEnvelope envelope =
+    let
+        uuid value = case String.split "-" value of
+            [ a, b, c, d, e ] -> List.map String.length [ a, b, c, d, e ] == [ 8, 4, 4, 4, 12 ] && List.all (String.all (\ch -> String.contains (String.fromChar ch) "0123456789abcdef")) [ a, b, c, d, e ]
+            _ -> False
+        matches expected =
+            List.all (\item -> List.member ( item.kind, item.target ) expected) envelope.invalidations
+                && List.all (\( kind, target ) -> List.any (\item -> item.kind == kind && item.target == target) envelope.invalidations) expected
+    in
+    case ( envelope.scope, envelope.entityType, String.split ":" envelope.entityId ) of
+        ( Api.WorkspaceScope workspace, "agent_session", [ id ] ) ->
+            uuid id && List.member envelope.entityAction [ "created", "updated" ] && matches
+                [ ( "entity", "agent_session:" ++ id ), ( "collection", "sessions:" ++ workspace ) ]
+        ( Api.WorkspaceScope workspace, "task_session", [ id, task ] ) ->
+            uuid id && uuid task && envelope.entityAction == "created" && matches
+                [ ( "entity", "task_session:" ++ id ++ ":" ++ task ), ( "entity", "agent_session:" ++ id )
+                , ( "collection", "sessions:" ++ workspace ), ( "collection", "task_sessions:" ++ task ) ]
+        ( _, "agent_session", _ ) -> False
+        ( _, "task_session", _ ) -> False
+        _ -> True
 
 
 timelineEligible : Api.CanonicalEnvelope -> Bool
@@ -321,6 +347,24 @@ invalidationActions envelope invalidation =
                         [ RefetchEntity entity identity ]
     in
     case ( envelope.scope, invalidation.kind, parts ) of
+        ( Api.WorkspaceScope workspace, "entity", [ "agent_session", id ] ) ->
+            if List.member envelope.entityType [ "agent_session", "task_session" ] then [ RefreshAgentSession workspace id ] else [ BeginResync ]
+
+        ( Api.WorkspaceScope workspace, "entity", [ "task_session", id, task ] ) ->
+            if envelope.entityType == "task_session" && envelope.entityId == id ++ ":" ++ task then
+                [ RefreshAgentSession workspace id, RefreshTaskSessions workspace task ]
+            else [ BeginResync ]
+
+        ( Api.WorkspaceScope workspace, "collection", [ "sessions", expected ] ) ->
+            if workspace == expected && List.member envelope.entityType [ "agent_session", "task_session" ] then
+                [ RefreshAgentSessionList workspace ]
+            else [ BeginResync ]
+
+        ( Api.WorkspaceScope workspace, "collection", [ "task_sessions", task ] ) ->
+            if envelope.entityType == "task_session" && (String.split ":" envelope.entityId |> List.drop 1) == [task] then
+                [ RefreshTaskSessions workspace task ]
+            else [ BeginResync ]
+
         ( Api.WorkspaceScope expected, "entity", [ "workspace", workspaceId ] ) ->
             if expected == workspaceId && not (String.isEmpty workspaceId) then
                 entityAction "workspace" workspaceId
@@ -536,6 +580,15 @@ coalesce actions =
 
                 RefreshSessionAuthorization ->
                     "session"
+
+                RefreshAgentSession workspace id ->
+                    "agent-session:" ++ workspace ++ ":" ++ id
+
+                RefreshAgentSessionList workspace ->
+                    "agent-session-list:" ++ workspace
+
+                RefreshTaskSessions workspace task ->
+                    "task-sessions:" ++ workspace ++ ":" ++ task
 
                 AccessGranted workspace ->
                     "grant:" ++ workspace

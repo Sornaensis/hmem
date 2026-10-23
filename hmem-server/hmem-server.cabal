@@ -59,6 +59,7 @@ data-files:
     migrations/V039__declared_bot_identity.sql
     migrations/V040__task_dependency_scopes.sql
     migrations/V041__agent_sessions.sql
+    migrations/V042__agent_session_change_delivery.sql
 
 library
   exposed-modules:

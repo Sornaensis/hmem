@@ -1,5 +1,75 @@
 # Schema reference
 
+## Agent session evidence (V041)
+
+`V041__agent_sessions.sql` adds `sessions`, ordered `session_chunks`, and the
+many-to-many `task_sessions` relation. The migration owns its transaction and
+version-41 ledger entry. Existing tasks and evidence are unchanged; a failed
+migration rolls back its DDL and ledger together and can be retried. There is no
+destructive down migration for captured evidence; use the existing database
+backup and upgrade recovery procedure.
+
+A caller-supplied session UUID fixes its workspace, format label (1–128 UTF-8
+bytes), creator attribution and creation time. An exact create retry returns the
+existing row, including after termination; different immutable metadata conflicts.
+Creator actor/declaration fields come from the effective request context and
+grant no authority. Sessions are distinct from Observations and task status.
+Task links are unique, additive and restricted by composite foreign keys to the
+same workspace. Soft deletion hides linked tasks from both list directions;
+restoration exposes their retained links. Links can be added after termination.
+
+Append takes expected byte offset/revision, original bytes, and an explicit
+`allow_final_record` flag. Each chunk contains 1–1,048,576 bytes and complete
+UTF-8 JSON records; the record limit is also 1,048,576 bytes. JSON values may use
+any provider schema. Validation does not rewrite bytes, JSON, CRLF or whitespace.
+Empty records and incomplete/invalid tails are rejected atomically. Ordinary
+append requires a trailing LF. An explicit finite-snapshot flush can commit a
+complete final JSON record without LF while the session stays active. Its next
+append must start with LF or CRLF, even when the final JSON accepts trailing
+whitespace. A separator-only append is allowed at that boundary and adds no
+record. Each new chunk advances revision once; an exact replay matches its
+original offset, revision, bytes and flush flag and returns the current canonical
+session without mutation. Gaps, conflicting overlap and stale cursors fail.
+
+`HMem.DB.AgentSession.terminateSession` is the canonical seal primitive. Under
+the session row lock it verifies expected offset/revision, final byte count and
+lowercase SHA-256 of the already committed prefix. It reads one indexed chunk at
+a time into an incremental crypton hash, with memory bounded by the chunk limit;
+there is no total transcript size cap or growing transcript rewrite. Termination
+advances revision once, fixes the final receipt and freezes every session column
+and chunk. An identical termination retry succeeds; a different receipt conflicts.
+It never reads a local path, uploads bytes, inspects an uploader, or changes a
+task. Heartbeats, EOF and absent/stopped/lost upload processes cannot terminate a
+session. Heartbeats update only the active session's `last_seen_at`, independently
+of the transcript revision. Freshness is derived by consumers from that timestamp.
+
+Database triggers also reject raw chunk edits/deletes, malformed or out-of-order
+inserts, counter drift, identity edits and changes to already terminated metadata.
+Statement guards reject `TRUNCATE` of each evidence table, including cascades
+from task/workspace tables. Only the privileged test harness suspends those exact
+three guards during its authorized fixture reset, restoring them before commit
+on the same connection and rolling back on failure or cancellation.
+Canonical core termination owns digest verification; these guards do not claim
+to prevent a privileged database administrator from forging an initial seal or
+disabling triggers. Transcript bytes have no audit/outbox trigger and never enter
+workspace snapshots. The HTTP authorization and live invalidation adapters are
+separate boundaries over these primitives.
+
+Lists reject limits outside 1–100. Session lists use immutable descending
+`(created_at,id)` keyset cursors; task references use ascending task UUID cursors.
+Newer sessions do not shift a previously issued page cursor. Links added behind
+a cursor appear after a fresh list; lists are not historical snapshots. Ranges
+reject negative offsets, starts beyond the committed prefix, and windows outside
+1–1,048,576 bytes. A range holds a shared session lock while reading its bounded
+window and returns the canonical cursor, next offset and `has_more`. Local core
+inputs/results use `ByteString`; transport adapters own binary encoding.
+
+Core errors distinguish not found, conflict, terminated and invalid input through
+`SessionException`. Database JSONL/direct-write guards report a fixed
+`DBCheckViolation` without embedding raw record/parser text. No mutation retries
+automatically; callers may retry an exact request after an uncertain response and
+must inspect the returned canonical cursor before submitting another append.
+
 ## Declared attribution (V039)
 
 `V039__declared_bot_identity.sql` adds nullable `bot_identity` JSONB to

@@ -45,6 +45,7 @@ import Control.Exception qualified as Exception
 import Control.Monad (forM_, unless, void, when)
 import Data.Char (isHexDigit)
 import Data.Aeson (Value)
+import Data.ByteString.Char8 qualified as B8
 import Data.Functor.Contravariant (contramap)
 import Data.Foldable qualified as Foldable
 import Data.List (intercalate, isInfixOf)
@@ -303,8 +304,15 @@ resolveMigrationsDir repoRoot = do
 -- | Truncate all tables in dependency order, resetting the database
 -- to a clean state between tests.
 cleanDB :: TestEnv -> IO ()
-cleanDB env = withConn env.pool $ \conn -> do
-  let stmt = Statement.Statement sql E.noParams D.noResult True
+cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
+  -- TestEnv already carries the harness's explicit destructive reset authority,
+  -- including the separately opted-in unsafe external test-database mode.
+  -- Only these three statement guards are suspended, under table locks held
+  -- until commit. Production has no setting or SQL helper that bypasses them.
+  rollbackSql <- newIORef "ROLLBACK"
+  identifier <- UUID.nextRandom
+  let savepoint = "hmem_fixture_" <> T.replace "-" "" (T.pack (show identifier))
+      savepointBytes = B8.pack (T.unpack savepoint)
       sql = mconcat
         [ "TRUNCATE change_stream_snapshot_page_tokens, change_stream_snapshot_items, "
         , "change_stream_snapshot_sessions, change_stream_resume_tokens, "
@@ -313,10 +321,40 @@ cleanDB env = withConn env.pool $ \conn -> do
         , "workspace_group_members, workspace_groups, delete_cascade_migration_report, "
         , "task_dependencies, tasks, projects, observations, workspaces CASCADE"
         ]
-  result <- Session.run (Session.statement () stmt) conn
+      guardSql action = B8.pack $ unlines
+        [ "DO $$ DECLARE target TEXT; BEGIN"
+        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions'] LOOP"
+        , "IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.'||target)"
+        , "AND tgname='session_evidence_no_truncate' AND NOT tgisinternal) THEN"
+        , "EXECUTE format('ALTER TABLE public.%I " <> action <> " TRIGGER session_evidence_no_truncate',target);"
+        , "END IF; END LOOP; END $$;"
+        ]
+      run action = Session.run action conn >>= either (fail . ("Failed to clean test DB: " <>) . show) pure
+      reset = do
+        established <- Session.run (Session.sql ("SAVEPOINT " <> savepointBytes)) conn
+        finish <- case established of
+          Right () -> do
+            writeIORef rollbackSql ("ROLLBACK TO SAVEPOINT " <> savepointBytes <> "; RELEASE SAVEPOINT " <> savepointBytes)
+            pure ("RELEASE SAVEPOINT " <> savepointBytes)
+          Left err | noTransaction err -> run (Session.sql "BEGIN") >> pure "COMMIT"
+          Left err -> fail $ "Failed to establish test cleanup transaction: " <> show err
+        run $ do
+          Session.sql (guardSql "DISABLE")
+          Session.sql sql
+          Session.sql (guardSql "ENABLE")
+          Session.sql finish
+  result <- try @SomeException (restore reset)
   case result of
-    Left err -> fail $ "Failed to clean test DB: " <> show err
-    Right _  -> pure ()
+    Right () -> pure ()
+    Left original -> do
+      rollback <- readIORef rollbackSql
+      -- On uncertain rollback the exception still leaves withResource, which
+      -- discards its connection rather than returning an open transaction.
+      _ <- try @SomeException (Session.run (Session.sql rollback) conn)
+      throwIO original
+  where
+    noTransaction (Session.QueryError _ _ (Session.ResultError (Session.ServerError "25P01" _ _ _ _))) = True
+    noTransaction _ = False
 
 getAuditLogRows :: Pool Hasql.Connection -> Text -> Text -> IO [AuditLogRow]
 getAuditLogRows pool entityType entityId =

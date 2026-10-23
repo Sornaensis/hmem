@@ -58,6 +58,7 @@ data-files:
     migrations/V038__remove_task_due.sql
     migrations/V039__declared_bot_identity.sql
     migrations/V040__task_dependency_scopes.sql
+    migrations/V041__agent_sessions.sql
 
 library
   exposed-modules:

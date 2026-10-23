@@ -16,8 +16,10 @@ build-type:     Simple
 
 library
   exposed-modules:
+      HMem.AgentSession
       HMem.BotIdentity
       HMem.Config
+      HMem.DB.AgentSession
       HMem.DB.Audit
       HMem.DB.Auth
       HMem.DB.ChangeStream
@@ -88,6 +90,7 @@ test-suite hmem-core-test
   other-modules:
       HMem.BotIdentitySpec
       HMem.ConfigSpec
+      HMem.DB.AgentSessionSpec
       HMem.DB.AuditSpec
       HMem.DB.AuthSpec
       HMem.DB.BotIdentitySpec

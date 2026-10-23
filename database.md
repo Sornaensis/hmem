@@ -116,6 +116,41 @@ classDiagram
       TIMESTAMPTZ? last_used_at
       TIMESTAMPTZ created_at
     }
+  %% Agent session evidence
+    class sessions {
+      UUID id PK
+      UUID workspace_id FK
+      TEXT format_label
+      TEXT state
+      TEXT? creator_actor_type
+      TEXT? creator_actor_id
+      TEXT? creator_actor_label
+      JSONB? creator_bot_identity
+      TIMESTAMPTZ created_at
+      TIMESTAMPTZ last_seen_at
+      BIGINT committed_bytes
+      BIGINT committed_records
+      BIGINT revision
+      BOOLEAN ends_with_newline
+      TIMESTAMPTZ? terminated_at
+      BIGINT? final_bytes
+      TEXT? final_sha256
+    }
+    class session_chunks {
+      UUID session_id PK FK
+      BIGINT start_offset PK
+      BIGINT revision
+      BYTEA data
+      BOOLEAN allow_final_record
+      BIGINT record_count
+      BOOLEAN ends_with_newline
+    }
+    class task_sessions {
+      UUID workspace_id FK
+      UUID task_id PK FK
+      UUID session_id PK FK
+      TIMESTAMPTZ created_at
+    }
   %% Evidence
     class observations {
       UUID id PK
@@ -292,6 +327,10 @@ classDiagram
   users "0..1" --> "0..*" workspace_memberships : granted_by SET NULL
   users "1" --> "0..*" access_tokens : grant_user_id
   users "1" --> "0..*" auth_sessions : user_id
+  workspaces "1" --> "0..*" sessions : workspace_id NO ACTION
+  sessions "1" --> "0..*" session_chunks : session_id NO ACTION
+  sessions "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
+  tasks "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
   workspaces "1" --> "0..*" observations : workspace_id
   observations "1" --> "0..*" observation_subjects : observation_id
   observations "1" --> "0..*" observation_revision_events : observation_id
@@ -304,6 +343,10 @@ classDiagram
   note "PK = primary key; UK = unique key; FK = foreign key\n? = nullable; all other columns NOT NULL\nRepeated PK marks a composite key\nLines show declared foreign keys only\nON DELETE CASCADE unless a line says otherwise"
   note for workspaces "UNIQUE (gh_owner, gh_repo)\nWHERE both are non-null AND deleted_at IS NULL"
   note for observations "UNIQUE (id, workspace_id)\nembedding: vector(1536), nullable; present only with pgvector enabled"
+  note for sessions "UNIQUE (id, workspace_id)\nstate: active or terminated; sealed metadata immutable"
+  note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; ordered append only"
+  note for tasks "UNIQUE (id, workspace_id), used by session links"
+  note for task_sessions "Composite foreign keys enforce one workspace\nAdditive links survive task soft deletion"
   note for observation_subjects "UNIQUE (observation_id, subject_kind, subject)"
   note for change_stream_scope_counters "UNIQUE (scope, coalesce(workspace_id, zero UUID))"
   note for change_stream_outbox "UNIQUE (scope, workspace_id, cursor)\nAlso UNIQUE with workspace_id coalesced to zero UUID"

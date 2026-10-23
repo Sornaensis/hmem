@@ -130,20 +130,36 @@ Use a fresh backup filename for each retained copy. It contains authentication
 data; protect it along with the separately supplied secrets. This single-database
 backup does not include PostgreSQL roles or configuration.
 
-To replace the database contents with that backup, stop hmem and any other
-writers. The following restore drops/recreates objects covered by the backup:
+Restore into a distinctly named **new, empty replacement database**, keeping the
+current database intact. Stop hmem, the optional MCP sidecar and all other writers
+first. For the default administrator role and a new name `hmem_recovered`:
 
 ```bash
-docker compose stop hmem
+docker compose stop hmem mcp
 docker compose cp ./hmem-backup.dump postgres:/tmp/hmem-backup.dump
-docker compose exec -T postgres pg_restore -U hmem -d hmem \
-  --clean --if-exists --no-owner --exit-on-error --single-transaction /tmp/hmem-backup.dump
-docker compose up -d hmem
+docker compose exec -T postgres createdb -U hmem --owner=hmem \
+  --template=template0 hmem_recovered
+docker compose exec -T postgres pg_restore -U hmem -d hmem_recovered \
+  --no-owner --exit-on-error --single-transaction /tmp/hmem-backup.dump
 ```
 
-Restart hmem only after restore succeeds. Substitute your configured database
-and user names if they differ, and use a PostgreSQL image with any extensions
-required by the backup. See PostgreSQL's [pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html)
+Choose a fresh replacement name if it already exists. Check every command
+succeeds. Use a PostgreSQL image with the extensions required by the archive and
+the application release matched to that backup. Before restarting, set
+`POSTGRES_DB=hmem_recovered` in Compose's `.env` and update any mounted database
+configuration to the same target. `compose.yaml` derives `HMEM_DB_NAME` from
+`POSTGRES_DB`, overriding the runtime env file's value. Recreate the PostgreSQL
+service with `docker compose up -d postgres`, then start hmem and any previously
+enabled MCP service using the matched release only after restore succeeds.
+Substitute your configured role/database names as needed; keep the old database
+until recovery is verified.
+
+Do not restore an older archive in place with `--clean --if-exists`: that option
+only drops objects covered by the archive. For example, pre-V041 archives do not
+contain the session tables and their foreign keys, so restoring them into an
+upgraded database can fail while dropping tasks or workspaces. The empty
+replacement target avoids those dependencies without disabling evidence guards.
+See PostgreSQL's [pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html)
 and [pg_restore](https://www.postgresql.org/docs/17/app-pgrestore.html) references
 for other backup/restore needs.
 

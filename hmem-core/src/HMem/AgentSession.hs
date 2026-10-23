@@ -1,6 +1,6 @@
 -- | Provider-neutral metadata and byte-oriented agent session inputs.
 module HMem.AgentSession
-  ( SessionState(..), AgentSession(..), CreateSession(..)
+  ( SessionState(..), SessionFreshness(..), SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..)
   , AppendSession(..), TerminateSession(..), SessionAppendResult(..)
   , SessionPageCursor(..), SessionPage(..), SessionTask(..), SessionTaskPage(..)
   , SessionRange(..), SessionException(..), SessionErrorCode(..)
@@ -30,6 +30,16 @@ instance FromJSON SessionState where
     "active" -> pure Active
     "terminated" -> pure Terminated
     _ -> fail "Invalid agent session state"
+
+-- | Freshness is independent of lifecycle. The database applies both filters
+-- before keyset pagination, using its statement clock and the 30-second policy.
+data SessionFreshness = Fresh | Stale deriving stock (Show, Eq)
+data SessionFilter = SessionFilter
+  { state :: !(Maybe SessionState), freshness :: !(Maybe SessionFreshness)
+  } deriving stock (Show, Eq)
+
+defaultSessionFilter :: SessionFilter
+defaultSessionFilter = SessionFilter Nothing Nothing
 
 data AgentSession = AgentSession
   { id :: !UUID

@@ -136,10 +136,12 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> "sessions" :> AgentSessionAPI
   :<|> Capture "workspaceId" UUID :> "tasks" :> Capture "taskId" UUID :> "sessions"
          :> QueryParam "limit" Text :> QueryParam "before_created_at" Text :> QueryParam "before_id" Text
+         :> QueryParam "state" Text :> QueryParam "freshness" Text
          :> Get '[JSON] SessionWire.SessionPageResponse
 
 type AgentSessionAPI =
        QueryParam "limit" Text :> QueryParam "before_created_at" Text :> QueryParam "before_id" Text
+         :> QueryParam "state" Text :> QueryParam "freshness" Text
          :> Get '[JSON] SessionWire.SessionPageResponse
   :<|> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.CreateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> Get '[JSON] AgentSession.AgentSession
@@ -525,6 +527,20 @@ sessionCursor Nothing Nothing = pure Nothing
 sessionCursor (Just timestamp) (Just identifier) = Just <$> (AgentSession.SessionPageCursor <$> parseSessionParam timestamp <*> parseSessionParam identifier)
 sessionCursor _ _ = throwError $ sessionError err400 "validation_error" "Both before_created_at and before_id are required for continuation"
 
+sessionFilters :: Maybe Text -> Maybe Text -> Handler AgentSession.SessionFilter
+sessionFilters rawState rawFreshness = do
+  state <- case rawState of
+    Nothing -> pure Nothing
+    Just "active" -> pure (Just AgentSession.Active)
+    Just "terminated" -> pure (Just AgentSession.Terminated)
+    _ -> throwError $ sessionError err400 "validation_error" "Session state must be active or terminated"
+  freshness <- case rawFreshness of
+    Nothing -> pure Nothing
+    Just "fresh" -> pure (Just AgentSession.Fresh)
+    Just "stale" -> pure (Just AgentSession.Stale)
+    _ -> throwError $ sessionError err400 "validation_error" "Session freshness must be fresh or stale"
+  pure AgentSession.SessionFilter{..}
+
 sessionLimit :: Maybe Text -> Handler Int
 sessionLimit input = do
   limit <- maybe (pure 50) parseSessionParam input
@@ -543,11 +559,12 @@ agentSessions pool workspace = listH :<|> createH :<|> getH :<|> appendH :<|> he
   where
     readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
     writeAccess = authorizeAgentSessionWrite pool workspace
-    listH rawLimit timestamp identifier = do
+    listH rawLimit timestamp identifier rawState rawFreshness = do
       readAccess
       limit <- sessionLimit rawLimit
       cursor <- sessionCursor timestamp identifier
-      pageResult <- sessionIO pool workspace $ AgentSessions.listWorkspaceSessions pool workspace cursor limit
+      filters <- sessionFilters rawState rawFreshness
+      pageResult <- sessionIO pool workspace $ AgentSessions.listWorkspaceSessionsFiltered pool workspace filters cursor limit
       pure $ SessionWire.SessionPageResponse pageResult.items pageResult.nextCursor
     createH request = do
       writeAccess
@@ -596,13 +613,14 @@ agentSessions pool workspace = listH :<|> createH :<|> getH :<|> appendH :<|> he
         throwError $ sessionError err409 "session_state_conflict" "Use transcript for active sessions and evidence for terminated sessions"
       pure $ SessionWire.SessionRangeResponse result.session result.offset (SessionWire.encodeSessionBytes result.bytes) result.nextOffset result.hasMore
 
-taskAgentSessions :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Text -> Maybe Text -> Maybe Text -> Handler SessionWire.SessionPageResponse
-taskAgentSessions pool workspace task rawLimit timestamp identifier = do
+taskAgentSessions :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Handler SessionWire.SessionPageResponse
+taskAgentSessions pool workspace task rawLimit timestamp identifier rawState rawFreshness = do
   requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
   requireSessionTask pool workspace task
   limit <- sessionLimit rawLimit
   cursor <- sessionCursor timestamp identifier
-  result <- sessionIO pool workspace $ AgentSessions.listTaskSessions pool workspace task cursor limit
+  filters <- sessionFilters rawState rawFreshness
+  result <- sessionIO pool workspace $ AgentSessions.listTaskSessionsFiltered pool workspace task filters cursor limit
   pure $ SessionWire.SessionPageResponse result.items result.nextCursor
 
 ------------------------------------------------------------------------

@@ -43,6 +43,7 @@ import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
+import Feature.Sessions
 import Permissions
 import Helpers exposing (..)
 import Html exposing (..)
@@ -2398,6 +2399,7 @@ viewTaskCardBody descendants projection showProject model task =
 
               else
                 text ""
+            , if model.focus.focusedEntity == Just ("task",task.id) then Feature.Sessions.viewTaskPanel task.workspaceId model task.id else text ""
             ]
         , div [ class "card-inline-actions" ]
             [ if Permissions.canEditCurrentWorkspace model then

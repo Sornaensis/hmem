@@ -256,3 +256,33 @@ current authorized demand, this module sends no HTTP requests. Session reset
 clears demand/cache while retaining outstanding physical slots and monotonic IDs
 until their callbacks arrive. These are delivery primitives; session widgets and
 route/filter presentation are separate consumers.
+
+## Sessions workspace UI
+
+`Feature.Sessions` owns the Sessions tab and the focused task's session panel.
+Direct session links use `#tab=sessions&session=<UUID>`. Lifecycle and heartbeat
+filters are canonical server predicates applied before keyset pagination; each
+filter/cursor combination has a separate demand identity. Lists contain 50 rows
+and retain at most sixteen navigation cursors. Hidden pages and closed focus
+remove their demand without releasing outstanding physical request slots.
+
+The viewer consumes finite windows of at most 2 MiB, one 64 KiB response at a
+time. JavaScript frames bytes before UTF-8 decoding and retains at most one
+incomplete 1 MiB JSONL record, independently of the four raw-range cache slots.
+It renders at most 100 records and 2 MiB of original record bytes. An initial
+mid-record fragment is omitted with a notice. Older windows end at the first
+retained record boundary so a long record cannot be stranded between windows.
+Unknown JSON objects, arrays and scalars retain an expandable original JSON
+view. CRLF and byte offsets remain exact. Pausing preserves rows and scroll
+position across same-authority canonical resynchronization; real scope changes
+retire the viewer. Generation-stamped bridge acknowledgements reject old work.
+
+Evidence saving uses a separate one-chunk `SessionSave` target within the same
+sixteen-target/two-request admission limits. The immediate click opens the File
+System Access picker. Production `session-save.js` streams each validated chunk
+to the writable and updates pinned `@noble/hashes` 1.8.0 SHA-256 state. Only a
+completed write acknowledgement re-arms the next HTTP chunk. Immutable receipt,
+byte count and digest must match before close; cancellation, scope retirement or
+verification failure aborts the writable. The one-writer reservation spans
+picker acquisition, pending writes and joined abort cleanup. Unsupported browser
+capability is explicit; no whole-session Blob or digest buffer is constructed.

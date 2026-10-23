@@ -39,7 +39,7 @@ file path or reads the caller's filesystem.
 | Method and path suffix | Request or query | Response |
 | --- | --- | --- |
 | POST `/sessions` | `id` (caller UUID), `format_label` (1–128 UTF-8 bytes) | Empty active session, or identical create retry |
-| GET `/sessions` | `limit`, paired `before_created_at`/`before_id` | `items`, optional `next_cursor` |
+| GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness` | `items`, optional `next_cursor` |
 | GET `/sessions/{sessionId}` | — | Canonical metadata, counters, state and final receipt when sealed |
 | POST `/sessions/{sessionId}/append` | `expected_offset`, `expected_revision`, `data_base64`, optional `allow_final_record` (false) | `session`, `replayed` |
 | POST `/sessions/{sessionId}/heartbeat` | No body | Active session with refreshed `last_seen_at`; revision unchanged |
@@ -68,6 +68,12 @@ Lists default to 50 rows and reject limits outside 1–100. Session continuation
 use the returned cursor's `created_at` and `id` as `before_created_at` and
 `before_id`, retaining filters. The descending immutable keyset does not shift
 when a newer session is created. Task references use ascending UUID continuations.
+Both workspace and task session lists accept `state=active|terminated` and
+`freshness=fresh|stale`. Omission includes both values. These predicates apply
+before keyset pagination. Fresh means `last_seen_at` is newer than the server's
+statement time minus 30 seconds; it is independent of termination. Unknown
+values return 400 after workspace authorization. Keep the same predicates on
+every continuation, or restart from the first page when changing them.
 Links added behind a cursor require a fresh list; these lists are not snapshots.
 Range windows default to 65,536 bytes and reject limits outside 1–1,048,576.
 Offsets must be nonnegative and no larger than the committed prefix.

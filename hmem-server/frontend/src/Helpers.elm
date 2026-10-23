@@ -126,6 +126,9 @@ parseFragment fragment =
                         "timeline" ->
                             TimelineTab
 
+                        "sessions" ->
+                            SessionsTab
+
                         "audit" ->
                             AuditTab
 
@@ -187,6 +190,9 @@ buildFragment tab focus observationId =
 
                 TimelineTab ->
                     "tab=timeline"
+
+                SessionsTab ->
+                    "tab=sessions"
 
                 AuditTab ->
                     "tab=audit"

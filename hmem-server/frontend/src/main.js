@@ -6,6 +6,7 @@ import { installObservationNavigation } from './observation-navigation.js'
 import { installObservationViewport } from './observation-viewport.js'
 import { installObservationPreferences } from './observation-preferences.js'
 import { installTimestampDisplay } from './timestamp-display.js'
+import { installSessionBridge } from './session-save.js'
 import { Elm } from './Main.elm'
 import { installNativeDialog } from './native-dialog.js'
 
@@ -714,3 +715,4 @@ installSearchNavigation(app)
 installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)
+installSessionBridge(app)

@@ -3,6 +3,8 @@ module Api exposing
     , AgentSession
     , AgentSessionState(..)
     , SessionCursor
+    , SessionFilters
+    , defaultSessionFilters
     , SessionPage
     , SessionTaskPage
     , SessionRange
@@ -11,6 +13,7 @@ module Api exposing
     , sessionRangeDecoder
     , fetchAgentSession
     , fetchAgentSessions
+    , fetchFilteredAgentSessions
     , fetchSessionTasks
     , fetchSessionRange
     , AuditAction(..)
@@ -4398,6 +4401,14 @@ type alias SessionCursor =
     { createdAt : String, id : String }
 
 
+type alias SessionFilters =
+    { state : String, freshness : String }
+
+
+defaultSessionFilters : SessionFilters
+defaultSessionFilters = { state = "", freshness = "" }
+
+
 type alias SessionPage =
     { items : List AgentSession, nextCursor : Maybe SessionCursor }
 
@@ -4421,25 +4432,30 @@ agentSessionDecoder =
             "terminated" -> D.succeed SessionTerminated
             _ -> D.fail "Invalid agent session state"))
         |> custom (D.map4 ActorAttribution.Actor
-            (D.field "creator_actor_type" (D.nullable D.string))
-            (D.field "creator_actor_id" (D.nullable D.string))
-            (D.field "creator_actor_label" (D.nullable D.string))
-            (D.field "creator_bot_identity" (D.nullable ActorAttribution.botIdentityDecoder)))
+            (nullableSessionField "creator_actor_type" D.string)
+            (nullableSessionField "creator_actor_id" D.string)
+            (nullableSessionField "creator_actor_label" D.string)
+            (nullableSessionField "creator_bot_identity" ActorAttribution.botIdentityDecoder))
         |> required "created_at" D.string
         |> required "last_seen_at" D.string
         |> required "committed_bytes" D.int
         |> required "committed_records" D.int
         |> required "revision" D.int
         |> required "ends_with_newline" D.bool
-        |> required "terminated_at" (D.nullable D.string)
-        |> required "final_bytes" (D.nullable D.int)
-        |> required "final_sha256" (D.nullable D.string)
+        |> optional "terminated_at" (D.nullable D.string) Nothing
+        |> optional "final_bytes" (D.nullable D.int) Nothing
+        |> optional "final_sha256" (D.nullable D.string) Nothing
+
+
+nullableSessionField : String -> Decoder a -> Decoder (Maybe a)
+nullableSessionField name decoder =
+    D.succeed identity |> optional name (D.nullable decoder) Nothing
 
 
 sessionPageDecoder : Decoder SessionPage
 sessionPageDecoder =
     D.map2 SessionPage (D.field "items" (D.list agentSessionDecoder))
-        (D.field "next_cursor" (D.nullable (D.map2 SessionCursor (D.field "created_at" D.string) (D.field "id" D.string))))
+        (nullableSessionField "next_cursor" (D.map2 SessionCursor (D.field "created_at" D.string) (D.field "id" D.string)))
 
 
 sessionRangeDecoder : Decoder SessionRange
@@ -4466,6 +4482,11 @@ fetchAgentSession apiUrl workspace id =
 
 fetchAgentSessions : String -> String -> Maybe String -> Maybe SessionCursor -> Int -> (Result Http.Error SessionPage -> msg) -> Cmd msg
 fetchAgentSessions apiUrl workspace task cursor limit toMsg =
+    fetchFilteredAgentSessions apiUrl workspace task defaultSessionFilters cursor limit toMsg
+
+
+fetchFilteredAgentSessions : String -> String -> Maybe String -> SessionFilters -> Maybe SessionCursor -> Int -> (Result Http.Error SessionPage -> msg) -> Cmd msg
+fetchFilteredAgentSessions apiUrl workspace task filters cursor limit toMsg =
     if limit < 1 || limit > 100 then
         Task.succeed (Err (Http.BadBody "Session page limit must be 1..100")) |> Task.perform toMsg
     else
@@ -4474,8 +4495,10 @@ fetchAgentSessions apiUrl workspace task cursor limit toMsg =
                 Just id -> apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode workspace ++ "/tasks/" ++ Url.percentEncode id ++ "/sessions"
                 Nothing -> sessionResourceUrl apiUrl workspace
             after = cursor |> Maybe.map (\key -> "&before_created_at=" ++ Url.percentEncode key.createdAt ++ "&before_id=" ++ Url.percentEncode key.id) |> Maybe.withDefault ""
+            predicates = (if filters.state == "" then "" else "&state=" ++ Url.percentEncode filters.state)
+                ++ (if filters.freshness == "" then "" else "&freshness=" ++ Url.percentEncode filters.freshness)
         in
-        sessionGet (path ++ "?limit=" ++ String.fromInt limit ++ after) sessionPageDecoder toMsg
+        sessionGet (path ++ "?limit=" ++ String.fromInt limit ++ predicates ++ after) sessionPageDecoder toMsg
 
 
 fetchSessionTasks : String -> String -> String -> Maybe String -> Int -> (Result Http.Error SessionTaskPage -> msg) -> Cmd msg
@@ -4488,7 +4511,7 @@ fetchSessionTasks apiUrl workspace id after limit toMsg =
             (D.map2 SessionTaskPage
                 (D.field "items" (D.list (D.map3 (\taskId title status -> { id = taskId, title = title, status = status })
                     (D.field "id" D.string) (D.field "title" D.string) (D.field "status" D.string))))
-                (D.field "next_task_id" (D.nullable D.string))) toMsg
+                (nullableSessionField "next_task_id" D.string)) toMsg
 
 
 fetchSessionRange : String -> String -> String -> Bool -> Int -> Int -> (Result Http.Error SessionRange -> msg) -> Cmd msg

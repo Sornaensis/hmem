@@ -7,6 +7,7 @@ module Feature.WebSocket exposing
     , init
     , subscriptions
     , update
+    , pumpSessionResources
     )
 
 import ActorAttribution

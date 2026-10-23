@@ -18,6 +18,7 @@ import Feature.Groups
 import Feature.Mutations
 import Feature.Observation
 import Feature.Search
+import Feature.Sessions
 import Feature.Timeline
 import Feature.TimestampDisplay
 import Feature.WebSocket
@@ -87,6 +88,19 @@ reconcileFocusedFilters previous ( updated, command ) =
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
+        SessionsNextPage _ -> Ok (Feature.Sessions.update msg model)
+        SessionsPreviousPage -> Ok (Feature.Sessions.update msg model)
+        SessionsLinkedPage _ -> Ok (Feature.Sessions.update msg model)
+        SessionsRetry -> Ok (Feature.Sessions.update msg model)
+        SessionsStateFilter _ -> Ok (Feature.Sessions.update msg model)
+        SessionsFreshnessFilter _ -> Ok (Feature.Sessions.update msg model)
+        SessionsFollow _ -> Ok (Feature.Sessions.update msg model)
+        SessionsOlder -> Ok (Feature.Sessions.update msg model)
+        SessionsBridgeEvent _ -> Ok (Feature.Sessions.update msg model)
+        SessionsTick _ -> Ok (Feature.Sessions.update msg model)
+        SessionsCancelSave -> Ok (Feature.Sessions.update msg model)
+        SessionsTaskNextPage _ -> Ok (Feature.Sessions.update msg model)
+        SessionsTaskPreviousPage -> Ok (Feature.Sessions.update msg model)
         OpenAuditDiff _ _ -> Ok (Feature.AuditDiff.update msg model)
         OpenAuditDiffFrom _ _ _ -> Ok (Feature.AuditDiff.update msg model)
         CloseAuditDiff -> Ok (Feature.AuditDiff.update msg model)

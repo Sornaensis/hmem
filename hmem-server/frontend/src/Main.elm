@@ -11,12 +11,14 @@ import Feature.Move
 import Feature.DataLoading
 import Feature.Observation
 import Feature.TimestampDisplay
+import Feature.Sessions
 import Helpers exposing (parseFragment)
 import Json.Decode as Decode
 import Route exposing (handleUrlChange, handleUrlRequest, urlToPage)
 import Types exposing (..)
 import UpdateRouter
 import Url
+import Time
 
 
 
@@ -122,7 +124,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.TimestampDisplay.reconcile
+    updateCore msg model |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.TimestampDisplay.reconcile
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )
@@ -149,8 +151,8 @@ updateCore msg model =
 
 
 subscriptions : Model -> Sub Msg
-subscriptions _ =
-    AppShell.subscriptions
+subscriptions model =
+    Sub.batch [ AppShell.subscriptions, if model.auth.status == AuthReady && not (List.isEmpty model.sessions.owned) then Time.every 1000 SessionsTick else Sub.none ]
 
 
 

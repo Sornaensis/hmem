@@ -293,6 +293,31 @@ spec = do
       expectCode SessionNotFound $ readSessionRange env.pool other.id row.id 0 1
       listWorkspaceSessions env.pool other.id Nothing 1 `shouldReturn` SessionPage [] Nothing
 
+    it "filters lifecycle and heartbeat freshness before keyset pagination independently" $ \env -> do
+      (workspace,current) <- fresh env
+      old <- UUID.nextRandom
+      older <- UUID.nextRandom
+      execute env ("INSERT INTO sessions(id,workspace_id,format_label,created_at,last_seen_at) VALUES ('" <> uuid old <> "','" <> uuid workspace <> "','jsonl',clock_timestamp()-interval '60 seconds',clock_timestamp()-interval '60 seconds'),('" <> uuid older <> "','" <> uuid workspace <> "','jsonl',clock_timestamp()-interval '90 seconds',clock_timestamp()-interval '90 seconds')")
+      oldRow <- getSession env.pool workspace old >>= maybe (fail "Missing seeded session") pure
+      sealed <- terminateSession env.pool workspace old (receipt oldRow "")
+      let stale = SessionFilter Nothing (Just Stale)
+          freshOnly = SessionFilter Nothing (Just Fresh)
+      first <- listWorkspaceSessionsFiltered env.pool workspace stale Nothing 1
+      map (.id) first.items `shouldBe` [old]
+      second <- listWorkspaceSessionsFiltered env.pool workspace stale first.nextCursor 1
+      map (.id) second.items `shouldBe` [older]
+      second.nextCursor `shouldBe` Nothing
+      recent <- listWorkspaceSessionsFiltered env.pool workspace freshOnly Nothing 50
+      map (.id) recent.items `shouldBe` [current.id]
+      closed <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Terminated) (Just Stale)) Nothing 50
+      closed.items `shouldBe` [sealed]
+      active <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Active) (Just Stale)) Nothing 50
+      map (.id) active.items `shouldBe` [older]
+      task <- makeTask env workspace "filtered evidence"
+      forM_ [current.id,old,older] $ \id -> associateSessionTask env.pool workspace id task.id
+      linked <- listTaskSessionsFiltered env.pool workspace task.id (SessionFilter (Just Terminated) Nothing) Nothing 1
+      linked.items `shouldBe` [sealed]
+
     it "serializes concurrent appends and append/termination races without losing a committed prefix" $ \env -> do
       (workspace,row) <- fresh env
       (one,two) <- concurrently

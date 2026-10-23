@@ -1,6 +1,7 @@
 -- | Canonical transactional persistence for immutable JSONL evidence.
 module HMem.DB.AgentSession
   ( createSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
+  , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
   , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange
   ) where
 
@@ -95,16 +96,24 @@ validateLimit limit
   | otherwise = pure ()
 
 listWorkspaceSessions :: Pool Hasql.Connection -> UUID -> Maybe SessionPageCursor -> Int -> IO SessionPage
-listWorkspaceSessions pool workspace cursor limit = listSessions pool workspace Nothing cursor limit
+listWorkspaceSessions pool workspace = listWorkspaceSessionsFiltered pool workspace defaultSessionFilter
+
+listWorkspaceSessionsFiltered :: Pool Hasql.Connection -> UUID -> SessionFilter -> Maybe SessionPageCursor -> Int -> IO SessionPage
+listWorkspaceSessionsFiltered pool workspace filters = listSessions pool workspace Nothing filters
 
 listTaskSessions :: Pool Hasql.Connection -> UUID -> UUID -> Maybe SessionPageCursor -> Int -> IO SessionPage
-listTaskSessions pool workspace task cursor limit = listSessions pool workspace (Just task) cursor limit
+listTaskSessions pool workspace task = listTaskSessionsFiltered pool workspace task defaultSessionFilter
 
-listSessions :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe SessionPageCursor -> Int -> IO SessionPage
-listSessions pool workspace task cursor limit = do
+listTaskSessionsFiltered :: Pool Hasql.Connection -> UUID -> UUID -> SessionFilter -> Maybe SessionPageCursor -> Int -> IO SessionPage
+listTaskSessionsFiltered pool workspace task filters = listSessions pool workspace (Just task) filters
+
+listSessions :: Pool Hasql.Connection -> UUID -> Maybe UUID -> SessionFilter -> Maybe SessionPageCursor -> Int -> IO SessionPage
+listSessions pool workspace task filters cursor limit = do
   validateLimit limit
   rows <- runSession pool $ S.statement
-    (workspace, fmap (.createdAt) cursor, fmap (.id) cursor, task, fromIntegral (limit+1)) listStatement
+    (workspace, fmap (.createdAt) cursor, fmap (.id) cursor, task, fromIntegral (limit+1),
+      fmap (\case Active -> "active"; Terminated -> "terminated") filters.state,
+      fmap (\case Fresh -> True; Stale -> False) filters.freshness) listStatement
   let items = take limit rows
       nextCursor = if length rows > limit then case reverse items of
         row:_ -> Just (SessionPageCursor row.createdAt row.id)
@@ -112,15 +121,17 @@ listSessions pool workspace task cursor limit = do
         else Nothing
   pure SessionPage{..}
 
-listStatement :: St.Statement (UUID,Maybe UTCTime,Maybe UUID,Maybe UUID,Int32) [AgentSession]
+listStatement :: St.Statement (UUID,Maybe UTCTime,Maybe UUID,Maybe UUID,Int32,Maybe Text,Maybe Bool) [AgentSession]
 listStatement = St.Statement sql encoder (D.rowList jsonRow) True
   where
-    sql = "SELECT to_jsonb(s) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
-    encoder = param (\(a,_,_,_,_) -> a) E.uuid
-      <> optional (\(_,b,_,_,_) -> b) E.timestamptz
-      <> optional (\(_,_,c,_,_) -> c) E.uuid
-      <> optional (\(_,_,_,d,_) -> d) E.uuid
-      <> param (\(_,_,_,_,e) -> e) E.int4
+    sql = "SELECT to_jsonb(s) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) AND ($6::text IS NULL OR s.state=$6) AND ($7::boolean IS NULL OR (s.last_seen_at > statement_timestamp()-interval '30 seconds')=$7) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
+    encoder = param (\(a,_,_,_,_,_,_) -> a) E.uuid
+      <> optional (\(_,b,_,_,_,_,_) -> b) E.timestamptz
+      <> optional (\(_,_,c,_,_,_,_) -> c) E.uuid
+      <> optional (\(_,_,_,d,_,_,_) -> d) E.uuid
+      <> param (\(_,_,_,_,e,_,_) -> e) E.int4
+      <> optional (\(_,_,_,_,_,f,_) -> f) E.text
+      <> optional (\(_,_,_,_,_,_,g) -> g) E.bool
 
 listSessionTasks :: Pool Hasql.Connection -> UUID -> UUID -> Maybe UUID -> Int -> IO SessionTaskPage
 listSessionTasks pool workspace identifier cursor limit = do

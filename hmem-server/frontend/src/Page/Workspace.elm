@@ -12,6 +12,7 @@ import Feature.Editing
 import Feature.Focus
 import Feature.Observation
 import Feature.Search
+import Feature.Sessions
 import Feature.Timeline
 import Feature.WorkspaceAdmin
 import Helpers
@@ -106,7 +107,7 @@ viewReadableWorkspacePage wsId model ws =
                     ]
                 ]
             ]
-        , if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab then
+        , if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab || model.activeTab == SessionsTab then
             text ""
           else
             Feature.Search.viewSearchBar model
@@ -123,7 +124,7 @@ viewReadableWorkspacePage wsId model ws =
                   else if model.dataLoading.loadingWorkspaceData then
                     div [ class "loading-indicator" ] [ text "Loading..." ]
 
-                  else if model.activeTab == AuditTab || model.activeTab == TimelineTab then
+                  else if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == SessionsTab then
                     viewTabContent wsId model
 
                   else if model.search.isSearching then
@@ -236,6 +237,7 @@ viewTabs model =
             [ Just (viewTab ProjectsTab model.activeTab (workspaceTabLabel ProjectsTab))
             , Just (viewTab ObservationsTab model.activeTab (workspaceTabLabel ObservationsTab))
             , Just (viewTab TimelineTab model.activeTab (workspaceTabLabel TimelineTab))
+            , Just (viewTab SessionsTab model.activeTab (workspaceTabLabel SessionsTab))
             , if Permissions.canViewCurrentWorkspaceAudit model then
                 Just (viewTab AuditTab model.activeTab (workspaceTabLabel AuditTab))
 
@@ -261,6 +263,9 @@ workspaceTabLabel tab =
 
         TimelineTab ->
             "Timeline"
+
+        SessionsTab ->
+            "Sessions"
 
         AuditTab ->
             "Audit"
@@ -302,6 +307,9 @@ viewTabContent wsId model =
 
         TimelineTab ->
             Feature.Timeline.viewWorkspaceTimelinePanel wsId model
+
+        SessionsTab ->
+            Feature.Sessions.view wsId model
 
         AuditTab ->
             Feature.AuditLog.viewWorkspaceAuditPanel wsId model

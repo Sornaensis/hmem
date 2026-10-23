@@ -84,6 +84,7 @@ initModel key url page flags storedFilters legacyFrag =
             , sessionContext = Nothing
             , sessionRequestEpoch = 0
             , sessionDelivery = Feature.SessionDelivery.init
+            , sessions = emptySessionsModel
             , timestamps = TimestampDisplay.empty
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
@@ -1003,6 +1004,7 @@ subscriptions =
         , Ports.observationPreferencesReceived ObservationPreferencesReceived
         , Ports.clipboardResult ClipboardResult
         , Ports.timestampsFormatted TimestampsFormatted
+        , Ports.sessionBridgeEvent SessionsBridgeEvent
         , onMainContentScroll MainContentScrolled
         ]
 

@@ -4674,3 +4674,26 @@ textarea.observation-edit-content {
 .observation-search .observation-paired-content { flex: 1 1 100%; position: relative; }
 .observation-search .observation-query-clear { position: absolute; right: 0.5rem; bottom: 0.45rem; }
 .observation-search .observation-filter-input[type="search"] { padding-right: 2.5rem; }
+.sessions-toolbar { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:1rem; }
+.sessions-toolbar h2 { margin:0; margin-right:auto; }
+.sessions-layout { display:grid; grid-template-columns:minmax(260px, 340px) minmax(0,1fr); gap:1.5rem; }
+.session-summaries { list-style:none; padding:0; margin:0; }
+.session-summary { padding:1rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.75rem; }
+.session-summary.selected { border-color:var(--accent); background:var(--bg-surface); }
+.session-summary a { display:flex; flex-direction:column; gap:.5rem; overflow-wrap:anywhere; }
+.session-summary code { font-size:.75rem; }
+.session-detail { min-width:0; border:1px solid var(--border); border-radius:8px; padding:1.25rem; }
+.session-detail code { overflow-wrap:anywhere; }
+.sessions-filters { display:flex; gap:1rem; margin-bottom:1rem; flex-wrap:wrap; }
+.sessions-filters label { display:flex; align-items:center; gap:.5rem; color:var(--text-muted); }
+.sessions-filters select { padding:.5rem; background:var(--bg-surface); color:var(--text); border:1px solid var(--border); border-radius:5px; }
+.session-viewer { margin:1.25rem 0; padding-top:1rem; border-top:1px solid var(--border); }
+.session-records { max-height:520px; overflow:auto; overflow-anchor:auto; margin:.75rem 0; }
+.session-record { padding:.75rem; margin-bottom:.5rem; background:var(--bg-surface); border-radius:5px; }
+.session-record-meta { font-size:.75rem; color:var(--text-muted); margin-bottom:.5rem; }
+.session-record-text,.session-record-raw { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.85rem; line-height:1.5; }
+.session-record details { margin-top:.75rem; color:var(--text-muted); }
+.session-record-raw { max-height:350px; overflow:auto; margin-top:.5rem; }
+.session-notice { color:var(--warning); font-size:.85rem; margin:.5rem 0; }
+.sessions-pagination { display:flex; gap:.5rem; justify-content:space-between; }
+@media(max-width:800px) { .sessions-layout { grid-template-columns:1fr; } }

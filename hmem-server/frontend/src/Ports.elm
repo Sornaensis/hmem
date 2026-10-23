@@ -129,3 +129,9 @@ port observationSearchRuntimeReady : (Encode.Value -> msg) -> Sub msg
 
 
 port resetObservationSearchViewport : Encode.Value -> Cmd msg
+
+
+port sessionBridgeCommand : Encode.Value -> Cmd msg
+
+
+port sessionBridgeEvent : (Encode.Value -> msg) -> Sub msg

@@ -80,6 +80,8 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
           in case parameter ^. name of
             "limit" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ bound))
             "offset" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiInteger & format ?~ "int64" & minimum_ ?~ 0))
+            "state" -> Inline (parameter & description ?~ "Lifecycle filter applied before keyset pagination: active or terminated. Omit for both.")
+            "freshness" -> Inline (parameter & description ?~ "Heartbeat filter applied before keyset pagination: fresh or stale (30 seconds), independently of lifecycle. Omit for both.")
             "before_created_at" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "date-time"))
             name | name `elem` ["before_id","after_task_id"] -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid"))
             _ -> parameterRef

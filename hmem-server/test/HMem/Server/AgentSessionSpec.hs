@@ -33,6 +33,27 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+  it "applies lifecycle/freshness predicates before paging and authorizes before invalid filters" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      let env=ctx.deployedEnv; app=ctx.deployedApplication
+      workspace <- createTestWorkspace env "http-session-filters"
+      row <- seed env workspace.id
+      newer <- seed env workspace.id
+      sealed <- DB.terminateSession env.pool workspace.id row.id (Core.TerminateSession 0 0 0 (Core.sessionSha256 ""))
+      reader <- audience ctx workspace.id (Just Auth.WorkspaceRoleRead) False
+      outsider <- audience ctx workspace.id Nothing False
+      let root=sessions workspace.id
+      closed <- call app methodGet (root<>"?limit=1&state=terminated&freshness=fresh") reader "" >>= decoded @SessionPageResponse
+      closed.items `shouldBe` [sealed]
+      closed.nextCursor `shouldBe` Nothing
+      active <- call app methodGet (root<>"?limit=1&state=active") reader "" >>= decoded @SessionPageResponse
+      active.items `shouldBe` [newer]
+      stale <- call app methodGet (root<>"?freshness=stale") reader "" >>= decoded @SessionPageResponse
+      stale.items `shouldBe` []
+      forM_ ["?state=invalid","?freshness=invalid"] $ \query -> do
+        call app methodGet (root<>query) reader "" >>= status status400
+        call app methodGet (root<>query) outsider "" >>= status status403
+        call app methodGet (root<>query) [] "" >>= status status401
   it "captures live JSONL, replays lost acknowledgments, links tasks and reconstructs sealed bytes/hash" $
     withLocalSandboxAppContext $ \ctx -> do
       let env = ctx.localEnv; app = ctx.localApplication

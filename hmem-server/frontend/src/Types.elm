@@ -50,6 +50,7 @@ type alias Model =
     , sessionContext : Maybe Api.SessionContext
     , sessionRequestEpoch : Int
     , sessionDelivery : Feature.SessionDelivery.State
+    , sessions : SessionsModel
     , timestamps : TimestampDisplay.State
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
@@ -1255,8 +1256,59 @@ type WorkspaceTab
     = ProjectsTab
     | ObservationsTab
     | TimelineTab
+    | SessionsTab
     | AuditTab
     | AdministrationTab
+
+
+type alias SessionsModel =
+    { workspace : Maybe String
+    , epoch : Int
+    , selected : Maybe String
+    , cursor : Maybe Api.SessionCursor
+    , previous : List (Maybe Api.SessionCursor)
+    , linksCursor : Maybe String
+    , owned : List ( String, Feature.SessionDelivery.Target )
+    , filters : Api.SessionFilters
+    , stamp : String
+    , generation : Int
+    , bridgedGeneration : Int
+    , start : Maybe Int
+    , offset : Int
+    , end : Int
+    , following : Bool
+    , loadWindow : Bool
+    , pending : Bool
+    , rows : List SessionRecord
+    , notice : String
+    , error : Maybe String
+    , now : Float
+    , saveCapability : Maybe Bool
+    , save : Maybe SessionSaveOperation
+    , nextOperation : Int
+    , saveMessage : String
+    , heartbeats : Dict String String
+    , lastFilterRefresh : Float
+    , taskPanel : Maybe String
+    , taskCursor : Maybe Api.SessionCursor
+    , taskPrevious : List (Maybe Api.SessionCursor)
+    }
+
+
+type alias SessionRecord =
+    { offset : Int, end : Int, raw : String, delimiter : String, recordType : String, role : String, time : String, content : String }
+
+
+emptySessionsModel : SessionsModel
+emptySessionsModel =
+    { workspace = Nothing, epoch = 0, selected = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, owned = []
+    , filters = Api.defaultSessionFilters, stamp = "", generation = 0, bridgedGeneration = -1, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
+    , saveCapability = Nothing, save = Nothing, nextOperation = 1, saveMessage = ""
+    , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
+
+
+type alias SessionSaveOperation =
+    { operation : Int, session : String, size : Int, hash : String, revision : Int, offset : Int, phase : String, pending : Bool }
 
 
 
@@ -1347,6 +1399,19 @@ type Msg
     | WsConnectionFailed String
     | WsMessageReceived String
     | DemandSessionResource String Feature.SessionDelivery.Target
+    | SessionsNextPage Api.SessionCursor
+    | SessionsPreviousPage
+    | SessionsLinkedPage (Maybe String)
+    | SessionsRetry
+    | SessionsStateFilter String
+    | SessionsFreshnessFilter String
+    | SessionsFollow Bool
+    | SessionsOlder
+    | SessionsBridgeEvent Encode.Value
+    | SessionsTick Time.Posix
+    | SessionsCancelSave
+    | SessionsTaskNextPage Api.SessionCursor
+    | SessionsTaskPreviousPage
     | RemoveSessionResource String Feature.SessionDelivery.Target
     | SessionResourceFetched Int CanonicalRequestGuard (Result Http.Error Feature.SessionDelivery.Payload)
     | CanonicalWorkspaceFetched CanonicalRequestGuard String (Result Http.Error Api.Workspace)

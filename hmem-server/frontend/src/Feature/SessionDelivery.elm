@@ -1,7 +1,7 @@
 module Feature.SessionDelivery exposing
     ( State, Target(..), Payload(..), Request, Resource, init, key, demand, removeDemand
     , invalidateSession, invalidateTask, invalidateLists, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
-    , admit, settle, fetch, staleAt
+    , admit, settle, fetch, staleAt, consume
     )
 
 {-| Bounded demand for canonical session HTTP resources. Logical retirement
@@ -16,10 +16,13 @@ import Set exposing (Set)
 
 type Target
     = WorkspaceSessions (Maybe Api.SessionCursor)
+    | WorkspaceSessionsFiltered Api.SessionFilters (Maybe Api.SessionCursor)
     | TaskSessions String (Maybe Api.SessionCursor)
     | SessionMetadata String
     | SessionTasks String (Maybe String)
     | SessionBytes String Int Bool
+    | SessionWindow String Int Int Bool
+    | SessionSave String Int Int
 
 
 type Payload
@@ -40,12 +43,12 @@ type alias Request =
 
 type alias State =
     { resources : Dict String Resource, physical : Dict Int Request, order : List String, implicitMetadata : Set String
-    , nextId : Int, version : Int, admissionError : Maybe String }
+    , nextId : Int, version : Int, retirement : Int, admissionError : Maybe String }
 
 
 init : State
 init =
-    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, admissionError = Nothing }
+    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, admissionError = Nothing }
 
 
 key : String -> Target -> String
@@ -54,10 +57,13 @@ key workspace target =
         cursor value = value |> Maybe.map (\item -> item.createdAt ++ ":" ++ item.id) |> Maybe.withDefault "first"
         suffix = case target of
             WorkspaceSessions before -> "list:" ++ cursor before
+            WorkspaceSessionsFiltered filters before -> "list:" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
             TaskSessions task before -> "task:" ++ task ++ ":" ++ cursor before
             SessionMetadata id -> "detail:" ++ id
             SessionTasks id after -> "links:" ++ id ++ ":" ++ Maybe.withDefault "first" after
             SessionBytes id _ _ -> "range:" ++ id
+            SessionWindow id _ _ _ -> "window:" ++ id
+            SessionSave id _ _ -> "save:" ++ id
     in
     "workspace:" ++ workspace ++ "|sessions:" ++ suffix
 
@@ -79,7 +85,33 @@ demand workspace target state =
         SessionMetadata _ ->
             let explicit = demandOne workspace target state in
             { explicit | implicitMetadata = Set.remove (key workspace target) explicit.implicitMetadata }
+        SessionWindow id offset end _ ->
+            if offset < 0 || end <= offset || end - offset > 2097152 then { state | admissionError = Just "invalid_window" }
+            else demandPaired workspace target id state
+        SessionSave id offset count ->
+            if offset < 0 || count < 1 || count > 65536 then { state | admissionError = Just "invalid_save_chunk" }
+            else demandPaired workspace target id state
         _ -> demandOne workspace target state
+
+
+demandPaired : String -> Target -> String -> State -> State
+demandPaired workspace target id state =
+    if Dict.size state.resources + (List.filter (\identity -> not (Dict.member identity state.resources)) [key workspace target,key workspace (SessionMetadata id)] |> List.length) > 16 then
+        { state | admissionError = Just "demand_limit" }
+    else
+        let
+            metadataKey = key workspace (SessionMetadata id)
+            withMetadata = demandOne workspace (SessionMetadata id) state
+            owned = if Dict.member metadataKey state.resources then withMetadata else { withMetadata | implicitMetadata = Set.insert metadataKey withMetadata.implicitMetadata }
+        in demandOne workspace target owned
+
+
+pairedId : Target -> Maybe String
+pairedId target = case target of
+    SessionBytes id _ _ -> Just id
+    SessionWindow id _ _ _ -> Just id
+    SessionSave id _ _ -> Just id
+    _ -> Nothing
 
 
 demandOne : String -> Target -> State -> State
@@ -105,16 +137,17 @@ removeDemand workspace target state =
         remove identity source = { source | resources = Dict.remove identity source.resources, order = List.filter ((/=) identity) source.order, implicitMetadata = Set.remove identity source.implicitMetadata, admissionError = Nothing }
     in
     case target of
-        SessionBytes id _ _ ->
-            let metadataKey = key workspace (SessionMetadata id)
-                withoutRange = remove (key workspace target) state
-            in
-            if Set.member metadataKey state.implicitMetadata then remove metadataKey withoutRange else withoutRange
         SessionMetadata id ->
-            if Dict.member (key workspace (SessionBytes id 0 False)) state.resources then
+            if Dict.values state.resources |> List.any (\resource -> resource.workspace == workspace && pairedId resource.target == Just id) then
                 { state | implicitMetadata = Set.insert (key workspace target) state.implicitMetadata }
             else remove (key workspace target) state
-        _ -> remove (key workspace target) state
+        _ ->
+            let without = remove (key workspace target) state in
+            case pairedId target of
+                Just id ->
+                    let metadataKey = key workspace (SessionMetadata id) in
+                    if Set.member metadataKey state.implicitMetadata && not (Dict.values without.resources |> List.any (\resource -> resource.workspace == workspace && pairedId resource.target == Just id)) then remove metadataKey without else without
+                Nothing -> without
 
 
 invalidate : (Resource -> Bool) -> State -> State
@@ -127,13 +160,13 @@ invalidate matches state =
 invalidateWorkspace : String -> State -> State
 invalidateWorkspace workspace =
     invalidate (\resource -> resource.workspace == workspace)
-        >> (\state -> { state | resources = Dict.map (\_ resource ->
+        >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource ->
             if resource.workspace == workspace then { resource | data = Nothing } else resource) state.resources })
 
 
 invalidateAll : State -> State
 invalidateAll =
-    invalidate (always True) >> (\state -> { state | resources = Dict.map (\_ resource -> { resource | data = Nothing }) state.resources })
+    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource -> { resource | data = Nothing }) state.resources })
 
 
 invalidateSession : String -> String -> State -> State
@@ -142,8 +175,11 @@ invalidateSession workspace id =
         SessionMetadata actual -> actual == id
         SessionTasks actual _ -> actual == id
         WorkspaceSessions _ -> True
+        WorkspaceSessionsFiltered _ _ -> True
         TaskSessions _ _ -> True
-        SessionBytes _ _ _ -> False))
+        SessionBytes _ _ _ -> False
+        SessionWindow _ _ _ _ -> False
+        SessionSave _ _ _ -> False))
 
 
 invalidateTask : String -> String -> State -> State
@@ -157,28 +193,29 @@ invalidateLists : String -> State -> State
 invalidateLists workspace =
     invalidate (\resource -> resource.workspace == workspace && (case resource.target of
         WorkspaceSessions _ -> True
+        WorkspaceSessionsFiltered _ _ -> True
         _ -> False))
 
 
 retireWorkspace : String -> State -> State
 retireWorkspace workspace state =
     let kept = Dict.filter (\_ resource -> resource.workspace /= workspace) state.resources in
-    { state | resources = kept, order = List.filter (\id -> Dict.member id kept) state.order, implicitMetadata = Set.filter (\id -> Dict.member id kept) state.implicitMetadata }
+    { state | retirement = state.retirement + 1, resources = kept, order = List.filter (\id -> Dict.member id kept) state.order, implicitMetadata = Set.filter (\id -> Dict.member id kept) state.implicitMetadata }
 
 
 retireAll : State -> State
 retireAll state =
-    { state | resources = Dict.empty, order = [], implicitMetadata = Set.empty, admissionError = Nothing }
+    { state | retirement = state.retirement + 1, resources = Dict.empty, order = [], implicitMetadata = Set.empty, admissionError = Nothing }
 
 
 admit : String -> State -> ( State, List Request )
 admit workspace state =
     let
         occupied identity = Dict.values state.physical |> List.any (\request -> request.key == identity)
-        metadataReady resource = case resource.target of
-            SessionBytes id _ _ -> Dict.get (key workspace (SessionMetadata id)) state.resources
+        metadataReady resource = case pairedId resource.target of
+            Just id -> Dict.get (key workspace (SessionMetadata id)) state.resources
                 |> Maybe.map (\detail -> detail.dirty == detail.settled && detail.data /= Nothing) |> Maybe.withDefault False
-            _ -> True
+            Nothing -> True
         ready = state.order |> List.filterMap (\identity -> Dict.get identity state.resources |> Maybe.map (Tuple.pair identity)) |> List.filter (\( identity, resource ) ->
             resource.workspace == workspace && resource.dirty /= resource.settled && resource.error == Nothing && not (occupied identity) && metadataReady resource)
         selected = List.take (max 0 (2 - Dict.size state.physical)) ready
@@ -214,17 +251,30 @@ valid request payload =
     let sessionMatches id session = session.id == id && session.workspaceId == request.workspace in
     case ( request.target, payload ) of
         ( WorkspaceSessions _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
+        ( WorkspaceSessionsFiltered _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( TaskSessions _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( SessionMetadata id, Metadata session ) -> sessionMatches id session
         ( SessionTasks _ _, TasksPage page ) -> List.length page.items <= 50
         ( SessionBytes id offset sealed, Bytes range ) ->
-            sessionMatches id range.session && range.offset == offset && range.nextOffset >= offset
-                && range.nextOffset <= offset + 65536 && range.nextOffset <= range.session.committedBytes
-                && (not range.hasMore || range.nextOffset > offset)
-                && range.hasMore == (range.nextOffset < range.session.committedBytes)
-                && (range.session.state == Api.SessionTerminated) == sealed
-                && base64ByteLength range.dataBase64 == Just (range.nextOffset - offset)
+            validRange request.workspace id offset 65536 sealed range
+        ( SessionWindow id offset end sealed, Bytes range ) -> validRange request.workspace id offset (min 65536 (end-offset)) sealed range
+        ( SessionSave id offset count, Bytes range ) -> validRange request.workspace id offset count True range
         _ -> False
+
+
+validRange : String -> String -> Int -> Int -> Bool -> Api.SessionRange -> Bool
+validRange workspace id offset count sealed range =
+    range.session.id == id && range.session.workspaceId == workspace && range.offset == offset && range.nextOffset >= offset
+        && range.nextOffset <= offset + count && range.nextOffset <= range.session.committedBytes
+        && (not range.hasMore || range.nextOffset > offset)
+        && range.hasMore == (range.nextOffset < range.session.committedBytes)
+        && (range.session.state == Api.SessionTerminated) == sealed
+        && base64ByteLength range.dataBase64 == Just (range.nextOffset - offset)
+
+
+consume : String -> Target -> State -> State
+consume workspace target state =
+    { state | resources = Dict.update (key workspace target) (Maybe.map (\resource -> { resource | data = Nothing, ranges = [] })) state.resources }
 
 
 -- Validate standard padded base64, including zero pad bits, without decoding
@@ -269,6 +319,10 @@ apply request resource payload state =
             in
             { updated | version = updated.version + 1, resources = Dict.update rangeKey (Maybe.map updateRange) updated.resources }
         Bytes range ->
+            if pairedId request.target /= Nothing && (case request.target of
+                SessionBytes _ _ _ -> False
+                _ -> True) then updated
+            else
             let
                 nextVersion = updated.version + 1
                 metadataAhead = Dict.get (key request.workspace (SessionMetadata range.session.id)) updated.resources
@@ -287,10 +341,13 @@ fetch : String -> Request -> (Result Http.Error Payload -> msg) -> Cmd msg
 fetch apiUrl request toMsg =
     case request.target of
         WorkspaceSessions cursor -> Api.fetchAgentSessions apiUrl request.workspace Nothing cursor 50 (Result.map SessionsPage >> toMsg)
+        WorkspaceSessionsFiltered filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace Nothing filters cursor 50 (Result.map SessionsPage >> toMsg)
         TaskSessions task cursor -> Api.fetchAgentSessions apiUrl request.workspace (Just task) cursor 50 (Result.map SessionsPage >> toMsg)
         SessionMetadata id -> Api.fetchAgentSession apiUrl request.workspace id (Result.map Metadata >> toMsg)
         SessionTasks id cursor -> Api.fetchSessionTasks apiUrl request.workspace id cursor 50 (Result.map TasksPage >> toMsg)
         SessionBytes id offset sealed -> Api.fetchSessionRange apiUrl request.workspace id sealed offset 65536 (Result.map Bytes >> toMsg)
+        SessionWindow id offset end sealed -> Api.fetchSessionRange apiUrl request.workspace id sealed offset (min 65536 (end-offset)) (Result.map Bytes >> toMsg)
+        SessionSave id offset count -> Api.fetchSessionRange apiUrl request.workspace id True offset count (Result.map Bytes >> toMsg)
 
 
 staleAt : Float -> Float -> Bool

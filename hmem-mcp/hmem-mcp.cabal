@@ -18,6 +18,10 @@ library
   exposed-modules:
       HMem.MCP.Config
       HMem.MCP.Server
+      HMem.MCP.SessionFile
+      HMem.MCP.SessionFollower
+      HMem.MCP.SessionHTTP
+      HMem.MCP.SessionProcess
       HMem.MCP.Tools
   other-modules:
       Paths_hmem_mcp
@@ -35,11 +39,19 @@ library
       ImportQualifiedPost
       TypeApplications
   ghc-options: -Wall -Wcompat -Wredundant-constraints
+  c-sources:
+      cbits/session_file.c
+      cbits/session_process.c
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
+    , case-insensitive
     , containers
+    , crypton
+    , directory
+    , filepath
     , hmem-core
     , http-client
     , http-client-tls
@@ -71,9 +83,14 @@ executable hmem-mcp
   ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
+    , case-insensitive
     , containers
+    , crypton
+    , directory
+    , filepath
     , hmem-core
     , hmem-mcp
     , http-client
@@ -91,6 +108,7 @@ test-suite hmem-mcp-test
   main-is: Spec.hs
   other-modules:
       HMem.MCP.ServerSpec
+      HMem.MCP.SessionFollowerSpec
       HMem.MCP.ToolsSpec
       Paths_hmem_mcp
   hs-source-dirs:
@@ -109,10 +127,14 @@ test-suite hmem-mcp-test
   ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
+    , case-insensitive
     , containers
+    , crypton
     , directory
+    , filepath
     , hmem-core
     , hmem-mcp
     , hmem-server
@@ -121,6 +143,7 @@ test-suite hmem-mcp-test
     , http-client-tls
     , http-types
     , optparse-applicative
+    , process
     , scientific
     , stm
     , text

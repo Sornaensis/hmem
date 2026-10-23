@@ -20,6 +20,11 @@ dependencies:
   - http-types
   - optparse-applicative
   - uuid
+  - crypton
+  - async
+  - directory
+  - filepath
+  - case-insensitive
 
 ghc-options:
   - -Wall
@@ -28,6 +33,9 @@ ghc-options:
 
 library:
   source-dirs: src
+  c-sources:
+    - cbits/session_file.c
+    - cbits/session_process.c
 
 executables:
   hmem-mcp:
@@ -56,6 +64,7 @@ tests:
       - directory
       - wai
       - warp
+      - process
 
 default-extensions:
   - OverloadedStrings

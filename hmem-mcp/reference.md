@@ -120,6 +120,96 @@ refused while task association remains available. The normal tools above do not
 start uploaders or read local files. HTTP ingestion is described in the
 [session API reference](../api.md#agent-sessions).
 
+### Local upload followers
+
+`session_upload_start` accepts explicit `session_id`, `path`, `format_label`
+and optional `workspace_id`. It returns promptly with `status: validating`;
+validation and upload continue in the MCP process without further agent turns.
+The path must identify a readable regular file. Only this tool accepts a local
+path; paths, credentials and raw errors never appear in receipts or HTTP metadata.
+An existing active session is resumed only after its entire committed prefix
+matches the source. A second active follower for the same UUID is refused.
+
+`session_upload_status`, `session_upload_flush` and `session_upload_stop` accept
+`session_id` and optional `workspace_id`. They address this process's registry;
+a different resolved workspace cannot control the job. Context changes retain
+ordinary request ordering, while registered jobs keep their captured workspace,
+identity, bearer credential and provenance configuration. Context changes do not
+retarget or wait for background jobs. Restarting MCP loses the registry; start
+again explicitly with the same UUID and source to verify and resume.
+
+The registry admits at most four active jobs. Two fixed workers take fair turns;
+one shared gate permits at most two follower HTTP requests globally, including
+creation, metadata, verification, append, heartbeat and retry. Normal MCP tools,
+including explicit termination, use independent HTTP capacity. Each turn reads
+at most 1 MiB and performs at most one HTTP request; prefix verification uses
+64 KiB pages with a frozen end, interleaved with following and heartbeats.
+Nominal source checks occur every second, idle heartbeats every ten seconds;
+`stale` independently becomes true thirty seconds after the last HTTP
+acknowledgement. File/HTTP latency and other jobs can delay a turn.
+
+Each HTTP operation has a five-second deadline and a 2 MiB response cap. A
+transient failure preserves the exact pending append for retry, with exponential
+backoff (1, 2, 4, 8 seconds) and failure after five attempts. Cursor conflicts
+reconcile through canonical metadata and complete prefix verification. Revoked
+authorization fails closed. Status distinguishes `validating`, `following`,
+`caught_up`, `pending_tail`, `retry`, `finalizing`, `stopped`, `failed` and `terminated`.
+The registry retains at most sixteen terminal entries for five minutes.
+
+Normal following uploads complete LF-terminated records, preserving UTF-8 and
+CRLF bytes. Partial tails stay pending; malformed terminated records, oversized
+records, replacement, truncation and observed committed-prefix changes fail the
+job without skipping bytes. The source handle supplies both identity and reads;
+each check compares a separately opened current path. Windows uses volume plus
+128-bit file ID; POSIX uses device/inode identity. Unsupported identity queries
+fail closed. Ongoing bounded sweeps detect persistent edits even with unchanged
+size and modification time.
+
+Flush and stop serialize after current work and snapshot one finite source-size
+boundary. They may append a complete final JSON record without LF; incomplete or
+invalid final tails stay pending. A later record must begin after a line
+separator. These calls wait at most one second, then return an explicit pending
+`requested_operation` receipt pinned to the accepted operation UUID; inspect status's
+`operation` until its receipt or error is available. Admission and terminal receipt
+publication are atomic. During `finalizing`, stop is closing the source and further
+controls are refused; every accepted operation receives a receipt or error. A successful
+receipt includes `committed_offset`, `revision`, `capture_boundary`, canonical
+`sha256`, `pending_tail` and `source_verified`. It requires complete canonical
+prefix hashing, byte comparison and final identity/size/cursor checks. Later
+growth does not extend that capture. Flush resumes following; stop closes the
+source. Arbitrary external writes that change and restore bytes between
+observations cannot be disproved without writer cooperation or a filesystem
+snapshot. The receipt certifies the canonical server prefix and the source
+observations, rather than an atomic snapshot of concurrent external writes.
+
+For final evidence, stop the uploader, inspect the completed receipt, then call
+`session_terminate` with `expected_offset: committed_offset`,
+`expected_revision: revision`, `final_bytes: committed_offset` and
+`final_sha256: sha256`. Confirm `pending_tail` before deciding which committed
+prefix to seal. Direct termination remains available in any uploader state. A
+follower discovering a seal retires without later mutation. No upload control,
+EOF, caught-up status, failure or shutdown invokes termination.
+
+At process shutdown, new registrations stop, workers are cancelled and joined
+within seven seconds (the five-second HTTP deadline plus two seconds for
+retirement and joining), followed by a separate two-second handle-cleanup budget.
+Each follower request owns a short-lived helper process using the same compiled
+MCP binary, default verified TLS, system resolver and proxy behavior. At most two
+helpers run under the existing shared request cap. Private pipes carry requests;
+credentials and source paths never enter helper arguments or logs. A five-second
+monotonic budget includes startup, DNS, connect, TLS, body and cleanup, reserving
+one second for cleanup. The parent kills and reaps the child before joining pipe
+workers or releasing its slot. Frames are capped at 4 MiB; raw HTTP bodies retain
+the 2 MiB cap without JSON re-encoding expansion. The ordinary MCP manager stays
+independent. Parent loss kills owned helpers on Windows and Linux.
+The server returns successfully only after confirmed worker completion and handle
+cleanup; incomplete cleanup raises an explicit failure. A stuck native OS operation may
+outlive that budget; its handle is not closed concurrently with an active read.
+Unconfirmed helper ownership closes follower admission and retains its lease for
+cleanup, so retries cannot reuse capacity occupied by an unconfirmed owner.
+Ordinary local file/network cancellation is covered by the handle tests. Server
+sessions remain active unless the managing agent explicitly sealed them.
+
 ## Unified search
 
 `search` retrieves stored workspace records with all-term lexical matching. Omit

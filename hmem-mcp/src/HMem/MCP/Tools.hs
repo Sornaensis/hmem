@@ -46,6 +46,7 @@ import Network.HTTP.Types.URI (urlEncode)
 import HMem.Types
 import HMem.AgentSession qualified as AgentSession
 import HMem.AgentSession.Transport qualified as SessionWire
+import HMem.MCP.SessionFollower (uploadToolDefinitions)
 
 -- The MCP surface adapts the authorized HTTP API. The accepted context supplies
 -- workspace IDs when callers omit explicit overrides.
@@ -183,7 +184,7 @@ toolDefinitions =
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation. Done requires closing open descendants. Cancelled also cancels non-done subtasks while preserving done subtasks and dependency links; unrelated dependent tasks are not cancelled. Reopening does not reopen descendants." (schema ["task_id" .= prop "string" "Task UUID", "status" .= enumProp "Final execution state" ["done", "blocked", "cancelled"]] ["task_id", "status"])
-  ] <> sessionToolDefinitions
+  ] <> sessionToolDefinitions <> uploadToolDefinitions
   where
     tool name description inputSchema = object $
       ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]

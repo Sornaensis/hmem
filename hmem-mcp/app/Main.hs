@@ -2,12 +2,13 @@ module Main where
 
 import Data.Text qualified as T
 import Options.Applicative
-import System.Environment (lookupEnv)
+import System.Environment (getArgs, lookupEnv)
 import System.IO (hPutStrLn, stderr)
 
 import HMem.Config qualified as Config
 import HMem.MCP.Config (resolveForwardedToken, resolveServerUrl, safeServerUrlForLog)
 import HMem.MCP.Server (runMCPServer)
+import HMem.MCP.SessionHTTP (runSessionHTTPHelper)
 
 data Opts = Opts
   { optServerUrl :: Maybe String
@@ -35,6 +36,11 @@ optsParser = Opts
 
 main :: IO ()
 main = do
+  args <- getArgs
+  if args == ["--session-http-helper"] then runSessionHTTPHelper else runNormal
+
+runNormal :: IO ()
+runNormal = do
   opts <- execParser $ info (optsParser <**> helper)
     ( fullDesc
    <> progDesc "hmem-mcp - MCP bridge for observation, project & task management"

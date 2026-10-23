@@ -5,10 +5,12 @@ module HMem.MCP.Server
   -- * Testing
   , JsonRpcRequest(..)
   , handleRequest
+  , handleStdioLineWithRegistry
   , handleStdioLine
   , runMCPServerWithHandles
   , runMCPServerWithHandlesObserved
   , runMCPServerWithHandlesObservedWithFork
+  , runMCPServerWithHandlesObservedWithFollowerOptions
   , encodeStdioResponse
   , sendResponseToHandle
   ) where
@@ -18,7 +20,7 @@ import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
   ( atomically, TBQueue, newTBQueueIO, readTBQueue, writeTBQueue
   , isEmptyTBQueue, isFullTBQueue, TVar, newTVarIO, readTVar, modifyTVar', retry )
-import Control.Exception (SomeAsyncException, SomeException, catch, finally, fromException, mask, onException, throwIO, try)
+import Control.Exception (bracket, SomeAsyncException, SomeException, catch, finally, fromException, mask, onException, throwIO, try)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (parseEither)
@@ -34,6 +36,7 @@ import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, respons
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.IO (Handle, hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
 import HMem.BotIdentity (BotIdentity)
+import HMem.MCP.SessionFollower (Registry, FollowerOptions, defaultFollowerOptions, newRegistryWith, closeRegistry, handleUploadTool, isUploadTool)
 import HMem.MCP.Tools (handleToolCall, searchContextError, toolDefinitions)
 
 ------------------------------------------------------------------------
@@ -123,7 +126,12 @@ runMCPServerWithHandlesObserved = runMCPServerWithHandlesObservedWithFork forkWo
 -- startup behavior. The fork action must run the supplied worker action
 -- unmasked so queue and request processing remain interruptible.
 runMCPServerWithHandlesObservedWithFork :: (IO () -> IO ThreadId) -> ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
-runMCPServerWithHandlesObservedWithFork forkWorker observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = mask $ \restore -> do
+runMCPServerWithHandlesObservedWithFork = runMCPServerWithHandlesObservedWithFollowerOptions defaultFollowerOptions
+
+-- | Exercise the actual registry/stdio lifetime with injected follower scheduling
+-- and observations. Ordinary request admission and worker ownership are unchanged.
+runMCPServerWithHandlesObservedWithFollowerOptions :: FollowerOptions -> (IO () -> IO ThreadId) -> ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
+runMCPServerWithHandlesObservedWithFollowerOptions options forkWorker observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = bracket (newRegistryWith options) cleanupFollower $ \registry -> mask $ \restore -> do
   lock   <- newMVar ()
   queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
   active <- newTVarIO (0 :: Int)
@@ -134,12 +142,12 @@ runMCPServerWithHandlesObservedWithFork forkWorker observeWorkers workerCount qu
   -- are cleaned up if a later startup step fails. Workers are explicitly
   -- unmasked by the fork action so request processing remains interruptible.
   workerIds <- spawnWorkers forkWorker (max 1 workerCount) $
-    worker output mgr lock serverUrl mApiKey queue active initialized wsContext
+    worker (Just registry) output mgr lock serverUrl mApiKey queue active initialized wsContext
   let cleanupWorkers = mapM_ killThread workerIds
       requestWorkerCleanup = mapM_ (forkIO . killThread) workerIds
       runLoop = restore $ do
         -- Read stdin → queue
-        readLoop input output lock queue active mgr serverUrl mApiKey initialized wsContext
+        readLoop (Just registry) input output lock queue active mgr serverUrl mApiKey initialized wsContext
         observeWorkers workerIds
         -- Drain: wait for queue to empty and all workers to finish
         hPutStrLn errHandle "MCP server: stdin closed, draining in-flight requests..."
@@ -154,6 +162,11 @@ runMCPServerWithHandlesObservedWithFork forkWorker observeWorkers workerCount qu
 forkWorkerUnmasked :: IO () -> IO ThreadId
 forkWorkerUnmasked action = forkIOWithUnmask $ \unmask -> unmask action
 
+cleanupFollower :: Registry -> IO ()
+cleanupFollower registry = do
+  ok <- closeRegistry registry
+  if ok then pure () else throwIO (userError "MCP follower cleanup did not complete within its budget")
+
 spawnWorkers :: (IO () -> IO ThreadId) -> Int -> IO () -> IO [ThreadId]
 spawnWorkers forkWorker workerCount action = go workerCount []
   where
@@ -165,8 +178,8 @@ spawnWorkers forkWorker workerCount action = go workerCount []
 
 -- | Worker thread: reads from the queue and processes each line.
 -- Atomically dequeues + increments active counter to prevent drain races.
-worker :: Handle -> Manager -> MVar () -> String -> Maybe Text -> TBQueue QueuedLine -> TVar Int -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
-worker output mgr lock url mApiKey queue active initialized wsContext = go
+worker :: Maybe Registry -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TBQueue QueuedLine -> TVar Int -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
+worker follower output mgr lock url mApiKey queue active initialized wsContext = go
   where
     go = do
       mline <- try @SomeException $ atomically $ do
@@ -176,14 +189,14 @@ worker output mgr lock url mApiKey queue active initialized wsContext = go
       case mline of
         Left e -> rethrowAsync e  -- Worker exits cleanly for non-async queue errors
         Right (QueuedLine line workspaceSnapshot) -> do
-          (processLineWithWorkspaceSnapshot output mgr lock url mApiKey initialized wsContext (Just workspaceSnapshot) line `catch` \(e :: SomeException) -> rethrowAsync e)
+          (processLineWithWorkspaceSnapshot follower output mgr lock url mApiKey initialized wsContext (Just workspaceSnapshot) line `catch` \(e :: SomeException) -> rethrowAsync e)
             `finally` atomically (modifyTVar' active (subtract 1))
           go
 
 -- | Main read loop: reads lines from an input handle and enqueues them.
 -- If the queue is full, sends an overload error immediately.
-readLoop :: Handle -> Handle -> MVar () -> TBQueue QueuedLine -> TVar Int -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
-readLoop input output lock queue active mgr serverUrl mApiKey initialized wsContext = do
+readLoop :: Maybe Registry -> Handle -> Handle -> MVar () -> TBQueue QueuedLine -> TVar Int -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
+readLoop follower input output lock queue active mgr serverUrl mApiKey initialized wsContext = do
   eof <- hIsEOF input `catch` \(e :: SomeException) -> rethrowAsync e >> pure True
   if eof
     then pure ()
@@ -199,7 +212,7 @@ readLoop input output lock queue active mgr serverUrl mApiKey initialized wsCont
               -- committing it, so their externally-visible effects cannot
               -- overtake later context controls.
               waitForDrain queue active
-              processLine output mgr lock serverUrl mApiKey initialized wsContext line
+              processLine follower output mgr lock serverUrl mApiKey initialized wsContext line
             else do
               workspaceSnapshot <- atomically $ readTVar wsContext
               full <- atomically $ do
@@ -213,7 +226,7 @@ readLoop input output lock queue active mgr serverUrl mApiKey initialized wsCont
                 else pure ()
           continue
   where
-    continue = readLoop input output lock queue active mgr serverUrl mApiKey initialized wsContext
+    continue = readLoop follower input output lock queue active mgr serverUrl mApiKey initialized wsContext
 
 -- | Wait until no accepted ordinary request can still be running.  This is
 -- used only at workspace-context epoch boundaries; workers remain concurrent
@@ -240,13 +253,13 @@ isOrderedContextControl line = case eitherDecodeStrict @JsonRpcRequest line of
         _ -> False
   _ -> False
 
-processLine :: Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO ()
-processLine output mgr lock serverUrl mApiKey initialized wsContext =
-  processLineWithWorkspaceSnapshot output mgr lock serverUrl mApiKey initialized wsContext Nothing
+processLine :: Maybe Registry -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO ()
+processLine follower output mgr lock serverUrl mApiKey initialized wsContext =
+  processLineWithWorkspaceSnapshot follower output mgr lock serverUrl mApiKey initialized wsContext Nothing
 
-processLineWithWorkspaceSnapshot :: Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO ()
-processLineWithWorkspaceSnapshot output mgr lock serverUrl mApiKey initialized wsContext workspaceSnapshot line = do
-  mresp <- handleStdioLineWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext workspaceSnapshot line
+processLineWithWorkspaceSnapshot :: Maybe Registry -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO ()
+processLineWithWorkspaceSnapshot follower output mgr lock serverUrl mApiKey initialized wsContext workspaceSnapshot line = do
+  mresp <- handleStdioLineWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized wsContext workspaceSnapshot line
   case mresp of
     Nothing   -> pure ()
     Just resp -> sendResponseToHandle output lock resp
@@ -256,10 +269,14 @@ processLineWithWorkspaceSnapshot output mgr lock serverUrl mApiKey initialized w
 -- stdio loop's no-response behavior.
 handleStdioLine :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
 handleStdioLine mgr serverUrl mApiKey initialized wsContext line
-  = handleStdioLineWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext Nothing line
+  = handleStdioLineWithWorkspaceSnapshot Nothing mgr serverUrl mApiKey initialized wsContext Nothing line
 
-handleStdioLineWithWorkspaceSnapshot :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
-handleStdioLineWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext workspaceSnapshot line
+handleStdioLineWithRegistry :: Registry -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
+handleStdioLineWithRegistry registry mgr serverUrl mApiKey initialized wsContext =
+  handleStdioLineWithWorkspaceSnapshot (Just registry) mgr serverUrl mApiKey initialized wsContext Nothing
+
+handleStdioLineWithWorkspaceSnapshot :: Maybe Registry -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
+handleStdioLineWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized wsContext workspaceSnapshot line
   | BS8.null line = pure Nothing
   | otherwise = case eitherDecodeStrict @Value line of
       Left _err ->
@@ -271,7 +288,7 @@ handleStdioLineWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext
           pure $ Just $ jsonRpcError (extractId val) (-32600)
             "Invalid Request: missing required 'method' field"
         Right req ->
-          handleRequestWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext workspaceSnapshot req
+          handleRequestWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized wsContext workspaceSnapshot req
             `catch` \(e :: SomeException) -> do
               rethrowAsync e
               pure $ Just $ jsonRpcError req.reqId (-32603)
@@ -296,13 +313,13 @@ extractId _          = Nothing
 -- initialized").
 handleRequest :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
 handleRequest mgr serverUrl mApiKey initialized wsContext =
-  handleRequestWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext Nothing
+  handleRequestWithWorkspaceSnapshot Nothing mgr serverUrl mApiKey initialized wsContext Nothing
 
 -- | Handle a request, optionally using the whole context captured by the
 -- input reader.  Direct callers use 'handleRequest' and retain live-state
 -- behavior; queued stdio requests use a stable snapshot.
-handleRequestWithWorkspaceSnapshot :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
-handleRequestWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext workspaceSnapshot req = case req.reqMethod of
+handleRequestWithWorkspaceSnapshot :: Maybe Registry -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
+handleRequestWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized wsContext workspaceSnapshot req = case req.reqMethod of
   "initialize" -> do
     atomically $ modifyTVar' initialized (const True)
     pure $ Just $ jsonRpcResponse req.reqId $ object
@@ -333,11 +350,11 @@ handleRequestWithWorkspaceSnapshot mgr serverUrl mApiKey initialized wsContext w
     ready <- atomically $ readTVar initialized
     if not ready
       then pure $ Just $ jsonRpcError req.reqId (-32002) "Server not initialized"
-      else handleMethod mgr serverUrl mApiKey wsContext workspaceSnapshot req
+      else handleMethod follower mgr serverUrl mApiKey wsContext workspaceSnapshot req
 
 -- | Dispatch initialized requests to the appropriate handler.
-handleMethod :: Manager -> String -> Maybe Text -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
-handleMethod mgr serverUrl mApiKey wsContext workspaceSnapshot req = case req.reqMethod of
+handleMethod :: Maybe Registry -> Manager -> String -> Maybe Text -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
+handleMethod follower mgr serverUrl mApiKey wsContext workspaceSnapshot req = case req.reqMethod of
   "tools/list" -> do
     pure $ Just $ jsonRpcResponse req.reqId $ object
       [ "tools" .= toolDefinitions ]
@@ -362,13 +379,17 @@ handleMethod mgr serverUrl mApiKey wsContext workspaceSnapshot req = case req.re
               Nothing -> atomically $ readTVar wsContext
             case capturedWorkspace of
               Nothing -> pure $ Just $ jsonRpcResponse req.reqId $
-                if mToolName `elem` (map Just ["search", "observation_discovery", "session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence"]) then searchContextError else object
+                if maybe False isUploadTool mToolName || mToolName `elem` (map Just ["search", "observation_discovery", "session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence"]) then searchContextError else object
                   [ "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Call set_workspace with workspace_id and identity before using ordinary tools" :: Text)]]
                   , "isError" .= True
                   ]
               Just accepted -> do
                 let params' = injectWorkspaceContextValue capturedWorkspace params
-                result <- handleToolCall mgr serverUrl mApiKey accepted.identity params'
+                result <- case (follower, mToolName, params') of
+                  (Just registry, Just name, Object fields) | isUploadTool name ->
+                    handleUploadTool registry mgr serverUrl mApiKey accepted.identity name (maybe (object []) id (KM.lookup "arguments" fields))
+                  (_, Just name, _) | isUploadTool name -> pure $ object ["isError" .= True, "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Uploader requires a process-owned registry" :: Text)]]]
+                  _ -> handleToolCall mgr serverUrl mApiKey accepted.identity params'
                 pure $ Just $ jsonRpcResponse req.reqId result
 
   method ->

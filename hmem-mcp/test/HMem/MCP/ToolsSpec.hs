@@ -44,7 +44,7 @@ spec :: Spec
 spec = do
   describe "Agent session MCP" $ do
     it "advertises strict explicit management tools and bounded range/list windows without ingestion or local file controls" $ do
-      let names = [name | Object definition <- toolDefinitions, Just (String name) <- [KM.lookup "name" definition], "session_" `T.isPrefixOf` name]
+      let names = [name | Object definition <- toolDefinitions, Just (String name) <- [KM.lookup "name" definition], "session_" `T.isPrefixOf` name, not ("session_upload_" `T.isPrefixOf` name)]
       sort names `shouldBe` sort ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence"]
       forM_ names $ \name -> do
         let [definition] = [value | value <- toolDefinitions, jsonField "name" value == Just (String name)]

@@ -17,6 +17,7 @@ import Set exposing (Set)
 type Target
     = WorkspaceSessions (Maybe Api.SessionCursor)
     | WorkspaceSessionsFiltered Api.SessionFilters (Maybe Api.SessionCursor)
+    | TaskSessionsFiltered String Api.SessionFilters (Maybe Api.SessionCursor)
     | TaskSessions String (Maybe Api.SessionCursor)
     | SessionMetadata String
     | SessionTasks String (Maybe String)
@@ -43,12 +44,12 @@ type alias Request =
 
 type alias State =
     { resources : Dict String Resource, physical : Dict Int Request, order : List String, implicitMetadata : Set String
-    , nextId : Int, version : Int, retirement : Int, admissionError : Maybe String }
+    , nextId : Int, version : Int, retirement : Int, listInvalidation : Int, admissionError : Maybe String }
 
 
 init : State
 init =
-    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, admissionError = Nothing }
+    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, listInvalidation = 0, admissionError = Nothing }
 
 
 key : String -> Target -> String
@@ -58,6 +59,7 @@ key workspace target =
         suffix = case target of
             WorkspaceSessions before -> "list:" ++ cursor before
             WorkspaceSessionsFiltered filters before -> "list:" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
+            TaskSessionsFiltered task filters before -> "task-filter:" ++ task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
             TaskSessions task before -> "task:" ++ task ++ ":" ++ cursor before
             SessionMetadata id -> "detail:" ++ id
             SessionTasks id after -> "links:" ++ id ++ ":" ++ Maybe.withDefault "first" after
@@ -153,7 +155,7 @@ removeDemand workspace target state =
 invalidate : (Resource -> Bool) -> State -> State
 invalidate matches state =
     let version = state.version + 1 in
-    { state | version = version, resources = Dict.map (\_ resource ->
+    { state | version = version, listInvalidation = state.listInvalidation + 1, resources = Dict.map (\_ resource ->
         if matches resource then { resource | dirty = version, error = Nothing } else resource) state.resources }
 
 
@@ -176,6 +178,7 @@ invalidateSession workspace id =
         SessionTasks actual _ -> actual == id
         WorkspaceSessions _ -> True
         WorkspaceSessionsFiltered _ _ -> True
+        TaskSessionsFiltered _ _ _ -> True
         TaskSessions _ _ -> True
         SessionBytes _ _ _ -> False
         SessionWindow _ _ _ _ -> False
@@ -185,6 +188,7 @@ invalidateSession workspace id =
 invalidateTask : String -> String -> State -> State
 invalidateTask workspace task =
     invalidate (\resource -> resource.workspace == workspace && (case resource.target of
+        TaskSessionsFiltered actual _ _ -> actual == task
         TaskSessions actual _ -> actual == task
         _ -> False))
 
@@ -194,6 +198,7 @@ invalidateLists workspace =
     invalidate (\resource -> resource.workspace == workspace && (case resource.target of
         WorkspaceSessions _ -> True
         WorkspaceSessionsFiltered _ _ -> True
+        TaskSessionsFiltered _ _ _ -> True
         _ -> False))
 
 
@@ -252,6 +257,7 @@ valid request payload =
     case ( request.target, payload ) of
         ( WorkspaceSessions _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( WorkspaceSessionsFiltered _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
+        ( TaskSessionsFiltered _ _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( TaskSessions _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( SessionMetadata id, Metadata session ) -> sessionMatches id session
         ( SessionTasks _ _, TasksPage page ) -> List.length page.items <= 50
@@ -342,6 +348,7 @@ fetch apiUrl request toMsg =
     case request.target of
         WorkspaceSessions cursor -> Api.fetchAgentSessions apiUrl request.workspace Nothing cursor 50 (Result.map SessionsPage >> toMsg)
         WorkspaceSessionsFiltered filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace Nothing filters cursor 50 (Result.map SessionsPage >> toMsg)
+        TaskSessionsFiltered task filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace (Just task) filters cursor 50 (Result.map SessionsPage >> toMsg)
         TaskSessions task cursor -> Api.fetchAgentSessions apiUrl request.workspace (Just task) cursor 50 (Result.map SessionsPage >> toMsg)
         SessionMetadata id -> Api.fetchAgentSession apiUrl request.workspace id (Result.map Metadata >> toMsg)
         SessionTasks id cursor -> Api.fetchSessionTasks apiUrl request.workspace id cursor 50 (Result.map TasksPage >> toMsg)

@@ -9,6 +9,7 @@ import Feature.AuditDiff
 import Feature.Cards
 import Feature.Observation
 import Feature.Timeline
+import Feature.Sessions
 import Feature.WorkspaceAdmin
 import Permissions
 import Ports
@@ -45,11 +46,12 @@ sources model =
                                                     Feature.AuditLog.timestampSources model
                                                 else []
                                             TimelineTab -> Feature.Timeline.timestampSources model.timeline
+                                            SessionsTab -> Feature.Sessions.timestampSources model
                                             _ ->
                                                 if model.search.isSearching || model.search.searchError /= Nothing || model.search.unifiedResults /= Nothing then []
                                                 else if model.activeTab == ObservationsTab then
                                                     if workspace.workspaceType == Api.Repository then Feature.Observation.timestampSources model.observations else []
-                                                else Feature.Cards.timestampSources model
+                                                else Feature.Cards.timestampSources model ++ Feature.Sessions.timestampSources model
                             in
                             [ workspace.createdAt, workspace.updatedAt ] ++ body
 

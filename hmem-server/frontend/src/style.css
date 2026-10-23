@@ -4697,3 +4697,66 @@ textarea.observation-edit-content {
 .session-notice { color:var(--warning); font-size:.85rem; margin:.5rem 0; }
 .sessions-pagination { display:flex; gap:.5rem; justify-content:space-between; }
 @media(max-width:800px) { .sessions-layout { grid-template-columns:1fr; } }
+
+/* Sessions share the planning cards' quiet surfaces and compact controls. */
+.sessions-page { max-width:1500px; margin:0 auto; }
+.sessions-toolbar { gap:.65rem; margin-bottom:.8rem; }
+.sessions-toolbar h2,.sessions-toolbar h4 { margin:0; margin-right:auto; }
+.sessions-connection { font-size:.75rem; }
+.sessions-layout { grid-template-columns:minmax(210px,260px) minmax(0,1fr); gap:1rem; align-items:start; }
+.sessions-filters { gap:.75rem; font-size:.8rem; }
+.sessions-filters select { padding:.3rem .5rem; font:inherit; }
+.sessions-task-filter { display:flex; align-items:center; gap:.75rem; padding:.6rem .8rem; margin-bottom:.8rem; background:var(--bg-surface); border:1px solid var(--border); border-radius:8px; font-size:.85rem; }
+.session-summary { padding:0; margin-bottom:.5rem; background:var(--bg-card,var(--bg-surface)); transition:border-color .15s,background .15s; }
+.session-summary:hover,.session-summary.selected { border-color:var(--accent); }
+.session-summary-link { padding:.8rem; color:inherit; text-decoration:none; gap:.35rem!important; }
+.session-summary-heading { display:flex; gap:.5rem; align-items:center; justify-content:space-between; }
+.session-summary-heading strong { font-size:.9rem; }
+.session-short-id { font-family:monospace; font-size:.7rem; opacity:.5; }
+.session-state-dot { display:inline-block; flex:0 0 auto; width:7px; height:7px; background:var(--text-muted); border-radius:50%; }
+.is-active .session-state-dot,.task-session-active .session-state-dot { background:var(--success,#4ca886); box-shadow:0 0 0 3px color-mix(in srgb,var(--success,#4ca886) 12%,transparent); }
+.session-detail { padding:1rem; background:var(--bg-card,var(--bg-surface)); border-radius:10px; }
+.session-detail-header { display:flex; align-items:center; gap:.65rem; }
+.session-detail-header>div { flex:1; min-width:0; }
+.session-detail-header h3 { margin:0 0 .25rem; font-size:1rem; }
+.session-linked-tasks { margin-top:1rem; padding:.65rem .8rem; border:1px solid var(--border); border-radius:7px; }
+.session-linked-tasks summary,.task-session-section summary { cursor:pointer; font-size:.8rem; font-weight:600; }
+.session-task-cards { display:grid; gap:.5rem; margin-top:.65rem; }
+.session-task-card { display:flex; justify-content:space-between; gap:.5rem; align-items:center; color:inherit; text-decoration:none; border:1px solid var(--border); border-radius:6px; padding:.7rem; font-size:.85rem; }
+.session-viewer { margin:1rem 0 0; padding-top:.85rem; }
+.session-records { max-height:65vh; padding:.25rem; }
+.session-record { padding:.85rem 1rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.75rem; background:var(--bg-card,var(--bg-surface)); }
+.session-role-user { background:var(--bg-surface); margin-left:1.5rem; }
+.session-record-meta { font-size:.7rem; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+.session-record-text { font-size:.9rem; line-height:1.65; white-space:normal; }
+.session-record-text>:first-child { margin-top:0; }
+.session-record-text>:last-child { margin-bottom:0; }
+.session-record-text pre,.session-tool-content { white-space:pre-wrap; overflow-wrap:anywhere; max-height:360px; overflow:auto; padding:.75rem; border-radius:5px; background:var(--bg-surface); font-size:.8rem; }
+.session-record details { margin-top:.5rem; border-radius:5px; font-size:.8rem; }
+.session-content-tool,.session-content-result,.session-content-thinking,.session-content-unknown { padding:.65rem .75rem; border:1px solid var(--border); background:var(--bg-surface); }
+.session-content-thinking { opacity:.8; }
+.session-record summary { cursor:pointer; }
+.session-original { font-size:.7rem!important; opacity:.65; }
+.session-record-raw { white-space:pre-wrap; }
+.session-download-status { margin:0; font-size:.8rem; color:var(--text-muted); }
+.task-sessions-icon { position:relative; display:inline-flex; align-items:center; gap:.2rem; text-decoration:none; font-size:1rem; }
+.has-active-sessions { color:var(--success,#4ca886)!important; }
+.task-session-count { font-size:.65rem; }
+.card-has-active-sessions { border-left-color:var(--success,#4ca886)!important; box-shadow:inset 2px 0 0 color-mix(in srgb,var(--success,#4ca886) 35%,transparent); }
+.task-session-section { border:1px solid var(--border); border-radius:7px; padding:.65rem .75rem; margin:.6rem 0; }
+.task-session-active { border-left:2px solid color-mix(in srgb,var(--success,#4ca886) 60%,var(--border)); }
+.task-session-cards { display:grid; gap:.5rem; margin-top:.65rem; }
+.task-session-card { display:flex; gap:.6rem; align-items:center; padding:.65rem; background:var(--bg-surface); border:1px solid var(--border); border-radius:6px; }
+.task-session-card>a { flex:1; display:flex; flex-direction:column; gap:.25rem; color:inherit; text-decoration:none; font-size:.85rem; }
+@media(max-width:900px) { .sessions-layout { grid-template-columns:1fr; }.session-summaries { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.5rem; }.session-summary { margin:0; }.session-detail { padding:.8rem; }.session-role-user { margin-left:.5rem; } }
+.sessions-page .btn { background:transparent; border:1px solid var(--border); color:var(--text); padding:.35rem .65rem; border-radius:6px; font-size:.8rem; }
+.sessions-page .btn:hover:not(:disabled) { border-color:var(--accent); background:var(--bg-surface); }
+.sessions-page .btn:disabled { opacity:.4; }
+.session-record-text { font-family:inherit; }
+.session-record-activity { border:0; padding:0 .25rem; background:transparent; margin:.35rem 0; }
+.session-record-activity details { margin:0; }
+.session-raw-details { font-size:.75rem; color:var(--text-muted); margin-top:.75rem; }
+.session-raw-details summary { cursor:pointer; }
+.session-raw-details[open] { border-top:1px solid var(--border); padding-top:.6rem; }
+.task-session-section .btn { background:transparent; border:1px solid var(--border); color:var(--text); padding:.3rem .55rem; border-radius:6px; font-size:.8rem; }
+.task-session-section .btn:hover:not(:disabled) { border-color:var(--accent); }

@@ -14,11 +14,40 @@ export function decodeBase64(value) {
   return bytes
 }
 
-function presentation(value, raw) {
-  const object = value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
-  const field = name => typeof object[name] === 'string' ? object[name].slice(0,256) : ''
-  const content = typeof object.text === 'string' ? object.text : typeof object.content === 'string' ? object.content : raw
-  return { type:field('type'), role:field('role'), time:field('timestamp') || field('time'), text:content.slice(0,4096) }
+const string = value => typeof value === 'string' ? value : ''
+const printable = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2) || ''
+
+// Presentation never changes the stored record or its byte boundaries.
+export function presentation(value, raw) {
+  const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const time = string(object.timestamp || object.time)
+  const block = (kind, text, label = '') => ({kind, text:string(text), label:string(label).slice(0,256)})
+  const contentBlocks = content => (Array.isArray(content) ? content : [{type:typeof content === 'string'?'text':'unknown',text:content}]).flatMap(part => {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return [block('unknown',printable(part),'Content')]
+    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [block('unknown',printable(part),'Content')]
+    if (['thinking','reasoning','summary_text'].includes(part.type)) return [block('thinking',part.thinking || part.text,'Thinking')]
+    if (part.type === 'tool_use') return [block('tool',printable(part.input),part.name || 'Tool call')]
+    if (part.type === 'tool_result') return [block('result', typeof part.content === 'string' ? part.content : (Array.isArray(part.content) ? part.content.map(item=>item?.text || printable(item)).join('\n') : printable(part.content)),part.is_error ? 'Tool error' : 'Tool result')]
+    return [block('unknown',printable(part),'Attachment / content')]
+  })
+  const conversation = (role,blocks,extra={}) => ({type:'conversation',role:string(role).slice(0,256)||'assistant',time,text:JSON.stringify(blocks),...extra})
+  if (object.type === 'response_item') {
+    const item=object.payload || {}
+    if(item.type === 'message') return conversation(item.role || 'assistant',contentBlocks(item.content))
+    if(['function_call','custom_tool_call'].includes(item.type)) return conversation('assistant',[block('tool',printable(item.arguments || item.input),item.name || 'Tool call')])
+    if(['function_call_output','custom_tool_call_output'].includes(item.type)) return conversation('tool',[block('result',printable(item.output),'Tool result')])
+    if(item.type === 'reasoning') return conversation('assistant',[block('thinking', (Array.isArray(item.summary) ? item.summary.map(part=>part?.text || '').join('\n') : printable(item.summary)),'Thinking')])
+  }
+  if (['assistant','user'].includes(object.type) && object.message) {
+    const message=object.message
+    return conversation(message.role || object.type,typeof message.content === 'string' ? [block('text',message.content)] : contentBlocks(message.content))
+  }
+  if(object.type === 'event_msg' && ['agent_message','user_message','agent_reasoning'].includes(object.payload?.type)) {
+    const payload=object.payload,thinking=payload.type==='agent_reasoning'
+    return conversation(payload.type==='user_message'?'user':'assistant',[block(thinking?'thinking':'text',payload.message || payload.text)],{eventEnvelope:true})
+  }
+  if(typeof object.text === 'string' || typeof object.content === 'string') return {type:string(object.type),role:string(object.role),time,text:typeof object.text === 'string' ? object.text : object.content}
+  return {type:'unknown',role:'',time,text:''}
 }
 
 export function createRecordFramer(startOffset = 0) {
@@ -49,7 +78,25 @@ export function createRecordFramer(startOffset = 0) {
     rows.push(row); retained += row.bytes
     while (rows.length > MAX_VIEW_ROWS || retained > MAX_VIEW_BYTES) { retained -= rows.shift().bytes }
   }
-  function snapshot() { return { rows:rows.map(({bytes,...row}) => row), through, pendingBytes:pendingSize, retainedBytes:retained, notice } }
+  function snapshot() {
+    const fingerprint = row => row.role+':'+JSON.stringify(JSON.parse(row.text).map(({kind,text})=>({kind,text})))
+    const hidden = new Set()
+    let previous = null
+    for (const row of rows) {
+      if(row.type !== 'conversation') { previous=null; continue }
+      const paired = previous && Boolean(previous.eventEnvelope)!==Boolean(row.eventEnvelope) && fingerprint(previous)===fingerprint(row)
+      const firstTime=Date.parse(previous?.time),lastTime=Date.parse(row.time)
+      // Require temporal evidence as well as one-to-one adjacent envelopes.
+      // Missing, invalid or turn-scale times preserve both records.
+      const sameOccurrence=Number.isFinite(firstTime)&&Number.isFinite(lastTime)&&Math.abs(firstTime-lastTime)<=100
+      if(paired && sameOccurrence) {
+        hidden.add(row.eventEnvelope?row.offset:previous.offset)
+        previous=null // A canonical occurrence can consume only one envelope.
+      } else previous=row
+    }
+    return {rows:rows.filter(row=>!hidden.has(row.offset)).map(({bytes,eventEnvelope,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice}
+  }
+
   return {
     push(offset, input, final = false) {
       if (!(input instanceof Uint8Array) || input.length > 65536) throw new Error('chunk_limit')

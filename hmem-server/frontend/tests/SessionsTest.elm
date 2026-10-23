@@ -6,6 +6,9 @@ import Dict
 import Expect
 import Feature.Sessions as Sessions
 import Feature.SessionDelivery as Delivery
+import Helpers
+import Http
+import Set
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Test exposing (describe, test)
@@ -124,6 +127,62 @@ suite =
             in
             Expect.equal (0,[newTarget],Nothing)
                 (Dict.size completed.physical,List.map .target next,Dict.get (Delivery.key workspace newTarget) completed.resources |> Maybe.andThen .data)
+        , test "rotating mounted card pages converge beyond the resource cap and clear at authority retirement" <| \_ ->
+            let
+                ids = List.range 1 22 |> List.map (\n -> "task-" ++ String.fromInt n)
+                base = sessionModel
+                loading = base.dataLoading
+                cards = base.cards
+                model = {base | activeTab=ProjectsTab,dataLoading={loading | visibleDetailDemand=Just (Set.empty,Set.fromList ids)},cards={cards | expandedCards=Dict.fromList (List.map (\id -> (id,True)) ids)}}
+                advance _ (current,withinBounds) =
+                    let
+                        requested = Sessions.reconcile (current,Cmd.none) |> Tuple.first
+                        requests = Dict.values requested.sessionDelivery.physical
+                        settled = List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) delivery) requested.sessionDelivery requests
+                    in
+                    ({requested | sessionDelivery=settled},withinBounds && Dict.size requested.sessionDelivery.resources <= 16 && List.length requests <= 2)
+                (ready,bounded) = List.foldl advance (model,True) (List.range 1 100)
+                retired = Sessions.reconcile ({ready | auth={status=AuthRequired,mode=Nothing}},Cmd.none) |> Tuple.first
+            in
+            Expect.equal {pages=44,hints=22,bounded=True,retiredPages=0,retiredHints=0}
+                {pages=Dict.size ready.sessions.taskPages,hints=Dict.size ready.sessions.taskHints,bounded=bounded,retiredPages=Dict.size retired.sessions.taskPages,retiredHints=Dict.size retired.sessions.taskHints}
+        , test "active and evidence cursors remain independent between tasks" <| \_ ->
+            let
+                cursor={createdAt="2026-10-24T00:00:00Z",id=sessionId}
+                advanced=Sessions.update (SessionsTaskNextPage "active:one" cursor) sessionModel |> Tuple.first
+                next=Sessions.update (SessionsTaskNextPage "terminated:two" cursor) advanced |> Tuple.first
+                back=Sessions.update (SessionsTaskPreviousPage "active:one") next |> Tuple.first
+            in
+            Expect.equal (Just Nothing,Just (Just cursor),Nothing)
+                (Dict.get "active:one" back.sessions.taskCursors,Dict.get "terminated:two" back.sessions.taskCursors,Dict.get "active:two" back.sessions.taskCursors)
+        , test "versioned history permits Sessions and preserves task/session context" <| \_ ->
+            let
+                base=sessionModel
+                state=base.sessions
+                scoped={base | url=let url=base.url in {url | fragment=Just ("tab=sessions&task=" ++ workspace ++ "&session=" ++ sessionId)},sessions={state | taskFilter=Just workspace}}
+                target=Helpers.observationHistoryUrl scoped
+                context=Url.fromString target |> Maybe.map Helpers.observationUrlContext
+            in
+            Expect.equal {tab=Just SessionsTab,notice=Just Nothing,task=True,session=True}
+                {tab=Maybe.map (.fragment >> .tab) context,notice=Maybe.map .notice context,task=String.contains ("task=" ++ workspace) target,session=String.contains ("session=" ++ sessionId) target}
+        , test "paired metadata failure retires a card download without trapping its save reservation" <| \_ ->
+            let
+                entered=Sessions.reconcile ({sessionModel | activeTab=ProjectsTab},Cmd.none) |> Tuple.first
+                state=entered.sessions
+                operation=SessionSaveOperation 1 sessionId 5 (String.repeat 64 "a") 1 0 "writing" False
+                downloading=Sessions.reconcile ({entered | sessions={state | selected=Nothing,save=Just operation,nextOperation=2},activeTab=ProjectsTab},Cmd.none) |> Tuple.first
+                (failed,_) = List.foldl (\request (delivery,ignored) -> if request.target==Delivery.SessionMetadata sessionId then (Delivery.settle request.id True (Err (Http.BadBody "metadata failed")) delivery,ignored) else (delivery,ignored)) (downloading.sessionDelivery,()) (Dict.values downloading.sessionDelivery.physical)
+                rejected=Sessions.reconcile ({downloading | sessionDelivery=failed},Cmd.none) |> Tuple.first
+            in
+            Expect.equal (Nothing,"Download could not finish. Please retry.") (rejected.sessions.save,rejected.sessions.saveMessage)
+        , test "zero-byte download emits its pinned final receipt after card caches are unmounted" <| \_ ->
+            let
+                entered=Sessions.reconcile ({sessionModel | activeTab=ProjectsTab},Cmd.none) |> Tuple.first
+                state=entered.sessions
+                operation=SessionSaveOperation 1 sessionId 0 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" 1 0 "writing" False
+                ready=Sessions.reconcile ({entered | activeTab=ProjectsTab,sessions={state | selected=Nothing,save=Just operation,nextOperation=2,taskPages=Dict.empty},sessionDelivery=Delivery.init},Cmd.none) |> Tuple.first
+            in
+            Expect.equal (Just True,0) (ready.sessions.save |> Maybe.map .pending,Dict.size ready.sessions.taskPages)
         ]
 
 

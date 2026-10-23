@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS } from '../src/session-viewer.js'
+import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, presentation } from '../src/session-viewer.js'
 const encode = value => new TextEncoder().encode(value)
 
 test('frames split UTF-8/CRLF and arbitrary JSON before Unicode decoding', () => {
@@ -75,4 +75,54 @@ test('overlapping finite older windows make a maximum-sized boundary record reac
   const older=window(olderStart,olderEnd), restored=older.rows.find(row=>row.offset===before.length)
   assert.equal(restored.raw.length,1048576);assert.equal(restored.delimiter,'\r\n')
   assert.equal(new Set(older.rows.map(row=>row.offset)).size,older.rows.length)
+})
+
+
+test('native Codex and Claude blocks retain full text and safely tolerate arbitrary nested JSON',()=>{
+ const long='full message '.repeat(1000)
+ const codex=presentation({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:long}]}},'')
+ assert.equal(JSON.parse(codex.text)[0].text,long)
+ assert.equal(presentation({type:'response_item',payload:{type:'message',role:{bad:true},content:42}},'').role,'assistant')
+ assert.equal(JSON.parse(presentation({type:'response_item',payload:{type:'message',content:'scalar text'}},'').text)[0].text,'scalar text')
+ const claude=presentation({type:'assistant',message:{role:'assistant',content:[{type:'thinking',thinking:'hidden'},{type:'tool_use',name:'Read',input:{file:'a'}},{type:'text',text:'**Ready**'}]}},'')
+ assert.deepEqual(JSON.parse(claude.text).map(b=>b.kind),['thinking','tool','text'])
+ for(const content of [null,true,42,'text',[null,false,42,'str',[],{type:'tool_result',content:42},{type:'tool_result',content:[null,42]},{type:'text',text:{bad:true}}]]) {
+  assert.doesNotThrow(()=>presentation({type:'assistant',message:{content}},''))
+  assert.doesNotThrow(()=>presentation({type:'response_item',payload:{type:'reasoning',summary:content}},''))
+ }
+ for(const value of [null,[],42,true,{unknown:'value'}])assert.equal(presentation(value,JSON.stringify(value)).type,'unknown')
+})
+
+test('native canonical messages suppress matching Codex event envelopes without altering offsets or raw bytes',()=>{
+ const records=[{type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'agent_message',message:'same'}},{type:'response_item',timestamp:'2026-10-24T10:00:00Z',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'same'}]}}]
+ const source=records.map(r=>JSON.stringify(r)+'\r\n').join(''),bytes=encode(source),framer=createRecordFramer()
+ const view=framer.push(0,bytes,true)
+ assert.equal(view.rows.length,1);assert.equal(view.rows[0].offset,encode(JSON.stringify(records[0])+'\r\n').length)
+ assert.equal(view.rows[0].raw,JSON.stringify(records[1]));assert.equal(view.rows[0].delimiter,'\r\n');assert.equal(view.through,bytes.length)
+})
+
+
+test('generic content selects its verified string and occurrence pairing preserves later repeated turns',()=>{
+ assert.equal(presentation({text:42,content:'hello'},'').text,'hello')
+ const message=(text,time)=>({type:'response_item',timestamp:time,payload:{type:'message',role:'user',content:[{type:'input_text',text}]}})
+ const event=(text,time)=>({type:'event_msg',timestamp:time,payload:{type:'user_message',message:text}})
+ for(const records of [
+  [message('Continue','2026-10-24T10:00:00.000Z'),event('Continue','2026-10-24T10:00:00.005Z'),event('Continue','2026-10-24T10:01:00Z')],
+  [event('Continue','2026-10-24T10:00:00Z'),message('Continue','2026-10-24T10:00:00Z'),event('Continue','2026-10-24T10:01:00Z')],
+  [message('Continue','2026-10-24T10:00:00Z'),event('Continue','2026-10-24T10:10:00Z')],
+  [message('Continue'),{type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'Done'}]}},event('Continue')],
+ ]) {
+  const bytes=encode(records.map(r=>JSON.stringify(r)).join('\n')+'\n')
+  const view=createRecordFramer().push(0,bytes,true)
+  assert.equal(view.rows.filter(row=>row.role==='user').length,2,'a matching canonical occurrence is never reused for a later turn')
+ }
+})
+
+
+test('missing or invalid timestamps preserve ambiguous opposite envelope occurrences',()=>{
+ for(const timestamp of [undefined,'invalid']){
+  const records=[{type:'response_item',timestamp,payload:{type:'message',role:'user',content:[{type:'input_text',text:'Continue'}]}},{type:'event_msg',timestamp,payload:{type:'user_message',message:'Continue'}}]
+  const bytes=encode(records.map(r=>JSON.stringify(r)).join('\n')+'\n')
+  assert.equal(createRecordFramer().push(0,bytes,true).rows.length,2)
+ }
 })

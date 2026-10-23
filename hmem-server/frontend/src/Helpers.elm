@@ -314,8 +314,8 @@ observationUrlContext url =
         validFields =
             List.length pairs == List.length parts
                 && List.length keys == Set.size (Set.fromList keys)
-                && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox", "search-jump" ]) keys
-                && (lookup "tab" |> Maybe.map (\tab -> List.member tab [ "projects", "observations", "timeline", "audit", "administration" ]) |> Maybe.withDefault True)
+                && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox", "search-jump", "session", "task" ]) keys
+                && (lookup "tab" |> Maybe.map (\tab -> List.member tab [ "projects", "observations", "timeline", "sessions", "audit", "administration" ]) |> Maybe.withDefault True)
                 && (lookup "focus" |> Maybe.map (\focus -> case String.split ":" focus of
                         [ kind, entityId ] -> List.member kind [ "project", "task", "memory" ] && not (String.isEmpty entityId)
                         _ -> False
@@ -432,7 +432,7 @@ observationUrl model context =
     let
         url = model.url
     in
-    Url.toString { url | path = "/workspace/" ++ Url.percentEncode (Maybe.withDefault "" model.selectedWorkspaceId), query = Nothing, fragment = Just (buildFragment model.activeTab model.focus.focusedEntity model.observations.selectedId ++ context) }
+    Url.toString { url | path = "/workspace/" ++ Url.percentEncode (Maybe.withDefault "" model.selectedWorkspaceId), query = Nothing, fragment = Just (buildFragment model.activeTab model.focus.focusedEntity model.observations.selectedId ++ sessionUrlContext model ++ context) }
 
 
 completeObservationUrl : Model -> Result String String
@@ -2135,3 +2135,11 @@ projectNextDemandIsActive projectId model =
                                     && visible (Set.insert id visited) parent)
     in
     Dict.get projectId model.cards.expandedCards == Just True && visible Set.empty projectId
+
+
+sessionUrlContext : Model -> String
+sessionUrlContext model =
+    if model.activeTab /= SessionsTab then "" else
+    model.url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (\pair -> case String.split "=" pair of
+        [key,encoded] -> if List.member key ["task","session"] then Url.percentDecode encoded |> Maybe.map (\value -> "&" ++ key ++ "=" ++ Url.percentEncode value) else Nothing
+        _ -> Nothing) |> String.join ""

@@ -2268,7 +2268,7 @@ viewTaskCardBody descendants projection showProject model task =
                 "Reopen the project before adding open subtasks."
     in
     div
-        ([ class ("card tree-card " ++ cardClass ++ taskCardAppearanceClass task.status maybeRollup ++ Feature.DragDrop.dragOverClass model task.id)
+        ([ class ("card tree-card " ++ cardClass ++ (if Feature.Sessions.taskActive task.workspaceId model task.id then " card-has-active-sessions" else "") ++ taskCardAppearanceClass task.status maybeRollup ++ Feature.DragDrop.dragOverClass model task.id)
         , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
         , id ("entity-" ++ task.id)
         , on "dragstart" (Decode.succeed (DragStartCard "task" task.id))
@@ -2301,7 +2301,8 @@ viewTaskCardBody descendants projection showProject model task =
                 , Feature.Editing.viewEditableText model "task" task.id "title" task.title
                 ]
             , div [ class "card-actions" ]
-                [ Feature.Move.viewAction model "task" task.id
+                [ Feature.Sessions.viewTaskIcon task.workspaceId model task.id
+                , Feature.Move.viewAction model "task" task.id
                 , Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
@@ -2393,13 +2394,15 @@ viewTaskCardBody descendants projection showProject model task =
 
                       else
                         text ""
+                    , Feature.Sessions.viewTaskActive task.workspaceId model task.id
                     , Feature.Dependencies.viewTaskDependencies model task.id deps
+                    , Feature.Sessions.viewTaskEvidence task.workspaceId model task.id
                     , Feature.AuditLog.viewEntityHistory model "task" task.id
                     ]
 
               else
                 text ""
-            , if model.focus.focusedEntity == Just ("task",task.id) then Feature.Sessions.viewTaskPanel task.workspaceId model task.id else text ""
+
             ]
         , div [ class "card-inline-actions" ]
             [ if Permissions.canEditCurrentWorkspace model then

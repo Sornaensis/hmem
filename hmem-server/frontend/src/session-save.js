@@ -60,6 +60,60 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     } catch { send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:'writer_cleanup_failed'}) }
   }
   document.addEventListener('click', event => {
+    const button=event.target.closest?.('[data-session-download]')
+    if(!button || button.disabled) return
+    event.preventDefault()
+    let config
+    try {config=JSON.parse(button.dataset.sessionDownload)} catch {return}
+    if(config.stamp!==stamp || activeSave) return
+    const owned={...config,retired:false,writer:null,native:null,picking:false,acquiring:true}
+    activeSave=owned
+    send({kind:'save-picking',stamp:owned.stamp,operation:owned.operation,session:owned.session})
+    ;(async()=>{
+      const filename=config.session.id+'.jsonl'
+      const trigger=async (file,cleanup=async()=>{})=>{
+        if(owned.retired || stamp!==owned.stamp) throw new Error('retired_download')
+        const url=window.URL.createObjectURL(file),link=document.createElement('a')
+        link.href=url;link.download=filename;link.click()
+        let disposed=false
+        const dispose=()=>{if(disposed)return;disposed=true;window.URL.revokeObjectURL(url);void cleanup().catch(()=>{})}
+        window.setTimeout(dispose,60000)
+        window.addEventListener?.('pagehide',dispose,{once:true})
+      }
+      let root,temporary
+      try {
+        if(window.navigator?.storage?.getDirectory) {
+          root=await (await window.navigator.storage.getDirectory()).getDirectoryHandle('hmem-downloads',{create:true})
+          let inspected=0
+          for await (const name of root.keys()) {
+            if(++inspected>32) break
+            const created=/^hmem-download-(\d+)-/.exec(name)?.[1]
+            if(created && Date.now()-Number(created)>60000) await root.removeEntry(name).catch(()=>{})
+          }
+          temporary='hmem-download-'+Date.now()+'-'+window.crypto.randomUUID()+'.jsonl'
+          const handle=await root.getFileHandle(temporary,{create:true})
+          const writable=await handle.createWritable()
+          let removed=false
+          const remove=async()=>{if(!removed){await root.removeEntry(temporary);removed=true}}
+          owned.native={write:bytes=>writable.write(bytes),async close(){try{await writable.close();await trigger(await handle.getFile(),remove)}catch(error){await remove();throw error}},async abort(){try{await writable.abort()}finally{await remove()}}}
+        }
+      } catch {
+        if(root&&temporary) await root.removeEntry(temporary).catch(()=>{})
+      }
+      if(!owned.native) {
+        // Older browsers retain a finite download in memory; never allocate
+        // unbounded transcripts when durable temporary storage is unavailable.
+        if(config.session.finalBytes>33554432) throw new Error('download_storage_unavailable')
+        let chunks=[]
+        owned.native={async write(bytes){chunks.push(bytes)},async close(){await trigger(new Blob(chunks,{type:'application/x-ndjson'}));chunks=[]},async abort(){chunks=[]}}
+      }
+      owned.acquiring=false
+      owned.writer=createEvidenceWriter(owned.native,owned.session,()=>activeSave===owned&&!owned.retired&&stamp===owned.stamp)
+      if(owned.retired || stamp!==owned.stamp){await retireSave(owned);return}
+      send({kind:'save-ready',stamp:owned.stamp,operation:owned.operation})
+    })().catch(async error=>{owned.acquiring=false;await retireSave(owned);send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:error.message==='download_storage_unavailable'?'download_storage_unavailable':'download_failed'})})
+  })
+  document.addEventListener('click', event => {
     const button = event.target.closest?.('[data-session-save]')
     if (!button || button.disabled) return
     event.preventDefault()

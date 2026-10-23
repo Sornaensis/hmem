@@ -114,9 +114,8 @@ test('production Sessions uses canonical authenticated resources and direct task
       if(invalidResume&&body.scope.workspace_id===workspace.id){invalidResume=false;body.resume_token='expired-browser-resume';await route.continue({postData:JSON.stringify(body)})}
       else await route.continue()
     })
-    // Only the chooser is substituted: this returns a real OPFS file handle
-    // and its native writable. HTTP bytes, production writer/hash and close
-    // remain unchanged. The native OS chooser is deliberately not exercised.
+    // Production downloads use the browser's native OPFS staging and verified
+    // bytes. The test reads the actual resulting browser download independently.
     await context.addInitScript(()=>{
       // Observe native XHR completion before Elm's subsequently registered
       // load/error listener can admit its replacement. Playwright's remote
@@ -130,12 +129,7 @@ test('production Sessions uses canonical authenticated resources and direct task
         open(method,url,...rest){this.metricPath=new URL(url,location.href).pathname;return super.open(method,url,...rest)}
         send(...args){if(this.metricPath.includes('/sessions')){this.metricId=++next;active.add(this);metrics.peak=Math.max(metrics.peak,active.size);metrics.events.push({id:this.metricId,phase:'send',path:this.metricPath,time:performance.now()});if(metrics.events.length>64)metrics.events.shift()}return super.send(...args)}
       }
-      window.showSaveFilePicker = async()=>{
-        const root=await navigator.storage.getDirectory()
-        const handle=await root.getFileHandle('session-evidence.jsonl',{create:true})
-        window.__sessionEvidence=handle
-        return handle
-      }
+
     })
     await context.addCookies([{name:'hmem_session',value:'sandbox-session-token',url:origin},{name:'hmem_csrf',value:'sandbox-csrf-token',url:origin}])
     page = await context.newPage()
@@ -164,9 +158,12 @@ test('production Sessions uses canonical authenticated resources and direct task
     page.on('pageerror', error => errors.push(error.message))
     await page.goto(origin+'/workspace/'+workspace.id+'#tab=sessions&session='+id)
     await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor()
-    assert.equal(await page.getByLabel('Lifecycle',{exact:true}).evaluate(element=>element.selectedOptions[0]?.textContent),'All')
-    assert.equal(await page.getByLabel('Heartbeat',{exact:true}).evaluate(element=>element.selectedOptions[0]?.textContent),'All')
-    await page.getByRole('link',{name:task.title,exact:true}).waitFor()
+    assert.equal(await page.getByLabel('Status',{exact:true}).evaluate(element=>element.selectedOptions[0]?.textContent),'All')
+    assert.equal(await page.getByLabel('Activity',{exact:true}).evaluate(element=>element.selectedOptions[0]?.textContent),'All')
+    assert.equal(await page.locator('.session-linked-tasks').getAttribute('open'),null)
+    await page.locator('.session-linked-tasks summary').click()
+    await page.getByRole('link',{name:task.title,exact:false}).waitFor()
+    await page.locator('.session-linked-tasks summary').click()
     assert.equal(await page.locator('.session-summary').count(),1)
     await until(async()=>await page.locator('.session-record').count()===2,'initial byte viewer')
     assert.equal(await page.locator('.session-record-text').first().innerText(),'Hello from a real session λ')
@@ -213,21 +210,22 @@ test('production Sessions uses canonical authenticated resources and direct task
       assert.equal(offset,expectedBytes);assert.equal(hash.digest('hex'),expectedHash)
     }
     await evidence(id,original.length,sha(original))
-    await page.getByRole('button',{name:'Save original evidence',exact:true}).waitFor()
-    await page.getByRole('button',{name:'Save original evidence',exact:true}).click()
-    await page.getByText('Saved '+original.length+' original bytes. SHA-256 verified.',{exact:true}).waitFor()
-    const savedSize=await page.evaluate(async()=> (await window.__sessionEvidence.getFile()).size)
-    const savedHash=createHash('sha256');let savedBytes=0
-    for(let offset=0;offset<savedSize;offset+=65536){
-      const part=await page.evaluate(async({offset})=>Array.from(new Uint8Array(await (await window.__sessionEvidence.getFile()).slice(offset,offset+65536).arrayBuffer())),{offset})
-      savedHash.update(Buffer.from(part));savedBytes+=part.length
-    }
+    const smallDownloadEvent=page.waitForEvent('download')
+    await page.getByRole('button',{name:/Download session/}).click()
+    const smallDownload=await smallDownloadEvent
+    const downloadedSmall=await readFile(await smallDownload.path())
+    const savedBytes=downloadedSmall.length
+    const savedHash=createHash('sha256').update(downloadedSmall)
     assert.equal(savedBytes,original.length);assert.equal(savedHash.digest('hex'),sha(original))
     await page.screenshot({path:join(tmpdir(),'sessions-first-page.png'),fullPage:true})
-    await page.getByRole('link',{name:task.title,exact:true}).click()
+    await page.locator('.session-linked-tasks summary').click()
+    await page.getByRole('link',{name:task.title,exact:false}).click()
     await until(() => page.url().includes('focus=task'), 'task navigation')
-    await page.getByRole('region',{name:'Task sessions and evidence'}).getByRole('link').first().waitFor()
-    await page.getByRole('region',{name:'Task sessions and evidence'}).getByRole('link').first().click()
+    const focusedCard=page.locator('#entity-'+task.id)
+    await focusedCard.locator('.btn-extras-toggle').click()
+    await focusedCard.locator('.task-session-evidence summary').click()
+    await focusedCard.locator('.task-session-evidence a').first().waitFor()
+    await focusedCard.locator('.task-session-evidence a').first().click()
     await until(()=>page.url().includes('session='+id),'task evidence navigates back to exact session')
     console.log(JSON.stringify({phase:'small-live-pause-navigation-save',savedBytes,sha256:sha(original)}))
     // Larger than the viewer window and the four raw-range retention slots.
@@ -271,7 +269,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     assert.deepEqual(await page.locator('.session-record').allTextContents(),rows,'accepted snapshot preserves paused rows')
     assert.equal(await viewport.evaluate(element=>element.scrollTop),anchor,'late callbacks preserve paused scroll anchor')
     console.log(JSON.stringify({phase:'paused-canonical-resync',ticketConflicts,resyncs,anchor}))
-    await page.getByRole('button',{name:'Load older window',exact:true}).click()
+    await page.getByRole('button',{name:'Older messages',exact:true}).click()
     await until(async()=>await page.locator('.session-record').filter({hasText:'boundary'}).count()===1,'one large record across more than four chunks',30000)
     const offsets=await page.locator('.session-record').evaluateAll(elements=>elements.map(element=>element.getAttribute('data-offset')))
     assert.equal(new Set(offsets).size,offsets.length,'overlap contains no duplicate record offsets')
@@ -279,13 +277,11 @@ test('production Sessions uses canonical authenticated resources and direct task
     await boundary.locator('summary').click()
     assert.equal(await boundary.locator('.session-record-raw').textContent(),largeRecord.toString('utf8'))
     await call(base+'/'+largeId+'/terminate','POST',{expected_offset:count,expected_revision:revision,final_bytes:count,final_sha256:largeHash})
-    await page.getByRole('button',{name:'Save original evidence',exact:true}).click()
-    await page.getByText('Saved '+count+' original bytes. SHA-256 verified.',{exact:true}).waitFor({timeout:60000})
-    const largeSavedSize=await page.evaluate(async()=> (await window.__sessionEvidence.getFile()).size),independent=createHash('sha256');let largeSavedBytes=0
-    for(let offset=0;offset<largeSavedSize;offset+=65536){
-      const part=await page.evaluate(async offset=>Array.from(new Uint8Array(await (await window.__sessionEvidence.getFile()).slice(offset,offset+65536).arrayBuffer())),offset)
-      independent.update(Buffer.from(part));largeSavedBytes+=part.length
-    }
+    const largeDownloadEvent=page.waitForEvent('download')
+    await page.getByRole('button',{name:/Download session/}).click()
+    const largeDownload=await largeDownloadEvent
+    const downloadedLarge=await readFile(await largeDownload.path())
+    const largeSavedBytes=downloadedLarge.length,independent=createHash('sha256').update(downloadedLarge)
     assert.equal(largeSavedBytes,count);assert.equal(independent.digest('hex'),largeHash)
     await evidence(largeId,count,largeHash)
     console.log(JSON.stringify({phase:'large-older-window-and-verified-save',largeSavedBytes,largeHash,largeRecordBytes:largeRecord.length}))
@@ -300,9 +296,9 @@ test('production Sessions uses canonical authenticated resources and direct task
     for(let i=0;i<51;i++)await call(base,'POST',{id:randomUUID(),format_label:'Empty active '+i})
     await page.getByRole('link',{name:'Close session',exact:true}).click()
     await until(async()=>await page.locator('.session-summary').count()===50,'first bounded fifty summaries')
-    await page.getByLabel('Lifecycle',{exact:true}).selectOption('terminated')
+    await page.getByLabel('Status',{exact:true}).selectOption('terminated')
     await until(async()=>await page.locator('.session-summary').count()===2,'sealed filter before pagination')
-    await page.getByLabel('Lifecycle',{exact:true}).selectOption('active')
+    await page.getByLabel('Status',{exact:true}).selectOption('active')
     await until(async()=>await page.locator('.session-summary').count()===50,'active first page')
     let heldRelease,heldStarted=false
     const held=new Promise(done=>{heldRelease=done})
@@ -315,23 +311,24 @@ test('production Sessions uses canonical authenticated resources and direct task
         await route.fulfill({response})
       }else await route.continue()
     })
-    await page.getByLabel('Heartbeat',{exact:true}).selectOption('fresh')
+    await page.getByLabel('Activity',{exact:true}).selectOption('fresh')
     await until(()=>heldStarted,'controlled canonical list request')
     await page.getByText('Loading sessions…',{exact:true}).waitFor()
-    await page.getByLabel('Lifecycle',{exact:true}).selectOption('terminated')
-    await page.getByLabel('Heartbeat',{exact:true}).selectOption('')
+    await page.getByLabel('Status',{exact:true}).selectOption('terminated')
+    await page.getByLabel('Activity',{exact:true}).selectOption('')
     await until(async()=>await page.locator('.session-summary').count()===2,'new filter while old callback is held')
     heldRelease()
     await pause(150)
     assert.equal(await page.locator('.session-summary').count(),2,'late old-query callback cannot replace current filtered page')
     await context.unroute('**/sessions?*')
-    await page.getByLabel('Lifecycle',{exact:true}).selectOption('active')
+    await page.getByLabel('Status',{exact:true}).selectOption('active')
     await until(async()=>await page.locator('.session-summary').count()===50,'active page after stale callback')
     await page.getByRole('button',{name:'Older sessions',exact:true}).click()
     await until(async()=>await page.locator('.session-summary').count()===1,'keyset continuation final page')
     await page.locator('.session-summary a').click()
     await page.getByText('This session has no committed records.',{exact:true}).waitFor()
-    await page.getByText('No linked tasks.',{exact:true}).waitFor()
+    await page.getByText('No linked tasks.',{exact:true}).waitFor({state:'attached'})
+    assert.equal(await page.locator('.session-linked-tasks').getAttribute('open'),null)
     const empty=await call('/api/v1/workspaces','POST',{name:'Empty sessions scope',workspace_type:'repository'})
     await completeDocument('large-viewer-save-and-filter-paging')
     await page.goto(origin+'/workspace/'+empty.id+'#tab=sessions')
@@ -355,10 +352,10 @@ test('production Sessions uses canonical authenticated resources and direct task
     await until(async()=>(await uploader.tool('session_upload_status',{session_id:liveId})).status==='terminated','live follower discovers normal MCP termination',30000)
     assert.equal((await call(base+'/'+liveId)).committed_bytes,liveBytes.length)
     assert.deepEqual(errors,[])
-    console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,chooser:'OPFS-handle-only',nativeChooserTested:false}))
+    console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,download:'native-OPFS-and-browser-download'}))
   } catch (error) {
     if(page) {
-      console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-save [role=status]').allTextContents()).slice(0,2)}))
+      console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-download-status').allTextContents()).slice(0,2)}))
       await page.screenshot({path:join(tmpdir(),'sessions-first-page-failure.png'),fullPage:true})
     }
     failed = error; throw error

@@ -1289,6 +1289,13 @@ type alias SessionsModel =
     , saveMessage : String
     , heartbeats : Dict String String
     , lastFilterRefresh : Float
+    , taskPages : Dict String { result : Result String Api.SessionPage, epoch : Int, cursor : Maybe Api.SessionCursor }
+    , taskHints : Dict String { active : Bool, error : Bool, epoch : Int }
+    , sectionOrder : List String
+    , hintOrder : List String
+    , taskFilter : Maybe String
+    , taskCursors : Dict String (Maybe Api.SessionCursor)
+    , taskPreviousPages : Dict String (List (Maybe Api.SessionCursor))
     , taskPanel : Maybe String
     , taskCursor : Maybe Api.SessionCursor
     , taskPrevious : List (Maybe Api.SessionCursor)
@@ -1304,7 +1311,7 @@ emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, owned = []
     , filters = Api.defaultSessionFilters, stamp = "", generation = 0, bridgedGeneration = -1, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveCapability = Nothing, save = Nothing, nextOperation = 1, saveMessage = ""
-    , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
+    , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
 
 
 type alias SessionSaveOperation =
@@ -1410,8 +1417,8 @@ type Msg
     | SessionsBridgeEvent Encode.Value
     | SessionsTick Time.Posix
     | SessionsCancelSave
-    | SessionsTaskNextPage Api.SessionCursor
-    | SessionsTaskPreviousPage
+    | SessionsTaskNextPage String Api.SessionCursor
+    | SessionsTaskPreviousPage String
     | RemoveSessionResource String Feature.SessionDelivery.Target
     | SessionResourceFetched Int CanonicalRequestGuard (Result Http.Error Feature.SessionDelivery.Payload)
     | CanonicalWorkspaceFetched CanonicalRequestGuard String (Result Http.Error Api.Workspace)

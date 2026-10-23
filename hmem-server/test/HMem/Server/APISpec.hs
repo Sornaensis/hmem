@@ -348,7 +348,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       child <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "ready child" Nothing (Just 9) Nothing)
       blocked <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just parent.id) "blocked child" Nothing Nothing Nothing)
       prerequisite <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "prerequisite" Nothing Nothing Nothing)
-      Task.addDependency env.pool blocked.id prerequisite.id
+      Task.addDependency env.pool blocked.id child.id
       ready <- request app methodGet (pauseProjectPath project.id <> "/next-tasks?limit=1") ""
       responseStatus ready `shouldBe` status200
       let Just [candidate] = decode (responseBody ready) :: Maybe [NextTaskCandidate]

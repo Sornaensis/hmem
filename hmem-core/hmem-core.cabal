@@ -17,6 +17,7 @@ build-type:     Simple
 library
   exposed-modules:
       HMem.AgentSession
+      HMem.AgentSession.Transport
       HMem.BotIdentity
       HMem.Config
       HMem.DB.AgentSession
@@ -66,6 +67,7 @@ library
       aeson >=2.0
     , async
     , base >=4.7 && <5
+    , base64-bytestring
     , bytestring
     , containers
     , crypton
@@ -138,6 +140,7 @@ test-suite hmem-core-test
     , aeson >=2.0
     , async
     , base >=4.7 && <5
+    , base64-bytestring
     , bytestring
     , containers
     , crypton

@@ -13,9 +13,12 @@ import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.OpenApi
 import Data.Proxy (Proxy(..))
 import Data.Text (Text)
+import Data.List (isInfixOf)
 import Servant.OpenApi (toOpenApi)
 
-import HMem.Server.API (HMemAPI, CreateObservationRequest, ReviewedObservationRequest, ObservationMatchRequest, ObservationCountRequest, LinkDependencyRequest, UpdateWorkspaceRequest)
+import HMem.Server.API (HMemAPI, CreateObservationRequest, ReviewedObservationRequest, ObservationMatchRequest, ObservationCountRequest, LinkDependencyRequest, UpdateWorkspaceRequest, AgentSessionRequest)
+import HMem.AgentSession qualified as AgentSession
+import HMem.AgentSession.Transport qualified as SessionWire
 import HMem.Types
 import HMem.BotIdentity (BotIdentity)
 
@@ -27,10 +30,12 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
   & components . schemas . at "ObservationContentConflict" ?~ observationContentConflictSchema
   & paths . traversed . parameters %~ (<> [Inline botIdentityHeader])
+  & paths %~ InsOrdMap.mapWithKey documentSessionPath
   & tags .~ InsOrdSet.fromList
       [ Tag "Observations" (Just "Repository-scoped, provenance-bound observations.") Nothing
       , Tag "Workspace Groups" (Just "Global-superadmin workspace group management.") Nothing
       , Tag "Timeline" (Just "Workspace lifecycle timeline and histogram.") Nothing
+      , Tag "Agent Sessions" (Just "Workspace-scoped JSONL capture and immutable task evidence.") Nothing
       ]
   & paths . at "/api/v1/groups" . _Just . get %~ fmap tagWorkspaceGroups
   & paths . at "/api/v1/groups" . _Just . post %~ fmap tagWorkspaceGroups
@@ -65,6 +70,31 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . post %~ fmap documentDependencyAdd
   & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
   where
+    documentSessionPath path item
+      | "/sessions" `isInfixOf` path = let document operation = documentSession operation
+                                              & parameters . traversed %~ sessionParameter path
+          in item & get %~ fmap document & post %~ fmap document & put %~ fmap document
+      | otherwise = item
+    sessionParameter path parameterRef = case parameterRef of
+      Inline parameter -> let bound = if "/transcript" `isInfixOf` path || "/evidence" `isInfixOf` path then 1048576 else 100
+          in case parameter ^. name of
+            "limit" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ bound))
+            "offset" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiInteger & format ?~ "int64" & minimum_ ?~ 0))
+            "before_created_at" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "date-time"))
+            name | name `elem` ["before_id","after_task_id"] -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid"))
+            _ -> parameterRef
+      _ -> parameterRef
+    documentSession operation = operation
+      & tags .~ InsOrdSet.singleton "Agent Sessions"
+      & description ?~ "Workspace read permission for GET; edit permission for mutations, with normal cookie CSRF and bot attribution. Session ownership is immutable and task links are additive within the workspace. Create uses caller id and format_label. Lists use limit 1..100 (default50), paired before_created_at/before_id keyset cursors; session tasks use after_task_id. Ranges use offset>=0, limit1..1048576 (default65536). Transcript requires active state; evidence requires terminated state and includes the final receipt. Appends require expected_offset/expected_revision and canonical padded data_base64<=1398104 characters/1MiB decoded. Session mutation requests are capped at2MiB before JSON decode, including chunked bodies. Terminate independently verifies already committed prefix size/SHA256 and cursor; it never uploads or changes task status. An exact create/append/terminate retry is safe."
+      & responses %~ (<> Responses Nothing (InsOrdMap.fromList
+          [(400, Inline (mempty & description .~ "Invalid JSONL/base64/cursors/limits or missing credential-bot declaration; no mutation."))
+          ,(401, Inline (mempty & description .~ "Authentication required."))
+          ,(403, Inline (mempty & description .~ "Workspace permission or cookie CSRF verification required."))
+          ,(404, Inline (mempty & description .~ "Authorized workspace/session/task missing, foreign or deleted."))
+          ,(409, Inline (mempty & description .~ "Cursor, replay, receipt or session state conflict; no mutation."))
+          ,(413, Inline (mempty & description .~ "Encoded body/base64 or decoded chunk exceeds a published limit; no mutation."))
+          ,(504, Inline (mempty & description .~ "Session database operation timed out."))]))
     documentProjectPause operation = operation
       & description ?~ "Pausing cascades inherited pause to eligible descendant projects and automatic blocking to unfinished tasks/subtasks. Running descendants refuse the entire pause. Closed projects must reopen first. Resume returns eligible automatic blocks to todo while preserving manual, dependency, subtask and independent/ancestor pause causes. The flattened canonical Project response includes bounded pause_effects."
       & responses %~ (<> Responses Nothing (InsOrdMap.fromList [(409, Inline (mempty & description .~ "Authenticated lifecycle refusal with bounded running-task guidance; no mutation occurred."))]))
@@ -175,6 +205,32 @@ capNavigationOffsetSchema schemaRef = case schemaRef of
 
 opts :: SchemaOptions
 opts = defaultSchemaOptions { fieldLabelModifier = camelToSnake }
+
+instance ToSchema AgentSession.SessionState where
+  declareNamedSchema _ = pure $ NamedSchema (Just "AgentSessionState") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["active","terminated"])
+instance ToSchema AgentSession.AgentSession where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema AgentSession.SessionPageCursor where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema AgentSession.SessionTask where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema a => ToSchema (AgentSessionRequest a) where declareNamedSchema _ = declareNamedSchema (Proxy @a)
+instance ToSchema SessionWire.CreateSessionRequest where
+  declareNamedSchema proxy = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts proxy
+    pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False)
+instance ToSchema SessionWire.AppendSessionRequest where
+  declareNamedSchema proxy = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts proxy
+    pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
+      & required %~ filter (/="allow_final_record") & properties . at "data_base64" ?~ Inline
+      (mempty & type_ ?~ OpenApiString & maxLength ?~ 1398104 & description ?~ "Canonical padded standard base64; at most1048576 decoded bytes."))
+instance ToSchema SessionWire.TerminateSessionRequest where
+  declareNamedSchema proxy = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts proxy
+    pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
+      & properties . at "final_sha256" ?~ Inline (mempty & type_ ?~ OpenApiString & pattern ?~ "^[0-9a-f]{64}$"))
+instance ToSchema SessionWire.AppendSessionResponse where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionWire.SessionPageResponse where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionWire.SessionTaskPageResponse where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionWire.SessionRangeResponse where declareNamedSchema = genericDeclareNamedSchema opts
 
 instance ToSchema Value where declareNamedSchema _ = pure (NamedSchema (Just "JSONValue") mempty)
 instance ToSchema a => ToSchema (FieldUpdate a) where declareNamedSchema _ = declareNamedSchema (Proxy @a)

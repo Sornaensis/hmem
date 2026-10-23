@@ -21,6 +21,8 @@ module HMem.Server.API
   , serverWithChangeStream
   , serverWithDiscovery
   , prepareObservationDiscovery
+  , AgentSessionRequest
+  , authorizeAgentSessionWrite
   ) where
 
 import Control.Exception (try, throwIO)
@@ -32,6 +34,7 @@ import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isNothing, fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
@@ -49,6 +52,9 @@ import Servant
 import System.IO (stderr)
 
 import HMem.Config qualified as Config
+import HMem.AgentSession qualified as AgentSession
+import HMem.AgentSession.Transport qualified as SessionWire
+import HMem.DB.AgentSession qualified as AgentSessions
 import HMem.DB.Audit qualified as Audit
 import HMem.DB.ChangeStream qualified as ChangeStream
 import HMem.DB.Auth qualified as Auth
@@ -127,6 +133,23 @@ type WorkspaceAPI =
          :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime
          :> QueryParam "limit" Int :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult WorkspaceTimelineEvent)
+  :<|> Capture "workspaceId" UUID :> "sessions" :> AgentSessionAPI
+  :<|> Capture "workspaceId" UUID :> "tasks" :> Capture "taskId" UUID :> "sessions"
+         :> QueryParam "limit" Text :> QueryParam "before_created_at" Text :> QueryParam "before_id" Text
+         :> Get '[JSON] SessionWire.SessionPageResponse
+
+type AgentSessionAPI =
+       QueryParam "limit" Text :> QueryParam "before_created_at" Text :> QueryParam "before_id" Text
+         :> Get '[JSON] SessionWire.SessionPageResponse
+  :<|> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.CreateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
+  :<|> Capture "sessionId" UUID :> Get '[JSON] AgentSession.AgentSession
+  :<|> Capture "sessionId" UUID :> "append" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.AppendSessionRequest) :> Post '[JSON] SessionWire.AppendSessionResponse
+  :<|> Capture "sessionId" UUID :> "heartbeat" :> Post '[JSON] AgentSession.AgentSession
+  :<|> Capture "sessionId" UUID :> "tasks" :> QueryParam "limit" Text :> QueryParam "after_task_id" Text :> Get '[JSON] SessionWire.SessionTaskPageResponse
+  :<|> Capture "sessionId" UUID :> "tasks" :> Capture "taskId" UUID :> Put '[JSON] NoContent
+  :<|> Capture "sessionId" UUID :> "terminate" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.TerminateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
+  :<|> Capture "sessionId" UUID :> "transcript" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Get '[JSON] SessionWire.SessionRangeResponse
+  :<|> Capture "sessionId" UUID :> "evidence" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Get '[JSON] SessionWire.SessionRangeResponse
 
 type WorkspaceGroupAPI =
        QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult WorkspaceGroup)
@@ -297,6 +320,14 @@ newtype UpdateWorkspaceRequest = UpdateWorkspaceRequest (Either Text UpdateWorks
 -- not-found privacy run before the caller sees a body error.
 data TolerantJSON
 
+-- Parsing is deferred until workspace/session authorization has succeeded.
+-- Do not retain parser diagnostics: they can contain uploaded record fragments.
+newtype AgentSessionRequest a = AgentSessionRequest (Either Text a)
+instance FromJSON a => MimeUnrender TolerantJSON (AgentSessionRequest a) where
+  mimeUnrender _ body = Right $ AgentSessionRequest $ case Aeson.eitherDecode body of
+    Left _ -> Left "Invalid session request JSON"
+    Right parsed -> Right parsed
+
 instance Accept TolerantJSON where
   contentType _ = "application" // "json"
 
@@ -429,6 +460,150 @@ authError = \case
 
 page :: Maybe Int -> Maybe Int -> (Int, Int)
 page = capPagination
+
+sessionError :: ServerError -> Text -> Text -> ServerError
+sessionError status kind message = status
+  { errBody = Aeson.encode (object ["error" .= kind, "message" .= message])
+  , errHeaders = [("Content-Type","application/json")]
+  }
+
+-- Session payloads may contain secrets. Never pass an exception's Show value
+-- through the generic database logger or echo database/parser details.
+handleSessionErrors :: IO a -> Handler a
+handleSessionErrors action = do
+  result <- liftIO $ try @DBException (try @AgentSession.SessionException action)
+  case result of
+    Right (Right value) -> pure value
+    Right (Left exception) -> throwError $ case exception.code of
+      AgentSession.SessionNotFound -> sessionError err404 "session_not_found" "Session or task not found"
+      AgentSession.SessionConflict -> sessionError err409 "session_conflict" "Session cursor, receipt or immutable metadata conflicts"
+      AgentSession.SessionTerminated -> sessionError err409 "session_terminated" "Session is terminated"
+      AgentSession.SessionInvalidInput -> sessionError err400 "session_invalid_input" "Invalid session cursor, metadata or bounds"
+    Left exception -> throwError $ case exception of
+      DBCheckViolation{} -> sessionError err400 "session_invalid_input" "Invalid JSONL record or session constraint"
+      DBForeignKeyViolation{} -> sessionError err404 "session_not_found" "Session or task not found"
+      DBUniqueViolation{} -> sessionError err409 "session_conflict" "Concurrent session mutation conflicts"
+      DBSerializationFailure -> sessionError err409 "session_conflict" "Concurrent session mutation conflicts"
+      DBStatementTimeout -> sessionError err504 "session_timeout" "Session operation timed out"
+      _ -> sessionError err500 "session_internal" "Session operation failed"
+
+requireSessionWorkspace :: Pool Hasql.Connection -> UUID -> Auth.WorkspaceRole -> Handler ()
+requireSessionWorkspace pool workspace role = do
+  principal <- liftIO currentPrincipal
+  allowed <- handleSessionErrors (Auth.authorizeWorkspace pool principal workspace role)
+  case allowed of
+    Left Auth.MissingPrincipal -> throwError $ sessionError err401 "unauthorized" "Authentication required"
+    Left _ -> throwError $ sessionError err403 "forbidden" "Workspace permission required"
+    Right () -> pure ()
+  active <- handleSessionErrors $ runSession pool $ Session.statement () $ run $ select $ do
+    row <- each workspaceSchema
+    where_ (row.wsId ==. lit workspace &&. activeWorkspace row)
+    pure row.wsId
+  case active of [] -> throwError $ sessionError err404 "workspace_not_found" "Active workspace not found"; _ -> pure ()
+
+-- Used by the WAI body limiter before it consumes any session mutation body.
+authorizeAgentSessionWrite :: Pool Hasql.Connection -> UUID -> Handler ()
+authorizeAgentSessionWrite pool workspace = requireSessionWorkspace pool workspace Auth.WorkspaceRoleEdit
+
+requireAgentSession :: Pool Hasql.Connection -> UUID -> UUID -> Handler AgentSession.AgentSession
+requireAgentSession pool workspace identifier =
+  handleSessionErrors (AgentSessions.getSession pool workspace identifier)
+    >>= maybe (throwError $ sessionError err404 "session_not_found" "Session not found") pure
+
+requireSessionTask :: Pool Hasql.Connection -> UUID -> UUID -> Handler ()
+requireSessionTask pool workspace identifier = do
+  task <- handleSessionErrors (Task.getTask pool identifier)
+  case task of
+    Just row | row.workspaceId == workspace -> pure ()
+    _ -> throwError $ sessionError err404 "task_not_found" "Active same-workspace task not found"
+
+parseSessionParam :: FromHttpApiData a => Text -> Handler a
+parseSessionParam value = either (const $ throwError $ sessionError err400 "validation_error" "Invalid session query parameter") pure (parseQueryParam value)
+
+sessionCursor :: Maybe Text -> Maybe Text -> Handler (Maybe AgentSession.SessionPageCursor)
+sessionCursor Nothing Nothing = pure Nothing
+sessionCursor (Just timestamp) (Just identifier) = Just <$> (AgentSession.SessionPageCursor <$> parseSessionParam timestamp <*> parseSessionParam identifier)
+sessionCursor _ _ = throwError $ sessionError err400 "validation_error" "Both before_created_at and before_id are required for continuation"
+
+sessionLimit :: Maybe Text -> Handler Int
+sessionLimit input = do
+  limit <- maybe (pure 50) parseSessionParam input
+  when (limit < 1 || limit > AgentSession.maxSessionPageSize) $
+    throwError $ sessionError err400 "validation_error" "Session page limit must be between 1 and 100"
+  pure limit
+
+sessionRequest :: AgentSessionRequest a -> Handler a
+sessionRequest (AgentSessionRequest result) = either (const $ throwError $ sessionError err400 "validation_error" "Invalid session request JSON") pure result
+
+sessionIO :: Pool Hasql.Connection -> UUID -> IO a -> Handler a
+sessionIO _ workspace = handleSessionErrors . withWorkspaceIdContext (Just workspace)
+
+agentSessions :: Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
+agentSessions pool workspace = listH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated
+  where
+    readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
+    writeAccess = authorizeAgentSessionWrite pool workspace
+    listH rawLimit timestamp identifier = do
+      readAccess
+      limit <- sessionLimit rawLimit
+      cursor <- sessionCursor timestamp identifier
+      pageResult <- sessionIO pool workspace $ AgentSessions.listWorkspaceSessions pool workspace cursor limit
+      pure $ SessionWire.SessionPageResponse pageResult.items pageResult.nextCursor
+    createH request = do
+      writeAccess
+      input <- sessionRequest request
+      sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel)
+    getH identifier = readAccess >> requireAgentSession pool workspace identifier
+    appendH identifier request = do
+      writeAccess
+      _ <- requireAgentSession pool workspace identifier
+      input <- sessionRequest request
+      bytes <- case SessionWire.decodeSessionBytes input.dataBase64 of
+        Left SessionWire.SessionBytesTooLarge -> throwError $ sessionError err413 "session_too_large" "Session chunk exceeds 1 MiB"
+        Left SessionWire.SessionBase64Invalid -> throwError $ sessionError err400 "validation_error" "data_base64 must use canonical padded standard base64"
+        Right value -> pure value
+      result <- sessionIO pool workspace $ AgentSessions.appendSession pool workspace identifier
+        (AgentSession.AppendSession input.expectedOffset input.expectedRevision bytes input.allowFinalRecord)
+      pure $ SessionWire.AppendSessionResponse result.session result.replayed
+    heartbeatH identifier = do
+      writeAccess
+      sessionIO pool workspace $ AgentSessions.heartbeatSession pool workspace identifier
+    tasksH identifier rawLimit rawAfter = do
+      readAccess
+      _ <- requireAgentSession pool workspace identifier
+      limit <- sessionLimit rawLimit
+      after <- traverse parseSessionParam rawAfter
+      result <- sessionIO pool workspace $ AgentSessions.listSessionTasks pool workspace identifier after limit
+      pure $ SessionWire.SessionTaskPageResponse result.items result.nextTaskId
+    associateH identifier task = do
+      writeAccess
+      _ <- requireAgentSession pool workspace identifier
+      requireSessionTask pool workspace task
+      sessionIO pool workspace $ AgentSessions.associateSessionTask pool workspace identifier task
+      pure NoContent
+    terminateH identifier request = do
+      writeAccess
+      _ <- requireAgentSession pool workspace identifier
+      input <- sessionRequest request
+      sessionIO pool workspace $ AgentSessions.terminateSession pool workspace identifier
+        (AgentSession.TerminateSession input.expectedOffset input.expectedRevision input.finalBytes input.finalSha256)
+    rangeH expectedState identifier rawOffset rawLimit = do
+      readAccess
+      offset <- maybe (pure 0) (parseSessionParam @Int64) rawOffset
+      limit <- maybe (pure SessionWire.defaultSessionRangeBytes) parseSessionParam rawLimit
+      result <- sessionIO pool workspace $ AgentSessions.readSessionRange pool workspace identifier offset limit
+      when (result.session.state /= expectedState) $
+        throwError $ sessionError err409 "session_state_conflict" "Use transcript for active sessions and evidence for terminated sessions"
+      pure $ SessionWire.SessionRangeResponse result.session result.offset (SessionWire.encodeSessionBytes result.bytes) result.nextOffset result.hasMore
+
+taskAgentSessions :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Text -> Maybe Text -> Maybe Text -> Handler SessionWire.SessionPageResponse
+taskAgentSessions pool workspace task rawLimit timestamp identifier = do
+  requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
+  requireSessionTask pool workspace task
+  limit <- sessionLimit rawLimit
+  cursor <- sessionCursor timestamp identifier
+  result <- sessionIO pool workspace $ AgentSessions.listTaskSessions pool workspace task cursor limit
+  pure $ SessionWire.SessionPageResponse result.items result.nextCursor
 
 ------------------------------------------------------------------------
 -- Handlers
@@ -580,7 +755,7 @@ navigationOwnerOutcomes requests readOwner = forM requests $ \item -> do
       , error = Just (if errHTTPCode failure == 404 then "Navigation owner was not found" else "Navigation owner read failed") }
 
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> navigationBatchH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
+workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> navigationBatchH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH :<|> agentSessions pool :<|> taskAgentSessions pool where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.

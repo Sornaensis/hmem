@@ -28,6 +28,80 @@ shared installations. [MCP setup](README.md) shows how to use hmem through tools
 its startup declares a workspace (or null) and bot identity, with a bearer
 credential only when required by the server.
 
+## Agent sessions
+
+Session routes are scoped by `/api/v1/workspaces/{workspaceId}`. All GETs require
+read access; POST/PUT require edit access, normal cookie CSRF and automated caller
+declaration. Managing agent is workflow/attribution, not a creator-only permission.
+A different editor may terminate a session. The server never accepts a local
+file path or reads the caller's filesystem.
+
+| Method and path suffix | Request or query | Response |
+| --- | --- | --- |
+| POST `/sessions` | `id` (caller UUID), `format_label` (1–128 UTF-8 bytes) | Empty active session, or identical create retry |
+| GET `/sessions` | `limit`, paired `before_created_at`/`before_id` | `items`, optional `next_cursor` |
+| GET `/sessions/{sessionId}` | — | Canonical metadata, counters, state and final receipt when sealed |
+| POST `/sessions/{sessionId}/append` | `expected_offset`, `expected_revision`, `data_base64`, optional `allow_final_record` (false) | `session`, `replayed` |
+| POST `/sessions/{sessionId}/heartbeat` | No body | Active session with refreshed `last_seen_at`; revision unchanged |
+| GET `/sessions/{sessionId}/tasks` | `limit`, `after_task_id` | Task references, optional `next_task_id` |
+| PUT `/sessions/{sessionId}/tasks/{taskId}` | No body | Idempotent same-workspace association |
+| GET `/tasks/{taskId}/sessions` | Session list queries | Linked sessions, optional `next_cursor` |
+| POST `/sessions/{sessionId}/terminate` | `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Immutable terminated metadata |
+| GET `/sessions/{sessionId}/transcript` | `offset`, `limit` | Bounded active transcript range |
+| GET `/sessions/{sessionId}/evidence` | `offset`, `limit` | Bounded terminated evidence range |
+
+These are additive task links. Deleted tasks are hidden in either direction;
+restoring a task restores visibility of its links. Sessions have no edit, reopen,
+delete, redaction or unlink route. A link may be added after termination.
+
+Every mutation body is limited to **2 MiB before JSON decoding**, for both
+declared-length and chunked requests. `data_base64` must be canonical padded
+standard base64, without whitespace or URL alphabet, at most 1,398,104 characters
+and **1 MiB decoded**. Unknown request fields are rejected. Invalid UTF-8/JSONL,
+empty records and incomplete tails change nothing. Original bytes and line
+endings are preserved. Ordinary append requires complete LF-terminated records;
+an explicit finite-snapshot flush may set `allow_final_record=true` to commit a
+complete final JSON record without LF while remaining active. The next append
+must start with LF or CRLF; whitespace cannot replace that separator.
+
+Lists default to 50 rows and reject limits outside 1–100. Session continuations
+use the returned cursor's `created_at` and `id` as `before_created_at` and
+`before_id`, retaining filters. The descending immutable keyset does not shift
+when a newer session is created. Task references use ascending UUID continuations.
+Links added behind a cursor require a fresh list; these lists are not snapshots.
+Range windows default to 65,536 bytes and reject limits outside 1–1,048,576.
+Offsets must be nonnegative and no larger than the committed prefix.
+
+Both range endpoints return `session`, `offset`, `data_base64`, `next_offset` and
+`has_more` from a canonical read. Use `/transcript` while active and `/evidence`
+after termination; the other state returns 409. Decode each bounded range,
+continue at `next_offset`, concatenate the original bytes, then verify metadata's
+`final_bytes` and lowercase `final_sha256`. Never treat a response window as the
+whole transcript when `has_more=true`.
+
+Only explicit `/terminate` seals already committed server bytes. It atomically
+compares the expected cursor/revision, final size and server-computed SHA-256.
+It uploads nothing, requires no live uploader, and changes no task status. Live,
+stale, stopped and absent followers use this same endpoint. EOF, caught-up state,
+flush, stop, disconnect and process loss do not terminate a session. Later harness
+output, including a termination acknowledgment, is outside the sealed prefix.
+
+Create, append and terminate support exact retries after an uncertain response.
+Append replay returns the current canonical session, which can be newer than the
+original acknowledgment. A successful seal advances revision once; its exact
+retry resends the **original pre-seal** expected revision and the same receipt.
+Conflicting retries return 409. No mutation retry is automatic. Inspect the
+canonical cursor before accepting a newer prefix or submitting another append.
+
+Errors have fixed JSON `error`/`message` fields: 400 for invalid inputs/JSONL,
+401 for missing authentication, 403 for insufficient workspace permission,
+404 for missing/foreign/deleted resources, 409 for cursor/receipt/state conflicts,
+413 for encoded or decoded size limits, and 504 for database timeout. Workspace
+authorization precedes body validation/size disclosure; query semantics are
+validated after authorization. Record/parser/database details are never returned
+or logged by the session error boundary. For storage and direct-write guarantees,
+see [the schema reference](docs/reference/schema.md#agent-session-evidence-v041).
+
 ## Declared attribution
 
 Automated HTTP callers send one JSON-valued `X-HMem-Bot-Identity` header. This

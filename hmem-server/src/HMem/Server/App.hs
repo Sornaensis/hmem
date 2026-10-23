@@ -24,7 +24,7 @@ import Data.ByteString (ByteString, isPrefixOf)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
-import Data.List (find, foldl')
+import Data.List (dropWhileEnd, find, foldl')
 import Data.Pool (Pool)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -38,11 +38,11 @@ import Network.HTTP.Client (httpLbs, method, newManager, parseRequest, requestHe
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.Wai (Application, Middleware)
 import Network.Wai qualified as Wai
-import Network.HTTP.Types (HeaderName, Status, status200, status302, status400, status401, status403, status404, status429, status503, hContentType, hLocation, methodGet, methodHead, methodOptions, methodPost, statusCode)
+import Network.HTTP.Types (HeaderName, Status, mkStatus, status200, status302, status400, status401, status403, status404, status413, status429, status503, hContentType, hLocation, methodGet, methodHead, methodOptions, methodPost, statusCode)
 import Network.HTTP.Types.URI (renderQuery, urlDecode, urlEncode)
 import Network.Wai.Middleware.Cors
     (cors, simpleCorsResourcePolicy, corsRequestHeaders, corsMethods, corsOrigins, CorsResourcePolicy(..))
-import Servant (Proxy (..), serve)
+import Servant (Proxy (..), ServerError(..), runHandler, serve)
 
 import Crypto.JWT qualified as JWT
 import Crypto.JOSE.JWK qualified as JWK
@@ -52,7 +52,8 @@ import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, resolveEffectiveActor, withEffectiveActorContext, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
-import HMem.Server.API (HMemAPI, serverWithDiscovery)
+import HMem.Server.API (HMemAPI, serverWithDiscovery, authorizeAgentSessionWrite)
+import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
 import HMem.Server.OpenAPI (openApiSpec)
 import HMem.Server.Static (staticMiddleware)
@@ -99,9 +100,47 @@ mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg c
         $ csrfMiddleware authCfg pool
         $ principalContextMiddleware jwksCache authCfg pool
         $ authMiddleware authCfg
+        $ agentSessionBodyLimit pool
         $ openApiMiddleware
         $ normalizeObservationIfMatch
          $ serve (Proxy @HMemAPI) (serverWithDiscovery authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
+
+-- Authorize before inspecting either declared size or streamed body content.
+-- Read at most 2 MiB before JSON/base64 decoding, including chunked requests.
+agentSessionBodyLimit :: Pool Hasql.Connection -> Middleware
+agentSessionBodyLimit pool app req respond = case sessionMutationWorkspace req of
+  Nothing -> app req respond
+  Just workspace -> do
+    authority <- runHandler (authorizeAgentSessionWrite pool workspace)
+    case authority of
+      Left failure -> respond $ Wai.responseLBS
+        (mkStatus failure.errHTTPCode (BS8.pack failure.errReasonPhrase)) failure.errHeaders failure.errBody
+      Right () -> case Wai.requestBodyLength req of
+        Wai.KnownLength count | count > fromIntegral maxSessionRequestBytes -> tooLarge
+        _ -> do
+          bounded <- collect 0 []
+          case bounded of
+            Nothing -> tooLarge
+            Just chunks -> do
+              remaining <- newIORef chunks
+              let next = atomicModifyIORef' remaining $ \case [] -> ([], BS.empty); chunk:rest -> (rest,chunk)
+              app req { Wai.requestBody = next, Wai.requestBodyLength = Wai.KnownLength (fromIntegral (sum (map BS.length chunks))) } respond
+  where
+    tooLarge = respond $ jsonResponse status413 "session_too_large" "Session request body exceeds 2 MiB"
+    collect total chunks = do
+      chunk <- Wai.getRequestBodyChunk req
+      let nextTotal = total + BS.length chunk
+      if nextTotal > maxSessionRequestBytes then pure Nothing
+      else if BS.null chunk then pure (Just (reverse chunks))
+      else collect nextTotal (chunk:chunks)
+
+sessionMutationWorkspace :: Wai.Request -> Maybe UUID.UUID
+sessionMutationWorkspace req = case (Wai.requestMethod req, dropWhileEnd T.null (Wai.pathInfo req)) of
+  ("POST", ["api","v1","workspaces",workspace,"sessions"]) -> UUID.fromText workspace
+  ("POST", ["api","v1","workspaces",workspace,"sessions",_,operation])
+    | operation `elem` ["append","heartbeat","terminate"] -> UUID.fromText workspace
+  ("PUT", ["api","v1","workspaces",workspace,"sessions",_,"tasks",_]) -> UUID.fromText workspace
+  _ -> Nothing
 
 -- Servant's Header combinator selects the first physical header line. Join
 -- repeated content preconditions so the authorized handler rejects a tag list,

@@ -456,6 +456,7 @@ test-suite hmem-server-test
   main-is: Spec.hs
   other-modules:
       HMem.Server.AccessTrackerSpec
+      HMem.Server.AgentSessionSpec
       HMem.Server.APISpec
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec

@@ -4774,3 +4774,14 @@ textarea.observation-edit-content {
 .session-summary-link>.session-identity { align-self:flex-end; max-width:100%; }
 .task-session-card .session-identity { align-self:flex-end; max-width:100%; }
 @media(max-width:600px) { .session-detail-header>.session-identity { order:1; flex-basis:100%; } .session-record { padding-left:.15rem; padding-right:.15rem; } .session-record-activity { padding-left:.6rem; } }
+
+/* Task session grids keep a single item compact and reflow on narrow cards. */
+.task-session-cards { grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),300px)); align-items:stretch; }
+.task-session-card { min-width:0; flex-direction:column; align-items:stretch; gap:.5rem; }
+.task-session-card>a { min-width:0; overflow-wrap:anywhere; }
+.task-session-card .session-identity { text-align:left; align-self:flex-start; }
+.task-session-card .session-download { align-self:flex-end; }
+.task-session-card>.session-state-dot { align-self:flex-end; }
+.task-session-card .card-meta { font-size:.72rem; }
+.task-evidence-download { margin:.65rem 0; display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; font-size:.8rem; }
+@media(max-width:600px) { .task-session-cards { grid-template-columns:minmax(0,1fr); } }

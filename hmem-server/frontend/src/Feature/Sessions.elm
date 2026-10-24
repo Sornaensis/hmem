@@ -1,4 +1,4 @@
-module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskEvidence, viewTaskIcon, taskActive, timestampSources, olderWindow, viewerReset)
+module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskEvidence, viewTaskIcon, taskActive, timestampSources, olderWindow, viewerReset, validArchivePage, cursorKey)
 
 import Api
 import ActorAttribution
@@ -126,13 +126,13 @@ reconcile ( model, command ) =
         retired =
             if old.stamp == stamp then withPanel
             else if contextChanged || old.following then
-                { withPanel | stamp = stamp, generation = old.generation + 1, start = Nothing, offset = 0, end = 0, following = if contextChanged then True else old.following, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, save = Nothing, heartbeats = Dict.empty, saveMessage = if old.save /= Nothing then "Save cancelled because its session or authority changed." else old.saveMessage }
+                { withPanel | stamp = stamp, generation = old.generation + 1, start = Nothing, offset = 0, end = 0, following = if contextChanged then True else old.following, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, save = Nothing, archive = Nothing, heartbeats = Dict.empty, saveMessage = if old.save /= Nothing || old.archive /= Nothing then "Save cancelled because its session or authority changed." else old.saveMessage }
             else
-                { withPanel | stamp = stamp, generation = old.generation + 1, pending = False, loadWindow = False, save = Nothing, heartbeats = Dict.empty, saveMessage = if old.save /= Nothing then "Save cancelled during canonical resynchronization." else old.saveMessage }
+                { withPanel | stamp = stamp, generation = old.generation + 1, pending = False, loadWindow = False, save = Nothing, archive = Nothing, heartbeats = Dict.empty, saveMessage = if old.save /= Nothing || old.archive /= Nothing then "Save cancelled during canonical resynchronization." else old.saveMessage }
         metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.andThen (\value -> case value of
             Delivery.Metadata session -> Just session
             _ -> Nothing)) workspace selected |> Maybe.withDefault Nothing
-        current = case metadata of
+        beforeArchive = case metadata of
             Just session ->
                 if retired.start == Nothing then
                     let begin = max 0 (session.committedBytes - 2097152) in
@@ -141,16 +141,20 @@ reconcile ( model, command ) =
                     { retired | end = min session.committedBytes (retired.offset + 2097152) }
                 else retired
             Nothing -> retired
+        current = advanceArchive workspace beforeArchive model
         window = Maybe.map2 (\ws session -> (ws,Delivery.SessionWindow session.id current.offset current.end (session.state == Api.SessionTerminated))) workspace metadata
             |> Maybe.andThen (\target -> if current.loadWindow && current.error == Nothing && current.offset < current.end then Just target else Nothing)
         saveTarget = Maybe.map2 (\ws operation -> (ws,Delivery.SessionSave operation.session operation.offset (min 65536 (operation.size-operation.offset)))) workspace current.save
             |> Maybe.andThen (\target -> current.save |> Maybe.andThen (\operation -> if operation.phase == "writing" && operation.offset < operation.size then Just target else Nothing))
+        archiveTarget = Maybe.map2 (\ws archive -> (ws,Delivery.ArchiveSessions archive.task archive.cursor)) workspace current.archive |> Maybe.andThen (\target -> current.archive |> Maybe.andThen (\archive -> if archive.phase == "listing" then Just target else Nothing))
         desired = workspace |> Maybe.map (\ws ->
             (if model.activeTab == SessionsTab then [(ws,listTarget current)] else []) ++
             (selected |> Maybe.map (\id -> [(ws,Delivery.SessionMetadata id),(ws,Delivery.SessionTasks id current.linksCursor)]) |> Maybe.withDefault []) ++
-            (List.map (\target -> (ws,target)) sectionReads) ++
+            (archiveTarget |> Maybe.map List.singleton |> Maybe.withDefault []) ++
+            (saveTarget |> Maybe.map List.singleton |> Maybe.withDefault []) ++
+            (List.map (\target -> (ws,target)) (List.take (if current.archive /= Nothing || current.save /= Nothing then 10 else 12) sectionReads)) ++
             (List.map (\task -> (ws,Delivery.TaskSessionsFiltered task {state="active",freshness=""} Nothing)) hintTasks) ++
-            (window |> Maybe.map List.singleton |> Maybe.withDefault []) ++ (saveTarget |> Maybe.map List.singleton |> Maybe.withDefault [])) |> Maybe.withDefault []
+            (window |> Maybe.map List.singleton |> Maybe.withDefault [])) |> Maybe.withDefault []
         identities = List.map (\(ws,target) -> Delivery.key ws target) desired
         kept = List.foldl (\(ws,target) state -> if List.member (Delivery.key ws target) identities then state else Delivery.removeDemand ws target state) model.sessionDelivery old.owned
         demanded = List.foldl (\(ws,target) state -> if Dict.get (Delivery.key ws target) state.resources |> Maybe.map (\existing -> existing.target == target) |> Maybe.withDefault False then state else Delivery.demand ws target state) kept desired
@@ -174,6 +178,7 @@ reconcile ( model, command ) =
         saveFailure = Maybe.map2 (\(ws,target) operation ->
             [target,Delivery.SessionMetadata operation.session] |> List.filterMap (\purpose -> Dict.get (Delivery.key ws purpose) afterSave.resources |> Maybe.andThen .error) |> List.head) saveTarget current.save |> Maybe.withDefault Nothing
         pending = { current | owned = desired, pending = current.pending || chunk /= Nothing, bridgedGeneration = current.generation
+            , archive = if saveFailure /= Nothing then Nothing else current.archive
             , save = if saveFailure /= Nothing then Nothing else Maybe.map (\operation -> { operation | pending = operation.pending || savePayload /= Nothing }) current.save
             , saveMessage = if saveFailure /= Nothing then "Download could not finish. Please retry." else current.saveMessage }
         ( next, requests ) = WebSocket.pumpSessionResources { model | sessions = pending, sessionDelivery = afterSave }
@@ -188,7 +193,9 @@ reconcile ( model, command ) =
             , ("follow",Encode.bool current.following)
             , ("chunk",chunk |> Maybe.map (\range -> Encode.object [("offset",Encode.int range.offset),("nextOffset",Encode.int range.nextOffset),("dataBase64",Encode.string range.dataBase64),("final",Encode.bool (range.nextOffset >= current.end))]) |> Maybe.withDefault Encode.null)
             , ("nextOperation",Encode.int current.nextOperation)
-            , ("saveOperation",pending.save |> Maybe.map (.operation >> Encode.int) |> Maybe.withDefault Encode.null)
+            , ("saveOperation",(pending.save |> Maybe.map .operation |> Maybe.withDefault (pending.archive |> Maybe.map .operation |> Maybe.withDefault -1)) |> Encode.int)
+            , ("archiveEntry", archiveEntry pending)
+            , ("archiveFinish",Encode.bool (pending.archive |> Maybe.map (\archive -> archive.phase == "finishing") |> Maybe.withDefault False))
             , ("saveChunk",if saveFailure == Nothing then Maybe.withDefault Encode.null savePayload else Encode.null)
             , ("heartbeats",Encode.list (\session -> Encode.object [("id",Encode.string session.id),("lastSeenAt",Encode.string session.lastSeenAt)]) heartbeatSources)
             ])
@@ -243,7 +250,7 @@ update msg model =
             ( {model | sessions = {state | now = now, lastFilterRefresh = if refresh then now else state.lastFilterRefresh}
                 , sessionDelivery = if refresh then state.workspace |> Maybe.map (\ws -> Delivery.invalidateLists ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery else model.sessionDelivery }, Cmd.none )
         SessionsBridgeEvent value -> receiveBridge value model
-        SessionsCancelSave -> ( {model | sessions = {state | save = Nothing, saveMessage = "Save cancellation requested."}}, Cmd.none )
+        SessionsCancelSave -> ( {model | sessions = {state | save = Nothing, archive = Nothing, saveMessage = "Save cancellation requested."}}, Cmd.none )
         SessionsTaskNextPage task cursor ->
             ( {model | sessions = {state | taskCursors = Dict.insert task (Just cursor) state.taskCursors, taskPreviousPages = Dict.insert task (List.take 16 (taskCursor model task :: (Dict.get task state.taskPreviousPages |> Maybe.withDefault []))) state.taskPreviousPages}}, Cmd.none )
         SessionsTaskPreviousPage task ->
@@ -279,6 +286,7 @@ receiveBridge value model =
             Err _ -> (model,Cmd.none)
     else if kind == "save-capability" then
         ( {model | sessions = {state | saveCapability = Just (field "supported" Decode.bool False)}}, Cmd.none )
+    else if String.startsWith "archive-" kind then receiveArchive value model
     else if String.startsWith "save-" kind then receiveSave value model
     else if stamp /= state.stamp || generation /= state.generation || not state.pending then (model,Cmd.none)
     else if field "kind" Decode.string "" == "viewer-error" then
@@ -315,13 +323,15 @@ receiveSave value model =
         metadata = availableSessions model |> List.filter (\session -> Just session.id == requestedId) |> List.head
     in
     if stamp /= state.stamp || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then (model,Cmd.none)
-    else if kind == "save-picking" && operation == state.nextOperation && state.save == Nothing then
+    else if kind == "save-error" && field "code" Decode.string "" == "writer_cleanup_failed" && operation > 0 && operation < state.nextOperation then
+        ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=True,saveMessage="Writer cleanup could not be confirmed. Reload this page before another download."}},Cmd.none)
+    else if kind == "save-picking" && operation == state.nextOperation && state.save == Nothing && state.archive == Nothing then
         case metadata of
             Just session ->
                 case (session.finalBytes,session.finalSha256) of
                     (Just size,Just hash) ->
                         if session.state == Api.SessionTerminated then
-                            ( {model | sessions = {state | save = Just (SessionSaveOperation operation session.id size hash session.revision 0 "picking" False), nextOperation = operation + 1, saveMessage = "Preparing download…"}}, Cmd.none )
+                            ( {model | sessions = {state | save = Just (SessionSaveOperation operation session.id size hash session.revision 0 "picking" False), archiveMessageTask = Nothing, nextOperation = operation + 1, saveMessage = "Preparing download…"}}, Cmd.none )
                         else (model,Cmd.none)
                     _ -> (model,Cmd.none)
             Nothing -> (model,Cmd.none)
@@ -332,13 +342,13 @@ receiveSave value model =
                 "save-ready" -> ( {model | sessions = {state | save = Just {save | phase = "writing"}, saveMessage = "Saving verified evidence…"}}, Cmd.none )
                 "save-error" ->
                     if field "code" Decode.string "" == "writer_cleanup_failed" then
-                        ( {model | sessions = {state | save = Nothing, saveCapability = Just False, saveMessage = "Writer cleanup could not be confirmed. Reload this page before another save."}}, Cmd.none )
-                    else ( {model | sessions = {state | save = Nothing, saveMessage = if field "code" Decode.string "" == "download_storage_unavailable" then "This browser cannot download sessions larger than 32 MiB without temporary file storage." else "Download could not finish. Please retry."}}, Cmd.none )
+                        ( {model | sessions = {state | save = Nothing, archive = Nothing, saveCapability = Just False, saveBlocked = True, saveMessage = "Writer cleanup could not be confirmed. Reload this page before another save."}}, Cmd.none )
+                    else ( {model | sessions = {state | save = Nothing, archive = Nothing, saveMessage = if field "code" Decode.string "" == "download_storage_unavailable" then "This browser cannot download sessions larger than 32 MiB without temporary file storage." else "Download could not finish. Please retry."}}, Cmd.none )
                 _ ->
                     let offset = field "offset" Decode.int -1 in
                     if not save.pending || offset < save.offset || offset > min save.size (save.offset + 65536) || (offset == save.offset && save.size /= 0) then (model,Cmd.none)
                     else if kind == "save-complete" && offset == save.size then
-                        ( {model | sessions = {state | save = Nothing, saveMessage = "Downloaded " ++ String.fromInt save.size ++ " bytes."}}, Cmd.none )
+                        ( {model | sessions = {state | save = Nothing, archive = Maybe.map (\archive -> {archive | count=archive.count+1}) state.archive, saveMessage = if state.archive /= Nothing then "Verified session " ++ String.fromInt ((state.archive |> Maybe.map .count |> Maybe.withDefault 0)+1) else "Downloaded " ++ String.fromInt save.size ++ " bytes."}}, Cmd.none )
                     else if kind == "save-progress" && offset < save.size then
                         ( {model | sessions = {state | save = Just {save | offset = offset, pending = False}, saveMessage = "Saving " ++ String.fromInt offset ++ " / " ++ String.fromInt save.size ++ " bytes…"}}, Cmd.none )
                     else (model,Cmd.none)
@@ -421,7 +431,7 @@ viewDetail workspace model id =
                     ,if model.sessions.linksCursor /= Nothing then button [class "btn btn-sm",onClick (SessionsLinkedPage Nothing)] [text "First tasks"] else text ""]
                 _ -> p [class "card-meta"] [text "Loading linked tasks…"] ]
         , viewRecords workspace model id
-        ,p [class "session-download-status",attribute "role" "status",attribute "aria-live" "polite"] [text model.sessions.saveMessage] ]
+        ,p [class "session-download-status",attribute "role" "status",attribute "aria-live" "polite"] [text (if model.sessions.archiveMessageTask == Nothing || model.sessions.saveBlocked then model.sessions.saveMessage else "")] ]
 
 
 viewSave : Model -> Api.AgentSession -> Html Msg
@@ -431,7 +441,7 @@ viewSave model session =
         config = Encode.encode 0 (Encode.object [("stamp",Encode.string state.stamp),("operation",Encode.int state.nextOperation),("session",encodeReceipt session)])
     in
     if session.state /= Api.SessionTerminated then text ""
-    else button [class "btn btn-sm session-download",attribute "data-session-download" config,disabled (state.save /= Nothing || session.finalBytes == Nothing || session.finalSha256 == Nothing),attribute "aria-label" ("Download session " ++ String.left 8 session.id)] [text "↓ Download"]
+    else button [class "btn btn-sm session-download",attribute "data-session-download" config,disabled (state.saveBlocked || state.save /= Nothing || state.archive /= Nothing || session.finalBytes == Nothing || session.finalSha256 == Nothing),attribute "aria-label" ("Download session " ++ String.left 8 session.id)] [text "↓ Download"]
 
 
 sectionKey : Bool -> String -> String
@@ -498,13 +508,14 @@ viewTaskSection evidence workspace model task =
     in
     details [class ("task-session-section " ++ (if evidence then "task-session-evidence" else "task-session-active"))]
         [summary [] [text (heading ++ (if page /= Nothing then " · " ++ String.fromInt (List.length sessions) else ""))]
+        ,if evidence then viewArchive model task else text ""
         ,if page == Nothing then p [class "card-meta"] [text (if cachedError /= Nothing then "Sessions could not be loaded." else "Loading sessions…"),if cachedError /= Nothing then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""]
          else if List.isEmpty sessions then p [class "card-meta"] [text ("No " ++ String.toLower heading ++ " on this page.")]
-         else div [class "task-session-cards"] (List.map (\session -> div [class "task-session-card"] [a [href (sessionUrl workspace session.id)] [strong [] [text session.formatLabel],viewSessionIdentity session.creator,span [class "card-meta"] [text (TimestampDisplay.lookup model.timestamps session.createdAt ++ " · " ++ String.fromInt session.committedRecords ++ " records")]],if evidence then viewSave model session else span [class "session-state-dot",attribute "aria-label" "Active"] []]) sessions)
+         else div [class "task-session-cards"] (List.map (\session -> div [class "task-session-card"] [a [href (sessionUrl workspace session.id)] [strong [] [text session.formatLabel],viewSessionIdentity session.creator,span [class "card-meta"] [text ("Last activity · " ++ TimestampDisplay.lookup model.timestamps (sessionActivity session))]],if evidence then viewSave model session else span [class "session-state-dot",attribute "aria-label" "Active"] []]) sessions)
         ,div [class "sessions-pagination"]
             [if taskCursor model key /= Nothing then button [class "btn btn-sm",onClick (SessionsTaskPreviousPage key)] [text "Newer sessions"] else text ""
             ,page |> Maybe.andThen .nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsTaskNextPage key cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "")]
-        ,if evidence && model.sessions.saveMessage /= "" then p [class "card-meta",attribute "role" "status"] [text model.sessions.saveMessage] else text ""]
+        ,if evidence && model.sessions.archive == Nothing && model.sessions.saveMessage /= "" && (model.sessions.archiveMessageTask == Nothing || model.sessions.archiveMessageTask == Just task || model.sessions.saveBlocked) then p [class "card-meta",attribute "role" "status"] [text model.sessions.saveMessage] else text ""]
 
 
 viewRecords : String -> Model -> String -> Html Msg
@@ -598,7 +609,7 @@ timestampSources model =
         list = model.sessions.workspace |> Maybe.andThen (\ws -> resource ws (listTarget model.sessions) model |> Maybe.andThen .data) |> Maybe.map (\payload -> case payload of
             Delivery.SessionsPage page -> List.map .createdAt page.items
             _ -> []) |> Maybe.withDefault []
-        cards = Dict.values model.sessions.taskPages |> List.concatMap (\cached -> Result.toMaybe cached.result |> Maybe.map (.items >> List.map .createdAt) |> Maybe.withDefault [])
+        cards = Dict.values model.sessions.taskPages |> List.concatMap (\cached -> Result.toMaybe cached.result |> Maybe.map (.items >> List.map sessionActivity) |> Maybe.withDefault [])
     in
     if model.activeTab == SessionsTab then list else if model.activeTab == ProjectsTab then cards else []
 
@@ -609,3 +620,127 @@ availableSessions model =
         Just (Delivery.Metadata session) -> [session]
         Just (Delivery.SessionsPage page) -> page.items
         _ -> [])) ++ (Dict.values model.sessions.taskPages |> List.concatMap (\cached -> Result.toMaybe cached.result |> Maybe.map .items |> Maybe.withDefault []))
+
+
+sessionActivity : Api.AgentSession -> String
+sessionActivity session =
+    if session.state == Api.SessionTerminated then Maybe.withDefault session.lastSeenAt session.terminatedAt else session.lastSeenAt
+
+
+viewArchive : Model -> String -> Html Msg
+viewArchive model task =
+    let
+        state = model.sessions
+        title = Dict.get task model.tasks |> Maybe.map .title |> Maybe.withDefault "Task evidence"
+        config = Encode.encode 0 (Encode.object [("stamp",Encode.string state.stamp),("operation",Encode.int state.nextOperation),("task",Encode.string task),("title",Encode.string title)])
+    in
+    case state.archive of
+        Just archive ->
+            if archive.task == task then div [class "task-evidence-download",attribute "role" "status"]
+                [span [] [text ("Verified " ++ String.fromInt archive.count ++ " sessions · " ++ state.saveMessage)],button [class "btn btn-sm",onClick SessionsCancelSave] [text "Cancel"]]
+            else button [class "btn btn-sm",disabled True] [text "↓ Download all"]
+        Nothing -> button [class "btn btn-sm task-evidence-download",attribute "data-session-archive" config,disabled (state.saveBlocked || state.save /= Nothing)] [text "↓ Download all"]
+
+
+archiveEntry : SessionsModel -> Encode.Value
+archiveEntry state =
+    case (state.archive,state.save) of
+        (Just archive,Just save) ->
+            if save.phase == "entry" then Encode.object
+                [("session",Encode.object [("id",Encode.string save.session),("workspace",Encode.string (Maybe.withDefault "" state.workspace)),("state",Encode.string "terminated"),("finalBytes",Encode.int save.size),("finalSha256",Encode.string save.hash),("revision",Encode.int save.revision)]),("name",Encode.string archive.entryName)]
+            else Encode.null
+        _ -> Encode.null
+
+
+receiveArchive : Decode.Value -> Model -> (Model,Cmd Msg)
+receiveArchive value model =
+    let
+        state = model.sessions
+        field name decoder fallback = Decode.decodeValue (Decode.field name decoder) value |> Result.withDefault fallback
+        operation = field "operation" Decode.int -1
+        kind = field "kind" Decode.string ""
+        task = field "task" Decode.string ""
+    in
+    if field "stamp" Decode.string "" /= state.stamp || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then (model,Cmd.none)
+    else if kind == "archive-error" && field "code" Decode.string "" == "writer_cleanup_failed" && operation > 0 && operation < state.nextOperation then
+        ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=True,saveMessage="Writer cleanup could not be confirmed. Reload this page before another download."}},Cmd.none)
+    else if kind == "archive-picking" && operation == state.nextOperation && state.save == Nothing && state.archive == Nothing && Dict.member task model.tasks then
+        ({model | sessions={state | archiveMessageTask=Just task,archive=Just (SessionArchiveOperation operation task (field "title" Decode.string "Task evidence") Nothing [] Nothing "picking" 0 ""),nextOperation=operation+1,saveMessage="Preparing ZIP…"}},Cmd.none)
+    else case state.archive of
+        Just archive ->
+            if archive.operation /= operation then (model,Cmd.none)
+            else if kind == "archive-ready" then ({model | sessions={state | archive=Just {archive | phase="listing"},saveMessage="Reading saved sessions…"}},Cmd.none)
+            else if kind == "archive-complete" then ({model | sessions={state | archive=Nothing,save=Nothing,saveMessage="Downloaded " ++ String.fromInt archive.count ++ " sessions."}},Cmd.none)
+            else if kind == "archive-error" then
+                let blocked = field "code" Decode.string "" == "writer_cleanup_failed" in
+                ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=state.saveBlocked || blocked,saveMessage=if blocked then "Writer cleanup could not be confirmed. Reload this page before another download." else if field "code" Decode.string "" == "download_storage_unavailable" then "This browser needs temporary file storage for archives larger than 32 MiB." else "Archive could not finish. Please retry."}},Cmd.none)
+            else (model,Cmd.none)
+        Nothing -> (model,Cmd.none)
+
+
+advanceArchive : Maybe String -> SessionsModel -> Model -> SessionsModel
+advanceArchive workspace state model =
+    let
+        fail = {state | archive=Nothing,save=Nothing,saveMessage="Archive could not finish. Please retry."}
+        next archive =
+            case archive.page of
+                session::rest -> case (session.finalBytes,session.finalSha256) of
+                    (Just size,Just hash) -> {state | archive=Just {archive | page=rest,phase="entries",entryName=session.formatLabel},save=Just (SessionSaveOperation archive.operation session.id size hash session.revision 0 "entry" False),saveMessage="Verifying " ++ session.formatLabel ++ "…"}
+                    _ -> fail
+                [] -> case archive.nextCursor of
+                    Just cursor -> {state | archive=Just {archive | cursor=Just cursor,phase="listing"}}
+                    Nothing -> {state | archive=Just {archive | phase="finishing"},saveMessage="Finishing ZIP…"}
+    in
+    case (workspace,state.archive) of
+        (Just ws,Just archive) ->
+            if state.save /= Nothing then state
+            else if archive.phase == "entries" then next archive
+            else if archive.phase == "listing" then
+                case resource ws (Delivery.ArchiveSessions archive.task archive.cursor) model of
+                    Just entry ->
+                        if entry.error /= Nothing then fail else if entry.dirty /= entry.settled then state else case entry.data of
+                            Just (Delivery.SessionsPage page) ->
+                                if validArchivePage archive.cursor page then next {archive | page=page.items,nextCursor=page.nextCursor} else fail
+                            _ -> state
+                    Nothing -> state
+            else state
+        _ -> state
+
+
+validArchivePage : Maybe Api.SessionCursor -> Api.SessionPage -> Bool
+validArchivePage previous page =
+    let
+        key item = cursorKey {createdAt=item.createdAt,id=item.id}
+        ordered before remaining = case remaining of
+            [] -> True
+            item::rest -> case key item of
+                Just current -> item.state == Api.SessionTerminated && item.finalBytes /= Nothing && item.finalSha256 /= Nothing && (before |> Maybe.map (\prior -> current < prior) |> Maybe.withDefault True) && ordered (Just current) rest
+                Nothing -> False
+        last = List.reverse page.items |> List.head |> Maybe.map (\item -> {createdAt=item.createdAt,id=item.id})
+    in
+    List.length page.items <= 50 && (previous == Nothing || (previous |> Maybe.andThen cursorKey) /= Nothing)
+        && ordered (previous |> Maybe.andThen cursorKey) page.items
+        && (case page.nextCursor of
+            Nothing -> True
+            Just cursor -> not (List.isEmpty page.items) && Just cursor == last)
+
+
+cursorKey : Api.SessionCursor -> Maybe String
+cursorKey cursor =
+    let
+        source = cursor.createdAt
+        components = String.dropRight 1 source |> String.split "."
+        base = List.head components |> Maybe.withDefault ""
+        fraction = List.drop 1 components |> List.head |> Maybe.withDefault ""
+        number start length = String.slice start (start+length) base |> String.toInt |> Maybe.withDefault -1
+        year = number 0 4
+        month = number 5 2
+        day = number 8 2
+        leap = modBy 400 year == 0 || (modBy 4 year == 0 && modBy 100 year /= 0)
+        days = if month == 2 then (if leap then 29 else 28) else if List.member month [4,6,9,11] then 30 else 31
+        digits value = String.all (\char -> char >= '0' && char <= '9') value
+        validId = String.length cursor.id == 36 && List.map String.length (String.split "-" cursor.id) == [8,4,4,4,12] && String.all (\char -> String.contains (String.fromChar char) "0123456789abcdef-") cursor.id
+    in
+    if String.endsWith "Z" source && List.length components <= 2 && String.length base == 19 && String.slice 4 5 base == "-" && String.slice 7 8 base == "-" && String.slice 10 11 base == "T" && String.slice 13 14 base == ":" && String.slice 16 17 base == ":" && digits (String.filter (\char -> not (List.member char ['-','T',':'])) base) && month >= 1 && month <= 12 && day >= 1 && day <= days && number 11 2 >= 0 && number 11 2 < 24 && number 14 2 >= 0 && number 14 2 < 60 && number 17 2 >= 0 && number 17 2 < 60 && String.length fraction <= 12 && digits fraction && (List.length components == 1 || fraction /= "") && validId then
+        Just (base ++ "." ++ String.padRight 12 '0' fraction ++ ":" ++ cursor.id)
+    else Nothing

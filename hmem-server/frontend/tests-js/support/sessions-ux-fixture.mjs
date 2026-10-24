@@ -1,6 +1,6 @@
 import { hierarchyFixture, openHierarchy } from '../hierarchy-fixture.mjs'
 import { createHash } from 'node:crypto'
-export async function openSessionExplorer({many=false,empty=false,creator=null,housekeeping=false}={}) {
+export async function openSessionExplorer({many=false,empty=false,creator=null,housekeeping=false,activeCount=1,savedCount=1}={}) {
   const f=hierarchyFixture();f.projects=[f.projects[0]]
   f.tasks=Array.from({length:many?22:2},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null}))
   const records=[
@@ -25,6 +25,17 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
   const stamp=new Date().toISOString();const activeId='20000000-0000-4000-8000-000000000001',savedId='20000000-0000-4000-8000-000000000002'
   const base={workspace_id:f.workspace.id,format_label:'Codex · Session explorer',created_at:stamp,last_seen_at:stamp,committed_bytes:bytes.length,committed_records:empty?0:records.length,revision:1,ends_with_newline:true,...(creator||{})}
   const active={...base,id:activeId,state:'active'},saved={...base,id:savedId,format_label:'Claude · UX review',state:'terminated',terminated_at:stamp,final_bytes:bytes.length,final_sha256:createHash('sha256').update(bytes).digest('hex')}
+  const content=new Map()
+  const activeSessions=Array.from({length:activeCount},(_,i)=>({...active,id:i===0?active.id:`30000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,format_label:i===0?active.format_label:['Claude · Implementation','Codex · Follow-up'][i%2],created_at:new Date(Date.parse(stamp)-3600000-i*1000).toISOString(),last_seen_at:new Date(Date.parse(stamp)-i*60000).toISOString(),...(activeCount>1?{creator_actor_type:'bot',creator_bot_identity:{role:i%2?'Reviewer':'Developer','model-id':i%2?'claude:declared-review-model:high':'codex:gpt-6.1-sol:high'}}:{})}))
+  const savedSessions=Array.from({length:savedCount},(_,i)=>{
+    const data=savedCount===1?bytes:i%4===0?Buffer.alloc(0):i%4===1?Buffer.from('{"text":"λ café"}\r\n'):i%4===2?Buffer.from('[true,null]'):Buffer.from(JSON.stringify('x'.repeat(140000))+'\n')
+    const session={...saved,id:i===0?saved.id:`40000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,format_label:savedCount===1?saved.format_label:i%2?'Review / café ../capture':'Review / café ../capture',created_at:new Date(Date.parse(stamp)-7200000-i*1000).toISOString(),last_seen_at:new Date(Date.parse(stamp)-600000-i*1000).toISOString(),terminated_at:i%3===2?null:new Date(Date.parse(stamp)-300000-i*1000).toISOString(),committed_bytes:data.length,final_bytes:data.length,final_sha256:createHash('sha256').update(data).digest('hex'),...(savedCount>1?{creator_actor_type:'bot',creator_bot_identity:{role:i%2?'Reviewer':'Developer','model-id':i%2?'claude:actual-review-model:high':'codex:actual-builder-model:medium'}}:{})};content.set(session.id,data);return session
+  })
+  // Keep exposed first records identical to the objects served by the fixture.
+  Object.assign(active,activeSessions[0]);if(activeCount)activeSessions[0]=active
+  if(savedCount){Object.assign(saved,savedSessions[0]);savedSessions[0]=saved}
+  for(const session of activeSessions)content.set(session.id,bytes)
+  const allSessions=[...activeSessions,...savedSessions].sort((a,b)=>b.created_at.localeCompare(a.created_at)||b.id.localeCompare(a.id))
   const h=await openHierarchy(f),reads=[]
   let requestActive=0,peak=0
   const linked=new Set(many?[f.tasks.at(-1).id]:f.tasks.map(t=>t.id))
@@ -33,14 +44,14 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
     if(!path.includes('/sessions'))return route.fallback()
     reads.push({path,query:u.search});requestActive++;peak=Math.max(peak,requestActive)
     try{
-      const metadata=path.includes(savedId)?saved:active
+      const metadata=allSessions.find(session=>path.includes(session.id))||active
       let result
-      if(path.endsWith('/transcript')||path.endsWith('/evidence')){const offset=Number(u.searchParams.get('offset')||0),end=Math.min(bytes.length,offset+Number(u.searchParams.get('limit')||65536));result={session:metadata,offset,next_offset:end,data_base64:bytes.subarray(offset,end).toString('base64'),has_more:end<bytes.length}}
+      if(path.endsWith('/transcript')||path.endsWith('/evidence')){const data=content.get(metadata.id)||bytes,offset=Number(u.searchParams.get('offset')||0),end=Math.min(data.length,offset+Number(u.searchParams.get('limit')||65536));result={session:metadata,offset,next_offset:end,data_base64:data.subarray(offset,end).toString('base64'),has_more:end<data.length}}
       else if(path.endsWith('/tasks'))result={items:f.tasks.slice(0,2).map(t=>({id:t.id,title:t.title,status:t.status})),next_task_id:null}
-      else if(path.endsWith(activeId)||path.endsWith(savedId))result=metadata
-      else {let items=[saved,active];if(path.includes('/tasks/')&&!f.tasks.some(t=>linked.has(t.id)&&path.includes(t.id)))items=[];if(u.searchParams.get('state'))items=items.filter(s=>s.state===u.searchParams.get('state'));result={items,next_cursor:null}}
+      else if(allSessions.some(session=>path.endsWith(session.id)))result=metadata
+      else {let items=allSessions;if(path.includes('/tasks/')&&!f.tasks.some(t=>linked.has(t.id)&&path.includes(t.id)))items=[];if(u.searchParams.get('state'))items=items.filter(s=>s.state===u.searchParams.get('state'));const before=u.searchParams.get('before_created_at'),beforeId=u.searchParams.get('before_id');if(before)items=items.filter(session=>session.created_at<before||(session.created_at===before&&session.id<beforeId));const page=items.slice(0,50),last=page.at(-1);result={items:page,next_cursor:items.length>50?{created_at:last.created_at,id:last.id}:null}}
       await route.fulfill({json:result})
     }finally{requestActive--}
   })
-  return {...h,active,saved,bytes,reads,peak:()=>peak,async associate(task){linked.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
+  return {...h,active,saved,bytes,activeSessions,savedSessions,content,reads,peak:()=>peak,async associate(task){linked.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
 }

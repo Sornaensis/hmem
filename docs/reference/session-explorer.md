@@ -39,8 +39,34 @@ source. Workspace, authority or selected-session changes retire the writer.
 
 Where available, browser-private temporary file storage stages the bytes. The
 source and object URL remain available for 60 seconds after the verified browser
-download starts, then are disposed; page exit also requests disposal. Interrupted
-staging is cleaned on the next download after expiry. If temporary storage is
+download starts, then are disposed; page exit also requests disposal. Cleanup removes only the current operation’s owned files; another tab’s live
+staging is never removed by age. Files orphaned by a crashed page may remain
+until the browser clears the site’s storage. If temporary storage is
 unavailable, a finite in-memory fallback supports sessions up to 32 MiB; larger
 sessions report the storage limitation. MCP `session_evidence` remains the bounded
 retrieval interface independently of the browser explorer.
+
+
+Task-card sections use compact responsive grids. Active activity is `lastSeenAt`;
+Evidence uses `terminatedAt`, falling back to `lastSeenAt`. Declared creator role
+and model identity remain complete and selectable.
+
+Evidence **Download all** starts at the first terminated-session cursor independently
+of the visible page. It retains one metadata page of at most 50 sessions and one
+entry receipt, validates strict descending UTC timestamp/UUID keysets without
+rounding fractional seconds, and streams entries through the same 16-resource,
+two-request admission and exclusive download reservation. This live keyset walk
+is not an atomic snapshot of concurrent task associations.
+
+Archives use ZIP64 STORE, incremental CRC32 and the existing per-entry SHA-256
+receipt verification. Names contain a sanitized bounded label and full session
+UUID. An OPFS archive and central-index sidecar keep content and directory memory
+bounded; index copying also uses 64 KiB chunks. Without OPFS, a 32 MiB aggregate
+fallback includes archive and index overhead. Acknowledged chunks become immutable
+Blob parts; final assembly composes those parts without retaining a second
+Uint8Array copy. Index transfers count both retained and appended parts until
+acknowledged. No archive is emitted until every
+entry verifies. Cancel or authority/context retirement aborts staging and joins
+pending work before reuse. Cleanup failure holds the reservation and requires a
+page reload. Verified archives retain their temporary source for the same
+60-second browser download lifetime as individual evidence.

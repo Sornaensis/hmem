@@ -1,4 +1,5 @@
 import { createRecordFramer, decodeBase64 } from './session-viewer.js'
+import { createZip64Writer, evidenceEntryName } from './session-zip.js'
 import { sha256 } from '@noble/hashes/sha256'
 
 const hex = bytes => Array.from(bytes,byte => byte.toString(16).padStart(2,'0')).join('')
@@ -51,14 +52,72 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))
   let heartbeatKey = ''
   async function retireSave(owned = activeSave) {
-    if (!owned) return
+    if (!owned) return true
+    if (owned.cleanupFailed) return false
     owned.retired = true
     try {
       if(owned.writer) await owned.writer.abort()
-      else if(owned.native) await owned.native.abort()
+      if(owned.archive) await owned.archive.abort()
+      else if(!owned.writer && owned.native) await owned.native.abort()
       if(!owned.picking && !owned.acquiring && activeSave === owned) activeSave = null
-    } catch { send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:'writer_cleanup_failed'}) }
+      return true
+    } catch { reportCleanupFailure(owned);return false }
   }
+  function reportCleanupFailure(owned){
+    owned.cleanupFailed=true
+    if(!owned.cleanupReported){owned.cleanupReported=true;send({kind:owned.task?'archive-error':'save-error',stamp,operation:owned.operation,code:'writer_cleanup_failed'})}
+  }
+  async function archiveFailure(owned,error){
+    const cleaned=await retireSave(owned)
+    if(error.message==='writer_cleanup_failed'&&!owned.cleanupReported)reportCleanupFailure(owned)
+    if(cleaned&&!owned.cleanupFailed)send({kind:'archive-error',stamp:owned.stamp,operation:owned.operation,code:error.message})
+  }
+  const triggerArchive = async (owned,file,cleanup=async()=>{}) => {
+    if(owned.retired || stamp!==owned.stamp) throw Error('retired_download')
+    const url=window.URL.createObjectURL(file),link=document.createElement('a')
+    link.href=url;link.download=evidenceEntryName({name:owned.title,id:owned.task}).replace(/\.jsonl$/,'.zip');link.click()
+    let disposed=false
+    const dispose=()=>{if(disposed)return;disposed=true;window.URL.revokeObjectURL(url);void cleanup().catch(()=>{})}
+    window.setTimeout(dispose,60000);window.addEventListener?.('pagehide',dispose,{once:true})
+  }
+  async function archiveStorage(owned) {
+    let root,handles=[],writers=[],names=[]
+    try {
+      if(!window.navigator?.storage?.getDirectory)throw Error('storage_unavailable')
+      root=await(await window.navigator.storage.getDirectory()).getDirectoryHandle('hmem-downloads',{create:true})
+      const prefix='hmem-download-'+Date.now()+'-'+window.crypto.randomUUID()
+      for(const extension of ['.zip','.index']){const name=prefix+extension;names.push(name);const handle=await root.getFileHandle(name,{create:true});handles.push(handle);writers.push(await handle.createWritable())}
+    }catch(error){
+      const results=await Promise.allSettled(writers.map(writer=>writer.abort()));
+      if(root)results.push(...await Promise.allSettled(names.map(async name=>{try{await root.removeEntry(name)}catch(error){if(error.name!=='NotFoundError')throw error}})))
+      if(results.some(result=>result.status==='rejected')){owned.cleanupFailed=true;throw Error('writer_cleanup_failed')}
+      let used=0,archive=[],central=[]
+      const retain=(list,bytes)=>{if(used+bytes.length>33554432)throw Error('download_storage_unavailable');list.push(new Blob([bytes]));used+=bytes.length}
+      return {output:{async write(bytes){retain(archive,bytes)},async close(){const file=new Blob(archive,{type:'application/zip'});archive=[];await triggerArchive(owned,file);used=0},async abort(){archive=[]}},index:{async write(bytes){retain(central,bytes)},async *readChunks(){for(let i=0;i<central.length;i++){const part=central[i];yield new Uint8Array(await part.arrayBuffer());used-=part.size;central[i]=null}central=[]},async abort(){central=[]}}}
+    }
+    const closing=[null,null],aborting=[null,null],removing=[null,null]
+    const close=i=>closing[i]||=(Promise.resolve().then(()=>writers[i].close()))
+    const remove=i=>removing[i]||=(Promise.resolve().then(()=>root.removeEntry(names[i])).catch(error=>{if(error.name!=='NotFoundError')throw error}))
+    const abort=i=>aborting[i]||=(async()=>{try{if(closing[i])await closing[i];else await writers[i].abort()}finally{await remove(i)}})()
+    return {
+      output:{write:bytes=>writers[0].write(bytes),async close(){await close(0);await triggerArchive(owned,await handles[0].getFile(),()=>remove(0))},abort:()=>abort(0)},
+      index:{write:bytes=>writers[1].write(bytes),async *readChunks(){await close(1);const file=await handles[1].getFile();for(let offset=0;offset<file.size;offset+=65536)yield new Uint8Array(await file.slice(offset,offset+65536).arrayBuffer())},abort:()=>abort(1)}
+    }
+  }
+  document.addEventListener('click',event=>{
+    const button=event.target.closest?.('[data-session-archive]');if(!button||button.disabled)return
+    event.preventDefault();let config;try{config=JSON.parse(button.dataset.sessionArchive)}catch{return}
+    if(config.stamp!==stamp||activeSave)return
+    const owned={...config,retired:false,writer:null,native:null,archive:null,picking:false,acquiring:true,entry:null,finishing:false};activeSave=owned
+    send({kind:'archive-picking',stamp:owned.stamp,operation:owned.operation,task:owned.task,title:owned.title})
+    ;(async()=>{try{
+      const storage=await archiveStorage(owned)
+      owned.archive=createZip64Writer(storage.output,storage.index,()=>activeSave===owned&&!owned.retired&&stamp===owned.stamp)
+      owned.acquiring=false
+      if(owned.retired||stamp!==owned.stamp){await retireSave(owned);return}
+      send({kind:'archive-ready',stamp:owned.stamp,operation:owned.operation})
+    }catch(error){owned.acquiring=false;await archiveFailure(owned,error)}})()
+  })
   document.addEventListener('click', event => {
     const button=event.target.closest?.('[data-session-download]')
     if(!button || button.disabled) return
@@ -84,12 +143,6 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       try {
         if(window.navigator?.storage?.getDirectory) {
           root=await (await window.navigator.storage.getDirectory()).getDirectoryHandle('hmem-downloads',{create:true})
-          let inspected=0
-          for await (const name of root.keys()) {
-            if(++inspected>32) break
-            const created=/^hmem-download-(\d+)-/.exec(name)?.[1]
-            if(created && Date.now()-Number(created)>60000) await root.removeEntry(name).catch(()=>{})
-          }
           temporary='hmem-download-'+Date.now()+'-'+window.crypto.randomUUID()+'.jsonl'
           const handle=await root.getFileHandle(temporary,{create:true})
           const writable=await handle.createWritable()
@@ -111,7 +164,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       owned.writer=createEvidenceWriter(owned.native,owned.session,()=>activeSave===owned&&!owned.retired&&stamp===owned.stamp)
       if(owned.retired || stamp!==owned.stamp){await retireSave(owned);return}
       send({kind:'save-ready',stamp:owned.stamp,operation:owned.operation})
-    })().catch(async error=>{owned.acquiring=false;await retireSave(owned);send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:error.message==='download_storage_unavailable'?'download_storage_unavailable':'download_failed'})})
+    })().catch(async error=>{owned.acquiring=false;if(await retireSave(owned))send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:error.message==='download_storage_unavailable'?'download_storage_unavailable':'download_failed'})})
   })
   document.addEventListener('click', event => {
     const button = event.target.closest?.('[data-session-save]')
@@ -142,23 +195,35 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     }).catch(async () => {
       owned.picking = false
       owned.acquiring = false
-      await retireSave(owned)
-      send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:'picker_cancelled_or_failed'})
+      if(await retireSave(owned))send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:'picker_cancelled_or_failed'})
     })
   })
   queueMicrotask(()=>send({kind:'save-capability',supported:typeof window.showSaveFilePicker === 'function'}))
   app.ports.sessionBridgeCommand.subscribe(command => {
     if (command.stamp !== stamp) { stamp = command.stamp; framer = null; generation = -1; void retireSave() }
     if(activeSave && activeSave.operation < command.nextOperation && command.saveOperation !== activeSave.operation) void retireSave()
+    if(command.archiveEntry && activeSave?.archive && activeSave.operation===command.saveOperation && !activeSave.acquiring && !activeSave.writer){
+      const owned=activeSave,entry=command.archiveEntry;owned.acquiring=true
+      ;(async()=>{try{
+        const sink=await owned.archive.entry(evidenceEntryName({name:entry.name,id:entry.session.id}),entry.session.finalBytes)
+        owned.writer=createEvidenceWriter(sink,entry.session,()=>activeSave===owned&&!owned.retired&&stamp===owned.stamp)
+        owned.acquiring=false
+        if(owned.retired||stamp!==owned.stamp){await retireSave(owned);return}
+        send({kind:'save-ready',stamp:owned.stamp,operation:owned.operation})
+      }catch(error){owned.acquiring=false;await archiveFailure(owned,error)}})()
+    }
+    if(command.archiveFinish && activeSave?.archive && activeSave.operation===command.saveOperation && !activeSave.finishing){
+      const owned=activeSave;owned.finishing=true
+      owned.archive.finish().then(result=>{if(activeSave!==owned||owned.retired||stamp!==owned.stamp)return;activeSave=null;send({kind:'archive-complete',stamp:owned.stamp,operation:owned.operation,entries:result.entries})}).catch(async error=>{await archiveFailure(owned,error)})
+    }
     if(command.saveChunk && activeSave && activeSave.operation === command.saveOperation && activeSave.writer) {
       const owned = activeSave
       owned.writer.write(command.saveChunk).then(result => {
         if(activeSave !== owned || owned.retired || stamp !== owned.stamp) return
-        if(result.complete) activeSave = null
+        if(result.complete){if(owned.archive)owned.writer=null;else activeSave=null}
         send({kind:result.complete?'save-complete':'save-progress',stamp:owned.stamp,operation:owned.operation,offset:result.offset})
-      }).catch(async () => {
-        await retireSave(owned)
-        send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:'write_or_verification_failed'})
+      }).catch(async error => {
+        if(await retireSave(owned))send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:error.message==='download_storage_unavailable'?'download_storage_unavailable':'write_or_verification_failed'})
       })
     }
     const statuses = Object.fromEntries((command.heartbeats || []).slice(0,52).map(session=> {

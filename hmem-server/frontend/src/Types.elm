@@ -1283,8 +1283,11 @@ type alias SessionsModel =
     , notice : String
     , error : Maybe String
     , now : Float
+    , saveBlocked : Bool
     , saveCapability : Maybe Bool
     , save : Maybe SessionSaveOperation
+    , archive : Maybe SessionArchiveOperation
+    , archiveMessageTask : Maybe String
     , nextOperation : Int
     , saveMessage : String
     , heartbeats : Dict String String
@@ -1310,8 +1313,13 @@ emptySessionsModel : SessionsModel
 emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, owned = []
     , filters = Api.defaultSessionFilters, stamp = "", generation = 0, bridgedGeneration = -1, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
-    , saveCapability = Nothing, save = Nothing, nextOperation = 1, saveMessage = ""
+    , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, nextOperation = 1, saveMessage = ""
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
+
+
+type alias SessionArchiveOperation =
+    { operation : Int, task : String, title : String, cursor : Maybe Api.SessionCursor
+    , page : List Api.AgentSession, nextCursor : Maybe Api.SessionCursor, phase : String, count : Int, entryName : String }
 
 
 type alias SessionSaveOperation =

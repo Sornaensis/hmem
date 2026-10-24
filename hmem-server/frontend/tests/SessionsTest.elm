@@ -183,6 +183,48 @@ suite =
                 ready=Sessions.reconcile ({entered | activeTab=ProjectsTab,sessions={state | selected=Nothing,save=Just operation,nextOperation=2,taskPages=Dict.empty},sessionDelivery=Delivery.init},Cmd.none) |> Tuple.first
             in
             Expect.equal (Just True,0) (ready.sessions.save |> Maybe.map .pending,Dict.size ready.sessions.taskPages)
+        , test "archive keysets preserve sub-millisecond precision and normalize variable fractions" <| \_ ->
+            let
+                key stamp = Sessions.cursorKey {createdAt="2026-10-24T10:00:00" ++ stamp,id=sessionId} |> Maybe.withDefault "invalid"
+            in
+            Expect.equal (True,True,True)
+                (key ".1Z" == key ".100000Z",key ".000101Z" > key ".0001009Z",key ".11Z" > key ".1Z")
+        , test "archive pages reject nonprogress, inconsistent cursors and malformed timestamps" <| \_ ->
+            case Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head) of
+                Nothing -> Expect.fail "fixture decode failed"
+                Just source ->
+                    let
+                        row={source | state=Api.SessionTerminated,finalBytes=Just 0,finalSha256=Just (String.repeat 64 "a")}
+                        cursor={createdAt=row.createdAt,id=row.id}
+                        older={row | createdAt="2026-10-23T20:46:19.4538749Z"}
+                    in
+                    Expect.equal [True,False,False,False,False,True]
+                        [Sessions.validArchivePage Nothing {items=[row,older],nextCursor=Just {createdAt=older.createdAt,id=older.id}}
+                        ,Sessions.validArchivePage Nothing {items=[older,row],nextCursor=Nothing}
+                        ,Sessions.validArchivePage (Just cursor) {items=[row],nextCursor=Nothing}
+                        ,Sessions.validArchivePage Nothing {items=[],nextCursor=Just cursor}
+                        ,Sessions.validArchivePage Nothing {items=[{row | createdAt="invalid"}],nextCursor=Nothing}
+                        ,Sessions.validArchivePage Nothing {items=[],nextCursor=Nothing}]
+        , test "archive cancellation retires both native operation and range demand without releasing physical slots" <| \_ ->
+            let
+                entered=Sessions.reconcile ({sessionModel | activeTab=ProjectsTab},Cmd.none) |> Tuple.first
+                state=entered.sessions
+                archive=SessionArchiveOperation 1 workspace "Task evidence" Nothing [] Nothing "entries" 0 "Saved session"
+                save=SessionSaveOperation 1 sessionId 5 (String.repeat 64 "a") 1 0 "writing" False
+                downloading=Sessions.reconcile ({entered | sessions={state | archive=Just archive,save=Just save,nextOperation=2}},Cmd.none) |> Tuple.first
+                cancelled=Sessions.update SessionsCancelSave downloading |> Sessions.reconcile |> Tuple.first
+                denied=Sessions.reconcile ({downloading | auth={status=AuthRequired,mode=Nothing}},Cmd.none) |> Tuple.first
+            in
+            Expect.equal {archive=Nothing,save=Nothing,denied=Nothing,bounded=True}
+                {archive=cancelled.sessions.archive,save=cancelled.sessions.save,denied=denied.sessions.archive,bounded=Dict.size cancelled.sessionDelivery.physical == Dict.size downloading.sessionDelivery.physical}
+        , test "late archive cleanup failure after cancellation blocks reuse globally" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                state=entered.sessions
+                cancelled={entered | sessions={state | archive=Nothing,save=Nothing,nextOperation=2}}
+                failed=Sessions.update (SessionsBridgeEvent (Encode.object [("kind",Encode.string "archive-error"),("stamp",Encode.string state.stamp),("operation",Encode.int 1),("code",Encode.string "writer_cleanup_failed")])) cancelled |> Tuple.first
+            in
+            Expect.equal True failed.sessions.saveBlocked
         ]
 
 

@@ -24,6 +24,7 @@ type Target
     | SessionBytes String Int Bool
     | SessionWindow String Int Int Bool
     | SessionSave String Int Int
+    | ArchiveSessions String (Maybe Api.SessionCursor)
 
 
 type Payload
@@ -60,6 +61,7 @@ key workspace target =
             WorkspaceSessions before -> "list:" ++ cursor before
             WorkspaceSessionsFiltered filters before -> "list:" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
             TaskSessionsFiltered task filters before -> "task-filter:" ++ task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
+            ArchiveSessions task before -> "archive:" ++ task ++ ":" ++ cursor before
             TaskSessions task before -> "task:" ++ task ++ ":" ++ cursor before
             SessionMetadata id -> "detail:" ++ id
             SessionTasks id after -> "links:" ++ id ++ ":" ++ Maybe.withDefault "first" after
@@ -182,7 +184,8 @@ invalidateSession workspace id =
         TaskSessions _ _ -> True
         SessionBytes _ _ _ -> False
         SessionWindow _ _ _ _ -> False
-        SessionSave _ _ _ -> False))
+        SessionSave _ _ _ -> False
+        ArchiveSessions _ _ -> False))
 
 
 invalidateTask : String -> String -> State -> State
@@ -258,6 +261,7 @@ valid request payload =
         ( WorkspaceSessions _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( WorkspaceSessionsFiltered _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( TaskSessionsFiltered _ _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
+        ( ArchiveSessions _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace && session.state == Api.SessionTerminated) page.items
         ( TaskSessions _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( SessionMetadata id, Metadata session ) -> sessionMatches id session
         ( SessionTasks _ _, TasksPage page ) -> List.length page.items <= 50
@@ -349,6 +353,7 @@ fetch apiUrl request toMsg =
         WorkspaceSessions cursor -> Api.fetchAgentSessions apiUrl request.workspace Nothing cursor 50 (Result.map SessionsPage >> toMsg)
         WorkspaceSessionsFiltered filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace Nothing filters cursor 50 (Result.map SessionsPage >> toMsg)
         TaskSessionsFiltered task filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace (Just task) filters cursor 50 (Result.map SessionsPage >> toMsg)
+        ArchiveSessions task cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace (Just task) {state="terminated",freshness=""} cursor 50 (Result.map SessionsPage >> toMsg)
         TaskSessions task cursor -> Api.fetchAgentSessions apiUrl request.workspace (Just task) cursor 50 (Result.map SessionsPage >> toMsg)
         SessionMetadata id -> Api.fetchAgentSession apiUrl request.workspace id (Result.map Metadata >> toMsg)
         SessionTasks id cursor -> Api.fetchSessionTasks apiUrl request.workspace id cursor 50 (Result.map TasksPage >> toMsg)

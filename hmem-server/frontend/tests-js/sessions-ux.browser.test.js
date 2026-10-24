@@ -111,3 +111,56 @@ test('zero-byte evidence completes when writer acquisition outlives card collaps
   assert.deepEqual(h.errors,[])
  }finally{await h.close();await rm(scratch,{recursive:true,force:true})}
 })
+
+
+test('conversation flow preserves declared identity and wraps long model names without inventing missing metadata', {timeout:60000},async()=>{
+ const cases=[{creator:{creator_actor_type:'bot',creator_bot_identity:{role:'Developer','model-id':'declared-harness:actual-model:high'}},width:1440},{creator:{creator_actor_type:'bot',creator_bot_identity:{role:'Reviewer','model-id':'declared-harness:'+ 'long-model-name-'.repeat(12)+':high'}},width:430},{creator:null,width:430}]
+ for(const scenario of cases){
+  const h=await openSessionExplorer({creator:scenario.creator});const {page}=h
+  try{
+   await page.setViewportSize({width:scenario.width,height:1000});await h.start();await h.idle()
+   await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor()
+   const selected=page.locator('.session-summary a').filter({hasText:'Codex'})
+   if(scenario.creator){assert.match(await selected.locator('.session-identity').innerText(),new RegExp(scenario.creator.creator_bot_identity.role))}
+   else assert.equal(await selected.locator('.session-identity').count(),0)
+   await selected.click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor();await page.getByRole('button',{name:'Pause',exact:true}).click()
+   const identity=page.locator('.session-detail-header .session-identity')
+   if(scenario.creator){const declared=scenario.creator.creator_bot_identity;assert.ok((await identity.innerText()).includes(declared['model-id']));assert.ok((await identity.innerText()).includes(declared.role));assert.equal(await identity.evaluate(el=>getComputedStyle(el).userSelect),'text')}
+   else assert.equal(await identity.count(),0)
+   const user=page.locator('.session-role-user:not(.session-record-activity)').first(),assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
+   assert.notEqual(await user.evaluate(el=>getComputedStyle(el).borderRadius),'0px')
+   assert.equal(await assistant.evaluate(el=>getComputedStyle(el).borderTopWidth),'0px')
+   assert.equal(await assistant.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)')
+   assert.ok(await assistant.locator('.session-record-text').evaluate(el=>parseFloat(getComputedStyle(el).lineHeight)>=24))
+   const tool=page.locator('.session-content-tool').first();assert.equal(await tool.getAttribute('open'),null);await tool.locator('summary').focus();await page.keyboard.press('Enter');assert.notEqual(await tool.getAttribute('open'),null)
+   assert.equal(await page.getByText('Private reasoning stays collapsed.',{exact:true}).isVisible(),false)
+   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))
+   if(scenario.creator&&scenario.width===1440){
+    await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle()
+    const taskCard=page.locator('#entity-'+h.fixture.tasks[0].id);await taskCard.locator('.btn-extras-toggle').click();await h.idle()
+    await taskCard.locator('.task-session-active summary').click();await taskCard.locator('.task-session-evidence summary').click()
+    assert.equal(await taskCard.locator('.task-session-card .session-identity').count(),2)
+    for(const label of await taskCard.locator('.task-session-card .session-identity').allTextContents())assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
+   }
+   assert.deepEqual(h.errors,[])
+  }finally{await h.close()}
+ }
+})
+
+
+test('known harness housekeeping stays in Original JSON while unfamiliar events remain inspectable', {timeout:30000},async()=>{
+ const h=await openSessionExplorer({housekeeping:true});const {page}=h
+ try{
+  await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click()
+  await page.locator('.session-summary a').filter({hasText:'Codex'}).click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
+  await page.getByRole('button',{name:'Pause',exact:true}).click()
+  assert.equal(await page.locator('.session-record').count(),10)
+  assert.equal(await page.locator('.session-original').count(),2)
+  assert.equal(await page.locator('#session-records').getByText(/housekeeping-session|synthetic-workspace|total_tokens/).count(),0)
+  const unknown=page.locator('.session-original').filter({hasText:'novel_event'});await unknown.locator('summary').click();assert.ok(await unknown.getByText(/novel_event/).isVisible())
+  const raw=page.locator('.session-raw-details');await raw.locator('summary').click()
+  assert.equal(await raw.locator('.session-record-raw').count(),13)
+  const original=await raw.innerText();for(const type of ['session_meta','turn_context','token_count','novel_event'])assert.ok(original.includes(type))
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})

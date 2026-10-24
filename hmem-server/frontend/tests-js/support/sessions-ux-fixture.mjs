@@ -1,6 +1,6 @@
 import { hierarchyFixture, openHierarchy } from '../hierarchy-fixture.mjs'
 import { createHash } from 'node:crypto'
-export async function openSessionExplorer({many=false,empty=false}={}) {
+export async function openSessionExplorer({many=false,empty=false,creator=null,housekeeping=false}={}) {
   const f=hierarchyFixture();f.projects=[f.projects[0]]
   f.tasks=Array.from({length:many?22:2},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null}))
   const records=[
@@ -15,9 +15,15 @@ export async function openSessionExplorer({many=false,empty=false}={}) {
     {type:'assistant',message:{role:'assistant',content:[{type:'text',text:'The linked task cards and saved evidence are ready to explore.'}]}},
     {type:'mystery',payload:{preserved:true}},
   ]
+  if(housekeeping)records.unshift(
+    {type:'session_meta',payload:{id:'housekeeping-session'}},
+    {type:'turn_context',payload:{cwd:'synthetic-workspace'}},
+    {type:'event_msg',payload:{type:'token_count',info:{total_tokens:42}}},
+    {type:'event_msg',payload:{type:'novel_event',preserved:true}},
+  )
   const bytes=empty?Buffer.alloc(0):Buffer.from(records.map(r=>JSON.stringify(r)).join('\n')+'\r\n')
   const stamp=new Date().toISOString();const activeId='20000000-0000-4000-8000-000000000001',savedId='20000000-0000-4000-8000-000000000002'
-  const base={workspace_id:f.workspace.id,format_label:'Codex · Session explorer',created_at:stamp,last_seen_at:stamp,committed_bytes:bytes.length,committed_records:empty?0:records.length,revision:1,ends_with_newline:true}
+  const base={workspace_id:f.workspace.id,format_label:'Codex · Session explorer',created_at:stamp,last_seen_at:stamp,committed_bytes:bytes.length,committed_records:empty?0:records.length,revision:1,ends_with_newline:true,...(creator||{})}
   const active={...base,id:activeId,state:'active'},saved={...base,id:savedId,format_label:'Claude · UX review',state:'terminated',terminated_at:stamp,final_bytes:bytes.length,final_sha256:createHash('sha256').update(bytes).digest('hex')}
   const h=await openHierarchy(f),reads=[]
   let requestActive=0,peak=0

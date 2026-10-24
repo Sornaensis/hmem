@@ -4,7 +4,24 @@ The frontend presents stored JSONL without changing its original bytes. Native
 Codex response-item messages, function calls/results and reasoning summaries, and
 Claude message content blocks render as conversations. Adjacent opposite Codex message envelopes are paired one-to-one only when their
 content matches and valid timestamps differ by at most 100 ms. The event envelope
-is suppressed; missing or invalid timestamps preserve both records. Thinking and tool payloads start collapsed. Encrypted reasoning is a placeholder, and unknown records/content blocks are hidden. Tool inputs and outputs are formatted JSON with bounded syntax-token spans; non-JSON strings use an input/output wrapper. Markdown links permit HTTP, HTTPS, mailto
+is suppressed; missing or invalid timestamps preserve both records. A paired
+occurrence keeps its first source-position presentation anchor even when the
+canonical envelope arrives later or its hidden counterpart leaves the window.
+The retained rows carry only bounded pairing metadata; raw offsets, delimiters
+and evidence bytes still describe the canonical record.
+
+Consecutive thinking, tool calls and results share a collapsed activity group,
+including a run that currently has only one event. User and agent prose stays
+outside the disclosure and splits runs, including within mixed Claude content.
+Hidden unknown and empty blocks neither create groups nor split them. Each group
+shows its first timestamp and event count. Individual thinking and formatted tool
+payload disclosures remain available inside it; encrypted reasoning shows only
+*Thinking...*. Source-position keys preserve native disclosure state as a run
+grows or a message closes it. State belongs to the current session/authority and
+retained window; it is not an unbounded history of expanded groups.
+
+Tool inputs and outputs are formatted JSON with bounded syntax-token spans;
+non-JSON strings use an input/output wrapper. Markdown links permit HTTP, HTTPS, mailto
 and local fragments; raw HTML is not executed and images display their alt text.
 
 ## Bounded presentation and transport

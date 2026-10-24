@@ -4,6 +4,7 @@ import Api
 import Browser.Navigation as Nav
 import ActorAttribution
 import SessionActivityLight
+import SessionTranscript as Transcript
 import Dict
 import Feature.SessionDelivery as Delivery
 import Feature.WebSocket as WebSocket
@@ -318,7 +319,8 @@ receiveBridge value model =
         generation = field "generation" Decode.int -1
         through = field "through" Decode.int -1
         kind = field "kind" Decode.string ""
-        row = Decode.map8 SessionRecord (Decode.field "offset" Decode.int) (Decode.field "end" Decode.int) (Decode.field "raw" Decode.string) (Decode.field "delimiter" Decode.string) (Decode.field "type" Decode.string) (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "text" Decode.string)
+        row = Decode.map8 (\offset end raw delimiter recordType role time content -> {offset=offset,end=end,raw=raw,delimiter=delimiter,recordType=recordType,role=role,time=time,content=content,presentationOffset=offset}) (Decode.field "offset" Decode.int) (Decode.field "end" Decode.int) (Decode.field "raw" Decode.string) (Decode.field "delimiter" Decode.string) (Decode.field "type" Decode.string) (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "text" Decode.string)
+            |> Decode.andThen (\record -> Decode.map (\anchor -> {record | presentationOffset=anchor}) (Decode.oneOf [Decode.field "presentationOffset" Decode.int,Decode.succeed record.offset]))
     in
     if kind == "archive-http" then receiveArchiveHttp value model
     else if kind == "heartbeat-status" && stamp == state.stamp then
@@ -615,58 +617,51 @@ viewRecords workspace model id =
             ,session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
         ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "aria-label" "Bounded transcript records"]
-            (List.map (\record -> (String.fromInt record.offset,viewRecord model record)) (List.filter (\record -> record.recordType /= "unknown") state.rows))
+            (List.map (\item -> let (key,node) = viewTranscriptItem model item in (state.stamp ++ ":" ++ key,node)) (Transcript.project state.rows))
         ,if List.isEmpty state.rows then p [attribute "role" "status"] [text (if state.start == Nothing then "Loading transcript metadata…" else if state.offset < state.end then "Reading transcript…" else if newest == 0 then "This session has no committed records." else "No complete messages in this window.")] else text ""
         ,text "" ]
 
 
 
-viewRecord : Model -> SessionRecord -> Html Msg
-viewRecord model record =
-    if isHarnessHousekeeping record then
-        text ""
+viewTranscriptItem : Model -> Transcript.Item -> (String,Html Msg)
+viewTranscriptItem model item =
+    case item of
+        Transcript.Message piece ->
+            ("message:" ++ piece.key,viewTranscriptPiece model piece)
 
-    else
-        viewConversationRecord model record
-
-
-isHarnessHousekeeping : SessionRecord -> Bool
-isHarnessHousekeeping record =
-    let
-        decoder =
-            Decode.field "type" Decode.string
-                |> Decode.andThen (\kind ->
-                    if kind == "session_meta" || kind == "turn_context" then
-                        Decode.succeed True
-                    else if kind == "event_msg" then
-                        Decode.field "payload" (Decode.field "type" Decode.string) |> Decode.map ((==) "token_count")
-                    else
-                        Decode.succeed False)
-    in
-    record.recordType == "unknown" && (Decode.decodeString decoder record.raw |> Result.withDefault False)
+        Transcript.Activity pieces ->
+            let
+                firstKey = List.head pieces |> Maybe.map .key |> Maybe.withDefault ""
+                firstTime = List.filterMap (\piece -> if piece.record.time == "" then Nothing else Just piece.record.time) pieces |> List.head |> Maybe.withDefault ""
+                count = List.map (.blocks >> List.length) pieces |> List.sum
+            in
+            ("activity:" ++ firstKey,details [class "session-activity-group",attribute "data-group-key" firstKey]
+                [ summary [class "session-activity-summary"]
+                    [if firstTime == "" then text "" else time [class "session-event-time",attribute "datetime" firstTime] [text (compactTimestamp model firstTime)]
+                    ,span [] [text ("Activity · " ++ String.fromInt count ++ (if count == 1 then " event" else " events"))]]
+                ,Keyed.node "div" [class "session-activity-records"] (List.map (\piece -> (piece.key,viewTranscriptPiece model piece)) pieces)])
 
 
-viewConversationRecord : Model -> SessionRecord -> Html Msg
-viewConversationRecord model record =
-    let
-        token = Decode.map2 Tuple.pair (Decode.field "kind" Decode.string) (Decode.field "text" Decode.string)
-        blocks = Decode.decodeString (Decode.list (Decode.map4 (\kind content label tokens -> {kind=kind,content=content,label=label,tokens=tokens}) (Decode.field "kind" Decode.string) (Decode.field "text" Decode.string) (Decode.field "label" Decode.string) (Decode.oneOf [Decode.field "tokens" (Decode.list token),Decode.succeed []]))) record.content |> Result.withDefault [] |> List.filter (\block -> block.kind /= "unknown")
-        activity = record.recordType == "conversation" && not (List.any (\block -> block.kind == "text") blocks)
-        markdown content =
-            case Markdown.Parser.parse content |> Result.mapError (always "parse error") |> Result.andThen (Markdown.Renderer.render sessionMarkdownRenderer) of
-                Ok rendered -> div [class "markdown-content session-record-text"] rendered
-                Err _ -> pre [class "session-record-text"] [text content]
-        viewBlock block =
-            if block.kind == "text" then markdown block.content
-            else if block.kind == "encrypted" then em [class "session-thinking"] [text "Thinking..."]
-            else details [class ("session-content-" ++ block.kind)] [summary [Html.Attributes.title block.label] [text (if block.label /= "" then block.label else if block.kind == "thinking" then "Thinking" else "Tool activity")],if block.kind == "thinking" then markdown block.content else pre [class "session-tool-content"] [code [class "language-json"] (if List.isEmpty block.tokens then [text block.content] else List.map (\(kind,content) -> span [class ("json-" ++ kind)] [text content]) block.tokens)]]
-    in
-    if record.recordType == "conversation" && List.isEmpty blocks then text "" else
-    article [class ("session-record session-role-" ++ record.role ++ (if activity then " session-record-activity" else "")),attribute "data-offset" (String.fromInt record.offset)]
-        [div [class "session-record-meta"] [if record.time == "" then text "" else time [class "session-event-time",attribute "datetime" record.time] [text (compactTimestamp model record.time)],if activity then text "" else span [] [text (if record.role == "user" then "You" else if record.role == "tool" then "Tool" else if record.role == "assistant" then "Assistant" else "Message")]]
-        ,if record.recordType == "conversation" then div [] (List.map viewBlock blocks) else if record.recordType == "unknown" then text "" else markdown record.content
-        ]
+viewTranscriptPiece : Model -> Transcript.Piece -> Html Msg
+viewTranscriptPiece model piece =
+    let record = piece.record in
+    article [class ("session-record session-role-" ++ record.role ++ (if piece.activity then " session-record-activity" else "")),attribute "data-offset" (String.fromInt record.offset),attribute "data-block-key" piece.key]
+        [div [class "session-record-meta"] [if record.time == "" then text "" else time [class "session-event-time",attribute "datetime" record.time] [text (compactTimestamp model record.time)],if piece.activity then text "" else span [] [text (if record.role == "user" then "You" else if record.role == "tool" then "Tool" else if record.role == "assistant" then "Assistant" else "Message")]]
+        ,div [] (List.map viewTranscriptBlock piece.blocks)]
 
+
+viewTranscriptBlock : Transcript.Block -> Html Msg
+viewTranscriptBlock block =
+    if block.kind == "text" then sessionMarkdown block.content
+    else if block.kind == "encrypted" then em [class "session-thinking"] [text "Thinking..."]
+    else details [class ("session-content-" ++ block.kind)] [summary [Html.Attributes.title block.label] [text (if block.label /= "" then block.label else if block.kind == "thinking" then "Thinking" else "Tool activity")],if block.kind == "thinking" then sessionMarkdown block.content else pre [class "session-tool-content"] [code [class "language-json"] (if List.isEmpty block.tokens then [text block.content] else List.map (\(kind,content) -> span [class ("json-" ++ kind)] [text content]) block.tokens)]]
+
+
+sessionMarkdown : String -> Html Msg
+sessionMarkdown content =
+    case Markdown.Parser.parse content |> Result.mapError (always "parse error") |> Result.andThen (Markdown.Renderer.render sessionMarkdownRenderer) of
+        Ok rendered -> div [class "markdown-content session-record-text"] rendered
+        Err _ -> pre [class "session-record-text"] [text content]
 
 compactTimestamp : Model -> String -> String
 compactTimestamp model source =

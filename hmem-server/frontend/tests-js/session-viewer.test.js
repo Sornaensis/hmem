@@ -3,6 +3,67 @@ import test from 'node:test'
 import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, presentation, toolPayload } from '../src/session-viewer.js'
 const encode = value => new TextEncoder().encode(value)
 
+test('paired native envelopes keep the first real occurrence anchor through final-LF replacement and repeated events',()=>{
+ const event={type:'event_msg',timestamp:'2026-10-24T10:00:00.000Z',payload:{type:'agent_reasoning',text:'same'}}
+ const canonical={type:'response_item',timestamp:event.timestamp,payload:{type:'reasoning',summary:[{text:'same'}]}}
+ const first=encode(JSON.stringify(event)+'\n'),second=encode(JSON.stringify(canonical)),framer=createRecordFramer()
+ assert.equal(framer.push(0,first,true).rows[0].presentationOffset,0)
+ let view=framer.push(first.length,second,true)
+ assert.equal(view.rows.length,1);assert.equal(view.rows[0].offset,first.length);assert.equal(view.rows[0].presentationOffset,0)
+ assert.equal(view.rows[0].raw,JSON.stringify(canonical));assert.equal(view.rows[0].delimiter,'')
+ view=framer.push(first.length+second.length,encode('\r\n'),true)
+ assert.equal(view.rows[0].presentationOffset,0);assert.equal(view.rows[0].delimiter,'\r\n')
+ const nextOffset=view.through
+ view=framer.push(nextOffset,first,true)
+ assert.equal(view.rows.length,2);assert.equal(view.rows[1].presentationOffset,nextOffset)
+ view=framer.push(view.through,encode(JSON.stringify(canonical)+'\n'),true)
+ assert.equal(view.rows.length,2);assert.deepEqual(view.rows.map(row=>row.presentationOffset),[0,nextOffset])
+ assert.ok(view.rows.every(row=>!('pairedOffset'in row)&&!('eventEnvelope'in row)))
+})
+
+test('retained canonical anchors and consumed pairs survive hidden-envelope eviction without merging repeated occurrences',()=>{
+ const event={type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'agent_reasoning',text:'same'},padding:'x'.repeat(900000)}
+ const canonical={type:'response_item',timestamp:event.timestamp,payload:{type:'reasoning',summary:[{text:'same'}]}}
+ const later={...event,padding:''},framer=createRecordFramer()
+ function feed(value){const bytes=encode(value);let view;for(let i=0;i<bytes.length;i+=65536)view=framer.push(framer.snapshot().through,bytes.subarray(i,i+65536),i+65536>=bytes.length);return view}
+ feed(JSON.stringify(event)+'\n');const canonicalOffset=framer.snapshot().through
+ feed(JSON.stringify(canonical)+'\n');const laterOffset=framer.snapshot().through
+ feed(JSON.stringify(later)+'\n');feed(JSON.stringify('y'.repeat(900000))+'\n')
+ const view=feed(JSON.stringify('z'.repeat(400000))+'\n')
+ const visible=view.rows.filter(row=>row.type==='conversation')
+ assert.deepEqual(visible.map(row=>row.offset),[canonicalOffset,laterOffset])
+ assert.deepEqual(visible.map(row=>row.presentationOffset),[0,laterOffset])
+ assert.ok(view.retainedBytes<=MAX_VIEW_BYTES)
+})
+
+test('canonical-first pairing does not resurrect its hidden event or consume a later identical canonical after eviction',()=>{
+ const canonical={type:'response_item',timestamp:'2026-10-24T10:00:00Z',payload:{type:'reasoning',summary:[{text:'same'}]}}
+ const event={type:'event_msg',timestamp:canonical.timestamp,payload:{type:'agent_reasoning',text:'same'}}
+ const framer=createRecordFramer(),first=encode(JSON.stringify(canonical)+'\n'),second=encode(JSON.stringify(event)+'\n')
+ framer.push(0,first,true);framer.push(first.length,second,true)
+ const repeatedOffset=framer.snapshot().through
+ framer.push(repeatedOffset,first,true)
+ const view=framer.push(framer.snapshot().through,encode('null\n'.repeat(MAX_VIEW_ROWS-2)),true)
+ const visible=view.rows.filter(row=>row.type==='conversation')
+ assert.equal(visible.length,1);assert.equal(visible[0].offset,repeatedOffset);assert.equal(visible[0].presentationOffset,repeatedOffset)
+ assert.ok(view.rows.length<=MAX_VIEW_ROWS)
+})
+
+test('both envelope directions are paired before a single push evicts the first occurrence',()=>{
+ const event={type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'agent_reasoning',text:'same'}}
+ const canonical={type:'response_item',timestamp:event.timestamp,payload:{type:'reasoning',summary:[{text:'same'}]}}
+ for(const eventFirst of [true,false]){
+  const framer=createRecordFramer(),first=encode(JSON.stringify(eventFirst?event:canonical)+'\n')
+  framer.push(0,first,true)
+  const batch=encode(JSON.stringify(eventFirst?canonical:event)+'\n'+'null\n'.repeat(MAX_VIEW_ROWS-1))
+  assert.ok(batch.length<=65536)
+  const view=framer.push(first.length,batch,true),visible=view.rows.filter(row=>row.type==='conversation')
+  assert.equal(visible.length,eventFirst?1:0)
+  if(eventFirst){assert.equal(visible[0].offset,first.length);assert.equal(visible[0].presentationOffset,0);assert.equal(visible[0].raw,JSON.stringify(canonical));assert.equal(visible[0].delimiter,'\n')}
+  assert.equal(view.through,first.length+batch.length);assert.ok(view.rows.length<=MAX_VIEW_ROWS)
+ }
+})
+
 test('tool JSON is formatted and tokenized without changing payloads or growing unbounded spans',()=>{
  for(const value of [{path:'src/a.js',n:12,ok:true,missing:null},'{"query":"café"}', 'plain tool output',Array.from({length:10000},(_,i)=>i)]) {
   const result=toolPayload(value)

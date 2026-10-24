@@ -242,7 +242,7 @@ sessionId = "4eccfa7f-e68c-41fe-8598-eb1533152190"
 
 
 sampleRecord : SessionRecord
-sampleRecord = SessionRecord 0 32 "{}" "\r\n" "unknown" "" "" "{}"
+sampleRecord = SessionRecord 0 32 "{}" "\r\n" "unknown" "" "" "{}" 0
 
 
 sessionModel : Model

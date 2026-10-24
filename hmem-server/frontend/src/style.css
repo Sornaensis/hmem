@@ -4874,3 +4874,9 @@ textarea.observation-edit-content {
 .session-viewer .session-identity { flex-direction:row; flex-wrap:wrap; gap:.3rem 1rem; }
 .session-viewer .session-runtime-value,.task-session-card .session-runtime-value { overflow-wrap:anywhere; white-space:normal; }
 .task-session-card .session-connection { flex-wrap:wrap; }
+.session-activity-group { margin:.35rem 0 .65rem; border-left:2px solid var(--border); padding:.15rem .6rem; color:var(--text-muted); }
+.session-activity-summary { cursor:pointer; font-size:.75rem; line-height:1.5; }
+.session-activity-summary .session-event-time { margin-right:.6rem; font-size:.68rem; }
+.session-activity-summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.session-activity-records { padding-top:.3rem; }
+.session-activity-group .session-record-activity { border:0; padding:.2rem 0; }

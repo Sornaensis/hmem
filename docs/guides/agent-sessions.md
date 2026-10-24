@@ -21,7 +21,12 @@ uses **Session model** for its last declaration. Resuming capture does not repla
 the original caller.
 
 Conversation text renders as Markdown. Tool calls and results expand on demand,
-and thinking starts hidden. Expanded tool payloads display formatted, highlighted
+and thinking starts hidden. Consecutive thinking, tool calls and results appear
+as one collapsed **Activity** group with a timestamp and event count. Expand it
+to inspect the individual events; user and agent messages stay visible outside
+the group. Messages split activity runs, including messages mixed with tools in
+one native record. An expanded run stays expanded as live events arrive.
+Expanded tool payloads display formatted, highlighted
 JSON. Encrypted thinking displays *Thinking...*; unrecognized records stay hidden.
 
 The transcript follows new activity while you are near its end. Scroll up to read

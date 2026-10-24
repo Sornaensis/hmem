@@ -95,29 +95,35 @@ export function createRecordFramer(startOffset = 0) {
     let value
     try { value = JSON.parse(raw) } catch { if (final) { notice = 'Incomplete record at this finite window boundary.'; return }; throw new Error('invalid_json_record') }
     notice = leadingNotice
-    const row = { offset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw) }
+    const row = { offset:start, presentationOffset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw) }
     const old = rows.findIndex(item => item.offset === start)
-    if (old !== -1) { retained -= rows[old].bytes; rows.splice(old,1) }
+    if (old !== -1) {
+      const prior = rows[old]
+      if (prior.raw === raw) { row.presentationOffset = prior.presentationOffset; row.pairedOffset = prior.pairedOffset }
+      retained -= prior.bytes; rows.splice(old,1)
+    }
+    pairOccurrence(rows.at(-1),row)
     rows.push(row); retained += row.bytes
     while (rows.length > MAX_VIEW_ROWS || retained > MAX_VIEW_BYTES) { retained -= rows.shift().bytes }
   }
-  function snapshot() {
+  function pairOccurrence(previous,row) {
+    if (!previous || previous.type !== 'conversation' || row.type !== 'conversation') return
     const fingerprint = row => row.role+':'+JSON.stringify(JSON.parse(row.text).map(({kind,text})=>({kind,text})))
-    const hidden = new Set()
-    let previous = null
-    for (const row of rows) {
-      if(row.type !== 'conversation') { previous=null; continue }
-      const paired = previous && Boolean(previous.eventEnvelope)!==Boolean(row.eventEnvelope) && fingerprint(previous)===fingerprint(row)
-      const firstTime=Date.parse(previous?.time),lastTime=Date.parse(row.time)
-      // Require temporal evidence as well as one-to-one adjacent envelopes.
-      // Missing, invalid or turn-scale times preserve both records.
-      const sameOccurrence=Number.isFinite(firstTime)&&Number.isFinite(lastTime)&&Math.abs(firstTime-lastTime)<=100
-      if(paired && sameOccurrence) {
-        hidden.add(row.eventEnvelope?row.offset:previous.offset)
-        previous=null // A canonical occurrence can consume only one envelope.
-      } else previous=row
+    const paired = Boolean(previous.eventEnvelope)!==Boolean(row.eventEnvelope)
+      && (previous.pairedOffset === undefined || previous.pairedOffset === row.offset)
+      && (row.pairedOffset === undefined || row.pairedOffset === previous.offset)
+      && fingerprint(previous)===fingerprint(row)
+    const firstTime=Date.parse(previous.time),lastTime=Date.parse(row.time)
+    // Pair before bounded eviction, so an arriving canonical record retains
+    // the occurrence identity even if this same push retires its envelope.
+    if(paired && Number.isFinite(firstTime) && Number.isFinite(lastTime) && Math.abs(firstTime-lastTime)<=100) {
+      const canonical = row.eventEnvelope ? previous : row
+      canonical.presentationOffset = Math.min(previous.presentationOffset,row.presentationOffset)
+      previous.pairedOffset = row.offset; row.pairedOffset = previous.offset
     }
-    return {rows:rows.filter(row=>!hidden.has(row.offset)).map(({bytes,eventEnvelope,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice}
+  }
+  function snapshot() {
+    return {rows:rows.filter(row=>!(row.eventEnvelope && row.pairedOffset !== undefined)).map(({bytes,eventEnvelope,pairedOffset,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice}
   }
 
   return {

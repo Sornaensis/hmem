@@ -7,6 +7,7 @@
     "node": "^20.0.0 || >=22.0.0"
   },
   "scripts": {
+    "test:session-groups": "npm run build && elm-test-rs && node --test --test-concurrency=1 tests-js/session-viewer.test.js tests-js/session-save.test.js tests-js/timestamp-display.test.js tests-js/session-groups.browser.test.js tests-js/session-runtime.browser.test.js tests-js/sessions-ux.browser.test.js tests-js/sessions-hierarchy.browser.test.js tests-js/session-activity.browser.test.js tests-js/sessions-archive.browser.test.js",
     "test:session-identity": "npm run build && elm-test-rs && node --test --test-concurrency=1 tests-js/session-viewer.test.js tests-js/session-save.test.js tests-js/timestamp-display.test.js tests-js/session-runtime.browser.test.js tests-js/sessions-ux.browser.test.js tests-js/sessions-hierarchy.browser.test.js tests-js/session-activity.browser.test.js tests-js/sessions-archive.browser.test.js",
     "test:observation-state": "elm-test-rs tests/ObservationTest.elm tests/ObservationLiveTest.elm tests/ObservationTreeTest.elm",
     "test:observation-tree-regression": "node --test --test-concurrency=1 tests-js/observation-url.browser.test.js tests-js/observation-discovery.browser.test.js tests-js/observation-browse.browser.test.js tests-js/observation-counts.browser.test.js tests-js/observation-recovery.browser.test.js tests-js/observation-live-persistence.browser.test.js",

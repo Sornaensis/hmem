@@ -1330,7 +1330,7 @@ type alias SessionsModel =
 
 
 type alias SessionRecord =
-    { offset : Int, end : Int, raw : String, delimiter : String, recordType : String, role : String, time : String, content : String }
+    { offset : Int, end : Int, raw : String, delimiter : String, recordType : String, role : String, time : String, content : String, presentationOffset : Int }
 
 
 emptySessionsModel : SessionsModel

@@ -715,4 +715,11 @@ installSearchNavigation(app)
 installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)
-installSessionBridge(app)
+installSessionBridge(app, { async fetchArchive(url, {signal}) {
+  if(!isApiRequestUrl(url))throw new Error('invalid_archive_origin')
+  const generation=authTokenGeneration,signature=authTokenSignature()
+  const isCurrent=()=>generation===authTokenGeneration&&signature===authTokenSignature()
+  const response=await fetch(url,{method:'GET',headers:authHeaderObject(),credentials:'include',signal})
+  if(response.status===401&&isCurrent())notifyUnauthorized()
+  return {response,isCurrent}
+} })

@@ -75,7 +75,7 @@ still be added after sealing, but evidence cannot be edited or reopened.
 Task cards show active conversations and saved Evidence in compact session cards,
 with last activity and the declared creator model. Select a card to explore that
 session. Use its Download button for original JSONL, or Evidence **Download all**
-for a ZIP of every linked saved session, including other pages. Progress and
+for a server-compressed ZIP of every linked saved session, including other pages. Progress and
 Cancel stay in that task’s Evidence section. Keep the page open until the archive
 finishes; an error produces no partial download. The archive follows the current
 paginated task links while it runs.

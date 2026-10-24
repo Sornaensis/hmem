@@ -23,6 +23,7 @@ module HMem.Server.API
   , prepareObservationDiscovery
   , AgentSessionRequest
   , authorizeAgentSessionWrite
+  , authorizeTaskEvidenceRead
   ) where
 
 import Control.Exception (try, throwIO)
@@ -518,6 +519,11 @@ requireSessionTask pool workspace identifier = do
   case task of
     Just row | row.workspaceId == workspace -> pure ()
     _ -> throwError $ sessionError err404 "task_not_found" "Active same-workspace task not found"
+
+authorizeTaskEvidenceRead :: Pool Hasql.Connection -> UUID -> UUID -> Handler ()
+authorizeTaskEvidenceRead pool workspace task = do
+  requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
+  requireSessionTask pool workspace task
 
 parseSessionParam :: FromHttpApiData a => Text -> Handler a
 parseSessionParam value = either (const $ throwError $ sessionError err400 "validation_error" "Invalid session query parameter") pure (parseQueryParam value)

@@ -2340,7 +2340,11 @@ pumpSessionResources model =
                     issue request ( current, pendingCommands ) =
                         case prepareCanonicalRequest (ChangeStream.Workspace workspace) ("session-resource:" ++ request.key) current of
                             Just ( guard, guarded ) ->
-                                ( guarded, SessionDelivery.fetch model.flags.apiUrl request (SessionResourceFetched request.id guard) :: pendingCommands )
+                                case request.target of
+                                    SessionDelivery.TaskEvidenceArchive _ _ ->
+                                        let sessions=guarded.sessions in
+                                        ({guarded | sessions={sessions | archiveRequests=Dict.insert request.id guard sessions.archiveRequests}},pendingCommands)
+                                    _ -> ( guarded, SessionDelivery.fetch model.flags.apiUrl request (SessionResourceFetched request.id guard) :: pendingCommands )
                             Nothing ->
                                 ( { current | sessionDelivery = SessionDelivery.settle request.id False (Err (Http.BadBody "Retired session authority")) current.sessionDelivery }, pendingCommands )
                     ( updated, commands ) = List.foldl issue ( { model | sessionDelivery = admitted }, [] ) requests

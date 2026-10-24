@@ -1,5 +1,4 @@
 import { createRecordFramer, decodeBase64 } from './session-viewer.js'
-import { createZip64Writer, evidenceEntryName } from './session-zip.js'
 import { sha256 } from '@noble/hashes/sha256'
 
 const hex = bytes => Array.from(bytes,byte => byte.toString(16).padStart(2,'0')).join('')
@@ -46,7 +45,7 @@ export function createEvidenceWriter(writable, session, isCurrent = () => true) 
 
 // Elm owns demand and the two HTTP slots. This bridge only consumes one
 // validated chunk at a time and acknowledges it before Elm can rearm demand.
-export function installSessionBridge(app, { document = globalThis.document, window = globalThis.window, now = () => Date.now() } = {}) {
+export function installSessionBridge(app, { document = globalThis.document, window = globalThis.window, now = () => Date.now(), fetchArchive = async()=>{throw Error('archive_transport_unavailable')} } = {}) {
   let stamp = '', generation = -1, framer = null
   let activeSave = null
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))
@@ -55,11 +54,11 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if (!owned) return true
     if (owned.cleanupFailed) return false
     owned.retired = true
+    owned.controller?.abort()
     try {
       if(owned.writer) await owned.writer.abort()
-      if(owned.archive) await owned.archive.abort()
-      else if(!owned.writer && owned.native) await owned.native.abort()
-      if(!owned.picking && !owned.acquiring && activeSave === owned) activeSave = null
+      if(!owned.writer && owned.native) await owned.native.abort()
+      if(!owned.picking && !owned.acquiring && !owned.reading && activeSave === owned) activeSave = null
       return true
     } catch { reportCleanupFailure(owned);return false }
   }
@@ -67,57 +66,70 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     owned.cleanupFailed=true
     if(!owned.cleanupReported){owned.cleanupReported=true;send({kind:owned.task?'archive-error':'save-error',stamp,operation:owned.operation,code:'writer_cleanup_failed'})}
   }
-  async function archiveFailure(owned,error){
-    const cleaned=await retireSave(owned)
-    if(error.message==='writer_cleanup_failed'&&!owned.cleanupReported)reportCleanupFailure(owned)
-    if(cleaned&&!owned.cleanupFailed)send({kind:'archive-error',stamp:owned.stamp,operation:owned.operation,code:error.message})
-  }
-  const triggerArchive = async (owned,file,cleanup=async()=>{}) => {
-    if(owned.retired || stamp!==owned.stamp) throw Error('retired_download')
-    const url=window.URL.createObjectURL(file),link=document.createElement('a')
-    link.href=url;link.download=evidenceEntryName({name:owned.title,id:owned.task}).replace(/\.jsonl$/,'.zip');link.click()
-    let disposed=false
-    const dispose=()=>{if(disposed)return;disposed=true;window.URL.revokeObjectURL(url);void cleanup().catch(()=>{})}
-    window.setTimeout(dispose,60000);window.addEventListener?.('pagehide',dispose,{once:true})
-  }
-  async function archiveStorage(owned) {
-    let root,handles=[],writers=[],names=[]
-    try {
+  const archiveFilename=owned=>String(owned.title||'Task evidence').normalize('NFKC').replace(/[^\p{L}\p{N}._ -]/gu,'-').replace(/\.{2,}/g,'-').replace(/^[. -]+|[. -]+$/g,'').slice(0,72)+'-'+owned.task+'.zip'
+  async function prepareArchive(owned){
+    const trigger=async(file,cleanup=async()=>{})=>{
+      if(owned.retired||stamp!==owned.stamp)throw Error('retired_download')
+      const url=window.URL.createObjectURL(file),link=document.createElement('a');link.href=url;link.download=archiveFilename(owned);link.click()
+      let disposed=false;const dispose=()=>{if(disposed)return;disposed=true;window.URL.revokeObjectURL(url);void cleanup().catch(()=>{})}
+      window.setTimeout(dispose,60000);window.addEventListener?.('pagehide',dispose,{once:true})
+    }
+    let root,name,handle,writable
+    try{
       if(!window.navigator?.storage?.getDirectory)throw Error('storage_unavailable')
       root=await(await window.navigator.storage.getDirectory()).getDirectoryHandle('hmem-downloads',{create:true})
-      const prefix='hmem-download-'+Date.now()+'-'+window.crypto.randomUUID()
-      for(const extension of ['.zip','.index']){const name=prefix+extension;names.push(name);const handle=await root.getFileHandle(name,{create:true});handles.push(handle);writers.push(await handle.createWritable())}
+      name='hmem-download-'+Date.now()+'-'+window.crypto.randomUUID()+'.zip'
+      handle=await root.getFileHandle(name,{create:true});writable=await handle.createWritable()
     }catch(error){
-      const results=await Promise.allSettled(writers.map(writer=>writer.abort()));
-      if(root)results.push(...await Promise.allSettled(names.map(async name=>{try{await root.removeEntry(name)}catch(error){if(error.name!=='NotFoundError')throw error}})))
-      if(results.some(result=>result.status==='rejected')){owned.cleanupFailed=true;throw Error('writer_cleanup_failed')}
-      let used=0,archive=[],central=[]
-      const retain=(list,bytes)=>{if(used+bytes.length>33554432)throw Error('download_storage_unavailable');list.push(new Blob([bytes]));used+=bytes.length}
-      return {output:{async write(bytes){retain(archive,bytes)},async close(){const file=new Blob(archive,{type:'application/zip'});archive=[];await triggerArchive(owned,file);used=0},async abort(){archive=[]}},index:{async write(bytes){retain(central,bytes)},async *readChunks(){for(let i=0;i<central.length;i++){const part=central[i];yield new Uint8Array(await part.arrayBuffer());used-=part.size;central[i]=null}central=[]},async abort(){central=[]}}}
+      const attempts=[];if(writable)attempts.push(writable.abort());if(root&&name)attempts.push(root.removeEntry(name).catch(error=>{if(error.name!=='NotFoundError')throw error}))
+      const results=await Promise.allSettled(attempts);if(results.some(result=>result.status==='rejected')){owned.cleanupFailed=true;throw Error('writer_cleanup_failed')}
     }
-    const closing=[null,null],aborting=[null,null],removing=[null,null]
-    const close=i=>closing[i]||=(Promise.resolve().then(()=>writers[i].close()))
-    const remove=i=>removing[i]||=(Promise.resolve().then(()=>root.removeEntry(names[i])).catch(error=>{if(error.name!=='NotFoundError')throw error}))
-    const abort=i=>aborting[i]||=(async()=>{try{if(closing[i])await closing[i];else await writers[i].abort()}finally{await remove(i)}})()
-    return {
-      output:{write:bytes=>writers[0].write(bytes),async close(){await close(0);await triggerArchive(owned,await handles[0].getFile(),()=>remove(0))},abort:()=>abort(0)},
-      index:{write:bytes=>writers[1].write(bytes),async *readChunks(){await close(1);const file=await handles[1].getFile();for(let offset=0;offset<file.size;offset+=65536)yield new Uint8Array(await file.slice(offset,offset+65536).arrayBuffer())},abort:()=>abort(1)}
+    if(writable){
+      let closing,aborting,removing
+      const remove=()=>removing||=(root.removeEntry(name).catch(error=>{if(error.name!=='NotFoundError')throw error}))
+      return{write:bytes=>writable.write(bytes),async close(){closing||=writable.close();await closing;await trigger(await handle.getFile(),remove)},abort(){return aborting||=(async()=>{try{if(closing)await closing;else await writable.abort()}finally{await remove()}})()}}
     }
+    let bytes=0,parts=[]
+    return{async write(chunk){if(bytes+chunk.length>33554432)throw Error('download_storage_unavailable');parts.push(new Blob([chunk]));bytes+=chunk.length},async close(){const file=new Blob(parts,{type:'application/zip'});parts=[];await trigger(file)},async abort(){parts=[]}}
   }
   document.addEventListener('click',event=>{
     const button=event.target.closest?.('[data-session-archive]');if(!button||button.disabled)return
     event.preventDefault();let config;try{config=JSON.parse(button.dataset.sessionArchive)}catch{return}
     if(config.stamp!==stamp||activeSave)return
-    const owned={...config,retired:false,writer:null,native:null,archive:null,picking:false,acquiring:true,entry:null,finishing:false};activeSave=owned
+    const owned={...config,retired:false,writer:null,native:null,picking:false,acquiring:true,reading:false,request:null,controller:null};activeSave=owned
     send({kind:'archive-picking',stamp:owned.stamp,operation:owned.operation,task:owned.task,title:owned.title})
-    ;(async()=>{try{
-      const storage=await archiveStorage(owned)
-      owned.archive=createZip64Writer(storage.output,storage.index,()=>activeSave===owned&&!owned.retired&&stamp===owned.stamp)
-      owned.acquiring=false
-      if(owned.retired||stamp!==owned.stamp){await retireSave(owned);return}
-      send({kind:'archive-ready',stamp:owned.stamp,operation:owned.operation})
-    }catch(error){owned.acquiring=false;await archiveFailure(owned,error)}})()
+    ;(async()=>{try{owned.native=await prepareArchive(owned);owned.acquiring=false;if(owned.retired||stamp!==owned.stamp){await retireSave(owned);return}send({kind:'archive-ready',stamp:owned.stamp,operation:owned.operation})}
+      catch(error){owned.acquiring=false;if(error.message==='writer_cleanup_failed')reportCleanupFailure(owned);else if(await retireSave(owned))send({kind:'archive-error',stamp:owned.stamp,operation:owned.operation,code:error.message})}})()
   })
+  const archiveRequests=[]
+  function receiveArchiveRequest(request){
+    if(archiveRequests.includes(request.id))return
+    archiveRequests.push(request.id);if(archiveRequests.length>32)archiveRequests.shift()
+    const owned=activeSave
+    if(!owned?.task||owned.retired||owned.operation!==request.operation||owned.stamp!==request.stamp||owned.task!==request.task){send({kind:'archive-http',stamp:request.stamp,operation:request.operation,request:request.id,status:0});return}
+    owned.request=request.id;owned.controller=new AbortController();owned.reading=true
+    ;(async()=>{
+      let status=0,success=false,bytes=0,reader
+      try{
+        const transport=await fetchArchive(request.url,{signal:owned.controller.signal}),response=transport.response
+        status=response.status
+        if(!response.ok||!response.body||!/^application\/zip(?:;|$)/i.test(response.headers.get('Content-Type')||''))throw Error('archive_response_failed')
+        reader=response.body.getReader()
+        const current=()=>!owned.retired&&activeSave===owned&&stamp===owned.stamp&&transport.isCurrent()
+        while(true){if(!current())throw Error('retired_download');const part=await reader.read();if(part.done)break
+          for(let offset=0;offset<part.value.length;offset+=65536){if(!current())throw Error('retired_download');const chunk=part.value.subarray(offset,offset+65536);await owned.native.write(chunk);bytes+=chunk.length}
+          send({kind:'archive-progress',stamp:owned.stamp,operation:owned.operation,offset:bytes})
+        }
+        if(!current())throw Error('retired_download');await owned.native.close();success=true
+      }catch(error){status=status>=400?status:0;await retireSave(owned)}
+      finally{
+        try{if(!success)await reader?.cancel()}catch{}
+        reader?.releaseLock();owned.reading=false
+        if(success){if(activeSave===owned)activeSave=null}else await retireSave(owned)
+        send({kind:'archive-http',stamp:owned.stamp,operation:owned.operation,request:request.id,status:success?200:status})
+      }
+    })()
+  }
   document.addEventListener('click', event => {
     const button=event.target.closest?.('[data-session-download]')
     if(!button || button.disabled) return
@@ -202,25 +214,12 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   app.ports.sessionBridgeCommand.subscribe(command => {
     if (command.stamp !== stamp) { stamp = command.stamp; framer = null; generation = -1; void retireSave() }
     if(activeSave && activeSave.operation < command.nextOperation && command.saveOperation !== activeSave.operation) void retireSave()
-    if(command.archiveEntry && activeSave?.archive && activeSave.operation===command.saveOperation && !activeSave.acquiring && !activeSave.writer){
-      const owned=activeSave,entry=command.archiveEntry;owned.acquiring=true
-      ;(async()=>{try{
-        const sink=await owned.archive.entry(evidenceEntryName({name:entry.name,id:entry.session.id}),entry.session.finalBytes)
-        owned.writer=createEvidenceWriter(sink,entry.session,()=>activeSave===owned&&!owned.retired&&stamp===owned.stamp)
-        owned.acquiring=false
-        if(owned.retired||stamp!==owned.stamp){await retireSave(owned);return}
-        send({kind:'save-ready',stamp:owned.stamp,operation:owned.operation})
-      }catch(error){owned.acquiring=false;await archiveFailure(owned,error)}})()
-    }
-    if(command.archiveFinish && activeSave?.archive && activeSave.operation===command.saveOperation && !activeSave.finishing){
-      const owned=activeSave;owned.finishing=true
-      owned.archive.finish().then(result=>{if(activeSave!==owned||owned.retired||stamp!==owned.stamp)return;activeSave=null;send({kind:'archive-complete',stamp:owned.stamp,operation:owned.operation,entries:result.entries})}).catch(async error=>{await archiveFailure(owned,error)})
-    }
+    if(command.archiveRequest)receiveArchiveRequest(command.archiveRequest)
     if(command.saveChunk && activeSave && activeSave.operation === command.saveOperation && activeSave.writer) {
       const owned = activeSave
       owned.writer.write(command.saveChunk).then(result => {
         if(activeSave !== owned || owned.retired || stamp !== owned.stamp) return
-        if(result.complete){if(owned.archive)owned.writer=null;else activeSave=null}
+        if(result.complete)activeSave=null
         send({kind:result.complete?'save-complete':'save-progress',stamp:owned.stamp,operation:owned.operation,offset:result.offset})
       }).catch(async error => {
         if(await retireSave(owned))send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:error.message==='download_storage_unavailable'?'download_storage_unavailable':'write_or_verification_failed'})

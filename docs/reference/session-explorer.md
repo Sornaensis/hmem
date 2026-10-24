@@ -51,22 +51,29 @@ Task-card sections use compact responsive grids. Active activity is `lastSeenAt`
 Evidence uses `terminatedAt`, falling back to `lastSeenAt`. Declared creator role
 and model identity remain complete and selectable.
 
-Evidence **Download all** starts at the first terminated-session cursor independently
-of the visible page. It retains one metadata page of at most 50 sessions and one
-entry receipt, validates strict descending UTC timestamp/UUID keysets without
-rounding fractional seconds, and streams entries through the same 16-resource,
-two-request admission and exclusive download reservation. This live keyset walk
-is not an atomic snapshot of concurrent task associations.
+Evidence **Download all** requests one authenticated task-scoped binary response.
+The server walks all linked terminated sessions in pages of 50 independently of
+visible section pagination. It retains one page and one entry receipt, checks
+strict descending timestamp/UUID progress, and verifies each original byte count
+and SHA-256. This live keyset walk is not an atomic snapshot of concurrent links.
 
-Archives use ZIP64 STORE, incremental CRC32 and the existing per-entry SHA-256
-receipt verification. Names contain a sanitized bounded label and full session
-UUID. An OPFS archive and central-index sidecar keep content and directory memory
-bounded; index copying also uses 64 KiB chunks. Without OPFS, a 32 MiB aggregate
-fallback includes archive and index overhead. Acknowledged chunks become immutable
-Blob parts; final assembly composes those parts without retaining a second
-Uint8Array copy. Index transfers count both retained and appended parts until
-acknowledged. No archive is emitted until every
-entry verifies. Cancel or authority/context retirement aborts staging and joins
-pending work before reuse. Cleanup failure holds the reservation and requires a
-page reload. Verified archives retain their temporary source for the same
-60-second browser download lifetime as individual evidence.
+The server emits ZIP64 with actual raw DEFLATE compression (method 8), incremental
+CRC32, sanitized bounded labels and full session UUIDs. One 64 KiB source range,
+one compressor and a temporary central-index sidecar bound memory; the sidecar
+is also copied in 64 KiB chunks and removed on success, failure or cancellation.
+Two server exports may run concurrently, with a 15-minute deadline. Excess
+requests return 503 with Retry-After. Responses are no-store binary attachments.
+A failed receipt or stream produces no successful archive footer and fails the
+HTTP transfer; exception details and transcript contents are not exposed.
+
+The browser streams the opaque response into private temporary storage through
+the existing 16-resource, two-request admission and exclusive download reservation.
+Current bearer/cookie authentication is applied privately to the fetch. A physical
+admission remains held until its exact fetch/abort callback. The client never
+assembles ZIP entries or enumerates sessions for export. Without private storage,
+a 32 MiB fallback retains immutable compressed Blob parts. Only a complete,
+successful response is offered as a download. Cancel or authority/context retirement
+aborts the fetch and joins staging cleanup before reuse. Cleanup failure blocks
+reuse until reload. Verified archives retain their source for the same 60-second
+browser download lifetime as individual evidence; only operation-owned files are
+removed, and crash-orphan files require browser site-storage cleanup.

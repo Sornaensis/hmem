@@ -1,7 +1,14 @@
 module HMem.Server.AgentSessionSpec (spec) where
 
-import Control.Concurrent.Async (concurrently)
-import Control.Monad (forM_, replicateM)
+import Control.Concurrent.Async (concurrently, withAsync, cancel, waitCatch)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (bracket, throwIO, try, SomeException, displayException)
+import System.Directory (getTemporaryDirectory, removeFile, listDirectory)
+import System.IO (openBinaryTempFile, hClose)
+import System.Process (readProcessWithExitCode)
+import System.Exit (ExitCode(..))
+import Network.Wai.Internal (ResponseReceived(..))
+import Control.Monad (forM, forM_, replicateM)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
@@ -33,6 +40,86 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+  it "streams every task-associated terminated session as genuine DEFLATE ZIP64 without crossing task or auth scope" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      let env=ctx.deployedEnv; app=ctx.deployedApplication
+      workspace <- createTestWorkspace env "compressed-task-evidence"
+      task <- makeTask env workspace.id
+      other <- makeTask env workspace.id
+      foreignWorkspace <- createTestWorkspace env "other-evidence-workspace"
+      foreignTask <- makeTask env foreignWorkspace.id
+      rows <- forM [0..52 :: Int] $ \n -> do
+        let bytes=case n `mod` 4 of
+              0 -> ""
+              1 -> TE.encodeUtf8 "{\"text\":\"æ雪 café\"}\r\n"
+              2 -> "[true,null]"
+              _ -> TE.encodeUtf8 ("\"" <> T.replicate 140000 "x" <> "\"\n")
+        sealed <- seedEvidence env workspace.id task.id "Review / café ../capture" bytes
+        pure (sealed,bytes)
+      otherRow <- seedEvidence env workspace.id other.id "Excluded other task" "true\n"
+      active <- seed env workspace.id
+      DB.associateSessionTask env.pool workspace.id active.id task.id
+      reader <- audience ctx workspace.id (Just Auth.WorkspaceRoleRead) False
+      outsider <- audience ctx workspace.id Nothing False
+      let path=taskArchive workspace.id task.id
+      call app methodGet path [] "" >>= status status401
+      call app methodGet path outsider "" >>= status status403
+      call app methodGet (taskArchive workspace.id foreignTask.id) reader "" >>= status status404
+      result <- call app methodGet path reader ""
+      ok result
+      lookup hContentType result.simpleHeaders `shouldBe` Just "application/zip"
+      lookup "Cache-Control" result.simpleHeaders `shouldBe` Just "no-store"
+      lookup "Content-Disposition" result.simpleHeaders `shouldSatisfy` maybe False (BS.isPrefixOf "attachment;")
+      verifyArchive result.simpleBody rows
+      one <- call app methodGet (taskArchive workspace.id other.id) reader ""
+      ok one
+      verifyArchive one.simpleBody [(otherRow,"true\n")]
+      empty <- makeTask env workspace.id
+      call app methodGet (taskArchive workspace.id empty.id) reader "" >>= (\response -> ok response >> verifyArchive response.simpleBody [])
+  it "holds only two export admissions and releases disconnects before the first stream write" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+      workspace <- createTestWorkspace env "archive-admission"
+      task <- makeTask env workspace.id
+      entered <- newEmptyMVar
+      hold <- newEmptyMVar
+      let req=request methodGet (taskArchive workspace.id task.id) []
+          blocked=app req (\_ -> putMVar entered () >> takeMVar hold >> pure ResponseReceived)
+      withAsync blocked $ \first -> do
+        takeMVar entered
+        withAsync blocked $ \second -> do
+          takeMVar entered
+          overloaded <- call app methodGet (taskArchive workspace.id task.id) [] ""
+          status status503 overloaded
+          lookup "Retry-After" overloaded.simpleHeaders `shouldBe` Just "1"
+          cancel first; cancel second
+          _ <- waitCatch first; _ <- waitCatch second
+          recovered <- call app methodGet (taskArchive workspace.id task.id) [] ""
+          ok recovered
+          verifyArchive recovered.simpleBody []
+
+  it "aborts failed stream callbacks without leaking details, releases admission and removes the index" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+      workspace <- createTestWorkspace env "archive-stream-failure"
+      task <- makeTask env workspace.id
+      _ <- seedEvidence env workspace.id task.id "Private capture" "true\n"
+      temporary <- getTemporaryDirectory
+      let indexes = filter (T.isPrefixOf "hmem-task-evidence-index-" . T.pack) <$> listDirectory temporary
+      before <- indexes
+      result <- try @SomeException $ app (request methodGet (taskArchive workspace.id task.id) []) $ \response -> do
+        let (_,_,withBody)=Wai.responseToStream response
+        withBody $ \body -> body (\_ -> throwIO (userError "private storage details")) (pure ())
+        pure ResponseReceived
+      case result of
+        Left failure -> do
+          let message=T.pack (displayException failure)
+          message `shouldSatisfy` T.isPrefixOf "user error (Task evidence archive failed)"
+          message `shouldSatisfy` (not . T.isInfixOf "private storage details")
+        Right _ -> expectationFailure "stream failure was reported as success"
+      indexes >>= (`shouldMatchList` before)
+      call app methodGet (taskArchive workspace.id task.id) [] "" >>= ok
+
   it "applies lifecycle/freshness predicates before paging and authorizes before invalid filters" $
     withDeployedSandboxAppContext $ \ctx -> do
       let env=ctx.deployedEnv; app=ctx.deployedApplication
@@ -330,3 +417,27 @@ field :: [Text] -> Value -> Maybe Value
 field [] value=Just value
 field (key:rest) (Object objectValue)=KM.lookup (Key.fromText key) objectValue >>= field rest
 field _ _=Nothing
+
+
+taskArchive :: UUID -> UUID -> BS.ByteString
+taskArchive workspace task = "/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>uuid task<>"/evidence.zip"
+
+seedEvidence :: TestEnv -> UUID -> UUID -> Text -> BS.ByteString -> IO Core.AgentSession
+seedEvidence env workspace task label bytes = do
+  identifier <- UUID.nextRandom
+  created <- DB.createSession env.pool (Core.CreateSession identifier workspace label)
+  uploaded <- if BS.null bytes then pure created else (.session) <$> DB.appendSession env.pool workspace identifier (Core.AppendSession 0 0 bytes True)
+  sealed <- DB.terminateSession env.pool workspace identifier (Core.TerminateSession uploaded.committedBytes uploaded.revision uploaded.committedBytes (Core.sessionSha256 bytes))
+  DB.associateSessionTask env.pool workspace identifier task
+  pure sealed
+
+verifyArchive :: LBS.ByteString -> [(Core.AgentSession,BS.ByteString)] -> IO ()
+verifyArchive body rows = do
+  temporary <- getTemporaryDirectory
+  bracket (openBinaryTempFile temporary "hmem-zip-reader-") (\(name,handle) -> hClose handle >> removeFile name) $ \(name,handle) -> do
+    LBS.hPut handle body
+    hClose handle
+    let expected=encode $ object [Key.fromText (T.pack $ show session.id) .= Core.sessionSha256 bytes | (session,bytes)<-rows]
+        program="import sys,json,zipfile,hashlib\nexpected=json.loads(sys.stdin.read())\nwith zipfile.ZipFile(sys.argv[1]) as z:\n assert z.testzip() is None\n assert len(z.infolist())==len(expected)\n seen=set()\n for info in z.infolist():\n  assert info.compress_type==8\n  key=next((key for key in expected if info.filename.endswith(key+'.jsonl')),None)\n  assert key is not None and key not in seen\n  seen.add(key)\n  assert '/' not in info.filename and not info.filename.startswith('.')\n  assert hashlib.sha256(z.read(info)).hexdigest()==expected[key]\n if len(expected)>50: assert sum(i.compress_size for i in z.infolist()) < sum(i.file_size for i in z.infolist())\n"
+    (code,_,_) <- readProcessWithExitCode "python" ["-c",program,name] (map (toEnum . fromEnum) $ BS.unpack $ LBS.toStrict expected)
+    code `shouldBe` ExitSuccess

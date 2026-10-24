@@ -29,6 +29,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & info . description ?~ "Repository-scoped observation API with immutable provenance. Automated callers declare self-reported role/model metadata in X-HMem-Bot-Identity; it grants no permissions and local bootstrap remains tokenless. Known credential bots must declare on unsafe API requests. Session effective_actor is attribution alongside the unchanged authority-bearing principal. Task placement mutations can return structured lifecycle conflicts when project, hierarchy, or dependency invariants reject the requested state."
   & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
   & components . schemas . at "ObservationContentConflict" ?~ observationContentConflictSchema
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/evidence.zip" ?~ taskEvidenceArchivePath
   & paths . traversed . parameters %~ (<> [Inline botIdentityHeader])
   & paths %~ InsOrdMap.mapWithKey documentSessionPath
   & tags .~ InsOrdSet.fromList
@@ -888,3 +889,18 @@ deprecatedTimelineProjection schemaName = Inline $ mempty
 timelineBucketsResponseOpts :: SchemaOptions
 timelineBucketsResponseOpts = opts { fieldLabelModifier = \case
   "timelineBucketsWorkspaceId" -> "workspace_id"; "timelineBucketsSince" -> "since"; "timelineBucketsUntil" -> "until"; "timelineBucketsBucket" -> "bucket"; "timelineBucketsBuckets" -> "buckets"; "timelineBucketsNextSince" -> "next_since"; other -> camelToSnake other }
+
+
+taskEvidenceArchivePath :: PathItem
+taskEvidenceArchivePath = mempty
+  & parameters .~ map (\key -> Inline (mempty & name .~ key & in_ .~ ParamPath & required ?~ True & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid"))) ["workspaceId","taskId"]
+  & get ?~ (mempty
+      & tags .~ InsOrdSet.singleton "Agent Sessions"
+      & summary ?~ "Download this task’s saved sessions as a compressed ZIP"
+      & description ?~ "Requires read access to an active workspace and a visible same-workspace task before archive work. Includes only associated terminated sessions across all server keyset pages. Streams original JSONL bytes in ZIP64 entries using actual raw DEFLATE (method 8), with receipt/SHA-256/CRC verification and safe UUID filenames. Content-Type is application/zip with an attachment filename and Cache-Control:no-store. Two concurrent exports per application; overload returns 503 with Retry-After:1. A 15-minute deadline, disconnect, authority withdrawal or verification failure aborts the transfer without a successful ZIP footer. This is live keyset enumeration, not a historical association snapshot."
+      & responses .~ Responses Nothing (InsOrdMap.fromList
+          [(200,Inline (mempty & description .~ "Binary compressed ZIP attachment." & content .~ InsOrdMap.singleton "application/zip" (mempty & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "binary"))))
+          ,(401,Inline (mempty & description .~ "Authentication required."))
+          ,(403,Inline (mempty & description .~ "Workspace read permission required."))
+          ,(404,Inline (mempty & description .~ "Active workspace or visible same-workspace task not found."))
+          ,(503,Inline (mempty & description .~ "Both export admissions are occupied; retry after one second."))]))

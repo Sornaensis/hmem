@@ -88,6 +88,7 @@ library
       HMem.Server.LogRotation
       HMem.Server.ObservationDiscovery
       HMem.Server.OpenAPI
+      HMem.Server.SessionArchive
       HMem.Server.Snapshot
       HMem.Server.Static
       HMem.Server.WebSocket
@@ -158,6 +159,7 @@ library
     , warp-tls
     , websockets
     , yaml
+    , zlib
   default-language: Haskell2010
 
 executable build-frontend
@@ -229,6 +231,7 @@ executable build-frontend
     , warp-tls
     , websockets
     , yaml
+    , zlib
   default-language: Haskell2010
 
 executable hmem-ctl
@@ -305,6 +308,7 @@ executable hmem-ctl
     , warp-tls
     , websockets
     , yaml
+    , zlib
   default-language: Haskell2010
 
 executable hmem-server
@@ -378,6 +382,7 @@ executable hmem-server
     , warp-tls
     , websockets
     , yaml
+    , zlib
   default-language: Haskell2010
 
 executable hmem-test-harness
@@ -450,6 +455,7 @@ executable hmem-test-harness
     , warp-tls
     , websockets
     , yaml
+    , zlib
   default-language: Haskell2010
 
 test-suite hmem-server-test
@@ -557,4 +563,5 @@ test-suite hmem-server-test
     , warp-tls
     , websockets
     , yaml
+    , zlib
   default-language: Haskell2010

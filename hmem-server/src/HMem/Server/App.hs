@@ -57,6 +57,7 @@ import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
 import HMem.Server.OpenAPI (openApiSpec)
 import HMem.Server.Static (staticMiddleware)
+import HMem.Server.SessionArchive (newArchiveMiddleware)
 import HMem.Server.WebSocket (WSState, wsMiddleware)
 
 -- | Build the WAI Application.
@@ -89,6 +90,7 @@ mkAppWithServices :: Maybe ObservationDiscovery -> OidcCodeExchange -> Config.Ch
 mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   discoveryService <- maybe (newObservationDiscovery False) pure discovery
   rateLimit <- rateLimitMiddleware rateLimitCfg
+  archive <- newArchiveMiddleware pool
   jwksCache <- newIORef Nothing
   pure $ requestIdMiddleware
        $ logger
@@ -100,6 +102,7 @@ mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg c
         $ csrfMiddleware authCfg pool
         $ principalContextMiddleware jwksCache authCfg pool
         $ authMiddleware authCfg
+        $ archive
         $ agentSessionBodyLimit pool
         $ openApiMiddleware
         $ normalizeObservationIfMatch

@@ -1,4 +1,4 @@
-module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskEvidence, viewTaskIcon, taskActive, timestampSources, olderWindow, viewerReset, validArchivePage, cursorKey)
+module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskEvidence, viewTaskIcon, taskActive, timestampSources, olderWindow, viewerReset)
 
 import Api
 import ActorAttribution
@@ -11,6 +11,7 @@ import Html.Events exposing (onClick, onInput)
 import Html.Keyed as Keyed
 import Html.Lazy as Lazy
 import Json.Decode as Decode
+import Http
 import Json.Encode as Encode
 import Permissions
 import Ports
@@ -141,12 +142,12 @@ reconcile ( model, command ) =
                     { retired | end = min session.committedBytes (retired.offset + 2097152) }
                 else retired
             Nothing -> retired
-        current = advanceArchive workspace beforeArchive model
+        current = beforeArchive
         window = Maybe.map2 (\ws session -> (ws,Delivery.SessionWindow session.id current.offset current.end (session.state == Api.SessionTerminated))) workspace metadata
             |> Maybe.andThen (\target -> if current.loadWindow && current.error == Nothing && current.offset < current.end then Just target else Nothing)
         saveTarget = Maybe.map2 (\ws operation -> (ws,Delivery.SessionSave operation.session operation.offset (min 65536 (operation.size-operation.offset)))) workspace current.save
             |> Maybe.andThen (\target -> current.save |> Maybe.andThen (\operation -> if operation.phase == "writing" && operation.offset < operation.size then Just target else Nothing))
-        archiveTarget = Maybe.map2 (\ws archive -> (ws,Delivery.ArchiveSessions archive.task archive.cursor)) workspace current.archive |> Maybe.andThen (\target -> current.archive |> Maybe.andThen (\archive -> if archive.phase == "listing" then Just target else Nothing))
+        archiveTarget = Maybe.map2 (\ws archive -> (ws,Delivery.TaskEvidenceArchive archive.task archive.operation)) workspace current.archive |> Maybe.andThen (\target -> current.archive |> Maybe.andThen (\archive -> if archive.phase == "waiting" then Just target else Nothing))
         desired = workspace |> Maybe.map (\ws ->
             (if model.activeTab == SessionsTab then [(ws,listTarget current)] else []) ++
             (selected |> Maybe.map (\id -> [(ws,Delivery.SessionMetadata id),(ws,Delivery.SessionTasks id current.linksCursor)]) |> Maybe.withDefault []) ++
@@ -194,8 +195,7 @@ reconcile ( model, command ) =
             , ("chunk",chunk |> Maybe.map (\range -> Encode.object [("offset",Encode.int range.offset),("nextOffset",Encode.int range.nextOffset),("dataBase64",Encode.string range.dataBase64),("final",Encode.bool (range.nextOffset >= current.end))]) |> Maybe.withDefault Encode.null)
             , ("nextOperation",Encode.int current.nextOperation)
             , ("saveOperation",(pending.save |> Maybe.map .operation |> Maybe.withDefault (pending.archive |> Maybe.map .operation |> Maybe.withDefault -1)) |> Encode.int)
-            , ("archiveEntry", archiveEntry pending)
-            , ("archiveFinish",Encode.bool (pending.archive |> Maybe.map (\archive -> archive.phase == "finishing") |> Maybe.withDefault False))
+            , ("archiveRequest",archiveRequest next)
             , ("saveChunk",if saveFailure == Nothing then Maybe.withDefault Encode.null savePayload else Encode.null)
             , ("heartbeats",Encode.list (\session -> Encode.object [("id",Encode.string session.id),("lastSeenAt",Encode.string session.lastSeenAt)]) heartbeatSources)
             ])
@@ -280,7 +280,8 @@ receiveBridge value model =
         kind = field "kind" Decode.string ""
         row = Decode.map8 SessionRecord (Decode.field "offset" Decode.int) (Decode.field "end" Decode.int) (Decode.field "raw" Decode.string) (Decode.field "delimiter" Decode.string) (Decode.field "type" Decode.string) (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "text" Decode.string)
     in
-    if kind == "heartbeat-status" && stamp == state.stamp then
+    if kind == "archive-http" then receiveArchiveHttp value model
+    else if kind == "heartbeat-status" && stamp == state.stamp then
         case Decode.decodeValue (Decode.field "statuses" (Decode.dict Decode.string)) value of
             Ok statuses -> if Dict.size statuses <= 52 then ( {model | sessions = {state | heartbeats = statuses}}, Cmd.none ) else (model,Cmd.none)
             Err _ -> (model,Cmd.none)
@@ -348,7 +349,7 @@ receiveSave value model =
                     let offset = field "offset" Decode.int -1 in
                     if not save.pending || offset < save.offset || offset > min save.size (save.offset + 65536) || (offset == save.offset && save.size /= 0) then (model,Cmd.none)
                     else if kind == "save-complete" && offset == save.size then
-                        ( {model | sessions = {state | save = Nothing, archive = Maybe.map (\archive -> {archive | count=archive.count+1}) state.archive, saveMessage = if state.archive /= Nothing then "Verified session " ++ String.fromInt ((state.archive |> Maybe.map .count |> Maybe.withDefault 0)+1) else "Downloaded " ++ String.fromInt save.size ++ " bytes."}}, Cmd.none )
+                        ( {model | sessions = {state | save = Nothing, saveMessage = "Downloaded " ++ String.fromInt save.size ++ " bytes."}}, Cmd.none )
                     else if kind == "save-progress" && offset < save.size then
                         ( {model | sessions = {state | save = Just {save | offset = offset, pending = False}, saveMessage = "Saving " ++ String.fromInt offset ++ " / " ++ String.fromInt save.size ++ " bytes…"}}, Cmd.none )
                     else (model,Cmd.none)
@@ -637,19 +638,40 @@ viewArchive model task =
     case state.archive of
         Just archive ->
             if archive.task == task then div [class "task-evidence-download",attribute "role" "status"]
-                [span [] [text ("Verified " ++ String.fromInt archive.count ++ " sessions · " ++ state.saveMessage)],button [class "btn btn-sm",onClick SessionsCancelSave] [text "Cancel"]]
+                [span [] [text (state.saveMessage)],button [class "btn btn-sm",onClick SessionsCancelSave] [text "Cancel"]]
             else button [class "btn btn-sm",disabled True] [text "↓ Download all"]
         Nothing -> button [class "btn btn-sm task-evidence-download",attribute "data-session-archive" config,disabled (state.saveBlocked || state.save /= Nothing)] [text "↓ Download all"]
 
 
-archiveEntry : SessionsModel -> Encode.Value
-archiveEntry state =
-    case (state.archive,state.save) of
-        (Just archive,Just save) ->
-            if save.phase == "entry" then Encode.object
-                [("session",Encode.object [("id",Encode.string save.session),("workspace",Encode.string (Maybe.withDefault "" state.workspace)),("state",Encode.string "terminated"),("finalBytes",Encode.int save.size),("finalSha256",Encode.string save.hash),("revision",Encode.int save.revision)]),("name",Encode.string archive.entryName)]
-            else Encode.null
-        _ -> Encode.null
+archiveRequest : Model -> Encode.Value
+archiveRequest model =
+    case model.sessions.archive of
+        Just archive ->
+            Dict.values model.sessionDelivery.physical |> List.filter (\request -> request.target == Delivery.TaskEvidenceArchive archive.task archive.operation && Dict.member request.id model.sessions.archiveRequests) |> List.head
+                |> Maybe.map (\request -> Encode.object [("id",Encode.int request.id),("stamp",Encode.string model.sessions.stamp),("operation",Encode.int archive.operation),("task",Encode.string archive.task),("url",Encode.string (model.flags.apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode request.workspace ++ "/tasks/" ++ Url.percentEncode archive.task ++ "/evidence.zip"))]) |> Maybe.withDefault Encode.null
+        Nothing -> Encode.null
+
+
+receiveArchiveHttp : Decode.Value -> Model -> (Model,Cmd Msg)
+receiveArchiveHttp value model =
+    let
+        field name decoder fallback = Decode.decodeValue (Decode.field name decoder) value |> Result.withDefault fallback
+        id = field "request" Decode.int -1
+        status = field "status" Decode.int 0
+        state = model.sessions
+    in
+    case Dict.get id state.archiveRequests of
+        Nothing -> (model,Cmd.none)
+        Just guard ->
+            let
+                result = if status == 200 then Ok Delivery.ArchiveDownloaded else if status > 0 then Err (Http.BadStatus status) else Err (Http.BadBody "Archive transport failed")
+                retired = Dict.get id model.sessionDelivery.physical |> Maybe.map (\request -> Delivery.removeDemand request.workspace request.target model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery
+                (updated,command) = WebSocket.update (SessionResourceFetched id guard result) {model | sessionDelivery=retired,sessions={state | archiveRequests=Dict.remove id state.archiveRequests}}
+                current = updated.sessions
+                matches = field "stamp" Decode.string "" == current.stamp && (current.archive |> Maybe.map (\archive -> archive.operation == field "operation" Decode.int -1) |> Maybe.withDefault False)
+            in
+            if matches then ({updated | sessions={current | archive=Nothing,saveMessage=if status == 200 then "Downloaded task evidence." else "Archive could not finish. Please retry."}},command)
+            else (updated,command)
 
 
 receiveArchive : Decode.Value -> Model -> (Model,Cmd Msg)
@@ -665,82 +687,15 @@ receiveArchive value model =
     else if kind == "archive-error" && field "code" Decode.string "" == "writer_cleanup_failed" && operation > 0 && operation < state.nextOperation then
         ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=True,saveMessage="Writer cleanup could not be confirmed. Reload this page before another download."}},Cmd.none)
     else if kind == "archive-picking" && operation == state.nextOperation && state.save == Nothing && state.archive == Nothing && Dict.member task model.tasks then
-        ({model | sessions={state | archiveMessageTask=Just task,archive=Just (SessionArchiveOperation operation task (field "title" Decode.string "Task evidence") Nothing [] Nothing "picking" 0 ""),nextOperation=operation+1,saveMessage="Preparing ZIP…"}},Cmd.none)
+        ({model | sessions={state | archiveMessageTask=Just task,archive=Just (SessionArchiveOperation operation task (field "title" Decode.string "Task evidence") "picking"),nextOperation=operation+1,saveMessage="Preparing ZIP…"}},Cmd.none)
     else case state.archive of
         Just archive ->
             if archive.operation /= operation then (model,Cmd.none)
-            else if kind == "archive-ready" then ({model | sessions={state | archive=Just {archive | phase="listing"},saveMessage="Reading saved sessions…"}},Cmd.none)
-            else if kind == "archive-complete" then ({model | sessions={state | archive=Nothing,save=Nothing,saveMessage="Downloaded " ++ String.fromInt archive.count ++ " sessions."}},Cmd.none)
+            else if kind == "archive-ready" then ({model | sessions={state | archive=Just {archive | phase="waiting"},saveMessage="Downloading compressed evidence…"}},Cmd.none)
+            else if kind == "archive-progress" then ({model | sessions={state | saveMessage="Downloading compressed evidence…"}},Cmd.none)
             else if kind == "archive-error" then
                 let blocked = field "code" Decode.string "" == "writer_cleanup_failed" in
                 ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=state.saveBlocked || blocked,saveMessage=if blocked then "Writer cleanup could not be confirmed. Reload this page before another download." else if field "code" Decode.string "" == "download_storage_unavailable" then "This browser needs temporary file storage for archives larger than 32 MiB." else "Archive could not finish. Please retry."}},Cmd.none)
             else (model,Cmd.none)
         Nothing -> (model,Cmd.none)
 
-
-advanceArchive : Maybe String -> SessionsModel -> Model -> SessionsModel
-advanceArchive workspace state model =
-    let
-        fail = {state | archive=Nothing,save=Nothing,saveMessage="Archive could not finish. Please retry."}
-        next archive =
-            case archive.page of
-                session::rest -> case (session.finalBytes,session.finalSha256) of
-                    (Just size,Just hash) -> {state | archive=Just {archive | page=rest,phase="entries",entryName=session.formatLabel},save=Just (SessionSaveOperation archive.operation session.id size hash session.revision 0 "entry" False),saveMessage="Verifying " ++ session.formatLabel ++ "…"}
-                    _ -> fail
-                [] -> case archive.nextCursor of
-                    Just cursor -> {state | archive=Just {archive | cursor=Just cursor,phase="listing"}}
-                    Nothing -> {state | archive=Just {archive | phase="finishing"},saveMessage="Finishing ZIP…"}
-    in
-    case (workspace,state.archive) of
-        (Just ws,Just archive) ->
-            if state.save /= Nothing then state
-            else if archive.phase == "entries" then next archive
-            else if archive.phase == "listing" then
-                case resource ws (Delivery.ArchiveSessions archive.task archive.cursor) model of
-                    Just entry ->
-                        if entry.error /= Nothing then fail else if entry.dirty /= entry.settled then state else case entry.data of
-                            Just (Delivery.SessionsPage page) ->
-                                if validArchivePage archive.cursor page then next {archive | page=page.items,nextCursor=page.nextCursor} else fail
-                            _ -> state
-                    Nothing -> state
-            else state
-        _ -> state
-
-
-validArchivePage : Maybe Api.SessionCursor -> Api.SessionPage -> Bool
-validArchivePage previous page =
-    let
-        key item = cursorKey {createdAt=item.createdAt,id=item.id}
-        ordered before remaining = case remaining of
-            [] -> True
-            item::rest -> case key item of
-                Just current -> item.state == Api.SessionTerminated && item.finalBytes /= Nothing && item.finalSha256 /= Nothing && (before |> Maybe.map (\prior -> current < prior) |> Maybe.withDefault True) && ordered (Just current) rest
-                Nothing -> False
-        last = List.reverse page.items |> List.head |> Maybe.map (\item -> {createdAt=item.createdAt,id=item.id})
-    in
-    List.length page.items <= 50 && (previous == Nothing || (previous |> Maybe.andThen cursorKey) /= Nothing)
-        && ordered (previous |> Maybe.andThen cursorKey) page.items
-        && (case page.nextCursor of
-            Nothing -> True
-            Just cursor -> not (List.isEmpty page.items) && Just cursor == last)
-
-
-cursorKey : Api.SessionCursor -> Maybe String
-cursorKey cursor =
-    let
-        source = cursor.createdAt
-        components = String.dropRight 1 source |> String.split "."
-        base = List.head components |> Maybe.withDefault ""
-        fraction = List.drop 1 components |> List.head |> Maybe.withDefault ""
-        number start length = String.slice start (start+length) base |> String.toInt |> Maybe.withDefault -1
-        year = number 0 4
-        month = number 5 2
-        day = number 8 2
-        leap = modBy 400 year == 0 || (modBy 4 year == 0 && modBy 100 year /= 0)
-        days = if month == 2 then (if leap then 29 else 28) else if List.member month [4,6,9,11] then 30 else 31
-        digits value = String.all (\char -> char >= '0' && char <= '9') value
-        validId = String.length cursor.id == 36 && List.map String.length (String.split "-" cursor.id) == [8,4,4,4,12] && String.all (\char -> String.contains (String.fromChar char) "0123456789abcdef-") cursor.id
-    in
-    if String.endsWith "Z" source && List.length components <= 2 && String.length base == 19 && String.slice 4 5 base == "-" && String.slice 7 8 base == "-" && String.slice 10 11 base == "T" && String.slice 13 14 base == ":" && String.slice 16 17 base == ":" && digits (String.filter (\char -> not (List.member char ['-','T',':'])) base) && month >= 1 && month <= 12 && day >= 1 && day <= days && number 11 2 >= 0 && number 11 2 < 24 && number 14 2 >= 0 && number 14 2 < 60 && number 17 2 >= 0 && number 17 2 < 60 && String.length fraction <= 12 && digits fraction && (List.length components == 1 || fraction /= "") && validId then
-        Just (base ++ "." ++ String.padRight 12 '0' fraction ++ ":" ++ cursor.id)
-    else Nothing

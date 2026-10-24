@@ -46,9 +46,23 @@ file path or reads the caller's filesystem.
 | GET `/sessions/{sessionId}/tasks` | `limit`, `after_task_id` | Task references, optional `next_task_id` |
 | PUT `/sessions/{sessionId}/tasks/{taskId}` | No body | Idempotent same-workspace association |
 | GET `/tasks/{taskId}/sessions` | Session list queries | Linked sessions, optional `next_cursor` |
+| GET `/tasks/{taskId}/evidence.zip` | No query/body | Binary `application/zip` attachment of every linked terminated session |
 | POST `/sessions/{sessionId}/terminate` | `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Immutable terminated metadata |
 | GET `/sessions/{sessionId}/transcript` | `offset`, `limit` | Bounded active transcript range |
 | GET `/sessions/{sessionId}/evidence` | `offset`, `limit` | Bounded terminated evidence range |
+
+Task Evidence ZIP authorizes read access to the active workspace and the visible,
+same-workspace task before listing or temporary storage. It follows all terminated
+session pages, excludes active and unrelated sessions, preserves original JSONL
+bytes, and verifies immutable size/SHA-256 receipts. ZIP64 entries use actual raw
+DEFLATE (method 8), CRC32 and sanitized label/full-UUID names. The response is a
+`Cache-Control: no-store` attachment, not a JSON range response. Server memory is
+bounded by a 50-row page, one 64 KiB source range, compressor state and a temporary
+central-index sidecar. Two exports may run concurrently, each with a 15-minute
+deadline; excess requests return 503 with `Retry-After: 1`. Cancellation/failure
+cleans owned temporary storage. A failure after headers aborts the transfer without
+a valid completed ZIP; consumers must not publish partial responses. Session
+contents and internal exception details are never included in errors.
 
 These are additive task links. Deleted tasks are hidden in either direction;
 restoring a task restores visibility of its links. Sessions have no edit, reopen,

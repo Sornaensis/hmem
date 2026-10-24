@@ -351,6 +351,55 @@ test('production Sessions uses canonical authenticated resources and direct task
     await appendFile(livePath,Buffer.from('false\n'))
     await until(async()=>(await uploader.tool('session_upload_status',{session_id:liveId})).status==='terminated','live follower discovers normal MCP termination',30000)
     assert.equal((await call(base+'/'+liveId)).committed_bytes,liveBytes.length)
+    // One binary, authenticated server export; the client never enumerates
+    // evidence or assembles ZIP entries. Include more than one metadata page.
+    const archiveExpected={[id]:sha(original),[largeId]:largeHash}
+    for(let index=0;index<51;index++){
+      const sid=randomUUID(),data=index%3===0?Buffer.alloc(0):Buffer.from(JSON.stringify({text:index%3===1?'雪 café':'repeated '.repeat(16000)})+'\r\n')
+      await call(base,'POST',{id:sid,format_label:'Review / café ../capture'})
+      let offset=0,rev=0
+      if(data.length){const appended=await call(base+'/'+sid+'/append','POST',{expected_offset:0,expected_revision:0,data_base64:data.toString('base64'),allow_final_record:false});offset=appended.session.committed_bytes;rev=appended.session.revision}
+      await call(base+'/'+sid+'/terminate','POST',{expected_offset:offset,expected_revision:rev,final_bytes:data.length,final_sha256:sha(data)})
+      await managing.tool('session_associate',{session_id:sid,task_id:task.id});archiveExpected[sid]=sha(data)
+    }
+    const excluded=randomUUID(),excludedBytes=Buffer.from('true\n')
+    await call(base,'POST',{id:excluded,format_label:'Only the other task'})
+    const excludedAppend=await call(base+'/'+excluded+'/append','POST',{expected_offset:0,expected_revision:0,data_base64:excludedBytes.toString('base64'),allow_final_record:false})
+    await call(base+'/'+excluded+'/terminate','POST',{expected_offset:excludedAppend.session.committed_bytes,expected_revision:excludedAppend.session.revision,final_bytes:excludedBytes.length,final_sha256:sha(excludedBytes)})
+    await managing.tool('session_associate',{session_id:excluded,task_id:secondTask.id})
+    // The harness PAT is a bot credential; declare its identity for the normal
+    // POST change-stream bootstrap as required by the existing API contract.
+    await context.setExtraHTTPHeaders({'X-HMem-Bot-Identity':JSON.stringify(identity)})
+    await context.clearCookies()
+    await page.evaluate(token=>localStorage.setItem('hmem-auth-token',token),coordinates.token)
+    await page.goto(origin+'/workspace/'+workspace.id+'#tab=projects&focus=task:'+task.id)
+    const archiveCard=page.locator('#entity-'+task.id)
+    await archiveCard.locator('.btn-extras-toggle').click()
+    const archiveGroup=archiveCard.locator('.task-session-evidence')
+    await archiveGroup.locator('summary').click()
+    await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).waitFor()
+    let binaryRequests=0
+    const binaryHeaders=[]
+    page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip')){binaryRequests++;binaryHeaders.push(request.allHeaders())}})
+    const archiveDownloadEvent=page.waitForEvent('download')
+    await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).click()
+    const archiveDownload=await archiveDownloadEvent,archivePath=await archiveDownload.path()
+    for(const headers of await Promise.all(binaryHeaders)){assert.ok(headers.authorization?.startsWith('Bearer '));assert.equal(headers.cookie,undefined)}
+    const checked=await promisify(execFile)('python',['-c',`import sys,json,zipfile,hashlib
+expected=json.loads(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1]) as z:
+ assert z.testzip() is None
+ assert len(z.namelist())==len(set(z.namelist()))==53
+ for item in z.infolist():
+  assert item.compress_type==zipfile.ZIP_DEFLATED
+  key=next((key for key in expected if item.filename.endswith(key+'.jsonl')),None)
+  assert key is not None and '/' not in item.filename and not item.filename.startswith('.')
+  assert hashlib.sha256(z.read(item)).hexdigest()==expected[key]
+ assert sum(i.compress_size for i in z.infolist())<sum(i.file_size for i in z.infolist())
+print('independently verified 53 DEFLATE entries')`,archivePath,JSON.stringify(archiveExpected)],{windowsHide:true})
+    assert.equal(binaryRequests,1,'one task-only server archive request')
+    await until(async()=>await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).isEnabled(),'archive completion')
+    console.log(JSON.stringify({phase:'server-DEFLATE-task-evidence',entries:53,binaryRequests,verification:checked.stdout.trim(),zipBytes:(await readFile(archivePath)).length,auth:'bearer-only'}))
     assert.deepEqual(errors,[])
     console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,download:'native-OPFS-and-browser-download'}))
   } catch (error) {

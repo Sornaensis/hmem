@@ -105,75 +105,33 @@ test('late viewer acknowledgements and animation callbacks retain their retired 
 })
 
 
-function archiveBridge(storage){
- let incoming;const listeners=[],events=[]
+
+function binaryBridge(transport){
+ let incoming;const listeners=[],events=[],downloads=[]
  const app={ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(value){events.push(value)}}}}
- installSessionBridge(app,{document:{addEventListener(name,fn){if(name==='click')listeners.push(fn)},createElement(){return{click(){}}}},window:{navigator:{storage:{getDirectory:storage}},crypto:{randomUUID:()=> 'fixture'},setTimeout(){},URL:{createObjectURL(){return 'blob:fixture'},revokeObjectURL(){}},addEventListener(){}},now:()=>0})
+ let file
+ installSessionBridge(app,{fetchArchive:transport,document:{addEventListener(name,fn){if(name==='click')listeners.push(fn)},createElement(){return{click(){downloads.push(file)}}}},window:{navigator:{},crypto:{randomUUID:()=> 'fixture'},setTimeout(){},URL:{createObjectURL(value){file=value;return 'blob:fixture'},revokeObjectURL(){}},addEventListener(){}},now:()=>0})
  const command=(extra={})=>incoming({stamp:'scope',generation:0,reset:null,chunk:null,saveChunk:null,saveOperation:null,nextOperation:1,heartbeats:[],...extra})
  command()
- return{events,command,clickDownload(operation=1){const button={disabled:false,dataset:{sessionDownload:JSON.stringify({stamp:'scope',operation,session:session(Buffer.from('true\n'))})}};for(const fn of listeners)fn({target:{closest(selector){return selector==='[data-session-download]'?button:null}},preventDefault(){}})},click(operation=1){const config={stamp:'scope',operation,task:'task',title:'Task'},button={disabled:false,dataset:{sessionArchive:JSON.stringify(config)}};for(const fn of listeners)fn({target:{closest(selector){return selector==='[data-session-archive]'?button:null}},preventDefault(){}})}}
+ return{events,downloads,command,click(operation=1){const config={stamp:'scope',operation,task:'task',title:'Task evidence'},button={disabled:false,dataset:{sessionArchive:JSON.stringify(config)}};for(const fn of listeners)fn({target:{closest(selector){return selector==='[data-session-archive]'?button:null}},preventDefault(){}})},start(){command({nextOperation:2,saveOperation:1,archiveRequest:{id:7,stamp:'scope',operation:1,task:'task',url:'http://api.test/api/v1/workspaces/w/tasks/task/evidence.zip'}})}}
 }
-test('partial archive acquisition treats absent files as cleaned and can fall back safely',async()=>{
- let creates=0,aborts=0,removed=[]
- const root={async *keys(){},async getFileHandle(){if(++creates===2)throw Error('quota');return{async createWritable(){return{async abort(){aborts++}}}}},async removeEntry(name){removed.push(name);if(name.endsWith('.index')){const error=Error('absent');error.name='NotFoundError';throw error}}}
- const bridge=archiveBridge(async()=>({getDirectoryHandle:async()=>root}));bridge.click();await flush();await flush();await flush()
- assert.equal(aborts,1);assert.equal(removed.length,2);assert.ok(bridge.events.some(event=>event.kind==='archive-ready'));assert.equal(bridge.events.some(event=>event.code==='writer_cleanup_failed'),false)
- bridge.command({nextOperation:2});await flush()
+
+test('binary archive transport stages the exact server response without ZIP assembly',async()=>{
+ const bytes=Buffer.from('opaque server-compressed ZIP bytes'),bridge=binaryBridge(async()=>({response:new Response(bytes,{headers:{'Content-Type':'application/zip'}}),isCurrent:()=>true}))
+ bridge.click();await flush();await flush();bridge.start();for(let i=0;i<10;i++)await flush()
+ assert.equal(bridge.downloads.length,1);assert.deepEqual(Buffer.from(await bridge.downloads[0].arrayBuffer()),bytes)
+ assert.ok(bridge.events.some(event=>event.kind==='archive-http'&&event.request===7&&event.status===200))
 })
-test('unconfirmed archive acquisition cleanup keeps its reservation and reports reload-required failure',async()=>{
- let creates=0
- const root={async *keys(){},async getFileHandle(){if(++creates===2)throw Error('quota');return{async createWritable(){return{async abort(){}}}}},async removeEntry(){throw Error('cleanup denied')}}
- const bridge=archiveBridge(async()=>({getDirectoryHandle:async()=>root}));bridge.click();await flush();await flush();await flush()
- assert.ok(bridge.events.some(event=>event.kind==='archive-error'&&event.code==='writer_cleanup_failed'))
- bridge.command({nextOperation:2});await flush();bridge.click(2);await flush();assert.equal(creates,2,'failed cleanup retains the only writer reservation')
+test('an unsuccessful 200 stream never settles as ArchiveDownloaded or publishes partial bytes',async()=>{
+ const stream=new ReadableStream({start(controller){controller.enqueue(new Uint8Array([80,75]));setImmediate(()=>controller.error(Error('controlled partial body failure')))}})
+ const bridge=binaryBridge(async()=>({response:new Response(stream,{headers:{'Content-Type':'application/zip'}}),isCurrent:()=>true}))
+ bridge.click();await flush();await flush();bridge.start();for(let i=0;i<10;i++)await flush()
+ assert.equal(bridge.downloads.length,0);assert.ok(bridge.events.some(event=>event.kind==='archive-http'&&event.request===7&&event.status===0));assert.equal(bridge.events.some(event=>event.kind==='archive-http'&&event.status===200),false)
 })
-
-
-test('archive memory fallback counts ZIP and index overhead inside its aggregate 32 MiB bound',async()=>{
- const bridge=archiveBridge(async()=>{throw Error('private storage unavailable')});bridge.click();await flush();await flush()
- const bytes=Buffer.alloc(65536,120),hash=createHash('sha256');for(let i=0;i<512;i++)hash.update(bytes)
- const row={id:'20000000-0000-4000-8000-000000000001',workspace:'w',state:'terminated',revision:1,finalBytes:33554432,finalSha256:hash.digest('hex')}
- bridge.command({nextOperation:2,saveOperation:1,archiveEntry:{session:row,name:'Finite fallback'}});await flush();await flush()
- let writes=0
- for(let offset=0;offset<row.finalBytes;offset+=bytes.length){bridge.command({nextOperation:2,saveOperation:1,saveChunk:{session:row,offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64')}});writes++;await flush();if(bridge.events.some(event=>event.kind==='save-error'))break}
- assert.equal(writes,512);assert.ok(bridge.events.some(event=>event.kind==='save-error'));assert.equal(bridge.events.some(event=>event.kind==='archive-complete'),false)
-})
-
-
-test('another owner never age-cleans a live archive or index, including individual download acquisition',async()=>{
- const files=new Map(),now=Date.now;let instant=now()
- const root={async *keys(){yield*files.keys()},async getFileHandle(name){if(!files.has(name))files.set(name,[]);return{async createWritable(){return{async write(bytes){if(!files.has(name))throw Error('foreign staging deleted');files.get(name).push(new Uint8Array(bytes))},async close(){},async abort(){files.set(name,[])}}},async getFile(){if(!files.has(name))throw Error('foreign staging deleted');return new Blob(files.get(name))}}},async removeEntry(name){if(!files.delete(name)){const error=Error('absent');error.name='NotFoundError';throw error}}}
- const storage=async()=>({getDirectoryHandle:async()=>root}),first=archiveBridge(storage),second=archiveBridge(storage),individual=archiveBridge(storage)
- try{
-  Date.now=()=>instant;first.click();await flush();await flush();const firstFiles=[...files.keys()];assert.equal(firstFiles.length,2)
-  const bytes=Buffer.from('true\nfalse\n'),row={...session(bytes),id:'20000000-0000-4000-8000-000000000001'}
-  first.command({nextOperation:2,saveOperation:1,archiveEntry:{session:row,name:'Long-lived archive'}});await flush();await flush()
-  first.command({nextOperation:2,saveOperation:1,saveChunk:chunk(row,bytes.subarray(0,5))});await flush()
-  instant+=120000;second.click();await flush();await flush();individual.clickDownload();await flush();await flush()
-  for(const name of firstFiles)assert.ok(files.has(name),'another owner retained '+name)
-  first.command({nextOperation:2,saveOperation:1,saveChunk:chunk(row,bytes.subarray(5),5)});await flush();await flush()
-  first.command({nextOperation:2,saveOperation:1,archiveFinish:true});for(let i=0;i<10;i++)await flush()
-  assert.ok(first.events.some(event=>event.kind==='archive-complete'),'original owner continues and finishes after two other acquisitions')
-  assert.ok(files.has(firstFiles.find(name=>name.endsWith('.zip'))));assert.equal(files.has(firstFiles.find(name=>name.endsWith('.index'))),false)
-  assert.equal(first.events.some(event=>event.kind==='archive-error'),false)
-  second.command({nextOperation:2});individual.command({nextOperation:2});await flush();await flush()
- }finally{Date.now=now}
-})
-
-
-test('fallback final assembly composes immutable Blob parts rather than copying retained Uint8Arrays',async()=>{
- const NativeBlob=globalThis.Blob;let finalParts
- // This checks the copy-budget API invariant, not garbage collection timing.
- globalThis.Blob=class extends NativeBlob{constructor(parts,options){if(options?.type==='application/zip')finalParts=parts;super(parts,options)}}
- try{const bridge=archiveBridge(async()=>{throw Error('storage unavailable')});bridge.click();await flush();await flush();bridge.command({nextOperation:2,saveOperation:1,archiveFinish:true});for(let i=0;i<10;i++)await flush()
-  assert.ok(finalParts.length>0);assert.ok(finalParts.every(part=>part instanceof NativeBlob));assert.ok(bridge.events.some(event=>event.kind==='archive-complete'))
- }finally{globalThis.Blob=NativeBlob}
-})
-
-test('index cleanup failure still aborts archive output and retains the blocked reservation',async()=>{
- const files=new Map();let outputAborts=0,acquisitions=0
- const root={async getFileHandle(name){acquisitions++;files.set(name,[]);return{async createWritable(){return{async write(bytes){files.get(name).push(bytes)},async close(){},async abort(){if(name.endsWith('.zip'))outputAborts++}}},async getFile(){return new Blob(files.get(name))}}},async removeEntry(name){if(name.endsWith('.index'))throw Error('index cleanup denied');files.delete(name)}}
- const bridge=archiveBridge(async()=>({getDirectoryHandle:async()=>root}));bridge.click();await flush();await flush();bridge.command({nextOperation:2,saveOperation:1,archiveFinish:true});for(let i=0;i<20;i++)await flush()
- assert.equal(outputAborts,1);assert.equal(files.size,1);assert.ok(bridge.events.some(event=>event.kind==='archive-error'&&event.code==='writer_cleanup_failed'));assert.equal(bridge.events.some(event=>event.kind==='archive-complete'),false)
- bridge.command({nextOperation:2});bridge.click(2);await flush();assert.equal(acquisitions,2)
+test('binary status failures preserve401/403 and authority retirement aborts an in-flight body',async()=>{
+ for(const status of [401,403]){const bridge=binaryBridge(async()=>({response:new Response('{}',{status,headers:{'Content-Type':'application/json'}}),isCurrent:()=>true}));bridge.click();await flush();await flush();bridge.start();for(let i=0;i<5;i++)await flush();assert.equal(bridge.downloads.length,0);assert.ok(bridge.events.some(event=>event.kind==='archive-http'&&event.status===status))}
+ let controller,aborted=false
+ const bridge=binaryBridge(async(_url,{signal})=>{signal.addEventListener('abort',()=>{aborted=true;controller.error(Error('aborted'))});return{response:new Response(new ReadableStream({start(value){controller=value}}),{headers:{'Content-Type':'application/zip'}}),isCurrent:()=>true}})
+ bridge.click();await flush();await flush();bridge.start();await flush();bridge.command({stamp:'new-scope',nextOperation:2});for(let i=0;i<5;i++)await flush()
+ assert.equal(aborted,true);assert.equal(bridge.downloads.length,0);assert.ok(bridge.events.some(event=>event.kind==='archive-http'&&event.stamp==='scope'&&event.status===0))
 })

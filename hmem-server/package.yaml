@@ -40,6 +40,7 @@ dependencies:
   - aeson >= 2.0
   - text
   - bytestring
+  - zlib
   - time
   - uuid
   - stm

@@ -119,7 +119,7 @@ type WorkspaceAPI =
          :> QueryParam "task_limit" Int :> QueryParam "task_offset" Int
          :> QueryParam "include_projects" Bool :> QueryParam "include_tasks" Bool
          :> QueryParam "show_only" Text :> QueryParams "project_status" ProjectStatus :> QueryParams "task_status" TaskStatus
-          :> QueryParam "show_empty_projects" Bool :> QueryParam "priority_mode" Text :> QueryParam "priority_value" Int :> QueryParam "query" Text
+          :> QueryParam "show_empty_projects" Bool :> QueryParam "has_active_session" Bool :> QueryParam "priority_mode" Text :> QueryParam "priority_value" Int :> QueryParam "query" Text
           :> Description "Returns separately paged direct child Project and Task card summaries. parent_kind is workspace_root, project, or task; project/task require parent_id. The full tree filter DTO includes show_only, project_status, task_status, priority_mode (any/exact/above/below), priority_value, case-insensitive query, and show_empty_projects (default true); false requires a matching task in the project subtree even in projects-only mode; matching descendants retain ancestors. include_projects and include_tasks default to true; false skips that kind's selection and decoration and returns an empty page with has_more=false, which carries no membership/completion authority. Authorization, parent checks and all validation still apply. Each requested page defaults to 50, is capped at 100, and uses deterministic lifecycle-rank, priority DESC, title/name, id ordering."
          :> Get '[JSON] NavigationBranchResponse
   :<|> Capture "workspaceId" UUID :> "navigation" :> "batch"
@@ -147,7 +147,9 @@ type WorkspaceAPI =
 type AgentSessionAPI =
        QueryParam "limit" Text :> QueryParam "before_created_at" Text :> QueryParam "before_id" Text
          :> QueryParam "state" Text :> QueryParam "freshness" Text
+         :> QueryParam "project_id" UUID :> QueryParam "task_id" UUID
          :> Get '[JSON] SessionWire.SessionPageResponse
+  :<|> "filters" :> QueryParam "kind" Text :> QueryParam "project_id" UUID :> QueryParam "after_id" UUID :> QueryParam "selected_id" UUID :> QueryParam "limit" Text :> Get '[JSON] AgentSession.SessionFacetPage
   :<|> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.CreateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> Get '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> "append" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.AppendSessionRequest) :> Post '[JSON] SessionWire.AppendSessionResponse
@@ -486,6 +488,9 @@ handleSessionErrors action = do
       AgentSession.SessionConflict -> sessionError err409 "session_conflict" "Session cursor, receipt or immutable metadata conflicts"
       AgentSession.SessionTerminated -> sessionError err409 "session_terminated" "Session is terminated"
       AgentSession.SessionInvalidInput -> sessionError err400 "session_invalid_input" "Invalid session cursor, metadata or bounds"
+      AgentSession.SessionTaskNotInProgress status -> err409
+        { errBody = Aeson.encode (object ["error" .= ("session_task_not_in_progress" :: Text), "message" .= ("Sessions can only be added to tasks with status in_progress; current status is " <> status <> "."), "required_status" .= ("in_progress" :: Text), "current_status" .= status])
+        , errHeaders = [("Content-Type","application/json")] }
     Left exception -> throwError $ case exception of
       DBCheckViolation{} -> sessionError err400 "session_invalid_input" "Invalid JSONL record or session constraint"
       DBForeignKeyViolation{} -> sessionError err404 "session_not_found" "Session or task not found"
@@ -574,7 +579,7 @@ sessionFilters rawState rawFreshness = do
     Just "fresh" -> pure (Just AgentSession.Fresh)
     Just "stale" -> pure (Just AgentSession.Stale)
     _ -> throwError $ sessionError err400 "validation_error" "Session freshness must be fresh or stale"
-  pure AgentSession.SessionFilter{..}
+  pure $ AgentSession.SessionFilter state freshness Nothing Nothing
 
 sessionLimit :: Maybe Text -> Handler Int
 sessionLimit input = do
@@ -590,21 +595,29 @@ sessionIO :: Pool Hasql.Connection -> UUID -> IO a -> Handler a
 sessionIO _ workspace = handleSessionErrors . withWorkspaceIdContext (Just workspace)
 
 agentSessions :: Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
-agentSessions pool workspace = listH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated
+agentSessions pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated
   where
     readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
     writeAccess = authorizeAgentSessionWrite pool workspace
-    listH rawLimit timestamp identifier rawState rawFreshness = do
+    listH rawLimit timestamp identifier rawState rawFreshness project task = do
       readAccess
       limit <- sessionLimit rawLimit
       cursor <- sessionCursor timestamp identifier
       filters <- sessionFilters rawState rawFreshness
-      pageResult <- sessionIO pool workspace $ AgentSessions.listWorkspaceSessionsFiltered pool workspace filters cursor limit
+      pageResult <- sessionIO pool workspace $ AgentSessions.listWorkspaceSessionsFiltered pool workspace (filters {AgentSession.projectId = project, AgentSession.taskId = task}) cursor limit
       pure $ SessionWire.SessionPageResponse pageResult.items pageResult.nextCursor
+    facetsH kind project after selected rawLimit = do
+      readAccess
+      limit <- sessionLimit rawLimit
+      isProject <- case kind of
+        Just "projects" -> pure True
+        Just "tasks" -> pure False
+        _ -> throwError $ sessionError err400 "validation_error" "Session filter kind must be projects or tasks"
+      sessionIO pool workspace $ AgentSessions.listSessionFacets pool workspace isProject project after selected limit
     createH request = do
       writeAccess
       input <- sessionRequest request
-      sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel)
+      sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel input.title input.parentSessionId)
     getH identifier = readAccess >> requireAgentSession pool workspace identifier
     appendH identifier request = do
       writeAccess
@@ -848,18 +861,18 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> pl
   planningCountsH workspaceId = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     handleDBErrors (Workspace.getWorkspacePlanningCounts pool workspaceId) >>= maybe (throwError err404) pure
-  navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset includeProjects includeTasks maybeShowOnly projectStatuses taskStatuses maybeShowEmptyProjects maybePriorityMode maybePriorityValue maybeQuery = do
+  navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset includeProjects includeTasks maybeShowOnly projectStatuses taskStatuses maybeShowEmptyProjects maybeHasActiveSession maybePriorityMode maybePriorityValue maybeQuery = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     parent <- navigationParent maybeKind maybeParent
     reject (validateNavigationPage projectLimit projectOffset <> validateNavigationPage taskLimit taskOffset)
     reject (validateNavigationFilter maybeShowOnly maybePriorityMode maybePriorityValue maybeQuery)
-    let filters = NavigationFilter { showOnly = maybeShowOnly, projectStatuses = projectStatuses, taskStatuses = taskStatuses, priorityMode = maybePriorityMode, priorityValue = maybePriorityValue, query = maybeQuery, showEmptyProjects = maybeShowEmptyProjects }
+    let filters = NavigationFilter { showOnly = maybeShowOnly, projectStatuses = projectStatuses, taskStatuses = taskStatuses, priorityMode = maybePriorityMode, priorityValue = maybePriorityValue, query = maybeQuery, showEmptyProjects = maybeShowEmptyProjects, hasActiveSession = maybeHasActiveSession }
     navigationPageH workspaceId parent projectLimit projectOffset taskLimit taskOffset includeProjects includeTasks filters
 
   navigationBatchH workspaceId (batch :: NavigationBatchRequest) = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     reject (validateNavigationBatchRequest batch)
-    let filters = fromMaybe (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing) batch.filters
+    let filters = fromMaybe (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing Nothing) batch.filters
     reject (validateNavigationFilter filters.showOnly filters.priorityMode filters.priorityValue filters.query)
     outcomes <- navigationOwnerOutcomes batch.requests $ \item ->
       navigationPageH workspaceId item.parent item.projectLimit item.projectOffset item.taskLimit item.taskOffset item.includeProjects item.includeTasks filters

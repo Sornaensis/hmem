@@ -280,7 +280,7 @@ navigationFilterFingerprint model =
                 AbovePriority value -> "above:" ++ String.fromInt value
                 BelowPriority value -> "below:" ++ String.fromInt value
     in
-    String.join "|" [ showOnly, if model.search.filterShowEmptyProjects then "empty" else "nonempty", priority, String.join "," (List.sort model.search.filterProjectStatuses), String.join "," (List.sort model.search.filterTaskStatuses), String.trim model.search.query ]
+    String.join "|" [ showOnly, if model.search.filterHasActiveSession then "session" else "any-session", if model.search.filterShowEmptyProjects then "empty" else "nonempty", priority, String.join "," (List.sort model.search.filterProjectStatuses), String.join "," (List.sort model.search.filterTaskStatuses), String.trim model.search.query ]
 
 
 navigationFilterQuery : Model -> String
@@ -310,7 +310,7 @@ navigationFilterQuery model =
                 "" -> ""
                 value -> "&query=" ++ Url.percentEncode value
     in
-    showOnly ++ "&show_empty_projects=" ++ (if model.search.filterShowEmptyProjects then "true" else "false") ++ priority ++ projectStatuses ++ taskStatuses ++ query
+    showOnly ++ "&has_active_session=" ++ (if model.search.filterHasActiveSession then "true" else "false") ++ "&show_empty_projects=" ++ (if model.search.filterShowEmptyProjects then "true" else "false") ++ priority ++ projectStatuses ++ taskStatuses ++ query
 
 
 navigationBranchKey : String -> Maybe String -> String
@@ -588,7 +588,8 @@ navigationBatchFilters model =
     Encode.object (showOnly ++ priority ++ query ++
         [ ( "project_statuses", Encode.list Encode.string model.search.filterProjectStatuses )
         , ( "task_statuses", Encode.list Encode.string model.search.filterTaskStatuses )
-        , ( "show_empty_projects", Encode.bool model.search.filterShowEmptyProjects ) ])
+        , ( "show_empty_projects", Encode.bool model.search.filterShowEmptyProjects )
+        , ( "has_active_session", Encode.bool model.search.filterHasActiveSession ) ])
 
 
 pumpNavigationQueue : Int -> Model -> ( Model, List ( String, NavigationBranchState ) )
@@ -1493,7 +1494,7 @@ physical admissions and presentations intact; the allocator is not their lifetim
 revalidateNavigationForChangedSummaries : Model -> Api.NavigationSummariesResponse -> Model -> ( Model, Cmd Msg )
 revalidateNavigationForChangedSummaries before summaries model =
     let
-        filtered = not before.search.filterShowEmptyProjects || before.search.filterShowOnly /= ShowAll || before.search.filterProjectStatuses /= [] || before.search.filterTaskStatuses /= [] || before.search.filterPriority /= AnyPriority || String.trim before.search.query /= ""
+        filtered = before.search.filterHasActiveSession || not before.search.filterShowEmptyProjects || before.search.filterShowOnly /= ShowAll || before.search.filterProjectStatuses /= [] || before.search.filterTaskStatuses /= [] || before.search.filterPriority /= AnyPriority || String.trim before.search.query /= ""
         queried = String.trim before.search.query /= ""
         projectOwner summary = summary.parentId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
         taskOwner = taskNavigationOwner

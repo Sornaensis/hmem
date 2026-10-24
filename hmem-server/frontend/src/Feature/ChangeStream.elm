@@ -64,6 +64,7 @@ type Action
     | RefreshSessionAuthorization
     | RefreshAgentSession String String
     | RefreshAgentSessionList String
+    | RefreshSessionActivityMembership String
     | RefreshTaskSessions String String
     | AccessGranted String
     | ClearWorkspace String
@@ -263,13 +264,14 @@ validSessionEnvelope envelope =
         matches expected =
             List.all (\item -> List.member ( item.kind, item.target ) expected) envelope.invalidations
                 && List.all (\( kind, target ) -> List.any (\item -> item.kind == kind && item.target == target) envelope.invalidations) expected
+        membership workspace expected = matches expected || matches (expected ++ [("collection","active_sessions:" ++ workspace)])
     in
     case ( envelope.scope, envelope.entityType, String.split ":" envelope.entityId ) of
         ( Api.WorkspaceScope workspace, "agent_session", [ id ] ) ->
-            uuid id && List.member envelope.entityAction [ "created", "updated" ] && matches
+            uuid id && List.member envelope.entityAction [ "created", "updated" ] && membership workspace
                 [ ( "entity", "agent_session:" ++ id ), ( "collection", "sessions:" ++ workspace ) ]
         ( Api.WorkspaceScope workspace, "task_session", [ id, task ] ) ->
-            uuid id && uuid task && envelope.entityAction == "created" && matches
+            uuid id && uuid task && envelope.entityAction == "created" && membership workspace
                 [ ( "entity", "task_session:" ++ id ++ ":" ++ task ), ( "entity", "agent_session:" ++ id )
                 , ( "collection", "sessions:" ++ workspace ), ( "collection", "task_sessions:" ++ task ) ]
         ( _, "agent_session", _ ) -> False
@@ -347,6 +349,9 @@ invalidationActions envelope invalidation =
                         [ RefetchEntity entity identity ]
     in
     case ( envelope.scope, invalidation.kind, parts ) of
+        ( Api.WorkspaceScope workspace, "collection", [ "active_sessions", expected ] ) ->
+            if workspace == expected && List.member envelope.entityType ["agent_session","task_session"] then [RefreshSessionActivityMembership workspace] else [BeginResync]
+
         ( Api.WorkspaceScope workspace, "entity", [ "agent_session", id ] ) ->
             if List.member envelope.entityType [ "agent_session", "task_session" ] then [ RefreshAgentSession workspace id ] else [ BeginResync ]
 
@@ -586,6 +591,9 @@ coalesce actions =
 
                 RefreshAgentSessionList workspace ->
                     "agent-session-list:" ++ workspace
+
+                RefreshSessionActivityMembership workspace ->
+                    "session-activity-membership:" ++ workspace
 
                 RefreshTaskSessions workspace task ->
                     "task-sessions:" ++ workspace ++ ":" ++ task

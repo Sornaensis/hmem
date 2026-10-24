@@ -153,3 +153,21 @@ upgrade the historical schema. Audit/outbox fixtures may retain obsolete due
 values as compatibility evidence. Operational retry times, job eligibility,
 leases, token expiry and request timeouts are separate from removed planning
 deadlines and remain supported.
+
+## Session tree and titles (V043)
+
+V043 adds nullable `title` and `parent_session_id` columns to `sessions`.
+Null titles identify pre-upgrade rows; the migration does not rewrite them,
+their timestamps, creator, counters, transcript or final receipt. New inserts
+require a trimmed, nonblank title of 1–80 UTF-8 bytes. Parent selection is optional
+and immutable, references an already existing same-workspace session through a
+composite FK, and rejects self/cyclic insertion. Task links remain additive:
+existing duplicates are no-ops, while new links lock a live same-workspace task
+and require `in_progress`. Status changes do not remove historical links.
+
+The migration installs stable active-task/project and bounded ancestor-context
+projections. Session audit values keep an explicit metadata allowlist including
+title/parent, with no evidence bytes. Only creation, lifecycle termination and
+new task links add the `active_sessions` collection invalidation. Append and
+heartbeat keep their ordinary metadata/list invalidations. Schema changes,
+functions, guards and ledger registration commit or roll back together.

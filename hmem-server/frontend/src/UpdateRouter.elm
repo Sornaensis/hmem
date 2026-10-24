@@ -95,6 +95,9 @@ route msg model =
         SessionsShowAllLinkedTasks -> Ok (Feature.Sessions.update msg model)
         SessionsRetry -> Ok (Feature.Sessions.update msg model)
         SessionsStateFilter _ -> Ok (Feature.Sessions.update msg model)
+        SessionsProjectFilter _ -> Ok (Feature.Sessions.update msg model)
+        SessionsTaskFilter _ -> Ok (Feature.Sessions.update msg model)
+        SessionsFacetPage _ _ -> Ok (Feature.Sessions.update msg model)
         SessionsFreshnessFilter _ -> Ok (Feature.Sessions.update msg model)
         SessionsFollow _ -> Ok (Feature.Sessions.update msg model)
         SessionsOlder -> Ok (Feature.Sessions.update msg model)
@@ -480,6 +483,9 @@ route msg model =
         ReturnSearchResults -> Ok (Feature.Search.update msg model)
 
         NavigateToSearchResult _ _ ->
+            Ok (Feature.Search.update msg model)
+
+        SetFilterHasActiveSession _ ->
             Ok (Feature.Search.update msg model)
 
         SetFilterShowEmptyProjects _ ->

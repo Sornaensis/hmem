@@ -1123,7 +1123,13 @@ applyActions scope actions model =
             ChangeStream.RevalidateNavigationSummary _ _ -> True
             _ -> False
         activity=refreshed.sessionActivity
-        withActivity=if scopeMatchesSelectedWorkspace scope refreshed && List.any activityRelevant actions then {refreshed | sessionActivity={activity | version=activity.version+1}} else refreshed
+        withActivity=
+            if scopeMatchesSelectedWorkspace scope refreshed && List.any activityRelevant actions then
+                let state = refreshed.sessions in
+                {refreshed | sessionActivity={activity | version=activity.version+1}
+                    , sessions = {state | activityDirty = True}
+                    , sessionDelivery = refreshed.selectedWorkspaceId |> Maybe.map (\ws -> SessionDelivery.invalidateFacets ws (SessionDelivery.invalidateLists ws refreshed.sessionDelivery)) |> Maybe.withDefault refreshed.sessionDelivery }
+            else refreshed
     in ( withActivity, Cmd.batch [ actionCmd, readinessCmd ] )
 
 
@@ -1144,20 +1150,39 @@ applyAction scope action ( model, accumulated ) =
                 ( { model | sessionDelivery = SessionDelivery.invalidateLists workspace model.sessionDelivery }, accumulated )
             else ( model, accumulated )
 
+        ChangeStream.RefreshSessionActivityMembership workspace ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                let state = model.sessions in
+                ( {model | sessionDelivery = SessionDelivery.invalidateFacets workspace model.sessionDelivery, sessions = {state | activityDirty = True}}, accumulated )
+            else (model, accumulated)
+
         ChangeStream.RefreshTaskSessions workspace task ->
             if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
                 ( { model | sessionDelivery = SessionDelivery.invalidateTask workspace task model.sessionDelivery }, accumulated )
             else ( model, accumulated )
 
         ChangeStream.RefetchEntity entity identity ->
-            requestEntity scope entity identity accumulated model
+            let
+                withFacets =
+                    if List.member entity ["project","task"] then
+                        model.selectedWorkspaceId |> Maybe.map (\ws -> {model | sessionDelivery = SessionDelivery.invalidateFacets ws (SessionDelivery.invalidateLists ws model.sessionDelivery)}) |> Maybe.withDefault model
+                    else
+                        model
+            in
+            requestEntity scope entity identity accumulated withFacets
 
         ChangeStream.RemoveEntity entity identity ->
             if entity == "task_dependency" && not (scopeMatchesSelectedWorkspace scope model) then
                 ( model, accumulated )
 
             else
-                removeEntity scope entity identity accumulated model
+                let
+                    withFacets =
+                        if List.member entity ["project","task"] && scopeMatchesSelectedWorkspace scope model then
+                            model.selectedWorkspaceId |> Maybe.map (\ws -> {model | sessionDelivery = SessionDelivery.invalidateFacets ws (SessionDelivery.invalidateLists ws model.sessionDelivery)}) |> Maybe.withDefault model
+                        else model
+                in
+                removeEntity scope entity identity accumulated withFacets
 
         ChangeStream.RefreshTaskDependencies taskId dependsOnId present requestId ->
             if scopeMatchesSelectedWorkspace scope model then

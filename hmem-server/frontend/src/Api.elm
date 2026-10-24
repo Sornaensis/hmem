@@ -7,6 +7,7 @@ module Api exposing
     , SessionCursor
     , SessionFilters
     , defaultSessionFilters
+    , SessionAncestor, SessionFacet, SessionFacetPage, fetchSessionFacets, fetchScopedAgentSessions
     , SessionPage
     , SessionTaskPage
     , SessionRange
@@ -4397,7 +4398,20 @@ type alias AgentSession =
     , creator : ActorAttribution.Actor, createdAt : String, lastSeenAt : String
     , committedBytes : Int, committedRecords : Int, revision : Int, endsWithNewline : Bool
     , terminatedAt : Maybe String, finalBytes : Maybe Int, finalSha256 : Maybe String
+    , title : Maybe String, parentSessionId : Maybe String, ancestors : List SessionAncestor, ancestorsTruncated : Bool
     }
+
+
+type alias SessionAncestor =
+    { id : String, title : Maybe String, formatLabel : String, state : String, parentSessionId : Maybe String }
+
+
+type alias SessionFacet =
+    { id : String, title : String }
+
+
+type alias SessionFacetPage =
+    { items : List SessionFacet, nextId : Maybe String, selected : Maybe SessionFacet }
 
 
 type alias SessionCursor =
@@ -4448,6 +4462,10 @@ agentSessionDecoder =
         |> optional "terminated_at" (D.nullable D.string) Nothing
         |> optional "final_bytes" (D.nullable D.int) Nothing
         |> optional "final_sha256" (D.nullable D.string) Nothing
+        |> optional "title" (D.nullable D.string) Nothing
+        |> optional "parent_session_id" (D.nullable D.string) Nothing
+        |> optional "ancestors" (D.list (D.map5 SessionAncestor (D.field "id" D.string) (nullableSessionField "title" D.string) (D.field "format_label" D.string) (D.field "state" D.string) (nullableSessionField "parent_session_id" D.string))) []
+        |> optional "ancestors_truncated" D.bool False
 
 
 nullableSessionField : String -> Decoder a -> Decoder (Maybe a)
@@ -4502,6 +4520,23 @@ fetchFilteredAgentSessions apiUrl workspace task filters cursor limit toMsg =
                 ++ (if filters.freshness == "" then "" else "&freshness=" ++ Url.percentEncode filters.freshness)
         in
         sessionGet (path ++ "?limit=" ++ String.fromInt limit ++ predicates ++ after) sessionPageDecoder toMsg
+
+
+fetchScopedAgentSessions : String -> String -> Maybe String -> Maybe String -> SessionFilters -> Maybe SessionCursor -> (Result Http.Error SessionPage -> msg) -> Cmd msg
+fetchScopedAgentSessions apiUrl workspace project task filters cursor =
+    let param key value = value |> Maybe.map (\id -> "&" ++ key ++ "=" ++ Url.percentEncode id) |> Maybe.withDefault ""
+        after = cursor |> Maybe.map (\key -> "&before_created_at=" ++ Url.percentEncode key.createdAt ++ "&before_id=" ++ Url.percentEncode key.id) |> Maybe.withDefault ""
+    in
+    sessionGet (sessionResourceUrl apiUrl workspace ++ "?limit=50&state=" ++ filters.state ++ "&freshness=" ++ filters.freshness ++ param "project_id" project ++ param "task_id" task ++ after) sessionPageDecoder
+
+
+fetchSessionFacets : String -> String -> String -> Maybe String -> Maybe String -> Maybe String -> (Result Http.Error SessionFacetPage -> msg) -> Cmd msg
+fetchSessionFacets apiUrl workspace kind project after selected =
+    let param key value = value |> Maybe.map (\id -> "&" ++ key ++ "=" ++ Url.percentEncode id) |> Maybe.withDefault ""
+        facet = D.map2 SessionFacet (D.field "id" D.string) (D.field "title" D.string)
+    in
+    sessionGet (sessionResourceUrl apiUrl workspace ++ "/filters?kind=" ++ kind ++ "&limit=50" ++ param "project_id" project ++ param "after_id" after ++ param "selected_id" selected)
+        (D.map3 SessionFacetPage (D.field "items" (D.list facet)) (nullableSessionField "next_id" D.string) (nullableSessionField "selected" facet))
 
 
 fetchSessionTasks : String -> String -> String -> Maybe String -> Int -> (Result Http.Error SessionTaskPage -> msg) -> Cmd msg

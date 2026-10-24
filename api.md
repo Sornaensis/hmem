@@ -38,8 +38,9 @@ file path or reads the caller's filesystem.
 
 | Method and path suffix | Request or query | Response |
 | --- | --- | --- |
-| POST `/sessions` | `id` (caller UUID), `format_label` (1–128 UTF-8 bytes) | Empty active session, or identical create retry |
-| GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness` | `items`, optional `next_cursor` |
+| POST `/sessions` | `id` (caller UUID), `format_label` (1–128 UTF-8 bytes), `title` (1–80 UTF-8 bytes), optional `parent_session_id` | Empty active session, or identical create retry |
+| GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness`/`project_id`/`task_id` | `items`, optional `next_cursor` |
+| GET `/sessions/filters` | `kind=projects` or `kind=tasks`, optional `project_id`, `after_id`, `selected_id`, `limit` | Active-session options, `next_id`, validated `selected` |
 | GET `/sessions/{sessionId}` | — | Canonical metadata, counters, state and final receipt when sealed |
 | POST `/sessions/{sessionId}/append` | `expected_offset`, `expected_revision`, `data_base64`, optional `allow_final_record` (false) | `session`, `replayed` |
 | POST `/sessions/{sessionId}/heartbeat` | No body | Active session with refreshed `last_seen_at`; revision unchanged |
@@ -66,7 +67,23 @@ contents and internal exception details are never included in errors.
 
 These are additive task links. Deleted tasks are hidden in either direction;
 restoring a task restores visibility of its links. Sessions have no edit, reopen,
-delete, redaction or unlink route. A link may be added after termination.
+delete, redaction or unlink route. A new link requires the live same-workspace task to be `in_progress`, including after session termination. Existing links remain retry-safe after task completion. A refusal returns 409 `session_task_not_in_progress` with `required_status` and `current_status`.
+
+New sessions require a very short descriptive title, normally 3–8 words, such as
+“Repair session filters”. Titles are trimmed, limited to 80 UTF-8 bytes and fixed
+at creation. `format_label` continues to identify the transcript format. An optional
+parent must already exist in the same workspace; self-parenting, cycles and later
+parent changes are rejected. Legacy title-null sessions remain readable and
+resumable without changing their stored metadata. Lists and metadata reads include
+up to 16 compact ancestors and `ancestors_truncated` when older context is omitted.
+
+Workspace lists may intersect `project_id` and `task_id`. Project scope includes
+all live descendant projects and nested tasks, including child tasks without a
+project ID. A selected task outside that project scope matches no sessions.
+`/sessions/filters` uses active lifecycle independently of freshness and of the
+current session page. Project options include descendant activity; task options
+narrow to the selected project. Continue by `after_id`; `selected_id` separately
+validates a selection even when it is outside the current option page.
 
 Every mutation body is limited to **2 MiB before JSON decoding**, for both
 declared-length and chunked requests. `data_base64` must be canonical padded
@@ -100,7 +117,7 @@ continue at `next_offset`, concatenate the original bytes, then verify metadata'
 whole transcript when `has_more=true`.
 
 Session changes use the existing durable workspace stream as compact
-`agent_session` and `task_session` invalidations. Link IDs are
+`agent_session` and `task_session` invalidations. Creation, termination and new links additionally invalidate `active_sessions:{workspaceId}`; ordinary append and heartbeat events do not. Link IDs are
 `session_id:task_id`. Create/append/seal replays and duplicate links add no event;
 append and heartbeat targets never fan out across linked tasks. Audit values,
 stream events and both snapshot profiles exclude transcript bytes. Snapshot item
@@ -289,7 +306,7 @@ each request has a unique nonblank `request_id` (at most 256 characters), a
 `parent` (`{"kind":"project"|"task","parent_id":"..."}`), and the GET route's
 optional independent limits, offsets and demand booleans. Filters use
 `project_statuses`/`task_statuses` arrays and the existing `show_only`,
-`show_empty_projects`, `priority_mode`, `priority_value` and `query` semantics.
+`show_empty_projects`, `has_active_session`, `priority_mode`, `priority_value` and `query` semantics. `has_active_session=true` requires active lifecycle on each matched task/project subtree, retains required ancestor paths and combines with the other predicates before pagination; freshness does not affect membership.
 Omitted filters and empty status arrays retain GET defaults. Workspace read
 authorization and normal cookie CSRF checks apply to the whole POST. Invalid
 request sets fail before reading owners. Ordered `outcomes` echo each request ID

@@ -562,6 +562,7 @@ encodeFilterState original =
                 )
           )
         , ( "filterShowEmptyProjects", Encode.bool model.search.filterShowEmptyProjects )
+        , ( "filterHasActiveSession", Encode.bool model.search.filterHasActiveSession )
         , ( "filterPriority", encodeFilterPriority model.search.filterPriority )
         , ( "filterProjectStatuses", Encode.list Encode.string model.search.filterProjectStatuses )
         , ( "filterTaskStatuses", Encode.list Encode.string model.search.filterTaskStatuses )
@@ -659,6 +660,7 @@ applyStoredFilters json model =
             { currentSearch
                 | query = Decode.decodeValue (Decode.field "searchQuery" Decode.string) json |> Result.withDefault currentSearch.query
                 , filterShowOnly = Decode.decodeValue (Decode.field "filterShowOnly" decodeShowOnly) json |> Result.withDefault currentSearch.filterShowOnly
+                , filterHasActiveSession = Decode.decodeValue (Decode.field "filterHasActiveSession" Decode.bool) json |> Result.withDefault currentSearch.filterHasActiveSession
                 , filterShowEmptyProjects = Decode.decodeValue (Decode.field "filterShowEmptyProjects" Decode.bool) json |> Result.withDefault currentSearch.filterShowEmptyProjects
                 , filterPriority = Decode.decodeValue (Decode.field "filterPriority" decodeFilterPriority) json |> Result.withDefault currentSearch.filterPriority
                 , filterProjectStatuses = Decode.decodeValue (Decode.field "filterProjectStatuses" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterProjectStatuses

@@ -68,6 +68,7 @@ init =
     , nextRequestToken = 1
     , filterShowOnly = ShowAll
     , filterShowEmptyProjects = True
+    , filterHasActiveSession = False
     , filterPriority = AnyPriority
     , filterProjectStatuses = [ "active", "paused" ]
     , filterTaskStatuses = [ "todo", "in_progress", "blocked" ]
@@ -142,6 +143,7 @@ hierarchySearchChange msg search =
         SearchInput query -> Just { search | query = query }
         SetFilterShowOnly show -> Just { search | filterShowOnly = show }
         SetFilterShowEmptyProjects show -> Just { search | filterShowEmptyProjects = show }
+        SetFilterHasActiveSession active -> Just { search | filterHasActiveSession = active }
         SetFilterPriority priority -> Just { search | filterPriority = priority }
         ToggleFilterProjectStatus status ->
             Just { search | filterProjectStatuses = toggle [ "active", "paused", "completed", "archived" ] status search.filterProjectStatuses }
@@ -737,6 +739,9 @@ viewFilterBar model =
                         ]
                         []
             ]
+        , label [ class "filter-group filter-checkbox filter-active-session" ]
+            [ input [ type_ "checkbox", checked model.search.filterHasActiveSession, onCheck SetFilterHasActiveSession ] []
+            , text "Has Active Session" ]
         ]
 
 

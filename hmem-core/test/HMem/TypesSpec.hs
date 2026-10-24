@@ -51,8 +51,8 @@ spec = do
     it "keeps optional GET defaults and independent demand/cursors" $ do
       eitherDecode (encode batch) `shouldBe` Right batch
       validateNavigationBatchRequest batch `shouldBe` []
-      eitherDecode "{}" `shouldBe` Right (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing)
-      eitherDecode "{\"project_statuses\":[],\"task_statuses\":[]}" `shouldBe` Right (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing)
+      eitherDecode "{}" `shouldBe` Right (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing Nothing)
+      eitherDecode "{\"project_statuses\":[],\"task_statuses\":[]}" `shouldBe` Right (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing Nothing)
     it "rejects empty oversized repeated identities/owners roots and invalid page bounds" $ do
       mapM_ (\value -> validateNavigationBatchRequest value `shouldSatisfy` (not . null))
         [ NavigationBatchRequest Nothing []
@@ -66,7 +66,7 @@ spec = do
         , NavigationBatchRequest Nothing [item { taskOffset = Just (-1) }] ]
     it "requires exact boolean types and keeps bounded IDs independent of long filters" $ do
       let bad = object ["requests" .= [object ["request_id" .= ("one" :: T.Text), "parent" .= NavigationProjectBranch owner, "include_tasks" .= ("false" :: T.Text)]]]
-          filters = NavigationFilter Nothing [] [] Nothing Nothing (Just (T.replicate 2048 "description needle")) Nothing
+          filters = NavigationFilter Nothing [] [] Nothing Nothing (Just (T.replicate 2048 "description needle")) Nothing Nothing
           long = NavigationBatchRequest (Just filters) [item]
       eitherDecode (encode bad) `shouldSatisfy` (isLeft :: Either String NavigationBatchRequest -> Bool)
       eitherDecode (encode long) `shouldBe` Right long

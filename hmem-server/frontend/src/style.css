@@ -4846,3 +4846,20 @@ textarea.observation-edit-content {
   .session-role-user:not(.session-record-activity) { max-width:100%; }
 }
 .workspace-card>.card-header { gap:.65rem; }.workspace-card>.card-header>.card-title { flex:1; min-width:0; overflow-wrap:anywhere; }.workspace-card>.card-header>.badge { flex-shrink:0; }
+
+/* Sessions share the workspace card and filter vocabulary. */
+.sessions-page { margin:0; text-align:left; }
+.session-summary.card { padding:0; transition:border-color .15s,box-shadow .15s; }
+.session-summary.card:hover { border-color:var(--accent); }
+.session-summary-link { color:inherit; text-decoration:none; }
+.session-summary-link:hover { color:inherit; text-decoration:none; }
+.session-tree-node { list-style:none; min-width:0; }
+.session-tree-children { list-style:none; margin:.35rem 0 .4rem .65rem; padding-left:.45rem; border-left:1px solid var(--border); }
+.session-parent-context { font-size:.65rem; color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sessions-filters { display:flex; flex-wrap:wrap; align-items:center; }
+.session-facet,.session-facet label { display:flex; gap:.4rem; align-items:center; min-width:0; }
+.session-facet select { max-width:260px; min-width:130px; }
+.filter-active-session { margin-left:auto; white-space:nowrap; }
+@media(max-width:900px) { .session-facet { flex-wrap:wrap; }.session-facet select { max-width:210px; }.session-tree-children { margin-left:.35rem; padding-left:.35rem; }.filter-active-session { margin-left:0; } }
+
+.session-tree-flat { margin-left:0; padding-left:0; border-left:0; }

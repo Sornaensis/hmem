@@ -7,13 +7,13 @@ import Types exposing (..)
 
 capture : SearchModel -> HierarchyFilters
 capture search =
-    { query = search.query, showOnly = search.filterShowOnly, showEmptyProjects = search.filterShowEmptyProjects
+    { query = search.query, showOnly = search.filterShowOnly, showEmptyProjects = search.filterShowEmptyProjects, hasActiveSession = search.filterHasActiveSession
     , priority = search.filterPriority, projectStatuses = search.filterProjectStatuses, taskStatuses = search.filterTaskStatuses }
 
 
 apply : HierarchyFilters -> SearchModel -> SearchModel
 apply filters search =
-    { search | query = filters.query, filterShowOnly = filters.showOnly, filterShowEmptyProjects = filters.showEmptyProjects
+    { search | query = filters.query, filterShowOnly = filters.showOnly, filterShowEmptyProjects = filters.showEmptyProjects, filterHasActiveSession = filters.hasActiveSession
         , filterPriority = filters.priority, filterProjectStatuses = filters.projectStatuses, filterTaskStatuses = filters.taskStatuses }
 
 

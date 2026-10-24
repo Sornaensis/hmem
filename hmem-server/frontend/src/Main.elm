@@ -159,7 +159,7 @@ updateCore msg model =
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    Sub.batch [ AppShell.subscriptions, Browser.Events.onVisibilityChange (\visibility -> SessionActivityVisibility (visibility == Browser.Events.Visible)), if model.auth.status == AuthReady && model.sessionActivity.visible && not (List.isEmpty model.sessionActivity.order) then Time.every 1000 SessionActivityTick else Sub.none, if model.auth.status == AuthReady && not (List.isEmpty model.sessions.owned) then Time.every 1000 SessionsTick else Sub.none ]
+    Sub.batch [ AppShell.subscriptions, Browser.Events.onVisibilityChange (\visibility -> SessionActivityVisibility (visibility == Browser.Events.Visible)), if model.auth.status == AuthReady && model.sessionActivity.visible && not (List.isEmpty model.sessionActivity.order) then Time.every 1000 SessionActivityTick else Sub.none, if model.auth.status == AuthReady && (not (List.isEmpty model.sessions.owned) || (model.sessions.activityDirty && model.search.filterHasActiveSession && model.activeTab == ProjectsTab)) then Time.every 1000 SessionsTick else Sub.none ]
 
 
 

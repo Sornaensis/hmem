@@ -105,11 +105,21 @@ suite =
             \_ ->
                 let
                     search = base.search
-                    prior = { base | search = { search | filterShowOnly = ShowTasksOnly, filterShowEmptyProjects = False, filterPriority = ExactPriority 3, filterProjectStatuses = [ "completed" ], filterTaskStatuses = [ "done" ] } }
+                    prior = { base | search = { search | filterShowOnly = ShowTasksOnly, filterShowEmptyProjects = False, filterHasActiveSession = True, filterPriority = ExactPriority 3, filterProjectStatuses = [ "completed" ], filterTaskStatuses = [ "done" ] } }
                     destination = { protocol = Url.Http, host = "fixture", port_ = Nothing, path = "/workspace/b", query = Nothing, fragment = Nothing }
                     routed = Route.handleUrlChange destination prior |> Tuple.first
                 in
                 expectDefaultFilters routed.search
+        , test "late storage changing only active sessions reloads the painted unfiltered hierarchy" <| \_ ->
+                let
+                    prepared = DataLoading.reloadNavigationForFilters base |> Tuple.first
+                    painted = case prepared.dataLoading.rootNavigationRequest of
+                        Just request -> DataLoading.update (GotRootNavigation "a" request.sessionEpoch prepared.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0 (Ok { workspaceId = "a", projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) prepared |> Tuple.first
+                        Nothing -> prepared
+                    loaded = AppShell.handleOwned (LocalStorageLoadedMsg (Encode.object [ ( "workspaceId", Encode.string "a" ), ( "filterHasActiveSession", Encode.bool True ) ])) painted |> Tuple.first
+                in
+                Expect.equal ( True, True, Just True )
+                    ( loaded.search.filterHasActiveSession, loaded.dataLoading.navigationGeneration > painted.dataLoading.navigationGeneration, Maybe.map .inFlight loaded.dataLoading.rootNavigationRequest )
         , test "saved workspace filters override defaults and later changes remain serializable" <|
             \_ ->
                 let
@@ -152,8 +162,8 @@ suite =
 expectDefaultFilters : SearchModel -> Expect.Expectation
 expectDefaultFilters search =
     Expect.equal
-        ( ( ShowAll, True, AnyPriority ), ( [ "active", "paused" ], [ "todo", "in_progress", "blocked" ] ) )
-        ( ( search.filterShowOnly, search.filterShowEmptyProjects, search.filterPriority ), ( search.filterProjectStatuses, search.filterTaskStatuses ) )
+        ( ( ShowAll, True, AnyPriority ), ( [ "active", "paused" ], [ "todo", "in_progress", "blocked" ] ), False )
+        ( ( search.filterShowOnly, search.filterShowEmptyProjects, search.filterPriority ), ( search.filterProjectStatuses, search.filterTaskStatuses ), search.filterHasActiveSession )
 
 
 deletionPending : Model -> Model

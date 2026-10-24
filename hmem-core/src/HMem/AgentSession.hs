@@ -2,7 +2,7 @@
 module HMem.AgentSession
   ( SessionState(..), SessionFreshness(..), SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..)
   , AppendSession(..), TerminateSession(..), SessionAppendResult(..)
-  , SessionPageCursor(..), SessionPage(..), SessionTask(..), SessionTaskPage(..)
+  , SessionPageCursor(..), SessionPage(..), SessionTask(..), SessionTaskPage(..), SessionAncestor(..), SessionFacet(..), SessionFacetPage(..)
   , SessionRange(..), SessionException(..), SessionErrorCode(..)
   , maxSessionChunkBytes, maxSessionRecordBytes, maxSessionRangeBytes, maxSessionPageSize
   , sessionSha256
@@ -36,15 +36,20 @@ instance FromJSON SessionState where
 data SessionFreshness = Fresh | Stale deriving stock (Show, Eq)
 data SessionFilter = SessionFilter
   { state :: !(Maybe SessionState), freshness :: !(Maybe SessionFreshness)
+  , projectId :: !(Maybe UUID), taskId :: !(Maybe UUID)
   } deriving stock (Show, Eq)
 
 defaultSessionFilter :: SessionFilter
-defaultSessionFilter = SessionFilter Nothing Nothing
+defaultSessionFilter = SessionFilter Nothing Nothing Nothing Nothing
 
 data AgentSession = AgentSession
   { id :: !UUID
   , workspaceId :: !UUID
   , formatLabel :: !Text
+  , title :: !(Maybe Text)
+  , parentSessionId :: !(Maybe UUID)
+  , ancestors :: ![SessionAncestor]
+  , ancestorsTruncated :: !Bool
   , state :: !SessionState
   , creatorActorType :: !(Maybe Text)
   , creatorActorId :: !(Maybe Text)
@@ -61,10 +66,29 @@ data AgentSession = AgentSession
   , finalSha256 :: !(Maybe Text)
   } deriving stock (Show, Eq, Generic)
 instance ToJSON AgentSession where toJSON = genericToJSON jsonOptions
-instance FromJSON AgentSession where parseJSON = genericParseJSON jsonOptions
+instance FromJSON AgentSession where
+  parseJSON = withObject "AgentSession" $ \o -> AgentSession
+    <$> o .: "id" <*> o .: "workspace_id" <*> o .: "format_label"
+    <*> o .:? "title" <*> o .:? "parent_session_id" <*> o .:? "ancestors" .!= [] <*> o .:? "ancestors_truncated" .!= False
+    <*> o .: "state" <*> o .:? "creator_actor_type" <*> o .:? "creator_actor_id" <*> o .:? "creator_actor_label" <*> o .:? "creator_bot_identity"
+    <*> o .: "created_at" <*> o .: "last_seen_at" <*> o .: "committed_bytes" <*> o .: "committed_records" <*> o .: "revision"
+    <*> o .: "ends_with_newline" <*> o .:? "terminated_at" <*> o .:? "final_bytes" <*> o .:? "final_sha256"
+
+data SessionAncestor = SessionAncestor
+  { id :: !UUID, title :: !(Maybe Text), formatLabel :: !Text, state :: !SessionState, parentSessionId :: !(Maybe UUID)
+  } deriving stock (Show, Eq, Generic)
+instance ToJSON SessionAncestor where toJSON = genericToJSON jsonOptions
+instance FromJSON SessionAncestor where parseJSON = genericParseJSON jsonOptions
+
+data SessionFacet = SessionFacet { id :: !UUID, title :: !Text } deriving stock (Show, Eq, Generic)
+instance ToJSON SessionFacet where toJSON = genericToJSON jsonOptions
+instance FromJSON SessionFacet where parseJSON = genericParseJSON jsonOptions
+data SessionFacetPage = SessionFacetPage { items :: ![SessionFacet], nextId :: !(Maybe UUID), selected :: !(Maybe SessionFacet) } deriving stock (Show, Eq, Generic)
+instance ToJSON SessionFacetPage where toJSON = genericToJSON jsonOptions
+instance FromJSON SessionFacetPage where parseJSON = genericParseJSON jsonOptions
 
 data CreateSession = CreateSession
-  { id :: !UUID, workspaceId :: !UUID, formatLabel :: !Text
+  { id :: !UUID, workspaceId :: !UUID, formatLabel :: !Text, title :: !Text, parentSessionId :: !(Maybe UUID)
   } deriving stock (Show, Eq, Generic)
 instance ToJSON CreateSession where toJSON = genericToJSON jsonOptions
 instance FromJSON CreateSession where parseJSON = genericParseJSON jsonOptions
@@ -110,7 +134,7 @@ data SessionRange = SessionRange
   , nextOffset :: !Int64, hasMore :: !Bool
   } deriving stock (Show, Eq)
 
-data SessionErrorCode = SessionNotFound | SessionConflict | SessionTerminated | SessionInvalidInput
+data SessionErrorCode = SessionNotFound | SessionConflict | SessionTerminated | SessionInvalidInput | SessionTaskNotInProgress !Text
   deriving stock (Show, Eq)
 data SessionException = SessionException
   { code :: !SessionErrorCode, message :: !Text

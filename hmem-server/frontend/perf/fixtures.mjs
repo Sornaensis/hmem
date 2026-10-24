@@ -524,7 +524,18 @@ function descendantProjectTasks(fixture, projectId) {
   return fixture.tasks.filter(task => ids.has(task.id))
 }
 
+function taskSessionActive(fixture, task) {
+  return descendantIds(fixture.tasks,task.id).some(id=>fixture.sessionActivity?.(id)===true)
+}
+function projectSessionActive(fixture, project) {
+  return descendantProjectTasks(fixture,project.id).some(task=>taskSessionActive(fixture,task))
+}
 function projectBranchMatches(fixture, project, filters) {
+  if(filters.hasActiveSession){
+    const taskMatch=descendantProjectTasks(fixture,project.id).some(candidate=>taskFilterMatches(candidate,filters)&&taskSessionActive(fixture,candidate))
+    const projectMatch=filters.showOnly!=='tasks'&&descendantProjects(fixture,project.id).some(candidate=>projectFilterMatches(candidate,filters)&&projectSessionActive(fixture,candidate))
+    return (projectMatch||((filters.showOnly!=='projects'||!filters.showEmptyProjects)&&taskMatch))&&(filters.showEmptyProjects||taskMatch)
+  }
   if (filters.showEmptyProjects === false) return descendantProjectTasks(fixture, project.id).some(candidate => taskFilterMatches(candidate, filters))
   // The SQL has an outer project lifecycle/priority gate before descendant
   // retention; preserve that subtlety here.
@@ -540,7 +551,7 @@ function projectBranchMatches(fixture, project, filters) {
 function taskBranchMatches(fixture, task, filters) {
   return descendantIds(fixture.tasks, task.id)
     .map(id => fixture.tasks.find(candidate => candidate.id === id))
-    .some(candidate => candidate && taskFilterMatches(candidate, filters))
+    .some(candidate => candidate && taskFilterMatches(candidate, filters) && (!filters.hasActiveSession || taskSessionActive(fixture,candidate)))
 }
 
 export function queryProjects(fixture, options = {}) {
@@ -855,7 +866,7 @@ export function navigationBatchDescriptors(body, physicalUrl, { allowSyntheticId
       projectLimit: integer('project_limit', 50, 1, 100), taskLimit: integer('task_limit', 50, 1, 100),
       projectOffset: integer('project_offset', 0, 0, 100000), taskOffset: integer('task_offset', 0, 0, 100000),
       includeProjects: boolean('include_projects'), includeTasks: boolean('include_tasks'),
-      showOnly: filters.show_only, showEmptyProjects: filters.show_empty_projects ?? true,
+      showOnly: filters.show_only, showEmptyProjects: filters.show_empty_projects ?? true, hasActiveSession: filters.has_active_session === true,
       projectStatuses: filters.project_statuses ?? [], taskStatuses: filters.task_statuses ?? [],
       priorityMode: filters.priority_mode, priorityValue: filters.priority_value, query: filters.query }
     // A derived logical selector for the existing owner proof, never a counted GET.
@@ -863,7 +874,7 @@ export function navigationBatchDescriptors(body, physicalUrl, { allowSyntheticId
     const query = logicalUrl.searchParams
     for (const [key, value] of Object.entries({ parent_kind: parent.kind, parent_id: parent.parent_id,
       project_limit: options.projectLimit, project_offset: options.projectOffset, task_limit: options.taskLimit, task_offset: options.taskOffset,
-      include_projects: options.includeProjects, include_tasks: options.includeTasks, show_empty_projects: options.showEmptyProjects,
+      include_projects: options.includeProjects, include_tasks: options.includeTasks, show_empty_projects: options.showEmptyProjects, has_active_session: options.hasActiveSession,
       show_only: options.showOnly, priority_mode: options.priorityMode, priority_value: options.priorityValue, query: options.query })) if (value != null) query.set(key, value)
     for (const value of options.projectStatuses) query.append('project_status', value)
     for (const value of options.taskStatuses) query.append('task_status', value)
@@ -897,6 +908,7 @@ export function navigationBranchResponse(fixture, options = {}) {
   const filters = {
     showOnly: options.showOnly || 'all',
     showEmptyProjects: options.showEmptyProjects !== false,
+    hasActiveSession: options.hasActiveSession === true,
     projectStatuses: options.projectStatuses || [],
     taskStatuses: options.taskStatuses || [],
     priorityMode: options.priorityMode || 'any',

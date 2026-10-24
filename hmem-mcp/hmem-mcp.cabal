@@ -135,6 +135,7 @@ test-suite hmem-mcp-test
     , crypton
     , directory
     , filepath
+    , hasql
     , hmem-core
     , hmem-mcp
     , hmem-server
@@ -144,6 +145,7 @@ test-suite hmem-mcp-test
     , http-types
     , optparse-applicative
     , process
+    , resource-pool
     , scientific
     , stm
     , text

@@ -2,6 +2,15 @@
 
 Open a workspace’s **Sessions** tab to explore active agent conversations. **Live**
 is selected initially; use the **Live** and **Quiet** buttons to filter activity.
+Use the **Project** and **Task** dropdowns to narrow the list. They offer only
+projects/tasks with active sessions; a project includes its descendant projects
+and nested tasks. **More projects/tasks** opens the next option page. Sessions
+form a parent tree; compact ancestor paths keep child sessions understandable
+when their parent is outside the selected activity/filter page.
+
+In the Projects tab, **Has Active Session** shows active-session work and the
+ancestor paths needed to reach it, combined with the other hierarchy filters.
+
 Quiet means there has been no heartbeat for 30 seconds; it does not end a session.
 
 Conversation text renders as Markdown. Tool calls and results expand on demand,
@@ -34,9 +43,13 @@ status established evidence completeness.
 
 Initialize MCP and declare the workspace and your identity with `set_workspace`.
 Choose a session UUID and call `session_upload_start` with that UUID, an explicit
-regular-file `path` and `format_label`. Registration returns `validating`
+regular-file `path`, `format_label` and a very short descriptive `title`, normally
+3–8 words such as “Repair session filters”. The title describes the work; the
+format label describes the transcript. An optional `parent_session_id` selects
+one existing session in that workspace and stays fixed. Registration returns `validating`
 promptly. The process continues following while you use ordinary MCP tools;
-`session_associate` links the session to one or several tasks. Each task can also
+`session_associate` links the session to one or several **in_progress** tasks;
+start a task before adding a session. Existing links remain valid after completion. Each task can also
 link to several sessions. The local path stays in the MCP process.
 
 Inspect `session_upload_status` while capture proceeds. A partial final record

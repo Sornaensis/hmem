@@ -25,6 +25,18 @@ and local fragments; raw HTML is not executed and images display their alt text.
   internal older windows recover complete records. The current UI follows the tail without window controls. Presentation text is not truncated to
   a separate short preview limit.
 
+Session titles are distinct from transcript format labels. The list is a bounded
+preorder of matching active sessions, with at most three levels of indentation.
+Missing or excluded parents appear as compact ancestor context, not inactive
+result cards. Each metadata result carries at most sixteen ancestors; deeper
+context is explicitly marked as omitted. Native title/parent fields are fixed at
+creation; legacy null titles display the format label.
+
+Project/task facets use their own authorized 50-option UUID pages, independent of
+session pages and freshness. A validated selected option is returned separately
+so a selection beyond the current option page remains visible. Errors preserve
+selection; only successful authority can retire a deleted/moved/inactive choice.
+
 Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.
 The active-state and Live/Quiet activity predicates apply before pagination; Live
@@ -106,3 +118,12 @@ seconds; selected-workspace session/link and hierarchy events or reconnects
 request a coalesced refresh, at most once a second for already loaded targets.
 Unselected workspace cards converge through polling without broadening global
 change events or snapshots. Hidden pages and unmounted cards do not poll.
+
+The Projects **Has Active Session** filter is evaluated in server navigation
+queries, including unloaded descendants and ancestor retention. It combines with
+status, priority, query, show-only and empty-project predicates. Canonical
+`active_sessions` invalidations refresh its membership and the dropdown facets
+on create, termination and new links. Ordinary append/heartbeat updates do not
+restart hierarchy membership passes. Project/task placement and deletion also
+invalidate scoped lists and facets. Existing request/authority guards and
+transport/mounting bounds remain unchanged.

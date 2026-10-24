@@ -85,10 +85,10 @@ spec = describe "canonical change-stream loopback" $ do
       testWithApplication (pure ctx.deployedApplication) $ \port ->
         bracket (startOneFrameClient port otherTicket.ticket) (\client -> joinClient "session other-scope client" client.clientWorker) $ \otherClient -> do
           frameType <$> awaitFrame otherClient.clientInitial `shouldReturn` Just "checkpoint"
-          response <- post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl"))
+          response <- post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl" "Test session work" Nothing))
           responseStatus response `shouldBe` status200
           created <- decodeResponse response :: IO Agent.AgentSession
-          responseStatus <$> post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl")) `shouldReturn` status200
+          responseStatus <$> post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl" "Test session work" Nothing)) `shouldReturn` status200
           uploadedResponse <- post (path<>"/append") (toJSON (AgentWire.AppendSessionRequest 0 0 (AgentWire.encodeSessionBytes bytes) False))
           responseStatus uploadedResponse `shouldBe` status200
           uploaded <- decodeResponse uploadedResponse :: IO AgentWire.AppendSessionResponse

@@ -59,7 +59,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     let actor = EffectiveActor ActorBot "session-live-bot" "Session writer" (Just identity)
         attributed :: IO a -> IO a
         attributed action = withEffectiveActorContext (Just actor) $ withRequestIdContext (Just "session-live-request") $ withChangeCauseContext (Just ChangeCauseMcp) action
-        input = Agent.CreateSession identifier workspace.id "jsonl"
+        input = Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing
         sentinel = "SESSION_PRIVATE_PAYLOAD_SENTINEL"
         body = "\"" <> TE.encodeUtf8 sentinel <> BS.replicate 131072 97 <> "\"\r\n"
         records = filter (\row -> envelopeEntityField "type" row `elem` [Just (String "agent_session"),Just (String "task_session")])
@@ -71,12 +71,15 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     before <- records <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 1000
     length before `shouldBe` 2
     tasks <- replicateM 20 $ Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "associated" Nothing Nothing Nothing)
-    forM_ tasks $ \task -> attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier task.id
+    forM_ tasks $ \task -> do
+      runSession env.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='" <> TE.encodeUtf8 (T.pack (show task.id)) <> "'")
+      attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier task.id
     beat <- attributed $ AgentDB.heartbeatSession env.pool workspace.id identifier
     let receipt = Agent.TerminateSession beat.committedBytes beat.revision beat.committedBytes (Agent.sessionSha256 body)
     sealed <- attributed $ AgentDB.terminateSession env.pool workspace.id identifier receipt
     attributed (AgentDB.terminateSession env.pool workspace.id identifier receipt) `shouldReturn` sealed
     later <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "after seal" Nothing Nothing Nothing)
+    runSession env.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='" <> TE.encodeUtf8 (T.pack (show later.id)) <> "'")
     attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier later.id
     attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier later.id
     effects <- records <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 1000
@@ -84,9 +87,10 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
         links = filter ((== Just (String "task_session")) . envelopeEntityField "type") effects
     length metadata `shouldBe` 4
     length links `shouldBe` 21
-    forM_ metadata $ \event -> envelopeField "invalidations" event `shouldBe` Just (toJSON
-      [object ["kind" .= ("entity" :: T.Text),"target" .= ("agent_session:" <> T.pack (show identifier))]
-      ,object ["kind" .= ("collection" :: T.Text),"target" .= ("sessions:" <> T.pack (show workspace.id))]])
+    forM_ (zip [0::Int ..] metadata) $ \(index,event) -> envelopeField "invalidations" event `shouldBe` Just (toJSON
+      ([object ["kind" .= ("entity" :: T.Text),"target" .= ("agent_session:" <> T.pack (show identifier))]
+      ,object ["kind" .= ("collection" :: T.Text),"target" .= ("sessions:" <> T.pack (show workspace.id))]]
+      <> [object ["kind" .= ("collection" :: T.Text),"target" .= ("active_sessions:" <> T.pack (show workspace.id))] | index `elem` [0,3]]))
     forM_ effects $ \event -> do
       envelopeField "actor" event `shouldBe` Just (object ["type" .= ("service" :: T.Text),"id" .= ("session-live-bot" :: T.Text),"bot_identity" .= identity])
       case envelopeField "transaction" event of
@@ -109,7 +113,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     workspace <- createTestWorkspace env "session-change-upgrade"
     runSession env.pool $ Session.sql "DROP TRIGGER trg_agent_session_change ON sessions; DROP TRIGGER trg_task_session_change ON task_sessions; DROP FUNCTION hmem_agent_session_change(); DROP FUNCTION hmem_task_session_change(); DROP FUNCTION hmem_agent_session_audit_value(sessions); DELETE FROM schema_migrations WHERE version=42"
     identifier <- UUIDV4.nextRandom
-    _ <- AgentDB.createSession env.pool (Agent.CreateSession identifier workspace.id "jsonl")
+    _ <- AgentDB.createSession env.pool (Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing)
     let scope = WorkspaceScope workspace.id
         audience = TrustedAudience "session-change-upgrade"
         unwrap = either (fail . show) pure
@@ -160,7 +164,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     identifier <- UUIDV4.nextRandom
     bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \peer -> do
       let visible = filter ((== Just (String "agent_session")) . envelopeEntityField "type") <$> listOutboxAfter peer (WorkspaceScope workspace.id) 0 100
-          insert = Statement.Statement "INSERT INTO sessions(id,workspace_id,format_label) VALUES($1,$2,'jsonl')"
+          insert = Statement.Statement "INSERT INTO sessions(id,workspace_id,format_label,title) VALUES($1,$2,'jsonl','Test session work')"
             (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
       withConn env.pool $ \connection -> flip finally (void (Session.run (Session.sql "ROLLBACK") connection)) $ do
         Session.run (Session.sql "BEGIN") connection >>= either (fail . show) pure

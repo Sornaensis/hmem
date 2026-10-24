@@ -75,11 +75,11 @@ read access; creation, association and termination require edit access.
 
 | Tool | Arguments beyond optional `workspace_id` | Result |
 | --- | --- | --- |
-| `session_create` | Caller-owned `session_id`, `format_label` | Idempotent metadata acknowledgement |
+| `session_create` | Caller-owned `session_id`, `format_label`, very short `title`, optional `parent_session_id` | Idempotent metadata acknowledgement |
 | `session_list` | Optional `task_id`, `limit`, paired `before_created_at` / `before_id` | Compact workspace or task sessions |
 | `session_detail` | `session_id` | Metadata including creator attribution |
 | `session_tasks` | `session_id`, optional `limit`, `after_task_id` | Visible associated tasks |
-| `session_associate` | `session_id`, `task_id` | Idempotent link acknowledgement, also after sealing |
+| `session_associate` | `session_id`, `task_id` | New links require `in_progress`; existing links remain idempotent after task completion |
 | `session_terminate` | `session_id`, `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Explicit immutable seal receipt |
 | `session_read` | `session_id`, optional `offset`, `limit` | Active transcript byte range |
 | `session_evidence` | `session_id`, optional `offset`, `limit` | Terminated evidence byte range |
@@ -108,6 +108,13 @@ including errors, is capped at 2 MiB before JSON decoding. Overflow returns
 Errors carry a safe code and optional HTTP status, without raw response content,
 parser diagnostics or credentials.
 
+Titles describe the work, for example `Repair session filters`; `format_label`
+identifies the provider-neutral transcript format. Both create and upload start
+require a title. New titles and parents are immutable. Legacy sessions with no
+stored title remain readable/resumable without assigning one. A new task link to
+a non-running task returns `session_task_not_in_progress` with the actual status;
+start the task first. Termination does not change task status.
+
 Termination seals only the already committed server prefix. Supply its expected
 offset/revision and final byte count/SHA-256; the server verifies them atomically.
 An exact retry uses the original pre-seal revision. Only an explicit
@@ -122,8 +129,10 @@ start uploaders or read local files. HTTP ingestion is described in the
 
 ### Local upload followers
 
-`session_upload_start` accepts explicit `session_id`, `path`, `format_label`
-and optional `workspace_id`. It returns promptly with `status: validating`;
+`session_upload_start` requires explicit `session_id`, `path`, `format_label` and a
+very short descriptive `title` (normally 3–8 words; 1–80 UTF-8 bytes). Optional
+`parent_session_id` fixes its existing same-workspace parent at creation;
+`workspace_id` may override context. It returns promptly with `status: validating`;
 validation and upload continue in the MCP process without further agent turns.
 The path must identify a readable regular file. Only this tool accepts a local
 path; paths, credentials and raw errors never appear in receipts or HTTP metadata.

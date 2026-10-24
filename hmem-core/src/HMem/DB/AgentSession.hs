@@ -2,7 +2,7 @@
 module HMem.DB.AgentSession
   ( createSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
   , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
-  , workspaceSessionActivity, projectSessionActivity
+  , workspaceSessionActivity, projectSessionActivity, listSessionFacets
   , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange
   ) where
 
@@ -54,7 +54,7 @@ pairParams :: E.Params (UUID, UUID)
 pairParams = param fst E.uuid <> param snd E.uuid
 
 sessionSelect :: ByteString
-sessionSelect = "SELECT to_jsonb(s) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND w.deleted_at IS NULL"
+sessionSelect = "SELECT to_jsonb(s) || hmem_session_ancestor_context(s.id) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND w.deleted_at IS NULL"
 
 getStatement :: Bool -> St.Statement (UUID,UUID) (Maybe AgentSession)
 getStatement locked = St.Statement (sessionSelect <> if locked then " FOR UPDATE OF s" else "") pairParams (D.rowMaybe jsonRow) True
@@ -64,16 +64,26 @@ createSession pool input = do
   if BS.length (TE.encodeUtf8 input.formatLabel) > 128 || T.null (T.strip input.formatLabel)
     then invalid "format_label must contain 1 to 128 UTF-8 bytes"
     else pure ()
+  if BS.length (TE.encodeUtf8 (T.strip input.title)) > 80 || T.null (T.strip input.title)
+    then invalid "A very short descriptive title is required (1 to 80 UTF-8 bytes)"
+    else pure ()
   actor <- currentEffectiveActor
   checked pool $ do
-    inserted <- S.statement input createStatement
-    existing <- case inserted of
+    -- Read before INSERT: a legacy row may have no title and must remain
+    -- unchanged on resume, including when it is permanently sealed.
+    found <- S.statement (input.workspaceId,input.id) (getStatement True)
+    existing <- case found of
       Just row -> pure (Just row)
-      Nothing -> S.statement (input.workspaceId,input.id) (getStatement True)
+      Nothing -> do
+        inserted <- S.statement (input {title = T.strip input.title} :: CreateSession) createStatement
+        case inserted of
+          Just row -> pure (Just row)
+          Nothing -> S.statement (input.workspaceId,input.id) (getStatement True)
     pure $ case existing of
       Nothing -> problem SessionConflict "Session UUID already exists in another workspace, or workspace is inactive"
       Just row
-        | row.formatLabel == input.formatLabel && sameCreator actor row -> Right row
+        | row.formatLabel == input.formatLabel && row.parentSessionId == input.parentSessionId
+          && maybe True (== T.strip input.title) row.title && sameCreator actor row -> Right row
         | otherwise -> problem SessionConflict "Session UUID was already created with different immutable metadata"
   where
     sameCreator Nothing row = row.creatorActorType == Nothing && row.creatorActorId == Nothing
@@ -85,8 +95,8 @@ createSession pool input = do
 createStatement :: St.Statement CreateSession (Maybe AgentSession)
 createStatement = St.Statement sql encoder (D.rowMaybe jsonRow) True
   where
-    sql = "WITH workspace AS (SELECT id FROM workspaces WHERE id=$2 AND deleted_at IS NULL FOR SHARE), inserted AS (INSERT INTO sessions(id,workspace_id,format_label,creator_actor_type,creator_actor_id,creator_actor_label,creator_bot_identity) SELECT $1,id,$3,NULLIF(current_setting('hmem.actor_type',true),''),NULLIF(current_setting('hmem.actor_id',true),''),NULLIF(current_setting('hmem.actor_label',true),''),NULLIF(current_setting('hmem.bot_identity',true),'')::jsonb FROM workspace ON CONFLICT(id) DO NOTHING RETURNING *) SELECT to_jsonb(inserted) FROM inserted"
-    encoder = param (.id) E.uuid <> param (.workspaceId) E.uuid <> param (.formatLabel) E.text
+    sql = "WITH workspace AS (SELECT id FROM workspaces WHERE id=$2 AND deleted_at IS NULL FOR SHARE), inserted AS (INSERT INTO sessions(id,workspace_id,format_label,title,parent_session_id,creator_actor_type,creator_actor_id,creator_actor_label,creator_bot_identity) SELECT $1,id,$3,$4,$5,NULLIF(current_setting('hmem.actor_type',true),''),NULLIF(current_setting('hmem.actor_id',true),''),NULLIF(current_setting('hmem.actor_label',true),''),NULLIF(current_setting('hmem.bot_identity',true),'')::jsonb FROM workspace ON CONFLICT(id) DO NOTHING RETURNING *) SELECT to_jsonb(inserted) FROM inserted"
+    encoder = param (.id) E.uuid <> param (.workspaceId) E.uuid <> param (.formatLabel) E.text <> param (.title) E.text <> optional (.parentSessionId) E.uuid
 
 getSession :: Pool Hasql.Connection -> UUID -> UUID -> IO (Maybe AgentSession)
 getSession pool workspace identifier = runSession pool $ S.statement (workspace,identifier) (getStatement False)
@@ -114,7 +124,7 @@ listSessions pool workspace task filters cursor limit = do
   rows <- runSession pool $ S.statement
     (workspace, fmap (.createdAt) cursor, fmap (.id) cursor, task, fromIntegral (limit+1),
       fmap (\case Active -> "active"; Terminated -> "terminated") filters.state,
-      fmap (\case Fresh -> True; Stale -> False) filters.freshness) listStatement
+      fmap (\case Fresh -> True; Stale -> False) filters.freshness, filters.projectId, filters.taskId) listStatement
   let items = take limit rows
       nextCursor = if length rows > limit then case reverse items of
         row:_ -> Just (SessionPageCursor row.createdAt row.id)
@@ -122,17 +132,42 @@ listSessions pool workspace task filters cursor limit = do
         else Nothing
   pure SessionPage{..}
 
-listStatement :: St.Statement (UUID,Maybe UTCTime,Maybe UUID,Maybe UUID,Int32,Maybe Text,Maybe Bool) [AgentSession]
+listStatement :: St.Statement (UUID,Maybe UTCTime,Maybe UUID,Maybe UUID,Int32,Maybe Text,Maybe Bool,Maybe UUID,Maybe UUID) [AgentSession]
 listStatement = St.Statement sql encoder (D.rowList jsonRow) True
   where
-    sql = "SELECT to_jsonb(s) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) AND ($6::text IS NULL OR s.state=$6) AND ($7::boolean IS NULL OR (s.last_seen_at > statement_timestamp()-interval '30 seconds')=$7) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
-    encoder = param (\(a,_,_,_,_,_,_) -> a) E.uuid
-      <> optional (\(_,b,_,_,_,_,_) -> b) E.timestamptz
-      <> optional (\(_,_,c,_,_,_,_) -> c) E.uuid
-      <> optional (\(_,_,_,d,_,_,_) -> d) E.uuid
-      <> param (\(_,_,_,_,e,_,_) -> e) E.int4
-      <> optional (\(_,_,_,_,_,f,_) -> f) E.text
-      <> optional (\(_,_,_,_,_,_,g) -> g) E.bool
+    sql = "SELECT to_jsonb(s) || hmem_session_ancestor_context(s.id) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) AND ($6::text IS NULL OR s.state=$6) AND ($7::boolean IS NULL OR (s.last_seen_at > statement_timestamp()-interval '30 seconds')=$7) AND ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN hmem_session_project_tasks($1,$8) scoped ON scoped.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1)) AND ($8::uuid IS NULL OR $9::uuid IS NULL OR $9 IN (SELECT id FROM hmem_session_project_tasks($1,$8))) AND ($9::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$9 AND t.deleted_at IS NULL)) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
+    encoder = param (\(a,_,_,_,_,_,_,_,_) -> a) E.uuid
+      <> optional (\(_,b,_,_,_,_,_,_,_) -> b) E.timestamptz
+      <> optional (\(_,_,c,_,_,_,_,_,_) -> c) E.uuid
+      <> optional (\(_,_,_,d,_,_,_,_,_) -> d) E.uuid
+      <> param (\(_,_,_,_,e,_,_,_,_) -> e) E.int4
+      <> optional (\(_,_,_,_,_,f,_,_,_) -> f) E.text
+      <> optional (\(_,_,_,_,_,_,g,_,_) -> g) E.bool
+      <> optional (\(_,_,_,_,_,_,_,h,_) -> h) E.uuid
+      <> optional (\(_,_,_,_,_,_,_,_,i) -> i) E.uuid
+
+-- Facets are independent of transcript pages and heartbeat freshness. Each
+-- response is bounded; the UUID cursor makes every active option reachable.
+listSessionFacets :: Pool Hasql.Connection -> UUID -> Bool -> Maybe UUID -> Maybe UUID -> Maybe UUID -> Int -> IO SessionFacetPage
+listSessionFacets pool workspace projects project cursor selectedId limit = do
+  validateLimit limit
+  rows <- runSession pool $ S.statement (workspace,project,cursor,fromIntegral (limit+1)) statement
+  selected <- case selectedId of
+    Nothing -> pure Nothing
+    Just identifier -> runSession pool $ S.statement (workspace,project,Just identifier,1) $
+      St.Statement (if projects then replace "($3::uuid IS NULL OR p.id>$3)" "p.id=$3" sql else replace "($3::uuid IS NULL OR t.id>$3)" "t.id=$3" sql) encoder (D.rowMaybe jsonRow) True
+  let items = take limit rows
+      nextId = if length rows > limit then (.id) <$> lastMaybe items else Nothing
+  pure SessionFacetPage{..}
+  where
+    lastMaybe [] = Nothing
+    lastMaybe xs = Just (last xs)
+    replace before after = TE.encodeUtf8 . T.replace before after . TE.decodeUtf8
+    encoder = param (\(a,_,_,_) -> a) E.uuid <> optional (\(_,b,_,_) -> b) E.uuid <> optional (\(_,_,c,_) -> c) E.uuid <> param (\(_,_,_,d) -> d) E.int4
+    statement = St.Statement sql encoder (D.rowList jsonRow) True
+    sql = if projects then
+      "SELECT jsonb_build_object('id',p.id,'title',p.name) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR p.id=$2) AND ($3::uuid IS NULL OR p.id>$3) AND hmem_project_has_active_session(p.id) ORDER BY p.id LIMIT $4"
+      else "SELECT jsonb_build_object('id',t.id,'title',t.title) FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR t.id IN (SELECT id FROM hmem_session_project_tasks($1,$2))) AND ($3::uuid IS NULL OR t.id>$3) AND EXISTS(SELECT 1 FROM task_sessions link JOIN sessions s ON s.id=link.session_id WHERE link.workspace_id=$1 AND link.task_id=t.id AND s.workspace_id=$1 AND s.state='active') ORDER BY t.id LIMIT $4"
 
 listSessionTasks :: Pool Hasql.Connection -> UUID -> UUID -> Maybe UUID -> Int -> IO SessionTaskPage
 listSessionTasks pool workspace identifier cursor limit = do
@@ -207,11 +242,19 @@ associateSessionTask pool workspace identifier task = checked pool $ do
   case current of
     Nothing -> pure $ problem SessionNotFound "Session not found"
     Just _ -> do
-      linked <- S.statement (workspace,identifier,task) $ St.Statement
-        "WITH task AS (SELECT id FROM tasks WHERE workspace_id=$1 AND id=$3 AND deleted_at IS NULL FOR SHARE), inserted AS (INSERT INTO task_sessions(workspace_id,session_id,task_id) SELECT $1,$2,id FROM task ON CONFLICT DO NOTHING) SELECT EXISTS(SELECT 1 FROM task)"
+      target <- S.statement (workspace,identifier,task) $ St.Statement
+        "SELECT t.status::text,EXISTS(SELECT 1 FROM task_sessions link WHERE link.workspace_id=$1 AND link.session_id=$2 AND link.task_id=$3) FROM tasks t WHERE t.workspace_id=$1 AND t.id=$3 AND t.deleted_at IS NULL FOR SHARE OF t"
         (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.uuid)
-        (D.singleRow (D.column (D.nonNullable D.bool))) True
-      pure $ if linked then Right () else problem SessionNotFound "Active same-workspace task not found"
+        (D.rowMaybe ((,) <$> D.column (D.nonNullable D.text) <*> D.column (D.nonNullable D.bool))) True
+      case target of
+        Nothing -> pure $ problem SessionNotFound "Live same-workspace task not found"
+        Just (_,True) -> pure (Right ())
+        Just (status,False) | status /= "in_progress" -> pure $ problem (SessionTaskNotInProgress status) "Task must be in_progress before adding a session"
+        _ -> do
+          S.statement (workspace,identifier,task) $ St.Statement
+            "INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"
+            (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.uuid) D.noResult True
+          pure (Right ())
 
 -- | A bounded, indexed chunk read, including chunks intersecting the window.
 rangeStatement :: St.Statement (UUID,Int64,Int64) ByteString

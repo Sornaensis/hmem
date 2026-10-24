@@ -390,6 +390,7 @@ handleUrlChangeWithoutProtectedExit url model =
                             , filterPriority = AnyPriority
                             , filterProjectStatuses = [ "active", "paused" ]
                             , filterShowEmptyProjects = True
+                            , filterHasActiveSession = False
                             , filterTaskStatuses = [ "todo", "in_progress", "blocked" ]
                             , filterMemoryTypes = []
                             , filterImportance = AnyPriority

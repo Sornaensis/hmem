@@ -1364,24 +1364,24 @@ listFilteredTaskChildren :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe
 listFilteredTaskChildren pool workspace maybeProject maybeParent selector lim off = do
   rows <- runSession pool $ Session.statement
     ( workspace, maybeProject, maybeParent, map taskStatusToText selector.taskStatuses, selector.priorityMode, selector.priorityValue, selector.query
-    , fromIntegral lim :: Int32, fromIntegral off :: Int32 ) filteredTaskChildrenStatement
+    , fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe False selector.hasActiveSession ) filteredTaskChildrenStatement
   enrichTaskCounts pool rows
 
 listFilteredTaskSummaryRows :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> NavigationFilter -> Int -> Int -> IO [TaskSummaryRow]
 listFilteredTaskSummaryRows pool workspace maybeProject maybeParent selector lim off = do
   rows <- runSession pool $ Session.statement
     ( workspace, maybeProject, maybeParent, map taskStatusToText selector.taskStatuses, selector.priorityMode, selector.priorityValue, selector.query
-    , fromIntegral lim :: Int32, fromIntegral off :: Int32 ) filteredTaskSummaryRowsStatement
+    , fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe False selector.hasActiveSession ) filteredTaskSummaryRowsStatement
   enrichTaskSummaryCounts pool rows
 
-filteredTaskChildrenStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32) [Task]
+filteredTaskChildrenStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool) [Task]
 filteredTaskChildrenStatement = filteredTaskChildrenStatementWith
   "t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.description,t.status::text,t.priority,t.metadata,t.completed_at,t.created_at,t.updated_at" rawTaskRowDecoder
 
-filteredTaskSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32) [TaskSummaryRow]
+filteredTaskSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool) [TaskSummaryRow]
 filteredTaskSummaryRowsStatement = filteredTaskChildrenStatementWith taskSummaryColumns taskSummaryRowDecoder
 
-filteredTaskChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32) [a]
+filteredTaskChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool) [a]
 filteredTaskChildrenStatementWith projection decoder = Statement.Statement sql encoder (Dec.rowList decoder) True
   where
     sql = BS8.pack $ unlines
@@ -1390,20 +1390,21 @@ filteredTaskChildrenStatementWith projection decoder = Statement.Statement sql e
       , " UNION SELECT tree.root_id,child.id FROM tasks child JOIN task_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL AND child.workspace_id=$1"
       , ") SELECT " <> projection
       , " FROM tasks t WHERE t.id IN (SELECT DISTINCT root_id FROM task_tree) AND ("
-      , " (cardinality($4::text[])=0 OR t.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND t.priority=$6) OR ($5='above' AND t.priority>$6) OR ($5='below' AND t.priority<$6)) AND ($7 IS NULL OR lower(t.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(t.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')"
-      , " OR EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=t.id) AND descendant.deleted_at IS NULL AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')))"
+      , " (NOT $10 OR hmem_task_has_active_session(t.id)) AND (cardinality($4::text[])=0 OR t.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND t.priority=$6) OR ($5='above' AND t.priority>$6) OR ($5='below' AND t.priority<$6)) AND ($7 IS NULL OR lower(t.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(t.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')"
+      , " OR EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=t.id) AND descendant.deleted_at IS NULL AND (NOT $10 OR hmem_task_has_active_session(descendant.id)) AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')))"
       , " ORDER BY CASE WHEN t.status='in_progress'::task_status_enum OR (t.status='blocked'::task_status_enum AND EXISTS (SELECT 1 FROM tasks child WHERE child.parent_id=t.id AND child.deleted_at IS NULL AND child.status='in_progress'::task_status_enum)) THEN 0 WHEN t.status='todo'::task_status_enum THEN 1 WHEN t.status='blocked'::task_status_enum THEN 2 WHEN t.status='done'::task_status_enum THEN 3 ELSE 4 END, t.priority DESC, lower(t.title),t.id LIMIT $8 OFFSET $9"
       ]
     encoder =
-      contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
-      contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
-      contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <>
-      contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
-      contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,_,_,f,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
-      contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nonNullable Enc.int4))
+      contramap (\(a,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,c,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,_,d,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
+      contramap (\(_,_,_,_,e,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,f,_,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
+      contramap (\(_,_,_,_,_,_,g,_,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,_,_,h,_,_) -> h) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,i,_) -> i) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,_,j) -> j) (Enc.param (Enc.nonNullable Enc.bool))
 
 -- | Return the next actionable tasks for a project subtree.
 --

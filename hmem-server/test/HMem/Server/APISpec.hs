@@ -848,7 +848,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           outside = item "foreign" (NavigationProjectBranch foreignOwner.id)
       _ <- postJson app "/api/v1/projects" (object ["workspace_id" .= workspace.id, "parent_id" .= root.id, "name" .= ("child" :: T.Text), "description" .= ("description-only needle" :: T.Text)])
       _ <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= root.id, "title" .= ("task" :: T.Text), "description" .= ("description-only needle" :: T.Text)])
-      let filters = NavigationFilter Nothing [ProjActive,ProjPaused] [Todo,Blocked] Nothing Nothing (Just "needle") (Just True)
+      let filters = NavigationFilter Nothing [ProjActive,ProjPaused] [Todo,Blocked] Nothing Nothing (Just "needle") (Just True) Nothing
           requestBody = NavigationBatchRequest (Just filters) [valid,outside,missing]
       response <- postJson app batchPath (toJSON requestBody)
       responseStatus response `shouldBe` status200
@@ -857,7 +857,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       map (\(outcome :: NavigationBatchOutcome) -> outcome.status) batch.outcomes `shouldBe` [200,404,404]
       expected <- request app methodGet (workspacePath <> "/navigation?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show root.id)) <> "&query=needle&project_status=active&project_status=paused&task_status=todo&task_status=blocked") ""
       (head batch.outcomes).response `shouldBe` (decode (responseBody expected) :: Maybe NavigationBranchResponse)
-      forM_ [Nothing, Just (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing)] $ \common -> do
+      forM_ [Nothing, Just (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing Nothing)] $ \common -> do
         defaults <- postJson app batchPath (toJSON (NavigationBatchRequest common [valid]))
         legacy <- request app methodGet (workspacePath <> "/navigation?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show root.id))) ""
         let Just result = decode (responseBody defaults) :: Maybe NavigationBatchResponse

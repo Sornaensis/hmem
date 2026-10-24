@@ -60,6 +60,7 @@ data-files:
     migrations/V040__task_dependency_scopes.sql
     migrations/V041__agent_sessions.sql
     migrations/V042__agent_session_change_delivery.sql
+    migrations/V043__session_hierarchy_and_titles.sql
 
 library
   exposed-modules:

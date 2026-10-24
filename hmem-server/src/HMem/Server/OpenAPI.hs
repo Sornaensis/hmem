@@ -212,6 +212,9 @@ opts = defaultSchemaOptions { fieldLabelModifier = camelToSnake }
 instance ToSchema AgentSession.SessionState where
   declareNamedSchema _ = pure $ NamedSchema (Just "AgentSessionState") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["active","terminated"])
 instance ToSchema AgentSession.AgentSession where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema AgentSession.SessionAncestor where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema AgentSession.SessionFacet where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema AgentSession.SessionFacetPage where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema AgentSession.SessionPageCursor where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema AgentSession.SessionTask where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema a => ToSchema (AgentSessionRequest a) where declareNamedSchema _ = declareNamedSchema (Proxy @a)
@@ -555,6 +558,7 @@ instance ToSchema NavigationFilter where
     & type_ ?~ OpenApiObject
     & description ?~ "Server-owned tree filter; matching descendants retain their ancestors. priority_mode is any, exact, above, or below; priority_value is required except for any."
     & properties . at "show_empty_projects" ?~ Inline (mempty & type_ ?~ OpenApiBoolean & description ?~ "Defaults true; false requires matching tasks anywhere in the project subtree.")
+    & properties . at "has_active_session" ?~ Inline (mempty & type_ ?~ OpenApiBoolean & default_ ?~ Bool False & description ?~ "Require active sessions on the matched task/project subtree; matching descendants retain ancestor paths. Independent of heartbeat freshness.")
     & properties . at "show_only" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["projects", "tasks"])
     & properties . at "project_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject (Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["active", "paused", "completed", "archived"])))
     & properties . at "task_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject (Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["todo", "in_progress", "blocked", "done", "cancelled"])))

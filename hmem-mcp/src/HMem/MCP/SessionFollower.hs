@@ -56,7 +56,7 @@ data Registry = Registry
   , processScope :: ProcessScope, helperPath :: FilePath
   }
 data Job = Job
-  { sid :: UUID, workspace :: UUID, sourcePath :: FilePath, formatLabel :: Text
+  { sid :: UUID, workspace :: UUID, sourcePath :: FilePath, formatLabel :: Text, title :: Text, parentSessionId :: Maybe UUID
   , http :: CapturedHTTP, state :: TVar JobState, control :: TVar (Maybe Control)
   , busy :: TVar Bool
   }
@@ -79,8 +79,8 @@ isUploadTool name = name `elem` ["session_upload_start", "session_upload_status"
 
 uploadToolDefinitions :: [Value]
 uploadToolDefinitions =
-  [ define "session_upload_start" "Register one process-owned JSONL follower and return promptly in validating state. Explicit readable regular file only. Captures resolved workspace/identity/HTTP credentials; later context changes do not retarget or await it. Four active jobs, two global follower HTTP slots. No control ever terminates a session."
-      ["path" .= str "Explicit local JSONL file path; never sent to the HTTP server or echoed", "format_label" .= str "Required provider-neutral format label for create/resume"] ["path", "format_label"]
+  [ define "session_upload_start" "Start/resume capture with a VERY SHORT DESCRIPTIVE TITLE, normally 3–8 words such as 'Repair session filters'. Title describes the work, not the transcript format. An optional parent_session_id fixes one parent at creation. Registers a process-owned JSONL follower and returns promptly in validating state. Explicit regular file only; captured workspace/identity/credentials never retarget. Four jobs, two shared HTTP slots. Never terminates a session."
+      ["path" .= str "Explicit local JSONL file path; never sent to the HTTP server or echoed", "format_label" .= str "Required provider-neutral format label for create/resume", "title" .= str "Required very short descriptive title (normally 3–8 words; 1..80 UTF-8 bytes)", "parent_session_id" .= str "Optional existing same-workspace parent session UUID, fixed at creation"] ["path", "format_label", "title"]
   , define "session_upload_status" "Inspect bounded process-local metadata, pending control receipt and independent 30-second HTTP acknowledgement staleness. No paths or transcript data." [] []
   , define "session_upload_flush" "Capture one finite source boundary after current job work; may send a complete final JSON record without LF. Returns a fully verified canonical prefix receipt or explicit pending operation within one second. Does not seal." [] []
   , define "session_upload_stop" "Capture and flush one finite source boundary, verify receipt and close the source. Partial/invalid final tail remains pending in the receipt. Returns complete or pending within one second; never seals." [] []
@@ -182,8 +182,8 @@ closeRegistry registry = mask $ \restore -> do
 
 handleUploadTool :: Registry -> Manager -> String -> Maybe Text -> BotIdentity -> Text -> Value -> IO Value
 handleUploadTool registry _ordinaryManager base token identity name arguments = case parseEither parse arguments of
-  Left _ -> pure $ toolError "invalid_arguments" "Invalid uploader arguments"
-  Right (workspace,sid,path,label) -> do
+  Left _ -> pure $ toolError "invalid_arguments" (if name == "session_upload_start" then "session_upload_start requires a very short descriptive title (1 to 80 UTF-8 bytes), a format_label and readable path; parent_session_id is optional and must differ from session_id." else "Invalid uploader arguments")
+  Right (workspace,sid,path,label,title,parentSessionId) -> do
     prune registry
     found <- Map.lookup sid <$> readTVarIO registry.jobs
     case name of
@@ -192,7 +192,7 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
         time <- registry.options.now
         state <- newTVarIO (JobState "validating" Nothing Nothing False Nothing False Nothing False time Nothing 0 Nothing Nothing Nothing 0 Nothing)
         control <- newTVarIO Nothing; busy <- newTVarIO False
-        let job = Job sid workspace path label captured state control busy
+        let job = Job sid workspace path label title parentSessionId captured state control busy
         result <- atomically $ do
           closing <- readTVar registry.closed
           existing <- readTVar registry.jobs
@@ -242,13 +242,16 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
   where
     parse = withObject "uploader arguments" $ \o -> do
       let allowed = ["workspace_id", "session_id"]
-          extra = if name == "session_upload_start" then ["path", "format_label"] else []
+          extra = if name == "session_upload_start" then ["path", "format_label", "title", "parent_session_id"] else []
       unless (all (`elem` (allowed <> extra)) (KM.keys o)) $ fail "Unsupported fields"
       workspace <- o .: "workspace_id"; sid <- o .: "session_id"
       path <- if name == "session_upload_start" then o .: "path" else pure ""
       label <- if name == "session_upload_start" then o .: "format_label" else pure ""
+      title <- if name == "session_upload_start" then T.strip <$> o .: "title" else pure ""
+      parentSessionId <- if name == "session_upload_start" then o .:? "parent_session_id" else pure Nothing
       when (name == "session_upload_start" && (null path || '\0' `elem` path || T.null (T.strip label) || BS.length (TE.encodeUtf8 label) > 128)) $ fail "Invalid source"
-      pure (workspace,sid,path,label)
+      when (name == "session_upload_start" && (T.null title || BS.length (TE.encodeUtf8 title)>80 || parentSessionId==Just sid)) $ fail "Invalid title or optional parent"
+      pure (workspace,sid,path,label,title,parentSessionId)
 
 toolError :: Text -> Text -> Value
 toolError code message = object ["isError" .= True, "content" .= [object ["type" .= ("text" :: Text), "text" .= message]], "structuredContent" .= object ["error" .= object ["code" .= code, "message" .= message]]]
@@ -362,7 +365,7 @@ turn registry job = do
       decodeValue value = either (const $ throwIO SourceUnavailable) pure (parseEither parseJSON value)
       acceptSession value = do
         session <- decodeValue value
-        unless ((session :: Core.AgentSession).id == job.sid && session.workspaceId == job.workspace && session.formatLabel == job.formatLabel) $ throwIO SourceChanged
+        unless ((session :: Core.AgentSession).id == job.sid && session.workspaceId == job.workspace && session.formatLabel == job.formatLabel && session.parentSessionId == job.parentSessionId && maybe True (==job.title) session.title) $ throwIO SourceChanged
         pure session
       begin session = if session.state == Core.Terminated then retire registry job "terminated" "session_terminated"
         else acknowledge state {remote = Just session, createNeeded = False, sweep = Just (Sweep Resume session.committedBytes 0 hashInit), phase = "validating"}
@@ -484,7 +487,7 @@ validFinal bytes = not (BS.null bytes) && case TE.decodeUtf8' bytes of
 createRemote :: Registry -> Job -> IO (Either HTTPFault Value)
 createRemote registry job = bracket_ acquire release $ do
   let path = "/api/v1/workspaces/" <> show job.workspace <> "/sessions"
-      body = Just (toJSON (Wire.CreateSessionRequest job.sid job.formatLabel))
+      body = Just (toJSON (Wire.CreateSessionRequest job.sid job.formatLabel job.title job.parentSessionId))
   case registry.options.requestOverride of Nothing -> followerRequest job.http "POST" path body; Just action -> action "POST" path body
   where
     acquire = atomically $ do n <- readTVar registry.slots; check (n < 2); writeTVar registry.slots (n+1); modifyTVar' registry.peak (max (n+1))

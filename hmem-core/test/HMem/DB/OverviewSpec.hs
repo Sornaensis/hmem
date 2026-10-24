@@ -174,7 +174,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
         , priority = Just 10, metadata = Nothing }
 
       roots <- listFilteredProjectSummaryRows env.pool workspace.id Nothing NavigationFilter
-        { showOnly = Nothing, showEmptyProjects = Nothing, projectStatuses = [ProjPaused], taskStatuses = []
+        { showOnly = Nothing, showEmptyProjects = Nothing, hasActiveSession = Nothing, projectStatuses = [ProjPaused], taskStatuses = []
         , priorityMode = Just "exact", priorityValue = Just 10, query = Just "literal_100%" }
         50 0
 
@@ -268,7 +268,7 @@ newTask workspace project title = CreateTask
 
 emptyNavigationFilter :: NavigationFilter
 emptyNavigationFilter = NavigationFilter
-  { showOnly = Nothing, showEmptyProjects = Nothing, projectStatuses = [], taskStatuses = []
+  { showOnly = Nothing, showEmptyProjects = Nothing, hasActiveSession = Nothing, projectStatuses = [], taskStatuses = []
   , priorityMode = Nothing, priorityValue = Nothing, query = Nothing }
 
 canonicalSha :: Text

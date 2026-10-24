@@ -439,6 +439,7 @@ handleOwnedRaw ownedMsg model =
                     loaded.search.query /= model.search.query
                         || loaded.search.filterShowOnly /= model.search.filterShowOnly
                         || loaded.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
+                        || loaded.search.filterHasActiveSession /= model.search.filterHasActiveSession
                         || loaded.search.filterPriority /= model.search.filterPriority
                         || loaded.search.filterProjectStatuses /= model.search.filterProjectStatuses
                         || loaded.search.filterTaskStatuses /= model.search.filterTaskStatuses

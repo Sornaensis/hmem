@@ -318,15 +318,15 @@ isSessionTool name = name `elem`
 
 sessionToolDefinitions :: [Value]
 sessionToolDefinitions =
-  [ define "session_create" "Create session metadata with a caller-owned UUID; exact retries are idempotent. Returns a compact receipt without transcript content."
-      ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)"] ["session_id", "format_label"]
+  [ define "session_create" "Create a session with a VERY SHORT DESCRIPTIVE TITLE (usually 3–8 words, e.g. 'Repair session filters'). Title describes the work; format_label identifies the transcript format. Optional parent_session_id fixes its one parent at creation. Exact retries are idempotent. No transcript content is returned."
+      ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)", "title" .= string "Required very short descriptive title, normally 3–8 words; 1..80 UTF-8 bytes, not a UUID or format label", "parent_session_id" .= uuid] ["session_id", "format_label", "title"]
   , define "session_list" "List compact session metadata, optionally for a visible same-workspace task. Descending immutable created_at/UUID keyset; execute next_request to continue in the resolved workspace."
       ["task_id" .= uuid, "limit" .= pageLimit, "before_created_at" .= string "Returned keyset timestamp, paired with before_id", "before_id" .= uuid] []
   , define "session_detail" "Get session metadata including creator attribution, committed cursor and final receipt; never returns transcript bytes."
       ["session_id" .= uuid] ["session_id"]
   , define "session_tasks" "List visible tasks associated with a session, including terminated sessions. Execute next_request to continue by task UUID."
       ["session_id" .= uuid, "limit" .= pageLimit, "after_task_id" .= uuid] ["session_id"]
-  , define "session_associate" "Idempotently associate a same-workspace task with an explicit session UUID, including after termination."
+  , define "session_associate" "Add a session to a same-workspace task only while the task is in_progress; start the task first. Existing links remain idempotent after task completion. Session termination does not prevent adding a new link to an in_progress task."
       ["session_id" .= uuid, "task_id" .= uuid] ["session_id", "task_id"]
   , define "session_terminate" "Explicitly seal the already committed server prefix using its expected offset/revision and final byte count/SHA-256. Independent of task state, uploader/file access, stop, flush, EOF or process loss. Exact retries use the original pre-seal revision. No transcript is echoed."
       ["session_id" .= uuid, "expected_offset" .= nonnegative, "expected_revision" .= nonnegative, "final_bytes" .= nonnegative
@@ -363,7 +363,7 @@ data SessionToolCall
 parseSessionTool :: Text -> Value -> Either String SessionToolCall
 parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
   let allowed = "workspace_id" : case name of
-        "session_create" -> ["session_id", "format_label"]
+        "session_create" -> ["session_id", "format_label", "title", "parent_session_id"]
         "session_list" -> ["task_id", "limit", "before_created_at", "before_id"]
         "session_detail" -> ["session_id"]
         "session_tasks" -> ["session_id", "limit", "after_task_id"]
@@ -379,7 +379,7 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
   if all (`elem` allowed) (KM.keys o) then pure () else fail "Unsupported session fields"
   workspace <- o .: "workspace_id"
   case name of
-    "session_create" -> SessionCreate workspace <$> (SessionWire.CreateSessionRequest <$> o .: "session_id" <*> o .: "format_label")
+    "session_create" -> SessionCreate workspace <$> (SessionWire.CreateSessionRequest <$> o .: "session_id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id")
     "session_list" -> do
       timestamp <- o .:? "before_created_at"
       identifier <- o .:? "before_id"
@@ -725,11 +725,14 @@ sessionRequest manager base credentials verb target body = do
       if BL.null chunk then pure (Just (BL.concat (reverse chunks)))
       else if BL.length chunk > fromIntegral remaining then pure Nothing
       else readBounded reader (remaining - fromIntegral (BL.length chunk)) (chunk : chunks)
-    safeHttpError status bytes = sessionToolError code (Just status) message
+    safeHttpError status bytes
+      | code == "session_task_not_in_progress", Just current <- payload >>= textField "current_status", current `elem` ["todo","blocked","done","cancelled"] =
+          searchError code Nothing ("Sessions can only be added to in_progress tasks; current status is " <> current <> ".") ["http_status" .= status,"required_status" .= ("in_progress" :: Text),"current_status" .= current]
+      | otherwise = sessionToolError code (Just status) message
       where
         payload = decode bytes :: Maybe Value
         reported = payload >>= textField "error"
-        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required"]
+        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress"]
         code = case reported of Just known | known `elem` allowed -> known; _ -> "HTTP_" <> T.pack (show status)
         message = case status of
           400 -> "Invalid session request"

@@ -1576,13 +1576,13 @@ data NavigationFilter = NavigationFilter
   -- below modes, so reducing it to an equality at this boundary silently
   -- changed the existing tree-filter semantics.
   , priorityMode :: Maybe Text, priorityValue :: Maybe Int, query :: Maybe Text
-  , showEmptyProjects :: Maybe Bool
+  , showEmptyProjects :: Maybe Bool, hasActiveSession :: Maybe Bool
   } deriving (Show, Eq, Generic)
 instance ToJSON NavigationFilter where toJSON = genericToJSON jsonOptions
 instance FromJSON NavigationFilter where
   parseJSON = withObject "NavigationFilter" $ \o -> NavigationFilter
     <$> o .:? "show_only" <*> o .:? "project_statuses" .!= [] <*> o .:? "task_statuses" .!= []
-    <*> o .:? "priority_mode" <*> o .:? "priority_value" <*> o .:? "query" <*> o .:? "show_empty_projects"
+    <*> o .:? "priority_mode" <*> o .:? "priority_value" <*> o .:? "query" <*> o .:? "show_empty_projects" <*> o .:? "has_active_session"
 
 data NavigationBranchRequest = NavigationBranchRequest
   { parent :: NavigationParent, projectLimit :: Maybe Int, projectOffset :: Maybe Int

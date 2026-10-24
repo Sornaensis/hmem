@@ -850,24 +850,24 @@ listFilteredProjectChildren :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Na
 listFilteredProjectChildren pool workspace parent selector lim off =
   runSession pool $ Session.statement
     ( workspace, parent, map projectStatusToText selector.projectStatuses, map taskStatusToText selector.taskStatuses
-    , selector.priorityMode, selector.priorityValue, selector.query, fromMaybe "all" selector.showOnly, fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe True selector.showEmptyProjects )
+    , selector.priorityMode, selector.priorityValue, selector.query, fromMaybe "all" selector.showOnly, fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe True selector.showEmptyProjects, fromMaybe False selector.hasActiveSession )
     filteredProjectChildrenStatement
 
 listFilteredProjectSummaryRows :: Pool Hasql.Connection -> UUID -> Maybe UUID -> NavigationFilter -> Int -> Int -> IO [ProjectSummaryRow]
 listFilteredProjectSummaryRows pool workspace parent selector lim off =
   runSession pool $ Session.statement
     ( workspace, parent, map projectStatusToText selector.projectStatuses, map taskStatusToText selector.taskStatuses
-    , selector.priorityMode, selector.priorityValue, selector.query, fromMaybe "all" selector.showOnly, fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe True selector.showEmptyProjects )
+    , selector.priorityMode, selector.priorityValue, selector.query, fromMaybe "all" selector.showOnly, fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe True selector.showEmptyProjects, fromMaybe False selector.hasActiveSession )
     filteredProjectSummaryRowsStatement
 
-filteredProjectChildrenStatement :: Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool) [Project]
+filteredProjectChildrenStatement :: Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool, Bool) [Project]
 filteredProjectChildrenStatement = filteredProjectChildrenStatementWith
   "p.id,p.workspace_id,p.parent_id,p.name,p.description,p.status::text,p.priority,p.metadata,p.created_at,p.updated_at" projectCardRowDecoder
 
-filteredProjectSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool) [ProjectSummaryRow]
+filteredProjectSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool, Bool) [ProjectSummaryRow]
 filteredProjectSummaryRowsStatement = filteredProjectChildrenStatementWith projectSummaryColumns projectSummaryRowDecoder
 
-filteredProjectChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool) [a]
+filteredProjectChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32, Bool, Bool) [a]
 filteredProjectChildrenStatementWith projection decoder = Statement.Statement sql encoder (Dec.rowList decoder) True
   where
     sql = BS8.pack $ unlines
@@ -883,21 +883,22 @@ filteredProjectChildrenStatementWith projection decoder = Statement.Statement sq
       -- particular, do not apply p's own status/priority before the matching
       -- disjunction: that made an inactive-looking ancestor hide an otherwise
       -- visible descendant path.
-      , " AND ((($8 <> 'tasks') AND (((cardinality($3::text[])=0 OR p.status::text=ANY($3)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND p.priority=$6) OR ($5='above' AND p.priority>$6) OR ($5='below' AND p.priority<$6)) AND ($7 IS NULL OR lower(p.name) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(p.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))"
-      , " OR EXISTS (SELECT 1 FROM projects descendant WHERE descendant.id IN (SELECT id FROM project_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (cardinality($3::text[])=0 OR descendant.status::text=ANY($3)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.name) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))))"
-      , " OR (($8 <> 'projects' OR NOT $11) AND EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))))"
-      , " AND ($11 OR EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')))"
+      , " AND ((($8 <> 'tasks') AND (((cardinality($3::text[])=0 OR p.status::text=ANY($3)) AND (NOT $12 OR hmem_project_has_active_session(p.id)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND p.priority=$6) OR ($5='above' AND p.priority>$6) OR ($5='below' AND p.priority<$6)) AND ($7 IS NULL OR lower(p.name) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(p.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))"
+      , " OR EXISTS (SELECT 1 FROM projects descendant WHERE descendant.id IN (SELECT id FROM project_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (NOT $12 OR hmem_project_has_active_session(descendant.id)) AND (cardinality($3::text[])=0 OR descendant.status::text=ANY($3)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.name) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))))"
+      , " OR (($8 <> 'projects' OR NOT $11) AND EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (NOT $12 OR hmem_task_has_active_session(descendant.id)) AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))))"
+      , " AND ($11 OR EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (NOT $12 OR hmem_task_has_active_session(descendant.id)) AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')))"
       , " ORDER BY CASE p.status WHEN 'active'::project_status_enum THEN 0 WHEN 'paused'::project_status_enum THEN 1 WHEN 'completed'::project_status_enum THEN 2 ELSE 3 END, p.priority DESC, lower(p.name),p.id LIMIT $9 OFFSET $10"
       ]
     encoder =
-      contramap (\(a,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
-      contramap (\(_,b,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
-      contramap (\(_,_,c,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
-      contramap (\(_,_,_,d,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
-      contramap (\(_,_,_,_,e,_,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,_,_,f,_,_,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
-      contramap (\(_,_,_,_,_,_,g,_,_,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,_,_,_,_,h,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.text)) <>
-      contramap (\(_,_,_,_,_,_,_,_,i,_,_) -> i) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,_,_,_,_,j,_) -> j) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,_,_,_,_,_,k) -> k) (Enc.param (Enc.nonNullable Enc.bool))
+      contramap (\(a,_,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,c,_,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
+      contramap (\(_,_,_,d,_,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
+      contramap (\(_,_,_,_,e,_,_,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,f,_,_,_,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
+      contramap (\(_,_,_,_,_,_,g,_,_,_,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,_,_,h,_,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,_,_,_,i,_,_,_) -> i) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,_,j,_,_) -> j) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,_,_,k,_) -> k) (Enc.param (Enc.nonNullable Enc.bool)) <>
+      contramap (\(_,_,_,_,_,_,_,_,_,_,_,l) -> l) (Enc.param (Enc.nonNullable Enc.bool))

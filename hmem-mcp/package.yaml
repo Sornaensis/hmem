@@ -65,6 +65,8 @@ tests:
       - wai
       - warp
       - process
+      - hasql
+      - resource-pool
 
 default-extensions:
   - OverloadedStrings

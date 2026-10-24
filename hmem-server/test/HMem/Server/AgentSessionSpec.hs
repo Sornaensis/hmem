@@ -41,6 +41,29 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+  it "explains non-running task status and preserves existing completed links through HTTP" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+      workspace <- createTestWorkspace env "session-state-refusal"
+      row <- seed env workspace.id
+      waiting <- Task.createTask env.pool (Types.CreateTask workspace.id Nothing Nothing "Waiting task" Nothing Nothing Nothing)
+      let target=sessions workspace.id<>"/"<>uuid row.id<>"/tasks/"<>uuid waiting.id
+      refused <- call app methodPut target [] ""
+      simpleStatus refused `shouldBe` status409
+      value <- either fail pure (eitherDecode (simpleBody refused) :: Either String Value)
+      case value of
+        Object fields -> do
+          KM.lookup "error" fields `shouldBe` Just (String "session_task_not_in_progress")
+          KM.lookup "required_status" fields `shouldBe` Just (String "in_progress")
+          KM.lookup "current_status" fields `shouldBe` Just (String "todo")
+        _ -> expectationFailure "Missing structured task state error"
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid waiting.id<>"'")
+      call app methodPut target [] "" >>= ok
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid waiting.id<>"'")
+      call app methodPut target [] "" >>= ok
+      facets <- call app methodGet (sessions workspace.id<>"/filters?kind=tasks") [] "" >>= decoded @Core.SessionFacetPage
+      map (.id) facets.items `shouldBe` [waiting.id]
+
   it "activity projects include unloaded nested and null-project tasks across moves, status and deletion" $
     withLocalSandboxAppContext $ \ctx -> do
       let env=ctx.localEnv
@@ -56,7 +79,8 @@ spec = describe "Agent session HTTP" $ do
       Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET project_id=NULL WHERE id='"<>uuid child.id<>"'")
       fmap (.projectId) <$> Task.getTask env.pool child.id `shouldReturn` Just Nothing
       identifier <- UUID.nextRandom
-      Pool.runSession env.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,created_at,last_seen_at) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','quiet activity',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
+      Pool.runSession env.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','quiet activity','Quiet activity test',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid child.id<>"'")
       DB.associateSessionTask env.pool workspace.id identifier child.id
       DB.projectSessionActivity env.pool workspace.id [root.id,middle.id,leaf.id] >>= (`shouldMatchList` [(root.id,True),(middle.id,True),(leaf.id,True)])
       _ <- Task.updateTask env.pool parent.id (Types.UpdateTask Nothing Types.Unchanged (Types.SetTo destination.id) Types.Unchanged Nothing Nothing Nothing)
@@ -67,8 +91,10 @@ spec = describe "Agent session HTTP" $ do
       DB.projectSessionActivity env.pool workspace.id [destination.id] `shouldReturn` [(destination.id,False)]
       unlinked <- seed env workspace.id
       DB.workspaceSessionActivity env.pool [workspace.id] `shouldReturn` [(workspace.id,True)]
-      DB.associateSessionTask env.pool workspace.id unlinked.id child.id
-      _ <- Task.deleteTask env.pool child.id
+      running <- makeTask env workspace.id
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET project_id='"<>uuid destination.id<>"' WHERE id='"<>uuid running.id<>"'")
+      DB.associateSessionTask env.pool workspace.id unlinked.id running.id
+      _ <- Task.deleteTask env.pool running.id
       DB.projectSessionActivity env.pool workspace.id [destination.id] `shouldReturn` [(destination.id,False)]
       _ <- Project.deleteProject env.pool destination.id
       DB.projectSessionActivity env.pool workspace.id [destination.id] `shouldReturn` []
@@ -202,7 +228,7 @@ spec = describe "Agent session HTTP" $ do
       task <- makeTask env workspace.id
       let root = sessions workspace.id
           path = root <> "/" <> uuid identifier
-          input = CreateSessionRequest identifier "neutral-jsonl"
+          input = CreateSessionRequest identifier "neutral-jsonl" "Test session work" Nothing
           body = TE.encodeUtf8 "{\"message\":\"æ雪\"}\r\n[true,null]\n{}"
       created <- post app root [] (toJSON input) >>= decoded @Core.AgentSession
       retried <- post app root [] (toJSON input) >>= decoded @Core.AgentSession
@@ -235,7 +261,7 @@ spec = describe "Agent session HTTP" $ do
       taskPage <- call app methodGet (taskSessions workspace.id later.id) [] "" >>= decoded @SessionPageResponse
       map (.id) taskPage.items `shouldBe` [identifier]
       Just unchanged <- Task.getTask env.pool task.id
-      unchanged.status `shouldBe` Types.Todo
+      unchanged.status `shouldBe` Types.InProgress
       forM_ [methodDelete,methodPut] $ \method -> call app method path [] "{}" >>= (\r -> simpleStatus r `shouldSatisfy` (`elem` [status404,status405]))
 
   it "uses strict JSON/base64, rejects malformed tails and oversize chunks without changing the cursor or leaking records" $
@@ -313,7 +339,7 @@ spec = describe "Agent session HTTP" $ do
         call app method target [] "{" >>= status status401
       forM_ [editor,admin,superadmin] $ \headers -> do
         identifier <- UUID.nextRandom
-        created <- post app root headers (toJSON $ CreateSessionRequest identifier "role-jsonl") >>= decoded @Core.AgentSession
+        created <- post app root headers (toJSON $ CreateSessionRequest identifier "role-jsonl" "Test session work" Nothing) >>= decoded @Core.AgentSession
         created.creatorActorType `shouldBe` Just "bot"
         let target=root<>"/"<>uuid identifier
         call app methodPost (target<>"/heartbeat") headers "" >>= ok
@@ -344,7 +370,7 @@ spec = describe "Agent session HTTP" $ do
           valid=cookies<>[("X-CSRF-Token","csrf-value")]
       identifier <- UUID.nextRandom
       call ctx.deployedApplication methodPost (sessions workspace.id) cookies "{" >>= status status403
-      created <- post ctx.deployedApplication (sessions workspace.id) valid (toJSON $ CreateSessionRequest identifier "cookie-jsonl") >>= decoded @Core.AgentSession
+      created <- post ctx.deployedApplication (sessions workspace.id) valid (toJSON $ CreateSessionRequest identifier "cookie-jsonl" "Test session work" Nothing) >>= decoded @Core.AgentSession
       created.creatorActorType `shouldBe` Just "user"
       token <- issueDeployedSandboxPAT ctx.deployedEnv user "later-editor"
       let bearer=[("Authorization","Bearer "<>TE.encodeUtf8 token.rawToken)]
@@ -375,7 +401,7 @@ spec = describe "Agent session HTTP" $ do
         if heartbeat then call app methodPost (target<>"/heartbeat") [] "" >> pure () else pure ()
         post app (target<>"/terminate") [] (toJSON $ TerminateSessionRequest 0 0 0 (Core.sessionSha256 "")) >>= ok
       staleId <- UUID.nextRandom
-      Pool.runSession ctx.localEnv.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,created_at,last_seen_at) VALUES ('"<>uuid staleId<>"','"<>uuid workspace.id<>"','jsonl',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
+      Pool.runSession ctx.localEnv.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid staleId<>"','"<>uuid workspace.id<>"','jsonl','Test session work',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
       post app (sessions workspace.id<>"/"<>uuid staleId<>"/terminate") [] (toJSON $ TerminateSessionRequest 0 0 0 (Core.sessionSha256 "")) >>= ok
 
   it "preserves keyset cursors, bounded task pages/ranges and rejects partial or invalid continuation inputs" $
@@ -438,9 +464,12 @@ decoded response = do
 seed :: TestEnv -> UUID -> IO Core.AgentSession
 seed env workspace = do
   identifier <- UUID.nextRandom
-  DB.createSession env.pool (Core.CreateSession identifier workspace "jsonl")
+  DB.createSession env.pool (Core.CreateSession identifier workspace "jsonl" "Test session work" Nothing)
 makeTask :: TestEnv -> UUID -> IO Types.Task
-makeTask env workspace = Task.createTask env.pool (Types.CreateTask workspace Nothing Nothing "session-task" Nothing Nothing Nothing)
+makeTask env workspace = do
+  task <- Task.createTask env.pool (Types.CreateTask workspace Nothing Nothing "session-task" Nothing Nothing Nothing)
+  Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='in_progress' WHERE id='" <> uuid task.id <> "'")
+  Task.getTask env.pool task.id >>= maybe (fail "Missing test task") pure
 identityHeader :: Header
 identityHeader=("X-HMem-Bot-Identity","{\"role\":\"Session API Test\",\"model-id\":\"test:fixture:default\"}")
 audience :: DeployedSandboxApp -> UUID -> Maybe Auth.WorkspaceRole -> Bool -> IO [Header]
@@ -478,7 +507,7 @@ taskArchive workspace task = "/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>u
 seedEvidence :: TestEnv -> UUID -> UUID -> Text -> BS.ByteString -> IO Core.AgentSession
 seedEvidence env workspace task label bytes = do
   identifier <- UUID.nextRandom
-  created <- DB.createSession env.pool (Core.CreateSession identifier workspace label)
+  created <- DB.createSession env.pool (Core.CreateSession identifier workspace label "Test session work" Nothing)
   uploaded <- if BS.null bytes then pure created else (.session) <$> DB.appendSession env.pool workspace identifier (Core.AppendSession 0 0 bytes True)
   sealed <- DB.terminateSession env.pool workspace identifier (Core.TerminateSession uploaded.committedBytes uploaded.revision uploaded.committedBytes (Core.sessionSha256 bytes))
   DB.associateSessionTask env.pool workspace identifier task

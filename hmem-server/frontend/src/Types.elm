@@ -435,6 +435,7 @@ type alias SearchModel =
     , nextRequestToken : Int
     , filterShowOnly : FilterShowOnly
     , filterShowEmptyProjects : Bool
+    , filterHasActiveSession : Bool
     , filterPriority : FilterPriority
     , filterProjectStatuses : List String
     , filterTaskStatuses : List String
@@ -465,6 +466,7 @@ type alias HierarchyFilters =
     { query : String
     , showOnly : FilterShowOnly
     , showEmptyProjects : Bool
+    , hasActiveSession : Bool
     , priority : FilterPriority
     , projectStatuses : List String
     , taskStatuses : List String
@@ -1314,6 +1316,11 @@ type alias SessionsModel =
     , sectionOrder : List String
     , hintOrder : List String
     , taskFilter : Maybe String
+    , projectFilter : Maybe String
+    , projectFacetCursor : Maybe String
+    , taskFacetCursor : Maybe String
+    , activityDirty : Bool
+    , lastActivityRefresh : Float
     , taskCursors : Dict String (Maybe Api.SessionCursor)
     , taskPreviousPages : Dict String (List (Maybe Api.SessionCursor))
     , taskPanel : Maybe String
@@ -1331,7 +1338,7 @@ emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
     , filters = Api.defaultSessionFilters, stamp = "", generation = 0, bridgedGeneration = -1, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
-    , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
+    , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
 
 
 type alias SessionArchiveOperation =
@@ -1437,6 +1444,9 @@ type Msg
     | SessionsRetry
     | SessionsStateFilter String
     | SessionsFreshnessFilter String
+    | SessionsProjectFilter String
+    | SessionsTaskFilter String
+    | SessionsFacetPage String (Maybe String)
     | SessionsFollow Bool
     | SessionsOlder
     | SessionsBridgeEvent Encode.Value
@@ -1551,6 +1561,7 @@ type Msg
     | ReturnSearchResults
     | SetFilterShowOnly FilterShowOnly
     | SetFilterShowEmptyProjects Bool
+    | SetFilterHasActiveSession Bool
     | ToggleWorkspaceGroup String
     | ConfirmWorkspaceDelete String
     | PerformWorkspaceDelete

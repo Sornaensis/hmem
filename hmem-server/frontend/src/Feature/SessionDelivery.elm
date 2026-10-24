@@ -1,6 +1,6 @@
 module Feature.SessionDelivery exposing
     ( State, Target(..), Payload(..), Request, Resource, init, key, demand, removeDemand
-    , invalidateSession, invalidateTask, invalidateLists, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
+    , invalidateSession, invalidateTask, invalidateLists, invalidateFacets, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
     , admit, settle, fetch, staleAt, consume
     )
 
@@ -17,6 +17,8 @@ import Set exposing (Set)
 type Target
     = WorkspaceSessions (Maybe Api.SessionCursor)
     | WorkspaceSessionsFiltered Api.SessionFilters (Maybe Api.SessionCursor)
+    | ScopedSessions (Maybe String) (Maybe String) Api.SessionFilters (Maybe Api.SessionCursor)
+    | SessionFacets String (Maybe String) (Maybe String) (Maybe String)
     | TaskSessionsFiltered String Api.SessionFilters (Maybe Api.SessionCursor)
     | TaskSessions String (Maybe Api.SessionCursor)
     | SessionMetadata String
@@ -33,6 +35,7 @@ type Payload
     | TasksPage Api.SessionTaskPage
     | Bytes Api.SessionRange
     | ArchiveDownloaded
+    | FacetsPage Api.SessionFacetPage
 
 
 type alias Resource =
@@ -61,6 +64,8 @@ key workspace target =
         suffix = case target of
             WorkspaceSessions before -> "list:" ++ cursor before
             WorkspaceSessionsFiltered filters before -> "list:" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
+            ScopedSessions project task filters before -> "scoped:" ++ Maybe.withDefault "all" project ++ ":" ++ Maybe.withDefault "all" task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
+            SessionFacets kind project after selected -> "facets:" ++ kind ++ ":" ++ Maybe.withDefault "all" project ++ ":" ++ Maybe.withDefault "first" after ++ ":" ++ Maybe.withDefault "none" selected
             TaskSessionsFiltered task filters before -> "task-filter:" ++ task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
             TaskEvidenceArchive task operation -> "archive:" ++ task ++ ":" ++ String.fromInt operation
             TaskSessions task before -> "task:" ++ task ++ ":" ++ cursor before
@@ -181,6 +186,8 @@ invalidateSession workspace id =
         SessionTasks actual _ -> actual == id
         WorkspaceSessions _ -> True
         WorkspaceSessionsFiltered _ _ -> True
+        ScopedSessions _ _ _ _ -> True
+        SessionFacets _ _ _ _ -> False
         TaskSessionsFiltered _ _ _ -> True
         TaskSessions _ _ -> True
         SessionBytes _ _ _ -> False
@@ -202,7 +209,16 @@ invalidateLists workspace =
     invalidate (\resource -> resource.workspace == workspace && (case resource.target of
         WorkspaceSessions _ -> True
         WorkspaceSessionsFiltered _ _ -> True
+        ScopedSessions _ _ _ _ -> True
+        SessionFacets _ _ _ _ -> False
         TaskSessionsFiltered _ _ _ -> True
+        _ -> False))
+
+
+invalidateFacets : String -> State -> State
+invalidateFacets workspace =
+    invalidate (\resource -> resource.workspace == workspace && (case resource.target of
+        SessionFacets _ _ _ _ -> True
         _ -> False))
 
 
@@ -261,6 +277,8 @@ valid request payload =
     case ( request.target, payload ) of
         ( WorkspaceSessions _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( WorkspaceSessionsFiltered _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
+        ( ScopedSessions _ _ _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
+        ( SessionFacets _ _ _ _, FacetsPage page ) -> List.length page.items <= 50
         ( TaskSessionsFiltered _ _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( TaskEvidenceArchive _ _, ArchiveDownloaded ) -> True
         ( TaskSessions _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
@@ -353,6 +371,8 @@ fetch apiUrl request toMsg =
     case request.target of
         WorkspaceSessions cursor -> Api.fetchAgentSessions apiUrl request.workspace Nothing cursor 50 (Result.map SessionsPage >> toMsg)
         WorkspaceSessionsFiltered filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace Nothing filters cursor 50 (Result.map SessionsPage >> toMsg)
+        ScopedSessions project task filters cursor -> Api.fetchScopedAgentSessions apiUrl request.workspace project task filters cursor (Result.map SessionsPage >> toMsg)
+        SessionFacets kind project after selected -> Api.fetchSessionFacets apiUrl request.workspace kind project after selected (Result.map FacetsPage >> toMsg)
         TaskSessionsFiltered task filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace (Just task) filters cursor 50 (Result.map SessionsPage >> toMsg)
         TaskEvidenceArchive _ _ -> Cmd.none
         TaskSessions task cursor -> Api.fetchAgentSessions apiUrl request.workspace (Just task) cursor 50 (Result.map SessionsPage >> toMsg)

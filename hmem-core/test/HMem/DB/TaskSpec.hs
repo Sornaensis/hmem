@@ -42,7 +42,7 @@ spec = do
       _ <- updateTask env.pool todo.id ((cancelStatusUpdate Todo) { priority = Just 10 })
       idle <- createTaskFor env workspace.id (Just project.id) Nothing "idle"
       _ <- updateTask env.pool idle.id (cancelStatusUpdate Blocked)
-      let selector = NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing
+      let selector = NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing Nothing
           load filters = listFilteredTaskChildren env.pool workspace.id (Just project.id) Nothing filters 50 0
       ordered <- load selector
       map (.id) ordered `shouldBe` sort [parent.id,running.id] <> [todo.id,idle.id]
@@ -64,7 +64,7 @@ spec = do
       right <- createTaskFor env workspace.id Nothing Nothing "Right"
       child <- createTaskFor env workspace.id Nothing (Just left.id) "child"
       _ <- updateTask env.pool child.id (cancelStatusUpdate InProgress)
-      let selector = NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing
+      let selector = NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing Nothing
           ids = map (.id) <$> listFilteredTaskChildren env.pool workspace.id Nothing Nothing selector 50 0
       ids `shouldReturn` [left.id,right.id]
       _ <- updateTask env.pool child.id ((cancelStatusUpdate InProgress) { parentId = SetTo right.id })
@@ -86,7 +86,7 @@ spec = do
       listed <- listTasks env.pool project.id Nothing Nothing Nothing
       children <- listTaskChildren env.pool workspace.id (Just project.id) (Just parent.id) 20 0
       map (.id) children `shouldBe` [child.id]
-      filtered <- listFilteredTaskChildren env.pool workspace.id (Just project.id) Nothing (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing) 20 0
+      filtered <- listFilteredTaskChildren env.pool workspace.id (Just project.id) Nothing (NavigationFilter Nothing [] [] Nothing Nothing Nothing Nothing Nothing) 20 0
       map (.id) filtered `shouldBe` [parent.id]
       candidates <- listNextTasks env.pool project.id False 20
       map (\candidate -> candidate.task.id) candidates `shouldBe` [child.id]

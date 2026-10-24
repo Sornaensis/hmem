@@ -121,6 +121,8 @@ classDiagram
       UUID id PK
       UUID workspace_id FK
       TEXT format_label
+      TEXT? title
+      UUID? parent_session_id FK
       TEXT state
       TEXT? creator_actor_type
       TEXT? creator_actor_id
@@ -343,7 +345,8 @@ classDiagram
   note "PK = primary key; UK = unique key; FK = foreign key\n? = nullable; all other columns NOT NULL\nRepeated PK marks a composite key\nLines show declared foreign keys only\nON DELETE CASCADE unless a line says otherwise"
   note for workspaces "UNIQUE (gh_owner, gh_repo)\nWHERE both are non-null AND deleted_at IS NULL"
   note for observations "UNIQUE (id, workspace_id)\nembedding: vector(1536), nullable; present only with pgvector enabled"
-  note for sessions "UNIQUE (id, workspace_id)\nstate: active or terminated; sealed metadata immutable"
+  note for sessions "UNIQUE (id, workspace_id)\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
+  sessions "0..1" --> "0..*" sessions : parent_session_id, workspace_id
   note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; ordered append only"
   note for tasks "UNIQUE (id, workspace_id), used by session links"
   note for task_sessions "Composite foreign keys enforce one workspace\nAdditive links survive task soft deletion"
@@ -363,3 +366,11 @@ updates have two fixed invalidations, links four; neither scans linked tasks.
 `session_chunks` remains outside audit, outbox and snapshot materialization.
 Existing snapshot items, versions and retained bearers are unchanged. See the
 [schema reference](docs/reference/schema.md#agent-session-change-delivery-v042).
+
+V043 adds nullable `sessions.title` and `parent_session_id` without rewriting
+legacy evidence. New inserts require a trimmed nonblank title of at most 80 UTF-8
+bytes and an existing same-workspace parent when supplied. Title and parent are
+immutable; the composite parent FK and prospective guard prevent foreign,
+self/cyclic or later parent changes. Existing task links remain additive;
+new links lock the task row and require `in_progress`. Historical links survive
+later status transitions. See the [schema reference](docs/reference/schema.md#session-tree-and-titles-v043).

@@ -1,8 +1,8 @@
 import { hierarchyFixture, openHierarchy } from '../hierarchy-fixture.mjs'
 import { createHash } from 'node:crypto'
 export async function openSessionExplorer({many=false,empty=false,creator=null,housekeeping=false,activeCount=1,savedCount=1,linkedCount=2,encrypted=false,timezoneId='UTC',stamp=new Date().toISOString(),eventTimes=[],launchOptions={},extraRecords=[]}={}) {
-  const f=hierarchyFixture();f.projects=[f.projects[0]]
-  f.tasks=Array.from({length:many?22:Math.max(2,linkedCount)},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null}))
+  const f=hierarchyFixture();f.projects=[{...f.projects[0],id:"50000000-0000-4000-8000-000000000001"}]
+  f.tasks=Array.from({length:many?22:Math.max(2,linkedCount)},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null,project_id:f.projects[0].id}))
   const records=[
     {type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'user_message',message:'Show the **session explorer** and its connected tasks.'}},
     {type:'response_item',timestamp:'2026-10-24T10:00:00Z',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Show the **session explorer** and its connected tasks.'}]}},
@@ -42,6 +42,14 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
   const h=await openHierarchy(f,[],null,{timezoneId},launchOptions),reads=[]
   let requestActive=0,peak=0
   const linked=new Set(many?[f.tasks.at(-1).id]:f.tasks.map(t=>t.id))
+  const sessionLinks=new Map(allSessions.map(session=>[session.id,new Set(linked)]))
+  const scoped=(task,project)=>{
+    const projects=new Set([project]);for(let i=0;i<f.projects.length;i++)for(const p of f.projects)if(projects.has(p.parent_id))projects.add(p.id)
+    const seen=new Set();let current=task
+    while(current&&!seen.has(current.id)){seen.add(current.id);if(projects.has(current.project_id))return true;current=f.tasks.find(t=>t.id===current.parent_id)}return false
+  }
+  f.sessionActivity=id=>allSessions.some(session=>session.state==='active'&&sessionLinks.get(session.id)?.has(id))
+  const eligible=()=>f.tasks.filter(t=>allSessions.some(session=>session.state==='active'&&sessionLinks.get(session.id)?.has(t.id)))
   await h.page.route('**/api/v1/**',async route=>{
     const u=new URL(route.request().url()),path=u.pathname
     if(!path.includes('/sessions'))return route.fallback()
@@ -49,16 +57,22 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
     try{
       const metadata=allSessions.find(session=>path.includes(session.id))||active
       let result
-      if(path.endsWith('/transcript')||path.endsWith('/evidence')){const data=content.get(metadata.id)||bytes,offset=Number(u.searchParams.get('offset')||0),end=Math.min(data.length,offset+Number(u.searchParams.get('limit')||65536));result={session:metadata,offset,next_offset:end,data_base64:data.subarray(offset,end).toString('base64'),has_more:end<data.length}}
-      else if(path.endsWith('/tasks'))result={items:f.tasks.slice(0,linkedCount).map(t=>({id:t.id,title:t.title,status:t.status})),next_task_id:null}
+      if(path.endsWith('/filters')){
+        const kind=u.searchParams.get('kind'),project=u.searchParams.get('project_id'),after=u.searchParams.get('after_id'),selected=u.searchParams.get('selected_id')
+        const candidates=(kind==='projects'?f.projects.filter(p=>eligible().some(t=>scoped(t,p.id))).map(p=>({id:p.id,title:p.name})):eligible().filter(t=>!project||scoped(t,project)).map(t=>({id:t.id,title:t.title}))).sort((a,b)=>a.id.localeCompare(b.id))
+        const remaining=candidates.filter(item=>!after||item.id>after),items=remaining.slice(0,50)
+        result={items,next_id:remaining.length>50?items.at(-1).id:null,selected:candidates.find(item=>item.id===selected)||null}
+      }
+      else if(path.endsWith('/transcript')||path.endsWith('/evidence')){const data=content.get(metadata.id)||bytes,offset=Number(u.searchParams.get('offset')||0),end=Math.min(data.length,offset+Number(u.searchParams.get('limit')||65536));result={session:metadata,offset,next_offset:end,data_base64:data.subarray(offset,end).toString('base64'),has_more:end<data.length}}
+      else if(path.endsWith('/tasks'))result={items:f.tasks.filter(t=>sessionLinks.get(metadata.id)?.has(t.id)).slice(0,linkedCount).map(t=>({id:t.id,title:t.title,status:t.status})),next_task_id:null}
       else if(allSessions.some(session=>path.endsWith(session.id)))result=metadata
-      else {let items=allSessions;if(path.includes('/tasks/')&&!f.tasks.some(t=>linked.has(t.id)&&path.includes(t.id)))items=[];if(u.searchParams.get('state'))items=items.filter(s=>s.state===u.searchParams.get('state'));if(u.searchParams.get('freshness'))items=items.filter(s=>(Date.now()-Date.parse(s.last_seen_at)<30000)===(u.searchParams.get('freshness')==='fresh'));const before=u.searchParams.get('before_created_at'),beforeId=u.searchParams.get('before_id');if(before)items=items.filter(session=>session.created_at<before||(session.created_at===before&&session.id<beforeId));const page=items.slice(0,50),last=page.at(-1);result={items:page,next_cursor:items.length>50?{created_at:last.created_at,id:last.id}:null}}
+      else {let items=allSessions;if(path.includes('/tasks/'))items=items.filter(session=>f.tasks.some(t=>sessionLinks.get(session.id)?.has(t.id)&&path.includes(t.id)));const project=u.searchParams.get('project_id'),task=u.searchParams.get('task_id');if(project)items=items.filter(session=>f.tasks.some(t=>sessionLinks.get(session.id)?.has(t.id)&&scoped(t,project)));if(task)items=items.filter(session=>sessionLinks.get(session.id)?.has(task)&&(!project||f.tasks.some(t=>t.id===task&&scoped(t,project))));if(u.searchParams.get('state'))items=items.filter(s=>s.state===u.searchParams.get('state'));if(u.searchParams.get('freshness'))items=items.filter(s=>(Date.now()-Date.parse(s.last_seen_at)<30000)===(u.searchParams.get('freshness')==='fresh'));const before=u.searchParams.get('before_created_at'),beforeId=u.searchParams.get('before_id');if(before)items=items.filter(session=>session.created_at<before||(session.created_at===before&&session.id<beforeId));const page=items.slice(0,50),last=page.at(-1);result={items:page,next_cursor:items.length>50?{created_at:last.created_at,id:last.id}:null}}
       await route.fulfill({json:result})
     }finally{requestActive--}
   })
-  return {...h,active,saved,bytes,activeSessions,savedSessions,content,reads,peak:()=>peak,async appendRecords(...added){
+  return {...h,start:async(fragment="tab=projects",anchor=f.projects[0].id)=>h.start(fragment,anchor),active,saved,bytes,activeSessions,savedSessions,allSessions,sessionLinks,content,reads,peak:()=>peak,async appendRecords(...added){
     const data=Buffer.concat([content.get(active.id),Buffer.from(added.map(record=>JSON.stringify(record)).join('\n')+'\n')]);content.set(active.id,data)
     Object.assign(active,{committed_bytes:data.length,committed_records:active.committed_records+added.length,revision:active.revision+1,last_seen_at:new Date().toISOString()})
     await h.page.evaluate(({workspace,session,revision})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'append-'+revision,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'append-'+revision,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:active.id,revision:active.revision})
-  },async associate(task){linked.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
+  },async associate(task){linked.add(task);sessionLinks.get(active.id)?.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
 }

@@ -3457,6 +3457,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                 || previous.focus.focusedEntity /= model.focus.focusedEntity
                 || previous.search.query /= model.search.query
                 || previous.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
+                || previous.search.filterHasActiveSession /= model.search.filterHasActiveSession
                 || previous.search.filterShowOnly /= model.search.filterShowOnly
                 || previous.search.filterPriority /= model.search.filterPriority
                 || previous.search.filterProjectStatuses /= model.search.filterProjectStatuses
@@ -3468,6 +3469,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
         filtersChanged =
             previous.search.query /= model.search.query
                 || previous.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
+                || previous.search.filterHasActiveSession /= model.search.filterHasActiveSession
                 || previous.search.filterShowOnly /= model.search.filterShowOnly
                 || previous.search.filterPriority /= model.search.filterPriority
                 || previous.search.filterProjectStatuses /= model.search.filterProjectStatuses

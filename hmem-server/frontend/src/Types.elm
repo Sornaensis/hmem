@@ -49,6 +49,7 @@ type alias Model =
     , auth : AuthModel
     , sessionContext : Maybe Api.SessionContext
     , sessionRequestEpoch : Int
+    , sessionActivity : SessionActivityModel
     , sessionDelivery : Feature.SessionDelivery.State
     , sessions : SessionsModel
     , timestamps : TimestampDisplay.State
@@ -170,6 +171,19 @@ type alias ToastModel =
     { toasts : List Toast
     , nextToastId : Int
     }
+
+
+type alias SessionActivityValue =
+    { active : Maybe Bool, checked : Float, version : Int }
+
+
+type alias SessionActivityRequest =
+    { id : Int, owner : String, keys : List String, workspace : Maybe String, version : Int, generation : Int }
+
+
+type alias SessionActivityModel =
+    { cache : Dict String SessionActivityValue, order : List String, pending : Maybe SessionActivityRequest
+    , nextId : Int, version : Int, sessionVersion : Int, generation : Int, now : Float, lastProbe : Float, visible : Bool, owner : String }
 
 
 type alias AuthModel =
@@ -1423,6 +1437,9 @@ type Msg
     | SessionsFollow Bool
     | SessionsOlder
     | SessionsBridgeEvent Encode.Value
+    | SessionActivityTick Time.Posix
+    | SessionActivityVisibility Bool
+    | SessionActivityFetched Int (Result Http.Error Api.SessionActivityResponse)
     | SessionsTick Time.Posix
     | SessionsCancelSave
     | SessionsTaskNextPage String Api.SessionCursor

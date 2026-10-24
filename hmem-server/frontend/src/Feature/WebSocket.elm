@@ -1116,7 +1116,15 @@ applyActions scope actions model =
         ( refreshed, readinessCmd ) =
             if scopeMatchesSelectedWorkspace scope acted then requestReadinessSummaryBatches scope readinessTargets acted
             else ( acted, Cmd.none )
-    in ( refreshed, Cmd.batch [ actionCmd, readinessCmd ] )
+        activityRelevant action = case action of
+            ChangeStream.RefetchEntity kind _ -> List.member kind ["project","task"]
+            ChangeStream.RemoveEntity kind _ -> List.member kind ["project","task"]
+            ChangeStream.RefreshNavigation -> True
+            ChangeStream.RevalidateNavigationSummary _ _ -> True
+            _ -> False
+        activity=refreshed.sessionActivity
+        withActivity=if scopeMatchesSelectedWorkspace scope refreshed && List.any activityRelevant actions then {refreshed | sessionActivity={activity | version=activity.version+1}} else refreshed
+    in ( withActivity, Cmd.batch [ actionCmd, readinessCmd ] )
 
 
 applyAction : ChangeStream.Scope -> ChangeStream.Action -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )

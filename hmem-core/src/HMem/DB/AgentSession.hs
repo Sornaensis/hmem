@@ -2,6 +2,7 @@
 module HMem.DB.AgentSession
   ( createSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
   , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
+  , workspaceSessionActivity, projectSessionActivity
   , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange
   ) where
 
@@ -279,3 +280,24 @@ hashCommitted identifier end offset context
       let next = offset+fromIntegral (BS.length chunks)
           updated = hashUpdate context chunks
       updated `seq` hashCommitted identifier end next updated
+
+-- Boolean projections only: no transcript or descendant metadata leaves SQL.
+workspaceSessionActivity :: Pool Hasql.Connection -> [UUID] -> IO [(UUID,Bool)]
+workspaceSessionActivity pool identifiers = runSession pool $ S.statement identifiers $
+  St.Statement "SELECT w.id,EXISTS(SELECT 1 FROM sessions s WHERE s.workspace_id=w.id AND s.state='active') FROM workspaces w WHERE w.id=ANY($1) AND w.deleted_at IS NULL"
+    (E.param (E.nonNullable (E.foldableArray (E.nonNullable E.uuid))))
+    (D.rowList ((,) <$> D.column (D.nonNullable D.uuid) <*> D.column (D.nonNullable D.bool))) True
+
+projectSessionActivity :: Pool Hasql.Connection -> UUID -> [UUID] -> IO [(UUID,Bool)]
+projectSessionActivity pool workspace identifiers = runSession pool $ S.statement (workspace,identifiers) $
+  St.Statement sql (param fst E.uuid <> param snd (E.foldableArray (E.nonNullable E.uuid)))
+    (D.rowList ((,) <$> D.column (D.nonNullable D.uuid) <*> D.column (D.nonNullable D.bool))) True
+  where
+    sql = "WITH RECURSIVE project_tree(root,id) AS (\
+      \ SELECT p.id,p.id FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.id=ANY($2) AND p.deleted_at IS NULL AND w.deleted_at IS NULL\
+      \ UNION SELECT parent.root,child.id FROM projects child JOIN project_tree parent ON child.parent_id=parent.id WHERE child.workspace_id=$1 AND child.deleted_at IS NULL\
+      \ ), task_tree(root,id) AS (\
+      \ SELECT p.root,t.id FROM project_tree p JOIN tasks t ON t.project_id=p.id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL\
+      \ UNION SELECT parent.root,child.id FROM tasks child JOIN task_tree parent ON child.parent_id=parent.id WHERE child.workspace_id=$1 AND child.deleted_at IS NULL\
+      \ ) SELECT p.id,EXISTS(SELECT 1 FROM task_tree t JOIN task_sessions link ON link.task_id=t.id JOIN sessions s ON s.id=link.session_id WHERE t.root=p.id AND s.workspace_id=$1 AND s.state='active')\
+      \ FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.id=ANY($2) AND p.deleted_at IS NULL AND w.deleted_at IS NULL"

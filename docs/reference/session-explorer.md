@@ -77,3 +77,27 @@ aborts the fetch and joins staging cleanup before reuse. Cleanup failure blocks
 reuse until reload. Verified archives retain their source for the same 60-second
 browser download lifetime as individual evidence; only operation-owned files are
 removed, and crash-orphan files require browser site-storage cleanup.
+
+## Activity lights
+
+Green lights mean at least one session is explicitly active, regardless of its
+heartbeat age or task/project status. A project includes every live descendant
+project and task, following task parent links even when a child has no project ID.
+A workspace includes active sessions with no task links. Deleted targets and
+terminated sessions do not contribute. The shared ring is decorative; reduced
+motion leaves it static and an accessible label identifies activity.
+
+`GET /api/v1/session-activity` returns boolean rows for at most 50 combined unique
+`workspace_id` and `project_id` targets. Project IDs require one explicit
+`project_workspace_id`; missing, deleted or inaccessible targets are not reported
+as inactive. Server authorization precedes traversal and no transcript bytes or
+hierarchy rows are returned. Unknown/error results remain distinct in the client.
+
+The client probes only rendered workspace/project cards, deduplicates grouped
+workspaces, and fairly rotates batches under one physical request. Retired
+requests retain their occupancy until the exact callback; authority, visibility
+and target generations reject stale replies. Idle probes refresh about every ten
+seconds; selected-workspace session/link and hierarchy events or reconnects
+request a coalesced refresh, at most once a second for already loaded targets.
+Unselected workspace cards converge through polling without broadening global
+change events or snapshots. Hidden pages and unmounted cards do not poll.

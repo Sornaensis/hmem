@@ -33,6 +33,7 @@ import HMem.DB.AgentSession qualified as DB
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.Pool qualified as Pool
 import HMem.DB.Task qualified as Task
+import HMem.DB.Project qualified as Project
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.TestHarness
@@ -40,6 +41,58 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+  it "activity projects include unloaded nested and null-project tasks across moves, status and deletion" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv
+      workspace <- createTestWorkspace env "activity-tree"
+      root <- Project.createProject env.pool (Types.CreateProject workspace.id Nothing "Root" Nothing Nothing Nothing)
+      middle <- Project.createProject env.pool (Types.CreateProject workspace.id (Just root.id) "Middle" Nothing Nothing Nothing)
+      leaf <- Project.createProject env.pool (Types.CreateProject workspace.id (Just middle.id) "Unloaded leaf" Nothing Nothing Nothing)
+      destination <- Project.createProject env.pool (Types.CreateProject workspace.id Nothing "Destination" Nothing Nothing Nothing)
+      parent <- Task.createTask env.pool (Types.CreateTask workspace.id (Just leaf.id) Nothing "Parent" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (Types.CreateTask workspace.id (Just leaf.id) (Just parent.id) "Null-project subtask" Nothing Nothing Nothing)
+      -- Legacy/direct-SQL rows can omit a subtask project. Keep every database
+      -- guard enabled; the projection must follow its canonical parent link.
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET project_id=NULL WHERE id='"<>uuid child.id<>"'")
+      fmap (.projectId) <$> Task.getTask env.pool child.id `shouldReturn` Just Nothing
+      identifier <- UUID.nextRandom
+      Pool.runSession env.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,created_at,last_seen_at) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','quiet activity',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
+      DB.associateSessionTask env.pool workspace.id identifier child.id
+      DB.projectSessionActivity env.pool workspace.id [root.id,middle.id,leaf.id] >>= (`shouldMatchList` [(root.id,True),(middle.id,True),(leaf.id,True)])
+      _ <- Task.updateTask env.pool parent.id (Types.UpdateTask Nothing Types.Unchanged (Types.SetTo destination.id) Types.Unchanged Nothing Nothing Nothing)
+      DB.projectSessionActivity env.pool workspace.id [root.id,destination.id] >>= (`shouldMatchList` [(root.id,False),(destination.id,True)])
+      _ <- Task.updateTask env.pool parent.id (Types.UpdateTask Nothing Types.Unchanged Types.Unchanged Types.Unchanged (Just Types.Cancelled) Nothing Nothing)
+      DB.projectSessionActivity env.pool workspace.id [destination.id] `shouldReturn` [(destination.id,True)]
+      _ <- DB.terminateSession env.pool workspace.id identifier (Core.TerminateSession 0 0 0 (Core.sessionSha256 ""))
+      DB.projectSessionActivity env.pool workspace.id [destination.id] `shouldReturn` [(destination.id,False)]
+      unlinked <- seed env workspace.id
+      DB.workspaceSessionActivity env.pool [workspace.id] `shouldReturn` [(workspace.id,True)]
+      DB.associateSessionTask env.pool workspace.id unlinked.id child.id
+      _ <- Task.deleteTask env.pool child.id
+      DB.projectSessionActivity env.pool workspace.id [destination.id] `shouldReturn` [(destination.id,False)]
+      _ <- Project.deleteProject env.pool destination.id
+      DB.projectSessionActivity env.pool workspace.id [destination.id] `shouldReturn` []
+
+  it "activity batches authorize each scope, omit unknown targets and cap unique targets before work" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      let env=ctx.deployedEnv; app=ctx.deployedApplication
+      workspace <- createTestWorkspace env "activity-reader"
+      foreignWorkspace <- createTestWorkspace env "activity-foreign"
+      project <- Project.createProject env.pool (Types.CreateProject workspace.id Nothing "Visible" Nothing Nothing Nothing)
+      foreignProject <- Project.createProject env.pool (Types.CreateProject foreignWorkspace.id Nothing "Hidden" Nothing Nothing Nothing)
+      _ <- seed env foreignWorkspace.id
+      reader <- audience ctx workspace.id (Just Auth.WorkspaceRoleRead) False
+      let path="/api/v1/session-activity?workspace_id="<>uuid workspace.id<>"&workspace_id="<>uuid foreignWorkspace.id<>"&project_workspace_id="<>uuid workspace.id<>"&project_id="<>uuid project.id<>"&project_id="<>uuid foreignProject.id
+      call app methodGet path [] "" >>= status status401
+      response <- call app methodGet path reader "" >>= decoded @Value
+      field ["workspaces"] response `shouldBe` Just (toJSON [object ["id" .= workspace.id,"active" .= False]])
+      field ["projects"] response `shouldBe` Just (toJSON [object ["id" .= project.id,"active" .= False]])
+      call app methodGet ("/api/v1/session-activity?project_workspace_id="<>uuid foreignWorkspace.id<>"&project_id="<>uuid foreignProject.id) reader "" >>= status status403
+      let over="/api/v1/session-activity?"<>BS.intercalate "&" ["workspace_id=invalid-"<>TE.encodeUtf8 (T.pack $ show n) | n<-[1..51::Int]]
+      call app methodGet over reader "" >>= status status400
+      let duplicates="/api/v1/session-activity?"<>BS.intercalate "&" (replicate 51 ("workspace_id="<>uuid workspace.id))
+      call app methodGet duplicates reader "" >>= ok
+
   it "streams every task-associated terminated session as genuine DEFLATE ZIP64 without crossing task or auth scope" $
     withDeployedSandboxAppContext $ \ctx -> do
       let env=ctx.deployedEnv; app=ctx.deployedApplication

@@ -168,6 +168,12 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       if (navigation) receipt.viewport = await page.evaluate(() => { try { return JSON.parse(document.getElementById("hierarchy-viewport")?.dataset.hierarchyContext || "null") } catch { return null } })
         let value, status = 200
         if (path === '/api/v1/session') value = { auth_mode: 'local', principal: { actor_type: 'user', actor_id: principalId, actor_label: 'Fixture User', authority: 'local', grant_user_id: null }, global_permissions: { create_workspace: false, superadmin: false }, workspace: { workspace_id: fixture.workspace.id, role: 'owner', can_read: true, can_edit: true, can_admin: true } }
+        else if (path === '/api/v1/session-activity') {
+          const workspaces=[...new Set(url.searchParams.getAll('workspace_id'))],projects=[...new Set(url.searchParams.getAll('project_id'))]
+          assert.ok(workspaces.length+projects.length<=50,'bounded activity projection')
+          const projectScope=fixtures.find(value=>value.workspace.id===url.searchParams.get('project_workspace_id'))
+          value={workspaces:workspaces.filter(id=>fixtures.some(value=>value.workspace.id===id&&!value.workspace.deleted_at)).map(id=>({id,active:false})),projects:projects.filter(id=>projectScope?.projects.some(row=>row.id===id&&!row.deleted_at)).map(id=>({id,active:false}))}
+        }
         else if (path === '/api/v1/change-stream/resync') { const body = request.postDataJSON(); assert.equal(body.scope.workspace_id, fixture.workspace.id); value = { snapshot_profile: 'workspace_shell_v1', items: workspaceShellSnapshotItems(fixture), has_more: false, resume_token: 'browser-shell' } }
         else if (path === '/api/v1/change-stream/ticket') value = { ticket: 'browser-ticket', expires_at: '2099-01-01T00:00:00Z' }
         else if (path === '/api/v1/workspaces') value = { items: fixtures.map(value => value.workspace), has_more: false }

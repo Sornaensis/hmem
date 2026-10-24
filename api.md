@@ -132,6 +132,23 @@ validated after authorization. Record/parser/database details are never returned
 or logged by the session error boundary. For storage and direct-write guarantees,
 see [the schema reference](docs/reference/schema.md#agent-session-evidence-v041).
 
+## Session activity projection
+
+`GET /api/v1/session-activity` accepts repeated `workspace_id` and `project_id`
+queries, with one `project_workspace_id` required for project targets. At most 50
+combined unique targets are allowed, checked before database work. Authentication
+and workspace read permissions apply. The response has `workspaces` and `projects`
+arrays of `{id, active}` booleans; inaccessible/missing/deleted targets are omitted,
+not reported false. A denied project workspace returns 403. Project IDs cannot
+cross that workspace boundary.
+
+Active means explicit session state, independently of freshness and planning
+status. Projects include all live descendant project/task links, including
+null-project subtasks; workspaces include unlinked sessions. Traversal stays
+server-side and cycle-safe. No transcript, descendants, counts or presentation
+state is stored or returned. Rendered-card clients poll about every ten seconds
+and refresh selected-workspace changes promptly under one coalesced probe.
+
 ## Declared attribution
 
 Automated HTTP callers send one JSON-valued `X-HMem-Bot-Identity` header. This

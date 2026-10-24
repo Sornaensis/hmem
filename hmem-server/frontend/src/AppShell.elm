@@ -1,6 +1,7 @@
 module AppShell exposing (AppShellOwnedMsg(..), finalizeInit, handleOwned, prepareOwned, initModel, sessionEpochMatches, subscriptions, viewDocument)
 
 import Api
+import Feature.SessionActivity
 import Browser
 import Browser.Events
 import Browser.Navigation as Nav
@@ -83,6 +84,7 @@ initModel key url page flags storedFilters legacyFrag =
             , auth = { status = AuthBooting, mode = Nothing }
             , sessionContext = Nothing
             , sessionRequestEpoch = 0
+            , sessionActivity = Feature.SessionActivity.init
             , sessionDelivery = Feature.SessionDelivery.init
             , sessions = emptySessionsModel
             , timestamps = TimestampDisplay.empty

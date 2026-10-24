@@ -436,6 +436,7 @@ function getWorkspaceFilters() {
 const app = Elm.Main.init({
   node: document.getElementById('app'),
   flags: {
+    documentVisible: document.visibilityState !== 'hidden',
     apiUrl,
     wsUrl,
     sessionId: createSessionId(),

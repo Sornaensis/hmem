@@ -4785,3 +4785,13 @@ textarea.observation-edit-content {
 .task-session-card .card-meta { font-size:.72rem; }
 .task-evidence-download { margin:.65rem 0; display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; font-size:.8rem; }
 @media(max-width:600px) { .task-session-cards { grid-template-columns:minmax(0,1fr); } }
+
+/* Shared session activity marker. The ring is decoration; status stays quiet. */
+.session-activity-light { position:relative; display:inline-flex; flex:0 0 16px; width:16px; height:16px; align-items:center; justify-content:center; vertical-align:middle; }
+.session-activity-core { width:7px; height:7px; border-radius:50%; background:var(--success,#4ca886); }
+.session-activity-ring { position:absolute; inset:0; border:1px solid color-mix(in srgb,var(--success,#4ca886) 20%,transparent); border-top-color:var(--success,#4ca886); border-right-color:var(--success,#4ca886); border-radius:50%; animation:session-activity-spin 1.8s linear infinite; }
+.card.clickable>.card-header>.session-activity-light { margin-left:auto; }
+.task-sessions-icon .session-activity-light { flex-basis:16px; }
+@keyframes session-activity-spin { to { transform:rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .session-activity-ring { animation:none; } }
+.workspace-card>.card-header { gap:.65rem; }.workspace-card>.card-header>.card-title { flex:1; min-width:0; overflow-wrap:anywhere; }.workspace-card>.card-header>.badge { flex-shrink:0; }

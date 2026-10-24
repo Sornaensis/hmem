@@ -36,8 +36,9 @@ import Data.Aeson.KeyMap qualified as AesonKeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Int (Int64)
+import Data.List (nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isNothing, fromMaybe, mapMaybe)
+import Data.Maybe (isNothing, fromMaybe, mapMaybe, catMaybes)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -84,6 +85,9 @@ import HMem.Types
 type HMemAPI = "api" :> "v1" :>
   (    "health"       :> Get '[JSON] Value
   :<|> "session"      :> QueryParam "workspace_id" UUID :> Get '[JSON] SessionContext
+  :<|> "session-activity" :> QueryParams "workspace_id" Text :> QueryParam "project_workspace_id" Text :> QueryParams "project_id" Text
+         :> Description "Boolean active-session projection for at most 50 combined unique workspace/project targets. Workspace targets must be readable; project targets require an explicit readable same-workspace scope and include all live project/task descendants. Missing or denied targets are omitted, never reported inactive. No freshness or task/project status filter."
+         :> Get '[JSON] Value
   :<|> "workspaces"   :> WorkspaceAPI
   :<|> "groups"       :> WorkspaceGroupAPI
   :<|> "observations" :> ObservationAPI
@@ -520,6 +524,31 @@ requireSessionTask pool workspace identifier = do
     Just row | row.workspaceId == workspace -> pure ()
     _ -> throwError $ sessionError err404 "task_not_found" "Active same-workspace task not found"
 
+sessionActivity :: Pool Hasql.Connection -> [Text] -> Maybe Text -> [Text] -> Handler Value
+sessionActivity pool rawWorkspaces rawScope rawProjects = do
+  principal <- liftIO currentPrincipal
+  case principal of Nothing -> throwError $ sessionError err401 "unauthorized" "Authentication required"; _ -> pure ()
+  let workspaceTexts=nub rawWorkspaces; projectTexts=nub rawProjects
+  when (length workspaceTexts + length projectTexts > 50) $
+    throwError $ sessionError err400 "validation_error" "At most 50 activity targets are allowed"
+  let parse value=maybe (throwError $ sessionError err400 "validation_error" "Invalid activity target") pure (UUID.fromText value)
+  workspaceIds <- mapM parse workspaceTexts
+  projectIds <- mapM parse projectTexts
+  scope <- mapM parse rawScope
+  when (projectIds /= [] && scope == Nothing) $
+    throwError $ sessionError err400 "validation_error" "Project workspace is required"
+  readable <- fmap catMaybes $ forM workspaceIds $ \identifier -> do
+    allowed <- handleSessionErrors $ Auth.authorizeWorkspace pool principal identifier Auth.WorkspaceRoleRead
+    pure $ either (const Nothing) (const $ Just identifier) allowed
+  workspaceRows <- handleSessionErrors $ AgentSessions.workspaceSessionActivity pool readable
+  projectRows <- case scope of
+    Just workspace | projectIds /= [] -> do
+      requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
+      handleSessionErrors $ AgentSessions.projectSessionActivity pool workspace projectIds
+    _ -> pure []
+  let row (identifier,active)=object ["id" .= identifier,"active" .= active]
+  pure $ object ["workspaces" .= map row workspaceRows,"projects" .= map row projectRows]
+
 authorizeTaskEvidenceRead :: Pool Hasql.Connection -> UUID -> UUID -> Handler ()
 authorizeTaskEvidenceRead pool workspace task = do
   requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
@@ -644,6 +673,7 @@ serverWithDiscovery :: Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe D
 serverWithDiscovery authConfig changeStreamConfig discovery pool tracker wsState _ =
        health pool tracker
   :<|> session authConfig pool
+  :<|> sessionActivity pool
   :<|> workspaces pool
   :<|> groups pool
   :<|> observations pool

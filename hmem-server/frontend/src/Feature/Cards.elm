@@ -43,6 +43,8 @@ import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
+import SessionActivityLight
+import Feature.SessionActivity
 import Feature.Sessions
 import Permissions
 import Helpers exposing (..)
@@ -1692,6 +1694,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                       else
                         span [ class "tree-toggle-spacer" ] []
                     , span [ class "entity-type-label entity-type-project" ] [ text "PRJ" ]
+                    , SessionActivityLight.view (Feature.SessionActivity.active ("project:" ++ project.id) model) "Active sessions in this project"
                     , Feature.Editing.viewEditableText model "project" project.id "name" project.name
                 ]
             , div [ class "card-actions" ]

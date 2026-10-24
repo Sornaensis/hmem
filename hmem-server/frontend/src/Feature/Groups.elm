@@ -1,6 +1,8 @@
 module Feature.Groups exposing (init, update, viewHomePage, viewSidebar)
 
 import Api
+import Feature.SessionActivity
+import SessionActivityLight
 import Dict
 import Helpers exposing (..)
 import Html exposing (..)
@@ -485,7 +487,7 @@ viewHomePage model =
                                       else
                                         text ""
                                     , div [ class "card-grid" ]
-                                        (ungroupedWs |> List.map viewWorkspaceCard)
+                                        (ungroupedWs |> List.map (viewWorkspaceCard model))
                                     ]
 
                              else
@@ -658,17 +660,18 @@ viewHomeGroup model group =
 
           else
             div [ class "card-grid" ]
-                (memberWs |> List.map viewWorkspaceCard)
+                (memberWs |> List.map (viewWorkspaceCard model))
         ]
 
 
-viewWorkspaceCard : Api.Workspace -> Html Msg
-viewWorkspaceCard ws =
-    div [ class "card clickable", onClick (SelectWorkspace ws.id) ]
+viewWorkspaceCard : Model -> Api.Workspace -> Html Msg
+viewWorkspaceCard model ws =
+    div [ class "card clickable workspace-card", onClick (SelectWorkspace ws.id) ]
         [ div [ class "card-header" ]
             [ span [ class "card-title" ] [ text ws.name ]
             , span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
                 [ text (Api.workspaceTypeToString ws.workspaceType) ]
+            , SessionActivityLight.view (Feature.SessionActivity.active ("workspace:" ++ ws.id) model) "Active sessions in this workspace"
             ]
         , div [ class "card-body" ]
             [ text ""

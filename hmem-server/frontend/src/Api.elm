@@ -1,5 +1,7 @@
 module Api exposing
-    ( ApiError
+    ( SessionActivityResponse
+    , fetchSessionActivity
+    , ApiError
     , AgentSession
     , AgentSessionState(..)
     , SessionCursor
@@ -269,6 +271,7 @@ module Api exposing
     )
 
 import ActorAttribution
+import Dict exposing (Dict)
 import Http
 import Json.Decode as D exposing (Decoder)
 import Json.Decode.Pipeline exposing (custom, optional, required)
@@ -4522,3 +4525,17 @@ fetchSessionRange apiUrl workspace id sealed offset limit toMsg =
         sessionGet (sessionResourceUrl apiUrl workspace ++ "/" ++ Url.percentEncode id
             ++ (if sealed then "/evidence" else "/transcript")
             ++ "?offset=" ++ String.fromInt offset ++ "&limit=" ++ String.fromInt limit) sessionRangeDecoder toMsg
+
+
+type alias SessionActivityResponse =
+    { workspaces : Dict String Bool, projects : Dict String Bool }
+
+
+fetchSessionActivity : String -> List String -> Maybe String -> List String -> (Result Http.Error SessionActivityResponse -> msg) -> Cmd msg
+fetchSessionActivity apiUrl workspaces workspace projects toMsg =
+    let
+        query name ids = List.map (\id -> name ++ "=" ++ Url.percentEncode id) ids
+        parts = query "workspace_id" workspaces ++ query "project_workspace_id" (workspace |> Maybe.map List.singleton |> Maybe.withDefault []) ++ query "project_id" projects
+        rows = D.list (D.map2 Tuple.pair (D.field "id" D.string) (D.field "active" D.bool)) |> D.map Dict.fromList
+    in
+    sessionGet (apiUrl ++ "/api/v1/session-activity?" ++ String.join "&" parts) (D.map2 SessionActivityResponse (D.field "workspaces" rows) (D.field "projects" rows)) toMsg

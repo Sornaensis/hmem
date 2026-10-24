@@ -2,6 +2,7 @@ module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTa
 
 import Api
 import ActorAttribution
+import SessionActivityLight
 import Dict
 import Feature.SessionDelivery as Delivery
 import Feature.WebSocket as WebSocket
@@ -480,7 +481,7 @@ viewTaskIcon workspace model task =
             Just current -> if current.error then " · activity unavailable" else if current.active then " · active sessions" ++ (if current.epoch /= model.sessionDelivery.listInvalidation then " · refreshing" else "") else if current.epoch /= model.sessionDelivery.listInvalidation then " · checking activity" else " · no active sessions"
             Nothing -> " · checking activity")
     in
-    a [class ("btn-icon task-sessions-icon" ++ (if Maybe.withDefault 0 count > 0 then " has-active-sessions" else "")),href ("/workspace/" ++ Url.percentEncode workspace ++ "#tab=sessions&task=" ++ Url.percentEncode task),attribute "aria-label" label,Html.Attributes.title label] [text "◉",text ""]
+    a [class ("btn-icon task-sessions-icon" ++ (if Maybe.withDefault 0 count > 0 then " has-active-sessions" else "")),href ("/workspace/" ++ Url.percentEncode workspace ++ "#tab=sessions&task=" ++ Url.percentEncode task),attribute "aria-label" label,Html.Attributes.title label] [if Maybe.withDefault 0 count > 0 then SessionActivityLight.view True "Active sessions for this task" else text "◉"]
 
 
 viewTaskPanel : String -> Model -> String -> Html Msg

@@ -5,12 +5,15 @@ import AppShell
 import Feature.Search
 import Feature.AuditDiff
 import Browser
+import Browser.Events
+import Task
 import Browser.Navigation as Nav
 import Feature.Cards as Cards
 import Feature.Move
 import Feature.DataLoading
 import Feature.Observation
 import Feature.TimestampDisplay
+import Feature.SessionActivity
 import Feature.Sessions
 import Helpers exposing (parseFragment)
 import Json.Decode as Decode
@@ -95,11 +98,15 @@ init rawFlags url key =
         frag =
             parseFragment url.fragment
 
-        model =
+        initialModel =
             AppShell.initModel (Just key) url page flags decoded.storedFilters frag
 
+        activity = initialModel.sessionActivity
+        model = {initialModel | sessionActivity={activity | visible=Feature.SessionActivity.initialVisibility rawFlags}}
+
         cmds =
-            [ Api.fetchSessionContext flags.apiUrl (sessionWorkspace page) (GotSessionContext 1 (sessionWorkspace page))
+            [ Task.perform SessionActivityTick Time.now
+            , Api.fetchSessionContext flags.apiUrl (sessionWorkspace page) (GotSessionContext 1 (sessionWorkspace page))
             ]
 
     in
@@ -124,7 +131,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.TimestampDisplay.reconcile
+    updateCore msg model |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )
@@ -152,7 +159,7 @@ updateCore msg model =
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    Sub.batch [ AppShell.subscriptions, if model.auth.status == AuthReady && not (List.isEmpty model.sessions.owned) then Time.every 1000 SessionsTick else Sub.none ]
+    Sub.batch [ AppShell.subscriptions, Browser.Events.onVisibilityChange (\visibility -> SessionActivityVisibility (visibility == Browser.Events.Visible)), if model.auth.status == AuthReady && model.sessionActivity.visible && not (List.isEmpty model.sessionActivity.order) then Time.every 1000 SessionActivityTick else Sub.none, if model.auth.status == AuthReady && not (List.isEmpty model.sessions.owned) then Time.every 1000 SessionsTick else Sub.none ]
 
 
 

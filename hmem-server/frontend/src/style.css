@@ -4792,6 +4792,32 @@ textarea.observation-edit-content {
 .session-activity-ring { position:absolute; inset:0; border:1px solid color-mix(in srgb,var(--success,#4ca886) 20%,transparent); border-top-color:var(--success,#4ca886); border-right-color:var(--success,#4ca886); border-radius:50%; animation:session-activity-spin 1.8s linear infinite; }
 .card.clickable>.card-header>.session-activity-light { margin-left:auto; }
 .task-sessions-icon .session-activity-light { flex-basis:16px; }
+
+.task-sessions-icon { gap:.35rem; white-space:nowrap; font-size:.78rem; padding:.3rem .5rem; }
+.task-sessions-icon:disabled { opacity:.5; cursor:default; }
+.task-card > .card-header { flex-wrap:wrap; gap:.5rem; }
+.task-card > .card-header .tree-toggle-row { flex:1 1 180px; min-width:0; }
+.task-card-with-dock > .card-header .tree-toggle-row { flex-basis:100%; }
+.task-card > .card-header .card-actions { flex-wrap:wrap; flex-shrink:1; }
+.task-card-with-dock { display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,1.2fr); column-gap:1rem; align-items:start; }
+.task-card-with-dock > * { grid-column:1; min-width:0; }
+.task-card-with-dock > .task-session-dock { grid-column:2; grid-row:1 / span 10; }
+.task-card-with-dock > .tree-children { grid-column:1 / -1; }
+.task-session-dock { min-width:0; border-left:1px solid var(--border); padding-left:1rem; }
+.task-session-dock-header { display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.5rem; }
+.task-session-picker { display:flex; flex-wrap:wrap; gap:.4rem; max-height:150px; overflow:auto; }
+.task-session-choice { width:300px; flex:0 1 300px; display:flex; align-items:center; flex-wrap:wrap; gap:.35rem; text-align:left; min-width:0; max-width:100%; }
+.task-session-choice > span { overflow-wrap:anywhere; }
+.task-session-choice .card-meta { flex-basis:100%; }
+.task-session-choice.selected { border-color:var(--accent); }
+.task-session-choice:hover:not(:disabled) { background:var(--bg-elevated); border-color:var(--accent); }
+.task-session-transcript > a { margin:.5rem 0; }
+.task-session-dock .session-records { height:440px; min-height:180px; max-height:65vh; }
+.task-session-dock .sessions-toolbar { align-items:flex-start; flex-wrap:wrap; }
+@media (max-width:1000px) {
+    .task-card-with-dock { display:block; }
+    .task-session-dock { border-left:0; border-top:1px solid var(--border); padding:1rem 0 0; margin-top:.75rem; }
+}
 @keyframes session-activity-spin { to { transform:rotate(360deg); } }
 @media(prefers-reduced-motion:reduce) { .session-activity-ring { animation:none; } }
 

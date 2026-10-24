@@ -78,7 +78,7 @@ draft. Workspace, subjects, creation SHA and creation time cannot be edited.
 Observation text filters update after a short pause. Clearing text, selecting a
 kind, and completing or clearing a SHA filter update immediately. Enter a full
 lowercase Git SHA; incomplete values stay local while the last completed results
-remain visible. Subject Tree and All Observations remember separate pairs of search fields; Files keeps its own search text. All Observations remains the initial mode.
+remain visible. Subject Tree and All Observations remember separate pairs of search fields; Files keeps its own search text. Subject Tree is the initial mode. An explicit view choice is remembered for this actor and workspace.
 Advanced shows the number of active filters when closed. Kind, exact subject in
 All Observations, and creation/current/history SHA filters apply live; closing Advanced retains
 them. Incomplete SHAs show associated feedback until completed or cleared.
@@ -128,6 +128,12 @@ Uncheck **Show empty projects** to require a matching task in the subtree;
 ancestors stay visible.
 Workspace group disclosure is saved globally.
 
+On task cards, **Active Agent →** opens the task’s active agents and transcript
+in a dock inside the card. Choose an agent to inspect its messages and expand
+grouped activity. Close the dock to return the card to its usual width. The dock
+also works with task extras collapsed; saved transcripts and downloads remain
+under **Evidence** in the extras.
+
 Tasks with **In Progress** status and **Blocked** parents with a running subtask
 appear first, followed by Todo, other Blocked, Done and Cancelled tasks. Within
 each group, higher priority comes first, then title; the parent's status stays Blocked.
@@ -170,3 +176,4 @@ selected workspace returns home and retains its contents. MCP has no workspace
 delete tool. The **Administration** tab requires explicit workspace admin access;
 implicit local superadmin sessions keep it hidden. Failed membership writes retain
 the form and list. Wait for the permission recheck, or use **Retry session** if it fails.
+

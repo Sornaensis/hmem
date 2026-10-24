@@ -68,6 +68,7 @@ module Feature.Observation exposing
     , viewObservationsStateWithPermission
     , viewRetainedDraft
     , refreshViewport
+    , rememberPreferences
     , updateViewport
     , projectResultRows
     , timestampSources
@@ -122,6 +123,7 @@ init =
     , preferenceValue = Preferences.empty
     , preferenceHydrated = False
     , preferencePendingDetail = False
+    , preferenceEntryEcho = Nothing
     , preferenceEntryHistory = Nothing
     , preferenceTouch = 0
     , nextPreferenceRequest = 1
@@ -134,7 +136,7 @@ init =
     , gitSha = ""
     , currentGitSha = ""
     , historyGitSha = ""
-    , requestMode = ObservationFlatMode
+    , requestMode = ObservationFacetMode
     , fileComposerOpen = False
     , advancedFiltersOpen = False
     , appliedQuery = Nothing
@@ -2355,12 +2357,12 @@ restoreBrowseAfterMatch model =
             restored =
                 model.observations.browseReturn
                     |> Maybe.withDefault
-                        { requestMode = ObservationFlatMode
+                        { requestMode = ObservationFacetMode
                         , subjectKind = model.observations.subjectKind
                         , subject = model.observations.subject
                         , selectedFacet = model.observations.selectedFacet
-                        , query = model.observations.query
-                        , subjectQuery = model.observations.subjectQuery
+                        , query = Dict.get "tree" model.observations.modeQueries |> Maybe.withDefault ""
+                        , subjectQuery = Dict.get "tree" model.observations.modeSubjectQueries |> Maybe.withDefault ""
                         , gitSha = model.observations.gitSha
                         , currentGitSha = model.observations.currentGitSha
                         , historyGitSha = model.observations.historyGitSha
@@ -4438,7 +4440,8 @@ rememberPreferences model =
         , preferencePendingDetail = False
         , preferenceEntryHistory = Nothing
         , preferenceValue = Preferences.normalize
-            { detail = state.selectedId |> Maybe.map (\observationId -> { id = observationId, occurrence = state.detailReturnTarget, mode = preferenceMode state.requestMode })
+            { modeIntent = True
+            , detail = state.selectedId |> Maybe.map (\observationId -> { id = observationId, occurrence = state.detailReturnTarget, mode = preferenceMode state.requestMode })
             , subjects = Dict.toList state.expandedSubjects |> List.filter Tuple.second |> List.map Tuple.first
             , groups = Dict.toList state.expandedMatchGroups |> List.filter Tuple.second |> List.map Tuple.first
             , paths = Set.toList state.tree.expanded, focusedPath = state.tree.focused, selectedPath = state.tree.selectedPath
@@ -4475,7 +4478,7 @@ syncPreferences previous model =
     case authorizedPreferenceOwner model of
         Nothing ->
             if state.preferenceOwner == Nothing && previous.observations.preferenceOwner == Nothing then ( model, Cmd.none ) else
-            ( updateObservation (\current -> { current | preferenceOwner = Nothing, preferenceValue = Preferences.empty, preferenceHydrated = False, preferencePendingDetail = False, preferenceEntryHistory = Nothing
+            ( updateObservation (\current -> { current | preferenceOwner = Nothing, preferenceValue = Preferences.empty, preferenceHydrated = False, preferencePendingDetail = False, preferenceEntryHistory = Nothing, preferenceEntryEcho = Nothing
                 , expandedSubjects = Dict.empty, expandedMatchGroups = Dict.empty, nextPreferenceRequest = current.nextPreferenceRequest + 1 }) model, retire )
         Just authorized ->
             case state.preferenceOwner of
@@ -4487,7 +4490,7 @@ syncPreferences previous model =
                             ( model, preferenceCommand "write" owner (Preferences.encode owner state.preferenceValue) )
                         else ( model, Cmd.none )
                     else
-                        let clean = { state | preferenceOwner = Nothing, preferenceValue = Preferences.empty, preferenceHydrated = False, preferencePendingDetail = False, preferenceEntryHistory = Nothing, expandedSubjects = Dict.empty, expandedMatchGroups = Dict.empty } in
+                        let clean = { state | preferenceOwner = Nothing, preferenceValue = Preferences.empty, preferenceHydrated = False, preferencePendingDetail = False, preferenceEntryHistory = Nothing, preferenceEntryEcho = Nothing, expandedSubjects = Dict.empty, expandedMatchGroups = Dict.empty } in
                         syncPreferences previous { model | observations = clean }
                 Nothing ->
                     ( { model | observations = { state | preferenceOwner = Just authorized, preferenceHydrated = False, nextPreferenceRequest = state.nextPreferenceRequest + 1 } }
@@ -4504,14 +4507,20 @@ hydratePreferences payload model =
                 accepted = { state | preferenceHydrated = True }
                 value = Decode.decodeValue (Decode.field "value" (Preferences.decoder owner)) payload
             in
-            if state.preferenceTouch /= owner.touch then ( { model | observations = { accepted | preferenceEntryHistory = Nothing } }, Cmd.none ) else
+            if state.preferenceTouch /= owner.touch then ( { model | observations = accepted }, Cmd.none ) else
             case value of
-                Err _ -> ( { model | observations = { accepted | preferenceEntryHistory = Nothing } }, Cmd.none )
+                Err _ ->
+                    let
+                        context = Helpers.observationUrlContext model.url
+                        explicit = state.preferenceEntryHistory /= Just (Url.toString model.url) && context.notice == Nothing && (model.url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (String.split "=" >> List.head >> Maybe.andThen Url.percentDecode) |> List.any (\key -> List.member key ["ov","oq","observation"]))
+                        ready = {model | observations = accepted}
+                    in
+                    (if explicit then rememberPreferences ready else ready, Cmd.none)
                 Ok prefs ->
                     let
                         restoredTree = let tree = accepted.tree in ObservationTree.reconcileSelection { tree | expanded = Set.fromList prefs.paths, focused = prefs.focusedPath
                             , selectedPath = if explicit || tree.revealTarget /= Nothing || tree.selectedPath /= Nothing then tree.selectedPath else prefs.selectedPath }
-                        hydrated = { accepted | preferenceValue = {prefs | selectedPath = restoredTree.selectedPath}, preferencePendingDetail = prefs.detail /= Nothing, preferenceEntryHistory = if prefs.detail == Nothing then Nothing else accepted.preferenceEntryHistory, expandedSubjects = Dict.fromList (List.map (\key -> ( key, True )) prefs.subjects)
+                        hydrated = { accepted | preferenceValue = {prefs | selectedPath = restoredTree.selectedPath, modeIntent = prefs.modeIntent || explicit, context = if explicit then Just (Helpers.encodeObservationQuery (Helpers.observationAppliedQuery accepted)) else prefs.context}, preferencePendingDetail = prefs.detail /= Nothing, preferenceEntryHistory = accepted.preferenceEntryHistory, expandedSubjects = Dict.fromList (List.map (\key -> ( key, True )) prefs.subjects)
                             , expandedMatchGroups = Dict.fromList (List.map (\key -> ( key, True )) prefs.groups)
                             , modeQueries = if explicit then Dict.union accepted.modeQueries prefs.queries else Dict.union prefs.queries accepted.modeQueries
                             , modeSubjectQueries = if explicit then Dict.union accepted.modeSubjectQueries prefs.subjectQueries else Dict.union prefs.subjectQueries accepted.modeSubjectQueries
@@ -4519,9 +4528,11 @@ hydratePreferences payload model =
                             , matchPathsInput = if accepted.matchPathsInput == "" then prefs.fileInput else accepted.matchPathsInput
                             , tree = restoredTree }
                         context = Helpers.observationUrlContext model.url
-                        explicit = model.url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (String.split "=" >> List.head >> Maybe.andThen Url.percentDecode)
-                            |> List.any (\key -> List.member key [ "ov", "oq", "ox", "observation" ])
-                        restored = if explicit || context.notice /= Nothing then Nothing else prefs.context |> Maybe.andThen Url.percentDecode |> Maybe.andThen (Decode.decodeString Helpers.observationQueryDecoder >> Result.toMaybe)
+                        ownedEntry = state.preferenceEntryHistory == Just (Url.toString model.url)
+                        explicit = not ownedEntry && (model.url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (String.split "=" >> List.head >> Maybe.andThen Url.percentDecode)
+                            |> List.any (\key -> List.member key [ "ov", "oq", "ox", "observation" ]))
+                        default = Helpers.defaultObservationQuery
+                        restored = if explicit || context.notice /= Nothing then Nothing else prefs.context |> Maybe.andThen Url.percentDecode |> Maybe.andThen (Decode.decodeString Helpers.observationQueryDecoder >> Result.toMaybe) |> Maybe.map (\query -> if not prefs.modeIntent && prefs.detail == Nothing && query == { default | requestMode = ObservationFlatMode } then default else query)
                         queryState = restored |> Maybe.map (\query ->
                             let restoredState = Helpers.restoreObservationQuery query hydrated in
                             if query == Helpers.observationAppliedQuery hydrated then restoredState else retireFilterReads restoredState) |> Maybe.withDefault hydrated
@@ -4531,7 +4542,10 @@ hydratePreferences payload model =
                         ( loaded, loadCmd ) = if restored /= Nothing then restoreRouteResults ready else ( ready, Cmd.none )
                         ( selected, selectCmd ) = restorePendingPreferences loaded
                     in
-                    ( selected, Cmd.batch [ loadCmd, selectCmd ] )
+                    if ownedEntry && restored /= Nothing then
+                        let (linked,linkCmd) = Helpers.writeObservationHistory False selected in
+                        (linked,Cmd.batch [loadCmd,selectCmd,linkCmd])
+                    else ( selected, Cmd.batch [ loadCmd, selectCmd ] )
         _ -> ( model, Cmd.none )
 
 

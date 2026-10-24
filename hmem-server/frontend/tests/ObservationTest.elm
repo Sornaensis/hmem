@@ -40,7 +40,7 @@ suite =
         , describe "bounded applied URL context" observationUrlTests
         , test "decoded detached detail survives excluded tree reconciliation while ordinary tree selection clears" <| \_ ->
             let
-                initial = Feature.Observation.init
+                initial = flatState
                 tree = ObservationTree.retire "excluded" ObservationTree.init
                     |> treeAccept "" [ { path = "docs", segment = "docs", hasChildren = True, observationCount = 1, terminals = [] } ]
                 state = { initial | requestMode = ObservationFacetMode, query = "docs/", tree = tree }
@@ -76,7 +76,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     loadedTree =
                         ObservationTree.retire "fixture" ObservationTree.init
@@ -139,7 +139,7 @@ suite =
                         fixtureObservation "loaded" "2026-01-01T00:00:00Z"
 
                     initialState =
-                        Feature.Observation.init
+                        flatState
 
                     initial =
                         { initialState | items = Dict.singleton loaded.id loaded, orderedIds = [ loaded.id ] }
@@ -169,7 +169,7 @@ suite =
                     apply mode =
                         let
                             initial =
-                                Feature.Observation.init
+                                flatState
                         in
                         Feature.Observation.applyCanonicalObservation canonical
                             { initial
@@ -1162,7 +1162,7 @@ suite =
                     state mode =
                         let
                             initial =
-                                Feature.Observation.init
+                                flatState
                         in
                         { initial
                             | items = Dict.fromList [ ( retained.id, retained ), ( deleted.id, deleted ) ]
@@ -1275,7 +1275,7 @@ suite =
                         facetFixture Api.SubjectFile "src/Main.elm" 2 "2026-01-01T00:00:00Z"
 
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     base mode =
                         { initial
@@ -1478,7 +1478,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     seeded =
                         editableModel { initial | selectedId = Just "off-page-link" }
@@ -1864,7 +1864,7 @@ suite =
                     selected =
                         let
                             initial =
-                                Feature.Observation.init
+                                flatState
                         in
                         { initial
                             | selectedId = Just "selected-observation"
@@ -1900,7 +1900,7 @@ suite =
                     afterRoute =
                         Route.handleUrlChange
                             (workspaceUrl "tab=observations&observation=direct-observation")
-                            (sameWorkspaceModel Feature.Observation.init)
+                            (sameWorkspaceModel flatState)
                             |> Tuple.first
                 in
                 [ afterRoute.activeTab == ObservationsTab
@@ -1928,7 +1928,7 @@ suite =
             \_ ->
                 let
                     empty =
-                        Feature.Observation.init
+                        flatState
 
                     repository =
                         observationWorkspace Api.Repository
@@ -1986,7 +1986,7 @@ suite =
             \_ ->
                 let
                     empty =
-                        Feature.Observation.init
+                        flatState
 
                     observation =
                         fixtureObservation "selected" "2026-01-01T00:00:00Z"
@@ -2062,7 +2062,7 @@ suite =
         , test "native discovery controls expose disclosure state and explicit search submission" <|
             \_ ->
                 let
-                    initial = Feature.Observation.init
+                    initial = flatState
                     view state = Feature.Observation.viewObservationsState TimestampDisplay.empty (observationWorkspace Api.Repository) state |> Query.fromHtml
                     opened = { initial | fileComposerOpen = True, advancedFiltersOpen = True }
                 in
@@ -2124,7 +2124,7 @@ suite =
             \_ ->
                 let
                     empty =
-                        Feature.Observation.init
+                        flatState
 
                     repository =
                         observationWorkspace Api.Repository
@@ -2154,7 +2154,7 @@ suite =
                     ranked =
                         Feature.DataLoading.mergeObservationPage 0
                             { items = [ fixtureObservation "ranked-first" "2026-03-01T00:00:00Z", fixtureObservation "ranked-second" "2025-01-01T00:00:00Z" ], hasMore = True }
-                            (Feature.Observation.startReload "workspace-1" Feature.Observation.init)
+                            (Feature.Observation.startReload "workspace-1" flatState)
 
                     unfiltered =
                         Feature.DataLoading.mergeObservationPage ranked.nextOffset
@@ -2233,7 +2233,7 @@ suite =
                         }
 
                     baseState =
-                        Feature.Observation.init
+                        flatState
 
                     state =
                         { baseState
@@ -2294,7 +2294,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     base =
                         let
@@ -2351,7 +2351,7 @@ suite =
             \_ ->
                 let
                     base =
-                        Feature.Observation.init
+                        flatState
 
                     matchState =
                         { base
@@ -2433,7 +2433,7 @@ suite =
             \_ ->
                 let
                     applied =
-                        Feature.Observation.startReload "workspace-1" Feature.Observation.init
+                        Feature.Observation.startReload "workspace-1" flatState
 
                     loaded =
                         { applied | loading = False, hasMore = True, expectedOffset = Nothing, nextOffset = 50 }
@@ -2452,7 +2452,7 @@ suite =
                         { workspaceId = "workspace-1", observationId = "A", sessionEpoch = 4, token = 3 }
 
                     base =
-                        Feature.Observation.init
+                        flatState
 
                     state =
                         { base | selectedId = Just "A", activeDetailRequest = Just finalA }
@@ -2468,7 +2468,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.startReload "workspace-1" Feature.Observation.init
+                        Feature.Observation.startReload "workspace-1" flatState
 
                     changedFilter =
                         Feature.Observation.startReload "workspace-1" { initial | query = "new query", selectedId = Just "search-only-hit", detailLoading = True }
@@ -2561,7 +2561,7 @@ suite =
                     first =
                         Feature.Observation.mergeFacetPage 0
                             { items = [ fileMain, globMain, updatedFile ], hasMore = True }
-                            Feature.Observation.init
+                            flatState
 
                     third =
                         facetFixture Api.SubjectGlob "test/**/*.elm" 2 "2026-08-28T10:00:00Z"
@@ -2589,7 +2589,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     facetState =
                         { initial
@@ -2624,7 +2624,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     exactState =
                         { initial
@@ -2688,7 +2688,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     facetModel =
                         editableModel { initial | requestMode = ObservationFacetMode }
@@ -2733,7 +2733,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     observation =
                         observationWithSubjects "applied-a"
@@ -2798,7 +2798,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     facet =
                         facetFixture Api.SubjectGlob "src/**/*.elm" 3 "2026-01-01T00:00:00Z"
@@ -2923,7 +2923,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     observation =
                         observationWithSubjects "deleted"
@@ -3308,7 +3308,7 @@ suite =
             \_ ->
                 let
                     selected =
-                        Feature.Observation.selectObservation "off-page" (editableModel Feature.Observation.init) |> Tuple.first
+                        Feature.Observation.selectObservation "off-page" (editableModel flatState) |> Tuple.first
                 in
                 case selected.observations.activeDetailRequest of
                     Nothing -> Expect.fail "Expected initial linked detail request"
@@ -3377,7 +3377,7 @@ suite =
             \_ ->
                 let
                     model =
-                        editableModel Feature.Observation.init
+                        editableModel flatState
 
                     requested =
                         Feature.Observation.update RefreshObservationResults model |> Tuple.first
@@ -3495,7 +3495,7 @@ suite =
             \_ ->
                 let
                     initial =
-                        Feature.Observation.init
+                        flatState
 
                     facet =
                         facetFixture Api.SubjectGlob "very/long/shared/**/*.elm" 123 "2026-08-30T12:00:00Z"
@@ -3801,7 +3801,7 @@ selectedObservationState : Api.Observation -> ObservationModel
 selectedObservationState observation =
     let
         initial =
-            Feature.Observation.init
+            flatState
     in
     { initial
         | items = Dict.singleton observation.id observation
@@ -4083,7 +4083,7 @@ observationUrlTests =
             [ test ("complete applied URL round-trips Unicode and reserved values in " ++ Debug.toString mode) <| \_ ->
                 let
                     query = { subjectQuery = "", requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
-                    state = Helpers.restoreObservationQuery query Feature.Observation.init
+                    state = Helpers.restoreObservationQuery query flatState
                     draft = { state | query = "unapplied secret", matchPathsInput = "unapplied path" }
                     model = editableModel draft
                     restored = Helpers.completeObservationUrl model |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.map Helpers.observationUrlContext
@@ -4092,7 +4092,7 @@ observationUrlTests =
             , test ("authorized bootstrap preserves mode and closes initial loading accounting in " ++ Debug.toString mode) <| \_ ->
                 let
                     query = { subjectQuery = "", requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
-                    original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
+                    original = editableModel (Helpers.restoreObservationQuery query flatState)
                     loading = original.dataLoading
                     initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 44 } }
                     after = Feature.DataLoading.update (GotWorkspace "workspace-1" 44 (Ok (observationWorkspace Api.Repository))) initial |> Tuple.first
@@ -4113,7 +4113,7 @@ observationUrlTests =
                 contexts |> List.all (\context -> context.query == Helpers.defaultObservationQuery && context.fragment.observationId == Nothing && context.fragment.focus == Nothing && context.notice /= Nothing) |> Expect.equal True
             , test "complete encoded URL cap accepts 4096 and rejects 4097 bytes" <| \_ ->
                 let
-                    model = editableModel Feature.Observation.init
+                    model = editableModel flatState
                     base = Helpers.observationUrl model ("&ov=1&oq=" ++ Helpers.encodeObservationQuery Helpers.defaultObservationQuery)
                     defaultQuery = Helpers.defaultObservationQuery
                     atQuery = { defaultQuery | query = String.repeat (4096 - Helpers.observationUrlBytes base) "a" }
@@ -4123,7 +4123,7 @@ observationUrlTests =
                 Expect.equal ( True, True ) ( Helpers.completeObservationUrl at |> isOk, Helpers.completeObservationUrl { model | observations = Helpers.restoreObservationQuery aboveQuery model.observations } |> isErr )
             , test "search navigation URLs validate markers and enforce the complete4096-byte budget" <| \_ ->
                 let
-                    initial = Feature.Observation.init
+                    initial = flatState
                     model = editableModel { initial | selectedId = Just "target" }
                     base = Helpers.observationSearchHistoryUrl 2147483647 model
                     query = Helpers.defaultObservationQuery
@@ -4148,7 +4148,7 @@ observationUrlTests =
                     ] ()
             , test "shell refresh hydrates missing restored detail once and keeps its request ownership" <| \_ ->
                 let
-                    state = Feature.Observation.init
+                    state = flatState
                     model = editableModel { state | selectedId = Just "off-page" }
                     first = Feature.Observation.refreshActiveResults model |> Tuple.first
                     second = Feature.Observation.refreshActiveResults first |> Tuple.first
@@ -4164,7 +4164,7 @@ observationUrlTests =
             , test "oversized own replacement proof is consumed once and does not resurrect on Back or ABA" <| \_ ->
                 let
                     query = { subjectQuery = "", requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
-                    original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
+                    original = editableModel (Helpers.restoreObservationQuery query flatState)
                     issued = Helpers.writeObservationHistory True original |> Tuple.first
                     url = issued.observations.pendingExcludedLink |> Maybe.andThen (.url >> Url.fromString) |> Maybe.withDefault original.url
                     consumed = Route.handleUrlChange url issued |> Tuple.first
@@ -4184,7 +4184,7 @@ observationUrlTests =
             , test "same applied route preserves unapplied controls and unchanged request identity" <| \_ ->
                 let
                     query = { subjectQuery = "", requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
-                    state = Helpers.restoreObservationQuery query Feature.Observation.init
+                    state = Helpers.restoreObservationQuery query flatState
                     model = editableModel { state | query = "unapplied", requestGeneration = 99, selectedId = Nothing }
                     url = Helpers.completeObservationUrl model |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault model.url
                     after = Route.handleUrlChange url model |> Tuple.first
@@ -4192,7 +4192,7 @@ observationUrlTests =
                 Expect.equal ( "unapplied", 99, Just query ) (after.observations.query, after.observations.requestGeneration, after.observations.appliedQuery)
             , test "changed URL query fences old pages without mutating the protected owner" <| \_ ->
                 let
-                    initialState = Feature.Observation.init
+                    initialState = flatState
                     selected = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
                     original = editableModel ({ initialState | selectedId = Just selected.id, selectedDetail = Just selected, items = Dict.singleton selected.id selected, orderedIds = [ selected.id ] }) |> Feature.Observation.update StartObservationEdit |> Tuple.first |> Feature.Observation.update (SetObservationDraft "protected URL draft") |> Tuple.first
                     old = Feature.Observation.update ApplyObservationFilters original |> Tuple.first
@@ -4216,7 +4216,7 @@ observationUrlReviewTests =
             [ "unauthorized", "session401", "token", "read-regrant" ] |> List.map (\boundary ->
                 test ("fresh URL admission after " ++ boundary ++ " restores " ++ Debug.toString mode ++ " with no retired private state or stale callback") <| \_ ->
                     let
-                        state = Helpers.restoreObservationQuery (urlReviewQuery mode) Feature.Observation.init
+                        state = Helpers.restoreObservationQuery (urlReviewQuery mode) flatState
                         selected = fixtureObservation "off-page" "2026-01-01T00:00:00Z"
                         beforeDetail = Feature.Observation.selectObservation selected.id (editableModel { state | selectedId = Just selected.id }) |> Tuple.first
                         oldRequest = beforeDetail.observations.activeDetailRequest |> Maybe.withDefault { workspaceId = "workspace-1", observationId = selected.id, sessionEpoch = beforeDetail.sessionRequestEpoch, token = 0 }
@@ -4256,7 +4256,7 @@ observationUrlReviewTests =
                     [ True, False ] |> List.map (\success ->
                         test ("superseded tagged " ++ Debug.toString initialMode ++ " bootstrap settles once before " ++ Debug.toString targetMode ++ " and old " ++ (if success then "success" else "error")) <| \_ ->
                             let
-                                original = editableModel (Helpers.restoreObservationQuery (urlReviewQuery initialMode) Feature.Observation.init)
+                                original = editableModel (Helpers.restoreObservationQuery (urlReviewQuery initialMode) flatState)
                                 loading = original.dataLoading
                                 initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 99 } }
                                 bootstrapped = Feature.DataLoading.update (GotWorkspace "workspace-1" 99 (Ok (observationWorkspace Api.Repository))) initial |> Tuple.first
@@ -4282,7 +4282,7 @@ observationUrlReviewTests =
                     )))) ++
             [ test "initial obligation cannot settle another workspace, session, token or superseding load" <| \_ ->
                 let
-                    original = editableModel Feature.Observation.init
+                    original = editableModel flatState
                     loading = original.dataLoading
                     initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 91 } }
                     bootstrapped = Feature.DataLoading.update (GotWorkspace "workspace-1" 91 (Ok (observationWorkspace Api.Repository))) initial |> Tuple.first
@@ -4299,7 +4299,7 @@ observationUrlReviewTests =
             , test "search Observation capture retains selection context and bounded excluded URLs without changing filters" <| \_ ->
                 let
                     selected = fixtureObservation "a" "2026-01-01T00:00:00Z"
-                    state = Feature.Observation.init
+                    state = flatState
                     original = editableModel { state | selectedId = Just selected.id, selectedDetail = Just selected }
                     jump id source =
                         let pending = Feature.Search.update (NavigateToSearchResult "observation" id) source |> Tuple.first in
@@ -4350,7 +4350,7 @@ pendingReturnModel : Model
 pendingReturnModel =
     let
         value = fixtureObservation "curated" "2026-01-01T00:00:00Z"
-        initial = Feature.Observation.init
+        initial = flatState
         before = editableModel initial
         loaded = editableModel { initial | items = Dict.singleton value.id value, orderedIds = [ value.id ] }
         projected = Feature.Observation.refreshViewport before ( loaded, Cmd.none ) |> Tuple.first
@@ -4531,7 +4531,7 @@ observationProjectionTests =
         let
             observations = List.range 0 149 |> List.map (\number -> fixtureObservation (String.fromInt number) "2026-01-01T00:00:00Z")
             ids = List.map .id observations
-            initial = Feature.Observation.init
+            initial = flatState
             loaded = { initial | items = observations |> List.map (\value -> ( value.id, value )) |> Dict.fromList, orderedIds = ids }
             cardIds state = Feature.Observation.projectResultRows state |> Array.toList |> List.filterMap (\row -> case row of
                 ObservationCardRow _ value -> Just value.id
@@ -4541,7 +4541,7 @@ observationProjectionTests =
         Expect.equal [ ids, ids ] [ cardIds loaded, cardIds { loaded | requestMode = ObservationExactSubjectMode, tree = treeWithItems observations } ]
     , test "ordered match paths and overlapping subject groups preserve every canonical contextual duplicate through collapse" <| \_ ->
         let
-            initial = Feature.Observation.init
+            initial = flatState
             value = fixtureObservation "repeated" "2026-01-01T00:00:00Z"
             subjects = [ { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, { subjectKind = Api.SubjectFile, subject = "src/Shared.elm" } ]
             paths = [ "src/Main.elm", "src/View.elm" ]
@@ -4562,7 +4562,7 @@ observationProjectionTests =
     , test "draft input reuses projection and layout revision while canonical content changes retire origin geometry" <| \_ ->
         let
             value = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
-            initial = Feature.Observation.init
+            initial = flatState
             loaded = { initial | items = Dict.singleton value.id value, orderedIds = [ value.id ], selectedId = Just value.id, selectedDetail = Just value }
             before = editableModel initial
             projected = Feature.Observation.refreshViewport before ( editableModel loaded, Cmd.none ) |> Tuple.first
@@ -4602,7 +4602,7 @@ structuredCopyTests =
         case ( decode relationship, decode ordinary ) of
             ( Ok dependency, Ok title ) ->
                 let
-                    base = editableModel Feature.Observation.init
+                    base = editableModel flatState
                     session = editorSession
                     admin = { session | workspace = Just { workspaceId = "workspace-1", role = Just "admin", canRead = True, canEdit = True, canAdmin = True } }
                     audit = Feature.AuditLog.init
@@ -4626,7 +4626,7 @@ structuredCopyTests =
             Err _ -> Expect.fail "observation audit fixture did not decode"
             Ok entry ->
                 let
-                    base = editableModel Feature.Observation.init
+                    base = editableModel flatState
                     audit = Feature.AuditLog.init
                     model = { base | auditLog = { audit | entityHistory = Dict.singleton "observation-1" [ entry ], historyExpanded = Dict.singleton "observation-1" True } }
                     view = Feature.AuditLog.viewEntityHistory model "observation" "observation-1" |> Query.fromHtml
@@ -4852,7 +4852,7 @@ revisionTests =
             ] ()
     , test "three SHA predicates round-trip independently through links and API requests" <| \_ ->
         let
-            initial = Feature.Observation.init
+            initial = flatState
             state = { initial | gitSha = fullSha, currentGitSha = String.repeat 40 "b", historyGitSha = String.repeat 40 "c" }
             model = editableModel state
             url = Helpers.observationHistoryUrl model
@@ -4884,3 +4884,10 @@ revisionProvenance sequence sha =
     , contentDigest = Just (String.repeat 64 "a"), recordedAt = "2026-01-01T00:00:00Z"
     , actorType = Just "user", actorId = Just "reviewer", actorLabel = Just "Reviewer", botIdentity = Nothing
     }
+
+
+{-| Flat-list regression fixtures choose All explicitly; production entry defaults are tested separately. -}
+flatState : ObservationModel
+flatState =
+    let initial = Feature.Observation.init in
+    { initial | requestMode = ObservationFlatMode }

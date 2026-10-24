@@ -19,7 +19,8 @@ import Url
 suite : Test.Test
 suite =
     describe "Sessions production wire contract"
-        [ test "session and authority changes restore the compact linked-task default" <| \_ ->
+        [ describe "card-owned dock authority" dockTests
+        , test "session and authority changes restore the compact linked-task default" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
                 state=entered.sessions
@@ -161,7 +162,7 @@ suite =
                 (ready,bounded) = List.foldl advance (model,True) (List.range 1 100)
                 retired = Sessions.reconcile ({ready | auth={status=AuthRequired,mode=Nothing}},Cmd.none) |> Tuple.first
             in
-            Expect.equal {pages=44,hints=22,bounded=True,retiredPages=0,retiredHints=0}
+            Expect.equal {pages=22,hints=22,bounded=True,retiredPages=0,retiredHints=0}
                 {pages=Dict.size ready.sessions.taskPages,hints=Dict.size ready.sessions.taskHints,bounded=bounded,retiredPages=Dict.size retired.sessions.taskPages,retiredHints=Dict.size retired.sessions.taskHints}
         , test "active and evidence cursors remain independent between tasks" <| \_ ->
             let
@@ -208,7 +209,7 @@ suite =
                 downloading=Sessions.reconcile ({entered | sessions={state | archive=Just archive,nextOperation=2}},Cmd.none) |> Tuple.first
                 request=Dict.values downloading.sessionDelivery.physical |> List.head
                 cancelled=Sessions.update SessionsCancelSave downloading |> Sessions.reconcile |> Tuple.first
-                completed=request |> Maybe.map (\owned -> Sessions.update (SessionsBridgeEvent (Encode.object [("kind",Encode.string "archive-http"),("stamp",Encode.string state.stamp),("operation",Encode.int 1),("request",Encode.int owned.id),("status",Encode.int 0)])) cancelled |> Tuple.first) |> Maybe.withDefault cancelled
+                completed=request |> Maybe.map (\owned -> Sessions.update (SessionsBridgeEvent (Encode.object [("kind",Encode.string "archive-http"),("stamp",Encode.string state.downloadStamp),("operation",Encode.int 1),("request",Encode.int owned.id),("status",Encode.int 0)])) cancelled |> Tuple.first) |> Maybe.withDefault cancelled
             in
             Expect.equal (1,1,0) (Dict.size downloading.sessionDelivery.physical,Dict.size cancelled.sessionDelivery.physical,Dict.size completed.sessionDelivery.physical)
         , test "binary401 retires current authority while stale-token errors release only their old slot" <| \_ ->
@@ -217,7 +218,7 @@ suite =
                 state=entered.sessions
                 downloading=Sessions.reconcile ({entered | sessions={state | archive=Just (SessionArchiveOperation 1 workspace "Task" "waiting"),nextOperation=2}},Cmd.none) |> Tuple.first
                 id=Dict.keys downloading.sessionDelivery.physical |> List.head |> Maybe.withDefault -1
-                event=SessionsBridgeEvent (Encode.object [("kind",Encode.string "archive-http"),("stamp",Encode.string state.stamp),("operation",Encode.int 1),("request",Encode.int id),("status",Encode.int 401)])
+                event=SessionsBridgeEvent (Encode.object [("kind",Encode.string "archive-http"),("stamp",Encode.string state.downloadStamp),("operation",Encode.int 1),("request",Encode.int id),("status",Encode.int 401)])
                 current=Sessions.update event downloading |> Tuple.first
                 stale=Sessions.update event {downloading | sessionRequestEpoch=downloading.sessionRequestEpoch+1} |> Tuple.first
             in
@@ -227,7 +228,7 @@ suite =
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
                 state=entered.sessions
                 cancelled={entered | sessions={state | archive=Nothing,save=Nothing,nextOperation=2}}
-                failed=Sessions.update (SessionsBridgeEvent (Encode.object [("kind",Encode.string "archive-error"),("stamp",Encode.string state.stamp),("operation",Encode.int 1),("code",Encode.string "writer_cleanup_failed")])) cancelled |> Tuple.first
+                failed=Sessions.update (SessionsBridgeEvent (Encode.object [("kind",Encode.string "archive-error"),("stamp",Encode.string state.downloadStamp),("operation",Encode.int 1),("code",Encode.string "writer_cleanup_failed")])) cancelled |> Tuple.first
             in
             Expect.equal True failed.sessions.saveBlocked
         ]
@@ -261,3 +262,80 @@ sessionModel =
 canonicalPage : String
 canonicalPage =
     """{"items":[{"committed_bytes":92,"committed_records":2,"created_at":"2026-10-23T20:46:19.453875Z","creator_actor_id":"43db6893-cc92-4daa-bcf9-51e13c444501","creator_actor_label":"Sandbox Superadmin","creator_actor_type":"user","ends_with_newline":true,"format_label":"Provider-neutral JSONL","id":"4eccfa7f-e68c-41fe-8598-eb1533152190","last_seen_at":"2026-10-23T20:46:19.470361Z","revision":1,"state":"active","workspace_id":"f96e817f-9981-4178-8611-37a4e42b0896"}]}"""
+
+
+
+dockFixture : Model
+dockFixture =
+    let
+        base = sessionModel
+        loading = base.dataLoading
+        entered = Sessions.reconcile ({base | activeTab=ProjectsTab,dataLoading={loading | visibleDetailDemand=Just (Set.empty,Set.fromList ["one","two"])}},Cmd.none) |> Tuple.first
+        state = entered.sessions
+        page = Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.withDefault {items=[],nextCursor=Nothing}
+        second = page.items |> List.map (\session -> {session | id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})
+        all = {page | items=page.items ++ second}
+        cached = {result=Ok all,epoch=entered.sessionDelivery.listInvalidation,cursor=Nothing}
+    in {entered | tasks=Dict.fromList (List.map (\id -> (id,{id=id,workspaceId=workspace,projectId=Nothing,parentId=Nothing,title=id,description=Nothing,status=Api.InProgress,priority=1,completedAt=Nothing,dependencyCount=0,memoryLinkCount=0,createdAt="",updatedAt=""})) ["one","two"]), sessionDelivery=List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage all)) delivery) entered.sessionDelivery (Dict.values entered.sessionDelivery.physical), sessions={state | taskPages=Dict.fromList [("active:one",cached),("active:two",cached)],taskHints=Dict.fromList [("one",{active=True,error=False,epoch=entered.sessionDelivery.listInvalidation}),("two",{active=True,error=False,epoch=entered.sessionDelivery.listInvalidation})]}}
+
+
+dockTests : List Test.Test
+dockTests =
+    [ test "invalidated membership cannot admit a new viewer or manually select a stale card" <| \_ ->
+        let
+            initial = dockFixture
+            stale = {initial | sessionDelivery=Delivery.invalidateLists workspace initial.sessionDelivery}
+            opened = Sessions.update (SessionsToggleDock "one") stale |> Sessions.reconcile |> Tuple.first
+            admitted = Sessions.update (SessionsToggleDock "one") initial |> Sessions.reconcile |> Tuple.first
+            refreshed = {admitted | sessionDelivery=Delivery.invalidateLists workspace admitted.sessionDelivery}
+            attempted = Sessions.update (SessionsSelectDock "one" "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") refreshed |> Sessions.reconcile |> Tuple.first
+            metadataDemand current = List.any (\(_,target) -> case target of
+                Delivery.SessionMetadata _ -> True
+                Delivery.SessionWindow _ _ _ _ -> True
+                _ -> False) current.sessions.owned
+        in Expect.equal {opened=Nothing,demand=False,admitted=Just sessionId,attempted=Just sessionId}
+            {opened=opened.sessions.selected,demand=metadataDemand opened,admitted=admitted.sessions.selected,attempted=attempted.sessions.selected}
+    , test "unmount and authority retirement close the dock and reject old viewer callbacks while physical admissions remain" <| \_ ->
+        let
+            opened = Sessions.update (SessionsToggleDock "one") dockFixture |> Sessions.reconcile |> Tuple.first
+            state = opened.sessions
+            loading = opened.dataLoading
+            withRows = {opened | sessions={state | rows=[sampleRecord],pending=True}}
+            unmounted = Sessions.reconcile ({withRows | dataLoading={loading | visibleDetailDemand=Just (Set.empty,Set.empty)}},Cmd.none) |> Tuple.first
+            missing = Sessions.reconcile ({withRows | tasks=Dict.remove "one" withRows.tasks,focus={focused | focusedEntity=Just ("task","one")}},Cmd.none) |> Tuple.first
+            focused = withRows.focus
+            retired = Sessions.reconcile ({withRows | sessionRequestEpoch=withRows.sessionRequestEpoch+1},Cmd.none) |> Tuple.first
+            event = SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string state.stamp),("generation",Encode.int state.generation),("through",Encode.int 32),("rows",Encode.list identity [])])
+            late = Sessions.update event unmounted |> Tuple.first
+        in Expect.equal {dock=Nothing,selected=Nothing,rows=[],retired=Nothing,missing=Nothing,physical=Dict.size withRows.sessionDelivery.physical}
+            {dock=late.sessions.taskPanel,selected=late.sessions.selected,rows=late.sessions.rows,retired=retired.sessions.taskPanel,missing=missing.sessions.taskPanel,physical=Dict.size unmounted.sessionDelivery.physical}
+    , test "dock selection close and task switches preserve Evidence acquisition; full Sessions selection still retires it" <| \_ ->
+        let
+            initial = dockFixture
+            state = initial.sessions
+            operation = SessionArchiveOperation 1 "one" "Evidence" "picking"
+            picking = {initial | sessions={state | archive=Just operation,nextOperation=2}}
+            opened = Sessions.update (SessionsToggleDock "one") picking |> Sessions.reconcile |> Tuple.first
+            switched = Sessions.update (SessionsToggleDock "two") opened |> Sessions.reconcile |> Tuple.first
+            closed = Sessions.update (SessionsToggleDock "two") switched |> Sessions.reconcile |> Tuple.first
+            global = Sessions.reconcile ({closed | activeTab=SessionsTab},Cmd.none) |> Tuple.first
+        in Expect.equal ([Just operation,Just operation,Just operation],Nothing,True)
+            (List.map (.sessions >> .archive) [opened,switched,closed],global.sessions.archive,opened.sessions.downloadStamp==closed.sessions.downloadStamp)
+    , test "same session in another card and full view has distinct owner stamps" <| \_ ->
+        let
+            first = Sessions.update (SessionsToggleDock "one") dockFixture |> Sessions.reconcile |> Tuple.first
+            second = Sessions.update (SessionsToggleDock "two") first |> Sessions.reconcile |> Tuple.first |> settleDockPages |> (\current -> Sessions.reconcile (current,Cmd.none) |> Tuple.first)
+            full = Sessions.reconcile ({second | activeTab=SessionsTab},Cmd.none) |> Tuple.first
+        in Expect.equal {first=Just sessionId,second=Just sessionId,card=True,full=True}
+            {first=first.sessions.selected,second=second.sessions.selected,card=first.sessions.stamp/=second.sessions.stamp,full=second.sessions.stamp/=full.sessions.stamp}
+    ]
+
+
+settleDockPages : Model -> Model
+settleDockPages current =
+    let
+        page = Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.withDefault {items=[],nextCursor=Nothing}
+        settle request delivery = case request.target of
+            Delivery.TaskSessionsFiltered _ _ _ -> Delivery.settle request.id True (Ok (Delivery.SessionsPage page)) delivery
+            _ -> delivery
+    in {current | sessionDelivery=List.foldl settle current.sessionDelivery (Dict.values current.sessionDelivery.physical)}

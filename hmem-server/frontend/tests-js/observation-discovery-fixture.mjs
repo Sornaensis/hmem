@@ -99,7 +99,7 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
     finally { receipt.done = true }
   })
   return { ...h, receipts, sha,
-    async start() { await h.page.goto(h.origin + '/workspace/' + fixture.workspace.id + '#tab=observations'); await h.page.locator('#observation-panel').waitFor(); await this.idle() },
+    async start() { await h.page.goto(h.origin + '/workspace/' + fixture.workspace.id + '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(['flat','',null,'','',null,null,[],'','','']))); await h.page.locator('#observation-panel').waitFor(); await this.idle() },
     async idle() { await h.page.waitForFunction(()=>!document.querySelector('.observation-filter-pending') || !!document.querySelector('#observation-filter-validation')); await h.idle(); await h.bounded((async () => { while (receipts.some(value => !value.done)) await h.page.waitForTimeout(20) })(), 10000, 'Discovery HTTP quiet'); assert.deepEqual(h.errors, []) }
   }
 }

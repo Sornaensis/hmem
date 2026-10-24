@@ -245,7 +245,7 @@ replaceFragment model =
 
 defaultObservationQuery : ObservationAppliedQuery
 defaultObservationQuery =
-    { requestMode = ObservationFlatMode, query = "", subjectQuery = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
+    { requestMode = ObservationFacetMode, query = "", subjectQuery = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
 
 
 observationAppliedQuery : ObservationModel -> ObservationAppliedQuery

@@ -58,7 +58,7 @@ function bridgeFixture(picker) {
   let incoming,click
   const events=[],app={ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(value){events.push(value)}}}}
   installSessionBridge(app,{document:{addEventListener(name,fn){if(name==='click')click=fn}},window:{showSaveFilePicker:picker},now:()=>0})
-  return {events,configure(stamp,nextOperation=1){incoming({stamp,generation:0,reset:null,chunk:null,saveChunk:null,saveOperation:null,nextOperation,heartbeats:[]})},click(stamp,operation=1){
+  return {events,configure(stamp,nextOperation=1,extra={}){incoming({stamp,generation:0,reset:null,chunk:null,saveChunk:null,saveOperation:null,nextOperation,heartbeats:[],...extra})},click(stamp,operation=1){
     const config={stamp,operation,session:session(Buffer.from('true\n'))},button={disabled:false,dataset:{sessionSave:JSON.stringify(config)}}
     click({target:{closest(){return button}},preventDefault(){}})
   }}
@@ -153,4 +153,27 @@ test('binary status failures preserve401/403 and authority retirement aborts an 
  const bridge=binaryBridge(async(_url,{signal})=>{signal.addEventListener('abort',()=>{aborted=true;controller.error(Error('aborted'))});return{response:new Response(new ReadableStream({start(value){controller=value}}),{headers:{'Content-Type':'application/zip'}}),isCurrent:()=>true}})
  bridge.click();await flush();await flush();bridge.start();await flush();bridge.command({stamp:'new-scope',nextOperation:2});for(let i=0;i<5;i++)await flush()
  assert.equal(aborted,true);assert.equal(bridge.downloads.length,0);assert.ok(bridge.events.some(event=>event.kind==='archive-http'&&event.stamp==='scope'&&event.status===0))
+})
+
+
+test('card viewer switches preserve pending Evidence acquisition while a full-session download owner switch retires it',async()=>{
+ const acquisition=deferred();let aborted=0,picks=0
+ const bridge=bridgeFixture(()=>{picks++;return Promise.resolve({createWritable:()=>acquisition.promise})})
+ bridge.configure('task-one',1,{downloadStamp:'workspace-evidence'})
+ bridge.click('workspace-evidence');await flush()
+ for(const owner of ['task-two','closed','task-one'])bridge.configure(owner,2,{downloadStamp:'workspace-evidence',saveOperation:1})
+ acquisition.resolve({async write(){},async close(){},async abort(){aborted++}});await flush();await flush()
+ assert.equal(picks,1);assert.equal(aborted,0);assert.ok(bridge.events.some(event=>event.kind==='save-ready'&&event.stamp==='workspace-evidence'))
+ bridge.configure('full-session-b',2,{downloadStamp:'full-session-b'})
+ await flush();await flush();assert.equal(aborted,1)
+})
+
+test('a task Evidence ZIP body survives dock viewer changes and still returns its exact physical receipt',async()=>{
+ let body
+ const bridge=binaryBridge(async()=>({response:new Response(new ReadableStream({start(value){body=value}}),{headers:{'Content-Type':'application/zip'}}),isCurrent:()=>true}))
+ bridge.command({stamp:'task-one',downloadStamp:'scope'});bridge.click();await flush();await flush();bridge.start();await flush()
+ bridge.command({stamp:'task-two',downloadStamp:'scope',nextOperation:2,saveOperation:1});bridge.command({stamp:'closed',downloadStamp:'scope',nextOperation:2,saveOperation:1})
+ const bytes=new Uint8Array([80,75,1,2]);body.enqueue(bytes);body.close();for(let i=0;i<8;i++)await flush()
+ assert.equal(bridge.downloads.length,1);assert.deepEqual(new Uint8Array(await bridge.downloads[0].arrayBuffer()),bytes)
+ assert.ok(bridge.events.some(event=>event.kind==='archive-http'&&event.stamp==='scope'&&event.request===7&&event.status===200))
 })

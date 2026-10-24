@@ -90,6 +90,8 @@ route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
         SessionsNextPage _ -> Ok (Feature.Sessions.update msg model)
+        SessionsToggleDock _ -> Ok (Feature.Sessions.update msg model)
+        SessionsSelectDock _ _ -> Ok (Feature.Sessions.update msg model)
         SessionsPreviousPage -> Ok (Feature.Sessions.update msg model)
         SessionsLinkedPage _ -> Ok (Feature.Sessions.update msg model)
         SessionsShowAllLinkedTasks -> Ok (Feature.Sessions.update msg model)

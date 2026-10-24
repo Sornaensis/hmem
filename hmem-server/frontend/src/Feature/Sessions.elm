@@ -11,7 +11,7 @@ import Feature.WebSocket as WebSocket
 import Feature.DataLoading as DataLoading
 import Html exposing (..)
 import Html.Attributes exposing (attribute, class, disabled, href, tabindex, value)
-import Html.Events exposing (onClick, onInput)
+import Html.Events exposing (onClick, onInput, stopPropagationOn)
 import Html.Keyed as Keyed
 import Json.Decode as Decode
 import Http
@@ -87,9 +87,18 @@ reconcile ( model, command ) =
     let
         old = model.sessions
         workspace = if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model && (model.selectedWorkspaceId |> Maybe.map (\ws -> model.page == WorkspacePage ws) |> Maybe.withDefault False) then model.selectedWorkspaceId else Nothing
-        selected = if workspace /= Nothing && model.activeTab == SessionsTab then selectedFromUrl model else Nothing
-        taskPanel = if workspace /= Nothing && model.activeTab == ProjectsTab then model.focus.focusedEntity |> Maybe.andThen (\(kind,id) -> if kind == "task" && Dict.member id model.tasks then Just id else Nothing) else Nothing
-        stamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", String.fromInt model.sessionDelivery.retirement, Maybe.withDefault "" selected])
+        taskPanel = if workspace /= Nothing && old.workspace == workspace && old.epoch == model.sessionRequestEpoch && model.activeTab == ProjectsTab then old.taskPanel |> Maybe.andThen (\task -> if Dict.member task model.tasks && List.member task (mountedTasks model) then Just task else Nothing) else Nothing
+        dockSessions = taskPanel |> Maybe.andThen (taskPage False (Maybe.withDefault "" workspace) model) |> Maybe.map (.items >> List.filter (\session -> session.state == Api.SessionActive)) |> Maybe.withDefault []
+        currentDockSessions = List.filter (effectiveActive (Maybe.withDefault "" workspace) model) dockSessions
+        freshDockPage = taskPanel |> Maybe.andThen (freshTaskPage False (Maybe.withDefault "" workspace) model)
+        freshDockSessions = freshDockPage |> Maybe.map (.items >> List.filter (effectiveActive (Maybe.withDefault "" workspace) model)) |> Maybe.withDefault []
+        selected = if workspace /= Nothing && model.activeTab == SessionsTab then selectedFromUrl model else if taskPanel /= Nothing then
+            if freshDockPage /= Nothing then (List.filter (\session -> Just session.id == old.selected) freshDockSessions ++ freshDockSessions) |> List.head |> Maybe.map .id
+            else List.filter (\session -> Just session.id == old.selected) currentDockSessions |> List.head |> Maybe.map .id
+            else Nothing
+        stamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", String.fromInt model.sessionDelivery.retirement, Maybe.withDefault "" selected, Maybe.withDefault "" taskPanel])
+        downloadStamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", String.fromInt model.sessionDelivery.retirement, if model.activeTab == SessionsTab then Maybe.withDefault "" selected else ""])
+        downloadChanged = old.downloadStamp /= downloadStamp
         taskFilter = if workspace /= Nothing && model.activeTab == SessionsTab then urlId "task" model else Nothing
         projectFilter = if workspace /= Nothing && model.activeTab == SessionsTab then urlId "project" model else Nothing
         taskIds = if workspace /= Nothing && model.activeTab == ProjectsTab then mountedTasks model else []
@@ -119,8 +128,8 @@ reconcile ( model, command ) =
             _ -> Nothing)
         hintTasks = (pendingHintTasks ++ (List.filter (\id -> not (Dict.member id hints)) rotation ++ List.filter (\id -> Dict.member id hints && unresolved id) rotation)) |> List.foldl (\id ids -> if List.member id ids then ids else ids ++ [id]) [] |> List.take 2
         nextRotation = List.filter (\id -> not (List.member id hintTasks)) rotation ++ hintTasks
-        expandedTasks = List.filter (\id -> Just id == taskPanel || Dict.get id model.cards.expandedCards == Just True) taskIds
-        sectionTargets = expandedTasks |> List.concatMap (\task -> [sectionTarget False model task,sectionTarget True model task]) |> List.take 64
+        expandedTasks = List.filter (\id -> Dict.get id model.cards.expandedCards == Just True) taskIds
+        sectionTargets = ((taskPanel |> Maybe.map (sectionTarget False model >> List.singleton) |> Maybe.withDefault []) ++ List.map (sectionTarget True model) expandedTasks) |> List.take 64
         sectionIdentity target = case target of
             Delivery.TaskSessionsFiltered task filters _ -> sectionKey (filters.state == "terminated") task
             _ -> ""
@@ -145,14 +154,14 @@ reconcile ( model, command ) =
             if List.member target sectionTargets && (resource ws target model |> Maybe.map (\entry -> entry.error == Nothing && entry.dirty /= entry.settled) |> Maybe.withDefault False) then Just target else Nothing)
         sectionReads = (sectionPending ++ List.filter (\target -> not (Dict.member (sectionIdentity target) pages)) orderedSections ++ List.filter sectionUnresolved orderedSections)
             |> List.foldl (\target targets -> if List.member target targets then targets else targets ++ [target]) [] |> List.take 12
-        withPanel = { filtered | taskPanel = taskPanel, taskHints = hints, hintOrder = nextRotation, taskPages = pages, sectionOrder = List.map sectionIdentity (List.filter (\target -> not (List.member target sectionReads)) orderedSections ++ sectionReads) }
-        contextChanged = reset || old.selected /= selected
+        withPanel = { filtered | taskPanel = taskPanel, downloadStamp = downloadStamp, taskHints = hints, hintOrder = nextRotation, taskPages = pages, sectionOrder = List.map sectionIdentity (List.filter (\target -> not (List.member target sectionReads)) orderedSections ++ sectionReads) }
+        contextChanged = reset || old.selected /= selected || old.taskPanel /= taskPanel
         retired =
             if old.stamp == stamp then withPanel
             else if contextChanged || old.following then
-                { withPanel | stamp = stamp, generation = old.generation + 1, start = Nothing, offset = 0, end = 0, following = if contextChanged then True else old.following, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, save = Nothing, archive = Nothing, heartbeats = Dict.empty, saveMessage = if old.save /= Nothing || old.archive /= Nothing then "Save cancelled because its session or authority changed." else old.saveMessage }
+                { withPanel | stamp = stamp, generation = old.generation + 1, start = Nothing, offset = 0, end = 0, following = if contextChanged then True else old.following, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, save = if downloadChanged then Nothing else old.save, archive = if downloadChanged then Nothing else old.archive, heartbeats = Dict.empty, saveMessage = if downloadChanged && (old.save /= Nothing || old.archive /= Nothing) then "Save cancelled because its authority changed." else old.saveMessage }
             else
-                { withPanel | stamp = stamp, generation = old.generation + 1, pending = False, loadWindow = False, save = Nothing, archive = Nothing, heartbeats = Dict.empty, saveMessage = if old.save /= Nothing || old.archive /= Nothing then "Save cancelled during canonical resynchronization." else old.saveMessage }
+                { withPanel | stamp = stamp, generation = old.generation + 1, pending = False, loadWindow = False, save = if downloadChanged then Nothing else old.save, archive = if downloadChanged then Nothing else old.archive, heartbeats = Dict.empty, saveMessage = if downloadChanged && (old.save /= Nothing || old.archive /= Nothing) then "Save cancelled during canonical resynchronization." else old.saveMessage }
         metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.andThen (\value -> case value of
             Delivery.Metadata session -> Just session
             _ -> Nothing)) workspace selected |> Maybe.withDefault Nothing
@@ -173,7 +182,7 @@ reconcile ( model, command ) =
         archiveTarget = Maybe.map2 (\ws archive -> (ws,Delivery.TaskEvidenceArchive archive.task archive.operation)) workspace current.archive |> Maybe.andThen (\target -> current.archive |> Maybe.andThen (\archive -> if archive.phase == "waiting" then Just target else Nothing))
         desired = workspace |> Maybe.map (\ws ->
             (if model.activeTab == SessionsTab then [(ws,listTarget current),(ws,facetTarget "projects" current),(ws,facetTarget "tasks" current)] else []) ++
-            (selected |> Maybe.map (\id -> [(ws,Delivery.SessionMetadata id),(ws,Delivery.SessionTasks id current.linksCursor)]) |> Maybe.withDefault []) ++
+            (selected |> Maybe.map (\id -> [(ws,Delivery.SessionMetadata id)] ++ (if model.activeTab == SessionsTab then [(ws,Delivery.SessionTasks id current.linksCursor)] else [])) |> Maybe.withDefault []) ++
             (archiveTarget |> Maybe.map List.singleton |> Maybe.withDefault []) ++
             (saveTarget |> Maybe.map List.singleton |> Maybe.withDefault []) ++
             (List.map (\target -> (ws,target)) (List.take (if current.archive /= Nothing || current.save /= Nothing then 10 else 12) sectionReads)) ++
@@ -212,6 +221,7 @@ reconcile ( model, command ) =
             _ -> []) |> Maybe.withDefault []) |> List.take 52
         bridge = Ports.sessionBridgeCommand (Encode.object
             [ ("stamp",Encode.string stamp)
+            , ("downloadStamp",Encode.string downloadStamp)
             , ("generation",Encode.int current.generation)
             , ("reset",viewerReset current |> Maybe.map Encode.int |> Maybe.withDefault Encode.null)
             , ("follow",Encode.bool current.following)
@@ -244,6 +254,12 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     let state = model.sessions in
     case msg of
+        SessionsToggleDock task ->
+            if model.activeTab /= ProjectsTab || not (Dict.member task model.tasks) || not (List.member task (mountedTasks model)) || (state.taskPanel /= Just task && not (taskActive (Maybe.withDefault "" state.workspace) model task)) then (model,Cmd.none)
+            else ({model | sessions = {state | taskPanel = if state.taskPanel == Just task then Nothing else Just task, selected = Nothing, following = True}},Cmd.none)
+        SessionsSelectDock task id ->
+            if state.taskPanel /= Just task || not (freshTaskPage False (Maybe.withDefault "" state.workspace) model task |> Maybe.map (.items >> List.any (\session -> session.id == id && effectiveActive (Maybe.withDefault "" state.workspace) model session)) |> Maybe.withDefault False) then (model,Cmd.none)
+            else ({model | sessions = {state | selected = Just id, following = True}},Cmd.none)
         SessionsNextPage cursor ->
             ( { model | sessions = { state | cursor = Just cursor, previous = List.take 16 (state.cursor :: state.previous) } }, Cmd.none )
         SessionsPreviousPage ->
@@ -365,7 +381,7 @@ receiveSave value model =
         requestedId = Decode.decodeValue (Decode.at ["session","id"] Decode.string) value |> Result.toMaybe
         metadata = availableSessions model |> List.filter (\session -> Just session.id == requestedId) |> List.head
     in
-    if stamp /= state.stamp || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then (model,Cmd.none)
+    if stamp /= state.downloadStamp || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then (model,Cmd.none)
     else if kind == "save-error" && field "code" Decode.string "" == "writer_cleanup_failed" && operation > 0 && operation < state.nextOperation then
         ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=True,saveMessage="Writer cleanup could not be confirmed. Reload this page before another download."}},Cmd.none)
     else if kind == "save-picking" && operation == state.nextOperation && state.save == Nothing && state.archive == Nothing then
@@ -521,7 +537,7 @@ viewSave : Model -> Api.AgentSession -> Html Msg
 viewSave model session =
     let
         state = model.sessions
-        config = Encode.encode 0 (Encode.object [("stamp",Encode.string state.stamp),("operation",Encode.int state.nextOperation),("session",encodeReceipt session)])
+        config = Encode.encode 0 (Encode.object [("stamp",Encode.string state.downloadStamp),("operation",Encode.int state.nextOperation),("session",encodeReceipt session)])
     in
     if session.state /= Api.SessionTerminated then text ""
     else button [class "btn btn-sm session-download",attribute "data-session-download" config,disabled (state.saveBlocked || state.save /= Nothing || state.archive /= Nothing || session.finalBytes == Nothing || session.finalSha256 == Nothing),attribute "aria-label" ("Download session " ++ String.left 8 session.id)] [text "↓ Download"]
@@ -553,16 +569,36 @@ taskActive : String -> Model -> String -> Bool
 taskActive workspace model task = Dict.get task model.sessions.taskHints |> Maybe.map (\hint -> hint.active && not hint.error) |> Maybe.withDefault False
 
 
+freshTaskPage : Bool -> String -> Model -> String -> Maybe Api.SessionPage
+freshTaskPage evidence workspace model task =
+    case resource workspace (sectionTarget evidence model task) model of
+        Just entry ->
+            if entry.error /= Nothing || entry.dirty /= entry.settled then Nothing else
+            case entry.data of
+                Just (Delivery.SessionsPage page) -> Just page
+                _ -> Nothing
+        Nothing -> Dict.get (sectionKey evidence task) model.sessions.taskPages |> Maybe.andThen (\cached ->
+            if cached.epoch == model.sessionDelivery.listInvalidation && cached.cursor == taskCursor model (sectionKey evidence task) then Result.toMaybe cached.result else Nothing)
+
+
+effectiveActive : String -> Model -> Api.AgentSession -> Bool
+effectiveActive workspace model session =
+    session.state == Api.SessionActive && (case resource workspace (Delivery.SessionMetadata session.id) model |> Maybe.andThen .data of
+        Just (Delivery.Metadata currentMetadata) -> currentMetadata.state == Api.SessionActive
+        _ -> True)
+
+
 viewTaskIcon : String -> Model -> String -> Html Msg
 viewTaskIcon workspace model task =
     let
         hint = Dict.get task model.sessions.taskHints
         count = hint |> Maybe.andThen (\value -> if value.error then Nothing else Just (if value.active then 1 else 0))
-        label = "Sessions for this task" ++ (case hint of
+        label = "Active Agent →" ++ (case hint of
             Just current -> if current.error then " · activity unavailable" else if current.active then " · active sessions" ++ (if current.epoch /= model.sessionDelivery.listInvalidation then " · refreshing" else "") else if current.epoch /= model.sessionDelivery.listInvalidation then " · checking activity" else " · no active sessions"
             Nothing -> " · checking activity")
     in
-    a [class ("btn-icon task-sessions-icon" ++ (if Maybe.withDefault 0 count > 0 then " has-active-sessions" else "")),href ("/workspace/" ++ Url.percentEncode workspace ++ "#tab=sessions&task=" ++ Url.percentEncode task),attribute "aria-label" label,Html.Attributes.title label] [if Maybe.withDefault 0 count > 0 then SessionActivityLight.view True "Active sessions for this task" else text "◉"]
+    button [class ("btn btn-secondary btn-sm task-sessions-icon" ++ (if Maybe.withDefault 0 count > 0 then " has-active-sessions" else "")),disabled (count /= Just 1 && model.sessions.taskPanel /= Just task),attribute "aria-label" label,attribute "aria-expanded" (if model.sessions.taskPanel == Just task then "true" else "false"),Html.Attributes.title label,stopPropagationOn "click" (Decode.succeed (SessionsToggleDock task,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
+        [SessionActivityLight.view (count == Just 1) label,text "Active Agent →"]
 
 
 viewTaskPanel : String -> Model -> String -> Html Msg
@@ -570,7 +606,24 @@ viewTaskPanel workspace model task = div [] [viewTaskActive workspace model task
 
 
 viewTaskActive : String -> Model -> String -> Html Msg
-viewTaskActive = viewTaskSection False
+viewTaskActive workspace model task =
+    if model.sessions.taskPanel /= Just task then text "" else
+    let
+        page = taskPage False workspace model task
+        fresh = freshTaskPage False workspace model task /= Nothing
+        sessions = page |> Maybe.map (.items >> List.filter (effectiveActive workspace model)) |> Maybe.withDefault []
+        error = resource workspace (sectionTarget False model task) model |> Maybe.andThen .error
+        failed = error /= Nothing || (Dict.get (sectionKey False task) model.sessions.taskPages |> Maybe.map (\cached -> case cached.result of
+            Err _ -> True
+            Ok _ -> False) |> Maybe.withDefault False)
+        key = sectionKey False task
+    in
+    aside [class "task-session-dock",attribute "aria-label" "Task active agents",stopPropagationOn "click" (Decode.succeed (NoOp,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
+        [div [class "task-session-dock-header"] [strong [] [text "Active agents"],button [class "btn btn-secondary btn-sm",attribute "aria-label" "Close active agents",onClick (SessionsToggleDock task)] [text "✕"]]
+        ,div [class "task-session-picker"] (List.map (\session -> button [class ("btn btn-secondary task-session-choice" ++ (if model.sessions.selected == Just session.id then " selected" else "")),disabled (not fresh),attribute "aria-pressed" (if model.sessions.selected == Just session.id then "true" else "false"),onClick (SessionsSelectDock task session.id)] [SessionActivityLight.view True "Active",span [] [text (sessionTitle session)],span [class "card-meta"] [text ("Last activity · " ++ TimestampDisplay.lookup model.timestamps (sessionActivity session))]]) sessions)
+        ,if page == Nothing || failed then p [attribute "role" (if failed then "alert" else "status")] [text (if failed then "Active sessions could not be loaded." else "Loading active sessions…"),if failed then button [class "btn btn-secondary btn-sm",onClick SessionsRetry] [text "Retry"] else text ""] else if not fresh then p [class "card-meta",attribute "role" "status"] [text "Refreshing active sessions…"] else if List.isEmpty sessions then p [class "card-meta"] [text "No active sessions for this task."] else text ""
+        ,div [class "sessions-pagination"] [if taskCursor model key /= Nothing then button [class "btn btn-sm",onClick (SessionsTaskPreviousPage key)] [text "Newer sessions"] else text "",page |> Maybe.andThen .nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsTaskNextPage key cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "")]
+        ,model.sessions.selected |> Maybe.map (\id -> div [class "task-session-transcript"] [a [class "btn btn-sm",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"],viewRecords workspace model id]) |> Maybe.withDefault (text "")]
 
 
 viewTaskEvidence : String -> Model -> String -> Html Msg
@@ -689,7 +742,7 @@ timestampSources model =
             _ -> []) |> Maybe.withDefault []
         cards = Dict.values model.sessions.taskPages |> List.concatMap (\cached -> Result.toMaybe cached.result |> Maybe.map (.items >> List.map sessionActivity) |> Maybe.withDefault [])
     in
-    if model.activeTab == SessionsTab then list ++ List.map .time model.sessions.rows else if model.activeTab == ProjectsTab then cards else []
+    if model.activeTab == SessionsTab then list ++ List.map .time model.sessions.rows else if model.activeTab == ProjectsTab then cards ++ (if model.sessions.taskPanel /= Nothing then List.map .time model.sessions.rows else []) else []
 
 
 availableSessions : Model -> List Api.AgentSession
@@ -710,7 +763,7 @@ viewArchive model task =
     let
         state = model.sessions
         title = Dict.get task model.tasks |> Maybe.map .title |> Maybe.withDefault "Task evidence"
-        config = Encode.encode 0 (Encode.object [("stamp",Encode.string state.stamp),("operation",Encode.int state.nextOperation),("task",Encode.string task),("title",Encode.string title)])
+        config = Encode.encode 0 (Encode.object [("stamp",Encode.string state.downloadStamp),("operation",Encode.int state.nextOperation),("task",Encode.string task),("title",Encode.string title)])
     in
     case state.archive of
         Just archive ->
@@ -725,7 +778,7 @@ archiveRequest model =
     case model.sessions.archive of
         Just archive ->
             Dict.values model.sessionDelivery.physical |> List.filter (\request -> request.target == Delivery.TaskEvidenceArchive archive.task archive.operation && Dict.member request.id model.sessions.archiveRequests) |> List.head
-                |> Maybe.map (\request -> Encode.object [("id",Encode.int request.id),("stamp",Encode.string model.sessions.stamp),("operation",Encode.int archive.operation),("task",Encode.string archive.task),("url",Encode.string (model.flags.apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode request.workspace ++ "/tasks/" ++ Url.percentEncode archive.task ++ "/evidence.zip"))]) |> Maybe.withDefault Encode.null
+                |> Maybe.map (\request -> Encode.object [("id",Encode.int request.id),("stamp",Encode.string model.sessions.downloadStamp),("operation",Encode.int archive.operation),("task",Encode.string archive.task),("url",Encode.string (model.flags.apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode request.workspace ++ "/tasks/" ++ Url.percentEncode archive.task ++ "/evidence.zip"))]) |> Maybe.withDefault Encode.null
         Nothing -> Encode.null
 
 
@@ -745,7 +798,7 @@ receiveArchiveHttp value model =
                 retired = Dict.get id model.sessionDelivery.physical |> Maybe.map (\request -> Delivery.removeDemand request.workspace request.target model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery
                 (updated,command) = WebSocket.update (SessionResourceFetched id guard result) {model | sessionDelivery=retired,sessions={state | archiveRequests=Dict.remove id state.archiveRequests}}
                 current = updated.sessions
-                matches = field "stamp" Decode.string "" == current.stamp && (current.archive |> Maybe.map (\archive -> archive.operation == field "operation" Decode.int -1) |> Maybe.withDefault False)
+                matches = field "stamp" Decode.string "" == current.downloadStamp && (current.archive |> Maybe.map (\archive -> archive.operation == field "operation" Decode.int -1) |> Maybe.withDefault False)
             in
             if matches then ({updated | sessions={current | archive=Nothing,saveMessage=if status == 200 then "Downloaded task evidence." else "Archive could not finish. Please retry."}},command)
             else (updated,command)
@@ -760,7 +813,7 @@ receiveArchive value model =
         kind = field "kind" Decode.string ""
         task = field "task" Decode.string ""
     in
-    if field "stamp" Decode.string "" /= state.stamp || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then (model,Cmd.none)
+    if field "stamp" Decode.string "" /= state.downloadStamp || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then (model,Cmd.none)
     else if kind == "archive-error" && field "code" Decode.string "" == "writer_cleanup_failed" && operation > 0 && operation < state.nextOperation then
         ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=True,saveMessage="Writer cleanup could not be confirmed. Reload this page before another download."}},Cmd.none)
     else if kind == "archive-picking" && operation == state.nextOperation && state.save == Nothing && state.archive == Nothing && Dict.member task model.tasks then
@@ -775,4 +828,5 @@ receiveArchive value model =
                 ({model | sessions={state | archive=Nothing,save=Nothing,saveBlocked=state.saveBlocked || blocked,saveMessage=if blocked then "Writer cleanup could not be confirmed. Reload this page before another download." else if field "code" Decode.string "" == "download_storage_unavailable" then "This browser needs temporary file storage for archives larger than 32 MiB." else "Archive could not finish. Please retry."}},Cmd.none)
             else (model,Cmd.none)
         Nothing -> (model,Cmd.none)
+
 

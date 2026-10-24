@@ -235,9 +235,9 @@ viewTabs model =
     div [ class "tabs workspace-tabs", attribute "aria-label" "Workspace sections" ]
         (List.filterMap identity
             [ Just (viewTab ProjectsTab model.activeTab (workspaceTabLabel ProjectsTab))
+            , Just (viewTab SessionsTab model.activeTab (workspaceTabLabel SessionsTab))
             , Just (viewTab ObservationsTab model.activeTab (workspaceTabLabel ObservationsTab))
             , Just (viewTab TimelineTab model.activeTab (workspaceTabLabel TimelineTab))
-            , Just (viewTab SessionsTab model.activeTab (workspaceTabLabel SessionsTab))
             , if Permissions.canViewCurrentWorkspaceAudit model then
                 Just (viewTab AuditTab model.activeTab (workspaceTabLabel AuditTab))
 

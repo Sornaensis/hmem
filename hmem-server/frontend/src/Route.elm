@@ -123,8 +123,22 @@ handleUrlChangeWithoutProtectedExit url model =
                 -- Only reset focusHistory when the focus actually changed
                 -- externally (browser back/forward), not from our own handlers.
                 let
-                    context =
+                    incomingContext =
                         Helpers.observationUrlContext url
+
+                    ownedEntry =
+                        model.observations.preferenceEntryEcho == Just (Url.toString url)
+
+                    context =
+                        if ownedEntry then
+                            let fragment = incomingContext.fragment in
+                            { incomingContext | query = Helpers.observationAppliedQuery model.observations, fragment = {fragment | tab = model.activeTab, focus = model.focus.focusedEntity, observationId = model.observations.selectedId} }
+                        else incomingContext
+
+                    routeObservations =
+                        let state = model.observations in
+                        if ownedEntry then {state | preferenceEntryEcho = Nothing}
+                        else {state | preferenceEntryHistory = Nothing}
 
                     frag =
                         context.fragment
@@ -212,6 +226,7 @@ handleUrlChangeWithoutProtectedExit url model =
                             , editing = updatedEditing
                             , memory = updatedMemory
                             , search = updatedSearch
+                            , observations = routeObservations
                         }
                             |> clearRouteConfirmations True
 
@@ -228,8 +243,10 @@ handleUrlChangeWithoutProtectedExit url model =
                         let
                             targetState = if frag.observationId /= model.observations.selectedId then Feature.Observation.clearSelection routeState else routeState
                             restored = { queryInput | observations = { targetState | searchOriginDetail = Helpers.isObservationSearchUrl url, linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
+                            intentional = not ownedEntry && frag.tab == ObservationsTab && context.notice == Nothing && (url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (String.split "=" >> List.head >> Maybe.andThen Url.percentDecode) |> List.any (\name -> List.member name ["ov","oq","observation"]))
+                            preferred = if intentional then Feature.Observation.rememberPreferences restored else restored
                         in
-                        if queryChanged then Feature.Observation.restoreRouteResults restored else ( restored, Cmd.none )
+                        if queryChanged then Feature.Observation.restoreRouteResults preferred else ( preferred, Cmd.none )
 
                     ( observationModel, observationCmd ) =
                         if frag.tab == ObservationsTab then
@@ -272,6 +289,12 @@ handleUrlChangeWithoutProtectedExit url model =
                 if context.notice /= Nothing && context.notice /= Just Helpers.excludedObservationNotice then
                     let
                         ( repaired, repairCmd ) = Helpers.writeObservationHistory False focusedModel
+                    in
+                    ( repaired, Cmd.batch [ repairCmd, queryCmd, observationCmd, auditCmd, timelineCmd, adminCmd, focusCmd ] )
+                else if ownedEntry then
+                    let
+                        state = focusedModel.observations
+                        ( repaired, repairCmd ) = Helpers.writeObservationHistory False {focusedModel | observations = {state | preferenceEntryHistory = if state.preferenceHydrated && not state.preferencePendingDetail then Nothing else state.preferenceEntryHistory}}
                     in
                     ( repaired, Cmd.batch [ repairCmd, queryCmd, observationCmd, auditCmd, timelineCmd, adminCmd, focusCmd ] )
                 else

@@ -8,12 +8,12 @@ test('task session grids remain compact for one item and display actual last act
  for(const width of [1440,430]){
   const h=await openSessionExplorer({creator:{creator_actor_type:'bot',creator_bot_identity:{role:'Developer','model-id':'declared:model:high'}}})
   try{await h.page.setViewportSize({width,height:1600});const{card,group}=await openEvidence(h)
-   const active=card.locator('.task-session-active');await active.locator('summary').click()
+   await card.locator('.task-sessions-icon').click();const active=card.locator('.task-session-dock');await active.locator('.session-viewer .session-identity').waitFor()
    for(const[section,session,source]of[[active,h.active,h.active.last_seen_at],[group,h.saved,h.saved.terminated_at||h.saved.last_seen_at]]){
-    const item=section.locator('.task-session-card');await item.waitFor();assert.ok(await item.evaluate(el=>el.getBoundingClientRect().width)<= (width>600?301:430))
+    const item=section.locator(section===active?'.task-session-choice':'.task-session-card');await item.waitFor();assert.ok(await item.evaluate(el=>el.getBoundingClientRect().width)<= (width>600?301:430))
     const expected=await h.page.evaluate(value=>{const date=new Date(value),pad=v=>String(v).padStart(2,'0');return date.getFullYear()+'-'+pad(date.getMonth()+1)+'-'+pad(date.getDate())+' '+pad(date.getHours())+':'+pad(date.getMinutes())},source)
     await until(async()=>(await item.locator('.card-meta').innerText()).includes(expected));assert.notEqual(source,session.created_at)
-    assert.ok((await item.locator('.session-identity').innerText()).includes('declared:model:high'))
+    assert.ok((await (section===active?active.locator('.session-viewer .session-identity'):item.locator('.session-identity')).innerText()).includes('declared:model:high'))
    }
    assert.ok(await h.page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));assert.deepEqual(h.errors,[])
   }finally{await h.close()}

@@ -171,7 +171,7 @@ for (const phase of ['Initial','HeaderOnly']) test(`production ${phase}: count o
       } else if(payload.view==='list'&&holdPage){holdPage=false;await new Promise(resolve=>{releasePage=resolve})}
       await route.fallback()
     })
-    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects')
+    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects&ov=1&oq='+encodeURIComponent(JSON.stringify(['flat','',null,'','',null,null,[],'','',''])))
     await h.page.locator('#entity-root-project').waitFor()
     if(phase==='HeaderOnly') {
       await h.idle();holding=true
@@ -257,7 +257,7 @@ test('failed hidden count stays paused and a new visible collection owns its nor
   const h=await openDiscovery()
   try {
     const count=h.gate(r=>r.payload?.view==='count',{error:429})
-    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects')
+    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects&ov=1&oq='+encodeURIComponent(JSON.stringify(['flat','',null,'','',null,null,[],'','',''])))
     await h.bounded(count.arrived,5000,'Hidden count capacity failure');await h.idle()
     const before=h.receipts.length
     await h.page.waitForTimeout(350);assert.equal(h.receipts.length,before,'No event-driven retry loop')

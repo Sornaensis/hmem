@@ -573,6 +573,7 @@ type alias ObservationModel =
     , preferenceValue : ObservationPreferences.Preferences
     , preferenceHydrated : Bool
     , preferencePendingDetail : Bool
+    , preferenceEntryEcho : Maybe String
     , preferenceEntryHistory : Maybe String
     , preferenceTouch : Int
     , nextPreferenceRequest : Int
@@ -1289,6 +1290,7 @@ type alias SessionsModel =
     , owned : List ( String, Feature.SessionDelivery.Target )
     , filters : Api.SessionFilters
     , stamp : String
+    , downloadStamp : String
     , generation : Int
     , bridgedGeneration : Int
     , start : Maybe Int
@@ -1336,7 +1338,7 @@ type alias SessionRecord =
 emptySessionsModel : SessionsModel
 emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
-    , filters = Api.defaultSessionFilters, stamp = "", generation = 0, bridgedGeneration = -1, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
+    , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", generation = 0, bridgedGeneration = -1, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
 
@@ -1438,6 +1440,8 @@ type Msg
     | WsMessageReceived String
     | DemandSessionResource String Feature.SessionDelivery.Target
     | SessionsNextPage Api.SessionCursor
+    | SessionsToggleDock String
+    | SessionsSelectDock String String
     | SessionsPreviousPage
     | SessionsLinkedPage (Maybe String)
     | SessionsShowAllLinkedTasks

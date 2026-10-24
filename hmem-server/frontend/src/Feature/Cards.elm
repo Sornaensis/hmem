@@ -2271,10 +2271,10 @@ viewTaskCardBody descendants projection showProject model task =
                 "Reopen the project before adding open subtasks."
     in
     div
-        ([ class ("card tree-card " ++ cardClass ++ (if Feature.Sessions.taskActive task.workspaceId model task.id then " card-has-active-sessions" else "") ++ taskCardAppearanceClass task.status maybeRollup ++ Feature.DragDrop.dragOverClass model task.id)
-        , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
+        ([ class ("card tree-card task-card " ++ cardClass ++ (if model.sessions.taskPanel == Just task.id then " task-card-with-dock" else "") ++ (if Feature.Sessions.taskActive task.workspaceId model task.id then " card-has-active-sessions" else "") ++ taskCardAppearanceClass task.status maybeRollup ++ Feature.DragDrop.dragOverClass model task.id)
+        , draggable (if Permissions.canEditCurrentWorkspace model && model.sessions.taskPanel /= Just task.id then "true" else "false")
         , id ("entity-" ++ task.id)
-        , on "dragstart" (Decode.succeed (DragStartCard "task" task.id))
+        , on "dragstart" (Decode.succeed (if model.sessions.taskPanel == Just task.id then NoOp else DragStartCard "task" task.id))
         , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard task.id, True ))
         , preventDefaultOn "drop" (Decode.succeed ( DropOnCard "task" task.id, True ))
         , on "dragend" (Decode.succeed DragEndCard)
@@ -2397,7 +2397,6 @@ viewTaskCardBody descendants projection showProject model task =
 
                       else
                         text ""
-                    , Feature.Sessions.viewTaskActive task.workspaceId model task.id
                     , Feature.Dependencies.viewTaskDependencies model task.id deps
                     , Feature.Sessions.viewTaskEvidence task.workspaceId model task.id
                     , Feature.AuditLog.viewEntityHistory model "task" task.id
@@ -2420,6 +2419,7 @@ viewTaskCardBody descendants projection showProject model task =
               else
                 text ""
             ]
+        , Feature.Sessions.viewTaskActive task.workspaceId model task.id
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
         , div [ class "card-meta-group" ]
             [ div [ class "card-meta-row" ]

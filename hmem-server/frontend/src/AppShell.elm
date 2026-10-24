@@ -232,7 +232,7 @@ handleOwnedRaw ownedMsg model =
                         pendingEntry = tab == ObservationsTab && model.activeTab /= ObservationsTab && not state.preferenceHydrated
                     in
                     { adminModel | auditLog = auditLog, timeline = timeline
-                        , observations = if pendingEntry then { state | preferenceEntryHistory = Just (Helpers.observationHistoryUrl preferredModel) } else if tab /= ObservationsTab then { state | preferenceEntryHistory = Nothing } else state }
+                        , observations = if pendingEntry then { state | preferenceEntryHistory = Just (Helpers.observationHistoryUrl preferredModel), preferenceEntryEcho = Just (Helpers.observationHistoryUrl preferredModel) } else if tab /= ObservationsTab then { state | preferenceEntryHistory = Nothing } else state }
             in
             let
                 ( foregroundModel, foregroundCmd ) =

@@ -45,7 +45,7 @@ model =
         workspace = { id = workspaceId, name = "Repository", workspaceType = Api.Repository, ghOwner = Nothing, ghRepo = Nothing, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z" }
         session = { authMode = "local", effectiveActor = Nothing, principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }
             , workspace = Just { workspaceId = workspaceId, role = Just "owner", canRead = True, canEdit = True, canAdmin = True } }
-        state0 = O.startReloadForSession 3 workspaceId O.init
+        state0 = O.startReloadForSession 3 workspaceId flatState
         discovery = state0.discovery
         state = { state0 | discovery = { discovery | sessionId = "10000000-0000-4000-8000-000000000001" } }
     in
@@ -338,7 +338,7 @@ liveFilterTests =
                 in request |> Maybe.map (\guard -> ObservationTree.receiveTerminal guard (Ok {items = [{item | subjects = [typed], subject = "a", subjectKind = kind}], hasMore = False}) started) |> Maybe.withDefault started
             loaded = terminal Api.SubjectFile catalog |> terminal Api.SubjectGlob
             completeTree = {loaded | expanded = Set.singleton "a"}
-            state = O.init
+            state = flatState
             rows current = O.projectResultRows {state | requestMode = ObservationFacetMode, tree = current} |> Array.toList
             topology matches current = rows current |> List.filterMap (\entry -> case entry of
                 ObservationTreeRow value content -> if matches content then Just value else Nothing
@@ -554,7 +554,7 @@ liveFilterTests =
             [ \_ -> List.length next.observations.tree.physical |> Expect.equal 1
             , \_ -> List.length settled.observations.tree.physical |> Expect.equal 0
             , \_ -> settled.observations.tree.totals |> Expect.equal Nothing
-            , \_ -> next.observations.modeQueries |> Expect.equal (Dict.singleton "flat" "") ] ()
+            , \_ -> next.observations.modeQueries |> Expect.equal (Dict.singleton "tree" "") ] ()
     , test "mode scroll positions and bounded legacy Subject preferences migrate independently" <| \_ ->
         let
             original = model.observations
@@ -810,7 +810,8 @@ liveFilterTests =
 
 suite : Test
 suite = describe "automatic observation refresh and scoped preferences"
-    [ describe "live discovery input lifetimes" liveFilterTests
+    [ describe "Tree default and entry precedence" defaultModeTests
+    , describe "live discovery input lifetimes" liveFilterTests
     , test "Observation pages share 200 while full aggregate query ignores offsets" <| \_ ->
         Expect.equal ( [ 200, 200, 200 ], [ False, False, False ] )
             ( [ (O.listQuery workspaceId 0 model.observations).limit, (O.facetQuery workspaceId 200 model.observations).limit, (O.matchQuery workspaceId [ "src/Main.elm" ] 400 model.observations).limit ]
@@ -1353,3 +1354,110 @@ finishLogicalHandoff failed current =
                 oldSettled = deliver request.destination accepted
                 settled = current.observations.discovery.afterBootstrap |> Maybe.map (\destination -> deliver destination oldSettled) |> Maybe.withDefault oldSettled
             in project current settled
+
+
+flatState =
+    let initial = O.init in
+    { initial | requestMode = ObservationFlatMode }
+
+
+-- Real entry models retain Tree; older flat-list fixtures above opt into All.
+defaultModeTests : List Test
+defaultModeTests =
+    [ test "originless Files clear restores the independent Tree query" <| \_ ->
+        let
+            initial = O.init
+            source = {model | observations={initial | requestMode=ObservationMatchMode,query="Files query",matchAppliedPaths=["src/Main.elm"],browseReturn=Nothing,modeQueries=Dict.singleton "tree" "Tree query",modeSubjectQueries=Dict.singleton "tree" "src"}}
+            cleared = update ClearObservationMatch source |> Tuple.first
+        in Expect.equal (ObservationFacetMode,"Tree query","src") (cleared.observations.requestMode,cleared.observations.query,cleared.observations.subjectQuery)
+    , test "shared fresh and malformed URL defaults are Tree" <| \_ ->
+        Expect.equal (ObservationFacetMode,ObservationFacetMode,ObservationFacetMode)
+            (O.init.requestMode,Helpers.defaultObservationQuery.requestMode,(Helpers.observationUrlContext {modelUrl | fragment=Just "tab=observations&ov=1&oq=broken"}).query.requestMode)
+    , test "saved Flat arrives before or after the owned generated Tree echo without being overwritten" <| \_ ->
+        let
+            entered = earlyTreeEntry
+            owner = entered.observations.preferenceOwner |> Maybe.withDefault emptyPreferenceOwner
+            query = Helpers.defaultObservationQuery
+            prefs = {preferenceDefaults | modeIntent=True,context=Just (Helpers.encodeObservationQuery {query | requestMode=ObservationFlatMode})}
+            payload = ObservationPreferencesReceived (E.object [("owner",P.ownerValue owner),("value",P.encode owner prefs)])
+            echo = entered.observations.preferenceEntryHistory |> Maybe.andThen Url.fromString |> Maybe.withDefault modelUrl
+            firstRead = update payload entered |> Tuple.first
+            afterEcho = Route.handleUrlChange echo firstRead |> Tuple.first
+            firstEcho = Route.handleUrlChange echo entered |> Tuple.first
+            afterRead = update payload firstEcho |> Tuple.first
+        in Expect.equal (ObservationFlatMode,ObservationFlatMode,ObservationFlatMode)
+            (firstRead.observations.requestMode,afterEcho.observations.requestMode,afterRead.observations.requestMode)
+    , test "new local mode intent wins both a held read and a delayed old entry echo" <| \_ ->
+        let
+            entered = earlyTreeEntry
+            owner = entered.observations.preferenceOwner |> Maybe.withDefault emptyPreferenceOwner
+            query = Helpers.defaultObservationQuery
+            prefs = {preferenceDefaults | modeIntent=True,context=Just (Helpers.encodeObservationQuery {query | requestMode=ObservationFlatMode})}
+            payload = ObservationPreferencesReceived (E.object [("owner",P.ownerValue owner),("value",P.encode owner prefs)])
+            echo = entered.observations.preferenceEntryHistory |> Maybe.andThen Url.fromString |> Maybe.withDefault modelUrl
+            flat = update (SetObservationBrowseMode ObservationFlatMode) entered |> Tuple.first
+            tree = update (SetObservationBrowseMode ObservationFacetMode) flat |> Tuple.first
+            received = update payload tree |> Tuple.first
+            echoed = Route.handleUrlChange echo received |> Tuple.first
+        in Expect.equal (ObservationFacetMode,True) (echoed.observations.requestMode,echoed.observations.preferenceValue.modeIntent)
+    , test "a consumed entry echo cannot hide explicit Back navigation after a different external URL" <| \_ ->
+        let
+            entered = earlyTreeEntry
+            echo = entered.observations.preferenceEntryEcho |> Maybe.andThen Url.fromString |> Maybe.withDefault modelUrl
+            echoed = Route.handleUrlChange echo entered |> Tuple.first
+            query = Helpers.defaultObservationQuery
+            flatUrl = {echo | fragment=Just ("tab=observations&ov=1&oq=" ++ Helpers.encodeObservationQuery {query | requestMode=ObservationFlatMode})}
+            external = Route.handleUrlChange flatUrl echoed |> Tuple.first
+            back = Route.handleUrlChange echo external |> Tuple.first
+        in Expect.equal (ObservationFacetMode,Nothing,Nothing)
+            (back.observations.requestMode,back.observations.preferenceEntryHistory,back.observations.preferenceEntryEcho)
+    , test "one pending old echo cannot restore a newer tab or focus" <| \_ ->
+        let
+            entered = earlyTreeEntry
+            echo = entered.observations.preferenceEntryEcho |> Maybe.andThen Url.fromString |> Maybe.withDefault modelUrl
+            projects = AppShell.handleOwned (AppShell.SwitchTabMsg ProjectsTab) entered |> Tuple.first
+            oldFocus = projects.focus
+            focused = {projects | focus={oldFocus | focusedEntity=Just ("task","new-focus")}}
+            echoed = Route.handleUrlChange echo focused |> Tuple.first
+        in Expect.equal (ProjectsTab,Just ("task","new-focus"),Nothing)
+            (echoed.activeTab,echoed.focus.focusedEntity,echoed.observations.preferenceEntryEcho)
+    , test "saved detail hydration before the entry echo survives the real route callback" <| \_ ->
+        let
+            entered = earlyTreeEntry
+            owner = entered.observations.preferenceOwner |> Maybe.withDefault emptyPreferenceOwner
+            query = Helpers.defaultObservationQuery
+            prefs = {preferenceDefaults | modeIntent=True,context=Just (Helpers.encodeObservationQuery {query | requestMode=ObservationFlatMode}),detail=Just {id=observationId,occurrence=Nothing,mode="flat"}}
+            read = update (ObservationPreferencesReceived (E.object [("owner",P.ownerValue owner),("value",P.encode owner prefs)])) entered |> Tuple.first
+            echo = entered.observations.preferenceEntryEcho |> Maybe.andThen Url.fromString |> Maybe.withDefault modelUrl
+            routed = Route.handleUrlChange echo read |> Tuple.first |> project read
+        in Expect.equal (ObservationFlatMode,Just observationId,Nothing)
+            (routed.observations.requestMode,routed.observations.selectedId,routed.observations.preferenceEntryEcho)
+    , test "only unmarked empty legacy Flat migrates and explicit URLs survive foreign preferences" <| \_ ->
+        let
+            base = project {model | observations=O.init} {model | observations=O.init}
+            owner = base.observations.preferenceOwner |> Maybe.withDefault emptyPreferenceOwner
+            query = Helpers.defaultObservationQuery
+            apply intent content current =
+                let prefs = {preferenceDefaults | modeIntent=intent,context=Just (Helpers.encodeObservationQuery {query | requestMode=ObservationFlatMode,query=content})} in
+                update (ObservationPreferencesReceived (E.object [("owner",P.ownerValue owner),("value",P.encode owner prefs)])) current |> Tuple.first
+            emptyLegacy = apply False "" base
+            meaningful = apply False "Cache" base
+            explicit = apply True "" base
+            externalUrl = {modelUrl | fragment=Just ("tab=observations&ov=1&oq=" ++ Helpers.encodeObservationQuery {query | requestMode=ObservationFlatMode})}
+            external = Route.handleUrlChange externalUrl base |> Tuple.first |> apply False "Cache"
+        in Expect.equal [ObservationFacetMode,ObservationFlatMode,ObservationFlatMode,ObservationFlatMode]
+            (List.map (.observations >> .requestMode) [emptyLegacy,meaningful,explicit,external])
+    ]
+
+
+modelUrl = model.url
+
+
+emptyPreferenceOwner = {workspaceId="",actorId="",authority="",runtimeId="",epoch=0,requestId=0,touch=0}
+
+
+earlyTreeEntry =
+    let
+        projects = {model | activeTab=ProjectsTab,url={modelUrl | fragment=Just "tab=projects"},observations=O.init}
+        initial = project projects projects
+    in AppShell.handleOwned (AppShell.SwitchTabMsg ObservationsTab) initial |> Tuple.first

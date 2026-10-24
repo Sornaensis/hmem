@@ -91,10 +91,10 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   const card=page.locator('#entity-'+h.fixture.tasks[0].id)
   await until(async()=>await card.locator('.has-active-sessions').count()===1)
   await card.locator('.btn-extras-toggle').click();await h.idle()
-  const active=card.locator('.task-session-active'),evidence=card.locator('.task-session-evidence')
-  await active.locator('summary').click();await evidence.locator('summary').click()
-  await active.getByRole('link',{name:/Codex/}).waitFor()
-  assert.equal(await card.evaluate(el=>{const children=[...el.querySelector('.card-extras').children];return children.indexOf(el.querySelector('.task-session-active'))<children.indexOf(el.querySelector('.task-dependencies-section'))&&children.indexOf(el.querySelector('.task-session-evidence'))>children.indexOf(el.querySelector('.task-dependencies-section'))}),true)
+  const active=card.locator('.task-session-dock'),evidence=card.locator('.task-session-evidence')
+  await card.locator('.task-sessions-icon').click();await evidence.locator('summary').click()
+  await active.getByRole('button',{name:/Codex/}).waitFor()
+  assert.equal(await card.locator('.card-extras .task-session-active').count(),0);assert.equal(await card.evaluate(el=>{const children=[...el.querySelector('.card-extras').children];return children.indexOf(el.querySelector('.task-session-evidence'))>children.indexOf(el.querySelector('.task-dependencies-section'))}),true)
   const downloadPromise=page.waitForEvent('download');await evidence.getByRole('button',{name:/Download session/}).click();const download=await downloadPromise
   const target=join(scratch,'session.jsonl');await download.saveAs(target);assert.deepEqual(await readFile(target),h.bytes)
   await page.evaluate(()=>Object.defineProperty(navigator.storage,'getDirectory',{configurable:true,value:async()=>{throw new Error('storage denied')}}))
@@ -103,7 +103,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   const fallbackEvent=page.waitForEvent('download');await evidence.getByRole('button',{name:/Download session/}).click()
   const fallback=await fallbackEvent;const fallbackPath=join(scratch,'fallback.jsonl');await fallback.saveAs(fallbackPath);assert.deepEqual(await readFile(fallbackPath),h.bytes)
   if(process.env.SESSIONS_UX_SCREENSHOTS)await page.screenshot({path:process.env.SESSIONS_UX_SCREENSHOTS+'/after-task.png',fullPage:true})
-  await card.locator('.task-sessions-icon').click();await page.locator('.sessions-task-filter').waitFor()
+  await active.getByRole('link',{name:'Open full session ↗',exact:true}).click();await page.locator('.sessions-task-filter').waitFor()
   assert.match(page.url(),new RegExp('task='+h.fixture.tasks[0].id))
   await page.locator('.session-summary a').filter({hasText:'Codex'}).click();await page.locator('.session-record').first().waitFor()
   assert.match(page.url(),new RegExp('task='+h.fixture.tasks[0].id))
@@ -112,7 +112,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   assert.ok(h.peak()<=2,'session HTTP admission stays at two')
   await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects');await h.idle()
   const second=page.locator('#entity-'+h.fixture.tasks[1].id)
-  await second.locator('.task-sessions-icon').click();await until(()=>page.url().includes('task='+h.fixture.tasks[1].id));await page.locator('.sessions-task-filter').waitFor()
+  await second.locator('.task-sessions-icon').click();await second.locator('.task-session-dock').waitFor();assert.ok(page.url().includes('tab=projects'));await second.getByRole('link',{name:'Open full session ↗',exact:true}).click();await until(()=>page.url().includes('task='+h.fixture.tasks[1].id));await page.locator('.sessions-task-filter').waitFor()
   assert.ok(h.reads.some(read=>read.path.includes('/tasks/'+h.fixture.tasks[1].id+'/sessions')))
   assert.deepEqual(h.errors,[])
  }finally{await h.close();await rm(scratch,{recursive:true,force:true})}
@@ -199,9 +199,9 @@ test('conversation flow preserves declared identity and wraps long model names w
    if(scenario.creator&&scenario.width===1440){
     await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle()
     const taskCard=page.locator('#entity-'+h.fixture.tasks[0].id);await taskCard.locator('.btn-extras-toggle').click();await h.idle()
-    await taskCard.locator('.task-session-active summary').click();await taskCard.locator('.task-session-evidence summary').click()
-    assert.equal(await taskCard.locator('.task-session-card .session-identity').count(),2)
-    for(const label of await taskCard.locator('.task-session-card .session-identity').allTextContents())assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
+    await taskCard.locator('.task-sessions-icon').click();await taskCard.locator('.task-session-evidence summary').click();await taskCard.locator('.session-viewer .session-identity').waitFor()
+    assert.equal(await taskCard.locator('.task-session-card .session-identity,.task-session-dock .session-viewer .session-identity').count(),2)
+    for(const label of await taskCard.locator('.task-session-card .session-identity,.task-session-dock .session-viewer .session-identity').allTextContents())assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
    }
    assert.deepEqual(h.errors,[])
   }finally{await h.close()}

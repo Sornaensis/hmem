@@ -30,7 +30,7 @@ test('same-pair preference hydration hands a held bootstrap to the current page 
     const before=h.receipts.length
     bootstrap=h.gate(r=>r.payload?.view==='list'&&!r.payload.context_token,{hold:true})
     await h.page.goto('about:blank')
-    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=observations')
+    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=observations&ov=1&oq='+encodeURIComponent(JSON.stringify(['flat','',null,'','',null,null,[],'','',''])))
     await h.bounded(bootstrap.arrived,5000,'One held physical bootstrap')
     await h.page.evaluate(()=>{
       window.handoffInjectedChanges=0

@@ -46,7 +46,7 @@ export function createEvidenceWriter(writable, session, isCurrent = () => true) 
 // Elm owns demand and the two HTTP slots. This bridge only consumes one
 // validated chunk at a time and acknowledges it before Elm can rearm demand.
 export function installSessionBridge(app, { document = globalThis.document, window = globalThis.window, now = () => Date.now(), fetchArchive = async()=>{throw Error('archive_transport_unavailable')} } = {}) {
-  let stamp = '', generation = -1, framer = null
+  let stamp = '', viewerStamp = '', generation = -1, framer = null
   let activeSave = null
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))
   let heartbeatKey = ''
@@ -212,7 +212,9 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   })
   queueMicrotask(()=>send({kind:'save-capability',supported:typeof window.showSaveFilePicker === 'function'}))
   app.ports.sessionBridgeCommand.subscribe(command => {
-    if (command.stamp !== stamp) { stamp = command.stamp; framer = null; generation = -1; void retireSave() }
+    const downloadStamp = command.downloadStamp ?? command.stamp
+    if (downloadStamp !== stamp) { stamp = downloadStamp; void retireSave() }
+    if (command.stamp !== viewerStamp) { viewerStamp = command.stamp; framer = null; generation = -1 }
     if(activeSave && activeSave.operation < command.nextOperation && command.saveOperation !== activeSave.operation) void retireSave()
     if(command.archiveRequest)receiveArchiveRequest(command.archiveRequest)
     if(command.saveChunk && activeSave && activeSave.operation === command.saveOperation && activeSave.writer) {
@@ -231,8 +233,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     }))
     const localNow = new Date(now())
     const today = `${localNow.getFullYear()}-${String(localNow.getMonth()+1).padStart(2,'0')}-${String(localNow.getDate()).padStart(2,'0')}`
-    const fingerprint = stamp+today+JSON.stringify(statuses)
-    if(fingerprint!==heartbeatKey){heartbeatKey=fingerprint;send({kind:'heartbeat-status',stamp,statuses,today})}
+    const fingerprint = viewerStamp+today+JSON.stringify(statuses)
+    if(fingerprint!==heartbeatKey){heartbeatKey=fingerprint;send({kind:'heartbeat-status',stamp:viewerStamp,statuses,today})}
     if (command.reset !== null) { generation = command.generation; framer = createRecordFramer(command.reset) }
     if (!command.chunk) return
     const captured = { stamp:command.stamp, generation:command.generation }
@@ -246,7 +248,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const result = framer.push(command.chunk.offset,bytes,command.chunk.final)
       send({ kind:'viewer',...captured,...result })
       if (command.follow && atTail) requestAnimationFrame(() => {
-        if (stamp !== captured.stamp || generation !== captured.generation) return
+        if (viewerStamp !== captured.stamp || generation !== captured.generation) return
         const viewport = document.getElementById('session-records')
         if (viewport && viewport.scrollTop >= previousTop - 4) viewport.scrollTop = viewport.scrollHeight
       })

@@ -270,7 +270,11 @@ test('production malformed and oversized links restore atomically with an explic
       await h.page.goto(h.origin + '/'); await h.idle()
       const count = resultReceipts(h).length
       await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + suffix); await ready(h)
-      assert.equal(resultReceipts(h).length, count + 1)
+      const fallbackReads=resultReceipts(h).slice(count)
+      assert.ok(fallbackReads.length>=1&&fallbackReads.length<=2,'Tree fallback and initial canonical refresh have bounded owners')
+      assert.ok(fallbackReads.every(r=>r.endpoint==='/api/v1/observations/discovery'&&r.payload.view==='tree'&&r.payload.prefix===''&&r.payload.offset===0&&r.payload.limit===50))
+      if(fallbackReads.length===2)assert.equal(fallbackReads[1].payload.context_token,fallbackReads[0].response.context_token)
+      assert.equal(await h.page.getByRole('button',{name:'Subject Tree',exact:true}).getAttribute('aria-pressed'),'true')
       assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/discovery')
       assert.equal(predicates(h,resultReceipts(h).at(-1)).query, undefined)
       assert.equal(await h.page.locator('.observation-detail').count(), 0)

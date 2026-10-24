@@ -11,7 +11,7 @@ test('production backend wire omission loads hidden counts, flat pages and typed
   const h = await openDiscovery()
   const row = path => h.page.locator('[data-tree-path=' + JSON.stringify(path) + ']')
   try {
-    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id)
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=projects&ov=1&oq=' + encodeURIComponent(JSON.stringify(['flat','',null,'','',null,null,[],'','',''])))
     await h.idle()
     const count = h.receipts.find(value => value.payload?.view === 'count')
     assert.ok(count, 'Projects startup admits the shared hidden count bootstrap')
@@ -60,7 +60,7 @@ async function assertReachable(page, target) {
   })
   assert.ok(geometry.visible && geometry.unobscured && geometry.width > 0, JSON.stringify(geometry))
 }
-for (const width of [1440, 320]) test(`production ${width} mode DOM visual and native Tab order preserves the All Observations default`, { timeout: 60000 }, async () => {
+for (const width of [1440, 320]) test(`production ${width} mode DOM visual and native Tab order preserves an explicit All Observations choice`, { timeout: 60000 }, async () => {
   const h = await openDiscovery({ width, height: 800 })
   try {
     await h.start()

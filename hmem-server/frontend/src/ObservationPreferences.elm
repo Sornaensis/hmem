@@ -16,13 +16,13 @@ type alias Detail =
 
 
 type alias Preferences =
-    { detail : Maybe Detail, subjects : List String, groups : List String
+    { modeIntent : Bool, detail : Maybe Detail, subjects : List String, groups : List String
     , paths : List String, focusedPath : Maybe String, selectedPath : Maybe String, context : Maybe String, queries : Dict String String, subjectQueries : Dict String String, scrolls : Dict String Float, fileInput : String }
 
 
 empty : Preferences
 empty =
-    { detail = Nothing, subjects = [], groups = [], paths = [], focusedPath = Nothing, selectedPath = Nothing, context = Nothing, queries = Dict.empty, subjectQueries = Dict.empty, scrolls = Dict.empty, fileInput = "" }
+    { modeIntent = False, detail = Nothing, subjects = [], groups = [], paths = [], focusedPath = Nothing, selectedPath = Nothing, context = Nothing, queries = Dict.empty, subjectQueries = Dict.empty, scrolls = Dict.empty, fileInput = "" }
 
 
 uuid : String -> Bool
@@ -94,6 +94,7 @@ scopedDecoder owner =
                 [ D.field "subjectQueries" (D.dict D.string) |> D.map (\subjects -> ( scoped, { prefs | subjectQueries = subjects } ))
                 , D.succeed ( scoped, { prefs | subjectQueries = Dict.filter (\key _ -> List.member key [ "tree", "facets" ]) prefs.queries, queries = Dict.filter (\key _ -> not (List.member key [ "tree", "facets" ])) prefs.queries } )
                 ])
+        |> D.andThen (\( scoped, prefs ) -> D.map (\intent -> (scoped, {prefs | modeIntent = intent})) (optional "modeIntent" D.bool False))
         |> D.andThen (\( scoped, prefs ) ->
             if scoped
                 && List.length prefs.subjects <= 128 && List.length prefs.groups <= 128 && List.length prefs.paths <= 128
@@ -118,7 +119,8 @@ validPath value =
 normalize : Preferences -> Preferences
 normalize prefs =
     let bounded valid values = values |> List.filter valid |> Set.fromList |> Set.toList |> List.take 128 in
-    { detail = prefs.detail |> Maybe.andThen (\detail -> if validDetail detail then Just { detail | mode = if detail.mode == "facets" then "tree" else detail.mode } else Nothing)
+    { modeIntent = prefs.modeIntent
+    , detail = prefs.detail |> Maybe.andThen (\detail -> if validDetail detail then Just { detail | mode = if detail.mode == "facets" then "tree" else detail.mode } else Nothing)
     , subjects = bounded uuid prefs.subjects, groups = bounded validGroup prefs.groups
     , paths = bounded validPath prefs.paths, focusedPath = prefs.focusedPath |> Maybe.andThen (\path -> if validPath path then Just path else Nothing)
     , selectedPath = prefs.selectedPath |> Maybe.andThen (\path -> if validPath path then Just path else Nothing)
@@ -137,6 +139,7 @@ encode : Owner -> Preferences -> E.Value
 encode owner raw =
     let prefs = normalize raw in
     E.object [ ( "version", E.int 1 ), ( "workspaceId", E.string owner.workspaceId ), ( "actorId", E.string owner.actorId ), ( "authority", E.string owner.authority )
+        , ( "modeIntent", E.bool prefs.modeIntent )
         , ( "detail", prefs.detail |> Maybe.map (\detail -> E.object [ ( "id", E.string detail.id ), ( "occurrence", detail.occurrence |> Maybe.map E.string |> Maybe.withDefault E.null ), ( "mode", E.string detail.mode ) ]) |> Maybe.withDefault E.null )
         , ( "subjects", E.list E.string prefs.subjects ), ( "groups", E.list E.string prefs.groups )
         , ( "paths", E.list E.string prefs.paths ), ( "focusedPath", Maybe.map E.string prefs.focusedPath |> Maybe.withDefault E.null ), ( "selectedPath", Maybe.map E.string prefs.selectedPath |> Maybe.withDefault E.null )

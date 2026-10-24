@@ -158,7 +158,7 @@ suite =
                 original = observation "selected"
                 reviewed = provenance later
                 selected = { original | latestSequence = 26, currentProvenance = Just { reviewed | sequence = 26 } }
-                initial = Observation.init
+                initial = flatState
                 state = { initial | selectedId = Just selected.id, selectedDetail = Just selected, historyExpanded = True
                     , history = Just { workspaceId = "w", observationId = selected.id, sessionEpoch = 0, head = 26
                         , items = List.range 2 26 |> List.reverse |> List.map (\sequence -> { observationId = selected.id, provenance = let older = provenance raw in { older | sequence = sequence } })
@@ -217,7 +217,7 @@ suite =
                 first = observation "1"
                 outside = { first | id = "outside", updatedAt = "offscreen-only" }
                 values = (List.range 1 70 |> List.map (String.fromInt >> observation)) ++ [ outside ]
-                initial = Observation.init
+                initial = flatState
                 rows = Array.fromList (List.map (ObservationCardRow "flat") values)
                 keys = List.map (\value -> Observation.observationCardDomId "flat" value.id) values
                 state = { initial | resultRows = rows, items = Dict.fromList (List.map (\value -> ( value.id, value )) values), orderedIds = List.map .id values
@@ -249,7 +249,7 @@ suite =
                     Expect.equal ( [ audit ], model.auditLog.filters ) ( accepted.auditLog.entries, accepted.auditLog.filters )
         , test "typed terminal results and formatting replies update mounted localized card timestamps" <| \_ ->
             let
-                initial = Observation.init
+                initial = flatState
                 accept prefix nodes priorTree =
                     let (branchStarted, branchRequest) = ObservationTree.begin prefix 0 priorTree in
                     branchRequest |> Maybe.map (\guard -> ObservationTree.receive guard (Ok {items = nodes, hasMore = False, totalCount = 2, matchCount = 2}) branchStarted) |> Maybe.withDefault branchStarted
@@ -271,3 +271,8 @@ suite =
                 , \_ -> Observation.viewObservationsState Display.empty workspace paginated |> Query.fromHtml |> Query.has [ Selector.text "…" ]
                 ] ()
         ]
+
+
+flatState =
+    let initial = Observation.init in
+    { initial | requestMode = ObservationFlatMode }

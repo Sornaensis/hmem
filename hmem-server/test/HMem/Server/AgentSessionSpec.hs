@@ -41,6 +41,37 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+  it "declares target runtime separately from caller and guards model switches and explicit null clearing" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+          declared=object ["role" .= ("Connector" :: Text),"model-id" .= ("codex:connection-model:high" :: Text)]
+          headers=[("X-HMem-Bot-Identity",LBS.toStrict (encode declared))]
+          a=Core.RuntimeIdentity "actual-target-a" Nothing Nothing
+          b=Core.RuntimeIdentity "actual-target-b" (Just "Provider") Nothing
+      workspace <- createTestWorkspace env "http-runtime"
+      identifier <- UUID.nextRandom
+      let root=sessions workspace.id; target=root<>"/"<>uuid identifier
+          input=CreateSessionRequest identifier "jsonl" "Separate model identities" Nothing (Just a)
+      created <- post app root headers (toJSON input) >>= decoded @Core.AgentSession
+      created.runtimeIdentity `shouldBe` Just a
+      field ["creator_bot_identity","model-id"] (toJSON created) `shouldBe` Just (String "codex:connection-model:high")
+      changed <- call app methodPut (target<>"/runtime") headers (encode (Core.SetRuntimeIdentity 0 (Just b))) >>= decoded @Core.AgentSession
+      changed.runtimeRevision `shouldBe` 1
+      changed.revision `shouldBe` 0
+      changed.lastSeenAt `shouldBe` created.lastSeenAt
+      changed.creatorBotIdentity `shouldBe` created.creatorBotIdentity
+      post app root headers (toJSON input) >>= decoded @Core.AgentSession >>= (\row -> row.runtimeIdentity `shouldBe` Just b)
+      conflict <- call app methodPut (target<>"/runtime") headers (encode (Core.SetRuntimeIdentity 0 (Just a)))
+      simpleStatus conflict `shouldBe` status409
+      value <- either fail pure (eitherDecode (simpleBody conflict) :: Either String Value)
+      field ["error"] value `shouldBe` Just (String "session_runtime_conflict")
+      cleared <- call app methodPut (target<>"/runtime") headers (encode (Core.SetRuntimeIdentity 1 Nothing)) >>= decoded @Core.AgentSession
+      cleared.runtimeIdentity `shouldBe` Nothing
+      cleared.runtimeRevision `shouldBe` 2
+      call app methodPut (target<>"/runtime") headers (encode (object ["expected_runtime_revision" .= (2 :: Int)])) >>= status status400
+      _ <- post app (target<>"/terminate") headers (toJSON $ TerminateSessionRequest 0 0 0 (Core.sessionSha256 "")) >>= decoded @Core.AgentSession
+      call app methodPut (target<>"/runtime") headers (encode (Core.SetRuntimeIdentity 2 (Just a))) >>= status status409
+
   it "explains non-running task status and preserves existing completed links through HTTP" $
     withLocalSandboxAppContext $ \ctx -> do
       let env=ctx.localEnv; app=ctx.localApplication
@@ -228,7 +259,7 @@ spec = describe "Agent session HTTP" $ do
       task <- makeTask env workspace.id
       let root = sessions workspace.id
           path = root <> "/" <> uuid identifier
-          input = CreateSessionRequest identifier "neutral-jsonl" "Test session work" Nothing
+          input = CreateSessionRequest identifier "neutral-jsonl" "Test session work" Nothing Nothing
           body = TE.encodeUtf8 "{\"message\":\"æ雪\"}\r\n[true,null]\n{}"
       created <- post app root [] (toJSON input) >>= decoded @Core.AgentSession
       retried <- post app root [] (toJSON input) >>= decoded @Core.AgentSession
@@ -303,6 +334,11 @@ spec = describe "Agent session HTTP" $ do
         rawWithLength ctx.deployedApplication target reader huge lengthMode >>= status status403
         rawWithLength ctx.deployedApplication target [] huge lengthMode >>= status status401
       row <- seed ctx.deployedEnv workspace.id
+      forM_ [target<>"/"<>uuid row.id<>"/runtime",target<>"/"<>uuid row.id<>"/runtime/"] $ \runtime ->
+        forM_ [Wai.KnownLength (fromIntegral maxSessionRequestBytes+1),Wai.ChunkedBody] $ \lengthMode -> do
+          rawWithLengthMethod methodPut ctx.deployedApplication runtime editor huge lengthMode >>= status status413
+          rawWithLengthMethod methodPut ctx.deployedApplication runtime reader huge lengthMode >>= status status403
+          rawWithLengthMethod methodPut ctx.deployedApplication runtime [] huge lengthMode >>= status status401
       forM_ [target<>"/",target<>"/"<>uuid row.id<>"/append/",target<>"/"<>uuid row.id<>"/terminate/"] $ \trailing ->
         forM_ [Wai.KnownLength (fromIntegral maxSessionRequestBytes+1),Wai.ChunkedBody] $ \lengthMode -> do
           rawWithLength ctx.deployedApplication trailing editor huge lengthMode >>= status status413
@@ -339,7 +375,7 @@ spec = describe "Agent session HTTP" $ do
         call app method target [] "{" >>= status status401
       forM_ [editor,admin,superadmin] $ \headers -> do
         identifier <- UUID.nextRandom
-        created <- post app root headers (toJSON $ CreateSessionRequest identifier "role-jsonl" "Test session work" Nothing) >>= decoded @Core.AgentSession
+        created <- post app root headers (toJSON $ CreateSessionRequest identifier "role-jsonl" "Test session work" Nothing Nothing) >>= decoded @Core.AgentSession
         created.creatorActorType `shouldBe` Just "bot"
         let target=root<>"/"<>uuid identifier
         call app methodPost (target<>"/heartbeat") headers "" >>= ok
@@ -370,7 +406,7 @@ spec = describe "Agent session HTTP" $ do
           valid=cookies<>[("X-CSRF-Token","csrf-value")]
       identifier <- UUID.nextRandom
       call ctx.deployedApplication methodPost (sessions workspace.id) cookies "{" >>= status status403
-      created <- post ctx.deployedApplication (sessions workspace.id) valid (toJSON $ CreateSessionRequest identifier "cookie-jsonl" "Test session work" Nothing) >>= decoded @Core.AgentSession
+      created <- post ctx.deployedApplication (sessions workspace.id) valid (toJSON $ CreateSessionRequest identifier "cookie-jsonl" "Test session work" Nothing Nothing) >>= decoded @Core.AgentSession
       created.creatorActorType `shouldBe` Just "user"
       token <- issueDeployedSandboxPAT ctx.deployedEnv user "later-editor"
       let bearer=[("Authorization","Bearer "<>TE.encodeUtf8 token.rawToken)]
@@ -429,12 +465,18 @@ spec = describe "Agent session HTTP" $ do
     withLocalSandboxAppContext $ \ctx -> do
       document <- call ctx.localApplication methodGet "/api/v1/openapi.json" [] "" >>= decoded @Value
       let prefix="/api/v1/workspaces/{workspaceId}/sessions"
-      forM_ [(prefix,"post"),(prefix,"get"),(prefix<>"/{sessionId}/append","post"),(prefix<>"/{sessionId}/terminate","post"),(prefix<>"/{sessionId}/transcript","get"),(prefix<>"/{sessionId}/evidence","get")] $ \(path,method) -> do
+      forM_ [(prefix,"post"),(prefix,"get"),(prefix<>"/{sessionId}/append","post"),(prefix<>"/{sessionId}/runtime","put"),(prefix<>"/{sessionId}/terminate","post"),(prefix<>"/{sessionId}/transcript","get"),(prefix<>"/{sessionId}/evidence","get")] $ \(path,method) -> do
         field ["paths",path,method] document `shouldSatisfy` (/=Nothing)
         forM_ ["400","401","403","404","409","413"] $ \code -> field ["paths",path,method,"responses",code] document `shouldSatisfy` (/=Nothing)
       field ["paths",prefix<>"/{sessionId}","delete"] document `shouldBe` Nothing
       field ["paths",prefix<>"/{sessionId}","put"] document `shouldBe` Nothing
       field ["components","schemas","AppendSessionRequest","properties","data_base64","maxLength"] document `shouldBe` Just (Number 1398104)
+      forM_ [("SetRuntimeIdentity","runtime_identity"),("CreateSessionRequest","initial_runtime_identity"),("AgentSession","runtime_identity")] $ \(schema,property) -> do
+        let base=["components","schemas",schema,"properties",property]
+        field (base<>["type"]) document `shouldBe` Just (String "object")
+        field (base<>["nullable"]) document `shouldBe` Just (Bool True)
+        field (base<>["allOf"]) document `shouldBe` Nothing
+      field ["components","schemas","SetRuntimeIdentity","required"] document `shouldBe` Just (toJSON (["expected_runtime_revision","runtime_identity"] :: [Text]))
 
 sessions :: UUID -> BS.ByteString
 sessions workspace = "/api/v1/workspaces/"<>uuid workspace<>"/sessions"
@@ -464,7 +506,7 @@ decoded response = do
 seed :: TestEnv -> UUID -> IO Core.AgentSession
 seed env workspace = do
   identifier <- UUID.nextRandom
-  DB.createSession env.pool (Core.CreateSession identifier workspace "jsonl" "Test session work" Nothing)
+  DB.createSession env.pool (Core.CreateSession identifier workspace "jsonl" "Test session work" Nothing Nothing)
 makeTask :: TestEnv -> UUID -> IO Types.Task
 makeTask env workspace = do
   task <- Task.createTask env.pool (Types.CreateTask workspace Nothing Nothing "session-task" Nothing Nothing Nothing)
@@ -481,9 +523,12 @@ audience ctx workspace role superadmin = do
   token <- issueDeployedSandboxPAT ctx.deployedEnv user "session-audience"
   pure [identityHeader,("Authorization","Bearer "<>TE.encodeUtf8 token.rawToken)]
 rawWithLength :: Wai.Application -> BS.ByteString -> [Header] -> LBS.ByteString -> Wai.RequestBodyLength -> IO SResponse
-rawWithLength app path headers body lengthMode = runSession (srequest (SRequest rawRequest body)) app
+rawWithLength = rawWithLengthMethod methodPost
+
+rawWithLengthMethod :: Method -> Wai.Application -> BS.ByteString -> [Header] -> LBS.ByteString -> Wai.RequestBodyLength -> IO SResponse
+rawWithLengthMethod method app path headers body lengthMode = runSession (srequest (SRequest rawRequest body)) app
   where
-    base = request methodPost path headers
+    base = request method path headers
     -- Preserve Warp-style empty trailing path segments; the ordinary helper's
     -- filtering would hide Servant's accepted trailing-slash spelling.
     rawRequest = base {Wai.requestBodyLength=lengthMode,Wai.pathInfo=drop 1 (T.splitOn "/" (TE.decodeUtf8 $ Wai.rawPathInfo base))}
@@ -507,7 +552,7 @@ taskArchive workspace task = "/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>u
 seedEvidence :: TestEnv -> UUID -> UUID -> Text -> BS.ByteString -> IO Core.AgentSession
 seedEvidence env workspace task label bytes = do
   identifier <- UUID.nextRandom
-  created <- DB.createSession env.pool (Core.CreateSession identifier workspace label "Test session work" Nothing)
+  created <- DB.createSession env.pool (Core.CreateSession identifier workspace label "Test session work" Nothing Nothing)
   uploaded <- if BS.null bytes then pure created else (.session) <$> DB.appendSession env.pool workspace identifier (Core.AppendSession 0 0 bytes True)
   sealed <- DB.terminateSession env.pool workspace identifier (Core.TerminateSession uploaded.committedBytes uploaded.revision uploaded.committedBytes (Core.sessionSha256 bytes))
   DB.associateSessionTask env.pool workspace identifier task

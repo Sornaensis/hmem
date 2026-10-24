@@ -171,3 +171,33 @@ title/parent, with no evidence bytes. Only creation, lifecycle termination and
 new task links add the `active_sessions` collection invalidation. Append and
 heartbeat keep their ordinary metadata/list invalidations. Schema changes,
 functions, guards and ledger registration commit or roll back together.
+# Session runtime identity (V044)
+
+`sessions.runtime_identity` is nullable JSONB: unknown is SQL NULL; a declaration
+contains a required trimmed `model` (1–256 UTF-8 bytes) and optional known
+`provider`/`reasoning` strings (1–128 bytes each). No other keys are accepted.
+The server normalizes omitted/null optional components to omission. The runtime
+is declared by an authorized caller, not inferred or independently verified;
+immutable `creator_actor_*`/`creator_bot_identity` remain original connection
+attribution. Existing rows receive unknown runtime and `runtime_revision=0`
+without rewriting old metadata, evidence, audit records or final receipts.
+
+Runtime changes lock the same session row as append/termination and require a
+separate nonnegative `expected_runtime_revision`. Changed declarations increment
+only `runtime_revision`; a no-op or immediately previous identical retry changes
+nothing. Conflicting stale writes return HTTP 409 `session_runtime_conflict`.
+Explicit null clears to unknown. The database guard rejects runtime changes
+combined with any other session field or a skipped runtime revision. Terminated
+metadata cannot change. Original transcript bytes, append revision, last_seen_at
+and final receipt are unaffected by declaration-only changes.
+
+Creation's optional `initial_runtime_identity` is initialization only. Existing
+creation retries and uploader resumes preserve current canonical runtime,
+including after switches; they never compare it as immutable source identity or
+overwrite it from startup configuration. `PUT .../sessions/:id/runtime` is the
+dedicated authorized update, exposed as `session_set_runtime` in MCP. Its
+required nullable wire value must be present even when clearing. Runtime values
+and revisions enter the existing metadata audit allowlist; the ordinary session
+invalidation refreshes labels without active-membership invalidation or raw
+transcript content. V044 owns its transaction and ledger entry.
+

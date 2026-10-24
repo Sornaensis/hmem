@@ -154,6 +154,7 @@ type AgentSessionAPI =
   :<|> Capture "sessionId" UUID :> Get '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> "append" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.AppendSessionRequest) :> Post '[JSON] SessionWire.AppendSessionResponse
   :<|> Capture "sessionId" UUID :> "heartbeat" :> Post '[JSON] AgentSession.AgentSession
+  :<|> Capture "sessionId" UUID :> "runtime" :> ReqBody '[TolerantJSON] (AgentSessionRequest AgentSession.SetRuntimeIdentity) :> Put '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> "tasks" :> QueryParam "limit" Text :> QueryParam "after_task_id" Text :> Get '[JSON] SessionWire.SessionTaskPageResponse
   :<|> Capture "sessionId" UUID :> "tasks" :> Capture "taskId" UUID :> Put '[JSON] NoContent
   :<|> Capture "sessionId" UUID :> "terminate" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.TerminateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
@@ -486,6 +487,7 @@ handleSessionErrors action = do
     Right (Left exception) -> throwError $ case exception.code of
       AgentSession.SessionNotFound -> sessionError err404 "session_not_found" "Session or task not found"
       AgentSession.SessionConflict -> sessionError err409 "session_conflict" "Session cursor, receipt or immutable metadata conflicts"
+      AgentSession.SessionRuntimeConflict -> sessionError err409 "session_runtime_conflict" "Runtime identity revision conflicts; refresh runtime_revision from session metadata"
       AgentSession.SessionTerminated -> sessionError err409 "session_terminated" "Session is terminated"
       AgentSession.SessionInvalidInput -> sessionError err400 "session_invalid_input" "Invalid session cursor, metadata or bounds"
       AgentSession.SessionTaskNotInProgress status -> err409
@@ -595,7 +597,7 @@ sessionIO :: Pool Hasql.Connection -> UUID -> IO a -> Handler a
 sessionIO _ workspace = handleSessionErrors . withWorkspaceIdContext (Just workspace)
 
 agentSessions :: Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
-agentSessions pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated
+agentSessions pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated
   where
     readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
     writeAccess = authorizeAgentSessionWrite pool workspace
@@ -617,7 +619,7 @@ agentSessions pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> ap
     createH request = do
       writeAccess
       input <- sessionRequest request
-      sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel input.title input.parentSessionId)
+      sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel input.title input.parentSessionId input.initialRuntimeIdentity)
     getH identifier = readAccess >> requireAgentSession pool workspace identifier
     appendH identifier request = do
       writeAccess
@@ -633,6 +635,11 @@ agentSessions pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> ap
     heartbeatH identifier = do
       writeAccess
       sessionIO pool workspace $ AgentSessions.heartbeatSession pool workspace identifier
+    runtimeH identifier request = do
+      writeAccess
+      _ <- requireAgentSession pool workspace identifier
+      input <- sessionRequest request
+      sessionIO pool workspace $ AgentSessions.setRuntimeIdentity pool workspace identifier input
     tasksH identifier rawLimit rawAfter = do
       readAccess
       _ <- requireAgentSession pool workspace identifier

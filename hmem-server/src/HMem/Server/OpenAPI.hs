@@ -89,7 +89,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
       _ -> parameterRef
     documentSession operation = operation
       & tags .~ InsOrdSet.singleton "Agent Sessions"
-      & description ?~ "Workspace read permission for GET; edit permission for mutations, with normal cookie CSRF and bot attribution. Session ownership is immutable and task links are additive within the workspace. Create uses caller id and format_label. Lists use limit 1..100 (default50), paired before_created_at/before_id keyset cursors; session tasks use after_task_id. Ranges use offset>=0, limit1..1048576 (default65536). Transcript requires active state; evidence requires terminated state and includes the final receipt. Appends require expected_offset/expected_revision and canonical padded data_base64<=1398104 characters/1MiB decoded. Session mutation requests are capped at2MiB before JSON decode, including chunked bodies. Terminate independently verifies already committed prefix size/SHA256 and cursor; it never uploads or changes task status. An exact create/append/terminate retry is safe."
+      & description ?~ "Workspace read permission for GET; edit permission for mutations, with normal cookie CSRF and bot attribution. Session ownership is immutable and task links are additive within the workspace. Create uses caller id, format_label, a very short title, optional immutable parent and initial_runtime_identity for new-session target-model declarations. Creator attribution remains the connection caller. PUT runtime requires an explicit nullable runtime_identity and expected_runtime_revision; it changes only active runtime metadata, not transcript revision/bytes/hash or activity. Lists use limit 1..100 (default50), paired before_created_at/before_id keyset cursors; session tasks use after_task_id. Ranges use offset>=0, limit1..1048576 (default65536). Transcript requires active state; evidence requires terminated state and includes the final receipt. Appends require expected_offset/expected_revision and canonical padded data_base64<=1398104 characters/1MiB decoded. Session mutation requests are capped at2MiB before JSON decode, including chunked bodies. Terminate independently verifies already committed prefix size/SHA256 and cursor; it never uploads or changes task status. An exact create/append/terminate retry is safe."
       & responses %~ (<> Responses Nothing (InsOrdMap.fromList
           [(400, Inline (mempty & description .~ "Invalid JSONL/base64/cursors/limits or missing credential-bot declaration; no mutation."))
           ,(401, Inline (mempty & description .~ "Authentication required."))
@@ -211,7 +211,24 @@ opts = defaultSchemaOptions { fieldLabelModifier = camelToSnake }
 
 instance ToSchema AgentSession.SessionState where
   declareNamedSchema _ = pure $ NamedSchema (Just "AgentSessionState") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["active","terminated"])
-instance ToSchema AgentSession.AgentSession where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema AgentSession.AgentSession where
+  declareNamedSchema proxy = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts proxy
+    NamedSchema _ runtimeSchema <- declareNamedSchema (Proxy @AgentSession.RuntimeIdentity)
+    pure $ NamedSchema name (schema & properties . at "runtime_identity" ?~ Inline (runtimeSchema & nullable ?~ True))
+instance ToSchema AgentSession.RuntimeIdentity where
+  declareNamedSchema proxy = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts proxy
+    pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
+      & description ?~ "Explicit declaration about the target session model, not connection caller attribution or independently observed execution. Model alone is sufficient; provider and reasoning are optional.")
+instance ToSchema AgentSession.SetRuntimeIdentity where
+  declareNamedSchema proxy = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts proxy
+    NamedSchema _ runtimeSchema <- declareNamedSchema (Proxy @AgentSession.RuntimeIdentity)
+    pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
+      & required .~ ["expected_runtime_revision","runtime_identity"]
+      & properties . at "runtime_identity" ?~ Inline (runtimeSchema & nullable ?~ True)
+      & description ?~ "Active-session runtime declaration CAS, separate from the transcript revision. Explicit null clears it to unknown. Does not update activity or transcript bytes.")
 instance ToSchema AgentSession.SessionAncestor where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema AgentSession.SessionFacet where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema AgentSession.SessionFacetPage where declareNamedSchema = genericDeclareNamedSchema opts
@@ -221,7 +238,9 @@ instance ToSchema a => ToSchema (AgentSessionRequest a) where declareNamedSchema
 instance ToSchema SessionWire.CreateSessionRequest where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy
-    pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False)
+    NamedSchema _ runtimeSchema <- declareNamedSchema (Proxy @AgentSession.RuntimeIdentity)
+    pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
+      & properties . at "initial_runtime_identity" ?~ Inline (runtimeSchema & nullable ?~ True))
 instance ToSchema SessionWire.AppendSessionRequest where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy

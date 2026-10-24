@@ -2,7 +2,7 @@ module HMem.DB.AgentSessionSpec (spec) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel, concurrently, waitCatch, withAsync)
-import Control.Exception (SomeException, bracket, bracket_, try, finally)
+import Control.Exception (SomeException, bracket, bracket_, try, finally, onException)
 import Control.Monad (forM_, forM, foldM, replicateM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -34,10 +34,158 @@ import HMem.Types qualified as Types
 spec :: Spec
 spec = do
   around withTestEnv $ describe "Agent sessions" $ do
+    it "keeps runtime declarations separate from immutable caller and transcript receipts, including retry and clear" $ \env -> do
+      workspace <- createTestWorkspace env "runtime-identities"
+      identifier <- UUID.nextRandom
+      caller <- either (fail . T.unpack) pure (mkBotIdentity "Connector" "codex:connection-model:high")
+      updater <- either (fail . T.unpack) pure (mkBotIdentity "Manager" "codex:another-connection-model:low")
+      let actor = EffectiveActor ActorBot "connector" "Connector" (Just caller)
+          manager = EffectiveActor ActorBot "manager" "Manager" (Just updater)
+          first = RuntimeIdentity "actual-model-a" Nothing Nothing
+          second = RuntimeIdentity "actual-model-b" (Just "Known provider") (Just "high")
+          input = CreateSession identifier workspace.id "jsonl" "Separate runtime identity" Nothing (Just first)
+          body = "{\"text\":\"original bytes\"}\r\n"
+          stable row = ((row.creatorActorType,row.creatorActorId,row.creatorActorLabel,row.creatorBotIdentity),
+            (row.createdAt,row.lastSeenAt,row.committedBytes,row.committedRecords,row.revision,row.endsWithNewline),
+            (row.state,row.terminatedAt,row.finalBytes,row.finalSha256,row.title,row.parentSessionId))
+      created <- withEffectiveActorContext (Just actor) $ createSession env.pool input
+      created.creatorBotIdentity `shouldBe` Just caller
+      created.runtimeIdentity `shouldBe` Just first
+      created.runtimeRevision `shouldBe` 0
+      before <- (.session) <$> append env workspace.id created body False
+      changed <- withEffectiveActorContext (Just manager) $ setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 0 (Just second))
+      stable changed `shouldBe` stable before
+      changed.runtimeRevision `shouldBe` 1
+      changed.runtimeIdentity `shouldBe` Just second
+      replay <- setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 0 (Just second))
+      replay `shouldBe` changed
+      setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 1 (Just second)) `shouldReturn` changed
+      boolean env ("SELECT count(*)=3 AND bool_or(actor_id='manager' AND new_values->'runtime_identity'->>'model'='actual-model-b') FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"'") `shouldReturn` True
+      boolean env ("SELECT NOT EXISTS(SELECT 1 FROM change_stream_outbox WHERE envelope#>>'{entity,type}'='agent_session' AND envelope#>>'{entity,id}'='"<>uuid identifier<>"' AND envelope#>>'{entity,action}'='updated' AND (envelope->'invalidations')::text LIKE '%active_sessions:%')") `shouldReturn` True
+      retried <- withEffectiveActorContext (Just actor) $ createSession env.pool input
+      retried `shouldBe` changed
+      expectCode SessionRuntimeConflict $ setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 0 (Just first))
+      cleared <- setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 1 Nothing)
+      stable cleared `shouldBe` stable before
+      cleared.runtimeIdentity `shouldBe` Nothing
+      cleared.runtimeRevision `shouldBe` 2
+      setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 1 Nothing) `shouldReturn` cleared
+      forM_ ["runtime_revision=runtime_revision+1", "runtime_identity='{\"model\":\"Other\"}',runtime_revision=runtime_revision+2", "runtime_identity='{\"model\":\"Other\"}',runtime_revision=runtime_revision+1,last_seen_at=clock_timestamp()", "runtime_identity='{\"model\":\"Other\"}',runtime_revision=runtime_revision+1,revision=revision+1", "runtime_identity='{\"model\":\"Other\"}',runtime_revision=runtime_revision+1,creator_actor_label='Impersonated'"] $ \mutation ->
+        rejectDb $ execute env ("UPDATE sessions SET "<>mutation<>" WHERE id='"<>uuid identifier<>"'")
+      forM_ ["'{}'", "'{\"model\":\"\"}'", "'{\"model\":\" valid \"}'", "'{\"model\":\"A\",\"invented\":\"B\"}'", "'{\"model\":\"A\",\"provider\":null}'"] $ \value ->
+        rejectDb $ execute env ("UPDATE sessions SET runtime_identity="<>value<>"::jsonb,runtime_revision=runtime_revision+1 WHERE id='"<>uuid identifier<>"'")
+      sealed <- terminateSession env.pool workspace.id identifier (receipt cleared body)
+      sealed.runtimeIdentity `shouldBe` Nothing
+      sealed.runtimeRevision `shouldBe` 2
+      allBytes env workspace.id identifier `shouldReturn` body
+      expectCode SessionTerminated $ setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 2 (Just first))
+
+    it "serializes competing runtime changes with append and sealing without sharing transcript revisions" $ \env -> do
+      (workspace,row) <- fresh env
+      let a=RuntimeIdentity "Model A" Nothing Nothing; b=RuntimeIdentity "Model B" Nothing Nothing
+      bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \firstPool ->
+        bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \secondPool ->
+          bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \probePool -> do
+        let probe=env {pool=probePool}
+        (left,right) <- withConn env.pool $ \connection -> do
+          let sql command=S.run (S.sql command) connection >>= either (fail . show) pure
+              blocked 0=do
+                phase <- runSession probePool $ S.statement () $ St.Statement
+                  "SELECT coalesce(string_agg(state||':'||coalesce(wait_event_type,'-')||':'||left(query,240),E'\\n'),'') FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()"
+                  E.noParams (D.singleRow (D.column (D.nonNullable D.text))) False
+                expectationFailure ("Runtime contender phase: "<>T.unpack phase)
+                pure False
+              blocked attempts=do
+                waiting <- boolean probe "SELECT count(*)>=2 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT to_jsonb(s)%'"
+                if waiting then pure True else threadDelay 10000 >> blocked (attempts-1)
+          sql ("BEGIN; SELECT 1 FROM sessions WHERE id='"<>uuid row.id<>"' FOR UPDATE")
+          withAsync (try @SessionException $ setRuntimeIdentity firstPool workspace row.id (SetRuntimeIdentity 0 (Just a))) $ \first ->
+            withAsync (try @SessionException $ setRuntimeIdentity secondPool workspace row.id (SetRuntimeIdentity 0 (Just b))) $ \second ->
+              (do
+                blocked (500 :: Int) `shouldReturn` True
+                sql "COMMIT"
+                l <- waitCatch first >>= either (fail . show) pure
+                r <- waitCatch second >>= either (fail . show) pure
+                pure (l,r)) `onException` sql "ROLLBACK"
+        length [() | Right _ <- [left,right]] `shouldBe` 1
+        [e.code | Left e <- [left,right]] `shouldBe` [SessionRuntimeConflict]
+        Just winner <- getSession probePool workspace row.id
+        let body="{\"text\":\"parallel append\"}\n"
+        (_,changed) <- concurrently (append (env {pool=firstPool}) workspace row body False)
+          (setRuntimeIdentity secondPool workspace row.id (SetRuntimeIdentity winner.runtimeRevision Nothing))
+        changed.runtimeIdentity `shouldBe` Nothing
+        Just combined <- getSession probePool workspace row.id
+        combined.committedBytes `shouldBe` fromIntegral (BS.length body)
+        combined.revision `shouldBe` 1
+        combined.runtimeRevision `shouldBe` 2
+        (runtimeResult,sealed) <- concurrently (try @SessionException $ setRuntimeIdentity firstPool workspace row.id (SetRuntimeIdentity 2 (Just a)))
+          (terminateSession secondPool workspace row.id (receipt combined body))
+        sealed.state `shouldBe` Terminated
+        case runtimeResult of
+          Left e -> e.code `shouldBe` SessionTerminated
+          Right updated -> updated.runtimeRevision `shouldBe` 3
+        Just final <- getSession probePool workspace row.id
+        final.runtimeRevision `shouldBe` maybe 2 (.runtimeRevision) (either (const Nothing) Just runtimeResult)
+        final.finalSha256 `shouldBe` Just (sessionSha256 body)
+        final.revision `shouldBe` 2
+
+    it "upgrades populated V043 runtime to unknown without altering caller, active bytes or sealed receipts" $ \_ ->
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir=sandbox.sandboxRoot </> "before-v044"
+              upgradeDir=sandbox.sandboxRoot </> "only-v044"
+              filename="V044__session_runtime_identity.sql"
+              env=TestEnv pool sandbox db
+              body="{\"text\":\"legacy runtime evidence\"}\r\n"
+          createDirectory beforeDir
+          createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V044" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          before <- Migration.runMigrations pool beforeDir
+          before.failed `shouldBe` Nothing
+          workspace <- createTestWorkspace env "legacy-runtime-upgrade"
+          activeId <- UUID.nextRandom
+          sealedId <- UUID.nextRandom
+          caller <- either (fail . T.unpack) pure (mkBotIdentity "Connector" "codex:legacy-connector:high")
+          let actor=EffectiveActor ActorBot "legacy-connector" "Legacy Connector" (Just caller)
+          forM_ [activeId,sealedId] $ \identifier -> do
+            execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,creator_actor_type,creator_actor_id,creator_actor_label,creator_bot_identity) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Legacy runtime capture','bot','legacy-connector','Legacy Connector','{\"role\":\"Connector\",\"model-id\":\"codex:legacy-connector:high\"}'); INSERT INTO session_chunks(session_id,start_offset,revision,data,allow_final_record,record_count,ends_with_newline) VALUES ('"<>uuid identifier<>"',0,1,convert_to(E'{\"text\":\"legacy runtime evidence\"}\\r\\n','UTF8'),false,0,false)")
+          execute env ("UPDATE sessions SET state='terminated',terminated_at=clock_timestamp(),final_bytes=committed_bytes,final_sha256='"<>TE.encodeUtf8 (sessionSha256 body)<>"',revision=revision+1 WHERE id='"<>uuid sealedId<>"'")
+          execute env "CREATE TABLE runtime_legacy_expected AS SELECT id,to_jsonb(s) AS value FROM sessions s; CREATE TABLE runtime_legacy_audit_expected AS SELECT count(*) AS n FROM audit_log"
+          bracket_ (execute env "CREATE FUNCTION runtime_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=44 THEN RAISE EXCEPTION 'injected runtime ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER runtime_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION runtime_ledger_failure()")
+            (execute env "DROP TRIGGER runtime_ledger_failure ON schema_migrations; DROP FUNCTION runtime_ledger_failure()") $ do
+              refused <- Migration.runMigrations pool upgradeDir
+              refused.failed `shouldSatisfy` (/=Nothing)
+              boolean env "SELECT NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='sessions' AND column_name='runtime_identity') AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=44)" `shouldReturn` True
+          upgraded <- Migration.runMigrations pool upgradeDir
+          upgraded.failed `shouldBe` Nothing
+          upgraded.applied `shouldBe` [filename]
+          boolean env "SELECT NOT EXISTS(SELECT 1 FROM sessions s JOIN runtime_legacy_expected e USING(id) WHERE (to_jsonb(s)-ARRAY['runtime_identity','runtime_revision']) IS DISTINCT FROM e.value OR s.runtime_identity IS NOT NULL OR s.runtime_revision<>0) AND (SELECT count(*) FROM audit_log)=(SELECT n FROM runtime_legacy_audit_expected)" `shouldReturn` True
+          Just original <- getSession pool workspace.id activeId
+          let declaration=RuntimeIdentity "Known actual runtime" Nothing Nothing
+          resumed <- withEffectiveActorContext (Just actor) $ createSession pool (CreateSession activeId workspace.id "jsonl" "Legacy runtime capture" Nothing (Just declaration))
+          resumed `shouldBe` original
+          resumed.runtimeIdentity `shouldBe` Nothing
+          boolean env "SELECT (SELECT count(*) FROM audit_log)=(SELECT n FROM runtime_legacy_audit_expected)" `shouldReturn` True
+          updated <- setRuntimeIdentity pool workspace.id activeId (SetRuntimeIdentity 0 (Just declaration))
+          updated.lastSeenAt `shouldBe` original.lastSeenAt
+          updated.revision `shouldBe` original.revision
+          forM_ [activeId,sealedId] $ \identifier -> do
+            range <- readSessionRange pool workspace.id identifier 0 maxSessionRangeBytes
+            range.bytes `shouldBe` body
+          Just sealed <- getSession pool workspace.id sealedId
+          sealed.runtimeIdentity `shouldBe` Nothing
+          sealed.finalSha256 `shouldBe` Just (sessionSha256 body)
+          expectCode SessionTerminated $ setRuntimeIdentity pool workspace.id sealedId (SetRuntimeIdentity 0 (Just declaration))
+          repeated <- Migration.runMigrations pool upgradeDir
+          repeated.applied `shouldBe` []
+
     it "requires short titles and preserves a same-workspace immutable session tree, including raw SQL guards" $ \env -> do
       (workspace,parent) <- fresh env
       childId <- UUID.nextRandom
-      child <- createSession env.pool (CreateSession childId workspace "jsonl" "Repair session filters" (Just parent.id))
+      child <- createSession env.pool (CreateSession childId workspace "jsonl" "Repair session filters" (Just parent.id) Nothing)
       child.title `shouldBe` Just "Repair session filters"
       child.parentSessionId `shouldBe` Just parent.id
       Just viewed <- getSession env.pool workspace child.id
@@ -45,17 +193,17 @@ spec = do
       rejectDb $ execute env ("UPDATE sessions SET parent_session_id=NULL WHERE id='"<>uuid child.id<>"'")
       rejectDb $ execute env ("UPDATE sessions SET title='Changed title' WHERE id='"<>uuid child.id<>"'")
       another <- UUID.nextRandom
-      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Self parent test" (Just another))
+      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Self parent test" (Just another) Nothing)
       other <- createTestWorkspace env "foreign-session-parent"
-      rejectDb $ createSession env.pool (CreateSession another other.id "jsonl" "Foreign parent test" (Just parent.id))
+      rejectDb $ createSession env.pool (CreateSession another other.id "jsonl" "Foreign parent test" (Just parent.id) Nothing)
       missing <- UUID.nextRandom
-      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Missing parent test" (Just missing))
+      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Missing parent test" (Just missing) Nothing)
       forM_ ["NULL","''","E'\\t'","E'\\n'","U&'\\00a0'"] $ \title -> do
         identifier <- UUID.nextRandom
         rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace<>"','jsonl',"<>title<>")")
-      expectCode SessionInvalidInput $ createSession env.pool (CreateSession another workspace "jsonl" (T.replicate 27 "雪") Nothing)
+      expectCode SessionInvalidInput $ createSession env.pool (CreateSession another workspace "jsonl" (T.replicate 27 "雪") Nothing Nothing)
       rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,parent_session_id) VALUES ('"<>uuid another<>"','"<>uuid workspace<>"','jsonl','Cycle first','"<>uuid missing<>"'),('"<>uuid missing<>"','"<>uuid workspace<>"','jsonl','Cycle second','"<>uuid another<>"')")
-      deep <- foldM (\previous _ -> do identifier <- UUID.nextRandom; createSession env.pool (CreateSession identifier workspace "jsonl" "Nested session work" (Just previous.id))) child [1..20::Int]
+      deep <- foldM (\previous _ -> do identifier <- UUID.nextRandom; createSession env.pool (CreateSession identifier workspace "jsonl" "Nested session work" (Just previous.id) Nothing)) child [1..20::Int]
       Just context <- getSession env.pool workspace deep.id
       length context.ancestors `shouldBe` 16
       context.ancestorsTruncated `shouldBe` True
@@ -139,7 +287,7 @@ spec = do
       identifier <- UUID.nextRandom
       identity <- either (fail . T.unpack) pure (mkBotIdentity "developer" "codex:model:high")
       let actor = EffectiveActor ActorBot "credential-bot" "Developer" (Just identity)
-          input = CreateSession identifier workspace.id "provider-neutral-jsonl" "Test session work" Nothing
+          input = CreateSession identifier workspace.id "provider-neutral-jsonl" "Test session work" Nothing Nothing
       row <- withEffectiveActorContext (Just actor) $ createSession env.pool input
       row.creatorActorId `shouldBe` Just "credential-bot"
       row.creatorBotIdentity `shouldBe` Just identity
@@ -483,7 +631,7 @@ spec = do
           upgraded.applied `shouldBe` [filename]
           boolean env "SELECT NOT EXISTS(SELECT 1 FROM sessions s JOIN legacy_session_expected e USING(id) WHERE (s.state,s.created_at,s.last_seen_at,s.committed_bytes,s.committed_records,s.revision,s.terminated_at,s.final_bytes,s.final_sha256) IS DISTINCT FROM (e.state,e.created_at,e.last_seen_at,e.committed_bytes,e.committed_records,e.revision,e.terminated_at,e.final_bytes,e.final_sha256) OR s.title IS NOT NULL OR s.parent_session_id IS NOT NULL) AND (SELECT count(*) FROM audit_log)=(SELECT n FROM legacy_audit_expected)" `shouldReturn` True
           Just legacy <- getSession pool workspace.id activeId
-          resumed <- createSession pool (CreateSession activeId workspace.id "legacy-jsonl" "Resume legacy session work" Nothing)
+          resumed <- createSession pool (CreateSession activeId workspace.id "legacy-jsonl" "Resume legacy session work" Nothing Nothing)
           resumed `shouldBe` legacy
           resumed.title `shouldBe` Nothing
           sealed <- readSessionRange pool workspace.id sealedId 0 maxSessionRangeBytes
@@ -536,7 +684,7 @@ fresh env = do
 freshIn :: TestEnv -> UUID -> IO AgentSession
 freshIn env workspace = do
   identifier <- UUID.nextRandom
-  createSession env.pool (CreateSession identifier workspace "jsonl" "Test session work" Nothing)
+  createSession env.pool (CreateSession identifier workspace "jsonl" "Test session work" Nothing Nothing)
 
 append :: TestEnv -> UUID -> AgentSession -> ByteString -> Bool -> IO SessionAppendResult
 append env workspace row bytes flush = appendSession env.pool workspace row.id (AppendSession row.committedBytes row.revision bytes flush)

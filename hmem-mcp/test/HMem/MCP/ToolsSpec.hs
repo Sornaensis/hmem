@@ -11,6 +11,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (toList)
 import Data.List (sort)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -43,9 +44,32 @@ import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), Observation
 spec :: Spec
 spec = do
   describe "Agent session MCP" $ do
+    it "forwards explicit runtime declarations and null clearing separately from connection attribution" $ do
+      requests <- newTVarIO []
+      withSessionMock requests $ \manager base -> do
+        let runtime=object ["model" .= ("Actual target model" :: Text)]
+            args revision value=object ["workspace_id" .= workspaceId,"session_id" .= observationId,"expected_runtime_revision" .= (revision :: Int),"runtime_identity" .= value]
+        changed <- call manager base "session_set_runtime" (args 0 runtime)
+        jsonPath ["summary","runtime_identity"] changed `shouldBe` Just runtime
+        jsonPath ["summary","creator_bot_identity"] changed `shouldBe` Just (toJSON testIdentity)
+        cleared <- call manager base "session_set_runtime" (args 1 Null)
+        jsonPath ["summary","runtime_identity"] cleared `shouldBe` Nothing
+        jsonPath ["summary","runtime_revision"] cleared `shouldBe` Just (Number 2)
+        missing <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_set_runtime" :: Text),"arguments" .= object ["workspace_id" .= workspaceId,"session_id" .= observationId,"expected_runtime_revision" .= (2 :: Int)]])
+        missing `shouldSatisfy` isMcpError
+      observed <- readTVarIO requests
+      map (.requestMethod) observed `shouldBe` [methodPut,methodPut]
+      map (.requestPath) observed `shouldBe` replicate 2 "/api/v1/workspaces/11111111-2222-3333-4444-555555555555/sessions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/runtime"
+      decode (observed !! 1).requestBody `shouldBe` Just (object ["expected_runtime_revision" .= (1 :: Int),"runtime_identity" .= Null])
+      withSearchResponse status409 (encode (object ["error" .= ("session_runtime_conflict" :: Text),"message" .= ("sensitive-content" :: Text)])) $ \manager base -> do
+        result <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_set_runtime" :: Text),"arguments" .= object ["workspace_id" .= workspaceId,"session_id" .= observationId,"expected_runtime_revision" .= (0 :: Int),"runtime_identity" .= Null]])
+        jsonPath ["structuredContent","error","code"] result `shouldBe` Just (String "session_runtime_conflict")
+        result `shouldSatisfy` contains "runtime_revision"
+        result `shouldSatisfy` (not . contains "sensitive-content")
+
     it "advertises strict explicit management tools and bounded range/list windows without ingestion or local file controls" $ do
       let names = [name | Object definition <- toolDefinitions, Just (String name) <- [KM.lookup "name" definition], "session_" `T.isPrefixOf` name, not ("session_upload_" `T.isPrefixOf` name)]
-      sort names `shouldBe` sort ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence"]
+      sort names `shouldBe` sort ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]
       forM_ names $ \name -> do
         let [definition] = [value | value <- toolDefinitions, jsonField "name" value == Just (String name)]
         jsonPath ["inputSchema", "additionalProperties"] definition `shouldBe` Just (Bool False)
@@ -80,7 +104,7 @@ spec = do
           created <- callWithKey manager base (Just "session-credential") "session_create"
             (object ["workspace_id" .= workspaceId, "session_id" .= observationId, "title" .= ("Test session work" :: Text), "format_label" .= ("provider-jsonl" :: Text)])
           jsonField "action" created `shouldBe` Just (String "created")
-          created `shouldSatisfy` (not . contains "creator_actor_label")
+          created `shouldSatisfy` contains "creator_actor_label"
           _ <- callWithKey manager base (Just "session-credential") "session_terminate" sessionTerminateArguments
           _ <- callWithKey manager base Nothing "session_associate" (object ["workspace_id" .= workspaceId, "session_id" .= observationId, "task_id" .= workspaceId])
           pure ()
@@ -1623,11 +1647,16 @@ withSessionMock requests action = testWithApplication (pure app) $ \port ->
           later = any (`BS.isInfixOf` request.rawQueryString) ["before_id=", "after_task_id="]
           items = if later then [] else [if isTaskList then object ["id" .= workspaceId, "title" .= ("Linked task" :: Text), "status" .= ("todo" :: Text)] else sessionMetadata]
           value
+            | "/runtime" `BS.isSuffixOf` request.rawPathInfo =
+                let input=fromMaybe Null (decode body)
+                    runtime=fromMaybe Null (jsonField "runtime_identity" input)
+                    revision=case jsonField "expected_runtime_revision" input of Just (Number n) -> Number (n+1); _ -> Number 0
+                in setField "runtime_revision" revision (setField "runtime_identity" runtime sessionMetadata)
             | isTaskList && request.requestMethod == methodGet = object ["items" .= items, "next_task_id" .= (if later then Null else String workspaceId)]
             | isList = object ["items" .= items, "next_cursor" .= (if later then Null else object ["created_at" .= ("2026-01-01T00:00:00Z" :: Text), "id" .= observationId])]
             | "/terminate" `BS.isSuffixOf` request.rawPathInfo = setField "state" (String "terminated") sessionMetadata
             | otherwise = sessionMetadata
-      respond $ if request.requestMethod == methodPut then Wai.responseLBS status204 [] ""
+      respond $ if request.requestMethod == methodPut && not ("/runtime" `BS.isSuffixOf` request.rawPathInfo) then Wai.responseLBS status204 [] ""
         else Wai.responseLBS status200 [("Content-Type", "application/json")] (encode value)
 
 withSessionProxyApp :: (UUID -> Manager -> String -> IO a) -> IO a

@@ -1,7 +1,7 @@
 -- | Provider-neutral metadata and byte-oriented agent session inputs.
 module HMem.AgentSession
   ( SessionState(..), SessionFreshness(..), SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..)
-  , AppendSession(..), TerminateSession(..), SessionAppendResult(..)
+  , AppendSession(..), TerminateSession(..), SessionAppendResult(..), RuntimeIdentity(..), SetRuntimeIdentity(..), runtimeIdentityValid
   , SessionPageCursor(..), SessionPage(..), SessionTask(..), SessionTaskPage(..), SessionAncestor(..), SessionFacet(..), SessionFacetPage(..)
   , SessionRange(..), SessionException(..), SessionErrorCode(..)
   , maxSessionChunkBytes, maxSessionRecordBytes, maxSessionRangeBytes, maxSessionPageSize
@@ -9,12 +9,16 @@ module HMem.AgentSession
   ) where
 
 import Control.Exception (Exception)
+import Control.Monad (unless)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Data.ByteString qualified as BS
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import GHC.Generics (Generic)
@@ -42,6 +46,34 @@ data SessionFilter = SessionFilter
 defaultSessionFilter :: SessionFilter
 defaultSessionFilter = SessionFilter Nothing Nothing Nothing Nothing
 
+-- | A declaration about the target session, never the connecting actor.
+-- A model name alone is useful; missing provider/reasoning are not invented.
+data RuntimeIdentity = RuntimeIdentity
+  { model :: !Text, provider :: !(Maybe Text), reasoning :: !(Maybe Text)
+  } deriving stock (Show, Eq, Generic)
+instance ToJSON RuntimeIdentity where toJSON = genericToJSON jsonOptions
+instance FromJSON RuntimeIdentity where
+  parseJSON = withObject "RuntimeIdentity" $ \o -> do
+    unless (all (`elem` ["model","provider","reasoning"]) (KM.keys o)) (fail "Unsupported runtime identity fields")
+    identity <- RuntimeIdentity <$> o .: "model" <*> o .:? "provider" <*> o .:? "reasoning"
+    unless (runtimeIdentityValid identity) (fail "Runtime identity requires a short model name and valid optional metadata")
+    pure identity
+
+runtimeIdentityValid :: RuntimeIdentity -> Bool
+runtimeIdentityValid identity = valid 256 identity.model && all (maybe True (valid 128)) [identity.provider,identity.reasoning]
+  where valid limit value = not (T.null value) && value == T.strip value && not (T.any (== '\0') value) && BS.length (TE.encodeUtf8 value) <= limit
+
+data SetRuntimeIdentity = SetRuntimeIdentity
+  { expectedRuntimeRevision :: !Int64, runtimeIdentity :: !(Maybe RuntimeIdentity)
+  } deriving stock (Show, Eq, Generic)
+-- Clearing is an explicit operation; null must not be omitted by jsonOptions.
+instance ToJSON SetRuntimeIdentity where
+  toJSON input = object ["expected_runtime_revision" .= input.expectedRuntimeRevision,"runtime_identity" .= input.runtimeIdentity]
+instance FromJSON SetRuntimeIdentity where
+  parseJSON = withObject "SetRuntimeIdentity" $ \o -> do
+    unless (all (`elem` ["expected_runtime_revision","runtime_identity"]) (KM.keys o)) (fail "Unsupported runtime update fields")
+    SetRuntimeIdentity <$> o .: "expected_runtime_revision" <*> o .: "runtime_identity"
+
 data AgentSession = AgentSession
   { id :: !UUID
   , workspaceId :: !UUID
@@ -55,6 +87,8 @@ data AgentSession = AgentSession
   , creatorActorId :: !(Maybe Text)
   , creatorActorLabel :: !(Maybe Text)
   , creatorBotIdentity :: !(Maybe BotIdentity)
+  , runtimeIdentity :: !(Maybe RuntimeIdentity)
+  , runtimeRevision :: !Int64
   , createdAt :: !UTCTime
   , lastSeenAt :: !UTCTime
   , committedBytes :: !Int64
@@ -71,6 +105,7 @@ instance FromJSON AgentSession where
     <$> o .: "id" <*> o .: "workspace_id" <*> o .: "format_label"
     <*> o .:? "title" <*> o .:? "parent_session_id" <*> o .:? "ancestors" .!= [] <*> o .:? "ancestors_truncated" .!= False
     <*> o .: "state" <*> o .:? "creator_actor_type" <*> o .:? "creator_actor_id" <*> o .:? "creator_actor_label" <*> o .:? "creator_bot_identity"
+    <*> o .:? "runtime_identity" <*> o .:? "runtime_revision" .!= 0
     <*> o .: "created_at" <*> o .: "last_seen_at" <*> o .: "committed_bytes" <*> o .: "committed_records" <*> o .: "revision"
     <*> o .: "ends_with_newline" <*> o .:? "terminated_at" <*> o .:? "final_bytes" <*> o .:? "final_sha256"
 
@@ -88,7 +123,7 @@ instance ToJSON SessionFacetPage where toJSON = genericToJSON jsonOptions
 instance FromJSON SessionFacetPage where parseJSON = genericParseJSON jsonOptions
 
 data CreateSession = CreateSession
-  { id :: !UUID, workspaceId :: !UUID, formatLabel :: !Text, title :: !Text, parentSessionId :: !(Maybe UUID)
+  { id :: !UUID, workspaceId :: !UUID, formatLabel :: !Text, title :: !Text, parentSessionId :: !(Maybe UUID), initialRuntimeIdentity :: !(Maybe RuntimeIdentity)
   } deriving stock (Show, Eq, Generic)
 instance ToJSON CreateSession where toJSON = genericToJSON jsonOptions
 instance FromJSON CreateSession where parseJSON = genericParseJSON jsonOptions
@@ -134,7 +169,7 @@ data SessionRange = SessionRange
   , nextOffset :: !Int64, hasMore :: !Bool
   } deriving stock (Show, Eq)
 
-data SessionErrorCode = SessionNotFound | SessionConflict | SessionTerminated | SessionInvalidInput | SessionTaskNotInProgress !Text
+data SessionErrorCode = SessionNotFound | SessionConflict | SessionRuntimeConflict | SessionTerminated | SessionInvalidInput | SessionTaskNotInProgress !Text
   deriving stock (Show, Eq)
 data SessionException = SessionException
   { code :: !SessionErrorCode, message :: !Text

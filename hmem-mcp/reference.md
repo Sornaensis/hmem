@@ -71,11 +71,12 @@ records expose optional `bot_identity`; no historical attribution is inferred.
 Session tools use the accepted workspace and identity. An explicit `workspace_id`
 overrides the selected workspace; the HTTP server still checks permissions and
 requires the session and task to belong to that resolved workspace. Reads require
-read access; creation, association and termination require edit access.
+read access; creation, association, runtime changes and termination require edit access.
 
 | Tool | Arguments beyond optional `workspace_id` | Result |
 | --- | --- | --- |
-| `session_create` | Caller-owned `session_id`, `format_label`, very short `title`, optional `parent_session_id` | Idempotent metadata acknowledgement |
+| `session_create` | Caller-owned `session_id`, `format_label`, very short `title`, optional `parent_session_id` and `initial_runtime_identity` | New-session runtime initialization; retries preserve canonical metadata |
+| `session_set_runtime` | `session_id`, `expected_runtime_revision`, required nullable `runtime_identity` | Guarded active runtime declaration; explicit null clears to unknown |
 | `session_list` | Optional `task_id`, `limit`, paired `before_created_at` / `before_id` | Compact workspace or task sessions |
 | `session_detail` | `session_id` | Metadata including creator attribution |
 | `session_tasks` | `session_id`, optional `limit`, `after_task_id` | Visible associated tasks |
@@ -93,8 +94,27 @@ visibility and additive associations rather than a frozen snapshot.
 
 Metadata and mutation acknowledgements never include transcript bytes. Compact
 metadata retains full IDs, format, state, timestamps, committed bytes/records,
-revision, newline status and any final byte count/SHA-256. `session_detail` also
-returns creator attribution. All new session results include `structuredContent`.
+revision, newline status and any final byte count/SHA-256. Results keep immutable
+`creator_*` connection-caller attribution separate from nullable declared
+`runtime_identity` and its `runtime_revision`. Unknown runtime is never inferred
+from the caller or format. All new session results include `structuredContent`.
+
+`initial_runtime_identity` initializes NEW sessions only, for example
+`{"model":"actual-target-model"}`; `provider` and `reasoning` are optional known
+values. Model names contain 1–256 UTF-8 bytes; optional values contain 1–128.
+Values must be trimmed and nonblank. Omitted/null means unknown. Creation
+retries preserve and return canonical runtime, including after later switches.
+The accepted MCP identity still describes the caller, not necessarily the target.
+
+`session_set_runtime` requires `expected_runtime_revision` and an explicit
+`runtime_identity` value, including JSON null to clear it. It only edits active
+sessions. Changed declarations increment the runtime revision once; identical
+current-value updates do nothing, and an identical retry at the immediately
+preceding revision succeeds without another audit/change event. Other stale
+updates return `session_runtime_conflict`; refetch `session_detail` before retry.
+This revision is independent of append/termination `revision`: runtime changes
+do not alter transcript bytes, byte/hash receipts, heartbeat activity or creator.
+These declarations are self-reported metadata, not verified execution identity.
 
 Range reads default to 4096 bytes, accept 1..1048576, and return `session`,
 `offset`, canonical padded `data_base64`, `next_offset` and `has_more`. Decode each
@@ -138,6 +158,15 @@ The path must identify a readable regular file. Only this tool accepts a local
 path; paths, credentials and raw errors never appear in receipts or HTTP metadata.
 An existing active session is resumed only after its entire committed prefix
 matches the source. A second active follower for the same UUID is refused.
+
+Optional `initial_runtime_identity` describes the actual target model when a
+new session is created. Resume preserves canonical runtime even if its startup
+declaration is older; it never reasserts that declaration after a model switch.
+Use `session_set_runtime` for existing-session declarations or changes. Uploader
+status reports the last acknowledged remote `runtime_identity` and
+`runtime_revision`; those values can lag a concurrent change until the next
+metadata/append/heartbeat acknowledgement. Caller identity remains captured for
+request attribution and is never substituted for runtime.
 
 `session_upload_status`, `session_upload_flush` and `session_upload_stop` accept
 `session_id` and optional `workspace_id`. They address this process's registry;

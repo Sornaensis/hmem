@@ -128,6 +128,8 @@ classDiagram
       TEXT? creator_actor_id
       TEXT? creator_actor_label
       JSONB? creator_bot_identity
+      JSONB? runtime_identity
+      BIGINT runtime_revision
       TIMESTAMPTZ created_at
       TIMESTAMPTZ last_seen_at
       BIGINT committed_bytes
@@ -374,3 +376,10 @@ immutable; the composite parent FK and prospective guard prevent foreign,
 self/cyclic or later parent changes. Existing task links remain additive;
 new links lock the task row and require `in_progress`. Historical links survive
 later status transitions. See the [schema reference](docs/reference/schema.md#session-tree-and-titles-v043).
+
+V044 adds nullable `sessions.runtime_identity` and nonnegative, non-null
+`runtime_revision` (default 0). Runtime is an explicit declaration about the
+target model, separate from immutable `creator_*` connection attribution. Legacy
+runtime remains unknown. Active declarations use an isolated revision-guarded
+update without changing transcript cursors, bytes/hash or heartbeat activity;
+sealed metadata remains immutable. See the [schema reference](docs/reference/schema.md#session-runtime-identity-v044).

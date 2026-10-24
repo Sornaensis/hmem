@@ -182,11 +182,11 @@ test('conversation flow preserves declared identity and wraps long model names w
    await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor()
    const selected=page.locator('.session-summary a').filter({hasText:'Codex'})
    if(scenario.creator){assert.match(await selected.locator('.session-identity').innerText(),new RegExp(scenario.creator.creator_bot_identity.role));assert.ok(await selected.locator('.actor-attribution-kind').evaluate(el=>el.getBoundingClientRect().height<24),'Model badge stays on one line')}
-   else assert.equal(await selected.locator('.session-identity').count(),0)
+   else assert.match(await selected.locator('.session-connection').innerText(),/Unknown/)
    await selected.click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
    const identity=page.locator('.session-viewer .session-identity')
    if(scenario.creator){const declared=scenario.creator.creator_bot_identity;assert.ok((await identity.innerText()).includes(declared['model-id']));assert.ok((await identity.innerText()).includes(declared.role));assert.equal(await identity.evaluate(el=>getComputedStyle(el).userSelect),'text')}
-   else assert.equal(await identity.count(),0)
+   else assert.match(await identity.locator('.session-connection').innerText(),/Unknown/)
    const user=page.locator('.session-role-user:not(.session-record-activity)').first(),assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
    assert.notEqual(await user.evaluate(el=>getComputedStyle(el).borderRadius),'0px')
    assert.equal(await assistant.evaluate(el=>getComputedStyle(el).borderTopWidth),'0px')

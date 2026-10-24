@@ -13,6 +13,13 @@ ancestor paths needed to reach it, combined with the other hierarchy filters.
 
 Quiet means there has been no heartbeat for 30 seconds; it does not end a session.
 
+**Running model** identifies the declared model executing the session, separately
+from **Connected by**, the original caller that created its connection metadata.
+These may be different models. A running model is explicitly declared, not
+independently detected; missing declarations display **Unknown**. Saved evidence
+uses **Session model** for its last declaration. Resuming capture does not replace
+the original caller.
+
 Conversation text renders as Markdown. Tool calls and results expand on demand,
 and thinking starts hidden. Expanded tool payloads display formatted, highlighted
 JSON. Encrypted thinking displays *Thinking...*; unrecognized records stay hidden.
@@ -52,6 +59,19 @@ promptly. The process continues following while you use ordinary MCP tools;
 start a task before adding a session. Existing links remain valid after completion. Each task can also
 link to several sessions. The local path stays in the MCP process.
 
+When known, supply `initial_runtime_identity`, for example
+`{"model":"actual-target-model"}`. Add `provider` or `reasoning` only when known.
+This describes the captured session, not necessarily your own accepted MCP
+identity. Omit it or use null if unknown. It initializes a new session only;
+creation retries and resumed uploaders preserve the current declaration.
+
+For a model switch, read `runtime_revision` with `session_detail`, then call
+`session_set_runtime` with that value as `expected_runtime_revision` and the new
+`runtime_identity`. Explicit null clears the declaration to Unknown. An identical
+retry at the immediately preceding runtime revision is safe; other stale updates
+conflict and require fresh metadata. This changes neither transcript bytes nor
+heartbeat activity. Saved sessions reject runtime changes.
+
 Inspect `session_upload_status` while capture proceeds. A partial final record
 remains pending. `session_upload_flush` captures one finite file-size boundary
 and may commit a complete JSON record without a final newline while the session
@@ -88,7 +108,7 @@ still be added after sealing, but evidence cannot be edited or reopened.
 
 
 Task cards show active conversations and saved Evidence in compact session cards,
-with last activity and the declared creator model. Select a card to explore that
+with last activity and separate runtime-model and original-caller labels. Select a card to explore that
 session. Use its Download button for original JSONL, or Evidence **Download all**
 for a server-compressed ZIP of every linked saved session, including other pages. Progress and
 Cancel stay in that task’s Evidence section. Keep the page open until the archive

@@ -4399,7 +4399,12 @@ type alias AgentSession =
     , committedBytes : Int, committedRecords : Int, revision : Int, endsWithNewline : Bool
     , terminatedAt : Maybe String, finalBytes : Maybe Int, finalSha256 : Maybe String
     , title : Maybe String, parentSessionId : Maybe String, ancestors : List SessionAncestor, ancestorsTruncated : Bool
+    , runtimeIdentity : Maybe SessionRuntimeIdentity, runtimeRevision : Int
     }
+
+
+type alias SessionRuntimeIdentity =
+    { model : String, provider : Maybe String, reasoning : Maybe String }
 
 
 type alias SessionAncestor =
@@ -4466,6 +4471,8 @@ agentSessionDecoder =
         |> optional "parent_session_id" (D.nullable D.string) Nothing
         |> optional "ancestors" (D.list (D.map5 SessionAncestor (D.field "id" D.string) (nullableSessionField "title" D.string) (D.field "format_label" D.string) (D.field "state" D.string) (nullableSessionField "parent_session_id" D.string))) []
         |> optional "ancestors_truncated" D.bool False
+        |> optional "runtime_identity" (D.nullable (D.map3 SessionRuntimeIdentity (D.field "model" D.string) (nullableSessionField "provider" D.string) (nullableSessionField "reasoning" D.string))) Nothing
+        |> optional "runtime_revision" (D.int |> D.andThen (\revision -> if revision >= 0 then D.succeed revision else D.fail "Invalid runtime revision")) 0
 
 
 nullableSessionField : String -> Decoder a -> Decoder (Maybe a)

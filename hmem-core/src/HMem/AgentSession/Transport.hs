@@ -19,14 +19,14 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import GHC.Generics (Generic)
-import HMem.AgentSession (AgentSession, SessionPageCursor, SessionTask, maxSessionChunkBytes)
+import HMem.AgentSession (AgentSession, RuntimeIdentity, SessionPageCursor, SessionTask, maxSessionChunkBytes)
 import HMem.Types (jsonOptions)
 
-data CreateSessionRequest = CreateSessionRequest { id :: !UUID, formatLabel :: !Text, title :: !Text, parentSessionId :: !(Maybe UUID) }
+data CreateSessionRequest = CreateSessionRequest { id :: !UUID, formatLabel :: !Text, title :: !Text, parentSessionId :: !(Maybe UUID), initialRuntimeIdentity :: !(Maybe RuntimeIdentity) }
   deriving stock (Show, Eq, Generic)
 instance ToJSON CreateSessionRequest where toJSON = genericToJSON jsonOptions
 instance FromJSON CreateSessionRequest where
-  parseJSON = strictObject "CreateSessionRequest" ["id","format_label","title","parent_session_id"] $ \o -> CreateSessionRequest <$> o .: "id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id"
+  parseJSON = strictObject "CreateSessionRequest" ["id","format_label","title","parent_session_id","initial_runtime_identity"] $ \o -> CreateSessionRequest <$> o .: "id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id" <*> o .:? "initial_runtime_identity"
 
 data AppendSessionRequest = AppendSessionRequest
   { expectedOffset :: !Int64, expectedRevision :: !Int64, dataBase64 :: !Text, allowFinalRecord :: !Bool }

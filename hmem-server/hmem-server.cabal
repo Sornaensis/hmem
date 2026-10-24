@@ -61,6 +61,7 @@ data-files:
     migrations/V041__agent_sessions.sql
     migrations/V042__agent_session_change_delivery.sql
     migrations/V043__session_hierarchy_and_titles.sql
+    migrations/V044__session_runtime_identity.sql
 
 library
   exposed-modules:

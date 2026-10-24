@@ -61,6 +61,43 @@ import Text.Read (readMaybe)
 
 spec :: Spec
 spec = describe "Session follower" $ do
+  it "preserves canonical runtime switches and unknown clearing through stale-start declarations and continuing capture" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withRegistry fast $ \registry -> do
+      sid <- UUID.nextRandom
+      let a=Core.RuntimeIdentity "Target runtime A" Nothing Nothing
+          b=Core.RuntimeIdentity "Target runtime B" Nothing (Just "high")
+          upload=payload <$> handleUploadTool registry manager base Nothing identity "session_upload_start"
+            (object ["workspace_id" .= wid,"session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a])
+      _ <- upload
+      _ <- await registry manager base wid sid (hasOffset 6)
+      Just original <- Sessions.getSession env.pool wid sid
+      original.runtimeIdentity `shouldBe` Just a
+      _ <- Sessions.setRuntimeIdentity env.pool wid sid (Core.SetRuntimeIdentity 0 (Just b))
+      BL.appendFile path "true\n"
+      live <- await registry manager base wid sid (\value -> hasOffset 11 value && field "runtime_identity" value==Just (toJSON b))
+      field "runtime_revision" live `shouldBe` Just (Number 1)
+      retried <- handleToolCall manager base Nothing identity (object ["name" .= ("session_create" :: Text),"arguments" .= object ["workspace_id" .= wid,"session_id" .= sid,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a]])
+      nested ["summary","runtime_identity"] (payload retried) `shouldBe` Just (toJSON b)
+      _ <- control registry manager base wid sid "session_upload_stop"
+      _ <- await registry manager base wid sid (hasStatus "stopped")
+      _ <- upload
+      BL.appendFile path "null\n"
+      resumed <- await registry manager base wid sid (\value -> hasOffset 16 value && field "runtime_identity" value==Just (toJSON b))
+      field "runtime_revision" resumed `shouldBe` Just (Number 1)
+      _ <- control registry manager base wid sid "session_upload_stop"
+      _ <- await registry manager base wid sid (hasStatus "stopped")
+      _ <- Sessions.setRuntimeIdentity env.pool wid sid (Core.SetRuntimeIdentity 1 Nothing)
+      _ <- upload
+      BL.appendFile path "false\n"
+      cleared <- await registry manager base wid sid (\value -> hasOffset 22 value && field "runtime_identity" value==Just Null)
+      field "runtime_revision" cleared `shouldBe` Just (Number 2)
+      _ <- control registry manager base wid sid "session_upload_stop"
+      stopped <- await registry manager base wid sid (hasStatus "stopped")
+      receiptHash stopped `shouldBe` Just (String (Core.sessionSha256 "{}\n[]\ntrue\nnull\nfalse\n"))
+      Just final <- Sessions.getSession env.pool wid sid
+      final.creatorBotIdentity `shouldBe` original.creatorBotIdentity
+      final.runtimeIdentity `shouldBe` Nothing
+
   it "requires an explicit very short title while keeping parent optional in tools/list and validation" $
     withManager $ \manager -> withRegistry fast $ \registry -> do
       let [definition]=[value | value <- uploadToolDefinitions,field "name" value==Just (String "session_upload_start")]
@@ -379,7 +416,7 @@ spec = describe "Session follower" $ do
       let original = BS.concat (replicate 80000 "{}\n")
       withSourceFile original $ \path -> do
         sid <- UUID.nextRandom
-        _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing)
+        _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing)
         _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 original False)
         captured <- captureTestHTTP base
         seen <- newEmptyMVar; release <- newEmptyMVar; blocked <- newTVarIO False
@@ -772,7 +809,7 @@ epoch :: UTCTime
 epoch = UTCTime (fromGregorian 2026 1 1) 0
 
 fakeMetadata :: UUID -> Int -> Value
-fakeMetadata sid count = toJSON (Core.AgentSession sid workspace "jsonl" Nothing Nothing [] False Core.Active Nothing Nothing Nothing Nothing
+fakeMetadata sid count = toJSON (Core.AgentSession sid workspace "jsonl" Nothing Nothing [] False Core.Active Nothing Nothing Nothing Nothing Nothing 0
   epoch epoch (fromIntegral count) 0 0 True Nothing Nothing Nothing)
 
 queryNumber :: BS.ByteString -> String -> Int

@@ -3,12 +3,12 @@ module HMem.DB.AgentSession
   ( createSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
   , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
   , workspaceSessionActivity, projectSessionActivity, listSessionFacets
-  , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange
+  , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange, setRuntimeIdentity
   ) where
 
 import Control.Exception (throwIO)
 import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
-import Data.Aeson (FromJSON, Result(..), fromJSON)
+import Data.Aeson (FromJSON, Result(..), fromJSON, toJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Functor.Contravariant (contramap)
@@ -67,6 +67,9 @@ createSession pool input = do
   if BS.length (TE.encodeUtf8 (T.strip input.title)) > 80 || T.null (T.strip input.title)
     then invalid "A very short descriptive title is required (1 to 80 UTF-8 bytes)"
     else pure ()
+  if maybe False (not . runtimeIdentityValid) input.initialRuntimeIdentity
+    then invalid "Invalid initial runtime identity declaration"
+    else pure ()
   actor <- currentEffectiveActor
   checked pool $ do
     -- Read before INSERT: a legacy row may have no title and must remain
@@ -95,8 +98,33 @@ createSession pool input = do
 createStatement :: St.Statement CreateSession (Maybe AgentSession)
 createStatement = St.Statement sql encoder (D.rowMaybe jsonRow) True
   where
-    sql = "WITH workspace AS (SELECT id FROM workspaces WHERE id=$2 AND deleted_at IS NULL FOR SHARE), inserted AS (INSERT INTO sessions(id,workspace_id,format_label,title,parent_session_id,creator_actor_type,creator_actor_id,creator_actor_label,creator_bot_identity) SELECT $1,id,$3,$4,$5,NULLIF(current_setting('hmem.actor_type',true),''),NULLIF(current_setting('hmem.actor_id',true),''),NULLIF(current_setting('hmem.actor_label',true),''),NULLIF(current_setting('hmem.bot_identity',true),'')::jsonb FROM workspace ON CONFLICT(id) DO NOTHING RETURNING *) SELECT to_jsonb(inserted) FROM inserted"
-    encoder = param (.id) E.uuid <> param (.workspaceId) E.uuid <> param (.formatLabel) E.text <> param (.title) E.text <> optional (.parentSessionId) E.uuid
+    sql = "WITH workspace AS (SELECT id FROM workspaces WHERE id=$2 AND deleted_at IS NULL FOR SHARE), inserted AS (INSERT INTO sessions(id,workspace_id,format_label,title,parent_session_id,runtime_identity,creator_actor_type,creator_actor_id,creator_actor_label,creator_bot_identity) SELECT $1,id,$3,$4,$5,$6,NULLIF(current_setting('hmem.actor_type',true),''),NULLIF(current_setting('hmem.actor_id',true),''),NULLIF(current_setting('hmem.actor_label',true),''),NULLIF(current_setting('hmem.bot_identity',true),'')::jsonb FROM workspace ON CONFLICT(id) DO NOTHING RETURNING *) SELECT to_jsonb(inserted) FROM inserted"
+    encoder = param (.id) E.uuid <> param (.workspaceId) E.uuid <> param (.formatLabel) E.text <> param (.title) E.text <> optional (.parentSessionId) E.uuid <> optional (fmap toJSON . (.initialRuntimeIdentity)) E.jsonb
+
+-- Runtime declarations have their own cursor. They never consume transcript
+-- revisions, heartbeat activity or byte/hash receipts, and share the row lock
+-- with append/termination so a sealed session cannot change underneath a write.
+setRuntimeIdentity :: Pool Hasql.Connection -> UUID -> UUID -> SetRuntimeIdentity -> IO AgentSession
+setRuntimeIdentity pool workspace identifier input = do
+  if input.expectedRuntimeRevision < 0 || maybe False (not . runtimeIdentityValid) input.runtimeIdentity
+    then invalid "Runtime updates require a nonnegative runtime revision and valid declaration"
+    else pure ()
+  checked pool $ do
+    found <- S.statement (workspace,identifier) (getStatement True)
+    case found of
+      Nothing -> pure $ problem SessionNotFound "Session not found"
+      Just row | row.state == Terminated -> pure $ problem SessionTerminated "Session is terminated"
+      Just row
+        | row.runtimeRevision == input.expectedRuntimeRevision ->
+            if row.runtimeIdentity == input.runtimeIdentity then pure (Right row)
+            else do
+              updated <- S.statement (workspace,identifier,input.runtimeIdentity) $ St.Statement
+                "UPDATE sessions s SET runtime_identity=$3,runtime_revision=runtime_revision+1 WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s) || hmem_session_ancestor_context(s.id)"
+                (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> optional (\(_,_,c) -> toJSON <$> c) E.jsonb)
+                (D.singleRow jsonRow) True
+              pure (Right updated)
+        | input.expectedRuntimeRevision == row.runtimeRevision - 1 && row.runtimeIdentity == input.runtimeIdentity -> pure (Right row)
+        | otherwise -> pure $ problem SessionRuntimeConflict "Runtime identity revision conflicts; refresh session metadata"
 
 getSession :: Pool Hasql.Connection -> UUID -> UUID -> IO (Maybe AgentSession)
 getSession pool workspace identifier = runSession pool $ S.statement (workspace,identifier) (getStatement False)

@@ -473,15 +473,25 @@ sessionSummary workspace model session =
                 let path = (if session.ancestorsTruncated then "Earlier ancestors omitted (16-level context limit) › " else "") ++ "Parent: " ++ String.join " › " (List.map (\ancestor -> Maybe.withDefault ancestor.formatLabel ancestor.title) session.ancestors)
                 in span [class "session-parent-context",Html.Attributes.title path] [text path]
             , span [class "session-summary-heading"] [strong [Html.Attributes.title (sessionTitle session)] [text (sessionTitle session)], span [class "session-state-dot",attribute "aria-label" (if session.state == Api.SessionActive then "Active" else "Terminated")] []]
-            , viewSessionIdentity session.creator
+            , viewSessionIdentity session
             , span [class "card-meta"] [text (String.fromInt session.committedRecords ++ " records · " ++ (if session.state == Api.SessionTerminated then "Saved" else Dict.get session.id model.sessions.heartbeats |> Maybe.map (\status -> if status == "Fresh" then "Live" else if status == "Stale (30s)" then "Quiet" else "Active") |> Maybe.withDefault "Active"))]
             , span [class "session-latest-activity"] [text "Last activity · ",time [attribute "datetime" session.lastSeenAt] [text (compactTimestamp model session.lastSeenAt)]] ] ]
 
 
-viewSessionIdentity : ActorAttribution.Actor -> Html Msg
-viewSessionIdentity creator =
-    if creator == ActorAttribution.empty then text "" else
-    span [class "session-identity"] [ActorAttribution.viewInline creator]
+viewSessionIdentity : Api.AgentSession -> Html Msg
+viewSessionIdentity session =
+    let
+        runtime = session.runtimeIdentity |> Maybe.map (\identity -> String.join " · " (List.filterMap identityValue [Just identity.model,identity.provider,identity.reasoning])) |> Maybe.withDefault "Unknown"
+        identityValue value = value |> Maybe.andThen (\content -> if content == "" then Nothing else Just content)
+        label = if session.state == Api.SessionActive then "Running model" else "Session model"
+        unknownCallerType = session.creator.actorType == Nothing && session.creator.actorLabel == Nothing && session.creator.botIdentity == Nothing
+        caller = if unknownCallerType then Maybe.withDefault "Unknown" session.creator.actorId else ActorAttribution.label session.creator
+    in
+    span [class "session-identity"]
+        [span [class "session-runtime",Html.Attributes.title (label ++ ": " ++ runtime ++ (if session.runtimeIdentity == Nothing then ". No runtime declaration is available." else ". Explicit declaration; execution is not independently verified."))]
+            [span [class "session-identity-label"] [text (label ++ " · ")],span [class "session-runtime-value"] [text runtime],if session.runtimeIdentity == Nothing then text "" else span [class "session-runtime-source"] [text "Declared"]]
+        ,span [class "session-connection",Html.Attributes.title (caller ++ ". Original connection caller that created the session metadata; a later resuming manager does not replace this attribution.")]
+            [span [class "session-identity-label"] [text "Connected by · "],if unknownCallerType then text caller else ActorAttribution.viewInline session.creator]]
 
 
 viewDetail : String -> Model -> String -> Html Msg
@@ -582,7 +592,7 @@ viewTaskSection evidence workspace model task =
         ,if evidence then viewArchive model task else text ""
         ,if page == Nothing then p [class "card-meta"] [text (if cachedError /= Nothing then "Sessions could not be loaded." else "Loading sessions…"),if cachedError /= Nothing then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""]
          else if List.isEmpty sessions then p [class "card-meta"] [text ("No " ++ String.toLower heading ++ " on this page.")]
-         else div [class "task-session-cards"] (List.map (\session -> div [class "card task-session-card"] [a [href (sessionUrl workspace session.id)] [strong [] [text (sessionTitle session)],viewSessionIdentity session.creator,span [class "card-meta"] [text ("Last activity · " ++ TimestampDisplay.lookup model.timestamps (sessionActivity session))]],if evidence then viewSave model session else span [class "session-state-dot",attribute "aria-label" "Active"] []]) sessions)
+         else div [class "task-session-cards"] (List.map (\session -> div [class "card task-session-card"] [a [href (sessionUrl workspace session.id)] [strong [] [text (sessionTitle session)],viewSessionIdentity session,span [class "card-meta"] [text ("Last activity · " ++ TimestampDisplay.lookup model.timestamps (sessionActivity session))]],if evidence then viewSave model session else span [class "session-state-dot",attribute "aria-label" "Active"] []]) sessions)
         ,div [class "sessions-pagination"]
             [if taskCursor model key /= Nothing then button [class "btn btn-sm",onClick (SessionsTaskPreviousPage key)] [text "Newer sessions"] else text ""
             ,page |> Maybe.andThen .nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsTaskNextPage key cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "")]
@@ -602,7 +612,7 @@ viewRecords workspace model id =
     section [class "session-viewer",attribute "aria-label" "Session transcript"]
         [div [class "sessions-toolbar"]
             [h4 [] [text "Transcript"]
-            ,session |> Maybe.map (.creator >> viewSessionIdentity) |> Maybe.withDefault (text "")]
+            ,session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
         ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "aria-label" "Bounded transcript records"]
             (List.map (\record -> (String.fromInt record.offset,viewRecord model record)) (List.filter (\record -> record.recordType /= "unknown") state.rows))

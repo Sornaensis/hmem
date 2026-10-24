@@ -59,7 +59,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     let actor = EffectiveActor ActorBot "session-live-bot" "Session writer" (Just identity)
         attributed :: IO a -> IO a
         attributed action = withEffectiveActorContext (Just actor) $ withRequestIdContext (Just "session-live-request") $ withChangeCauseContext (Just ChangeCauseMcp) action
-        input = Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing
+        input = Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing Nothing
         sentinel = "SESSION_PRIVATE_PAYLOAD_SENTINEL"
         body = "\"" <> TE.encodeUtf8 sentinel <> BS.replicate 131072 97 <> "\"\r\n"
         records = filter (\row -> envelopeEntityField "type" row `elem` [Just (String "agent_session"),Just (String "task_session")])
@@ -113,7 +113,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     workspace <- createTestWorkspace env "session-change-upgrade"
     runSession env.pool $ Session.sql "DROP TRIGGER trg_agent_session_change ON sessions; DROP TRIGGER trg_task_session_change ON task_sessions; DROP FUNCTION hmem_agent_session_change(); DROP FUNCTION hmem_task_session_change(); DROP FUNCTION hmem_agent_session_audit_value(sessions); DELETE FROM schema_migrations WHERE version=42"
     identifier <- UUIDV4.nextRandom
-    _ <- AgentDB.createSession env.pool (Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing)
+    _ <- AgentDB.createSession env.pool (Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing Nothing)
     let scope = WorkspaceScope workspace.id
         audience = TrustedAudience "session-change-upgrade"
         unwrap = either (fail . show) pure

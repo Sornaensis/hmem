@@ -1,6 +1,6 @@
 import { hierarchyFixture, openHierarchy } from '../hierarchy-fixture.mjs'
 import { createHash } from 'node:crypto'
-export async function openSessionExplorer({many=false,empty=false,creator=null,housekeeping=false,activeCount=1,savedCount=1,linkedCount=2,encrypted=false,timezoneId='UTC',stamp=new Date().toISOString(),eventTimes=[],launchOptions={},extraRecords=[]}={}) {
+export async function openSessionExplorer({many=false,empty=false,creator=null,runtime=null,housekeeping=false,activeCount=1,savedCount=1,linkedCount=2,encrypted=false,timezoneId='UTC',stamp=new Date().toISOString(),eventTimes=[],launchOptions={},extraRecords=[]}={}) {
   const f=hierarchyFixture();f.projects=[{...f.projects[0],id:"50000000-0000-4000-8000-000000000001"}]
   f.tasks=Array.from({length:many?22:Math.max(2,linkedCount)},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null,project_id:f.projects[0].id}))
   const records=[
@@ -26,7 +26,7 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
   records.forEach((record,index)=>{record.timestamp=eventTimes[index] || (index<2?eventTimes[0]:'') || record.timestamp || stamp})
   const bytes=empty?Buffer.alloc(0):Buffer.from(records.map(r=>JSON.stringify(r)).join('\n')+'\r\n')
   const activeId='20000000-0000-4000-8000-000000000001',savedId='20000000-0000-4000-8000-000000000002'
-  const base={workspace_id:f.workspace.id,format_label:'Codex · Session explorer',created_at:stamp,last_seen_at:stamp,committed_bytes:bytes.length,committed_records:empty?0:records.length,revision:1,ends_with_newline:true,...(creator||{})}
+  const base={workspace_id:f.workspace.id,format_label:'Codex · Session explorer',runtime_identity:runtime,runtime_revision:0,created_at:stamp,last_seen_at:stamp,committed_bytes:bytes.length,committed_records:empty?0:records.length,revision:1,ends_with_newline:true,...(creator||{})}
   const active={...base,id:activeId,state:'active'},saved={...base,id:savedId,format_label:'Claude · UX review',state:'terminated',terminated_at:stamp,final_bytes:bytes.length,final_sha256:createHash('sha256').update(bytes).digest('hex')}
   const content=new Map()
   const activeSessions=Array.from({length:activeCount},(_,i)=>({...active,id:i===0?active.id:`30000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,format_label:i===0?active.format_label:['Claude · Implementation','Codex · Follow-up'][i%2],created_at:new Date(Date.parse(stamp)-3600000-i*1000).toISOString(),last_seen_at:new Date(Date.parse(stamp)-i*60000).toISOString(),...(activeCount>1?{creator_actor_type:'bot',creator_bot_identity:{role:i%2?'Reviewer':'Developer','model-id':i%2?'claude:declared-review-model:high':'codex:gpt-6.1-sol:high'}}:{})}))

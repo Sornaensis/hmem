@@ -314,12 +314,14 @@ outputNullable value = object ["anyOf" .= [value, outputType "null"]]
 -- identities and download bounded byte ranges; no local uploader state exists here.
 isSessionTool :: Text -> Bool
 isSessionTool name = name `elem`
-  ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence"]
+  ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]
 
 sessionToolDefinitions :: [Value]
 sessionToolDefinitions =
-  [ define "session_create" "Create a session with a VERY SHORT DESCRIPTIVE TITLE (usually 3–8 words, e.g. 'Repair session filters'). Title describes the work; format_label identifies the transcript format. Optional parent_session_id fixes its one parent at creation. Exact retries are idempotent. No transcript content is returned."
-      ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)", "title" .= string "Required very short descriptive title, normally 3–8 words; 1..80 UTF-8 bytes, not a UUID or format label", "parent_session_id" .= uuid] ["session_id", "format_label", "title"]
+  [ define "session_create" "Create a session with a VERY SHORT DESCRIPTIVE TITLE (usually 3–8 words, e.g. 'Repair session filters'). Your accepted identity attributes the connection caller, NOT necessarily the running session model. Supply initial_runtime_identity for the actual target model when known; omit/null means unknown. It initializes NEW sessions only: retries preserve and return canonical runtime after model switches; use session_set_runtime for changes. format_label identifies the transcript format; optional parent_session_id fixes its one parent at creation. No transcript content is returned."
+      ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)", "title" .= string "Required very short descriptive title, normally 3–8 words; 1..80 UTF-8 bytes, not a UUID or format label", "parent_session_id" .= uuid, "initial_runtime_identity" .= runtimeIdentitySchema] ["session_id", "format_label", "title"]
+  , define "session_set_runtime" "Declare or change the actual target session model while active. This self-reported identity is separate from immutable connection caller attribution and grants no permissions. Use the current runtime_revision from session_detail as expected_runtime_revision, never the transcript revision. Explicit runtime_identity:null clears to unknown. An identical lost-ack retry at the immediately prior runtime revision is safe; other stale updates conflict. Transcript bytes/cursor/hash and activity do not change; terminated sessions reject updates."
+      ["session_id" .= uuid,"expected_runtime_revision" .= nonnegative,"runtime_identity" .= runtimeIdentitySchema] ["session_id","expected_runtime_revision","runtime_identity"]
   , define "session_list" "List compact session metadata, optionally for a visible same-workspace task. Descending immutable created_at/UUID keyset; execute next_request to continue in the resolved workspace."
       ["task_id" .= uuid, "limit" .= pageLimit, "before_created_at" .= string "Returned keyset timestamp, paired with before_id", "before_id" .= uuid] []
   , define "session_detail" "Get session metadata including creator attribution, committed cursor and final receipt; never returns transcript bytes."
@@ -336,6 +338,7 @@ sessionToolDefinitions =
   , range "session_evidence" "Read immutable terminated evidence bytes and final byte count/SHA-256"
   ]
   where
+    runtimeIdentitySchema = object ["description" .= ("Explicit actual target model declaration; do not copy the connection caller unless it is actually that model. Model alone is sufficient; null means unknown. See this operation's initialization/update semantics." :: Text),"anyOf" .= [object ["type" .= ("object" :: Text),"additionalProperties" .= False,"required" .= (["model"] :: [Text]),"properties" .= object ["model" .= string "Actual target model name (1..256 UTF-8 bytes)","provider" .= string "Optional known provider (1..128 UTF-8 bytes)","reasoning" .= string "Optional known reasoning setting (1..128 UTF-8 bytes)"]],object ["type" .= ("null" :: Text)]]]
     string description = object ["type" .= ("string" :: Text), "description" .= (description :: Text)]
     uuid = string "UUID"
     nonnegative = object ["type" .= ("integer" :: Text), "minimum" .= (0 :: Int), "maximum" .= (maxBound :: Int64)]
@@ -352,6 +355,7 @@ sessionToolDefinitions =
 
 data SessionToolCall
   = SessionCreate UUID SessionWire.CreateSessionRequest
+  | SessionSetRuntime UUID UUID AgentSession.SetRuntimeIdentity
   | SessionList UUID (Maybe UUID) Int (Maybe AgentSession.SessionPageCursor)
   | SessionDetail UUID UUID
   | SessionTasks UUID UUID Int (Maybe UUID)
@@ -363,7 +367,8 @@ data SessionToolCall
 parseSessionTool :: Text -> Value -> Either String SessionToolCall
 parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
   let allowed = "workspace_id" : case name of
-        "session_create" -> ["session_id", "format_label", "title", "parent_session_id"]
+        "session_create" -> ["session_id", "format_label", "title", "parent_session_id", "initial_runtime_identity"]
+        "session_set_runtime" -> ["session_id","expected_runtime_revision","runtime_identity"]
         "session_list" -> ["task_id", "limit", "before_created_at", "before_id"]
         "session_detail" -> ["session_id"]
         "session_tasks" -> ["session_id", "limit", "after_task_id"]
@@ -379,7 +384,11 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
   if all (`elem` allowed) (KM.keys o) then pure () else fail "Unsupported session fields"
   workspace <- o .: "workspace_id"
   case name of
-    "session_create" -> SessionCreate workspace <$> (SessionWire.CreateSessionRequest <$> o .: "session_id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id")
+    "session_create" -> SessionCreate workspace <$> (SessionWire.CreateSessionRequest <$> o .: "session_id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id" <*> o .:? "initial_runtime_identity")
+    "session_set_runtime" -> do
+      input <- AgentSession.SetRuntimeIdentity <$> o .: "expected_runtime_revision" <*> o .: "runtime_identity"
+      if input.expectedRuntimeRevision < 0 then fail "Invalid runtime revision" else pure ()
+      SessionSetRuntime workspace <$> o .: "session_id" <*> pure input
     "session_list" -> do
       timestamp <- o .:? "before_created_at"
       identifier <- o .:? "before_id"
@@ -621,6 +630,7 @@ execute manager base apiKey = \case
 executeSessionTool :: Manager -> String -> ForwardingContext -> SessionToolCall -> IO Value
 executeSessionTool manager base credentials call = case call of
   SessionCreate workspace input -> run "POST" (root workspace) (Just (toJSON input)) $ metadata workspace (Just input.id) (Just "created") False
+  SessionSetRuntime workspace sid input -> run "PUT" (path workspace sid <> "/runtime") (Just (toJSON input)) $ metadata workspace (Just sid) (Just "runtime_updated") False
   SessionDetail workspace sid -> run "GET" (path workspace sid) Nothing $ metadata workspace (Just sid) Nothing True
   SessionTerminate workspace sid input -> run "POST" (path workspace sid <> "/terminate") (Just (toJSON input)) $ metadata workspace (Just sid) (Just "terminated") False
   SessionAssociate workspace sid tid -> run "PUT" (path workspace sid <> "/tasks/" <> show tid) Nothing $ \value ->
@@ -684,9 +694,7 @@ executeSessionTool manager base credentials call = case call of
       pure $ either id (either id mcpStructuredJSON . shape) result
 
 sessionSummary :: AgentSession.AgentSession -> Value
-sessionSummary session = case toJSON session of
-  Object fields -> Object $ foldr KM.delete fields (map Key.fromText ["creator_actor_type", "creator_actor_id", "creator_actor_label", "creator_bot_identity"])
-  _ -> Null
+sessionSummary = toJSON
 
 sessionToolError :: Text -> Maybe Int -> Text -> Value
 sessionToolError code status message = searchError code Nothing message (maybe [] (\n -> ["http_status" .= n]) status)
@@ -726,13 +734,14 @@ sessionRequest manager base credentials verb target body = do
       else if BL.length chunk > fromIntegral remaining then pure Nothing
       else readBounded reader (remaining - fromIntegral (BL.length chunk)) (chunk : chunks)
     safeHttpError status bytes
+      | code == "session_runtime_conflict" = sessionToolError code (Just status) "Runtime identity revision conflicts; refresh runtime_revision with session_detail before retrying"
       | code == "session_task_not_in_progress", Just current <- payload >>= textField "current_status", current `elem` ["todo","blocked","done","cancelled"] =
           searchError code Nothing ("Sessions can only be added to in_progress tasks; current status is " <> current <> ".") ["http_status" .= status,"required_status" .= ("in_progress" :: Text),"current_status" .= current]
       | otherwise = sessionToolError code (Just status) message
       where
         payload = decode bytes :: Maybe Value
         reported = payload >>= textField "error"
-        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress"]
+        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_conflict", "session_runtime_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress"]
         code = case reported of Just known | known `elem` allowed -> known; _ -> "HTTP_" <> T.pack (show status)
         message = case status of
           400 -> "Invalid session request"

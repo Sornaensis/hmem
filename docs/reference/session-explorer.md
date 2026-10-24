@@ -41,7 +41,14 @@ Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.
 The active-state and Live/Quiet activity predicates apply before pagination; Live
 is the default. Saved sessions remain reachable through task Evidence links.
-Transcript model identity uses declared creator attribution. Event times and list
+Runtime labels use the separate nullable `runtime_identity` declaration; they
+never infer a model from creator attribution, transcript format or content.
+`Connected by` retains the original `creator_*` attribution, including after a
+different manager resumes capture. Both labels keep complete values available
+through selectable text/tooltips, with compact card presentation. Saved sessions
+say `Session model` rather than implying current execution. Ordinary session
+metadata invalidation refreshes declarations; identity updates do not invalidate
+active hierarchy membership or change heartbeat freshness. Event times and list
 activity use the bounded local timestamp cache; the browser-local day decides
 whether to omit the date. Linked-task cards show two items initially, then one
 bounded page on expansion.

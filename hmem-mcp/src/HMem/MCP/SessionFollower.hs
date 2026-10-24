@@ -56,7 +56,7 @@ data Registry = Registry
   , processScope :: ProcessScope, helperPath :: FilePath
   }
 data Job = Job
-  { sid :: UUID, workspace :: UUID, sourcePath :: FilePath, formatLabel :: Text, title :: Text, parentSessionId :: Maybe UUID
+  { sid :: UUID, workspace :: UUID, sourcePath :: FilePath, formatLabel :: Text, title :: Text, parentSessionId :: Maybe UUID, initialRuntimeIdentity :: Maybe Core.RuntimeIdentity
   , http :: CapturedHTTP, state :: TVar JobState, control :: TVar (Maybe Control)
   , busy :: TVar Bool
   }
@@ -79,13 +79,14 @@ isUploadTool name = name `elem` ["session_upload_start", "session_upload_status"
 
 uploadToolDefinitions :: [Value]
 uploadToolDefinitions =
-  [ define "session_upload_start" "Start/resume capture with a VERY SHORT DESCRIPTIVE TITLE, normally 3–8 words such as 'Repair session filters'. Title describes the work, not the transcript format. An optional parent_session_id fixes one parent at creation. Registers a process-owned JSONL follower and returns promptly in validating state. Explicit regular file only; captured workspace/identity/credentials never retarget. Four jobs, two shared HTTP slots. Never terminates a session."
-      ["path" .= str "Explicit local JSONL file path; never sent to the HTTP server or echoed", "format_label" .= str "Required provider-neutral format label for create/resume", "title" .= str "Required very short descriptive title (normally 3–8 words; 1..80 UTF-8 bytes)", "parent_session_id" .= str "Optional existing same-workspace parent session UUID, fixed at creation"] ["path", "format_label", "title"]
+  [ define "session_upload_start" "Start/resume capture with a VERY SHORT DESCRIPTIVE TITLE, normally 3–8 words such as 'Repair session filters'. Accepted identity attributes the connection caller, NOT the actual target session model. Supply initial_runtime_identity for that model when known; omit/null means unknown. This initializes NEW sessions only; resume preserves canonical runtime and never reasserts startup identity after model switches. Use session_set_runtime for changes. An optional parent_session_id fixes one parent at creation. Registers a bounded process-owned JSONL follower; captured workspace/caller/credentials never retarget. Never terminates a session."
+      ["path" .= str "Explicit local JSONL file path; never sent to the HTTP server or echoed", "format_label" .= str "Required provider-neutral format label for create/resume", "title" .= str "Required very short descriptive title (normally 3–8 words; 1..80 UTF-8 bytes)", "parent_session_id" .= str "Optional existing same-workspace parent session UUID, fixed at creation", "initial_runtime_identity" .= runtimeIdentitySchema] ["path", "format_label", "title"]
   , define "session_upload_status" "Inspect bounded process-local metadata, pending control receipt and independent 30-second HTTP acknowledgement staleness. No paths or transcript data." [] []
   , define "session_upload_flush" "Capture one finite source boundary after current job work; may send a complete final JSON record without LF. Returns a fully verified canonical prefix receipt or explicit pending operation within one second. Does not seal." [] []
   , define "session_upload_stop" "Capture and flush one finite source boundary, verify receipt and close the source. Partial/invalid final tail remains pending in the receipt. Returns complete or pending within one second; never seals." [] []
   ]
   where
+    runtimeIdentitySchema = object ["description" .= ("Actual target model declaration for NEW sessions only; never inferred from the connection caller. Null/omitted is unknown. Resume preserves canonical runtime, reported by uploader status." :: Text),"anyOf" .= [object ["type" .= ("object" :: Text),"additionalProperties" .= False,"required" .= (["model"] :: [Text]),"properties" .= object ["model" .= str "Actual target model name (1..256 UTF-8 bytes)","provider" .= str "Optional known provider (1..128 UTF-8 bytes)","reasoning" .= str "Optional known reasoning setting (1..128 UTF-8 bytes)"]],object ["type" .= ("null" :: Text)]]]
     str description = object ["type" .= ("string" :: Text), "description" .= (description :: Text)]
     define name description extra required = object ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= object
       ["type" .= ("object" :: Text), "properties" .= object
@@ -183,7 +184,7 @@ closeRegistry registry = mask $ \restore -> do
 handleUploadTool :: Registry -> Manager -> String -> Maybe Text -> BotIdentity -> Text -> Value -> IO Value
 handleUploadTool registry _ordinaryManager base token identity name arguments = case parseEither parse arguments of
   Left _ -> pure $ toolError "invalid_arguments" (if name == "session_upload_start" then "session_upload_start requires a very short descriptive title (1 to 80 UTF-8 bytes), a format_label and readable path; parent_session_id is optional and must differ from session_id." else "Invalid uploader arguments")
-  Right (workspace,sid,path,label,title,parentSessionId) -> do
+  Right (workspace,sid,path,label,title,parentSessionId,initialRuntimeIdentity) -> do
     prune registry
     found <- Map.lookup sid <$> readTVarIO registry.jobs
     case name of
@@ -192,7 +193,7 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
         time <- registry.options.now
         state <- newTVarIO (JobState "validating" Nothing Nothing False Nothing False Nothing False time Nothing 0 Nothing Nothing Nothing 0 Nothing)
         control <- newTVarIO Nothing; busy <- newTVarIO False
-        let job = Job sid workspace path label title parentSessionId captured state control busy
+        let job = Job sid workspace path label title parentSessionId initialRuntimeIdentity captured state control busy
         result <- atomically $ do
           closing <- readTVar registry.closed
           existing <- readTVar registry.jobs
@@ -242,16 +243,17 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
   where
     parse = withObject "uploader arguments" $ \o -> do
       let allowed = ["workspace_id", "session_id"]
-          extra = if name == "session_upload_start" then ["path", "format_label", "title", "parent_session_id"] else []
+          extra = if name == "session_upload_start" then ["path", "format_label", "title", "parent_session_id", "initial_runtime_identity"] else []
       unless (all (`elem` (allowed <> extra)) (KM.keys o)) $ fail "Unsupported fields"
       workspace <- o .: "workspace_id"; sid <- o .: "session_id"
       path <- if name == "session_upload_start" then o .: "path" else pure ""
       label <- if name == "session_upload_start" then o .: "format_label" else pure ""
       title <- if name == "session_upload_start" then T.strip <$> o .: "title" else pure ""
       parentSessionId <- if name == "session_upload_start" then o .:? "parent_session_id" else pure Nothing
+      initialRuntimeIdentity <- if name == "session_upload_start" then o .:? "initial_runtime_identity" else pure Nothing
       when (name == "session_upload_start" && (null path || '\0' `elem` path || T.null (T.strip label) || BS.length (TE.encodeUtf8 label) > 128)) $ fail "Invalid source"
       when (name == "session_upload_start" && (T.null title || BS.length (TE.encodeUtf8 title)>80 || parentSessionId==Just sid)) $ fail "Invalid title or optional parent"
-      pure (workspace,sid,path,label,title,parentSessionId)
+      pure (workspace,sid,path,label,title,parentSessionId,initialRuntimeIdentity)
 
 toolError :: Text -> Text -> Value
 toolError code message = object ["isError" .= True, "content" .= [object ["type" .= ("text" :: Text), "text" .= message]], "structuredContent" .= object ["error" .= object ["code" .= code, "message" .= message]]]
@@ -271,6 +273,7 @@ statusValue registry job = do
   let value = object
         ["session_id" .= job.sid, "workspace_id" .= job.workspace, "status" .= state.phase, "error" .= state.failure
         , "committed_offset" .= fmap (.committedBytes) state.remote, "revision" .= fmap (.revision) state.remote
+        , "runtime_identity" .= (state.remote >>= (.runtimeIdentity)), "runtime_revision" .= fmap (.runtimeRevision) state.remote
         , "last_ack_at" .= state.lastAck, "stale" .= maybe True (\lastSeen -> diffUTCTime time lastSeen >= 30) state.lastAck
         , "receipt" .= state.receipt, "operation" .= fmap (\c -> object ["id" .= c.operationId, "pending" .= not (isJust c.result), "capture_boundary" .= c.boundary, "receipt" .= c.result]) control]
   pure $ object ["content" .= [object ["type" .= ("text" :: Text), "text" .= TE.decodeUtf8 (BL.toStrict (encode value))]], "structuredContent" .= value]
@@ -487,7 +490,7 @@ validFinal bytes = not (BS.null bytes) && case TE.decodeUtf8' bytes of
 createRemote :: Registry -> Job -> IO (Either HTTPFault Value)
 createRemote registry job = bracket_ acquire release $ do
   let path = "/api/v1/workspaces/" <> show job.workspace <> "/sessions"
-      body = Just (toJSON (Wire.CreateSessionRequest job.sid job.formatLabel job.title job.parentSessionId))
+      body = Just (toJSON (Wire.CreateSessionRequest job.sid job.formatLabel job.title job.parentSessionId job.initialRuntimeIdentity))
   case registry.options.requestOverride of Nothing -> followerRequest job.http "POST" path body; Just action -> action "POST" path body
   where
     acquire = atomically $ do n <- readTVar registry.slots; check (n < 2); writeTVar registry.slots (n+1); modifyTVar' registry.peak (max (n+1))

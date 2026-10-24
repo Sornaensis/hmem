@@ -143,6 +143,7 @@ sessionMutationWorkspace req = case (Wai.requestMethod req, dropWhileEnd T.null 
   ("POST", ["api","v1","workspaces",workspace,"sessions",_,operation])
     | operation `elem` ["append","heartbeat","terminate"] -> UUID.fromText workspace
   ("PUT", ["api","v1","workspaces",workspace,"sessions",_,"tasks",_]) -> UUID.fromText workspace
+  ("PUT", ["api","v1","workspaces",workspace,"sessions",_,"runtime"]) -> UUID.fromText workspace
   _ -> Nothing
 
 -- Servant's Header combinator selects the first physical header line. Join

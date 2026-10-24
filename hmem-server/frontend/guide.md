@@ -134,6 +134,11 @@ grouped activity. Close the dock to return the card to its usual width. The dock
 also works with task extras collapsed; saved transcripts and downloads remain
 under **Evidence** in the extras.
 
+Live transcripts keep recent agent messages visible while tool activity arrives.
+Expanded activity and tool details stay open during synchronization. Reading
+above the end keeps your place; following resumes when you scroll to the end.
+Loading a large transcript keeps the view steady.
+
 Tasks with **In Progress** status and **Blocked** parents with a running subtask
 appear first, followed by Todo, other Blocked, Done and Cancelled tasks. Within
 each group, higher priority comes first, then title; the parent's status stays Blocked.

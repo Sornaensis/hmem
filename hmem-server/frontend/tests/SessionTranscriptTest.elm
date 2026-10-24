@@ -2,6 +2,7 @@ module SessionTranscriptTest exposing (tests)
 
 import Expect
 import Json.Encode as Encode
+import Dict
 import SessionTranscript as Transcript exposing (Item(..))
 import Test exposing (..)
 import Types exposing (SessionRecord)
@@ -64,6 +65,21 @@ tests =
                     Message piece -> piece.record.offset
                     Activity pieces -> List.head pieces |> Maybe.map (.record >> .offset) |> Maybe.withDefault -1 ))
                 |> Expect.equal [ ( "10:0", 50 ) ]
+        , test "trimmed activity keeps its source run anchor and cannot merge across an omitted prose boundary" <| \_ ->
+            let
+                retained = record 30 [ block "tool" "{}" ]
+                later = record 90 [ block "tool" "{}" ]
+                anchored = { retained | activityAnchors = Dict.singleton "0" "10:0" }
+                distinct = { later | activityAnchors = Dict.singleton "0" "80:0" }
+            in
+            Transcript.project [ anchored, distinct ]
+                |> List.map key
+                |> Expect.equal [ "10:0", "80:0" ]
+        , test "identical prose at separate source occurrences stays separate" <| \_ ->
+            [ record 10 [ block "text" "Same message" ], record 20 [ block "text" "Same message" ] ]
+                |> Transcript.project
+                |> List.map key
+                |> Expect.equal [ "10:0", "20:0" ]
         ]
 
 
@@ -78,7 +94,7 @@ key : Item -> String
 key item =
     case item of
         Message piece -> piece.key
-        Activity pieces -> List.head pieces |> Maybe.map .key |> Maybe.withDefault ""
+        Activity pieces -> List.head pieces |> Maybe.map (\piece -> Maybe.withDefault piece.key piece.activityAnchor) |> Maybe.withDefault ""
 
 
 block : String -> String -> Encode.Value
@@ -93,4 +109,4 @@ record offset blocks =
 
 empty : SessionRecord
 empty =
-    { offset = 0, end = 1, raw = "unchanged", delimiter = "\r\n", recordType = "conversation", role = "assistant", time = "2026-10-24T10:00:00Z", content = "[]", presentationOffset = 0 }
+    { offset = 0, end = 1, raw = "unchanged", delimiter = "\r\n", recordType = "conversation", role = "assistant", time = "2026-10-24T10:00:00Z", content = "[]", presentationOffset = 0, activityAnchors = Dict.empty }

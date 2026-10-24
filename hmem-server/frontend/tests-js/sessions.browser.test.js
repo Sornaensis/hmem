@@ -44,6 +44,8 @@ test('production Sessions uses canonical authenticated resources and direct task
     const executable = join(stdout.trim(), 'bin', process.platform === 'win32' ? 'hmem-test-harness.exe' : 'hmem-test-harness')
     const executableHash = sha(await readFile(executable))
     const mcpExecutable=join(stdout.trim(),'bin',process.platform==='win32'?'hmem-mcp.exe':'hmem-mcp'),mcpHash=sha(await readFile(mcpExecutable))
+    if(process.env.SESSION_STACK_HARNESS_SHA256)assert.equal(executableHash,process.env.SESSION_STACK_HARNESS_SHA256,'qualified current-source harness')
+    if(process.env.SESSION_STACK_MCP_SHA256)assert.equal(mcpHash,process.env.SESSION_STACK_MCP_SHA256,'qualified current-source MCP executable')
     const number = await port(), origin = 'http://127.0.0.1:' + number
     const coordinates = {}
     harness = spawn(executable, ['deployed', '--interactive', '--port', String(number)], { cwd: repo, env: process.env, windowsHide: true, stdio: ['pipe','pipe','pipe'] })
@@ -78,6 +80,9 @@ test('production Sessions uses canonical authenticated resources and direct task
     }
     const workspace = await call('/api/v1/workspaces','POST',{name:'Sessions browser fixture',workspace_type:'repository'})
     const id = randomUUID(), base = '/api/v1/workspaces/'+workspace.id+'/sessions'
+    const task = await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Inspect session evidence'})
+    const secondTask=await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Review shared capture'})
+    for(const running of [task,secondTask])await call('/api/v1/tasks/'+running.id,'PUT',{status:'in_progress'})
     const identity={role:'Session workflow qualification','model-id':'test:production:default'}
     async function connectMcp(){
       assert.ok(coordinates.token,'sandbox seeded PAT available privately')
@@ -88,7 +93,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     const managing=await connectMcp(),source=join(sandbox,'producer.jsonl')
     const bytes = Buffer.from('{"type":"message","role":"assistant","text":"Hello from a real session λ"}\r\n["unknown",42]\n','utf8')
     await writeFile(source,bytes)
-    const started=await uploader.tool('session_upload_start',{session_id:id,path:source,format_label:'Provider-neutral JSONL'})
+    const started=await uploader.tool('session_upload_start',{session_id:id,path:source,format_label:'Provider-neutral JSONL',title:'Inspect live task session',task_id:task.id})
     assert.equal(started.status,'validating')
     async function uploaded(client,sid,offset){await until(async()=>{const status=await client.tool('session_upload_status',{session_id:sid});assert.notEqual(status.status,'failed','follower must not fail');return status.committed_offset===offset},'follower canonical committed offset',30000)}
     async function receipt(client,sid,control){
@@ -97,8 +102,6 @@ test('production Sessions uses canonical authenticated resources and direct task
       assert.equal(result.source_verified,true);return result
     }
     await uploaded(uploader,id,bytes.length)
-    const task = await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Inspect session evidence'})
-    const secondTask=await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Review shared capture'})
     await managing.tool('session_associate',{session_id:id,task_id:task.id})
     await managing.tool('session_associate',{session_id:id,task_id:secondTask.id})
     const taskStatus=(await call('/api/v1/tasks/'+task.id)).status
@@ -174,7 +177,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     const eof=Buffer.from('{"text":"Finite EOF 雪"}')
     await appendFile(source,eof)
     uploader=await connectMcp()
-    await uploader.tool('session_upload_start',{session_id:id,path:source,format_label:'Provider-neutral JSONL'})
+    await uploader.tool('session_upload_start',{session_id:id,path:source,format_label:'Provider-neutral JSONL',title:'Inspect live task session',task_id:task.id})
     await uploaded(uploader,id,bytes.length+extra.length)
     const flushed=await receipt(uploader,id,'session_upload_flush')
     assert.equal(flushed.committed_offset,bytes.length+extra.length+eof.length)
@@ -190,6 +193,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     await managing.tool('session_terminate',{session_id:id,expected_offset:stopped.committed_offset,expected_revision:stopped.revision,final_bytes:stopped.committed_offset,final_sha256:stopped.sha256})
     await managing.tool('session_terminate',{session_id:id,expected_offset:stopped.committed_offset,expected_revision:stopped.revision,final_bytes:stopped.committed_offset,final_sha256:stopped.sha256})
     const lateTask=await call('/api/v1/tasks','POST',{workspace_id:workspace.id,title:'Later evidence association'})
+    await call('/api/v1/tasks/'+lateTask.id,'PUT',{status:'in_progress'})
     await managing.tool('session_associate',{session_id:id,task_id:lateTask.id})
     assert.equal((await call('/api/v1/tasks/'+task.id)).status,taskStatus,'capturing and sealing do not change task status')
     async function evidence(sid,expectedBytes,expectedHash){
@@ -210,8 +214,9 @@ test('production Sessions uses canonical authenticated resources and direct task
     const savedBytes=downloadedSmall.length
     const savedHash=createHash('sha256').update(downloadedSmall)
     assert.equal(savedBytes,original.length);assert.equal(savedHash.digest('hex'),sha(original))
-    await page.screenshot({path:join(tmpdir(),'sessions-first-page.png'),fullPage:true})
-    await page.getByRole('link',{name:task.title,exact:false}).click()
+    const taskLink=page.getByRole('link',{name:task.title,exact:false})
+    if(await taskLink.count()===0)await page.getByRole('button',{name:'Show All Linked Tasks',exact:true}).click()
+    await taskLink.click()
     await until(() => page.url().includes('focus=task'), 'task navigation')
     const focusedCard=page.locator('#entity-'+task.id)
     await focusedCard.locator('.btn-extras-toggle').click()
@@ -224,7 +229,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     // A near-1MiB record outside the tail stays in evidence, and a second
     // occurrence at the tail must survive several bounded HTTP chunks.
     const largeId=randomUUID(),parts=[],hash=createHash('sha256');let count=0,revision=0
-    await call(base,'POST',{id:largeId,format_label:'Large arbitrary JSONL'})
+    await call(base,'POST',{id:largeId,format_label:'Large arbitrary JSONL',title:'Inspect large task transcript',task_id:task.id})
     await managing.tool('session_associate',{session_id:largeId,task_id:task.id})
     assert.equal((await managing.tool('session_list',{task_id:task.id})).items.length,2,'many sessions link to one task')
     assert.equal((await managing.tool('session_tasks',{session_id:id})).items.length,3,'one session links to several tasks including a late link')
@@ -238,7 +243,10 @@ test('production Sessions uses canonical authenticated resources and direct task
     // One canonical JSONL append; the viewer's 64KiB reads split the record.
     await appendPart(largeRecord)
     for(let i=0;i<9;i++)await appendPart(Buffer.from(JSON.stringify({text:'tail-'+i+' '+ 't'.repeat(260000)})+'\n'))
+    const tailBoundaryOffset=count
     await appendPart(largeRecord)
+    assert.ok(largeOffset<count-2097152,'the earlier identical occurrence remains outside the visible tail')
+    assert.ok(tailBoundaryOffset>=count-2097152&&largeRecord.length>15*65536,'the final near1MiB occurrence is fully inside the finite tail and crosses many chunks')
     const largeHash=hash.digest('hex')
     let firstWindowFailed=false
     await context.route('**/sessions/'+largeId+'/transcript?*',async route=>{
@@ -249,7 +257,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     await page.goto(origin+'/workspace/'+workspace.id+'#tab=sessions&session='+largeId)
     await page.getByRole('alert').getByRole('button',{name:'Retry',exact:true}).click()
     await until(async()=>await page.locator('.session-record').filter({hasText:'boundary'}).count()===1,'bounded initial tail with large framed record',30000)
-    assert.ok(await page.locator('.session-record').count()<=100)
+    assert.ok(await page.locator('.session-record').count()<=200)
     const viewport=page.locator('#session-records')
     const rows=await page.locator('.session-record').allTextContents()
     const snapshots=resyncs;invalidResume=true
@@ -271,15 +279,13 @@ test('production Sessions uses canonical authenticated resources and direct task
     assert.equal(largeSavedBytes,count);assert.equal(independent.digest('hex'),largeHash)
     await evidence(largeId,count,largeHash)
     console.log(JSON.stringify({phase:'large-tail-window-and-verified-save',largeSavedBytes,largeHash,largeRecordBytes:largeRecord.length}))
-    await page.screenshot({path:join(tmpdir(),'sessions-large-desktop.png'),fullPage:true})
     await page.setViewportSize({width:430,height:900})
     await page.locator('.session-detail').scrollIntoViewIfNeeded()
-    await page.screenshot({path:join(tmpdir(),'sessions-large-narrow.png'),fullPage:true})
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'narrow layout does not overflow horizontally')
     await page.setViewportSize({width:1440,height:1000})
     // Filtering is performed before pagination even when both sealed sessions
     // sit behind more than fifty newer active summaries.
-    for(let i=0;i<51;i++)await call(base,'POST',{id:randomUUID(),format_label:'Empty active '+i})
+    for(let i=0;i<51;i++)await call(base,'POST',{id:randomUUID(),format_label:'Provider-neutral JSONL',title:'Empty active task session '+i,task_id:task.id})
     await page.getByRole('link',{name:'Close session',exact:true}).click()
     await until(async()=>await page.locator('.session-summary').count()===50,'first bounded fifty summaries')
     assert.equal((await call(base+'?state=terminated')).items.length,2,'saved filter remains available through canonical API')
@@ -311,8 +317,8 @@ test('production Sessions uses canonical authenticated resources and direct task
     await until(async()=>await page.locator('.session-summary').count()===1,'keyset continuation final page')
     await page.locator('.session-summary a').click()
     await page.getByText('This session has no committed records.',{exact:true}).waitFor()
-    await page.getByText('No linked tasks.',{exact:true}).waitFor({state:'attached'})
-    assert.equal(await page.locator('.session-linked-tasks').getAttribute('open'),null)
+    await page.locator('.session-task-card').filter({hasText:task.title}).waitFor()
+    assert.equal(await page.locator('.session-task-card').count(),1,'new empty sessions retain their required initial task')
     const empty=await call('/api/v1/workspaces','POST',{name:'Empty sessions scope',workspace_type:'repository'})
     await completeDocument('large-viewer-save-and-filter-paging')
     await page.goto(origin+'/workspace/'+empty.id+'#tab=sessions')
@@ -327,7 +333,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     // uploader is still alive and caught up; later source output is refused.
     const liveId=randomUUID(),livePath=join(sandbox,'live-producer.jsonl'),liveBytes=Buffer.from('null\r\n')
     await writeFile(livePath,liveBytes)
-    await uploader.tool('session_upload_start',{session_id:liveId,path:livePath,format_label:'Live independent seal'})
+    await uploader.tool('session_upload_start',{session_id:liveId,path:livePath,format_label:'Provider-neutral JSONL',title:'Verify independent task session seal',task_id:secondTask.id})
     await uploaded(uploader,liveId,liveBytes.length)
     const live=await managing.tool('session_detail',{session_id:liveId})
     const liveSession=live.session??live
@@ -340,14 +346,14 @@ test('production Sessions uses canonical authenticated resources and direct task
     const archiveExpected={[id]:sha(original),[largeId]:largeHash}
     for(let index=0;index<51;index++){
       const sid=randomUUID(),data=index%3===0?Buffer.alloc(0):Buffer.from(JSON.stringify({text:index%3===1?'雪 café':'repeated '.repeat(16000)})+'\r\n')
-      await call(base,'POST',{id:sid,format_label:'Review / café ../capture'})
+      await call(base,'POST',{id:sid,format_label:'Review / café ../capture',title:'Review captured task evidence',task_id:task.id})
       let offset=0,rev=0
       if(data.length){const appended=await call(base+'/'+sid+'/append','POST',{expected_offset:0,expected_revision:0,data_base64:data.toString('base64'),allow_final_record:false});offset=appended.session.committed_bytes;rev=appended.session.revision}
       await call(base+'/'+sid+'/terminate','POST',{expected_offset:offset,expected_revision:rev,final_bytes:data.length,final_sha256:sha(data)})
       await managing.tool('session_associate',{session_id:sid,task_id:task.id});archiveExpected[sid]=sha(data)
     }
     const excluded=randomUUID(),excludedBytes=Buffer.from('true\n')
-    await call(base,'POST',{id:excluded,format_label:'Only the other task'})
+    await call(base,'POST',{id:excluded,format_label:'Provider-neutral JSONL',title:'Only the other task',task_id:secondTask.id})
     const excludedAppend=await call(base+'/'+excluded+'/append','POST',{expected_offset:0,expected_revision:0,data_base64:excludedBytes.toString('base64'),allow_final_record:false})
     await call(base+'/'+excluded+'/terminate','POST',{expected_offset:excludedAppend.session.committed_bytes,expected_revision:excludedAppend.session.revision,final_bytes:excludedBytes.length,final_sha256:sha(excludedBytes)})
     await managing.tool('session_associate',{session_id:excluded,task_id:secondTask.id})
@@ -385,11 +391,11 @@ print('independently verified 53 DEFLATE entries')`,archivePath,JSON.stringify(a
     await until(async()=>await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).isEnabled(),'archive completion')
     console.log(JSON.stringify({phase:'server-DEFLATE-task-evidence',entries:53,binaryRequests,verification:checked.stdout.trim(),zipBytes:(await readFile(archivePath)).length,auth:'bearer-only'}))
     assert.deepEqual(errors,[])
-    console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,download:'native-OPFS-and-browser-download'}))
+    console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,tailBoundaryOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,download:'native-OPFS-and-browser-download'}))
   } catch (error) {
     if(page) {
       console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-download-status').allTextContents()).slice(0,2)}))
-      await page.screenshot({path:join(tmpdir(),'sessions-first-page-failure.png'),fullPage:true})
+      if(process.env.SESSION_STACK_DIAGNOSTICS)await page.screenshot({path:join(process.env.SESSION_STACK_DIAGNOSTICS,'sessions-stack-failure.png'),fullPage:true})
     }
     failed = error; throw error
   }

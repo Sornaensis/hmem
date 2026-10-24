@@ -72,19 +72,30 @@ createSession pool input = do
     else pure ()
   actor <- currentEffectiveActor
   checked pool $ do
+    let racedOr problemValue = do
+          current <- S.statement (input.workspaceId,input.id) (getStatement True)
+          pure $ maybe (Left problemValue) (Right . Just) current
     -- Read before INSERT: a legacy row may have no title and must remain
     -- unchanged on resume, including when it is permanently sealed.
     found <- S.statement (input.workspaceId,input.id) (getStatement True)
     existing <- case found of
-      Just row -> pure (Just row)
+      Just row -> pure (Right (Just row))
       Nothing -> do
-        inserted <- S.statement (input {title = T.strip input.title} :: CreateSession) createStatement
-        case inserted of
-          Just row -> pure (Just row)
-          Nothing -> S.statement (input.workspaceId,input.id) (getStatement True)
+        target <- S.statement (input.workspaceId,input.id,input.taskId) taskAssociationStatement
+        case target of
+          Nothing -> racedOr (SessionException SessionTaskNotFound "task_id must identify a live same-workspace task")
+          Just (status,_) | status /= "in_progress" -> racedOr (SessionException (SessionTaskNotInProgress status) "Start the task before creating a session")
+          _ -> do
+            inserted <- S.statement (input {title = T.strip input.title} :: CreateSession) createStatement
+            case inserted of
+              Just row -> do
+                S.statement (input.workspaceId,input.id,input.taskId) associateStatement
+                pure (Right (Just row))
+              Nothing -> Right <$> S.statement (input.workspaceId,input.id) (getStatement True)
     pure $ case existing of
-      Nothing -> problem SessionConflict "Session UUID already exists in another workspace, or workspace is inactive"
-      Just row
+      Left exception -> Left exception
+      Right Nothing -> problem SessionConflict "Session UUID already exists in another workspace, or workspace is inactive"
+      Right (Just row)
         | row.formatLabel == input.formatLabel && row.parentSessionId == input.parentSessionId
           && maybe True (== T.strip input.title) row.title && sameCreator actor row -> Right row
         | otherwise -> problem SessionConflict "Session UUID was already created with different immutable metadata"
@@ -270,19 +281,27 @@ associateSessionTask pool workspace identifier task = checked pool $ do
   case current of
     Nothing -> pure $ problem SessionNotFound "Session not found"
     Just _ -> do
-      target <- S.statement (workspace,identifier,task) $ St.Statement
-        "SELECT t.status::text,EXISTS(SELECT 1 FROM task_sessions link WHERE link.workspace_id=$1 AND link.session_id=$2 AND link.task_id=$3) FROM tasks t WHERE t.workspace_id=$1 AND t.id=$3 AND t.deleted_at IS NULL FOR SHARE OF t"
-        (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.uuid)
-        (D.rowMaybe ((,) <$> D.column (D.nonNullable D.text) <*> D.column (D.nonNullable D.bool))) True
+      target <- S.statement (workspace,identifier,task) taskAssociationStatement
       case target of
         Nothing -> pure $ problem SessionNotFound "Live same-workspace task not found"
         Just (_,True) -> pure (Right ())
         Just (status,False) | status /= "in_progress" -> pure $ problem (SessionTaskNotInProgress status) "Task must be in_progress before adding a session"
         _ -> do
-          S.statement (workspace,identifier,task) $ St.Statement
-            "INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"
-            (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.uuid) D.noResult True
+          S.statement (workspace,identifier,task) associateStatement
           pure (Right ())
+
+-- The task lock is held until session creation and its initial link commit.
+-- Replays read the existing session before this creation-only validation.
+taskAssociationStatement :: St.Statement (UUID,UUID,UUID) (Maybe (Text,Bool))
+taskAssociationStatement = St.Statement
+  "SELECT t.status::text,EXISTS(SELECT 1 FROM task_sessions link WHERE link.workspace_id=$1 AND link.session_id=$2 AND link.task_id=$3) FROM tasks t WHERE t.workspace_id=$1 AND t.id=$3 AND t.deleted_at IS NULL FOR SHARE OF t"
+  (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.uuid)
+  (D.rowMaybe ((,) <$> D.column (D.nonNullable D.text) <*> D.column (D.nonNullable D.bool))) True
+
+associateStatement :: St.Statement (UUID,UUID,UUID) ()
+associateStatement = St.Statement
+  "INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"
+  (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.uuid) D.noResult True
 
 -- | A bounded, indexed chunk read, including chunks intersecting the window.
 rangeStatement :: St.Statement (UUID,Int64,Int64) ByteString

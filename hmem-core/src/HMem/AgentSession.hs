@@ -123,7 +123,7 @@ instance ToJSON SessionFacetPage where toJSON = genericToJSON jsonOptions
 instance FromJSON SessionFacetPage where parseJSON = genericParseJSON jsonOptions
 
 data CreateSession = CreateSession
-  { id :: !UUID, workspaceId :: !UUID, formatLabel :: !Text, title :: !Text, parentSessionId :: !(Maybe UUID), initialRuntimeIdentity :: !(Maybe RuntimeIdentity)
+  { id :: !UUID, workspaceId :: !UUID, formatLabel :: !Text, title :: !Text, parentSessionId :: !(Maybe UUID), initialRuntimeIdentity :: !(Maybe RuntimeIdentity), taskId :: !UUID
   } deriving stock (Show, Eq, Generic)
 instance ToJSON CreateSession where toJSON = genericToJSON jsonOptions
 instance FromJSON CreateSession where parseJSON = genericParseJSON jsonOptions
@@ -169,7 +169,7 @@ data SessionRange = SessionRange
   , nextOffset :: !Int64, hasMore :: !Bool
   } deriving stock (Show, Eq)
 
-data SessionErrorCode = SessionNotFound | SessionConflict | SessionRuntimeConflict | SessionTerminated | SessionInvalidInput | SessionTaskNotInProgress !Text
+data SessionErrorCode = SessionNotFound | SessionTaskNotFound | SessionConflict | SessionRuntimeConflict | SessionTerminated | SessionInvalidInput | SessionTaskNotInProgress !Text
   deriving stock (Show, Eq)
 data SessionException = SessionException
   { code :: !SessionErrorCode, message :: !Text

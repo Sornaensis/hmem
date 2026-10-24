@@ -201,3 +201,31 @@ and revisions enter the existing metadata audit allowlist; the ordinary session
 invalidation refreshes labels without active-membership invalidation or raw
 transcript content. V044 owns its transaction and ledger entry.
 
+## Initial session task (V045)
+
+`V045__session_initial_task.sql` installs the insert-only constraint trigger
+`session_initial_task_guard`, `DEFERRABLE INITIALLY DEFERRED`. At the creation
+check each newly inserted session must have a `task_sessions` association
+to a non-deleted task in the same live workspace with status `in_progress`.
+Otherwise validation fails with check violation `session_requires_in_progress_task`;
+the session, its links and their audit/outbox writes roll back together.
+
+Core creation validates and share-locks the initial task before inserting the
+session, then adds its initial link in the same transaction. The V043 link guard
+holds the task row lock against concurrent status changes. Direct SQL must
+likewise insert the session and a valid task link in one transaction. With the
+default deferral, the check runs at commit: a task changed to done before then
+does not satisfy it. A raw transaction may explicitly `SET CONSTRAINTS
+session_initial_task_guard IMMEDIATE` after establishing a valid running-task
+link. That validates creation at the requested checkpoint; a deliberately later
+task transition may follow in that transaction. An immediate check still rejects
+missing links and non-running initial tasks. Later independent task transitions
+are allowed and do not affect append, heartbeat, stop or sealing.
+
+Only inserts are checked: legacy sessions, including unlinked and terminated
+evidence, are not backfilled or rewritten. Existing-session retries read
+canonical metadata first and do not treat creation-only `task_id` as mutable
+identity or a new association request. The migration adds no columns, changes
+no historical evidence/audit/outbox records, and installs its function, trigger
+and version-45 ledger entry in one transaction.
+

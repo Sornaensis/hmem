@@ -41,6 +41,43 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+  it "requires a live in_progress initial task and rejects creation atomically with clear guidance" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+      workspace <- createTestWorkspace env "http-session-initial-task"
+      waiting <- Task.createTask env.pool (Types.CreateTask workspace.id Nothing Nothing "Waiting initial task" Nothing Nothing Nothing)
+      identifier <- UUID.nextRandom
+      let input=CreateSessionRequest identifier "jsonl" "Capture running task" Nothing Nothing waiting.id
+          withoutTask=case toJSON input of Object fields -> Object (KM.delete "task_id" fields); value -> value
+      missing <- post app (sessions workspace.id) [] withoutTask
+      simpleStatus missing `shouldBe` status400
+      simpleBody missing `shouldSatisfy` (BS.isInfixOf "task_id" . LBS.toStrict)
+      forM_ [Null,String "not-a-task-uuid"] $ \invalidTask -> do
+        let malformed=case toJSON input of Object fields -> Object (KM.insert "task_id" invalidTask fields); value -> value
+        post app (sessions workspace.id) [] malformed >>= status status400
+      refused <- post app (sessions workspace.id) [] (toJSON input)
+      simpleStatus refused `shouldBe` status409
+      value <- either fail pure (eitherDecode (simpleBody refused) :: Either String Value)
+      field ["error"] value `shouldBe` Just (String "session_task_not_in_progress")
+      field ["field"] value `shouldBe` Just (String "task_id")
+      field ["current_status"] value `shouldBe` Just (String "todo")
+      DB.getSession env.pool workspace.id identifier `shouldReturn` Nothing
+      foreignWorkspace <- createTestWorkspace env "http-foreign-session-task"
+      foreignTask <- makeTask env foreignWorkspace.id
+      forM_ [foreignTask.id,identifier] $ \target -> do
+        result <- post app (sessions workspace.id) [] (toJSON input {taskId=target})
+        simpleStatus result `shouldBe` status404
+        payload <- either fail pure (eitherDecode (simpleBody result) :: Either String Value)
+        field ["error"] payload `shouldBe` Just (String "session_task_not_found")
+        field ["field"] payload `shouldBe` Just (String "task_id")
+        DB.getSession env.pool workspace.id identifier `shouldReturn` Nothing
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid waiting.id<>"'")
+      created <- post app (sessions workspace.id) [] (toJSON input) >>= decoded @Core.AgentSession
+      tasks <- call app methodGet (sessions workspace.id<>"/"<>uuid identifier<>"/tasks") [] "" >>= decoded @SessionTaskPageResponse
+      map (.id) tasks.items `shouldBe` [waiting.id]
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid waiting.id<>"'")
+      post app (sessions workspace.id) [] (toJSON input) >>= decoded @Core.AgentSession >>= (`shouldBe` created)
+
   it "declares target runtime separately from caller and guards model switches and explicit null clearing" $
     withLocalSandboxAppContext $ \ctx -> do
       let env=ctx.localEnv; app=ctx.localApplication
@@ -49,9 +86,10 @@ spec = describe "Agent session HTTP" $ do
           a=Core.RuntimeIdentity "actual-target-a" Nothing Nothing
           b=Core.RuntimeIdentity "actual-target-b" (Just "Provider") Nothing
       workspace <- createTestWorkspace env "http-runtime"
+      initial <- makeTask env workspace.id
       identifier <- UUID.nextRandom
       let root=sessions workspace.id; target=root<>"/"<>uuid identifier
-          input=CreateSessionRequest identifier "jsonl" "Separate model identities" Nothing (Just a)
+          input=CreateSessionRequest identifier "jsonl" "Separate model identities" Nothing (Just a) initial.id
       created <- post app root headers (toJSON input) >>= decoded @Core.AgentSession
       created.runtimeIdentity `shouldBe` Just a
       field ["creator_bot_identity","model-id"] (toJSON created) `shouldBe` Just (String "codex:connection-model:high")
@@ -110,9 +148,8 @@ spec = describe "Agent session HTTP" $ do
       Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET project_id=NULL WHERE id='"<>uuid child.id<>"'")
       fmap (.projectId) <$> Task.getTask env.pool child.id `shouldReturn` Just Nothing
       identifier <- UUID.nextRandom
-      Pool.runSession env.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','quiet activity','Quiet activity test',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
       Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid child.id<>"'")
-      DB.associateSessionTask env.pool workspace.id identifier child.id
+      Pool.runTransaction env.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','quiet activity','Quiet activity test',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour'); INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace.id<>"','"<>uuid identifier<>"','"<>uuid child.id<>"')")
       DB.projectSessionActivity env.pool workspace.id [root.id,middle.id,leaf.id] >>= (`shouldMatchList` [(root.id,True),(middle.id,True),(leaf.id,True)])
       _ <- Task.updateTask env.pool parent.id (Types.UpdateTask Nothing Types.Unchanged (Types.SetTo destination.id) Types.Unchanged Nothing Nothing Nothing)
       DB.projectSessionActivity env.pool workspace.id [root.id,destination.id] >>= (`shouldMatchList` [(root.id,False),(destination.id,True)])
@@ -259,7 +296,7 @@ spec = describe "Agent session HTTP" $ do
       task <- makeTask env workspace.id
       let root = sessions workspace.id
           path = root <> "/" <> uuid identifier
-          input = CreateSessionRequest identifier "neutral-jsonl" "Test session work" Nothing Nothing
+          input = CreateSessionRequest identifier "neutral-jsonl" "Test session work" Nothing Nothing task.id
           body = TE.encodeUtf8 "{\"message\":\"æ雪\"}\r\n[true,null]\n{}"
       created <- post app root [] (toJSON input) >>= decoded @Core.AgentSession
       retried <- post app root [] (toJSON input) >>= decoded @Core.AgentSession
@@ -375,7 +412,7 @@ spec = describe "Agent session HTTP" $ do
         call app method target [] "{" >>= status status401
       forM_ [editor,admin,superadmin] $ \headers -> do
         identifier <- UUID.nextRandom
-        created <- post app root headers (toJSON $ CreateSessionRequest identifier "role-jsonl" "Test session work" Nothing Nothing) >>= decoded @Core.AgentSession
+        created <- post app root headers (toJSON $ CreateSessionRequest identifier "role-jsonl" "Test session work" Nothing Nothing task.id) >>= decoded @Core.AgentSession
         created.creatorActorType `shouldBe` Just "bot"
         let target=root<>"/"<>uuid identifier
         call app methodPost (target<>"/heartbeat") headers "" >>= ok
@@ -398,6 +435,7 @@ spec = describe "Agent session HTTP" $ do
   it "requires cookie CSRF and credential-bot declaration while preserving creator-independent edit authority" $
     withDeployedSandboxAppContext $ \ctx -> do
       workspace <- createTestWorkspace ctx.deployedEnv "http-session-csrf"
+      initial <- makeTask ctx.deployedEnv workspace.id
       user <- createDeployedSandboxUser ctx.deployedEnv False False
       _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleEdit) Nothing
       _ <- createDeployedSandboxAuthSession ctx.deployedEnv user "session-token" "csrf-value"
@@ -406,7 +444,7 @@ spec = describe "Agent session HTTP" $ do
           valid=cookies<>[("X-CSRF-Token","csrf-value")]
       identifier <- UUID.nextRandom
       call ctx.deployedApplication methodPost (sessions workspace.id) cookies "{" >>= status status403
-      created <- post ctx.deployedApplication (sessions workspace.id) valid (toJSON $ CreateSessionRequest identifier "cookie-jsonl" "Test session work" Nothing Nothing) >>= decoded @Core.AgentSession
+      created <- post ctx.deployedApplication (sessions workspace.id) valid (toJSON $ CreateSessionRequest identifier "cookie-jsonl" "Test session work" Nothing Nothing initial.id) >>= decoded @Core.AgentSession
       created.creatorActorType `shouldBe` Just "user"
       token <- issueDeployedSandboxPAT ctx.deployedEnv user "later-editor"
       let bearer=[("Authorization","Bearer "<>TE.encodeUtf8 token.rawToken)]
@@ -437,7 +475,8 @@ spec = describe "Agent session HTTP" $ do
         if heartbeat then call app methodPost (target<>"/heartbeat") [] "" >> pure () else pure ()
         post app (target<>"/terminate") [] (toJSON $ TerminateSessionRequest 0 0 0 (Core.sessionSha256 "")) >>= ok
       staleId <- UUID.nextRandom
-      Pool.runSession ctx.localEnv.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid staleId<>"','"<>uuid workspace.id<>"','jsonl','Test session work',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
+      initial <- makeTask ctx.localEnv workspace.id
+      Pool.runTransaction ctx.localEnv.pool $ SQL.sql ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid staleId<>"','"<>uuid workspace.id<>"','jsonl','Test session work',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour'); INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace.id<>"','"<>uuid staleId<>"','"<>uuid initial.id<>"')")
       post app (sessions workspace.id<>"/"<>uuid staleId<>"/terminate") [] (toJSON $ TerminateSessionRequest 0 0 0 (Core.sessionSha256 "")) >>= ok
 
   it "preserves keyset cursors, bounded task pages/ranges and rejects partial or invalid continuation inputs" $
@@ -477,6 +516,7 @@ spec = describe "Agent session HTTP" $ do
         field (base<>["nullable"]) document `shouldBe` Just (Bool True)
         field (base<>["allOf"]) document `shouldBe` Nothing
       field ["components","schemas","SetRuntimeIdentity","required"] document `shouldBe` Just (toJSON (["expected_runtime_revision","runtime_identity"] :: [Text]))
+      field ["components","schemas","CreateSessionRequest","required"] document `shouldBe` Just (toJSON (["id","format_label","title","task_id"] :: [Text]))
 
 sessions :: UUID -> BS.ByteString
 sessions workspace = "/api/v1/workspaces/"<>uuid workspace<>"/sessions"
@@ -506,7 +546,10 @@ decoded response = do
 seed :: TestEnv -> UUID -> IO Core.AgentSession
 seed env workspace = do
   identifier <- UUID.nextRandom
-  DB.createSession env.pool (Core.CreateSession identifier workspace "jsonl" "Test session work" Nothing Nothing)
+  initial <- makeTask env workspace
+  row <- DB.createSession env.pool (Core.CreateSession identifier workspace "jsonl" "Test session work" Nothing Nothing initial.id)
+  Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid initial.id<>"'")
+  pure row
 makeTask :: TestEnv -> UUID -> IO Types.Task
 makeTask env workspace = do
   task <- Task.createTask env.pool (Types.CreateTask workspace Nothing Nothing "session-task" Nothing Nothing Nothing)
@@ -552,7 +595,7 @@ taskArchive workspace task = "/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>u
 seedEvidence :: TestEnv -> UUID -> UUID -> Text -> BS.ByteString -> IO Core.AgentSession
 seedEvidence env workspace task label bytes = do
   identifier <- UUID.nextRandom
-  created <- DB.createSession env.pool (Core.CreateSession identifier workspace label "Test session work" Nothing Nothing)
+  created <- DB.createSession env.pool (Core.CreateSession identifier workspace label "Test session work" Nothing Nothing task)
   uploaded <- if BS.null bytes then pure created else (.session) <$> DB.appendSession env.pool workspace identifier (Core.AppendSession 0 0 bytes True)
   sealed <- DB.terminateSession env.pool workspace identifier (Core.TerminateSession uploaded.committedBytes uploaded.revision uploaded.committedBytes (Core.sessionSha256 bytes))
   DB.associateSessionTask env.pool workspace identifier task

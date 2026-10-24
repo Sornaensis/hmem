@@ -93,7 +93,8 @@ test('late viewer acknowledgements and animation callbacks retain their retired 
   try{
     installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(value){events.push(value)}}}},
       {document:{addEventListener(){},getElementById(){return viewport}},window:{},now:()=>31000})
-    const command={stamp:'authority-before-snapshot',generation:3,reset:0,chunk:{offset:0,nextOffset:5,dataBase64:Buffer.from('true\n').toString('base64'),final:true},follow:true,heartbeats:[{id:'s',lastSeenAt:'1970-01-01T00:00:00Z'}]}
+    const bytes=Buffer.from('{"text":"before"}\n')
+    const command={stamp:'authority-before-snapshot',generation:3,reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true},follow:true,heartbeats:[{id:'s',lastSeenAt:'1970-01-01T00:00:00Z'}]}
     incoming(command)
     incoming({...command,stamp:'same-authority-new-snapshot',generation:4,reset:0,chunk:null,follow:false})
     await flush();frames.forEach(callback=>callback())
@@ -120,6 +121,89 @@ test('new transcript chunks preserve a scrolled-up reader and follow readers at 
   viewport.scrollTop=800
   incoming({stamp:'current',generation:1,reset:null,chunk:chunk(10,'false\n'),follow:true})
   await flush();viewport.scrollTop=500;frames.shift()();assert.equal(viewport.scrollTop,500,'a scroll before paint also cancels auto-follow')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('finite windows publish once and same-owner generation handoff replays one unacknowledged short tail before growth',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[];let incoming
+ const viewport={scrollTop:0,scrollHeight:0,clientHeight:300}
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(value){events.push(value)}}}},{document:{addEventListener(){},getElementById(){return viewport}},window:{},now:()=>0})
+  const first=Buffer.from('{"text":"First admitted message"}\n'),tail=Buffer.from('{"text":"Short tail"}\n'),growth=Buffer.from('{"text":"Later growth"}\n')
+  const chunk=(offset,bytes,final)=>({offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64'),final})
+  incoming({stamp:'owner',generation:1,reset:0,chunk:chunk(0,first,false),follow:true})
+  await flush();assert.equal(events.filter(event=>event.kind==='viewer-progress').at(-1).through,first.length);assert.equal(events.filter(event=>event.kind==='viewer').length,0);assert.equal(frames.length,0)
+  incoming({stamp:'owner',generation:1,reset:null,chunk:chunk(first.length,tail,true),follow:true})
+  // Retire the acknowledgement after JS has framed the old finite end. Growth
+  // is deliberately a later chunk; replay keeps the original short boundary.
+  incoming({stamp:'owner',generation:2,reset:null,chunk:null,follow:true})
+  await flush();frames.splice(0).forEach(callback=>callback())
+  assert.equal(viewport.scrollTop,0,'the old generation cannot position after handoff')
+  incoming({stamp:'owner',generation:2,reset:null,chunk:chunk(first.length,tail,true),follow:true})
+  await flush();assert.deepEqual(events.filter(event=>event.kind==='viewer').at(-1).rows.map(row=>row.text),['First admitted message','Short tail'])
+  incoming({stamp:'owner',generation:2,reset:null,chunk:chunk(first.length+tail.length,growth,true),follow:true})
+  await flush();assert.deepEqual(events.filter(event=>event.kind==='viewer').at(-1).rows.map(row=>row.text),['First admitted message','Short tail','Later growth'])
+  assert.equal(events.filter(event=>event.kind==='viewer-error').length,0)
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('explicit decode recovery retains displayed rows until its bounded finite replacement is complete',async()=>{
+ const previous=globalThis.requestAnimationFrame,events=[];let incoming
+ globalThis.requestAnimationFrame=()=>0
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(value){events.push(value)}}}},{document:{addEventListener(){},getElementById(){return null}},window:{},now:()=>0})
+  const chunk=(offset,text,final)=>({offset,nextOffset:offset+Buffer.byteLength(text),dataBase64:Buffer.from(text).toString('base64'),final})
+  incoming({stamp:'owner',generation:1,reset:0,chunk:chunk(0,'{"text":"Admitted before recovery"}\n',true),follow:true});await flush()
+  const partial='leading fragment\n{"text":"Recovered'
+  incoming({stamp:'owner',generation:2,reset:100,chunk:chunk(100,partial,false),follow:true});await flush()
+  assert.deepEqual(events.filter(event=>event.kind==='viewer').at(-1).rows.map(row=>row.text),['Admitted before recovery'])
+  assert.equal('rows' in events.filter(event=>event.kind==='viewer-progress').at(-1),false,'intermediate recovery acknowledges only its cursor')
+  incoming({stamp:'owner',generation:2,reset:null,chunk:chunk(100+Buffer.byteLength(partial),'"}\n',true),follow:true});await flush()
+  assert.deepEqual(events.filter(event=>event.kind==='viewer').at(-1).rows.map(row=>row.text),['Recovered'])
+  assert.equal(events.filter(event=>event.kind==='viewer-error').length,0)
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('queued follow and anchor positioning yield to either scroll direction, disclosure intent and owner changes',async()=>{
+ const previous=globalThis.requestAnimationFrame
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ const frames=[];let incoming,offset=0,nodeTop=20
+ const listeners={},node={getBoundingClientRect:()=>({height:40,top:nodeTop,bottom:nodeTop+40}),hasAttribute:key=>key==='data-block-key',getAttribute:()=> 'kept:0'}
+ const viewport={scrollTop:40,scrollHeight:1000,clientHeight:300,getBoundingClientRect:()=>({top:0,bottom:300}),querySelectorAll:()=>[node],contains:target=>target===node}
+ const document={addEventListener(name,fn){(listeners[name]??=[]).push(fn)},getElementById:()=>viewport}
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(){}}}},{document,window:{},now:()=>0})
+  const send=(extra={})=>{const bytes=Buffer.from('{"text":"next"}\n');incoming({stamp:'owner',generation:1,reset:offset===0?0:null,chunk:{offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64'),final:true},follow:true,...extra});offset+=bytes.length}
+  send();await flush();nodeTop=70;frames.pop()();assert.equal(viewport.scrollTop,90,'a retained visible article preserves its relative reading anchor')
+  for(const tail of [false,true])for(const direction of [-20,20]){
+   viewport.scrollTop=tail?700:40;nodeTop=20;send();await flush();const callback=frames.pop();assert.equal(typeof callback,'function')
+   viewport.scrollTop+=direction;nodeTop+=50;const expected=viewport.scrollTop;callback();assert.equal(viewport.scrollTop,expected)
+  }
+  for(const tail of [false,true]){
+   viewport.scrollTop=tail?700:40;nodeTop=20;send();await flush();const callback=frames.pop()
+   for(const listener of listeners.toggle)listener({target:node})
+   nodeTop+=50;const expected=viewport.scrollTop;callback();assert.equal(viewport.scrollTop,expected,'a disclosure interaction supersedes positioning')
+  }
+  viewport.scrollTop=40;nodeTop=20;send();await flush();const callback=frames.pop()
+  incoming({stamp:'different owner',generation:2,reset:null,chunk:null,follow:true});nodeTop+=50;callback();assert.equal(viewport.scrollTop,40)
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('a delayed notification for a scroll settled before framing is not newer user intent',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],listeners={};let incoming
+ const viewport={scrollTop:600,scrollHeight:900,clientHeight:300}
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(){}}}},{document:{addEventListener(name,fn){(listeners[name]??=[]).push(fn)},getElementById(){return viewport}},window:{},now:()=>0})
+  const bytes=Buffer.from('{"text":"New tail"}\n')
+  incoming({stamp:'owner',generation:1,reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true},follow:true})
+  await flush();assert.equal(frames.length,1)
+  // The position was already600 when framing captured it. Browsers deliver
+  // its scroll notification asynchronously; no intervening input occurred.
+  for(const listener of listeners.scroll||[])listener({target:viewport})
+  viewport.scrollHeight=1100;frames.pop()()
+  assert.equal(viewport.scrollTop,1100)
  }finally{globalThis.requestAnimationFrame=previous}
 })
 

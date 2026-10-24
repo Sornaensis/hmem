@@ -37,10 +37,15 @@ and local fragments; raw HTML is not executed and images display their alt text.
   Pending physical requests retain their admissions until their exact callbacks.
   Invalidation makes cached results stale and queues a canonical refresh; errors
   stay paused until retry or invalidation. Workspace/authority epochs clear caches.
-- The viewer retains at most 100 records and 2 MiB of original bytes. A record may
-  occupy at most 1 MiB. A mid-record window omits its leading fragment; overlapping
-  internal older windows recover complete records. The current UI follows the tail without window controls. Presentation text is not truncated to
-  a separate short preview limit.
+- The live presentation retains the latest 100 prose-bearing occurrences and
+  latest 100 activity-only occurrences independently, each bounded to 2 MiB of
+  original record bytes (combined 200/4 MiB), plus a 1 MiB incomplete-record carry.
+  Hidden metadata and paired event envelopes consume neither visible reserve.
+  A record occupies at most 1 MiB. Transport uses finite 2 MiB windows in 64 KiB
+  chunks under the shared two-request admission. A finite window publishes and
+  positions once; same-authority synchronization preserves retained disclosures
+  and reading position. Only readers at the tail follow appends. Original evidence
+  bytes and bounded downloads are independent of this presentation retention.
 
 Session titles are distinct from transcript format labels. The list is a bounded
 preorder of matching active sessions, with at most three levels of indentation.

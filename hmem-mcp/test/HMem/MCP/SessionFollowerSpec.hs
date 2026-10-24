@@ -61,13 +61,54 @@ import Text.Read (readMaybe)
 
 spec :: Spec
 spec = describe "Session follower" $ do
+  it "rejects initial-task validation terminally without orphan sessions, handles or occupied capacity and can retry" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n" $ \path -> withRegistry fast $ \registry -> do
+      baseline <- openSourceCount
+      waiting <- UUID.nextRandom
+      runSession env.pool $ SQL.sql ("INSERT INTO tasks(id,workspace_id,title,status) VALUES ('"<>BS8.pack (show waiting)<>"','"<>BS8.pack (show wid)<>"','Waiting creation task','todo')")
+      missing <- UUID.nextRandom
+      let upload sid task=payload <$> handleUploadTool registry manager base Nothing identity "session_upload_start"
+            (object ["workspace_id" .= wid,"session_id" .= sid,"path" .= path,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text),"task_id" .= task])
+      forM_ [(waiting,"session_task_not_in_progress",Just "todo"),(missing,"session_task_not_found",Nothing)] $ \(task,code,current) -> do
+        sid <- UUID.nextRandom
+        initial <- upload sid task
+        field "status" initial `shouldBe` Just (String "validating")
+        failed <- await registry manager base wid sid (hasStatus "failed")
+        field "error" failed `shouldBe` Just (String code)
+        nested ["error_details","field"] failed `shouldBe` Just (String "task_id")
+        nested ["error_details","required_status"] failed `shouldBe` Just (String "in_progress")
+        forM_ current $ \status -> nested ["error_details","current_status"] failed `shouldBe` Just (String status)
+        failed `shouldSatisfy` (not . contains (T.pack path))
+        Sessions.getSession env.pool wid sid `shouldReturn` Nothing
+        openSourceCount `shouldReturn` baseline
+        (slots,_,_) <- registryMetrics registry
+        slots `shouldBe` 0
+        _ <- upload sid wid
+        _ <- await registry manager base wid sid (hasOffset 3)
+        runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>BS8.pack (show wid)<>"'")
+        BS.appendFile path "[]\n"
+        _ <- await registry manager base wid sid (hasOffset 6)
+        _ <- control registry manager base wid sid "session_upload_stop"
+        _ <- await registry manager base wid sid (hasStatus "stopped")
+        openSourceCount `shouldReturn` baseline
+        -- Resume and stop remain valid after independent task completion.
+        _ <- upload sid wid
+        _ <- await registry manager base wid sid (hasStatus "caught_up")
+        _ <- control registry manager base wid sid "session_upload_stop"
+        _ <- await registry manager base wid sid (hasStatus "stopped")
+        Just final <- Sessions.getSession env.pool wid sid
+        _ <- Sessions.terminateSession env.pool wid sid (Core.TerminateSession final.committedBytes final.revision 6 (Core.sessionSha256 "{}\n[]\n"))
+        openSourceCount `shouldReturn` baseline
+        BS.writeFile path "{}\n"
+        runSession env.pool $ SQL.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>BS8.pack (show wid)<>"'")
+
   it "preserves canonical runtime switches and unknown clearing through stale-start declarations and continuing capture" $
     withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withRegistry fast $ \registry -> do
       sid <- UUID.nextRandom
       let a=Core.RuntimeIdentity "Target runtime A" Nothing Nothing
           b=Core.RuntimeIdentity "Target runtime B" Nothing (Just "high")
           upload=payload <$> handleUploadTool registry manager base Nothing identity "session_upload_start"
-            (object ["workspace_id" .= wid,"session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a])
+            (object ["workspace_id" .= wid,"session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a,"task_id" .= wid])
       _ <- upload
       _ <- await registry manager base wid sid (hasOffset 6)
       Just original <- Sessions.getSession env.pool wid sid
@@ -76,7 +117,7 @@ spec = describe "Session follower" $ do
       BL.appendFile path "true\n"
       live <- await registry manager base wid sid (\value -> hasOffset 11 value && field "runtime_identity" value==Just (toJSON b))
       field "runtime_revision" live `shouldBe` Just (Number 1)
-      retried <- handleToolCall manager base Nothing identity (object ["name" .= ("session_create" :: Text),"arguments" .= object ["workspace_id" .= wid,"session_id" .= sid,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a]])
+      retried <- handleToolCall manager base Nothing identity (object ["name" .= ("session_create" :: Text),"arguments" .= object ["workspace_id" .= wid,"session_id" .= sid,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a,"task_id" .= wid]])
       nested ["summary","runtime_identity"] (payload retried) `shouldBe` Just (toJSON b)
       _ <- control registry manager base wid sid "session_upload_stop"
       _ <- await registry manager base wid sid (hasStatus "stopped")
@@ -101,11 +142,19 @@ spec = describe "Session follower" $ do
   it "requires an explicit very short title while keeping parent optional in tools/list and validation" $
     withManager $ \manager -> withRegistry fast $ \registry -> do
       let [definition]=[value | value <- uploadToolDefinitions,field "name" value==Just (String "session_upload_start")]
-      nested ["inputSchema","required"] definition `shouldBe` Just (toJSON (["session_id","path","format_label","title"] :: [Text]))
+      nested ["inputSchema","required"] definition `shouldBe` Just (toJSON (["session_id","path","format_label","title","task_id"] :: [Text]))
       result <- handleUploadTool registry manager "http://unused.invalid" Nothing identity "session_upload_start"
         (object ["workspace_id" .= workspace,"session_id" .= workspace,"path" .= ("source.jsonl" :: Text),"format_label" .= ("jsonl" :: Text)])
       nested ["error","code"] (payload result) `shouldBe` Just (String "invalid_arguments")
       result `shouldSatisfy` contains "very short descriptive title"
+      let base=object ["workspace_id" .= workspace,"session_id" .= workspace,"path" .= ("source.jsonl" :: Text),"format_label" .= ("jsonl" :: Text),"title" .= ("Capture running task" :: Text)]
+          taskField value=case base of Object fields -> Object (KM.insert "task_id" value fields); other -> other
+      forM_ [base,taskField Null,taskField (String "not-a-task-uuid")] $ \arguments -> do
+        refused <- handleUploadTool registry manager "http://unused.invalid" Nothing identity "session_upload_start" arguments
+        nested ["error","code"] (payload refused) `shouldBe` Just (String "invalid_arguments")
+        refused `shouldSatisfy` contains "task_id"
+        refused `shouldSatisfy` contains "in_progress"
+      registryMetrics registry `shouldReturn` (0,0,0)
 
   it "resumes actual pre-V043 untitled active evidence with a mandatory title while retaining immutable legacy metadata" $
     withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
@@ -226,7 +275,7 @@ spec = describe "Session follower" $ do
               let call name arguments = object ["jsonrpc" .= ("2.0" :: Text),"id" .= (name :: Text),"method" .= ("tools/call" :: Text),"params" .= object ["name" .= name,"arguments" .= arguments]]
                   requests = [object ["jsonrpc" .= ("2.0" :: Text),"id" .= ("init" :: Text),"method" .= ("initialize" :: Text)]
                     ,call "set_workspace" (object ["workspace_id" .= workspace,"identity" .= identity])]
-                    <> [call "session_upload_start" (object ["session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text)]) | sid <- ids]
+                    <> [call "session_upload_start" (object ["session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text),"task_id" .= workspace]) | sid <- ids]
               BL.hPut send (BL.concat [encode request <> "\n" | request <- requests]); hFlush send
               flip finally (void (tryPutMVar release ())) $ do
                 waitUntil $ (>= 2) <$> readTVarIO seen
@@ -387,7 +436,7 @@ spec = describe "Session follower" $ do
         initialized <- newTVarIO True
         context <- newTVarIO (Just (MCPContext (Just wid) identity))
         normal <- UUID.nextRandom
-        _ <- rpc registry manager base initialized context "session_create" (object ["session_id" .= normal, "title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text)])
+        _ <- rpc registry manager base initialized context "session_create" (object ["session_id" .= normal, "title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text),"task_id" .= wid])
         terminated <- timeout 1000000 $ rpc registry manager base initialized context "session_terminate" (object ["session_id" .= normal,"expected_offset" .= (0 :: Int),"expected_revision" .= (0 :: Int),"final_bytes" .= (0 :: Int),"final_sha256" .= Core.sessionSha256 ""])
         terminated `shouldSatisfy` isJustValue
         other <- UUID.nextRandom
@@ -416,7 +465,7 @@ spec = describe "Session follower" $ do
       let original = BS.concat (replicate 80000 "{}\n")
       withSourceFile original $ \path -> do
         sid <- UUID.nextRandom
-        _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing)
+        _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
         _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 original False)
         captured <- captureTestHTTP base
         seen <- newEmptyMVar; release <- newEmptyMVar; blocked <- newTVarIO False
@@ -747,7 +796,7 @@ spec = describe "Session follower" $ do
             _ <- exchange "initialize response" initial
             _ <- exchange "workspace response" (call "set_workspace" (object ["workspace_id" .= workspace,"identity" .= identity]))
             forM_ ids $ \sid -> do
-              response <- exchange "start response" (call "session_upload_start" (object ["session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text)]))
+              response <- exchange "start response" (call "session_upload_start" (object ["session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text),"task_id" .= workspace]))
               nested ["result","structuredContent","status"] response `shouldBe` Just (String "validating")
             waitUntil $ (>= 2) <$> readTVarIO seen
             stamp "both HTTP slots blocked"
@@ -873,7 +922,7 @@ payload :: Value -> Value
 payload result = maybe Null id (field "structuredContent" result)
 start :: Registry -> Manager -> String -> UUID -> UUID -> FilePath -> IO Value
 start registry manager base wid sid path = payload <$> handleUploadTool registry manager base Nothing identity "session_upload_start"
-  (object ["workspace_id" .= wid, "session_id" .= sid, "path" .= path, "title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text)])
+  (object ["workspace_id" .= wid, "session_id" .= sid, "path" .= path, "title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text),"task_id" .= wid])
 control :: Registry -> Manager -> String -> UUID -> UUID -> Text -> IO Value
 control registry manager base wid sid name = payload <$> handleUploadTool registry manager base Nothing identity name
   (object ["workspace_id" .= wid,"session_id" .= sid])
@@ -902,6 +951,8 @@ rpc registry manager base initialized context name arguments = handleStdioLineWi
 withBackend :: (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a
 withBackend action = withTestEnv $ \env -> do
   wid <- (.id) <$> createTestWorkspace env "follower-tests"
+  -- A fixture task shares the workspace UUID only to keep call helpers small.
+  runSession env.pool $ SQL.sql ("INSERT INTO tasks(id,workspace_id,title,status) VALUES ('"<>BS8.pack (show wid)<>"','"<>BS8.pack (show wid)<>"','Follower creation task','in_progress')")
   serveBackend env wid action
 
 serveBackend :: TestEnv -> UUID -> (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a

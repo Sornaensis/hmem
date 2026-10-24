@@ -54,12 +54,14 @@ spec :: Spec
 spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
   it "agent session metadata emits compact attributed effects once, independent of transcript bytes and link count" $ \env -> do
     workspace <- createTestWorkspace env "session-change-values"
+    initial <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "initial session task" Nothing Nothing Nothing)
+    runSession env.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>TE.encodeUtf8 (T.pack (show initial.id))<>"'")
     identifier <- UUIDV4.nextRandom
     identity <- either (fail . T.unpack) pure (mkBotIdentity "developer" "codex:live-test:high")
     let actor = EffectiveActor ActorBot "session-live-bot" "Session writer" (Just identity)
         attributed :: IO a -> IO a
         attributed action = withEffectiveActorContext (Just actor) $ withRequestIdContext (Just "session-live-request") $ withChangeCauseContext (Just ChangeCauseMcp) action
-        input = Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing Nothing
+        input = Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing Nothing initial.id
         sentinel = "SESSION_PRIVATE_PAYLOAD_SENTINEL"
         body = "\"" <> TE.encodeUtf8 sentinel <> BS.replicate 131072 97 <> "\"\r\n"
         records = filter (\row -> envelopeEntityField "type" row `elem` [Just (String "agent_session"),Just (String "task_session")])
@@ -69,7 +71,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     replay <- attributed $ AgentDB.appendSession env.pool workspace.id identifier (Agent.AppendSession 0 0 body False)
     replay.replayed `shouldBe` True
     before <- records <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 1000
-    length before `shouldBe` 2
+    length before `shouldBe` 3
     tasks <- replicateM 20 $ Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "associated" Nothing Nothing Nothing)
     forM_ tasks $ \task -> do
       runSession env.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='" <> TE.encodeUtf8 (T.pack (show task.id)) <> "'")
@@ -86,7 +88,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     let metadata = filter ((== Just (String "agent_session")) . envelopeEntityField "type") effects
         links = filter ((== Just (String "task_session")) . envelopeEntityField "type") effects
     length metadata `shouldBe` 4
-    length links `shouldBe` 21
+    length links `shouldBe` 22
     forM_ (zip [0::Int ..] metadata) $ \(index,event) -> envelopeField "invalidations" event `shouldBe` Just (toJSON
       ([object ["kind" .= ("entity" :: T.Text),"target" .= ("agent_session:" <> T.pack (show identifier))]
       ,object ["kind" .= ("collection" :: T.Text),"target" .= ("sessions:" <> T.pack (show workspace.id))]]
@@ -111,12 +113,15 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
 
   it "agent session metadata migration preserves old empty snapshot lineages and rolls back failed installation" $ \env -> do
     workspace <- createTestWorkspace env "session-change-upgrade"
+    initial <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "initial session task" Nothing Nothing Nothing)
+    runSession env.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>TE.encodeUtf8 (T.pack (show initial.id))<>"'")
     runSession env.pool $ Session.sql "DROP TRIGGER trg_agent_session_change ON sessions; DROP TRIGGER trg_task_session_change ON task_sessions; DROP FUNCTION hmem_agent_session_change(); DROP FUNCTION hmem_task_session_change(); DROP FUNCTION hmem_agent_session_audit_value(sessions); DELETE FROM schema_migrations WHERE version=42"
     identifier <- UUIDV4.nextRandom
-    _ <- AgentDB.createSession env.pool (Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing Nothing)
+    _ <- AgentDB.createSession env.pool (Agent.CreateSession identifier workspace.id "jsonl" "Test session work" Nothing Nothing initial.id)
     let scope = WorkspaceScope workspace.id
         audience = TrustedAudience "session-change-upgrade"
         unwrap = either (fail . show) pure
+    priorEffects <- listOutboxAfter env.pool scope 0 100
     old <- mapM (\(key,profile) -> do
       begun <- beginResyncWithStartKeyAndProfile env.pool 60 scope audience key 1 profile (pure []) >>= unwrap
       page <- readSnapshotPageWithStoredTtls env.pool 60 600 scope audience begun.snapshotToken >>= unwrap
@@ -146,7 +151,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
       pure (utc, local)
     utcCreation `shouldNotBe` localCreation
     getAuditLogRows env.pool "agent_session" (T.pack (show identifier)) `shouldReturn` []
-    listOutboxAfter env.pool scope 0 100 `shouldReturn` []
+    listOutboxAfter env.pool scope 0 100 `shouldReturn` priorEffects
     forM_ old $ \(begun,page) -> do
       readSnapshotPageWithStoredTtls env.pool 60 600 scope audience begun.snapshotToken `shouldReturn` Right page
       token <- maybe (fail "Empty snapshot omitted resume bearer") pure page.snapshotResumeToken
@@ -154,17 +159,20 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
       replay.replayPageRecords `shouldBe` []
     _ <- AgentDB.heartbeatSession env.pool workspace.id identifier
     effects <- listOutboxAfter env.pool scope 0 100
-    length effects `shouldBe` 1
+    take (length priorEffects) effects `shouldBe` priorEffects
+    length effects `shouldBe` length priorEffects+1
     repeated <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
     repeated.applied `shouldBe` []
     listOutboxAfter env.pool scope 0 100 `shouldReturn` effects
 
   it "agent session metadata is invisible cross-connection before commit and disappears with rollback" $ \env -> do
     workspace <- createTestWorkspace env "session-change-commit"
+    initial <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "initial session task" Nothing Nothing Nothing)
+    runSession env.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>TE.encodeUtf8 (T.pack (show initial.id))<>"'")
     identifier <- UUIDV4.nextRandom
     bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \peer -> do
-      let visible = filter ((== Just (String "agent_session")) . envelopeEntityField "type") <$> listOutboxAfter peer (WorkspaceScope workspace.id) 0 100
-          insert = Statement.Statement "INSERT INTO sessions(id,workspace_id,format_label,title) VALUES($1,$2,'jsonl','Test session work')"
+      let visible = filter (\row -> envelopeEntityField "type" row `elem` [Just (String "agent_session"),Just (String "task_session")]) <$> listOutboxAfter peer (WorkspaceScope workspace.id) 0 100
+          insert = Statement.Statement ("WITH inserted AS (INSERT INTO sessions(id,workspace_id,format_label,title) VALUES($1,$2,'jsonl','Test session work') RETURNING id,workspace_id) INSERT INTO task_sessions(workspace_id,session_id,task_id) SELECT workspace_id,id,'"<>TE.encodeUtf8 (T.pack (show initial.id))<>"' FROM inserted")
             (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
       withConn env.pool $ \connection -> flip finally (void (Session.run (Session.sql "ROLLBACK") connection)) $ do
         Session.run (Session.sql "BEGIN") connection >>= either (fail . show) pure
@@ -173,7 +181,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
         getAuditLogRows peer "agent_session" (T.pack (show identifier)) `shouldReturn` []
         Session.run (Session.sql "COMMIT") connection >>= either (fail . show) pure
       committed <- visible
-      length committed `shouldBe` 1
+      map (envelopeEntityField "type") committed `shouldBe` [Just (String "agent_session"),Just (String "task_session")]
       another <- UUIDV4.nextRandom
       rolledBack <- try @SomeException $ runTransaction env.pool $ do
         Session.statement (another,workspace.id) insert

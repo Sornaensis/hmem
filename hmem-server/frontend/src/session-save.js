@@ -46,10 +46,18 @@ export function createEvidenceWriter(writable, session, isCurrent = () => true) 
 // Elm owns demand and the two HTTP slots. This bridge only consumes one
 // validated chunk at a time and acknowledges it before Elm can rearm demand.
 export function installSessionBridge(app, { document = globalThis.document, window = globalThis.window, now = () => Date.now(), fetchArchive = async()=>{throw Error('archive_transport_unavailable')} } = {}) {
-  let stamp = '', viewerStamp = '', generation = -1, framer = null
+  let stamp = '', viewerStamp = '', generation = -1, framer = null, viewerIntent = 0
   let activeSave = null
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))
   let heartbeatKey = ''
+  const noteViewerIntent = event => {
+    const viewport=document.getElementById?.('session-records')
+    if(viewport && (event.target===viewport || viewport.contains?.(event.target))) viewerIntent++
+  }
+  // A scroll notification may lag the position change or come from browser
+  // anchoring. Actual input/disclosure events own intent; the position guard
+  // below also detects later programmatic scrolling in either direction.
+  for(const event of ['toggle','wheel','touchstart','pointerdown','keydown']) document.addEventListener(event,noteViewerIntent,true)
   async function retireSave(owned = activeSave) {
     if (!owned) return true
     if (owned.cleanupFailed) return false
@@ -235,9 +243,13 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     const today = `${localNow.getFullYear()}-${String(localNow.getMonth()+1).padStart(2,'0')}-${String(localNow.getDate()).padStart(2,'0')}`
     const fingerprint = viewerStamp+today+JSON.stringify(statuses)
     if(fingerprint!==heartbeatKey){heartbeatKey=fingerprint;send({kind:'heartbeat-status',stamp:viewerStamp,statuses,today})}
-    if (command.reset !== null) { generation = command.generation; framer = createRecordFramer(command.reset) }
+    if (command.generation < generation) return
+    generation = command.generation
+    if (command.reset !== null) {
+      framer = createRecordFramer(command.reset)
+    }
     if (!command.chunk) return
-    const captured = { stamp:command.stamp, generation:command.generation }
+    const captured = { stamp:command.stamp, generation:command.generation, intent:viewerIntent }
     try {
       if (!framer || generation !== command.generation) throw new Error('retired_window')
       const bytes = decodeBase64(command.chunk.dataBase64)
@@ -245,12 +257,37 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const viewport = document.getElementById('session-records')
       const atTail = !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48
       const previousTop = viewport?.scrollTop || 0
+      const anchors = !atTail && viewport?.getBoundingClientRect && viewport?.querySelectorAll ? (()=>{
+        const bounds = viewport.getBoundingClientRect()
+        const visible = selector => [...viewport.querySelectorAll(selector)].filter(node=>{
+          const rect=node.getBoundingClientRect()
+          return rect.height>0 && rect.bottom>bounds.top && rect.top<bounds.bottom
+        }).slice(0,8).map(node=>({attribute:node.hasAttribute('data-block-key')?'data-block-key':'data-group-key',key:node.getAttribute(node.hasAttribute('data-block-key')?'data-block-key':'data-group-key'),top:node.getBoundingClientRect().top-bounds.top}))
+        return [...visible('[data-block-key]'),...visible('[data-group-key]')]
+      })() : []
       const result = framer.push(command.chunk.offset,bytes,command.chunk.final)
-      send({ kind:'viewer',...captured,...result })
+      // A finite captured end owns publication. A large initial window (or a
+      // live burst) advances the bounded byte handshake without painting and
+      // following every intermediate 64 KiB history fragment.
+      if (!command.chunk.final) { send({kind:'viewer-progress',...captured,through:result.through}); return }
+      send({kind:'viewer',...captured,...result})
       if (command.follow && atTail) requestAnimationFrame(() => {
-        if (viewerStamp !== captured.stamp || generation !== captured.generation) return
+        if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return
         const viewport = document.getElementById('session-records')
-        if (viewport && viewport.scrollTop >= previousTop - 4) viewport.scrollTop = viewport.scrollHeight
+        if (viewport && Math.abs(viewport.scrollTop-previousTop)<=4) viewport.scrollTop = viewport.scrollHeight
+      })
+      else if (anchors.length) requestAnimationFrame(()=>{
+        if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return
+        const viewport=document.getElementById('session-records')
+        if (!viewport || Math.abs(viewport.scrollTop-previousTop)>4) return
+        const bounds=viewport.getBoundingClientRect()
+        for(const anchor of anchors) {
+          const node=[...viewport.querySelectorAll(`[${anchor.attribute}]`)].find(node=>node.getAttribute(anchor.attribute)===anchor.key)
+          if(node && node.getBoundingClientRect().height>0) {
+            viewport.scrollTop += node.getBoundingClientRect().top-bounds.top-anchor.top
+            break
+          }
+        }
       })
     } catch {
       send({ kind:'viewer-error',...captured })

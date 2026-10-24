@@ -94,6 +94,46 @@ suite =
                 state={previous | start=Just 2000000,offset=4097152,end=4097152,rows=[row]}
             in
             Expect.equal (902848,3000000) (Sessions.olderWindow state)
+        , test "decode Retry bounds recovery near the current finite end and retains displayed rows" <| \_ ->
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old = entered.sessions
+                failed = {entered | sessions={old | start=Just 0,offset=8388608,end=8388672,error=Just "decode",rows=[sampleRecord],resetPending=False}}
+                retried = Sessions.update SessionsRetry failed |> Tuple.first
+            in
+            Expect.equal {start=Just 6291520,offset=6291520,end=8388672,rows=[sampleRecord],reset=Just 6291520}
+                {start=retried.sessions.start,offset=retried.sessions.offset,end=retried.sessions.end,rows=retried.sessions.rows,reset=Sessions.viewerReset retried.sessions}
+        , test "transport Retry keeps the exact failed cursor without resetting presentation" <| \_ ->
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old = entered.sessions
+                failed = {entered | sessions={old | start=Just 0,offset=8388608,end=8388672,rows=[sampleRecord],pending=True,resetPending=False}}
+                retried = Sessions.update SessionsRetry failed |> Tuple.first
+            in
+            Expect.equal (8388608,[sampleRecord],Nothing)
+                (retried.sessions.offset,retried.sessions.rows,Sessions.viewerReset retried.sessions)
+        , test "intermediate framing acknowledgements advance one chunk without replacing displayed rows" <| \_ ->
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old = entered.sessions
+                reading = {entered | sessions={old | start=Just 0,offset=0,end=64,rows=[sampleRecord],pending=True,resetPending=False}}
+                event = SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-progress"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("through",Encode.int 32)])
+                advanced = Sessions.update event reading |> Tuple.first
+                retired = Sessions.reconcile ({reading | sessionDelivery=Delivery.invalidateWorkspace workspace reading.sessionDelivery},Cmd.none) |> Tuple.first
+                late = Sessions.update event retired |> Tuple.first
+            in
+            Expect.equal ((32,[sampleRecord],False),(0,[sampleRecord],False))
+                ((advanced.sessions.offset,advanced.sessions.rows,advanced.sessions.pending),(late.sessions.offset,late.sessions.rows,late.sessions.pending))
+        , test "malformed or unowned intermediate progress never advances the acknowledged cursor" <| \_ ->
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old = entered.sessions
+                reading = {entered | sessions={old | start=Just 0,offset=32,end=64,rows=[sampleRecord],pending=True,resetPending=False}}
+                event stamp generation through = SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-progress"),("stamp",Encode.string stamp),("generation",Encode.int generation),("through",through)])
+                rejected = [ event old.stamp old.generation (Encode.int 32),event old.stamp old.generation (Encode.int 65),event old.stamp old.generation (Encode.string "64"),event "other" old.generation (Encode.int 64),event old.stamp (old.generation+1) (Encode.int 64) ]
+                    |> List.map (\message -> Sessions.update message reading |> Tuple.first |> .sessions |> (\state -> (state.offset,state.rows)))
+            in
+            Expect.equal (List.repeat 5 (32,[sampleRecord])) rejected
         , test "late viewer callbacks after a same-context snapshot cannot replace the paused rows" <| \_ ->
             let
                 entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -104,6 +144,32 @@ suite =
                 late = Sessions.update (SessionsBridgeEvent oldEvent) resync |> Tuple.first
             in
             Expect.equal (32,[sampleRecord],False) (late.sessions.offset,late.sessions.rows,late.sessions.following)
+        , test "following resync preserves presentation while retiring only transport callbacks" <| \_ ->
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                previous = entered.sessions
+                reading = { entered | sessions = { previous | start = Just 0, offset = 32, end = 64, rows = [sampleRecord], pending = True, resetPending = False } }
+                resync = Sessions.reconcile ({ reading | sessionDelivery = Delivery.invalidateWorkspace workspace reading.sessionDelivery },Cmd.none) |> Tuple.first
+                oldEvent = Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string previous.stamp),("generation",Encode.int previous.generation),("through",Encode.int 64),("rows",Encode.list identity [])]
+                late = Sessions.update (SessionsBridgeEvent oldEvent) resync |> Tuple.first
+            in
+            Expect.equal {stamp=previous.stamp,offset=32,end=64,rows=[sampleRecord],reset=Nothing,retired=True}
+                {stamp=late.sessions.stamp,offset=late.sessions.offset,end=late.sessions.end,rows=late.sessions.rows,reset=Sessions.viewerReset late.sessions,retired=late.sessions.generation>previous.generation}
+        , test "unacknowledged finite tail keeps its exact end when resync metadata grows" <| \_ ->
+            case Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head) of
+                Nothing -> Expect.fail "Session fixture did not decode"
+                Just metadata ->
+                    let
+                        entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                        old = entered.sessions
+                        reading = {entered | sessions={old | start=Just 0,offset=32,end=64,rows=[sampleRecord],pending=True,resetPending=False}}
+                        resync = Sessions.reconcile ({reading | sessionDelivery=Delivery.invalidateWorkspace workspace reading.sessionDelivery},Cmd.none) |> Tuple.first
+                        delivery = resync.sessionDelivery
+                        settled = {delivery | resources=Dict.update (Delivery.key workspace (Delivery.SessionMetadata sessionId)) (Maybe.map (\entry -> {entry | data=Just (Delivery.Metadata {metadata | committedBytes=128}),settled=entry.dirty})) delivery.resources}
+                        renewed = Sessions.reconcile ({resync | sessionDelivery=settled},Cmd.none) |> Tuple.first
+                    in
+                    Expect.equal (32,64,Nothing)
+                        (renewed.sessions.offset,renewed.sessions.end,Sessions.viewerReset renewed.sessions)
         , test "bounded viewer and save purposes settle one chunk and await explicit consumption and rearm" <| \_ ->
             case Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head) of
                 Nothing -> Expect.fail "Canonical fixture did not decode"
@@ -243,7 +309,7 @@ sessionId = "4eccfa7f-e68c-41fe-8598-eb1533152190"
 
 
 sampleRecord : SessionRecord
-sampleRecord = SessionRecord 0 32 "{}" "\r\n" "unknown" "" "" "{}" 0
+sampleRecord = SessionRecord 0 32 "{}" "\r\n" "unknown" "" "" "{}" 0 Dict.empty
 
 
 sessionModel : Model

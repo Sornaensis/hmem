@@ -25,7 +25,8 @@ and thinking starts hidden. Consecutive thinking, tool calls and results appear
 as one collapsed **Activity** group with a timestamp and event count. Expand it
 to inspect the individual events; user and agent messages stay visible outside
 the group. Messages split activity runs, including messages mixed with tools in
-one native record. An expanded run stays expanded as live events arrive.
+one native record. An expanded run stays expanded as live events arrive or the
+view synchronizes.
 Expanded tool payloads display formatted, highlighted
 JSON. Encrypted thinking displays *Thinking...*; unrecognized records stay hidden.
 
@@ -34,10 +35,11 @@ without losing your position; returning to the end resumes following. Event time
 HH:MM today, or YYYY-MM-DD HH:MM on other days. Session cards show last activity,
 and green lights in the workspace sidebar indicate active sessions, including quiet ones.
 
-A task card’s session icon opens all sessions linked to that task. Expanded task
-cards have separate **Active sessions** and **Evidence** disclosures above and below
-their dependencies. Select a session to explore it, or use **Download** on saved
-evidence. The first two linked tasks appear as compact cards that focus their tasks.
+A task card’s **Active Agent →** button docks its active sessions and transcript
+beside the card, or below it on a narrow screen. Select a session there to read
+it without leaving the task. Expanded task cards keep saved captures under
+**Evidence**; use **Download** on saved evidence. The first two linked tasks
+appear as compact cards that focus their tasks.
 **Show All Linked Tasks** reveals additional links, with bounded pages when needed.
 
 **Download** retrieves the original saved JSONL and checks its final byte count and
@@ -54,14 +56,17 @@ status established evidence completeness.
 ## Capture a local producer with MCP
 
 Initialize MCP and declare the workspace and your identity with `set_workspace`.
-Choose a session UUID and call `session_upload_start` with that UUID, an explicit
+Start the task first so its status is **in_progress**. Choose a session UUID and
+call `session_upload_start` with that UUID, the required initial `task_id`, an explicit
 regular-file `path`, `format_label` and a very short descriptive `title`, normally
 3–8 words such as “Repair session filters”. The title describes the work; the
 format label describes the transcript. An optional `parent_session_id` selects
 one existing session in that workspace and stays fixed. Registration returns `validating`
-promptly. The process continues following while you use ordinary MCP tools;
-`session_associate` links the session to one or several **in_progress** tasks;
-start a task before adding a session. Existing links remain valid after completion. Each task can also
+promptly while the server validates and creates the task-linked session. A
+rejected task leaves no new session; inspect upload status for the task/status
+error, start the task and retry. The process continues following while you use
+ordinary MCP tools. `session_associate` adds other **in_progress** tasks.
+Existing links and resumed captures remain valid after completion. Each task can also
 link to several sessions. The local path stays in the MCP process.
 
 When known, supply `initial_runtime_identity`, for example

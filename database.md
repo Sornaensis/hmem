@@ -347,7 +347,7 @@ classDiagram
   note "PK = primary key; UK = unique key; FK = foreign key\n? = nullable; all other columns NOT NULL\nRepeated PK marks a composite key\nLines show declared foreign keys only\nON DELETE CASCADE unless a line says otherwise"
   note for workspaces "UNIQUE (gh_owner, gh_repo)\nWHERE both are non-null AND deleted_at IS NULL"
   note for observations "UNIQUE (id, workspace_id)\nembedding: vector(1536), nullable; present only with pgvector enabled"
-  note for sessions "UNIQUE (id, workspace_id)\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
+  note for sessions "UNIQUE (id, workspace_id)\nNew rows require a same-transaction in_progress task link\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
   sessions "0..1" --> "0..*" sessions : parent_session_id, workspace_id
   note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; ordered append only"
   note for tasks "UNIQUE (id, workspace_id), used by session links"
@@ -383,3 +383,11 @@ target model, separate from immutable `creator_*` connection attribution. Legacy
 runtime remains unknown. Active declarations use an isolated revision-guarded
 update without changing transcript cursors, bytes/hash or heartbeat activity;
 sealed metadata remains immutable. See the [schema reference](docs/reference/schema.md#session-runtime-identity-v044).
+
+V045 adds an insert-only deferred constraint trigger: each new session must have
+at least one live same-workspace `in_progress` task association at transaction
+completion by default, or when the transaction explicitly requests an immediate
+creation check. The existing task-link guard holds its task lock through commit.
+Historical orphans are retained; later task completion/deletion and session
+append/heartbeat/sealing remain independent. The guard and migration ledger
+commit atomically. See the [schema reference](docs/reference/schema.md#initial-session-task-v045).

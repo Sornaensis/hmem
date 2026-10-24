@@ -5,6 +5,7 @@ positions; original records and byte offsets are unchanged.
 -}
 
 import Json.Decode as Decode
+import Dict
 import Types exposing (SessionRecord)
 
 
@@ -13,7 +14,7 @@ type alias Block =
 
 
 type alias Piece =
-    { key : String, record : SessionRecord, blocks : List Block, activity : Bool }
+    { key : String, record : SessionRecord, blocks : List Block, activity : Bool, activityAnchor : Maybe String }
 
 
 type Item
@@ -30,7 +31,11 @@ project records =
                 if piece.activity then
                     case rest of
                         Activity run :: tail ->
-                            Activity (piece :: run) :: tail
+                            if sameRun piece run then
+                                Activity (piece :: run) :: tail
+
+                            else
+                                Activity [ piece ] :: rest
 
                         _ ->
                             Activity [ piece ] :: rest
@@ -39,6 +44,16 @@ project records =
                     Message piece :: rest
             )
             []
+
+
+sameRun : Piece -> List Piece -> Bool
+sameRun piece run =
+    case ( piece.activityAnchor, List.head run |> Maybe.andThen .activityAnchor ) of
+        ( Just first, Just second ) ->
+            first == second
+
+        _ ->
+            True
 
 
 pieces : SessionRecord -> List Piece
@@ -51,7 +66,7 @@ pieces record =
             []
 
         else
-            [ { key = String.fromInt record.presentationOffset ++ ":0", record = record, blocks = [ { kind = "text", content = record.content, label = "", tokens = [] } ], activity = False } ]
+            [ { key = String.fromInt record.presentationOffset ++ ":0", record = record, blocks = [ { kind = "text", content = record.content, label = "", tokens = [] } ], activity = False, activityAnchor = Nothing } ]
 
     else
         Decode.decodeString (Decode.list blockDecoder) record.content
@@ -61,7 +76,7 @@ pieces record =
             |> List.foldr
                 (\( index, block ) rest ->
                     let
-                        piece = { key = String.fromInt record.presentationOffset ++ ":" ++ String.fromInt index, record = record, blocks = [ block ], activity = block.kind /= "text" }
+                        piece = { key = String.fromInt record.presentationOffset ++ ":" ++ String.fromInt index, record = record, blocks = [ block ], activity = block.kind /= "text", activityAnchor = Dict.get (String.fromInt index) record.activityAnchors }
                     in
                     case rest of
                         next :: tail ->

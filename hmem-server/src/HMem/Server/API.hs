@@ -486,12 +486,15 @@ handleSessionErrors action = do
     Right (Right value) -> pure value
     Right (Left exception) -> throwError $ case exception.code of
       AgentSession.SessionNotFound -> sessionError err404 "session_not_found" "Session or task not found"
+      AgentSession.SessionTaskNotFound -> err404
+        { errBody = Aeson.encode (object ["error" .= ("session_task_not_found" :: Text), "field" .= ("task_id" :: Text), "message" .= ("task_id must identify a live task in this workspace. Start it before creating a session." :: Text)])
+        , errHeaders = [("Content-Type","application/json")] }
       AgentSession.SessionConflict -> sessionError err409 "session_conflict" "Session cursor, receipt or immutable metadata conflicts"
       AgentSession.SessionRuntimeConflict -> sessionError err409 "session_runtime_conflict" "Runtime identity revision conflicts; refresh runtime_revision from session metadata"
       AgentSession.SessionTerminated -> sessionError err409 "session_terminated" "Session is terminated"
       AgentSession.SessionInvalidInput -> sessionError err400 "session_invalid_input" "Invalid session cursor, metadata or bounds"
       AgentSession.SessionTaskNotInProgress status -> err409
-        { errBody = Aeson.encode (object ["error" .= ("session_task_not_in_progress" :: Text), "message" .= ("Sessions can only be added to tasks with status in_progress; current status is " <> status <> "."), "required_status" .= ("in_progress" :: Text), "current_status" .= status])
+        { errBody = Aeson.encode (object ["error" .= ("session_task_not_in_progress" :: Text), "field" .= ("task_id" :: Text), "message" .= ("Start the task before creating or associating a session. Required status is in_progress; current status is " <> status <> "."), "required_status" .= ("in_progress" :: Text), "current_status" .= status])
         , errHeaders = [("Content-Type","application/json")] }
     Left exception -> throwError $ case exception of
       DBCheckViolation{} -> sessionError err400 "session_invalid_input" "Invalid JSONL record or session constraint"
@@ -618,8 +621,10 @@ agentSessions pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> ap
       sessionIO pool workspace $ AgentSessions.listSessionFacets pool workspace isProject project after selected limit
     createH request = do
       writeAccess
-      input <- sessionRequest request
-      sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel input.title input.parentSessionId input.initialRuntimeIdentity)
+      input <- case request of
+        AgentSessionRequest (Right parsed) -> pure parsed
+        _ -> throwError $ sessionError err400 "validation_error" "Session creation requires task_id (UUID), a very short title and a format_label; task_id must identify an in_progress task."
+      sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel input.title input.parentSessionId input.initialRuntimeIdentity input.taskId)
     getH identifier = readAccess >> requireAgentSession pool workspace identifier
     appendH identifier request = do
       writeAccess

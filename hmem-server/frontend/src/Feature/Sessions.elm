@@ -96,7 +96,7 @@ reconcile ( model, command ) =
             if freshDockPage /= Nothing then (List.filter (\session -> Just session.id == old.selected) freshDockSessions ++ freshDockSessions) |> List.head |> Maybe.map .id
             else List.filter (\session -> Just session.id == old.selected) currentDockSessions |> List.head |> Maybe.map .id
             else Nothing
-        stamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", String.fromInt model.sessionDelivery.retirement, Maybe.withDefault "" selected, Maybe.withDefault "" taskPanel])
+        stamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", Maybe.withDefault "" selected, Maybe.withDefault "" taskPanel])
         downloadStamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", String.fromInt model.sessionDelivery.retirement, if model.activeTab == SessionsTab then Maybe.withDefault "" selected else ""])
         downloadChanged = old.downloadStamp /= downloadStamp
         taskFilter = if workspace /= Nothing && model.activeTab == SessionsTab then urlId "task" model else Nothing
@@ -155,13 +155,21 @@ reconcile ( model, command ) =
         sectionReads = (sectionPending ++ List.filter (\target -> not (Dict.member (sectionIdentity target) pages)) orderedSections ++ List.filter sectionUnresolved orderedSections)
             |> List.foldl (\target targets -> if List.member target targets then targets else targets ++ [target]) [] |> List.take 12
         withPanel = { filtered | taskPanel = taskPanel, downloadStamp = downloadStamp, taskHints = hints, hintOrder = nextRotation, taskPages = pages, sectionOrder = List.map sectionIdentity (List.filter (\target -> not (List.member target sectionReads)) orderedSections ++ sectionReads) }
-        contextChanged = reset || old.selected /= selected || old.taskPanel /= taskPanel
+        transportChanged = old.deliveryRetirement /= model.sessionDelivery.retirement
+        withDownloads = { withPanel | deliveryRetirement = model.sessionDelivery.retirement
+            , save = if downloadChanged then Nothing else old.save
+            , archive = if downloadChanged then Nothing else old.archive
+            , saveMessage = if downloadChanged && (old.save /= Nothing || old.archive /= Nothing) then "Save cancelled because its authority changed." else old.saveMessage }
         retired =
-            if old.stamp == stamp then withPanel
-            else if contextChanged || old.following then
-                { withPanel | stamp = stamp, generation = old.generation + 1, start = Nothing, offset = 0, end = 0, following = if contextChanged then True else old.following, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, save = if downloadChanged then Nothing else old.save, archive = if downloadChanged then Nothing else old.archive, heartbeats = Dict.empty, saveMessage = if downloadChanged && (old.save /= Nothing || old.archive /= Nothing) then "Save cancelled because its authority changed." else old.saveMessage }
+            if old.stamp /= stamp then
+                { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty }
+            else if transportChanged then
+                -- Retire response authority, not the presentation. Preserve the
+                -- finite end so a framed but unacknowledged short tail retries
+                -- exactly before newly committed bytes extend the next window.
+                { withDownloads | generation = old.generation + 1, pending = False }
             else
-                { withPanel | stamp = stamp, generation = old.generation + 1, pending = False, loadWindow = False, save = if downloadChanged then Nothing else old.save, archive = if downloadChanged then Nothing else old.archive, heartbeats = Dict.empty, saveMessage = if downloadChanged && (old.save /= Nothing || old.archive /= Nothing) then "Save cancelled during canonical resynchronization." else old.saveMessage }
+                withDownloads
         metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.andThen (\value -> case value of
             Delivery.Metadata session -> Just session
             _ -> Nothing)) workspace selected |> Maybe.withDefault Nothing
@@ -210,7 +218,7 @@ reconcile ( model, command ) =
             _ -> consumed
         saveFailure = Maybe.map2 (\(ws,target) operation ->
             [target,Delivery.SessionMetadata operation.session] |> List.filterMap (\purpose -> Dict.get (Delivery.key ws purpose) afterSave.resources |> Maybe.andThen .error) |> List.head) saveTarget current.save |> Maybe.withDefault Nothing
-        pending = { current | owned = desired, pending = current.pending || chunk /= Nothing, bridgedGeneration = current.generation
+        pending = { current | owned = desired, pending = current.pending || chunk /= Nothing, bridgedGeneration = current.generation, resetPending = current.resetPending && current.start == Nothing
             , archive = if saveFailure /= Nothing then Nothing else current.archive
             , save = if saveFailure /= Nothing then Nothing else Maybe.map (\operation -> { operation | pending = operation.pending || savePayload /= Nothing }) current.save
             , saveMessage = if saveFailure /= Nothing then "Download could not finish. Please retry." else current.saveMessage }
@@ -247,7 +255,7 @@ reconcile ( model, command ) =
 
 viewerReset : SessionsModel -> Maybe Int
 viewerReset state =
-    if state.generation /= state.bridgedGeneration then state.start else Nothing
+    if state.resetPending then state.start else Nothing
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -269,7 +277,10 @@ update msg model =
         SessionsLinkedPage cursor -> ( { model | sessions = { state | linksCursor = cursor } }, Cmd.none )
         SessionsShowAllLinkedTasks -> ( { model | sessions = { state | showAllLinkedTasks = True } }, Cmd.none )
         SessionsRetry ->
-            let refresh ws delivery =
+            let
+                decodeRecovery = state.error /= Nothing
+                begin = max 0 (state.end - 2097152)
+                refresh ws delivery =
                     Delivery.invalidateFacets ws (Delivery.invalidateLists ws delivery)
                         |> (\current -> state.selected |> Maybe.map (\id -> Delivery.invalidateSession ws id current) |> Maybe.withDefault current)
                         |> (\current -> state.taskPanel |> Maybe.map (\id -> Delivery.invalidateTask ws id current) |> Maybe.withDefault current)
@@ -277,7 +288,10 @@ update msg model =
                             Delivery.SessionWindow _ _ _ _ -> Delivery.removeDemand ownedWorkspace target accumulated
                             _ -> accumulated) current state.owned)
             in
-            ( {model | sessions = {state | error = Nothing,pending = False,loadWindow = True,offset = Maybe.withDefault 0 state.start,generation = state.generation + 1}
+            ( {model | sessions = {state | error = Nothing,pending = False,loadWindow = True
+                    , start = if decodeRecovery then Just begin else state.start
+                    , offset = if decodeRecovery then begin else state.offset
+                    , generation = state.generation + 1,resetPending = decodeRecovery || state.resetPending}
                 ,sessionDelivery = state.workspace |> Maybe.map (\ws -> refresh ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery},Cmd.none )
         SessionsStateFilter value ->
             if value == "active" then
@@ -294,10 +308,10 @@ update msg model =
         SessionsFacetPage kind cursor ->
             ({model | sessions = if kind == "projects" then {state | projectFacetCursor = cursor} else {state | taskFacetCursor = cursor}}, Cmd.none)
         SessionsFollow following ->
-            ( { model | sessions = { state | following = following, loadWindow = following, pending = False, generation = state.generation + 1, start = if following then Nothing else state.start } }, Cmd.none )
+            ( { model | sessions = { state | following = following, loadWindow = following, pending = False, generation = state.generation + 1, resetPending = following, start = if following then Nothing else state.start } }, Cmd.none )
         SessionsOlder ->
             let (begin,end) = olderWindow state in
-            ( { model | sessions = { state | following = False, loadWindow = True, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, rows = [], error = Nothing } }, Cmd.none )
+            ( { model | sessions = { state | following = False, loadWindow = True, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, rows = [], error = Nothing } }, Cmd.none )
         SessionsTick time ->
             let now = toFloat (Time.posixToMillis time)
                 refresh = state.filters.freshness /= "" && model.activeTab == SessionsTab && now-state.lastFilterRefresh >= 10000
@@ -335,8 +349,9 @@ receiveBridge value model =
         generation = field "generation" Decode.int -1
         through = field "through" Decode.int -1
         kind = field "kind" Decode.string ""
-        row = Decode.map8 (\offset end raw delimiter recordType role time content -> {offset=offset,end=end,raw=raw,delimiter=delimiter,recordType=recordType,role=role,time=time,content=content,presentationOffset=offset}) (Decode.field "offset" Decode.int) (Decode.field "end" Decode.int) (Decode.field "raw" Decode.string) (Decode.field "delimiter" Decode.string) (Decode.field "type" Decode.string) (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "text" Decode.string)
+        row = Decode.map8 (\offset end raw delimiter recordType role time content -> {offset=offset,end=end,raw=raw,delimiter=delimiter,recordType=recordType,role=role,time=time,content=content,presentationOffset=offset,activityAnchors=Dict.empty}) (Decode.field "offset" Decode.int) (Decode.field "end" Decode.int) (Decode.field "raw" Decode.string) (Decode.field "delimiter" Decode.string) (Decode.field "type" Decode.string) (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "text" Decode.string)
             |> Decode.andThen (\record -> Decode.map (\anchor -> {record | presentationOffset=anchor}) (Decode.oneOf [Decode.field "presentationOffset" Decode.int,Decode.succeed record.offset]))
+            |> Decode.andThen (\record -> Decode.map (\anchors -> {record | activityAnchors=anchors}) (Decode.oneOf [Decode.field "activityAnchors" (Decode.dict Decode.string),Decode.succeed Dict.empty]))
     in
     if kind == "archive-http" then receiveArchiveHttp value model
     else if kind == "heartbeat-status" && stamp == state.stamp then
@@ -351,9 +366,11 @@ receiveBridge value model =
     else if field "kind" Decode.string "" == "viewer-error" then
         ( {model | sessions = {state | pending = False, error = Just "Record window could not be decoded. Retry or load another window."}}, Cmd.none )
     else if through <= state.offset || through > min state.end (state.offset + 65536) then (model,Cmd.none)
+    else if kind == "viewer-progress" then
+        ( {model | sessions = {state | offset = through,pending = False}}, Cmd.none )
     else case Decode.decodeValue (Decode.field "rows" (Decode.list row)) value of
         Ok rows ->
-            if List.length rows <= 100 && List.sum (List.map (.raw >> String.length) rows) <= 2097152 then
+            if List.length rows <= 200 && List.sum (List.map (.raw >> String.length) rows) <= 4194304 then
                 ( {model | sessions = {state | offset = through, pending = False, rows = rows, notice = field "notice" Decode.string ""}}, Cmd.none )
             else ( {model | sessions = {state | pending = False,error = Just "Viewer row budget exceeded."}}, Cmd.none )
         Err _ -> ( {model | sessions = {state | pending = False,error = Just "Invalid viewer response."}}, Cmd.none )
@@ -684,7 +701,7 @@ viewTranscriptItem model item =
 
         Transcript.Activity pieces ->
             let
-                firstKey = List.head pieces |> Maybe.map .key |> Maybe.withDefault ""
+                firstKey = List.head pieces |> Maybe.map (\piece -> Maybe.withDefault piece.key piece.activityAnchor) |> Maybe.withDefault ""
                 firstTime = List.filterMap (\piece -> if piece.record.time == "" then Nothing else Just piece.record.time) pieces |> List.head |> Maybe.withDefault ""
                 count = List.map (.blocks >> List.length) pieces |> List.sum
             in

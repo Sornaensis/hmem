@@ -38,7 +38,7 @@ file path or reads the caller's filesystem.
 
 | Method and path suffix | Request or query | Response |
 | --- | --- | --- |
-| POST `/sessions` | `id` (caller UUID), `format_label` (1–128 UTF-8 bytes), `title` (1–80 UTF-8 bytes), optional `parent_session_id` | Empty active session, or identical create retry |
+| POST `/sessions` | `id` (caller UUID), required `task_id`, `format_label` (1–128 UTF-8 bytes), `title` (1–80 UTF-8 bytes), optional `parent_session_id` | Empty active session and its initial task link, or identical create retry |
 | GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness`/`project_id`/`task_id` | `items`, optional `next_cursor` |
 | GET `/sessions/filters` | `kind=projects` or `kind=tasks`, optional `project_id`, `after_id`, `selected_id`, `limit` | Active-session options, `next_id`, validated `selected` |
 | GET `/sessions/{sessionId}` | — | Canonical metadata, counters, state and final receipt when sealed |
@@ -69,7 +69,17 @@ These are additive task links. Deleted tasks are hidden in either direction;
 restoring a task restores visibility of its links. Sessions have no edit, reopen,
 delete, redaction or unlink route. A new link requires the live same-workspace task to be `in_progress`, including after session termination. Existing links remain retry-safe after task completion. A refusal returns 409 `session_task_not_in_progress` with `required_status` and `current_status`.
 
-New sessions require a very short descriptive title, normally 3–8 words, such as
+New sessions require `task_id` identifying a live same-workspace task whose
+status is `in_progress`. Session creation and that initial association commit
+atomically; rejection leaves no session, link, audit or outbox effects. Missing,
+foreign or deleted tasks return 404 `session_task_not_found`; a non-running task
+returns 409 `session_task_not_in_progress` with `field: task_id`, `required_status`
+and `current_status`. Start the task before creating the session. Existing-session
+retries and legacy resumes preserve canonical links without revalidating this
+creation-only input; use the association route to add another task. Later task
+completion/deletion does not prevent append, heartbeat or explicit sealing.
+
+New sessions also require a very short descriptive title, normally 3–8 words, such as
 “Repair session filters”. Titles are trimmed, limited to 80 UTF-8 bytes and fixed
 at creation. `format_label` continues to identify the transcript format. An optional
 parent must already exist in the same workspace; self-parenting, cycles and later

@@ -318,8 +318,8 @@ isSessionTool name = name `elem`
 
 sessionToolDefinitions :: [Value]
 sessionToolDefinitions =
-  [ define "session_create" "Create a session with a VERY SHORT DESCRIPTIVE TITLE (usually 3–8 words, e.g. 'Repair session filters'). Your accepted identity attributes the connection caller, NOT necessarily the running session model. Supply initial_runtime_identity for the actual target model when known; omit/null means unknown. It initializes NEW sessions only: retries preserve and return canonical runtime after model switches; use session_set_runtime for changes. format_label identifies the transcript format; optional parent_session_id fixes its one parent at creation. No transcript content is returned."
-      ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)", "title" .= string "Required very short descriptive title, normally 3–8 words; 1..80 UTF-8 bytes, not a UUID or format label", "parent_session_id" .= uuid, "initial_runtime_identity" .= runtimeIdentitySchema] ["session_id", "format_label", "title"]
+  [ define "session_create" "Create a session atomically linked to REQUIRED task_id: a same-workspace task with status in_progress. Start the task first. Use a VERY SHORT DESCRIPTIVE TITLE (usually 3–8 words, e.g. 'Repair session filters'). Existing-session retries preserve canonical links and metadata without requiring its task to remain in_progress. Your accepted identity attributes the connection caller, NOT necessarily the running session model. Supply initial_runtime_identity for the actual target model when known; omit/null means unknown. It initializes NEW sessions only: retries preserve and return canonical runtime after model switches; use session_set_runtime for changes. format_label identifies the transcript format; optional parent_session_id fixes its one parent at creation. No transcript content is returned."
+      ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)", "title" .= string "Required very short descriptive title, normally 3–8 words; 1..80 UTF-8 bytes, not a UUID or format label", "task_id" .= uuid, "parent_session_id" .= uuid, "initial_runtime_identity" .= runtimeIdentitySchema] ["session_id", "format_label", "title", "task_id"]
   , define "session_set_runtime" "Declare or change the actual target session model while active. This self-reported identity is separate from immutable connection caller attribution and grants no permissions. Use the current runtime_revision from session_detail as expected_runtime_revision, never the transcript revision. Explicit runtime_identity:null clears to unknown. An identical lost-ack retry at the immediately prior runtime revision is safe; other stale updates conflict. Transcript bytes/cursor/hash and activity do not change; terminated sessions reject updates."
       ["session_id" .= uuid,"expected_runtime_revision" .= nonnegative,"runtime_identity" .= runtimeIdentitySchema] ["session_id","expected_runtime_revision","runtime_identity"]
   , define "session_list" "List compact session metadata, optionally for a visible same-workspace task. Descending immutable created_at/UUID keyset; execute next_request to continue in the resolved workspace."
@@ -367,7 +367,7 @@ data SessionToolCall
 parseSessionTool :: Text -> Value -> Either String SessionToolCall
 parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
   let allowed = "workspace_id" : case name of
-        "session_create" -> ["session_id", "format_label", "title", "parent_session_id", "initial_runtime_identity"]
+        "session_create" -> ["session_id", "format_label", "title", "parent_session_id", "initial_runtime_identity", "task_id"]
         "session_set_runtime" -> ["session_id","expected_runtime_revision","runtime_identity"]
         "session_list" -> ["task_id", "limit", "before_created_at", "before_id"]
         "session_detail" -> ["session_id"]
@@ -384,7 +384,7 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
   if all (`elem` allowed) (KM.keys o) then pure () else fail "Unsupported session fields"
   workspace <- o .: "workspace_id"
   case name of
-    "session_create" -> SessionCreate workspace <$> (SessionWire.CreateSessionRequest <$> o .: "session_id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id" <*> o .:? "initial_runtime_identity")
+    "session_create" -> SessionCreate workspace <$> (SessionWire.CreateSessionRequest <$> o .: "session_id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id" <*> o .:? "initial_runtime_identity" <*> o .: "task_id")
     "session_set_runtime" -> do
       input <- AgentSession.SetRuntimeIdentity <$> o .: "expected_runtime_revision" <*> o .: "runtime_identity"
       if input.expectedRuntimeRevision < 0 then fail "Invalid runtime revision" else pure ()
@@ -577,6 +577,7 @@ handleToolCall manager base token identity params = case parseParams params of
   where
     localError "search" code message = searchError code (searchErrorField message) message []
     localError "observation_discovery" code message = searchError code (discoveryErrorField message) message []
+    localError "session_create" _ _ = sessionToolError "invalid_arguments" Nothing "session_create requires task_id (a same-workspace in_progress task UUID), session_id, a very short descriptive title and format_label"
     localError name _ _ | isSessionTool name = sessionToolError "invalid_arguments" Nothing "Invalid session tool arguments"
     localError _ _ message = mcpError message
 
@@ -735,13 +736,14 @@ sessionRequest manager base credentials verb target body = do
       else readBounded reader (remaining - fromIntegral (BL.length chunk)) (chunk : chunks)
     safeHttpError status bytes
       | code == "session_runtime_conflict" = sessionToolError code (Just status) "Runtime identity revision conflicts; refresh runtime_revision with session_detail before retrying"
+      | code == "session_task_not_found" = searchError code (Just "task_id") "task_id must identify a live task in this workspace. Start it before creating a session." ["http_status" .= status]
       | code == "session_task_not_in_progress", Just current <- payload >>= textField "current_status", current `elem` ["todo","blocked","done","cancelled"] =
-          searchError code Nothing ("Sessions can only be added to in_progress tasks; current status is " <> current <> ".") ["http_status" .= status,"required_status" .= ("in_progress" :: Text),"current_status" .= current]
+          searchError code (Just "task_id") ("Start the task before creating or associating a session. Required status is in_progress; current status is " <> current <> ".") ["http_status" .= status,"required_status" .= ("in_progress" :: Text),"current_status" .= current]
       | otherwise = sessionToolError code (Just status) message
       where
         payload = decode bytes :: Maybe Value
         reported = payload >>= textField "error"
-        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_conflict", "session_runtime_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress"]
+        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_task_not_found", "session_conflict", "session_runtime_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress"]
         code = case reported of Just known | known `elem` allowed -> known; _ -> "HTTP_" <> T.pack (show status)
         message = case status of
           400 -> "Invalid session request"

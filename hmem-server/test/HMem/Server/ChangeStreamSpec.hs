@@ -59,6 +59,8 @@ spec = describe "canonical change-stream loopback" $ do
   it "delivers session metadata through replay and live HTTP without evidence bytes, duplicate effects or cross-workspace leakage" $
     withDeployedSandboxAppContext $ \ctx -> do
       workspace <- createTestWorkspace ctx.deployedEnv "session-stream"
+      initial <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask workspace.id Nothing Nothing "initial session task" Nothing Nothing Nothing)
+      runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>Text.encodeUtf8 (UUID.toText initial.id)<>"'")
       other <- createTestWorkspace ctx.deployedEnv "session-stream-other"
       user <- createDeployedSandboxUser ctx.deployedEnv False False
       outsider <- createDeployedSandboxUser ctx.deployedEnv False False
@@ -85,16 +87,16 @@ spec = describe "canonical change-stream loopback" $ do
       testWithApplication (pure ctx.deployedApplication) $ \port ->
         bracket (startOneFrameClient port otherTicket.ticket) (\client -> joinClient "session other-scope client" client.clientWorker) $ \otherClient -> do
           frameType <$> awaitFrame otherClient.clientInitial `shouldReturn` Just "checkpoint"
-          response <- post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl" "Test session work" Nothing Nothing))
+          response <- post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl" "Test session work" Nothing Nothing initial.id))
           responseStatus response `shouldBe` status200
           created <- decodeResponse response :: IO Agent.AgentSession
-          responseStatus <$> post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl" "Test session work" Nothing Nothing)) `shouldReturn` status200
+          responseStatus <$> post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl" "Test session work" Nothing Nothing initial.id)) `shouldReturn` status200
           uploadedResponse <- post (path<>"/append") (toJSON (AgentWire.AppendSessionRequest 0 0 (AgentWire.encodeSessionBytes bytes) False))
           responseStatus uploadedResponse `shouldBe` status200
           uploaded <- decodeResponse uploadedResponse :: IO AgentWire.AppendSessionResponse
           responseStatus <$> post (path<>"/append") (toJSON (AgentWire.AppendSessionRequest 0 0 (AgentWire.encodeSessionBytes bytes) False)) `shouldReturn` status200
           before <- sessionRecords <$> listOutboxAfter ctx.deployedEnv.pool scope 0 100
-          length before `shouldBe` 2
+          length before `shouldBe` 3
           forM_ [FullV1,WorkspaceShellV1] $ \profile -> do
             items <- runSession ctx.deployedEnv.pool (materializeSnapshotWithProfile profile scope)
             map (jsonField "kind") items `shouldSatisfy` all (`notElem` [Just (String "agent_session"),Just (String "task_session"),Just (String "session_chunks")])
@@ -105,11 +107,11 @@ spec = describe "canonical change-stream loopback" $ do
                 (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket) $ \conn -> do
                   replicateM_ count (WS.receiveData conn >>= writeChan frames)
                   WS.sendClose conn ("session scenario complete" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
-          beat <- withDeclaredClient (client 4 issued.ticket) $ \_ -> do
-            first <- receive; second <- receive; checkpoint <- receive
-            map frameType [first,second,checkpoint] `shouldBe` [Just "change",Just "change",Just "checkpoint"]
-            mapM_ noEvidence [first,second,checkpoint]
-            map (\frame -> jsonField "event" frame >>= jsonField "entity" >>= jsonField "type") [first,second] `shouldBe` replicate 2 (Just (String "agent_session"))
+          beat <- withDeclaredClient (client 5 issued.ticket) $ \_ -> do
+            first <- receive; initialLink <- receive; second <- receive; checkpoint <- receive
+            map frameType [first,initialLink,second,checkpoint] `shouldBe` [Just "change",Just "change",Just "change",Just "checkpoint"]
+            mapM_ noEvidence [first,initialLink,second,checkpoint]
+            map (\frame -> jsonField "event" frame >>= jsonField "entity" >>= jsonField "type") [first,initialLink,second] `shouldBe` [Just (String "agent_session"),Just (String "task_session"),Just (String "agent_session")]
             responseBeat <- apiRequest ctx.deployedApplication methodPost (path<>"/heartbeat") headers ""
             responseStatus responseBeat `shouldBe` status200
             canonical <- decodeResponse responseBeat :: IO Agent.AgentSession
@@ -121,6 +123,7 @@ spec = describe "canonical change-stream loopback" $ do
             LBS.length (encode live) `shouldSatisfy` (< 2048)
             pure canonical
           task <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask workspace.id Nothing Nothing "late association" Nothing Nothing Nothing)
+          runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>Text.encodeUtf8 (UUID.toText task.id)<>"'")
           reconnect <- terminalResume ctx scope audience
           let receipt = AgentWire.TerminateSessionRequest uploaded.session.committedBytes beat.revision uploaded.session.committedBytes (Agent.sessionSha256 bytes)
           sealedResponse <- post (path<>"/terminate") (toJSON receipt)
@@ -139,7 +142,7 @@ spec = describe "canonical change-stream loopback" $ do
             (jsonField "event" association >>= jsonField "entity" >>= jsonField "id") `shouldBe` Just (String (UUID.toText identifier<>":"<>UUID.toText task.id))
             mapM_ noEvidence [seal,association,checkpoint]
           effects <- sessionRecords <$> listOutboxAfter ctx.deployedEnv.pool scope 0 100
-          length effects `shouldBe` 5
+          length effects `shouldBe` 6
           mapM_ (noEvidence . (.outboxEnvelope)) effects
           metadata <- apiRequest ctx.deployedApplication methodGet path headers ""
           responseStatus metadata `shouldBe` status200

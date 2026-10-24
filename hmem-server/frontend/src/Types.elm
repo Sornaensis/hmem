@@ -1291,8 +1291,10 @@ type alias SessionsModel =
     , filters : Api.SessionFilters
     , stamp : String
     , downloadStamp : String
+    , deliveryRetirement : Int
     , generation : Int
     , bridgedGeneration : Int
+    , resetPending : Bool
     , start : Maybe Int
     , offset : Int
     , end : Int
@@ -1332,13 +1334,13 @@ type alias SessionsModel =
 
 
 type alias SessionRecord =
-    { offset : Int, end : Int, raw : String, delimiter : String, recordType : String, role : String, time : String, content : String, presentationOffset : Int }
+    { offset : Int, end : Int, raw : String, delimiter : String, recordType : String, role : String, time : String, content : String, presentationOffset : Int, activityAnchors : Dict String String }
 
 
 emptySessionsModel : SessionsModel
 emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
-    , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", generation = 0, bridgedGeneration = -1, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
+    , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
 

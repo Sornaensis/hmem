@@ -1,7 +1,38 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, presentation, toolPayload } from '../src/session-viewer.js'
+import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, MAX_OCCURRENCE_ROWS, MAX_OCCURRENCE_BYTES, presentation, toolPayload } from '../src/session-viewer.js'
 const encode = value => new TextEncoder().encode(value)
+
+test('visible prose has a separate bounded reserve from metadata and tool bursts with stable source run anchors',()=>{
+ const framer=createRecordFramer(),feed=value=>{const bytes=encode(JSON.stringify(value)+'\n');let result;for(let i=0;i<bytes.length;i+=65536)result=framer.push(framer.snapshot().through,bytes.subarray(i,i+65536),i+65536>=bytes.length);return result}
+ const prose=()=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'Repeated agent message.'}]}})
+ feed(prose());const firstMessage=framer.snapshot().rows[0].offset
+ for(let i=0;i<240;i++)feed({type:'turn_context',payload:{index:i,padding:'x'.repeat(1000)}})
+ const runOffset=framer.snapshot().through
+ for(let i=0;i<180;i++)feed({type:'response_item',payload:{type:'function_call',name:'read',arguments:JSON.stringify({index:i})}})
+ let view=framer.snapshot(),activity=view.rows.filter(row=>JSON.parse(row.text)[0].kind==='tool')
+ assert.equal(view.rows.find(row=>row.offset===firstMessage).role,'assistant')
+ assert.equal(activity.length,MAX_OCCURRENCE_ROWS);assert.ok(activity.every(row=>row.activityAnchors[0]===runOffset+':0'))
+ feed(prose());const secondMessage=framer.snapshot().rows.at(-1).offset
+ feed({type:'response_item',payload:{type:'function_call',name:'read',arguments:'{}'}})
+ view=framer.snapshot();const last=view.rows.at(-1)
+ assert.notEqual(last.activityAnchors[0],runOffset+':0','a prose boundary gives identical activity a distinct run')
+ assert.deepEqual(view.rows.filter(row=>row.role==='assistant'&&JSON.parse(row.text)[0].kind==='text').map(row=>row.offset),[firstMessage,secondMessage],'identical later prose remains a distinct occurrence')
+ assert.ok(view.rows.length<=MAX_VIEW_ROWS);assert.ok(view.retainedBytes<=MAX_VIEW_BYTES)
+})
+
+test('message and activity byte reserves remain independent under maximum-sized visible records',()=>{
+ const framer=createRecordFramer(),feed=value=>{const bytes=encode(JSON.stringify(value)+'\n');for(let i=0;i<bytes.length;i+=65536)framer.push(framer.snapshot().through,bytes.subarray(i,i+65536),i+65536>=bytes.length)}
+ for(let i=0;i<3;i++)feed({text:String(i)+'λ'.repeat(450000)})
+ const keptMessages=framer.snapshot().rows.map(row=>row.offset)
+ for(let i=0;i<3;i++)feed({type:'response_item',payload:{type:'function_call_output',output:'x'.repeat(900000)}})
+ feed({type:'turn_context',payload:{padding:'x'.repeat(1000000)}})
+ const view=framer.snapshot(),messages=view.rows.filter(row=>row.type!=='conversation'),activity=view.rows.filter(row=>row.type==='conversation')
+ assert.deepEqual(messages.map(row=>row.offset),keptMessages)
+ assert.equal(messages.length,2);assert.equal(activity.length,2)
+ for(const rows of [messages,activity])assert.ok(rows.reduce((total,row)=>total+encode(row.raw).length+row.delimiter.length,0)<=MAX_OCCURRENCE_BYTES)
+ assert.ok(view.retainedBytes<=MAX_VIEW_BYTES)
+})
 
 test('paired native envelopes keep the first real occurrence anchor through final-LF replacement and repeated events',()=>{
  const event={type:'event_msg',timestamp:'2026-10-24T10:00:00.000Z',payload:{type:'agent_reasoning',text:'same'}}
@@ -21,7 +52,17 @@ test('paired native envelopes keep the first real occurrence anchor through fina
  assert.ok(view.rows.every(row=>!('pairedOffset'in row)&&!('eventEnvelope'in row)))
 })
 
-test('retained canonical anchors and consumed pairs survive hidden-envelope eviction without merging repeated occurrences',()=>{
+test('trailing whitespace after a provisional paired EOF retains its exact source occurrence and run anchors',()=>{
+ const event={type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'agent_reasoning',text:'same'}}
+ const canonical={type:'response_item',timestamp:event.timestamp,payload:{type:'reasoning',summary:[{text:'same'}]}}
+ const first=encode(JSON.stringify(event)+'\n'),second=encode(JSON.stringify(canonical)),framer=createRecordFramer()
+ framer.push(0,first,true);const provisional=framer.push(first.length,second,true).rows[0]
+ const complete=framer.push(first.length+second.length,encode('  \r\n'),true).rows[0]
+ assert.equal(complete.presentationOffset,provisional.presentationOffset);assert.deepEqual(complete.activityAnchors,provisional.activityAnchors)
+ assert.equal(complete.raw,JSON.stringify(canonical)+'  ');assert.equal(complete.delimiter,'\r\n')
+})
+
+test('retained canonical anchors and consumed pairs ignore metadata without merging repeated occurrences',()=>{
  const event={type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'agent_reasoning',text:'same'},padding:'x'.repeat(900000)}
  const canonical={type:'response_item',timestamp:event.timestamp,payload:{type:'reasoning',summary:[{text:'same'}]}}
  const later={...event,padding:''},framer=createRecordFramer()
@@ -43,13 +84,14 @@ test('canonical-first pairing does not resurrect its hidden event or consume a l
  framer.push(0,first,true);framer.push(first.length,second,true)
  const repeatedOffset=framer.snapshot().through
  framer.push(repeatedOffset,first,true)
- const view=framer.push(framer.snapshot().through,encode('null\n'.repeat(MAX_VIEW_ROWS-2)),true)
- const visible=view.rows.filter(row=>row.type==='conversation')
+ const churn=Array.from({length:MAX_OCCURRENCE_ROWS-1},(_,i)=>JSON.stringify({...canonical,payload:{type:'reasoning',summary:[{text:'new '+i}]}})+'\n').join('')
+ const view=framer.push(framer.snapshot().through,encode(churn),true)
+ const visible=view.rows.filter(row=>JSON.parse(row.text)[0].text==='same')
  assert.equal(visible.length,1);assert.equal(visible[0].offset,repeatedOffset);assert.equal(visible[0].presentationOffset,repeatedOffset)
  assert.ok(view.rows.length<=MAX_VIEW_ROWS)
 })
 
-test('both envelope directions are paired before a single push evicts the first occurrence',()=>{
+test('both envelope directions retain one visible occurrence through a single metadata-heavy push',()=>{
  const event={type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'agent_reasoning',text:'same'}}
  const canonical={type:'response_item',timestamp:event.timestamp,payload:{type:'reasoning',summary:[{text:'same'}]}}
  for(const eventFirst of [true,false]){
@@ -58,7 +100,7 @@ test('both envelope directions are paired before a single push evicts the first 
   const batch=encode(JSON.stringify(eventFirst?canonical:event)+'\n'+'null\n'.repeat(MAX_VIEW_ROWS-1))
   assert.ok(batch.length<=65536)
   const view=framer.push(first.length,batch,true),visible=view.rows.filter(row=>row.type==='conversation')
-  assert.equal(visible.length,eventFirst?1:0)
+  assert.equal(visible.length,1)
   if(eventFirst){assert.equal(visible[0].offset,first.length);assert.equal(visible[0].presentationOffset,0);assert.equal(visible[0].raw,JSON.stringify(canonical));assert.equal(visible[0].delimiter,'\n')}
   assert.equal(view.through,first.length+batch.length);assert.ok(view.rows.length<=MAX_VIEW_ROWS)
  }
@@ -84,22 +126,22 @@ test('encrypted provider thinking is represented only by its placeholder',()=>{
 })
 
 test('frames split UTF-8/CRLF and arbitrary JSON before Unicode decoding', () => {
-  const text = '{"text":"λ😀","type":"message","role":"assistant"}\r\n[1,"unknown"]\ntrue\nnull\n"scalar"'
+  const text = '{"text":"λ😀","type":"message","role":"assistant"}\r\n[1,"unknown"]\ntrue\nnull\n{"text":"scalar"}'
   const bytes = encode(text), framer = createRecordFramer()
   for(let i=0;i<bytes.length;i++) framer.push(i,bytes.subarray(i,i+1),i===bytes.length-1)
   const view = framer.snapshot()
-  assert.equal(view.rows.length,5); assert.equal(view.rows[0].text,'λ😀'); assert.equal(view.rows[0].delimiter,'\r\n')
-  assert.deepEqual(view.rows.map(row => JSON.parse(row.raw)),[{text:'λ😀',type:'message',role:'assistant'},[1,'unknown'],true,null,'scalar'])
+  assert.equal(view.rows.length,2); assert.equal(view.rows[0].text,'λ😀'); assert.equal(view.rows[0].delimiter,'\r\n')
+  assert.deepEqual(view.rows.map(row => JSON.parse(row.raw)),[{text:'λ😀',type:'message',role:'assistant'},{text:'scalar'}])
   assert.equal(view.through,bytes.length)
   const separator = encode('\r\n{"text":"next"}\n')
   const next = framer.push(bytes.length,separator,true)
-  assert.equal(next.rows.length,6); assert.equal(next.rows[4].delimiter,'\r\n')
+  assert.equal(next.rows.length,3); assert.equal(next.rows[1].delimiter,'\r\n')
 })
 
 test('one 1MiB record survives more than four chunks while retained rows and bytes stay bounded', () => {
-  const bytes = encode(JSON.stringify('x'.repeat(1048500))+'\n'), framer = createRecordFramer()
+  const bytes = encode(JSON.stringify({text:'x'.repeat(1048500)})+'\n'), framer = createRecordFramer()
   for(let i=0;i<bytes.length;i+=65536) framer.push(i,bytes.subarray(i,i+65536),i+65536>=bytes.length)
-  assert.equal(framer.snapshot().rows[0].raw.length,1048502)
+  assert.equal(framer.snapshot().rows[0].raw.length,bytes.length-1)
   let offset = bytes.length
   for(let i=0;i<250;i++){ const chunk=encode(JSON.stringify({text:'small'+i})+'\n'); framer.push(offset,chunk,true); offset+=chunk.length }
   assert.ok(framer.snapshot().rows.length<=MAX_VIEW_ROWS); assert.ok(framer.snapshot().retainedBytes<=MAX_VIEW_BYTES)
@@ -122,7 +164,7 @@ test('rejects noncanonical base64 and overlarge records explicitly', () => {
 })
 
 test('finite boundary inside UTF-8 retains prior rows and completes exactly once later', () => {
-  const bytes=encode('true\n{"text":"λ"}\n'), split=bytes.indexOf(0xce)+1, framer=createRecordFramer()
+  const bytes=encode('{"text":"before"}\n{"text":"λ"}\n'), split=bytes.indexOf(0xce)+1, framer=createRecordFramer()
   const initial=framer.push(0,bytes.subarray(0,split),true)
   assert.equal(initial.rows.length,1); assert.match(initial.notice,/Incomplete UTF-8/)
   const final=framer.push(split,bytes.subarray(split),true)
@@ -132,7 +174,7 @@ test('finite boundary inside UTF-8 retains prior rows and completes exactly once
 
 test('enforces exact payload cap independently of LF and CRLF delimiters', () => {
   for(const delimiter of ['\n','\r\n']) for(const length of [1048576,1048577]) {
-    const bytes=encode(JSON.stringify('a'.repeat(length-2))+delimiter), framer=createRecordFramer()
+    const bytes=encode(JSON.stringify({text:'a'.repeat(length-11)})+delimiter), framer=createRecordFramer()
     const run=()=>{ for(let i=0;i<bytes.length;i+=65536) framer.push(i,bytes.subarray(i,i+65536),i+65536>=bytes.length) }
     if(length===1048576) {run();assert.equal(framer.snapshot().rows[0].raw.length,length)}
     else assert.throws(run,/record_limit/)
@@ -140,7 +182,7 @@ test('enforces exact payload cap independently of LF and CRLF delimiters', () =>
 })
 
 test('overlapping finite older windows make a maximum-sized boundary record reachable',()=>{
-  const before=encode('0\n'.repeat(1000000)), record=encode(JSON.stringify('b'.repeat(1048574))+'\r\n'), after=encode('true\n')
+  const before=encode('0\n'.repeat(1000000)), record=encode(JSON.stringify({text:'b'.repeat(1048565)})+'\r\n'), after=encode('true\n')
   const source=new Uint8Array(before.length+record.length+after.length)
   source.set(before);source.set(record,before.length);source.set(after,before.length+record.length)
   function window(begin,end) {

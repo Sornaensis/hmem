@@ -24,7 +24,7 @@ import HMem.AgentSession
 import HMem.BotIdentity (mkBotIdentity)
 import HMem.DB.AgentSession
 import HMem.DB.Migration qualified as Migration
-import HMem.DB.Pool (DBException(..), createPool, runSession, withConn)
+import HMem.DB.Pool (DBException(..), createPool, runSession, runTransaction, withConn)
 import HMem.DB.RequestContext
 import HMem.DB.Task qualified as Task
 import HMem.DB.Project qualified as Project
@@ -34,8 +34,183 @@ import HMem.Types qualified as Types
 spec :: Spec
 spec = do
   around withTestEnv $ describe "Agent sessions" $ do
+    it "creates the initial running-task link atomically and preserves later completion, retry and sealing" $ \env -> do
+      workspace <- createTestWorkspace env "initial-session-task"
+      task <- makeTask env workspace.id "Initial running task"
+      identifier <- UUID.nextRandom
+      let input=CreateSession identifier workspace.id "jsonl" "Capture running task" Nothing Nothing task.id
+      row <- createSession env.pool input
+      page <- listSessionTasks env.pool workspace.id identifier Nothing 50
+      map (.id) page.items `shouldBe` [task.id]
+      execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+      createSession env.pool input `shouldReturn` row
+      -- Creation-only task input is not an instruction to add another link.
+      createSession env.pool input {taskId=workspace.id} `shouldReturn` row
+      uploaded <- append env workspace.id row "{}\n" False
+      sealed <- terminateSession env.pool workspace.id identifier (receipt uploaded.session "{}\n")
+      sealed.state `shouldBe` Terminated
+      createSession env.pool input `shouldReturn` sealed
+      allBytes env workspace.id identifier `shouldReturn` "{}\n"
+      execute env ("UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid task.id<>"'")
+      createSession env.pool input `shouldReturn` sealed
+
+    it "rejects missing, foreign, deleted and non-running initial tasks without publishing session effects" $ \env -> do
+      workspace <- createTestWorkspace env "refused-session-task"
+      other <- createTestWorkspace env "foreign-session-task"
+      foreignTask <- makeTask env other.id "Foreign running task"
+      deleted <- makeTask env workspace.id "Deleted running task"
+      execute env ("UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid deleted.id<>"'")
+      missing <- UUID.nextRandom
+      let refused code target = do
+            identifier <- UUID.nextRandom
+            expectCode code $ createSession env.pool (CreateSession identifier workspace.id "jsonl" "Rejected task capture" Nothing Nothing target)
+            boolean env ("SELECT NOT EXISTS(SELECT 1 FROM sessions WHERE id='"<>uuid identifier<>"') AND NOT EXISTS(SELECT 1 FROM task_sessions WHERE session_id='"<>uuid identifier<>"') AND NOT EXISTS(SELECT 1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"') AND NOT EXISTS(SELECT 1 FROM change_stream_outbox WHERE envelope#>>'{entity,id}'='"<>uuid identifier<>"')") `shouldReturn` True
+      forM_ [missing,foreignTask.id,deleted.id] (refused SessionTaskNotFound)
+      forM_ ["todo","blocked","done","cancelled"] $ \status -> do
+        task <- Task.createTask env.pool (Types.CreateTask workspace.id Nothing Nothing "Non-running initial task" Nothing Nothing Nothing)
+        execute env ("UPDATE tasks SET status='"<>TE.encodeUtf8 status<>"' WHERE id='"<>uuid task.id<>"'")
+        refused (SessionTaskNotInProgress status) task.id
+
+    it "rejects raw orphan commits and task completion inside the creation transaction while preserving rollback" $ \env -> do
+      workspace <- createTestWorkspace env "raw-session-initial-task"
+      task <- makeTask env workspace.id "Raw running task"
+      orphan <- UUID.nextRandom
+      closed <- UUID.nextRandom
+      valid <- UUID.nextRandom
+      let insert identifier="INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Raw task capture');"
+          link identifier="INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace.id<>"','"<>uuid identifier<>"','"<>uuid task.id<>"');"
+      rejectDb $ runTransaction env.pool $ S.sql (insert orphan)
+      rejectDb $ runTransaction env.pool $ S.sql (insert closed<>link closed<>"UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+      boolean env ("SELECT NOT EXISTS(SELECT 1 FROM sessions WHERE id IN ('"<>uuid orphan<>"','"<>uuid closed<>"')) AND NOT EXISTS(SELECT 1 FROM task_sessions WHERE session_id IN ('"<>uuid orphan<>"','"<>uuid closed<>"')) AND (SELECT status='in_progress' FROM tasks WHERE id='"<>uuid task.id<>"') AND NOT EXISTS(SELECT 1 FROM audit_log WHERE entity_type='agent_session' AND entity_id IN ('"<>uuid orphan<>"','"<>uuid closed<>"'))") `shouldReturn` True
+      runTransaction env.pool $ S.sql (insert valid<>link valid)
+      getSession env.pool workspace.id valid >>= (`shouldSatisfy` (/=Nothing))
+      execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+      Just row <- getSession env.pool workspace.id valid
+      terminateSession env.pool workspace.id valid (receipt row "") >>= (\sealed -> sealed.state `shouldBe` Terminated)
+
+    it "honors explicit immediate creation validation without allowing missing or non-running initial links" $ \env -> do
+      workspace <- createTestWorkspace env "immediate-session-initial-task"
+      running <- makeTask env workspace.id "Immediate initial task"
+      waiting <- Task.createTask env.pool (Types.CreateTask workspace.id Nothing Nothing "Waiting initial task" Nothing Nothing Nothing)
+      orphan <- UUID.nextRandom
+      eagerOrphan <- UUID.nextRandom
+      invalid <- UUID.nextRandom
+      missing <- UUID.nextRandom
+      valid <- UUID.nextRandom
+      let insert identifier="INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Immediate task capture');"
+          link identifier task="INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace.id<>"','"<>uuid identifier<>"','"<>uuid task<>"');"
+          immediate="SET CONSTRAINTS session_initial_task_guard IMMEDIATE;"
+      rejectDb $ runTransaction env.pool $ S.sql (insert orphan<>immediate)
+      rejectDb $ runTransaction env.pool $ S.sql (immediate<>insert eagerOrphan)
+      forM_ [waiting.id,missing] $ \target -> do
+        identifier <- UUID.nextRandom
+        rejectDb $ runTransaction env.pool $ S.sql (immediate<>"WITH inserted AS (INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Immediate task capture') RETURNING id,workspace_id) INSERT INTO task_sessions(workspace_id,session_id,task_id) SELECT workspace_id,id,'"<>uuid target<>"' FROM inserted")
+        getSession env.pool workspace.id identifier `shouldReturn` Nothing
+      rejectDb $ runTransaction env.pool $ S.sql (insert invalid<>link invalid waiting.id<>immediate)
+      rejectDb $ runTransaction env.pool $ S.sql (insert missing<>link missing missing<>immediate)
+      boolean env ("SELECT NOT EXISTS(SELECT 1 FROM sessions WHERE id IN ('"<>uuid orphan<>"','"<>uuid invalid<>"','"<>uuid missing<>"'))") `shouldReturn` True
+      -- An explicit immediate check establishes valid creation before this
+      -- deliberately later lifecycle operation in the same transaction.
+      runTransaction env.pool $ S.sql (insert valid<>link valid running.id<>immediate<>"UPDATE tasks SET status='done' WHERE id='"<>uuid running.id<>"'")
+      Just row <- getSession env.pool workspace.id valid
+      page <- listSessionTasks env.pool workspace.id valid Nothing 50
+      map (.id) page.items `shouldBe` [running.id]
+      uploaded <- append env workspace.id row "{}\n" False
+      terminateSession env.pool workspace.id valid (receipt uploaded.session "{}\n") >>= (\sealed -> sealed.state `shouldBe` Terminated)
+
+    it "serializes creation against both orders of task completion" $ \env -> do
+      workspace <- createTestWorkspace env "creation-task-race"
+      task <- makeTask env workspace.id "Racing initial task"
+      identifier <- UUID.nextRandom
+      bracket (createPool env.testDb.testDbConnStr 2 30 30000) destroyAllResources $ \peer -> do
+        -- Observe through the independent fixture pool: a blocked actor must
+        -- not starve its own observer on resource-pool's per-capability stripe.
+        let probe=env
+            input=CreateSession identifier workspace.id "jsonl" "Race task capture" Nothing Nothing task.id
+        withConn env.pool $ \connection -> do
+          let sql command=S.run (S.sql command) connection >>= either (fail . show) pure
+          sql ("BEGIN; UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+          withAsync (try @SessionException $ createSession peer input) $ \worker ->
+            (do
+              waitForLock probe "SELECT t.status%" `shouldReturn` True
+              sql "COMMIT"
+              result <- waitCatch worker >>= either (fail . show) pure
+              fmap (.code) (either Just (const Nothing) result) `shouldBe` Just (SessionTaskNotInProgress "done")
+              getSession peer workspace.id identifier `shouldReturn` Nothing) `finally` sql "ROLLBACK"
+        execute env ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid task.id<>"'")
+        withConn env.pool $ \connection -> do
+          let sql command=S.run (S.sql command) connection >>= either (fail . show) pure
+          sql ("BEGIN; INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Race task capture'); INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace.id<>"','"<>uuid identifier<>"','"<>uuid task.id<>"')")
+          withAsync (execute (env {pool=peer}) ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")) $ \worker ->
+            (do
+              waitForLock probe "UPDATE tasks SET status=%" `shouldReturn` True
+              sql "COMMIT"
+              waitCatch worker >>= either (fail . show) pure) `finally` sql "ROLLBACK"
+        Just row <- getSession peer workspace.id identifier
+        createSession peer input `shouldReturn` row
+
+    it "rereads a concurrently created canonical session when its creation-only task validation loses a race" $ \env -> do
+      workspace <- createTestWorkspace env "session-retry-task-race"
+      waiting <- makeTask env workspace.id "Waiting retry task"
+      winning <- makeTask env workspace.id "Winning creation task"
+      identifier <- UUID.nextRandom
+      bracket (createPool env.testDb.testDbConnStr 2 30 30000) destroyAllResources $ \peer -> do
+        let probe=env
+            input=CreateSession identifier workspace.id "jsonl" "Retry racing creation" Nothing Nothing waiting.id
+        withConn env.pool $ \connection -> do
+          let sql command=S.run (S.sql command) connection >>= either (fail . show) pure
+          -- A read lock holds the losing lookup without owning the workspace
+          -- outbox sequence needed by the concurrently winning creation.
+          sql ("BEGIN; SELECT 1 FROM tasks WHERE id='"<>uuid waiting.id<>"' FOR UPDATE")
+          withAsync (createSession peer input) $ \worker ->
+            (do
+              waitForLock probe "SELECT t.status%" `shouldReturn` True
+              canonical <- createSession env.pool input {taskId=winning.id}
+              sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid waiting.id<>"'")
+              sql "COMMIT"
+              waitCatch worker >>= either (fail . show) (`shouldBe` canonical)
+              links <- listSessionTasks peer workspace.id identifier Nothing 50
+              map (.id) links.items `shouldBe` [winning.id]) `finally` sql "ROLLBACK"
+
+    it "upgrades V044 legacy orphans without rewriting evidence and rolls back failed V045 installation" $ \_ ->
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir=sandbox.sandboxRoot </> "before-v045"
+              upgradeDir=sandbox.sandboxRoot </> "only-v045"
+              filename="V045__session_initial_task.sql"
+              env=TestEnv pool sandbox db
+          createDirectory beforeDir
+          createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V045" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
+          workspace <- createTestWorkspace env "legacy-orphan-session-upgrade"
+          active <- UUID.nextRandom
+          sealed <- UUID.nextRandom
+          forM_ [active,sealed] $ \identifier -> execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Legacy orphan capture')")
+          execute env ("UPDATE sessions SET state='terminated',terminated_at=clock_timestamp(),final_bytes=0,final_sha256='"<>TE.encodeUtf8 (sessionSha256 "")<>"',revision=1 WHERE id='"<>uuid sealed<>"'")
+          execute env "CREATE TABLE pre_v045_sessions AS SELECT * FROM sessions; CREATE TABLE pre_v045_counts AS SELECT (SELECT count(*) FROM audit_log) AS audits,(SELECT count(*) FROM change_stream_outbox) AS events"
+          bracket_
+            (execute env "CREATE FUNCTION initial_task_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=45 THEN RAISE EXCEPTION 'injected initial task ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER initial_task_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION initial_task_ledger_failure()")
+            (execute env "DROP TRIGGER initial_task_ledger_failure ON schema_migrations; DROP FUNCTION initial_task_ledger_failure()") $ do
+              Migration.runMigrations pool upgradeDir >>= (\result -> result.failed `shouldSatisfy` (/=Nothing))
+              boolean env "SELECT to_regprocedure('hmem_session_initial_task_guard()') IS NULL AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=45)" `shouldReturn` True
+          upgraded <- Migration.runMigrations pool upgradeDir
+          upgraded.failed `shouldBe` Nothing
+          upgraded.applied `shouldBe` [filename]
+          boolean env "SELECT NOT EXISTS((SELECT to_jsonb(s) FROM sessions s EXCEPT SELECT to_jsonb(s) FROM pre_v045_sessions s) UNION ALL (SELECT to_jsonb(s) FROM pre_v045_sessions s EXCEPT SELECT to_jsonb(s) FROM sessions s)) AND (SELECT count(*) FROM audit_log)=(SELECT audits FROM pre_v045_counts) AND (SELECT count(*) FROM change_stream_outbox)=(SELECT events FROM pre_v045_counts)" `shouldReturn` True
+          Just legacy <- getSession pool workspace.id active
+          createSession pool (CreateSession active workspace.id "jsonl" "Legacy orphan capture" Nothing Nothing workspace.id) `shouldReturn` legacy
+          terminateSession pool workspace.id active (receipt legacy "") >>= (\row -> row.state `shouldBe` Terminated)
+          newer <- UUID.nextRandom
+          rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid newer<>"','"<>uuid workspace.id<>"','jsonl','Rejected orphan capture')")
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
+
     it "keeps runtime declarations separate from immutable caller and transcript receipts, including retry and clear" $ \env -> do
       workspace <- createTestWorkspace env "runtime-identities"
+      initial <- makeTask env workspace.id "Runtime session task"
       identifier <- UUID.nextRandom
       caller <- either (fail . T.unpack) pure (mkBotIdentity "Connector" "codex:connection-model:high")
       updater <- either (fail . T.unpack) pure (mkBotIdentity "Manager" "codex:another-connection-model:low")
@@ -43,7 +218,7 @@ spec = do
           manager = EffectiveActor ActorBot "manager" "Manager" (Just updater)
           first = RuntimeIdentity "actual-model-a" Nothing Nothing
           second = RuntimeIdentity "actual-model-b" (Just "Known provider") (Just "high")
-          input = CreateSession identifier workspace.id "jsonl" "Separate runtime identity" Nothing (Just first)
+          input = CreateSession identifier workspace.id "jsonl" "Separate runtime identity" Nothing (Just first) initial.id
           body = "{\"text\":\"original bytes\"}\r\n"
           stable row = ((row.creatorActorType,row.creatorActorId,row.creatorActorLabel,row.creatorBotIdentity),
             (row.createdAt,row.lastSeenAt,row.committedBytes,row.committedRecords,row.revision,row.endsWithNewline),
@@ -165,7 +340,7 @@ spec = do
           boolean env "SELECT NOT EXISTS(SELECT 1 FROM sessions s JOIN runtime_legacy_expected e USING(id) WHERE (to_jsonb(s)-ARRAY['runtime_identity','runtime_revision']) IS DISTINCT FROM e.value OR s.runtime_identity IS NOT NULL OR s.runtime_revision<>0) AND (SELECT count(*) FROM audit_log)=(SELECT n FROM runtime_legacy_audit_expected)" `shouldReturn` True
           Just original <- getSession pool workspace.id activeId
           let declaration=RuntimeIdentity "Known actual runtime" Nothing Nothing
-          resumed <- withEffectiveActorContext (Just actor) $ createSession pool (CreateSession activeId workspace.id "jsonl" "Legacy runtime capture" Nothing (Just declaration))
+          resumed <- withEffectiveActorContext (Just actor) $ createSession pool (CreateSession activeId workspace.id "jsonl" "Legacy runtime capture" Nothing (Just declaration) workspace.id)
           resumed `shouldBe` original
           resumed.runtimeIdentity `shouldBe` Nothing
           boolean env "SELECT (SELECT count(*) FROM audit_log)=(SELECT n FROM runtime_legacy_audit_expected)" `shouldReturn` True
@@ -184,8 +359,9 @@ spec = do
 
     it "requires short titles and preserves a same-workspace immutable session tree, including raw SQL guards" $ \env -> do
       (workspace,parent) <- fresh env
+      initial <- makeTask env workspace "Session tree task"
       childId <- UUID.nextRandom
-      child <- createSession env.pool (CreateSession childId workspace "jsonl" "Repair session filters" (Just parent.id) Nothing)
+      child <- createSession env.pool (CreateSession childId workspace "jsonl" "Repair session filters" (Just parent.id) Nothing initial.id)
       child.title `shouldBe` Just "Repair session filters"
       child.parentSessionId `shouldBe` Just parent.id
       Just viewed <- getSession env.pool workspace child.id
@@ -193,17 +369,18 @@ spec = do
       rejectDb $ execute env ("UPDATE sessions SET parent_session_id=NULL WHERE id='"<>uuid child.id<>"'")
       rejectDb $ execute env ("UPDATE sessions SET title='Changed title' WHERE id='"<>uuid child.id<>"'")
       another <- UUID.nextRandom
-      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Self parent test" (Just another) Nothing)
+      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Self parent test" (Just another) Nothing initial.id)
       other <- createTestWorkspace env "foreign-session-parent"
-      rejectDb $ createSession env.pool (CreateSession another other.id "jsonl" "Foreign parent test" (Just parent.id) Nothing)
+      otherTask <- makeTask env other.id "Other session tree task"
+      rejectDb $ createSession env.pool (CreateSession another other.id "jsonl" "Foreign parent test" (Just parent.id) Nothing otherTask.id)
       missing <- UUID.nextRandom
-      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Missing parent test" (Just missing) Nothing)
+      rejectDb $ createSession env.pool (CreateSession another workspace "jsonl" "Missing parent test" (Just missing) Nothing initial.id)
       forM_ ["NULL","''","E'\\t'","E'\\n'","U&'\\00a0'"] $ \title -> do
         identifier <- UUID.nextRandom
         rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace<>"','jsonl',"<>title<>")")
-      expectCode SessionInvalidInput $ createSession env.pool (CreateSession another workspace "jsonl" (T.replicate 27 "雪") Nothing Nothing)
+      expectCode SessionInvalidInput $ createSession env.pool (CreateSession another workspace "jsonl" (T.replicate 27 "雪") Nothing Nothing initial.id)
       rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,parent_session_id) VALUES ('"<>uuid another<>"','"<>uuid workspace<>"','jsonl','Cycle first','"<>uuid missing<>"'),('"<>uuid missing<>"','"<>uuid workspace<>"','jsonl','Cycle second','"<>uuid another<>"')")
-      deep <- foldM (\previous _ -> do identifier <- UUID.nextRandom; createSession env.pool (CreateSession identifier workspace "jsonl" "Nested session work" (Just previous.id) Nothing)) child [1..20::Int]
+      deep <- foldM (\previous _ -> do identifier <- UUID.nextRandom; createSession env.pool (CreateSession identifier workspace "jsonl" "Nested session work" (Just previous.id) Nothing initial.id)) child [1..20::Int]
       Just context <- getSession env.pool workspace deep.id
       length context.ancestors `shouldBe` 16
       context.ancestorsTruncated `shouldBe` True
@@ -284,10 +461,11 @@ spec = do
 
     it "creates an empty active session with server attribution and idempotent immutable metadata" $ \env -> do
       workspace <- createTestWorkspace env "session-create"
+      initial <- makeTask env workspace.id "Initial session task"
       identifier <- UUID.nextRandom
       identity <- either (fail . T.unpack) pure (mkBotIdentity "developer" "codex:model:high")
       let actor = EffectiveActor ActorBot "credential-bot" "Developer" (Just identity)
-          input = CreateSession identifier workspace.id "provider-neutral-jsonl" "Test session work" Nothing Nothing
+          input = CreateSession identifier workspace.id "provider-neutral-jsonl" "Test session work" Nothing Nothing initial.id
       row <- withEffectiveActorContext (Just actor) $ createSession env.pool input
       row.creatorActorId `shouldBe` Just "credential-bot"
       row.creatorBotIdentity `shouldBe` Just identity
@@ -299,7 +477,8 @@ spec = do
       expectCode SessionConflict $ createSession env.pool input
       expectCode SessionConflict $ withEffectiveActorContext (Just actor) $ createSession env.pool input {formatLabel="other"}
       other <- createTestWorkspace env "session-create-other"
-      expectCode SessionConflict $ createSession env.pool input {workspaceId=other.id}
+      otherTask <- makeTask env other.id "Other creation task"
+      expectCode SessionConflict $ createSession env.pool input {workspaceId=other.id,taskId=otherTask.id}
       getSession env.pool other.id identifier `shouldReturn` Nothing
 
     it "preserves UTF-8, CRLF, arbitrary JSON values, escaped NUL and large JSON numbers byte for byte" $ \env -> do
@@ -418,7 +597,7 @@ spec = do
     it "seals a stale active prefix without requiring a heartbeat or uploader" $ \env -> do
       workspace <- createTestWorkspace env "stale-session"
       identifier <- UUID.nextRandom
-      execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"
+      insertRaw env workspace.id [identifier] ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"
         <> uuid identifier <> "','" <> uuid workspace.id <> "','jsonl','Test session work',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '1 hour')")
       Just stale <- getSession env.pool workspace.id identifier
       stale.state `shouldBe` Active
@@ -546,7 +725,7 @@ spec = do
       (workspace,current) <- fresh env
       old <- UUID.nextRandom
       older <- UUID.nextRandom
-      execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('" <> uuid old <> "','" <> uuid workspace <> "','jsonl','Test session work',clock_timestamp()-interval '60 seconds',clock_timestamp()-interval '60 seconds'),('" <> uuid older <> "','" <> uuid workspace <> "','jsonl','Test session work',clock_timestamp()-interval '90 seconds',clock_timestamp()-interval '90 seconds')")
+      insertRaw env workspace [old,older] ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('" <> uuid old <> "','" <> uuid workspace <> "','jsonl','Test session work',clock_timestamp()-interval '60 seconds',clock_timestamp()-interval '60 seconds'),('" <> uuid older <> "','" <> uuid workspace <> "','jsonl','Test session work',clock_timestamp()-interval '90 seconds',clock_timestamp()-interval '90 seconds')")
       oldRow <- getSession env.pool workspace old >>= maybe (fail "Missing seeded session") pure
       sealed <- terminateSession env.pool workspace old (receipt oldRow "")
       let stale = SessionFilter Nothing (Just Stale) Nothing Nothing
@@ -631,7 +810,7 @@ spec = do
           upgraded.applied `shouldBe` [filename]
           boolean env "SELECT NOT EXISTS(SELECT 1 FROM sessions s JOIN legacy_session_expected e USING(id) WHERE (s.state,s.created_at,s.last_seen_at,s.committed_bytes,s.committed_records,s.revision,s.terminated_at,s.final_bytes,s.final_sha256) IS DISTINCT FROM (e.state,e.created_at,e.last_seen_at,e.committed_bytes,e.committed_records,e.revision,e.terminated_at,e.final_bytes,e.final_sha256) OR s.title IS NOT NULL OR s.parent_session_id IS NOT NULL) AND (SELECT count(*) FROM audit_log)=(SELECT n FROM legacy_audit_expected)" `shouldReturn` True
           Just legacy <- getSession pool workspace.id activeId
-          resumed <- createSession pool (CreateSession activeId workspace.id "legacy-jsonl" "Resume legacy session work" Nothing Nothing)
+          resumed <- createSession pool (CreateSession activeId workspace.id "legacy-jsonl" "Resume legacy session work" Nothing Nothing workspace.id)
           resumed `shouldBe` legacy
           resumed.title `shouldBe` Nothing
           sealed <- readSessionRange pool workspace.id sealedId 0 maxSessionRangeBytes
@@ -684,7 +863,32 @@ fresh env = do
 freshIn :: TestEnv -> UUID -> IO AgentSession
 freshIn env workspace = do
   identifier <- UUID.nextRandom
-  createSession env.pool (CreateSession identifier workspace "jsonl" "Test session work" Nothing Nothing)
+  initial <- makeTask env workspace "Session fixture creation"
+  row <- createSession env.pool (CreateSession identifier workspace "jsonl" "Test session work" Nothing Nothing initial.id)
+  -- General fixtures have no visible task demand after valid creation. Keep
+  -- their historical initial link while exercising ordinary task deletion.
+  execute env ("UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid initial.id<>"'")
+  pure row
+
+insertRaw :: TestEnv -> UUID -> [UUID] -> ByteString -> IO ()
+insertRaw env workspace identifiers statement = do
+  initial <- makeTask env workspace "Raw session fixture creation"
+  runTransaction env.pool $ S.sql (statement <> ";" <> BS.concat
+    ["INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace<>"','"<>uuid identifier<>"','"<>uuid initial.id<>"');" | identifier <- identifiers])
+  execute env ("UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid initial.id<>"'")
+
+waitForLock :: TestEnv -> ByteString -> IO Bool
+waitForLock env pattern = loop (500::Int)
+  where
+    loop 0=do
+      phase <- runSession env.pool $ S.statement () $ St.Statement
+        "SELECT coalesce(string_agg(state||':'||coalesce(wait_event_type,'-')||':'||left(query,300),E'\\n'),'') FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()"
+        E.noParams (D.singleRow (D.column (D.nonNullable D.text))) False
+      expectationFailure ("Expected blocked phase "<>B8.unpack pattern<>"; observed "<>T.unpack phase)
+      pure False
+    loop remaining=do
+      blocked <- boolean env ("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '"<>pattern<>"')")
+      if blocked then pure True else threadDelay 10000 >> loop (remaining-1)
 
 append :: TestEnv -> UUID -> AgentSession -> ByteString -> Bool -> IO SessionAppendResult
 append env workspace row bytes flush = appendSession env.pool workspace row.id (AppendSession row.committedBytes row.revision bytes flush)

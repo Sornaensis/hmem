@@ -75,7 +75,7 @@ read access; creation, association, runtime changes and termination require edit
 
 | Tool | Arguments beyond optional `workspace_id` | Result |
 | --- | --- | --- |
-| `session_create` | Caller-owned `session_id`, `format_label`, very short `title`, optional `parent_session_id` and `initial_runtime_identity` | New-session runtime initialization; retries preserve canonical metadata |
+| `session_create` | Caller-owned `session_id`, required `task_id`, `format_label`, very short `title`, optional `parent_session_id` and `initial_runtime_identity` | Atomic new session plus initial in-progress task link; retries preserve canonical metadata/links |
 | `session_set_runtime` | `session_id`, `expected_runtime_revision`, required nullable `runtime_identity` | Guarded active runtime declaration; explicit null clears to unknown |
 | `session_list` | Optional `task_id`, `limit`, paired `before_created_at` / `before_id` | Compact workspace or task sessions |
 | `session_detail` | `session_id` | Metadata including creator attribution |
@@ -135,6 +135,14 @@ stored title remain readable/resumable without assigning one. A new task link to
 a non-running task returns `session_task_not_in_progress` with the actual status;
 start the task first. Termination does not change task status.
 
+Both creation tools require `task_id`. For a NEW session it must identify a live
+same-workspace `in_progress` task; the server commits creation and its initial
+link atomically. Missing/foreign/deleted tasks return `session_task_not_found`;
+non-running tasks return `session_task_not_in_progress` with task/status guidance.
+Existing session retries and resumes preserve their canonical associations,
+including legacy history and tasks that later completed. Supplying another
+creation-only `task_id` on resume does not add a link; call `session_associate`.
+
 Termination seals only the already committed server prefix. Supply its expected
 offset/revision and final byte count/SHA-256; the server verifies them atomically.
 An exact retry uses the original pre-seal revision. Only an explicit
@@ -149,11 +157,17 @@ start uploaders or read local files. HTTP ingestion is described in the
 
 ### Local upload followers
 
-`session_upload_start` requires explicit `session_id`, `path`, `format_label` and a
+`session_upload_start` requires explicit `session_id`, `task_id`, `path`, `format_label` and a
 very short descriptive `title` (normally 3–8 words; 1–80 UTF-8 bytes). Optional
 `parent_session_id` fixes its existing same-workspace parent at creation;
 `workspace_id` may override context. It returns promptly with `status: validating`;
 validation and upload continue in the MCP process without further agent turns.
+`validating` is registration, not proof that a remote session was created. A
+missing or malformed task UUID is rejected immediately. A server task refusal
+ends validation with `status: failed`, a safe `error` and `error_details` naming
+`task_id`, the required status and any known current status. No session or link
+is committed; the source handle and active follower/HTTP capacity are released,
+so the same UUID can be retried with a valid running task.
 The path must identify a readable regular file. Only this tool accepts a local
 path; paths, credentials and raw errors never appear in receipts or HTTP metadata.
 An existing active session is resumed only after its entire committed prefix

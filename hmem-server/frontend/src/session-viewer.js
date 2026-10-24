@@ -1,8 +1,10 @@
 // Frame exact bytes before decoding UTF-8. A raw window and a JSONL record
 // have separate bounds: one record may span more than four HTTP chunks.
 export const MAX_RECORD_BYTES = 1048576
-export const MAX_VIEW_ROWS = 100
-export const MAX_VIEW_BYTES = 2097152
+export const MAX_OCCURRENCE_ROWS = 100
+export const MAX_OCCURRENCE_BYTES = 2097152
+export const MAX_VIEW_ROWS = MAX_OCCURRENCE_ROWS * 2
+export const MAX_VIEW_BYTES = MAX_OCCURRENCE_BYTES * 2
 const decoder = new TextDecoder('utf-8', { fatal: true })
 const equal = (a,b) => a.length === b.length && a.every((byte,index) => byte === b[index])
 
@@ -76,7 +78,7 @@ export function presentation(value, raw) {
 export function createRecordFramer(startOffset = 0) {
   if (!Number.isSafeInteger(startOffset) || startOffset < 0) throw new Error('invalid_offset')
   let through = startOffset, start = startOffset, skipping = startOffset !== 0
-  let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput
+  let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput, previousRecord, activityAnchor = null
   const leadingNotice = skipping ? 'Window begins inside a possible record; the leading fragment is omitted.' : ''
   let notice = leadingNotice
   function append(bytes) {
@@ -96,18 +98,59 @@ export function createRecordFramer(startOffset = 0) {
     try { value = JSON.parse(raw) } catch { if (final) { notice = 'Incomplete record at this finite window boundary.'; return }; throw new Error('invalid_json_record') }
     notice = leadingNotice
     const row = { offset:start, presentationOffset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw) }
+    const replacement = previousRecord?.offset === start ? previousRecord : null
+    if (replacement && (replacement.raw === raw || (replacement.type === row.type && replacement.role === row.role && replacement.time === row.time && replacement.text === row.text))) {
+      row.presentationOffset = replacement.presentationOffset
+      row.pairedOffset = replacement.pairedOffset
+      row.activityAnchors = replacement.activityAnchors
+    }
     const old = rows.findIndex(item => item.offset === start)
     if (old !== -1) {
-      const prior = rows[old]
-      if (prior.raw === raw) { row.presentationOffset = prior.presentationOffset; row.pairedOffset = prior.pairedOffset }
-      retained -= prior.bytes; rows.splice(old,1)
+      retained -= rows[old].bytes; rows.splice(old,1)
     }
-    pairOccurrence(rows.at(-1),row)
-    rows.push(row); retained += row.bytes
-    while (rows.length > MAX_VIEW_ROWS || retained > MAX_VIEW_BYTES) { retained -= rows.shift().bytes }
+    const paired = !replacement && pairOccurrence(previousRecord,row)
+    if (paired && !row.eventEnvelope) row.activityAnchors = previousRecord.activityAnchors
+    const visible = visibleBlocks(row)
+    if (!row.activityAnchors) {
+      row.activityAnchors = {}
+      for (const [index,part] of visible) {
+        if (part.kind === 'text') activityAnchor = null
+        else {
+          activityAnchor ??= `${row.presentationOffset}:${index}`
+          row.activityAnchors[index] = activityAnchor
+        }
+      }
+    }
+    row.category = visible.some(([,part])=>part.kind === 'text') ? 'message' : visible.length ? 'activity' : null
+    // Pairing is a property of adjacent source occurrences, not of the retained
+    // display rows. Unknown metadata cannot pair two otherwise distant messages.
+    previousRecord = row.type === 'conversation' ? row : null
+    rows = rows.filter(item => {
+      if (item.eventEnvelope && item.pairedOffset !== undefined) { retained -= item.bytes; return false }
+      return true
+    })
+    if (row.category && !(row.eventEnvelope && row.pairedOffset !== undefined)) {
+      rows.push(row); retained += row.bytes
+      // Prose and activity have independent reserves. A long tool run or hidden
+      // provider metadata must not consume the admitted conversation history.
+      let count = rows.filter(item=>item.category === row.category).length
+      let bytes = rows.filter(item=>item.category === row.category).reduce((total,item)=>total+item.bytes,0)
+      while (count > MAX_OCCURRENCE_ROWS || bytes > MAX_OCCURRENCE_BYTES) {
+        const index = rows.findIndex(item=>item.category === row.category)
+        const [removed] = rows.splice(index,1)
+        retained -= removed.bytes; bytes -= removed.bytes; count--
+      }
+    }
+  }
+  function visibleBlocks(row) {
+    if (row.type === 'unknown') return []
+    if (row.type !== 'conversation') return row.text.trim() ? [[0,{kind:'text',text:row.text}]] : []
+    return JSON.parse(row.text).map((part,index)=>[index,part]).filter(([,part])=>
+      part.kind === 'encrypted' || (['text','thinking'].includes(part.kind) && part.text.trim())
+      || (['tool','result'].includes(part.kind) && (part.text.trim() || part.label.trim())))
   }
   function pairOccurrence(previous,row) {
-    if (!previous || previous.type !== 'conversation' || row.type !== 'conversation') return
+    if (!previous || previous.type !== 'conversation' || row.type !== 'conversation') return false
     const fingerprint = row => row.role+':'+JSON.stringify(JSON.parse(row.text).map(({kind,text})=>({kind,text})))
     const paired = Boolean(previous.eventEnvelope)!==Boolean(row.eventEnvelope)
       && (previous.pairedOffset === undefined || previous.pairedOffset === row.offset)
@@ -120,10 +163,12 @@ export function createRecordFramer(startOffset = 0) {
       const canonical = row.eventEnvelope ? previous : row
       canonical.presentationOffset = Math.min(previous.presentationOffset,row.presentationOffset)
       previous.pairedOffset = row.offset; row.pairedOffset = previous.offset
+      return true
     }
+    return false
   }
   function snapshot() {
-    return {rows:rows.filter(row=>!(row.eventEnvelope && row.pairedOffset !== undefined)).map(({bytes,eventEnvelope,pairedOffset,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice}
+    return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice}
   }
 
   return {

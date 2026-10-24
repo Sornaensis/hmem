@@ -4,6 +4,7 @@ module HMem.MCP.SessionHTTP
 import Control.Exception
 import Control.Monad (unless, when)
 import Data.Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (parseEither)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -24,7 +25,7 @@ import System.Timeout (timeout)
 
 -- Private requests, credentials and helper paths have no Show instance.
 data CapturedHTTP = CapturedHTTP !ProcessScope !FilePath !String ![(Text,Text)]
-data HTTPFault = HTTPStatus !Int | HTTPUnavailable | HTTPInvalid | HTTPTooLarge deriving (Show,Eq)
+data HTTPFault = HTTPStatus !Int | HTTPTaskRejected !Int !Text !(Maybe Text) | HTTPUnavailable | HTTPInvalid | HTTPTooLarge deriving (Show,Eq)
 
 captureHTTP :: ProcessScope -> FilePath -> String -> Maybe Text -> BotIdentity -> IO CapturedHTTP
 captureHTTP scope helper base credential identity = do
@@ -49,12 +50,26 @@ followerRequest (CapturedHTTP scope helper base headers) verb path body = do
         let status = fromIntegral (BS.index rest 0)*256 + fromIntegral (BS.index rest 1)
             content = BS.drop 2 rest
         in if BS.length content > 2097152 then Left HTTPTooLarge
-           else if status < 200 || status >= 300 then Left (HTTPStatus status)
+           else if status < 200 || status >= 300 then Left (taskRejection status content)
            else if BS.null content then Right Null
            else either (const (Left HTTPInvalid)) Right (eitherDecodeStrict' content)
       Just (3,rest) | BS.null rest -> Left HTTPTooLarge
       Just (1,rest) | BS.null rest -> Left HTTPUnavailable
       _ -> Left HTTPInvalid
+
+-- Preserve only fixed, task-specific server refusals. Never retain arbitrary
+-- response bodies, parser text or caller-controlled values in follower status.
+taskRejection :: Int -> ByteString -> HTTPFault
+taskRejection status content = case eitherDecodeStrict' content of
+  Right (Object fields)
+    | KM.lookup "error" fields == Just (String "session_task_not_found") && status == 404 ->
+        HTTPTaskRejected status "session_task_not_found" Nothing
+    | KM.lookup "error" fields == Just (String "session_task_not_in_progress") && status == 409 ->
+        let current = case KM.lookup "current_status" fields of
+              Just (String value) | value `elem` ["todo","blocked","done","cancelled"] -> Just value
+              _ -> Nothing
+        in HTTPTaskRejected status "session_task_not_in_progress" current
+  _ -> HTTPStatus status
 
 -- Fixed hidden mode: before normal configuration, logging or MCP initialization.
 -- Replies carry raw bounded HTTP bytes, avoiding Aeson re-encoding expansion.

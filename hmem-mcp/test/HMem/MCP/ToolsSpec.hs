@@ -78,7 +78,7 @@ spec = do
       jsonPath ["inputSchema", "properties", "limit", "default"] range `shouldBe` Just (Number 4096)
       jsonPath ["inputSchema", "properties", "limit", "maximum"] range `shouldBe` Just (Number 1048576)
       let [create] = [value | value <- toolDefinitions, jsonField "name" value == Just (String "session_create")]
-      jsonPath ["inputSchema","required"] create `shouldBe` Just (toJSON (["session_id","format_label","title"] :: [Text]))
+      jsonPath ["inputSchema","required"] create `shouldBe` Just (toJSON (["session_id","format_label","title","task_id"] :: [Text]))
       create `shouldSatisfy` contains "VERY SHORT DESCRIPTIVE TITLE"
       jsonPath ["inputSchema","properties","parent_session_id","type"] create `shouldBe` Just (String "string")
 
@@ -91,6 +91,9 @@ spec = do
         ,("session_read", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "offset" .= (-1 :: Int)])
         ,("session_list", object ["workspace_id" .= workspaceId, "limit" .= (101 :: Int)])
         ,("session_list", object ["workspace_id" .= workspaceId, "before_id" .= observationId])
+        ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text)])
+        ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text),"task_id" .= Null])
+        ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text),"task_id" .= ("invalid-task" :: Text)])
         ,("session_terminate", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "expected_offset" .= ("secret-value" :: Text)])] $ \(name,args) -> do
           result <- handleToolCall manager base Nothing testIdentity (object ["name" .= (name :: Text), "arguments" .= args])
           jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "invalid_arguments")
@@ -102,7 +105,7 @@ spec = do
       withEnvironment "HMEM_MCP_PROVENANCE_TOKEN" "session-test-provenance" $
         withSessionMock requests $ \manager base -> do
           created <- callWithKey manager base (Just "session-credential") "session_create"
-            (object ["workspace_id" .= workspaceId, "session_id" .= observationId, "title" .= ("Test session work" :: Text), "format_label" .= ("provider-jsonl" :: Text)])
+            (object ["workspace_id" .= workspaceId, "session_id" .= observationId, "title" .= ("Test session work" :: Text), "format_label" .= ("provider-jsonl" :: Text),"task_id" .= workspaceId])
           jsonField "action" created `shouldBe` Just (String "created")
           created `shouldSatisfy` contains "creator_actor_label"
           _ <- callWithKey manager base (Just "session-credential") "session_terminate" sessionTerminateArguments
@@ -115,7 +118,7 @@ spec = do
       map (.requestChangeCause) observed `shouldBe` replicate 3 (Just "mcp")
       map (.requestMcpProvenance) observed `shouldBe` replicate 3 (Just "session-test-provenance")
       map (.requestId) observed `shouldSatisfy` all (/= Nothing)
-      decode (head observed).requestBody `shouldBe` Just (object ["id" .= observationId, "title" .= ("Test session work" :: Text), "format_label" .= ("provider-jsonl" :: Text)])
+      decode (head observed).requestBody `shouldBe` Just (object ["id" .= observationId, "title" .= ("Test session work" :: Text), "format_label" .= ("provider-jsonl" :: Text),"task_id" .= workspaceId])
       decode (observed !! 1).requestBody `shouldBe` Just (object ["expected_offset" .= (0 :: Int), "expected_revision" .= (0 :: Int), "final_bytes" .= (0 :: Int), "final_sha256" .= AgentSession.sessionSha256 ""])
 
     it "projects HTTP status and allowlisted codes without arbitrary error messages or content" $
@@ -199,7 +202,20 @@ spec = do
             arguments = object ["workspace_id" .= workspace, "session_id" .= sid]
             invoke name args = call manager base name args
             bytes = TE.encodeUtf8 "{\"provider\":\"雪\",\"event\":{\"x\":[1,true,null]}}\r\n{\"raw\":2}"
-        _ <- invoke "session_create" (object ["workspace_id" .= workspace, "session_id" .= sid, "title" .= ("Test session work" :: Text), "format_label" .= ("unknown-provider" :: Text)])
+        initial <- invoke "task_create" (object ["workspace_id" .= workspace,"title" .= ("Initial session task" :: Text)])
+        let Just initialId = jsonPath ["summary","id"] initial
+            createArgs=object ["workspace_id" .= workspace, "session_id" .= sid, "title" .= ("Test session work" :: Text), "format_label" .= ("unknown-provider" :: Text),"task_id" .= initialId]
+        refused <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_create" :: Text),"arguments" .= createArgs])
+        jsonPath ["structuredContent","error","code"] refused `shouldBe` Just (String "session_task_not_in_progress")
+        jsonPath ["structuredContent","error","field"] refused `shouldBe` Just (String "task_id")
+        jsonPath ["structuredContent","error","current_status"] refused `shouldBe` Just (String "todo")
+        missing <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_create" :: Text),"arguments" .= setField "task_id" (String workspaceId) createArgs])
+        jsonPath ["structuredContent","error","code"] missing `shouldBe` Just (String "session_task_not_found")
+        jsonPath ["structuredContent","error","field"] missing `shouldBe` Just (String "task_id")
+        _ <- invoke "task_start" (object ["task_id" .= initialId])
+        _ <- invoke "session_create" createArgs
+        initialLinks <- invoke "session_tasks" arguments
+        jsonField "items" initialLinks `shouldSatisfy` maybe False (contains "Initial session task")
         appended <- sessionHTTP manager base workspace sid "/append" (toJSON (SessionWire.AppendSessionRequest 0 0 (SessionWire.encodeSessionBytes bytes) True))
         statusCode (Client.responseStatus appended) `shouldBe` 200
         let Just receipt = decode (Client.responseBody appended) :: Maybe SessionWire.AppendSessionResponse
@@ -238,7 +254,7 @@ spec = do
         let emptySid = read (T.unpack workspaceId) :: UUID
             emptyArgs = object ["workspace_id" .= workspace, "session_id" .= emptySid]
             emptyTerminate = object ["workspace_id" .= workspace, "session_id" .= emptySid, "expected_offset" .= (0 :: Int), "expected_revision" .= (0 :: Int), "final_bytes" .= (0 :: Int), "final_sha256" .= AgentSession.sessionSha256 ""]
-        _ <- invoke "session_create" (setField "title" (String "Empty evidence capture") (setField "format_label" (String "empty-session") emptyArgs))
+        _ <- invoke "session_create" (setField "task_id" tid (setField "title" (String "Empty evidence capture") (setField "format_label" (String "empty-session") emptyArgs)))
         _ <- invoke "session_associate" (setField "task_id" tid emptyArgs)
         _ <- invoke "task_start" (object ["task_id" .= tid])
         _ <- invoke "task_finish" (object ["task_id" .= tid, "status" .= ("done" :: Text)])
@@ -260,7 +276,7 @@ spec = do
     it "retains actual deployed workspace permission refusals through the session adapter" $
       withRenameProxyApp renameUnprivileged $ \workspace manager base -> do
         forM_ ["session_list", "session_create"] $ \name -> do
-          let args = if name == "session_create" then object ["workspace_id" .= workspace, "session_id" .= observationId, "title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text)] else object ["workspace_id" .= workspace]
+          let args = if name == "session_create" then object ["workspace_id" .= workspace, "session_id" .= observationId, "title" .= ("Test session work" :: Text), "format_label" .= ("jsonl" :: Text),"task_id" .= workspace] else object ["workspace_id" .= workspace]
           result <- handleToolCall manager base Nothing testIdentity (object ["name" .= (name :: Text), "arguments" .= args])
           jsonPath ["structuredContent", "error", "http_status"] result `shouldBe` Just (Number 403)
 

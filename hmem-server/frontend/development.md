@@ -259,7 +259,7 @@ route/filter presentation are separate consumers.
 
 ## Sessions workspace UI
 
-`Feature.Sessions` owns the Sessions tab and the focused task's session panel.
+`Feature.Sessions` owns the Sessions tab and the single card-local task dock.
 Direct session links use `#tab=sessions&session=<UUID>`. Lifecycle and heartbeat
 filters are canonical server predicates applied before keyset pagination; each
 filter/cursor combination has a separate demand identity. Lists contain 50 rows
@@ -267,15 +267,40 @@ and retain at most sixteen navigation cursors. Hidden pages and closed focus
 remove their demand without releasing outstanding physical request slots.
 
 The viewer consumes finite windows of at most 2 MiB, one 64 KiB response at a
-time. JavaScript frames bytes before UTF-8 decoding and retains at most one
-incomplete 1 MiB JSONL record, independently of the four raw-range cache slots.
-It renders at most 100 records and 2 MiB of original record bytes. An initial
-mid-record fragment is omitted with a notice. Older windows end at the first
-retained record boundary so a long record cannot be stranded between windows.
-Unknown JSON objects, arrays and scalars retain an expandable original JSON
-view. CRLF and byte offsets remain exact. Pausing preserves rows and scroll
-position across same-authority canonical resynchronization; real scope changes
-retire the viewer. Generation-stamped bridge acknowledgements reject old work.
+time. JavaScript frames bytes before UTF-8 decoding, with one incomplete 1 MiB
+JSONL carry and one bounded adjacent-pair candidate, independently of the four
+raw-range cache slots. Presentation reserves the latest 100 prose-bearing
+occurrences and latest 100 activity-only occurrences independently, each limited
+to 2 MiB of original record bytes: at most 200 occurrences and 4 MiB combined.
+These are raw-byte budgets, not heap-size guarantees. A mixed occurrence counts
+once in the prose reserve. Unknown metadata and paired event envelopes consume
+neither reserve; genuine repeated messages remain separate source occurrences.
+An initial mid-record fragment is omitted. CRLF and byte offsets remain exact.
+
+Each finite window publishes its completed presentation once while framing
+acknowledgements continue per chunk. Its captured end stays fixed through an
+unacknowledged-chunk retry, even if metadata reports newly committed bytes.
+Same-owner canonical resynchronization retires HTTP and bridge generations while
+preserving the framer, retained rows and native disclosure nodes. Source run
+anchors survive head eviction and preserve boundaries across omitted messages.
+Reading above the tail preserves a visible occurrence anchor; following and
+anchor callbacks yield to newer viewer interaction and owner/generation changes.
+Changing the session, dock owner, workspace or authorization retires presentation.
+Intermediate `viewer-progress` acknowledgements carry only the guarded cursor;
+only the finite window's final acknowledgement decodes a replacement row list.
+Transport Retry keeps its failed cursor. Decode Retry keeps displayed rows while
+reframing at most the current 2 MiB finite tail, never all elapsed session bytes.
+
+`npm run test:session-groups` includes the live append/synchronization regressions.
+The native replay additionally takes `SESSION_LIVE_NATIVE_PATH` and its proven
+`SESSION_LIVE_NATIVE_ID`; optional `SESSION_LIVE_NATIVE_PARENT` and
+`SESSION_LIVE_NATIVE_AGENT_PATH` verify producer lineage. The source working
+directory must resolve to this repository. `SESSION_LIVE_NATIVE_MAX_BYTES` bounds
+the final prefix between 2 and 4 MiB (default 4 MiB); both prefixes end at original
+LF boundaries. The test requires initial agent prose and a tool occurrence that
+remain within the final retention reserves, then reveals the later unchanged
+native bytes. A configured source is required for native replay qualification;
+an ordinary unconfigured run skips that local-source case.
 
 Evidence saving uses a separate one-chunk `SessionSave` target within the same
 sixteen-target/two-request admission limits. The immediate click opens the File

@@ -71,7 +71,12 @@ suite = describe "bounded activity probes"
         let
             loading=home.dataLoading
             workspace={home | page=WorkspacePage "ws",selectedWorkspaceId=Just "ws",activeTab=ProjectsTab,sessionContext=Just context,dataLoading={loading | visibleDetailDemand=Just (Set.fromList ["mounted"],Set.fromList ["task"] )}}
-        in Expect.equal ["project:mounted"] (Activity.targets workspace)
+        in Expect.equal (True,57) (List.member "project:mounted" (Activity.targets workspace),List.length (List.filter (String.startsWith "workspace:") (Activity.targets workspace)))
+    , test "sidebar workspace probes remain present on Sessions and omit collapsed-only members" <| \_ ->
+        let
+            groupState=home.groups
+            workspace={home | page=WorkspacePage "ws",selectedWorkspaceId=Just "ws",activeTab=SessionsTab,sessionContext=Just context,groups={groupState | collapsedGroups=Dict.fromList [("one",True),("two",True)]}}
+        in Expect.equal (56,False) (List.length (Activity.targets workspace),List.member "workspace:w1" (Activity.targets workspace))
     ]
 
 pump model = Activity.reconcile model (model,Cmd.none) |> Tuple.first

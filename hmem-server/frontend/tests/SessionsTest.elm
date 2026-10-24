@@ -19,7 +19,16 @@ import Url
 suite : Test.Test
 suite =
     describe "Sessions production wire contract"
-        [ test "decodes canonical HTTP metadata with omitted optional fields and final page cursor" <| \_ ->
+        [ test "session and authority changes restore the compact linked-task default" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                state=entered.sessions
+                expanded={entered | sessions={state | showAllLinkedTasks=True}}
+                epoch=Sessions.reconcile ({expanded | sessionRequestEpoch=expanded.sessionRequestEpoch+1},Cmd.none) |> Tuple.first
+                url=expanded.url
+                selected=Sessions.reconcile ({expanded | url={url | fragment=Just "tab=sessions&session=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}},Cmd.none) |> Tuple.first
+            in Expect.equal (False,False) (epoch.sessions.showAllLinkedTasks,selected.sessions.showAllLinkedTasks)
+        , test "decodes canonical HTTP metadata with omitted optional fields and final page cursor" <| \_ ->
             case Decode.decodeString Api.sessionPageDecoder canonicalPage of
                 Ok page ->
                     Expect.equal ( Nothing, Just ( Nothing, Nothing, Nothing ) )
@@ -109,12 +118,12 @@ suite =
             let
                 entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
                 oldTarget = Delivery.WorkspaceSessionsFiltered Api.defaultSessionFilters Nothing
-                filtered = Sessions.update (SessionsStateFilter "terminated") entered |> (\pair -> Sessions.reconcile pair) |> Tuple.first
+                filtered = Sessions.update (SessionsFreshnessFilter "stale") entered |> (\pair -> Sessions.reconcile pair) |> Tuple.first
                 hidden = Sessions.reconcile ({filtered | activeTab=ProjectsTab},Cmd.none) |> Tuple.first
                 denied = Sessions.reconcile ({filtered | auth={status=AuthRequired,mode=Nothing}},Cmd.none) |> Tuple.first
             in
-            Expect.equal {old=False,filter="terminated",hidden=0,denied=0,physical=2}
-                {old=Dict.member (Delivery.key workspace oldTarget) filtered.sessionDelivery.resources,filter=filtered.sessions.filters.state
+            Expect.equal {old=False,filter="stale",hidden=0,denied=0,physical=2}
+                {old=Dict.member (Delivery.key workspace oldTarget) filtered.sessionDelivery.resources,filter=filtered.sessions.filters.freshness
                 ,hidden=Dict.size hidden.sessionDelivery.resources,denied=Dict.size denied.sessionDelivery.resources,physical=Dict.size denied.sessionDelivery.physical}
         , test "late physical callback from an old filter releases only its slot and cannot install that page" <| \_ ->
             let

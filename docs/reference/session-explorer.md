@@ -4,8 +4,7 @@ The frontend presents stored JSONL without changing its original bytes. Native
 Codex response-item messages, function calls/results and reasoning summaries, and
 Claude message content blocks render as conversations. Adjacent opposite Codex message envelopes are paired one-to-one only when their
 content matches and valid timestamps differ by at most 100 ms. The event envelope
-is suppressed; missing or invalid timestamps preserve both records. Thinking and tool payloads start collapsed. Unknown JSON
-remains available behind a disclosure. Markdown links permit HTTP, HTTPS, mailto
+is suppressed; missing or invalid timestamps preserve both records. Thinking and tool payloads start collapsed. Encrypted reasoning is a placeholder, and unknown records/content blocks are hidden. Tool inputs and outputs are formatted JSON with bounded syntax-token spans; non-JSON strings use an input/output wrapper. Markdown links permit HTTP, HTTPS, mailto
 and local fragments; raw HTML is not executed and images display their alt text.
 
 ## Bounded presentation and transport
@@ -23,12 +22,17 @@ and local fragments; raw HTML is not executed and images display their alt text.
   stay paused until retry or invalidation. Workspace/authority epochs clear caches.
 - The viewer retains at most 100 records and 2 MiB of original bytes. A record may
   occupy at most 1 MiB. A mid-record window omits its leading fragment; overlapping
-  older windows recover complete records. Presentation text is not truncated to
+  internal older windows recover complete records. The current UI follows the tail without window controls. Presentation text is not truncated to
   a separate short preview limit.
 
 Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.
-The status/activity filters apply before pagination.
+The active-state and Live/Quiet activity predicates apply before pagination; Live
+is the default. Saved sessions remain reachable through task Evidence links.
+Transcript model identity uses declared creator attribution. Event times and list
+activity use the bounded local timestamp cache; the browser-local day decides
+whether to omit the date. Linked-task cards show two items initially, then one
+bounded page on expansion.
 
 ## Downloads
 
@@ -93,7 +97,8 @@ motion leaves it static and an accessible label identifies activity.
 as inactive. Server authorization precedes traversal and no transcript bytes or
 hierarchy rows are returned. Unknown/error results remain distinct in the client.
 
-The client probes only rendered workspace/project cards, deduplicates grouped
+The client probes rendered workspace/project cards and expanded sidebar workspace
+entries, deduplicates grouped
 workspaces, and fairly rotates batches under one physical request. Retired
 requests retain their occupancy until the exact callback; authority, visibility
 and target generations reject stale replies. Idle probes refresh about every ten

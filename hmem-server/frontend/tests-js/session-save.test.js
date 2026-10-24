@@ -88,7 +88,7 @@ test('a failed retired acquisition cannot dispose a later save owner',async()=>{
 
 test('late viewer acknowledgements and animation callbacks retain their retired generation and cannot scroll paused resync',async()=>{
   const previous=globalThis.requestAnimationFrame,frames=[],events=[];let incoming
-  const viewport={scrollTop:37,scrollHeight:900}
+  const viewport={scrollTop:37,scrollHeight:900,clientHeight:863}
   globalThis.requestAnimationFrame=callback=>frames.push(callback)
   try{
     installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(value){events.push(value)}}}},
@@ -102,6 +102,25 @@ test('late viewer acknowledgements and animation callbacks retain their retired 
     assert.equal(late.stamp,command.stamp);assert.equal(late.generation,3);assert.equal(late.rows.length,1)
     assert.equal(events.find(event=>event.kind==='heartbeat-status').statuses.s,'Stale (30s)')
   }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('new transcript chunks preserve a scrolled-up reader and follow readers at the tail',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[];let incoming
+ const viewport={scrollTop:40,scrollHeight:900,clientHeight:300}
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(){}}}},{document:{addEventListener(){},getElementById(){return viewport}},window:{},now:()=>0})
+  const chunk=(offset,text)=>({offset,nextOffset:offset+text.length,dataBase64:Buffer.from(text).toString('base64'),final:true})
+  incoming({stamp:'current',generation:1,reset:0,chunk:chunk(0,'true\n'),follow:true})
+  await flush();assert.equal(frames.length,0);assert.equal(viewport.scrollTop,40)
+  viewport.scrollTop=600
+  incoming({stamp:'current',generation:1,reset:null,chunk:chunk(5,'null\n'),follow:true})
+  await flush();assert.equal(frames.length,1)
+  viewport.scrollHeight=1100;frames.shift()();assert.equal(viewport.scrollTop,1100)
+  viewport.scrollTop=800
+  incoming({stamp:'current',generation:1,reset:null,chunk:chunk(10,'false\n'),follow:true})
+  await flush();viewport.scrollTop=500;frames.shift()();assert.equal(viewport.scrollTop,500,'a scroll before paint also cancels auto-follow')
+ }finally{globalThis.requestAnimationFrame=previous}
 })
 
 

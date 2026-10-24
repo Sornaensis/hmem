@@ -1,21 +1,23 @@
 # Agent sessions and evidence
 
-Open a workspace’s **Sessions** tab to explore agent conversations. Filter by
-**Status** (active or saved) and **Activity** (live or quiet), then select a card.
+Open a workspace’s **Sessions** tab to explore active agent conversations. **Live**
+is selected initially; use the **Live** and **Quiet** buttons to filter activity.
 Quiet means there has been no heartbeat for 30 seconds; it does not end a session.
 
 Conversation text renders as Markdown. Tool calls and results expand on demand,
-and thinking starts hidden. **Original JSON** keeps the current records available
-in one disclosure; unknown records have their own collapsed fallback.
+and thinking starts hidden. Expanded tool payloads display formatted, highlighted
+JSON. Encrypted thinking displays *Thinking...*; unrecognized records stay hidden.
 
-The transcript follows new activity by default. **Pause** preserves your position,
-**Follow tail** catches up and **Older messages** opens an earlier window. Reading
-or pausing never ends a session.
+The transcript follows new activity while you are near its end. Scroll up to read
+without losing your position; returning to the end resumes following. Event times use your browser’s local time:
+HH:MM today, or YYYY-MM-DD HH:MM on other days. Session cards show last activity,
+and green lights in the workspace sidebar indicate active sessions, including quiet ones.
 
 A task card’s session icon opens all sessions linked to that task. Expanded task
 cards have separate **Active sessions** and **Evidence** disclosures above and below
 their dependencies. Select a session to explore it, or use **Download** on saved
-evidence. Linked tasks in the session view start collapsed and open their task cards.
+evidence. The first two linked tasks appear as compact cards that focus their tasks.
+**Show All Linked Tasks** reveals additional links, with bounded pages when needed.
 
 **Download** retrieves the original saved JSONL and checks its final byte count and
 SHA-256 before handing it to the browser. Keep the page open until the download

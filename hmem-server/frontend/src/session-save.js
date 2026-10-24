@@ -229,8 +229,10 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const instant = Date.parse(session.lastSeenAt)
       return [session.id,Number.isFinite(instant)?(now()-instant>=30000?'Stale (30s)':'Fresh'):'Unknown heartbeat']
     }))
-    const fingerprint = stamp+JSON.stringify(statuses)
-    if(fingerprint!==heartbeatKey){heartbeatKey=fingerprint;send({kind:'heartbeat-status',stamp,statuses})}
+    const localNow = new Date(now())
+    const today = `${localNow.getFullYear()}-${String(localNow.getMonth()+1).padStart(2,'0')}-${String(localNow.getDate()).padStart(2,'0')}`
+    const fingerprint = stamp+today+JSON.stringify(statuses)
+    if(fingerprint!==heartbeatKey){heartbeatKey=fingerprint;send({kind:'heartbeat-status',stamp,statuses,today})}
     if (command.reset !== null) { generation = command.generation; framer = createRecordFramer(command.reset) }
     if (!command.chunk) return
     const captured = { stamp:command.stamp, generation:command.generation }
@@ -238,12 +240,15 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       if (!framer || generation !== command.generation) throw new Error('retired_window')
       const bytes = decodeBase64(command.chunk.dataBase64)
       if (bytes.length !== command.chunk.nextOffset-command.chunk.offset) throw new Error('range_length')
+      const viewport = document.getElementById('session-records')
+      const atTail = !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48
+      const previousTop = viewport?.scrollTop || 0
       const result = framer.push(command.chunk.offset,bytes,command.chunk.final)
       send({ kind:'viewer',...captured,...result })
-      if (command.follow) requestAnimationFrame(() => {
+      if (command.follow && atTail) requestAnimationFrame(() => {
         if (stamp !== captured.stamp || generation !== captured.generation) return
         const viewport = document.getElementById('session-records')
-        if (viewport) viewport.scrollTop = viewport.scrollHeight
+        if (viewport && viewport.scrollTop >= previousTop - 4) viewport.scrollTop = viewport.scrollHeight
       })
     } catch {
       send({ kind:'viewer-error',...captured })

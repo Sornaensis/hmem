@@ -1,8 +1,8 @@
 import { hierarchyFixture, openHierarchy } from '../hierarchy-fixture.mjs'
 import { createHash } from 'node:crypto'
-export async function openSessionExplorer({many=false,empty=false,creator=null,housekeeping=false,activeCount=1,savedCount=1}={}) {
+export async function openSessionExplorer({many=false,empty=false,creator=null,housekeeping=false,activeCount=1,savedCount=1,linkedCount=2,encrypted=false,timezoneId='UTC',stamp=new Date().toISOString(),eventTimes=[],launchOptions={},extraRecords=[]}={}) {
   const f=hierarchyFixture();f.projects=[f.projects[0]]
-  f.tasks=Array.from({length:many?22:2},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null}))
+  f.tasks=Array.from({length:many?22:Math.max(2,linkedCount)},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null}))
   const records=[
     {type:'event_msg',timestamp:'2026-10-24T10:00:00Z',payload:{type:'user_message',message:'Show the **session explorer** and its connected tasks.'}},
     {type:'response_item',timestamp:'2026-10-24T10:00:00Z',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Show the **session explorer** and its connected tasks.'}]}},
@@ -21,8 +21,11 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
     {type:'event_msg',payload:{type:'token_count',info:{total_tokens:42}}},
     {type:'event_msg',payload:{type:'novel_event',preserved:true}},
   )
+  if(encrypted)records.push({type:'response_item',payload:{type:'reasoning',encrypted_content:'ciphertext-must-stay-hidden'}},{type:'assistant',message:{content:[{type:'redacted_thinking',data:'claude-secret-ciphertext'}]}})
+  records.push(...extraRecords)
+  records.forEach((record,index)=>{record.timestamp=eventTimes[index] || (index<2?eventTimes[0]:'') || record.timestamp || stamp})
   const bytes=empty?Buffer.alloc(0):Buffer.from(records.map(r=>JSON.stringify(r)).join('\n')+'\r\n')
-  const stamp=new Date().toISOString();const activeId='20000000-0000-4000-8000-000000000001',savedId='20000000-0000-4000-8000-000000000002'
+  const activeId='20000000-0000-4000-8000-000000000001',savedId='20000000-0000-4000-8000-000000000002'
   const base={workspace_id:f.workspace.id,format_label:'Codex · Session explorer',created_at:stamp,last_seen_at:stamp,committed_bytes:bytes.length,committed_records:empty?0:records.length,revision:1,ends_with_newline:true,...(creator||{})}
   const active={...base,id:activeId,state:'active'},saved={...base,id:savedId,format_label:'Claude · UX review',state:'terminated',terminated_at:stamp,final_bytes:bytes.length,final_sha256:createHash('sha256').update(bytes).digest('hex')}
   const content=new Map()
@@ -36,7 +39,7 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
   if(savedCount){Object.assign(saved,savedSessions[0]);savedSessions[0]=saved}
   for(const session of activeSessions)content.set(session.id,bytes)
   const allSessions=[...activeSessions,...savedSessions].sort((a,b)=>b.created_at.localeCompare(a.created_at)||b.id.localeCompare(a.id))
-  const h=await openHierarchy(f),reads=[]
+  const h=await openHierarchy(f,[],null,{timezoneId},launchOptions),reads=[]
   let requestActive=0,peak=0
   const linked=new Set(many?[f.tasks.at(-1).id]:f.tasks.map(t=>t.id))
   await h.page.route('**/api/v1/**',async route=>{
@@ -47,11 +50,15 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,h
       const metadata=allSessions.find(session=>path.includes(session.id))||active
       let result
       if(path.endsWith('/transcript')||path.endsWith('/evidence')){const data=content.get(metadata.id)||bytes,offset=Number(u.searchParams.get('offset')||0),end=Math.min(data.length,offset+Number(u.searchParams.get('limit')||65536));result={session:metadata,offset,next_offset:end,data_base64:data.subarray(offset,end).toString('base64'),has_more:end<data.length}}
-      else if(path.endsWith('/tasks'))result={items:f.tasks.slice(0,2).map(t=>({id:t.id,title:t.title,status:t.status})),next_task_id:null}
+      else if(path.endsWith('/tasks'))result={items:f.tasks.slice(0,linkedCount).map(t=>({id:t.id,title:t.title,status:t.status})),next_task_id:null}
       else if(allSessions.some(session=>path.endsWith(session.id)))result=metadata
-      else {let items=allSessions;if(path.includes('/tasks/')&&!f.tasks.some(t=>linked.has(t.id)&&path.includes(t.id)))items=[];if(u.searchParams.get('state'))items=items.filter(s=>s.state===u.searchParams.get('state'));const before=u.searchParams.get('before_created_at'),beforeId=u.searchParams.get('before_id');if(before)items=items.filter(session=>session.created_at<before||(session.created_at===before&&session.id<beforeId));const page=items.slice(0,50),last=page.at(-1);result={items:page,next_cursor:items.length>50?{created_at:last.created_at,id:last.id}:null}}
+      else {let items=allSessions;if(path.includes('/tasks/')&&!f.tasks.some(t=>linked.has(t.id)&&path.includes(t.id)))items=[];if(u.searchParams.get('state'))items=items.filter(s=>s.state===u.searchParams.get('state'));if(u.searchParams.get('freshness'))items=items.filter(s=>(Date.now()-Date.parse(s.last_seen_at)<30000)===(u.searchParams.get('freshness')==='fresh'));const before=u.searchParams.get('before_created_at'),beforeId=u.searchParams.get('before_id');if(before)items=items.filter(session=>session.created_at<before||(session.created_at===before&&session.id<beforeId));const page=items.slice(0,50),last=page.at(-1);result={items:page,next_cursor:items.length>50?{created_at:last.created_at,id:last.id}:null}}
       await route.fulfill({json:result})
     }finally{requestActive--}
   })
-  return {...h,active,saved,bytes,activeSessions,savedSessions,content,reads,peak:()=>peak,async associate(task){linked.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
+  return {...h,active,saved,bytes,activeSessions,savedSessions,content,reads,peak:()=>peak,async appendRecords(...added){
+    const data=Buffer.concat([content.get(active.id),Buffer.from(added.map(record=>JSON.stringify(record)).join('\n')+'\n')]);content.set(active.id,data)
+    Object.assign(active,{committed_bytes:data.length,committed_records:active.committed_records+added.length,revision:active.revision+1,last_seen_at:new Date().toISOString()})
+    await h.page.evaluate(({workspace,session,revision})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'append-'+revision,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'append-'+revision,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:active.id,revision:active.revision})
+  },async associate(task){linked.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
 }

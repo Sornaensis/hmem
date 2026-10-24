@@ -4794,4 +4794,55 @@ textarea.observation-edit-content {
 .task-sessions-icon .session-activity-light { flex-basis:16px; }
 @keyframes session-activity-spin { to { transform:rotate(360deg); } }
 @media(prefers-reduced-motion:reduce) { .session-activity-ring { animation:none; } }
+
+/* The conversation uses the available panel width; metadata stays compact. */
+.sidebar-link>.session-activity-light { margin-left:auto; }
+.sessions-page { max-width:none; }
+.sessions-layout { grid-template-columns:minmax(190px,235px) minmax(0,1fr); gap:.8rem; }
+.sessions-page .session-filter.selected { background:var(--bg-surface); border-color:var(--accent); color:var(--accent); }
+.sessions-filters { gap:.4rem; margin-bottom:.65rem; }
+.session-summary-link { min-width:0; padding:.65rem!important; gap:.25rem!important; }
+.session-summary-heading { min-width:0; }
+.session-summary-heading strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.82rem; min-width:0; }
+.session-summary-link>.session-identity { align-self:stretch; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.3; }
+.session-summary-link .actor-attribution { display:flex; flex-wrap:nowrap; min-width:0; }
+.session-summary-link .actor-attribution-kind { flex-shrink:0; white-space:nowrap; }
+.session-summary-link .actor-attribution-label { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.session-summary-link .card-meta,.session-latest-activity { font-size:.7rem; color:var(--text-muted); }
+.session-detail { padding:.8rem 1rem; }
+.session-detail-header h3 { margin:0; font-size:.9rem; overflow-wrap:anywhere; }
+.session-detail-title>.card-meta { display:none; }
+.session-linked-tasks { margin-top:.6rem; padding:0; border:0; }
+.session-task-cards { display:flex; flex-wrap:wrap; gap:.4rem; margin:0; }
+.session-task-card { flex:1 1 190px; max-width:360px; min-width:0; padding:.4rem .6rem; font-size:.75rem; }
+.session-task-card strong { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.session-task-card .badge { flex-shrink:0; font-size:.65rem; }
+.session-show-linked { margin-top:.4rem; }
+.session-viewer { margin-top:.65rem; padding-top:.65rem; }
+.session-viewer>.sessions-toolbar { margin-bottom:.3rem; align-items:baseline; }
+.session-viewer .session-identity { text-align:left; flex:1; font-size:.7rem; }
+.session-viewer h4 { font-size:.8rem; flex:0; margin-right:.4rem; }
+.session-records { max-height:calc(100vh - 265px); min-height:220px; margin:0; padding:0 .4rem 0 0; }
+.session-record { max-width:none; width:auto; margin:.25rem 0 .7rem; padding:.35rem 0; }
+.session-record-text { max-width:none; font-size:.9rem; line-height:1.55; }
+.session-role-user:not(.session-record-activity) { max-width:100%; padding:.55rem .75rem; margin:.35rem 0 .7rem; border-radius:8px; }
+.session-record-meta { display:flex; gap:.6rem; align-items:baseline; margin-bottom:.25rem; font-size:.68rem; }
+.session-event-time { color:var(--text-muted); font-variant-numeric:tabular-nums; text-align:left; }
+.session-record-activity { margin:.15rem 0; padding:.2rem .6rem; }
+.session-record-activity .session-record-meta:has(.session-event-time) { margin-bottom:.15rem; }
+.session-record-activity .session-record-meta:empty { display:none; }
+.session-record summary { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; line-height:1.5; }
+.session-tool-content { margin:.35rem 0; font-size:.78rem; line-height:1.45; }
+.session-tool-content code { white-space:pre-wrap; }
+.json-key { color:var(--accent,#8ab4f8); }
+.json-string { color:var(--success,#8ac99c); }
+.json-number { color:var(--warning,#e5bd76); }
+.json-literal { color:#c5a4e8; }
+.session-thinking { color:var(--text-muted); font-size:.8rem; }
+@media(max-width:900px) {
+  .sessions-layout { grid-template-columns:1fr; }
+  .session-records { max-height:70vh; }
+  .session-summaries { grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); }
+  .session-role-user:not(.session-record-activity) { max-width:100%; }
+}
 .workspace-card>.card-header { gap:.65rem; }.workspace-card>.card-header>.card-title { flex:1; min-width:0; overflow-wrap:anywhere; }.workspace-card>.card-header>.badge { flex-shrink:0; }

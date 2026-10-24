@@ -6,6 +6,65 @@ import { join } from 'node:path'
 import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 const until=async(fn)=>{const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,25))}throw new Error('Explorer did not converge')}
 
+test('active filters, linked task focus, encrypted thinking and local-day timestamps form a compact transcript',{timeout:45000},async()=>{
+ const h=await openSessionExplorer({activeCount:2,linkedCount:3,encrypted:true,timezoneId:'Europe/Copenhagen',eventTimes:['2026-10-24T22:01:00Z','2026-10-24T22:01:00Z','2026-10-24T21:59:00Z']})
+ const {page}=h
+ try{
+  await page.clock.setFixedTime(new Date('2026-10-24T22:05:00Z'))
+  await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click()
+  await page.locator('.session-summary').waitFor()
+  assert.equal(await page.getByRole('button',{name:'Live',exact:true}).getAttribute('aria-pressed'),'true')
+  assert.equal(await page.locator('.session-summary').count(),1)
+  assert.ok(h.reads.some(read=>read.query.includes('state=active')&&read.query.includes('freshness=fresh')))
+  await page.getByRole('button',{name:'Quiet',exact:true}).click();await until(async()=>await page.locator('.session-summary a').filter({hasText:'Follow-up'}).count()===1)
+  assert.equal(await page.locator('.session-summary').count(),1)
+  await page.getByRole('button',{name:'Live',exact:true}).click();await page.locator('.session-summary a').filter({hasText:'Session explorer'}).click()
+  await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
+  assert.equal(await page.locator('.session-task-card').count(),2)
+  const positions=await page.locator('.session-task-card').evaluateAll(elements=>elements.map(el=>el.getBoundingClientRect().top))
+  assert.equal(positions[0],positions[1],'first linked task cards share a row')
+  await page.getByRole('button',{name:'Show All Linked Tasks',exact:true}).click();await until(async()=>await page.locator('.session-task-card').count()===3)
+  assert.equal(await page.locator('.session-thinking').count(),2)
+  assert.equal(await page.locator('#session-records').getByText(/ciphertext|Unrecognized record|Window begins|Following|Original JSON/).count(),0)
+  for(const name of ['Pause','Older messages','Refresh'])assert.equal(await page.getByRole('button',{name,exact:true}).count(),0)
+  await until(async()=>await page.locator('.session-event-time').first().innerText()==='00:01')
+  assert.equal(await page.locator('.session-event-time').nth(1).innerText(),'2026-10-24 23:59')
+  const identityText=await page.locator('.session-viewer .session-identity').innerText()
+  assert.ok(identityText.includes('codex:gpt-6.1-sol:high'),identityText)
+  const latest=page.locator('.session-latest-activity time')
+  assert.equal(await latest.getAttribute('datetime'),h.active.last_seen_at)
+  assert.notEqual(h.active.created_at,h.active.last_seen_at)
+  const result=page.locator('.session-content-result').first();await result.locator('summary').click()
+  assert.ok(await result.locator('.json-key').isVisible())
+  assert.deepEqual(JSON.parse(await result.locator('pre').textContent()),{output:'module Feature.Sessions exposing (view)'})
+  const assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
+  assert.ok(await assistant.evaluate(el=>el.getBoundingClientRect().width>el.closest('.session-detail').clientWidth*.85),'transcript uses its panel width')
+  await page.locator('.session-task-card').nth(2).click();await until(()=>page.url().includes('focus=task%3A'+h.fixture.tasks[2].id)||page.url().includes('focus=task:'+h.fixture.tasks[2].id))
+  await page.locator('#entity-'+h.fixture.tasks[2].id).waitFor()
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+test('appended live transcript chunks preserve readers above the tail and follow readers at the bottom',{timeout:45000},async()=>{
+ const h=await openSessionExplorer({extraRecords:[{text:Array.from({length:60},(_,i)=>'Paragraph '+i+' keeps the transcript scrollable.').join('\n\n')}]})
+ const {page}=h
+ try{
+  await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').click()
+  const viewport=page.locator('#session-records')
+  await until(async()=>await viewport.evaluate(el=>el.scrollHeight>el.clientHeight+300))
+  await until(async()=>await viewport.evaluate(el=>el.scrollHeight-el.clientHeight-el.scrollTop<=48))
+  await viewport.evaluate(el=>{el.scrollTop=40})
+  await h.appendRecords({text:'Arrived while reading older messages.'})
+  await page.getByText('Arrived while reading older messages.',{exact:true}).waitFor({state:'attached'})
+  assert.ok(await viewport.evaluate(el=>el.scrollTop<=44),'a reader above the tail keeps the current position')
+  await viewport.evaluate(el=>{el.scrollTop=el.scrollHeight})
+  await h.appendRecords({text:'Arrived at the live tail.'})
+  await page.getByText('Arrived at the live tail.',{exact:true}).waitFor({state:'attached'})
+  await until(async()=>await viewport.evaluate(el=>el.scrollHeight-el.clientHeight-el.scrollTop<=1))
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
 test('Sessions tab, task filters, native conversations and direct evidence downloads', {timeout:60000},async()=>{
  const scratch=await mkdtemp(join(tmpdir(),'sessions-ux-download-'))
  const h=await openSessionExplorer();const {page}=h
@@ -16,15 +75,16 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   assert.match(page.url(),/tab=sessions/)
   await page.locator('.session-summary a').filter({hasText:'Codex'}).click()
   await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
-  assert.equal(await page.locator('.session-record').count(),9,'duplicate Codex event envelope omitted')
+  assert.equal(await page.locator('.session-record').count(),8,'duplicate Codex envelope and unknown record omitted')
   assert.equal(await page.getByText('Private reasoning stays collapsed.',{exact:true}).isVisible(),false)
   assert.equal(await page.getByText('Claude thinking is hidden too.',{exact:true}).isVisible(),false)
   assert.equal(await page.locator('.session-content-tool').first().getAttribute('open'),null)
   await page.locator('.session-content-tool').first().locator('summary').click()
-  assert.equal(await page.getByText('{"path":"src/Feature/Sessions.elm"}',{exact:true}).isVisible(),true)
-  assert.equal(await page.locator('.session-linked-tasks').getAttribute('open'),null)
+  assert.deepEqual(JSON.parse(await page.locator('.session-content-tool pre').first().textContent()),{path:'src/Feature/Sessions.elm'})
+  assert.equal(await page.locator('.session-content-tool .json-key').first().isVisible(),true)
+  assert.equal(await page.locator('.session-task-card').count(),2)
   assert.equal(await page.locator('.session-record a[href^="javascript:"]').count(),0)
-  assert.equal(await page.locator('.session-original').last().getAttribute('open'),null)
+  assert.equal(await page.locator('.session-original,.session-raw-details').count(),0)
   if(process.env.SESSIONS_UX_SCREENSHOTS){await page.screenshot({path:process.env.SESSIONS_UX_SCREENSHOTS+'/after-sessions.png',fullPage:true});await page.setViewportSize({width:430,height:900});await page.locator('.session-detail').scrollIntoViewIfNeeded();await page.screenshot({path:process.env.SESSIONS_UX_SCREENSHOTS+'/after-sessions-narrow.png',fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await page.setViewportSize({width:1440,height:1000})}
   await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle()
   const card=page.locator('#entity-'+h.fixture.tasks[0].id)
@@ -121,17 +181,17 @@ test('conversation flow preserves declared identity and wraps long model names w
    await page.setViewportSize({width:scenario.width,height:1000});await h.start();await h.idle()
    await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor()
    const selected=page.locator('.session-summary a').filter({hasText:'Codex'})
-   if(scenario.creator){assert.match(await selected.locator('.session-identity').innerText(),new RegExp(scenario.creator.creator_bot_identity.role))}
+   if(scenario.creator){assert.match(await selected.locator('.session-identity').innerText(),new RegExp(scenario.creator.creator_bot_identity.role));assert.ok(await selected.locator('.actor-attribution-kind').evaluate(el=>el.getBoundingClientRect().height<24),'Model badge stays on one line')}
    else assert.equal(await selected.locator('.session-identity').count(),0)
-   await selected.click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor();await page.getByRole('button',{name:'Pause',exact:true}).click()
-   const identity=page.locator('.session-detail-header .session-identity')
+   await selected.click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
+   const identity=page.locator('.session-viewer .session-identity')
    if(scenario.creator){const declared=scenario.creator.creator_bot_identity;assert.ok((await identity.innerText()).includes(declared['model-id']));assert.ok((await identity.innerText()).includes(declared.role));assert.equal(await identity.evaluate(el=>getComputedStyle(el).userSelect),'text')}
    else assert.equal(await identity.count(),0)
    const user=page.locator('.session-role-user:not(.session-record-activity)').first(),assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
    assert.notEqual(await user.evaluate(el=>getComputedStyle(el).borderRadius),'0px')
    assert.equal(await assistant.evaluate(el=>getComputedStyle(el).borderTopWidth),'0px')
    assert.equal(await assistant.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)')
-   assert.ok(await assistant.locator('.session-record-text').evaluate(el=>parseFloat(getComputedStyle(el).lineHeight)>=24))
+   assert.ok(await assistant.locator('.session-record-text').evaluate(el=>parseFloat(getComputedStyle(el).lineHeight)>=20))
    const tool=page.locator('.session-content-tool').first();assert.equal(await tool.getAttribute('open'),null);await tool.locator('summary').focus();await page.keyboard.press('Enter');assert.notEqual(await tool.getAttribute('open'),null)
    assert.equal(await page.getByText('Private reasoning stays collapsed.',{exact:true}).isVisible(),false)
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))
@@ -148,19 +208,16 @@ test('conversation flow preserves declared identity and wraps long model names w
 })
 
 
-test('known harness housekeeping stays in Original JSON while unfamiliar events remain inspectable', {timeout:30000},async()=>{
+test('housekeeping and unrecognized records stay hidden without original JSON UI', {timeout:30000},async()=>{
  const h=await openSessionExplorer({housekeeping:true});const {page}=h
  try{
   await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click()
   await page.locator('.session-summary a').filter({hasText:'Codex'}).click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
-  await page.getByRole('button',{name:'Pause',exact:true}).click()
-  assert.equal(await page.locator('.session-record').count(),10)
-  assert.equal(await page.locator('.session-original').count(),2)
+  assert.equal(await page.locator('.session-record').count(),8)
+  assert.equal(await page.locator('.session-original').count(),0)
   assert.equal(await page.locator('#session-records').getByText(/housekeeping-session|synthetic-workspace|total_tokens/).count(),0)
-  const unknown=page.locator('.session-original').filter({hasText:'novel_event'});await unknown.locator('summary').click();assert.ok(await unknown.getByText(/novel_event/).isVisible())
-  const raw=page.locator('.session-raw-details');await raw.locator('summary').click()
-  assert.equal(await raw.locator('.session-record-raw').count(),13)
-  const original=await raw.innerText();for(const type of ['session_meta','turn_context','token_count','novel_event'])assert.ok(original.includes(type))
+  assert.equal(await page.locator('.session-raw-details').count(),0)
+  assert.equal(await page.locator('#session-records').getByText(/novel_event|preserved/).count(),0)
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })

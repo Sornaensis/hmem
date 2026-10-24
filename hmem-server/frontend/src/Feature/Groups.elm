@@ -289,7 +289,7 @@ viewSidebar model =
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
                 , ul [ class "sidebar-nav" ]
-                    (ungroupedWs |> List.map (viewSidebarWorkspace model.selectedWorkspaceId))
+                    (ungroupedWs |> List.map (viewSidebarWorkspace model))
                 ]
 
           else if List.isEmpty groups then
@@ -385,15 +385,15 @@ viewSidebarGroup model group =
 
           else
             ul [ class "sidebar-nav" ]
-                (memberWs |> List.map (viewSidebarWorkspace model.selectedWorkspaceId))
+                (memberWs |> List.map (viewSidebarWorkspace model))
         ]
 
 
-viewSidebarWorkspace : Maybe String -> Api.Workspace -> Html Msg
-viewSidebarWorkspace selectedId ws =
+viewSidebarWorkspace : Model -> Api.Workspace -> Html Msg
+viewSidebarWorkspace model ws =
     let
         isSelected =
-            selectedId == Just ws.id
+            model.selectedWorkspaceId == Just ws.id
 
         cls =
             if isSelected then
@@ -420,6 +420,7 @@ viewSidebarWorkspace selectedId ws =
         [ a [ href ("/workspace/" ++ ws.id), class cls ]
             [ span [ class "sidebar-icon" ] [ text icon ]
             , text ws.name
+            , SessionActivityLight.view (Feature.SessionActivity.active ("workspace:" ++ ws.id) model) "Active sessions in this workspace"
             ]
         ]
 

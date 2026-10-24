@@ -1,7 +1,26 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, presentation } from '../src/session-viewer.js'
+import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, presentation, toolPayload } from '../src/session-viewer.js'
 const encode = value => new TextEncoder().encode(value)
+
+test('tool JSON is formatted and tokenized without changing payloads or growing unbounded spans',()=>{
+ for(const value of [{path:'src/a.js',n:12,ok:true,missing:null},'{"query":"café"}', 'plain tool output',Array.from({length:10000},(_,i)=>i)]) {
+  const result=toolPayload(value)
+  assert.equal(result.tokens.map(token=>token.text).join(''),result.text)
+  assert.ok(result.tokens.length<=2049)
+  assert.doesNotThrow(()=>JSON.parse(result.text))
+ }
+ const call=JSON.parse(presentation({type:'response_item',payload:{type:'function_call',name:'mcp__hmem__task_detail',arguments:'{"task_id":"123"}'}},'').text)[0]
+ assert.match(call.label,/Call · hmem · task_detail/)
+ assert.ok(call.tokens.some(token=>token.kind==='key'))
+})
+
+test('encrypted provider thinking is represented only by its placeholder',()=>{
+ for(const value of [{type:'response_item',payload:{type:'reasoning',encrypted_content:'secret',summary:[]}},{type:'assistant',message:{content:[{type:'redacted_thinking',data:'secret'}]}}]) {
+  const blocks=JSON.parse(presentation(value,'').text)
+  assert.deepEqual(blocks,[{kind:'encrypted',text:'',label:'Thinking...'}])
+ }
+})
 
 test('frames split UTF-8/CRLF and arbitrary JSON before Unicode decoding', () => {
   const text = '{"text":"λ😀","type":"message","role":"assistant"}\r\n[1,"unknown"]\ntrue\nnull\n"scalar"'

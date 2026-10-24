@@ -92,6 +92,7 @@ route msg model =
         SessionsNextPage _ -> Ok (Feature.Sessions.update msg model)
         SessionsPreviousPage -> Ok (Feature.Sessions.update msg model)
         SessionsLinkedPage _ -> Ok (Feature.Sessions.update msg model)
+        SessionsShowAllLinkedTasks -> Ok (Feature.Sessions.update msg model)
         SessionsRetry -> Ok (Feature.Sessions.update msg model)
         SessionsStateFilter _ -> Ok (Feature.Sessions.update msg model)
         SessionsFreshnessFilter _ -> Ok (Feature.Sessions.update msg model)

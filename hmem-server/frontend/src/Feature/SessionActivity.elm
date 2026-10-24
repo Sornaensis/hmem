@@ -30,7 +30,7 @@ owner model =
         HomePage -> model.groups.catalogueOwner |> Maybe.map (\context -> "catalogue:" ++ context.principal.actorId ++ ":" ++ String.fromInt model.groups.catalogueEpoch) |> Maybe.withDefault ""
         WorkspacePage workspace ->
             if Permissions.canReadCurrentWorkspace model then model.sessionContext |> Maybe.map (\context -> "workspace:" ++ workspace ++ ":" ++ context.principal.actorId ++ ":" ++ String.fromInt model.sessionRequestEpoch) |> Maybe.withDefault "" else ""
-        _ -> ""
+        _ -> model.groups.catalogueOwner |> Maybe.map (\context -> "catalogue:" ++ context.principal.actorId ++ ":" ++ String.fromInt model.groups.catalogueEpoch) |> Maybe.withDefault ""
 
 
 targets : Model -> List String
@@ -45,8 +45,19 @@ targets model =
             in
             if model.dataLoading.loadingWorkspaces then [] else Set.fromList (inGroups ++ ungrouped) |> Set.toList |> List.filter (\id -> Dict.member id model.workspaces && not (Set.member id model.groups.deletedWorkspaces)) |> List.map ((++) "workspace:")
         WorkspacePage _ ->
-            if model.activeTab == ProjectsTab then model.dataLoading.visibleDetailDemand |> Maybe.map (Tuple.first >> Set.toList >> List.map ((++) "project:")) |> Maybe.withDefault [] else []
-        _ -> []
+            sidebarTargets model ++ (if model.activeTab == ProjectsTab then model.dataLoading.visibleDetailDemand |> Maybe.map (Tuple.first >> Set.toList >> List.map ((++) "project:")) |> Maybe.withDefault [] else [])
+        _ -> sidebarTargets model
+
+
+sidebarTargets : Model -> List String
+sidebarTargets model =
+    let
+        grouped = Dict.values model.groups.groupMembers |> List.concat |> Set.fromList
+        expanded = Dict.keys model.groups.workspaceGroups |> List.filter (\id -> Dict.get id model.groups.collapsedGroups /= Just True)
+        members = expanded |> List.concatMap (\id -> Dict.get id model.groups.groupMembers |> Maybe.withDefault [])
+        ungrouped = Dict.keys model.workspaces |> List.filter (\id -> not (Set.member id grouped))
+    in
+    if model.dataLoading.loadingWorkspaces then [] else Set.fromList (members ++ ungrouped) |> Set.toList |> List.filter (\id -> Dict.member id model.workspaces && not (Set.member id model.groups.deletedWorkspaces)) |> List.map ((++) "workspace:")
 
 
 active : String -> Model -> Bool

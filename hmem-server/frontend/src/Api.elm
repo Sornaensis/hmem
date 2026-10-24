@@ -4409,7 +4409,7 @@ type alias SessionFilters =
 
 
 defaultSessionFilters : SessionFilters
-defaultSessionFilters = { state = "", freshness = "" }
+defaultSessionFilters = { state = "active", freshness = "fresh" }
 
 
 type alias SessionPage =

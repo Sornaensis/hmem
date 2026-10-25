@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { chromium, request } from '@playwright/test'
 import { startSessionMcp, closeSessionMcps } from './support/session-mcp.js'
+import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 
 const repo = resolve(import.meta.dirname, '../../..')
 const frontend = resolve(import.meta.dirname, '..')
@@ -25,6 +26,18 @@ async function until(predicate, label, ms = 20000) {
   while (Date.now() < end) { if (await predicate()) return; await pause(25) }
   throw new Error(label + ' did not converge')
 }
+async function currentTaskCanonicalReady(page, workspace, task) {
+  await until(async () => {
+    const url = new URL(page.url()), fragment = new URLSearchParams(url.hash.slice(1))
+    return url.pathname === '/workspace/' + workspace && fragment.get('tab') === 'projects'
+      && fragment.get('focus') === 'task:' + task
+      && await page.locator('.connection-status.connected').count() === 1
+  }, 'current task canonical readiness')
+}
+function requestScope(request) {
+  const scope = request.postDataJSON()?.scope
+  return { scope: scope?.scope, workspace: scope?.workspace_id ?? null }
+}
 async function port() {
   const server = createServer()
   await new Promise(done => server.listen(0, '127.0.0.1', done))
@@ -38,7 +51,7 @@ test('production Sessions uses canonical authenticated resources and direct task
   let harness, harnessClosed, build, buildClosed, browser, context, api, sandbox, postgresPid, page
   let failed
   const mcpClients=[]
-  const reads = [],archiveTransport=[],noteArchive=event=>{archiveTransport.push(event);if(archiveTransport.length>32)archiveTransport.shift()};let sessionReadCount=0,harnessDiagnostic='',archivePhaseStart=0
+  const reads = [],archiveTransport=[],noteArchive=event=>{archiveTransport.push(event);if(archiveTransport.length>32)archiveTransport.shift()};let sessionReadCount=0,harnessDiagnostic='',archivePreparationStart=0,documentGeneration=0
   try {
     const { stdout } = await promisify(execFile)('stack', ['path', '--local-install-root'], { cwd: repo, windowsHide: true, timeout: 30000 })
     const executable = join(stdout.trim(), 'bin', process.platform === 'win32' ? 'hmem-test-harness.exe' : 'hmem-test-harness')
@@ -109,8 +122,9 @@ test('production Sessions uses canonical authenticated resources and direct task
     context = await browser.newContext({viewport:{width:1440,height:1000}})
     const sockets=[];let invalidResume=false,resyncs=0,ticketConflicts=0
     await context.routeWebSocket('**/api/v1/ws*', socket=>{
+      const generation=documentGeneration
       const server=socket.connectToServer();sockets.push(socket)
-      server.onMessage(message=>{if(archivePhaseStart){try{const frame=JSON.parse(String(message));if(frame.type==='resync_required')noteArchive({phase:'canonical-resync-required',at:Date.now()})}catch{}}socket.send(message)})
+      server.onMessage(message=>{if(archivePreparationStart){try{const frame=JSON.parse(String(message));if(frame.type==='resync_required'||(frame.type==='checkpoint'&&frame.catch_up==='complete'))noteArchive({phase:frame.type==='checkpoint'?'canonical-checkpoint':'canonical-resync-required',document:generation,at:Date.now()})}catch{}}socket.send(message)})
     })
     await context.route('**/api/v1/change-stream/ticket',async route=>{
       const body=route.request().postDataJSON()
@@ -154,17 +168,18 @@ test('production Sessions uses canonical authenticated resources and direct task
     page.on('response', response => {
       const path=new URL(response.url()).pathname
       if(path.endsWith('/evidence.zip'))noteArchive({phase:'response',status:response.status(),at:Date.now()})
-      if(archivePhaseStart&&path.endsWith('/change-stream/resync'))noteArchive({phase:'canonical-resync-response',status:response.status(),at:Date.now()})
+      if(archivePreparationStart&&path.endsWith('/change-stream/resync'))noteArchive({phase:'canonical-resync-response',...requestScope(response.request()),status:response.status(),document:documentGeneration,at:Date.now()})
       if(path.includes('/sessions')) { sessionReadCount++;reads.push({path,status:response.status()}); if(reads.length>32) reads.shift() }
       if(path.endsWith('/change-stream/resync')&&response.ok())resyncs++
       if(path.endsWith('/change-stream/ticket')&&response.status()===409)ticketConflicts++
     })
-    const errors = [],inflight=new Map(),peakSamples=[];let peakRequests=0,documentGeneration=0
+    const errors = [],inflight=new Map(),peakSamples=[];let peakRequests=0
     page.on('request',request=>{
       // Full document replacement creates a new Elm application lifetime.
       // Late browser completion notifications from the retired document do
       // not belong to the new application's physical admission map.
       if(request.isNavigationRequest()&&request.frame()===page.mainFrame())documentGeneration++
+      if(archivePreparationStart&&new URL(request.url()).pathname.endsWith('/change-stream/resync'))noteArchive({phase:'canonical-resync-request',...requestScope(request),document:documentGeneration,at:Date.now()})
       if(new URL(request.url()).pathname.includes('/sessions')){
         inflight.set(request,documentGeneration)
         const current=[...inflight].filter(([,generation])=>generation===documentGeneration)
@@ -374,6 +389,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     await managing.tool('session_associate',{session_id:excluded,task_id:secondTask.id})
     // The harness PAT is a bot credential; declare its identity for the normal
     // POST change-stream bootstrap as required by the existing API contract.
+    archivePreparationStart=Date.now()
     await context.setExtraHTTPHeaders({'X-HMem-Bot-Identity':JSON.stringify(identity)})
     await context.clearCookies()
     await page.evaluate(token=>localStorage.setItem('hmem-auth-token',token),coordinates.token)
@@ -383,12 +399,15 @@ test('production Sessions uses canonical authenticated resources and direct task
     const archiveGroup=archiveCard.locator('.task-session-evidence')
     await archiveGroup.locator('summary').click()
     await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).waitFor()
+    // REST-backed cards can render before this new PAT document's initial
+    // canonical snapshot retires prior download authority. Await live scopes.
+    await currentTaskCanonicalReady(page,workspace.id,task.id)
+    noteArchive({phase:'current-canonical-ready',workspace:workspace.id,document:documentGeneration,at:Date.now()})
     let binaryRequests=0
     const binaryHeaders=[]
     page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip')){binaryRequests++;binaryHeaders.push(request.allHeaders());noteArchive({phase:'request',at:Date.now()})}})
     page.on('requestfinished',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))noteArchive({phase:'body-finished',at:Date.now()})})
     page.on('requestfailed',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))noteArchive({phase:'body-failed',error:request.failure()?.errorText,at:Date.now()})})
-    archivePhaseStart=Date.now()
     const archiveDownloadEvent=page.waitForEvent('download')
     await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).click()
     const archiveDownload=await archiveDownloadEvent,archivePath=await archiveDownload.path()
@@ -432,4 +451,32 @@ print('independently verified 53 DEFLATE entries')`,archivePath,JSON.stringify(a
     if(failed)console.log(JSON.stringify({phase:'archive-cleanup-attribution',archiveTransport}))
     if(failures.length) throw new AggregateError([...(failed?[failed]:[]),...failures.map(value => new Error(value))],'Sessions fixture cleanup failed')
   }
+})
+
+test('archive readiness waits for the current task initial canonical resync', { timeout: 30000 }, async () => {
+  const h=await openSessionExplorer(),{page}=h,workspace=h.fixture.workspace.id,task=h.fixture.tasks[0].id
+  let release,held=false,ready=false,canonical
+  const barrier=new Promise(resolve=>{release=resolve})
+  try {
+    await page.route('**/api/v1/change-stream/resync',async route=>{
+      if(!held&&requestScope(route.request()).workspace===workspace){held=true;await barrier}
+      await route.fallback()
+    })
+    await h.start('tab=projects&focus=task:'+task,task)
+    await until(()=>held,'held initial workspace resync')
+    const card=page.locator('#entity-'+task)
+    await card.locator('.btn-extras-toggle').click()
+    const evidence=card.locator('.task-session-evidence')
+    await evidence.locator('summary').click()
+    await evidence.getByRole('button',{name:'↓ Download all',exact:true}).waitFor()
+    canonical=currentTaskCanonicalReady(page,workspace,task).then(()=>{ready=true})
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+    assert.equal(await page.locator('.connection-status.connected').count(),0)
+    assert.equal(ready,false,'a rendered evidence card does not establish canonical readiness')
+    release()
+    await canonical
+    assert.equal(ready,true)
+    assert.equal(await page.locator('.connection-status.connected').count(),1)
+    assert.deepEqual(h.errors,[])
+  } finally { release();await canonical?.catch(()=>{});await h.close() }
 })

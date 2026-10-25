@@ -38,7 +38,7 @@ test('production Sessions uses canonical authenticated resources and direct task
   let harness, harnessClosed, build, buildClosed, browser, context, api, sandbox, postgresPid, page
   let failed
   const mcpClients=[]
-  const reads = [],archiveTransport=[];let sessionReadCount=0
+  const reads = [],archiveTransport=[],noteArchive=event=>{archiveTransport.push(event);if(archiveTransport.length>32)archiveTransport.shift()};let sessionReadCount=0,harnessDiagnostic='',archivePhaseStart=0
   try {
     const { stdout } = await promisify(execFile)('stack', ['path', '--local-install-root'], { cwd: repo, windowsHide: true, timeout: 30000 })
     const executable = join(stdout.trim(), 'bin', process.platform === 'win32' ? 'hmem-test-harness.exe' : 'hmem-test-harness')
@@ -49,7 +49,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     const number = await port(), origin = 'http://127.0.0.1:' + number
     const coordinates = {}
     harness = spawn(executable, ['deployed', '--interactive', '--port', String(number)], { cwd: repo, env: process.env, windowsHide: true, stdio: ['pipe','pipe','pipe'] })
-    harnessClosed = once(harness, 'close'); harness.stderr.resume()
+    harnessClosed = once(harness, 'close'); harness.stderr.on('data',chunk=>{harnessDiagnostic=(harnessDiagnostic+chunk.toString()).slice(-2048)})
     createInterface({ input: harness.stdout }).on('line', line => {
       for (const [label,key] of [['Sandbox root:','root'],['Static dir  :','static'],['Server URL  :','url']]) if (line.startsWith(label)) coordinates[key] = line.slice(label.length).trim()
       if (line.startsWith('Press Enter')) coordinates.ready = true
@@ -110,7 +110,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     const sockets=[];let invalidResume=false,resyncs=0,ticketConflicts=0
     await context.routeWebSocket('**/api/v1/ws*', socket=>{
       const server=socket.connectToServer();sockets.push(socket)
-      server.onMessage(message=>socket.send(message))
+      server.onMessage(message=>{if(archivePhaseStart){try{const frame=JSON.parse(String(message));if(frame.type==='resync_required')noteArchive({phase:'canonical-resync-required',at:Date.now()})}catch{}}socket.send(message)})
     })
     await context.route('**/api/v1/change-stream/ticket',async route=>{
       const body=route.request().postDataJSON()
@@ -132,7 +132,14 @@ test('production Sessions uses canonical authenticated resources and direct task
         open(method,url,...rest){this.metricPath=new URL(url,location.href).pathname;return super.open(method,url,...rest)}
         send(...args){if(this.metricPath.includes('/sessions')){this.metricId=++next;active.add(this);metrics.peak=Math.max(metrics.peak,active.size);metrics.events.push({id:this.metricId,phase:'send',path:this.metricPath,time:performance.now()});if(metrics.events.length>64)metrics.events.shift()}return super.send(...args)}
       }
-      const archive=window.__archiveTrace=[],record=phase=>{archive.push(phase);if(archive.length>24)archive.shift()}
+      const archive=window.__archiveTrace=[],record=phase=>{archive.push({...phase,at:Date.now()});if(archive.length>24)archive.shift()}
+      const nativeFetch=window.fetch
+      window.fetch=async function(url,options){if(!String(url).endsWith('/evidence.zip'))return nativeFetch.call(this,url,options)
+        window.__archiveSignal=options?.signal
+        options?.signal?.addEventListener('abort',()=>record({phase:'fetch-abort',reason:options.signal.reason?.name}))
+        const response=await nativeFetch.call(this,url,options),getReader=response.body?.getReader.bind(response.body)
+        if(getReader)response.body.getReader=(...args)=>{const reader=getReader(...args),read=reader.read.bind(reader);reader.read=async()=>{try{return await read()}catch(error){record({phase:'body-read-error',name:error.name,message:error.message});throw error}};return reader};return response
+      }
       document.addEventListener('click',event=>{const button=event.target.closest?.('[data-session-archive]');if(button)record({phase:'document-click',enabled:!button.disabled,operation:JSON.parse(button.dataset.sessionArchive).operation})},true)
       const get=StorageManager.prototype.getDirectory
       StorageManager.prototype.getDirectory=async function(...args){record({phase:'storage-acquire'});const root=await get.apply(this,args),directory=await root.getDirectoryHandle('hmem-downloads',{create:true}),file=directory.getFileHandle.bind(directory)
@@ -146,7 +153,8 @@ test('production Sessions uses canonical authenticated resources and direct task
     async function completeDocument(label){const metrics=await page.evaluate(()=>window.__sessionHTTPMetrics);assert.ok(metrics.peak<=2,JSON.stringify({label,...metrics}));nativeReceipts.push({label,peak:metrics.peak})}
     page.on('response', response => {
       const path=new URL(response.url()).pathname
-      if(path.endsWith('/evidence.zip'))archiveTransport.push({phase:'response',status:response.status()})
+      if(path.endsWith('/evidence.zip'))noteArchive({phase:'response',status:response.status(),at:Date.now()})
+      if(archivePhaseStart&&path.endsWith('/change-stream/resync'))noteArchive({phase:'canonical-resync-response',status:response.status(),at:Date.now()})
       if(path.includes('/sessions')) { sessionReadCount++;reads.push({path,status:response.status()}); if(reads.length>32) reads.shift() }
       if(path.endsWith('/change-stream/resync')&&response.ok())resyncs++
       if(path.endsWith('/change-stream/ticket')&&response.status()===409)ticketConflicts++
@@ -377,9 +385,10 @@ test('production Sessions uses canonical authenticated resources and direct task
     await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).waitFor()
     let binaryRequests=0
     const binaryHeaders=[]
-    page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip')){binaryRequests++;binaryHeaders.push(request.allHeaders());archiveTransport.push({phase:'request'})}})
-    page.on('requestfinished',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))archiveTransport.push({phase:'body-finished'})})
-    page.on('requestfailed',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))archiveTransport.push({phase:'body-failed'})})
+    page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip')){binaryRequests++;binaryHeaders.push(request.allHeaders());noteArchive({phase:'request',at:Date.now()})}})
+    page.on('requestfinished',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))noteArchive({phase:'body-finished',at:Date.now()})})
+    page.on('requestfailed',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))noteArchive({phase:'body-failed',error:request.failure()?.errorText,at:Date.now()})})
+    archivePhaseStart=Date.now()
     const archiveDownloadEvent=page.waitForEvent('download')
     await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).click()
     const archiveDownload=await archiveDownloadEvent,archivePath=await archiveDownload.path()
@@ -402,13 +411,15 @@ print('independently verified 53 DEFLATE entries')`,archivePath,JSON.stringify(a
     assert.deepEqual(errors,[])
     console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,tailBoundaryOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,download:'native-OPFS-and-browser-download'}))
   } catch (error) {
+    noteArchive({phase:'catch-enter',at:Date.now()})
     if(page) {
-      console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-download-status').allTextContents()).slice(0,2),archiveTransport,archiveNative:await page.evaluate(()=>window.__archiveTrace)}))
+      console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-download-status,.task-evidence-download').allTextContents()).slice(0,2),archiveTransport,archiveNative:await page.evaluate(()=>window.__archiveTrace),signal:await page.evaluate(()=>({aborted:window.__archiveSignal?.aborted,reason:window.__archiveSignal?.reason?.name})),harnessDiagnostic:harnessDiagnostic.replace(/Bearer\s+\S+/gi,'Bearer [redacted]')}))
       if(process.env.SESSION_STACK_DIAGNOSTICS)await page.screenshot({path:join(process.env.SESSION_STACK_DIAGNOSTICS,'sessions-stack-failure.png'),fullPage:true})
     }
     failed = error; throw error
   }
   finally {
+    noteArchive({phase:'cleanup-begin',at:Date.now()})
     const failures = []
     async function finish(action) { try { await action() } catch(error) { failures.push(error.message) } }
     await finish(async () => { if(context) await bounded(context.close(),10000,'context close'); if(browser) await bounded(browser.close(),10000,'browser close') })
@@ -418,6 +429,7 @@ print('independently verified 53 DEFLATE entries')`,archivePath,JSON.stringify(a
     await finish(async () => { if(harness && harness.exitCode === null) { harness.stdin.end('\n'); await bounded(harnessClosed,30000,'sandbox cleanup') } })
     await finish(async () => { if(sandbox) { let remains=true; try { await access(sandbox) } catch(error) { if(error.code==='ENOENT') remains=false; else throw error } assert.equal(remains,false,'owned sandbox removed') } })
     await finish(async () => { if(postgresPid) { let alive=true; try { process.kill(postgresPid,0) } catch(error) { if(error.code==='ESRCH') alive=false; else throw error } assert.equal(alive,false,'owned PostgreSQL process exited') } })
+    if(failed)console.log(JSON.stringify({phase:'archive-cleanup-attribution',archiveTransport}))
     if(failures.length) throw new AggregateError([...(failed?[failed]:[]),...failures.map(value => new Error(value))],'Sessions fixture cleanup failed')
   }
 })

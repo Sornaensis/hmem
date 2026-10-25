@@ -133,6 +133,7 @@ for (const [zone, expected, next, live, rangeStart, rangeEnd] of [
     assert.equal(h.bucket.bucket_start, since); assert.equal(h.bucket.series_totals.created, 5)
 
     await h.page.getByLabel('Workspace sections').getByRole('button', { name: 'Observations', exact: true }).click()
+    await h.page.getByRole('button', { name: 'All Observations', exact: true }).click()
     await textIncludes(h.page, '.observation-updated', expected)
     await h.page.locator('.observation-card').first().click()
     await textIncludes(h.page, '.observation-current-provenance', expected)

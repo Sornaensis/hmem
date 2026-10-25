@@ -47,8 +47,10 @@ export function installObservationNavigation(app, options = {}) {
 
   function revealHeader(element, scroll) {
     const rect = element.getBoundingClientRect(), host = scroll.getBoundingClientRect()
+    const context = doc.querySelector?.('.workspace-context-persistent')?.getBoundingClientRect?.()
+    const top = Math.max(host.top, Math.min(host.bottom, context?.bottom ?? host.top))
     const bottom = rect.top + Math.min(rect.height ?? (rect.bottom - rect.top), 72)
-    if (rect.top < host.top + 12) scroll.scrollTop = Math.max(0, scroll.scrollTop + rect.top - host.top - 12)
+    if (rect.top < top + 12) scroll.scrollTop = Math.max(0, scroll.scrollTop + rect.top - top - 12)
     else if (bottom > host.bottom - 12) scroll.scrollTop += bottom - host.bottom + 12
   }
 

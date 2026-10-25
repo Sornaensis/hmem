@@ -21,6 +21,7 @@ for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sess
   await page.route('**/api/v1/**',async route=>{if(heldKind&&kind(new URL(route.request().url()).pathname)===heldKind)await new Promise(resolve=>releases.push(resolve));await route.fallback()})
   await enter(h,dock);await h.idle()
   const group=page.locator('.session-activity-group').first();await group.locator(':scope > summary').click();await group.locator('.session-content-tool summary').first().click();await h.idle()
+  await page.evaluate(async()=>{await document.fonts.ready;for(let index=0;index<8;index++)await new Promise(resolve=>requestAnimationFrame(resolve))})
   await page.evaluate(()=>{
    const root=document.getElementById('session-records')
    window.chromeNodes=[root,root.querySelector('[data-block-key]'),root.querySelector('.session-activity-group'),root.querySelector('.session-content-tool'),document.querySelector('.session-viewer .session-runtime-value'),...document.querySelectorAll('.session-summary,.session-detail-title,.session-task-card')]
@@ -28,8 +29,10 @@ for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sess
    window.chromeObserver=new MutationObserver(()=>{if(window.chromeNodes.some(node=>!node.isConnected)||!window.chromeNodes[2].open||!window.chromeNodes[3].open)window.chromeLost=true})
    window.chromeObserver.observe(document,{childList:true,subtree:true})
   })
-  const snapshot=async()=>({titles:await page.locator('.session-detail-title').allTextContents(),summaries:await page.locator('.session-summary').allTextContents(),links:await page.locator('.session-task-card').allTextContents(),runtime:await page.locator('.session-viewer .session-runtime-value').innerText(),owner:dock?await page.locator('.task-session-dock').boundingBox():{y:0},viewer:await page.locator('#session-records').boundingBox(),prose:await page.locator('.session-record-text').first().boundingBox()})
+  const snapshot=async()=>({titles:await page.locator('.session-detail-title').allTextContents(),summaries:await page.locator('.session-summary').allTextContents(),links:await page.locator('.session-task-card').allTextContents(),runtime:await page.locator('.session-viewer .session-runtime-value').innerText(),owner:dock?await page.locator('.task-session-dock').boundingBox():{y:0},card:dock?await page.locator('#entity-'+h.fixture.tasks[0].id).boundingBox():null,ancestor:dock?await page.locator('#entity-'+h.fixture.projects[0].id).boundingBox():null,scroll:await page.locator('#main-content-scroll').evaluate(node=>node.scrollTop),viewer:await page.locator('#session-records').boundingBox(),prose:await page.locator('.session-record-text').first().boundingBox()})
   const before=await snapshot()
+  await page.waitForTimeout(350)
+  assert.deepEqual(await snapshot(),before,'No-refresh control must settle before measuring canonical refresh')
   for(const pendingKind of (dock?['metadata','list']:['metadata','list','links','facets'])){
    heldKind=pendingKind
    const response=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/change-stream/resync'&&response.request().method()==='POST')
@@ -40,6 +43,8 @@ for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sess
    assert.ok(Math.abs((pending.viewer.y-pending.owner.y)-(before.viewer.y-before.owner.y))<=1,pendingKind+' moved the viewer within its owner')
    assert.ok(Math.abs((pending.prose.y-pending.owner.y)-(before.prose.y-before.owner.y))<=1,pendingKind+' moved admitted prose within its owner')
    if(dock)assert.equal(pending.owner.height,before.owner.height,pendingKind+' changed dock height')
+   for(const key of (dock?['owner','card','ancestor','viewer','prose']:['viewer','prose']))assert.ok(Math.abs(pending[key].y-before[key].y)<=1,pendingKind+' moved absolute '+key)
+   assert.equal(pending.scroll,before.scroll,pendingKind+' moved the outer reading position')
    assert.equal(await page.getByText(/Loading sessions|Loading session…|Loading linked tasks|Refreshing active sessions/).count(),0)
    assert.equal(await page.evaluate(()=>window.chromeLost),false)
    heldKind=null;for(const release of releases.splice(0))release();await h.idle()
@@ -47,6 +52,70 @@ for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sess
   assert.equal(await page.evaluate(()=>window.chromeLost),false)
   assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{heldKind=null;for(const release of releases.splice(0))release();await h.close()}
+})
+
+test('retained dock ancestor descriptions cannot start editing and fresh clears and errors replace them',{timeout:60000},async()=>{
+ const h=await openSessionExplorer(),{page}=h
+ let holding=false
+ const releases=[]
+ try{
+  await page.route('**/api/v1/**',async route=>{const path=new URL(route.request().url()).pathname;if(holding&&/^\/api\/v1\/(projects|tasks)\/[^/]+$/.test(path))await new Promise(resolve=>releases.push(resolve));await route.fallback()})
+  await enter(h,true);await h.idle()
+  const ancestor=page.locator('#entity-'+h.fixture.projects[0].id)
+  holding=true
+  const response=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/change-stream/resync'&&response.request().method()==='POST')
+  await page.evaluate(()=>window.pushHierarchyFrames([{schema_version:1,type:'resync_required'}]));await response;await until(()=>releases.length>0)
+  const retained=ancestor.locator('.editable-textarea.readonly')
+  await retained.waitFor();assert.match(await retained.innerText(),/Markdown link/)
+  await retained.click();assert.equal(await page.locator('.inline-edit-textarea').count(),0,'Retained text must not carry StartEdit')
+  h.fixture.projects[0].description='Fresh replacement description'
+  holding=false;for(const release of releases.splice(0))release();await h.idle()
+  // The held fixture response may already have been serialized. A new guarded
+  // refresh must replace it, including an explicit null description.
+  await resync(h);assert.match(await ancestor.innerText(),/Fresh replacement description/)
+  h.fixture.projects[0].description=null
+  await resync(h);assert.doesNotMatch(await ancestor.innerText(),/Fresh replacement description|Markdown link/)
+  const failure=h.gate(request=>request.path==='/api/v1/projects/'+h.fixture.projects[0].id,{error:404})
+  await resync(h);await failure.arrived
+  assert.match(await ancestor.innerText(),/Description unavailable/)
+  assert.ok(h.caps().maxDetails<=6);assert.deepEqual(h.errors,[])
+ }finally{holding=false;for(const release of releases.splice(0))release();await h.close()}
+})
+
+test('reader confirmed-empty ancestor preserves its original pre-origin scroll through repeated refreshes',{timeout:60000},async()=>{
+ const h=await openSessionExplorer(),{page}=h
+ let holding=false
+ const releases=[]
+ try{
+  h.fixture.projects[0].description=null
+  await page.route('**/api/v1/**',async route=>{
+   const path=new URL(route.request().url()).pathname
+   if(path==='/api/v1/session')return route.fulfill({json:{auth_mode:'local',principal:{actor_type:'user',actor_id:'fixture-user',actor_label:'Fixture User',authority:'local',grant_user_id:null},global_permissions:{create_workspace:false,superadmin:false},workspace:{workspace_id:h.fixture.workspace.id,role:'reader',can_read:true,can_edit:false,can_admin:false}}})
+   if(holding&&path.includes('/sessions'))await new Promise(resolve=>releases.push(resolve))
+   await route.fallback()
+  })
+  await enter(h,true);await h.idle();await page.evaluate(async()=>{await document.fonts.ready;for(let index=0;index<8;index++)await new Promise(resolve=>requestAnimationFrame(resolve))})
+  const description=page.locator('#entity-'+h.fixture.projects[0].id+' .editable-textarea.readonly')
+  assert.equal(await description.innerText(),'')
+  await page.waitForTimeout(350)
+  const before=await description.boundingBox()
+  const outerScroll=await page.locator('#main-content-scroll').evaluate(node=>node.scrollTop)
+  await page.waitForTimeout(350)
+  assert.deepEqual(await description.boundingBox(),before)
+  for(let iteration=0;iteration<2;iteration++){
+   holding=true
+   const response=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/change-stream/resync'&&response.request().method()==='POST')
+   await page.evaluate(()=>window.pushHierarchyFrames([{schema_version:1,type:'resync_required'}]));await response;await until(()=>releases.length>0)
+   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+   assert.equal(await description.innerText(),'');assert.deepEqual(await description.boundingBox(),before)
+   assert.equal(await page.locator('#main-content-scroll').evaluate(node=>node.scrollTop),outerScroll)
+   holding=false;for(const release of releases.splice(0))release();await h.idle()
+   await page.evaluate(async()=>{for(let index=0;index<8;index++)await new Promise(resolve=>requestAnimationFrame(resolve))})
+   assert.deepEqual(await description.boundingBox(),before)
+   assert.equal(await page.locator('#main-content-scroll').evaluate(node=>node.scrollTop),outerScroll)
+  }
+  await description.click({force:true});assert.equal(await page.locator('.inline-edit-textarea').count(),0)
+ }finally{holding=false;for(const release of releases.splice(0))release();await h.close()}
 })
 
 test('successful canonical empty membership and runtime clearing replace retained metadata',{timeout:60000},async()=>{

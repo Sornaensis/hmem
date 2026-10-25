@@ -283,6 +283,7 @@ markProjectDetailCurrent project model =
             , navigationGeneration = loading.navigationGeneration
             , requestId = loading.nextCardDetailRequestId
             , expectedUpdatedAt = project.updatedAt
+            , presentationOwner = Nothing
             , inFlight = False
             , succeeded = True
             }
@@ -351,6 +352,7 @@ markTaskDetailsCurrent tasks model =
                 , navigationGeneration = loading.navigationGeneration
                 , requestId = requestId
                 , expectedUpdatedAt = task.updatedAt
+                , presentationOwner = Nothing
                 , inFlight = False
                 , succeeded = True
                 }

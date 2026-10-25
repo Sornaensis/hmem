@@ -1354,18 +1354,36 @@ viewCardDescription model entityType entityId description =
 
             else
                 Dict.get entityId model.dataLoading.taskCardDetailRequests
+
+        retained =
+            Feature.DataLoading.cardDetailPresentation entityType entityId model
+
+        readOnly previous =
+            let value = Maybe.withDefault "" previous.description in
+            div [ class "editable-textarea readonly", title "Refreshing description", attribute "aria-busy" "true" ]
+                [ if String.isEmpty value then
+                    text (if Permissions.canEditCurrentWorkspace model then "Click to add description..." else "")
+                  else Feature.Editing.viewMarkdownContent value ]
+
+        pending =
+            case retained of
+                Just previous -> readOnly previous
+                Nothing -> div [ class "card-description-state", attribute "role" "status" ] [ text "Loading description…" ]
     in
-    if not summaryPresent then
+    if Helpers.editingValue model entityId "description" /= Nothing then
+        Feature.Editing.viewEditableTextarea model entityType entityId "description" (Maybe.withDefault "" description)
+
+    else if not summaryPresent && request == Nothing then
         Feature.Editing.viewEditableTextarea model entityType entityId "description" (Maybe.withDefault "" description)
 
     else
         case request of
             Just state ->
-                if state.succeeded then
+                if state.succeeded && state.presentationOwner == Feature.DataLoading.cardDetailPresentationOwner model then
                     Feature.Editing.viewEditableTextarea model entityType entityId "description" (Maybe.withDefault "" description)
 
-                else if state.inFlight then
-                    div [ class "card-description-state", attribute "role" "status" ] [ text "Loading description…" ]
+                else if state.inFlight || state.presentationOwner /= Feature.DataLoading.cardDetailPresentationOwner model then
+                    pending
 
                 else
                     div [ class "card-description-state card-description-error" ]
@@ -1374,10 +1392,39 @@ viewCardDescription model entityType entityId description =
                         ]
 
             Nothing ->
-                div [ class "card-description-state card-description-error" ]
-                    [ span [] [ text "Description not loaded." ]
-                    , button [ class "btn-small btn-ghost", onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
-                    ]
+                case retained of
+                    Just previous -> readOnly previous
+                    Nothing ->
+                        div [ class "card-description-state card-description-error" ]
+                            [ span [] [ text "Description not loaded." ]
+                            , button [ class "btn-small btn-ghost", onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
+                            ]
+
+
+{-| Suppress only a refresh-introduced body warning. Status controls still use
+current canonical readiness and expose their current disabled reason.
+-}
+refreshingKnownEligibility : Model -> Api.Task -> Bool
+refreshingKnownEligibility model task =
+    let
+        missing id = not (Dict.member id model.dependencies.taskReadinessRollups)
+        failed id = Dict.member id model.dependencies.taskDependencyErrors
+        parentMissing = task.parentId |> Maybe.map (\id -> Dict.member id model.tasks && missing id) |> Maybe.withDefault False
+        parentFailed = task.parentId |> Maybe.map failed |> Maybe.withDefault False
+        navigationPending =
+            (model.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False)
+                || List.any .inFlight (Dict.values model.dataLoading.loadedNavigationBranches)
+        navigationFailed = List.any (\pass -> pass.projectError /= Nothing || pass.taskError /= Nothing) (Dict.values model.dataLoading.navigationPasses)
+        streamPending = model.webSocket.state == Connecting
+        streamFailed = case model.webSocket.state of
+            ConnectionFailed _ -> True
+            _ -> False
+        pending id = Dict.member id model.dependencies.taskOverviewRequests || Dict.get id model.dependencies.taskDependencyLoading == Just True
+        dependencyPending = pending task.id || (task.parentId |> Maybe.map pending |> Maybe.withDefault False)
+    in
+    (Feature.DataLoading.cardDetailPresentation "task" task.id model |> Maybe.map .eligibilityKnown |> Maybe.withDefault False)
+        && (missing task.id || parentMissing) && not (failed task.id || parentFailed)
+        && (navigationPending || streamPending || dependencyPending) && not (navigationFailed || streamFailed)
 
 
 viewProjectsTree : String -> Model -> Html Msg
@@ -2353,7 +2400,7 @@ viewTaskCardBody descendants projection showProject model task =
 
           else
             div [ class "card-summary" ] [ text (String.join " · " summaryParts) ]
-        , case Helpers.taskStatusEligibilityUnavailableReason model task of
+        , case (if refreshingKnownEligibility model task then Nothing else Helpers.taskStatusEligibilityUnavailableReason model task) of
             Just reason ->
                 div [ class "card-filter-context-note" ]
                     [ text reason
@@ -3429,8 +3476,9 @@ summaryStructureChanged before after =
 
 
 refreshViewportWithStatusChange : Bool -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
-refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) =
+refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command ) =
     let
+        model = Feature.DataLoading.reconcileCardDetailPresentation previous incoming
         old = model.cards.viewport
         presentationOrderChanged =
             (taskStatusesChanged || previous.dependencies.taskReadinessRollups /= model.dependencies.taskReadinessRollups)
@@ -3527,7 +3575,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                     index = Viewport.build 160 measurements keys
                     anchorPosition = Viewport.positionAt old.top old.index
                     awaitingFirstRows =
-                        old.top == 0 && not (Dict.values old.rows |> List.any (\row -> row.kind == "project" || row.kind == "task"))
+                        old.top <= 0 && not (Dict.values old.rows |> List.any (\row -> row.kind == "project" || row.kind == "task"))
                     -- Loading end-status rows precede the first real roots.
                     -- They are not a user anchor at untouched scroll origin.
                     anchor = if awaitingFirstRows then Nothing else Array.get anchorPosition old.index.keys
@@ -3535,7 +3583,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                     anchoredTop =
                         if preserveScroll then old.top
                         else if sameContext then
-                            anchor |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Basics.max 0 (Viewport.offset i index + delta)) |> Maybe.withDefault old.top
+                            anchor |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Viewport.offset i index + delta) |> Maybe.withDefault old.top
                         else 0
                     viewport = { old | workspaceId = Just ws, sessionEpoch = model.sessionRequestEpoch, generation = model.dataLoading.navigationGeneration
                         , revision = old.revision + 1, rows = rows |> List.map (\row -> ( row.key, row )) |> Dict.fromList
@@ -3594,7 +3642,9 @@ updateViewport payload model =
             && get "generation" Decode.int -1 == model.dataLoading.navigationGeneration
             && get "revision" Decode.int -1 == viewport.revision
         measured = get "measurements" (Decode.list (Decode.map2 Tuple.pair (Decode.field "key" Decode.string) (Decode.field "height" Decode.float))) []
-        incomingTop = Basics.max 0 (get "top" Decode.float viewport.top)
+        -- Keep the signed displacement when the host is above the hierarchy.
+        -- Index lookups clamp independently; restoration must retain the gap.
+        incomingTop = get "top" Decode.float viewport.top
         anchorPosition = Viewport.positionAt incomingTop viewport.index
         anchorKey = Array.get anchorPosition viewport.index.keys
         anchorDelta = incomingTop - Viewport.offset anchorPosition viewport.index
@@ -3614,7 +3664,7 @@ updateViewport payload model =
             Just key -> Dict.get key index.positions |> Maybe.map (\i -> Viewport.offset i index) |> Maybe.withDefault viewport.top
             Nothing ->
                 if viewport.preserveScroll || List.isEmpty measured then incomingTop
-                else anchorKey |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Basics.max 0 (Viewport.offset i index + anchorDelta)) |> Maybe.withDefault viewport.top
+                else anchorKey |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Viewport.offset i index + anchorDelta) |> Maybe.withDefault viewport.top
         next = { viewport | top = top, height = Basics.max 1 (get "height" Decode.float viewport.height), index = index
             , preserveScroll = viewport.preserveScroll && target == Nothing
             , nativePins = get "pins" (Decode.list Decode.string) [] |> List.take 1 |> Set.fromList |> Set.filter (\key -> Dict.member key viewport.rows)

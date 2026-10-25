@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, ensureExpandedBranches, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, revalidateNavigationForTasksReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (cardDetailPresentationOwner, cardDetailPresentation, reconcileCardDetailPresentation, preserveCardDetailPresentation, forgetCardDetailPresentation, mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, ensureExpandedBranches, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, revalidateNavigationForTasksReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -51,6 +51,8 @@ init =
     , projectCardDetailRequests = Dict.empty
     , taskCardDetailRequests = Dict.empty
     , nextCardDetailRequestId = 1
+    , cardDetailPresentationOwner = Nothing
+    , cardDetailPresentations = Dict.empty
     , navigationVisibleProjectIds = Set.empty
     , navigationVisibleTaskIds = Set.empty
     , navigationVisibilityActive = False
@@ -1610,6 +1612,129 @@ revalidateNavigationOwners owners model =
     ( presented, Cmd.batch (detailCommand :: replayCommands) )
 
 
+cardDetailPresentationOwner : Model -> Maybe CardDetailPresentationOwner
+cardDetailPresentationOwner model =
+    if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then Nothing
+    else
+        Maybe.map2 (\workspaceId session -> { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, session = session }) model.selectedWorkspaceId model.sessionContext
+
+
+{-| Retire logical proofs even for an empty cache or inactive tab. Physical slots
+and monotonic request IDs survive, so a writer/reader/writer transition cannot
+admit a delayed request from the first writer lifetime.
+-}
+reconcileCardDetailPresentation : Model -> Model -> Model
+reconcileCardDetailPresentation previous model =
+    if cardDetailPresentationOwner previous == cardDetailPresentationOwner model then model
+    else
+        let loading = model.dataLoading in
+        { model | dataLoading = { loading | cardDetailPresentationOwner = Nothing, cardDetailPresentations = Dict.empty, projectCardDetailRequests = Dict.empty, taskCardDetailRequests = Dict.empty } }
+
+
+cardDetailPresentation : String -> String -> Model -> Maybe CardDetailPresentation
+cardDetailPresentation kind id model =
+    if model.dataLoading.cardDetailPresentationOwner == Nothing || model.dataLoading.cardDetailPresentationOwner /= cardDetailPresentationOwner model then Nothing
+    else Dict.get (kind ++ ":" ++ id) model.dataLoading.cardDetailPresentations
+
+
+{-| This cache is display only: at most 32 mounted/pinned descriptions and 2 MiB
+of estimated UTF-16 key/content storage plus fixed metadata. Oversized entries
+are omitted intact. Neither requests nor readiness read from this cache.
+-}
+boundCardDetailPresentations : Set.Set String -> Dict.Dict String CardDetailPresentation -> Dict.Dict String CardDetailPresentation
+boundCardDetailPresentations demand entries =
+    Dict.foldl (\key entry ( bytes, kept ) ->
+        let cost = 256 + 2 * (String.length key + String.length (Maybe.withDefault "" entry.description)) in
+        if not (Set.member key demand) || Dict.size kept >= 32 || bytes + cost > 2 * 1024 * 1024 then ( bytes, kept )
+        else ( bytes + cost, Dict.insert key entry kept )
+        ) ( 0, Dict.empty ) entries |> Tuple.second
+
+
+detailPresentationDemand : Model -> Set.Set String
+detailPresentationDemand model =
+    let
+        ( projects, tasks ) = Maybe.withDefault ( Set.empty, Set.empty ) model.dataLoading.visibleDetailDemand
+        keys kind ids = Set.toList ids |> List.map (\id -> kind ++ ":" ++ id)
+    in
+    keys "project" (detailPinnedIds "project" model) ++ keys "task" (detailPinnedIds "task" model)
+        ++ keys "project" projects ++ keys "task" tasks |> List.take 32 |> Set.fromList
+
+
+pruneCardDetailPresentations : Set.Set String -> Model -> Model
+pruneCardDetailPresentations demand model =
+    let
+        loading = model.dataLoading
+        entries = if loading.cardDetailPresentationOwner == cardDetailPresentationOwner model then boundCardDetailPresentations demand loading.cardDetailPresentations else Dict.empty
+    in
+    { model | dataLoading = { loading | cardDetailPresentations = entries, cardDetailPresentationOwner = if Dict.isEmpty entries then Nothing else loading.cardDetailPresentationOwner } }
+
+
+preserveCardDetailPresentation : Model -> Model
+preserveCardDetailPresentation model =
+    let
+        loading = model.dataLoading
+        owner = cardDetailPresentationOwner model
+        demand = detailPresentationDemand model
+        invalidEligibility id =
+            let
+                parent = Dict.get id model.tasks |> Maybe.andThen .parentId
+                unknown target = Dict.get target model.dependencies.taskReadinessRollups |> Maybe.map (\rollup -> rollup.ownOpenDependencyCount == Nothing) |> Maybe.withDefault False
+                failed target = Dict.member target model.dependencies.taskDependencyErrors
+            in
+            unknown id || failed id || (parent |> Maybe.map (\target -> unknown target || failed target) |> Maybe.withDefault False)
+                || List.any (\pass -> pass.projectError /= Nothing || pass.taskError /= Nothing) (Dict.values loading.navigationPasses)
+                || (case model.webSocket.state of
+                    ConnectionFailed _ -> True
+                    _ -> False)
+        previous =
+            if owner /= Nothing && owner == loading.cardDetailPresentationOwner then
+                Dict.map (\key entry ->
+                    let
+                        id = String.dropLeft 5 key
+                        known = Dict.get id model.tasks |> Maybe.map (Helpers.taskStatusEligibilityUnavailableReason model >> (==) Nothing) |> Maybe.withDefault False
+                    in
+                    { entry | eligibilityKnown = String.startsWith "task:" key && not (invalidEligibility id) && (known || entry.eligibilityKnown) }
+                    ) loading.cardDetailPresentations
+            else Dict.empty
+        capture kind requests entities accumulated =
+            Dict.foldl (\id request current ->
+                let key = kind ++ ":" ++ id in
+                if not (Set.member key demand) then current
+                else if request.presentationOwner /= owner || owner == Nothing then Dict.remove key current
+                else if request.succeeded then
+                    case Dict.get id entities of
+                        Just entity ->
+                            let
+                                known = kind == "task" && (Dict.get id model.tasks |> Maybe.map (Helpers.taskStatusEligibilityUnavailableReason model >> (==) Nothing) |> Maybe.withDefault False)
+                                wasKnown = Dict.get key previous |> Maybe.map .eligibilityKnown |> Maybe.withDefault False
+                            in
+                            if entity.updatedAt == request.expectedUpdatedAt then
+                                Dict.insert key { description = entity.description, eligibilityKnown = not (invalidEligibility id) && (known || wasKnown) } current
+                            else current
+                        Nothing -> Dict.remove key current
+                else if request.inFlight then current
+                else Dict.remove key current
+                ) accumulated requests
+        entries = previous |> capture "project" loading.projectCardDetailRequests model.projects |> capture "task" loading.taskCardDetailRequests model.tasks |> boundCardDetailPresentations demand
+    in
+    { model | dataLoading = { loading | cardDetailPresentationOwner = if Dict.isEmpty entries then Nothing else owner, cardDetailPresentations = entries } }
+
+
+forgetCardDetailPresentation : String -> String -> Model -> Model
+forgetCardDetailPresentation kind id model =
+    let loading = model.dataLoading in
+    { model | dataLoading = { loading | cardDetailPresentations = Dict.remove (kind ++ ":" ++ id) loading.cardDetailPresentations } }
+
+
+settleCardDetailPresentation : String -> String -> Maybe (Maybe String) -> Model -> Model
+settleCardDetailPresentation kind id description model =
+    case description of
+        Nothing -> forgetCardDetailPresentation kind id model
+        Just value ->
+            let loading = model.dataLoading in
+            { model | dataLoading = { loading | cardDetailPresentations = Dict.update (kind ++ ":" ++ id) (Maybe.map (\entry -> { entry | description = value })) loading.cardDetailPresentations |> boundCardDetailPresentations (detailPresentationDemand model) } }
+
+
 {-| Retire pending bounded responses as soon as the scoped stream is invalidated,
 while retaining the last canonical cards and the user's presentation positions.
 -}
@@ -2249,7 +2374,7 @@ markMissingNavigationSummaries projectIds taskIds model =
         (List.map (\id -> ( "project:" ++ id, Nothing )) projectIds
             ++ List.map (\id -> ( "task:" ++ id, Nothing )) taskIds
         )
-        issued
+        (List.foldl (forgetCardDetailPresentation "task") (List.foldl (forgetCardDetailPresentation "project") issued projectIds) taskIds)
 
 
 projectSummaryBelongsTo : String -> Maybe String -> Api.ProjectCardSummary -> Bool
@@ -2361,6 +2486,7 @@ beginProjectCardDetail summary ( model, commands ) =
                         (Dict.get summary.id model.projects |> Maybe.map .updatedAt)
                             == Just request.expectedUpdatedAt
                             && (request.inFlight || request.succeeded || request.expectedUpdatedAt == summary.updatedAt)
+                            && request.presentationOwner == cardDetailPresentationOwner model
                     )
                 |> Maybe.withDefault False
     in
@@ -2377,6 +2503,7 @@ beginProjectCardDetail summary ( model, commands ) =
                 , sessionEpoch = model.sessionRequestEpoch
                 , navigationGeneration = loading.navigationGeneration
                 , requestId = loading.nextCardDetailRequestId
+                , presentationOwner = cardDetailPresentationOwner model
                 , expectedUpdatedAt = summary.updatedAt
                 , inFlight = True
                 , succeeded = False
@@ -2404,6 +2531,7 @@ beginTaskCardDetail summary ( model, commands ) =
                         (Dict.get summary.id model.tasks |> Maybe.map .updatedAt)
                             == Just request.expectedUpdatedAt
                             && (request.inFlight || request.succeeded || request.expectedUpdatedAt == summary.updatedAt)
+                            && request.presentationOwner == cardDetailPresentationOwner model
                     )
                 |> Maybe.withDefault False
     in
@@ -2420,6 +2548,7 @@ beginTaskCardDetail summary ( model, commands ) =
                 , sessionEpoch = model.sessionRequestEpoch
                 , navigationGeneration = loading.navigationGeneration
                 , requestId = loading.nextCardDetailRequestId
+                , presentationOwner = cardDetailPresentationOwner model
                 , expectedUpdatedAt = summary.updatedAt
                 , inFlight = True
                 , succeeded = False
@@ -2602,7 +2731,7 @@ ensurePresentedCardDetails source =
 ensurePresentedCardDetailsWith : NavigationSummaryProjection -> Model -> ( Model, Cmd Msg )
 ensurePresentedCardDetailsWith projection source =
     let
-        model = prepareBackgroundAdmission source
+        model = prepareBackgroundAdmission source |> pruneCardDetailPresentations (detailPresentationDemand source)
         ( projectIds, taskIds ) =
             case model.dataLoading.visibleDetailDemand of
                 Just demand -> demand
@@ -3622,6 +3751,7 @@ updateResponse msg model =
                 valid =
                     currentRequest == Just request
                         && request.inFlight
+                        && request.presentationOwner == cardDetailPresentationOwner model
                         && model.selectedWorkspaceId == Just request.workspaceId
                         && model.sessionRequestEpoch == request.sessionEpoch
                         && (currentSummary |> Maybe.map .updatedAt) == Just request.expectedUpdatedAt
@@ -3644,15 +3774,15 @@ updateResponse msg model =
                                         | projectCardDetailRequests =
                                             Dict.insert projectId { request | expectedUpdatedAt = project.updatedAt, inFlight = False, succeeded = True } loading.projectCardDetailRequests
                                     }
-                              }
+                              } |> settleCardDetailPresentation "project" projectId (Just project.description)
                             , Cmd.none
                             )
 
                         else
-                            ( { model | dataLoading = { loading | projectCardDetailRequests = Dict.insert projectId { request | inFlight = False, succeeded = False } loading.projectCardDetailRequests } }, Cmd.none )
+                            ( { model | dataLoading = { loading | projectCardDetailRequests = Dict.insert projectId { request | inFlight = False, succeeded = False } loading.projectCardDetailRequests } } |> forgetCardDetailPresentation "project" projectId, Cmd.none )
 
                     Err _ ->
-                        ( { model | dataLoading = { loading | projectCardDetailRequests = Dict.insert projectId { request | inFlight = False, succeeded = False } loading.projectCardDetailRequests } }, Cmd.none )
+                        ( { model | dataLoading = { loading | projectCardDetailRequests = Dict.insert projectId { request | inFlight = False, succeeded = False } loading.projectCardDetailRequests } } |> forgetCardDetailPresentation "project" projectId, Cmd.none )
 
         GotTaskCardDetail request taskId result ->
             let
@@ -3668,6 +3798,7 @@ updateResponse msg model =
                 valid =
                     currentRequest == Just request
                         && request.inFlight
+                        && request.presentationOwner == cardDetailPresentationOwner model
                         && model.selectedWorkspaceId == Just request.workspaceId
                         && model.sessionRequestEpoch == request.sessionEpoch
                         && (currentSummary |> Maybe.map .updatedAt) == Just request.expectedUpdatedAt
@@ -3690,15 +3821,15 @@ updateResponse msg model =
                                         | taskCardDetailRequests =
                                             Dict.insert taskId { request | expectedUpdatedAt = task.updatedAt, inFlight = False, succeeded = True } loading.taskCardDetailRequests
                                     }
-                              }
+                              } |> settleCardDetailPresentation "task" taskId (Just task.description)
                             , Cmd.none
                             )
 
                         else
-                            ( { model | dataLoading = { loading | taskCardDetailRequests = Dict.insert taskId { request | inFlight = False, succeeded = False } loading.taskCardDetailRequests } }, Cmd.none )
+                            ( { model | dataLoading = { loading | taskCardDetailRequests = Dict.insert taskId { request | inFlight = False, succeeded = False } loading.taskCardDetailRequests } } |> forgetCardDetailPresentation "task" taskId, Cmd.none )
 
                     Err _ ->
-                        ( { model | dataLoading = { loading | taskCardDetailRequests = Dict.insert taskId { request | inFlight = False, succeeded = False } loading.taskCardDetailRequests } }, Cmd.none )
+                        ( { model | dataLoading = { loading | taskCardDetailRequests = Dict.insert taskId { request | inFlight = False, succeeded = False } loading.taskCardDetailRequests } } |> forgetCardDetailPresentation "task" taskId, Cmd.none )
 
         GotProjects wsId maybeToken offset result ->
             if model.selectedWorkspaceId /= Just wsId then

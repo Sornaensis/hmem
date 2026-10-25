@@ -1000,7 +1000,8 @@ beginScopedResync : ChangeStream.Scope -> Model -> ( Model, Cmd Msg )
 beginScopedResync scope model =
     let
         invalidated =
-            invalidateScopeRequests scope model
+            invalidateScopeRequests scope
+                (if scopeMatchesSelectedWorkspace scope model then Feature.DataLoading.preserveCardDetailPresentation model else model)
 
         cacheCleared =
             if scopeMatchesSelectedWorkspace scope invalidated then

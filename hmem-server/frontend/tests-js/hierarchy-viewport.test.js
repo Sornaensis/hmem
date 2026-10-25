@@ -2,13 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { installHierarchyViewport } from '../src/hierarchy-viewport.js'
 
-function harness({ resizeObserver = true } = {}) {
+function harness({ resizeObserver = true, hierarchyOrigin = 0 } = {}) {
   const listeners = new Map(), windowListeners = new Map(), frames = new Map(), sent = [], observers = []
   let nextFrame = 0, rows = [], viewport = true
   const elements = new Map()
   const stamp = { workspace: 'ws', epoch: 1, generation: 2, revision: 3 }
   const scroller = { scrollTop: 0, clientHeight: 600, getBoundingClientRect: () => ({ top: 0 }), addEventListener() {}, removeEventListener() {} }
-  const container = { dataset: { hierarchyContext: JSON.stringify(stamp) }, contains: row => rows.includes(row), querySelectorAll: () => rows, getBoundingClientRect: () => ({ top: -scroller.scrollTop }) }
+  const container = { dataset: { hierarchyContext: JSON.stringify(stamp) }, contains: row => rows.includes(row), querySelectorAll: () => rows, getBoundingClientRect: () => ({ top: hierarchyOrigin-scroller.scrollTop }) }
   const doc = { documentElement: {}, activeElement: null,
     getElementById(id) { if (elements.has(id)) return elements.get(id); if (id === 'main-content-scroll') return scroller; if (id === 'hierarchy-viewport') return viewport ? container : null; return rows.find(row => 'entity-' + row.dataset.hierarchyKey.split(':')[1] === id) || null },
     addEventListener(name, fn) { listeners.set(name, fn) }, removeEventListener(name) { listeners.delete(name) }
@@ -31,6 +31,44 @@ function harness({ resizeObserver = true } = {}) {
   return { bridge, row, flush, sent, callbacks, stamp, scroller, doc, observers, listeners, windowListeners, elements,
     setRows(value) { rows = value }, setStamp(value) { container.dataset.hierarchyContext = JSON.stringify(value) }, mutate(records) { for (const callback of mutationCallbacks) callback(records) }, hide() { viewport = false }, show() { viewport = true } }
 }
+
+test('signed pre-origin displacement survives both automatic anchor and fallback restoration', () => {
+  const h=harness({hierarchyOrigin:502.375}),row=h.row('project:p',502.375)
+  h.setRows([row]);h.scroller.scrollTop=483;h.flush()
+  assert.equal(h.sent.at(-1).top,-19.375)
+  for(const anchor of ['project:p',null]){
+    h.callbacks.sync({...h.stamp,anchor,delta:-19.375,top:-19.375,target:null});h.flush()
+    assert.equal(h.scroller.scrollTop,483)
+    assert.equal(h.sent.at(-1).top,-19.375)
+  }
+  h.callbacks.sync({...h.stamp,anchor:null,top:-1000,target:null});h.flush()
+  assert.equal(h.scroller.scrollTop,0,'Native raw scroll remains nonnegative')
+  h.bridge.dispose()
+})
+
+test('explicit top page and target commands still win with a nonzero hierarchy origin', () => {
+  const h=harness({hierarchyOrigin:502.375}),first=h.row('project:p',502.375),next=h.row('task:t',1500)
+  h.setRows([first,next]);h.scroller.scrollTop=483;h.flush()
+  h.callbacks.sync({...h.stamp,anchor:null,top:0,target:null});h.flush()
+  assert.equal(h.scroller.scrollTop,502.375,'Explicit top means hierarchy top, not the previous signed displacement')
+  h.callbacks.sync({...h.stamp,anchor:null,top:80,target:null});h.flush()
+  assert.equal(h.scroller.scrollTop,582.375)
+  h.callbacks.target('entity-t');h.flush()
+  assert.equal(h.scroller.scrollTop,984,'Explicit route target still reveals its header')
+  h.bridge.dispose()
+})
+
+test('signed restoration still rejects newer physical scrolling and stale owner layouts', () => {
+  const h=harness({hierarchyOrigin:502.375}),row=h.row('project:p',502.375)
+  h.setRows([row]);h.scroller.scrollTop=483;h.flush()
+  h.callbacks.sync({...h.stamp,anchor:'project:p',delta:-19.375,top:-19.375,target:null})
+  h.scroller.scrollTop=420;h.flush()
+  assert.equal(h.scroller.scrollTop,420,'A new physical scroll wins before its receipt is delivered')
+  h.callbacks.sync({...h.stamp,anchor:null,top:-19.375,target:null})
+  h.setStamp({...h.stamp,epoch:h.stamp.epoch+1});h.flush()
+  assert.equal(h.scroller.scrollTop,420,'A retired layout cannot restore another owner')
+  h.bridge.dispose()
+})
 
 test('a search edit consumes a queued prior anchor without moving the viewport or blocking later navigation', () => {
   const h = harness(), row = h.row('project:p', 0)

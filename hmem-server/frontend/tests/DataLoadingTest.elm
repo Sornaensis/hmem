@@ -35,7 +35,10 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "shared callback keeps successful owners independent from failed siblings and permits owner retry" <| \_ ->
+        [ signedOriginTest
+        , presentationTests
+        , mutationPresentationTest
+        , test "shared callback keeps successful owners independent from failed siblings and permits owner retry" <| \_ ->
             let
                 seed = batchNavigationSeed
                 owners = capturedNavigationOwners seed
@@ -1441,8 +1444,8 @@ suite =
                 Expect.equal
                     { project = Just { name = "new project", status = Api.ProjPaused, priority = 9, description = Just "new project description" }
                     , task = Just { title = "new task", status = Api.InProgress, priority = 8, description = Just "new task description" }
-                    , projectDetailCurrent = True
-                    , taskDetailCurrent = True
+                    , projectDetailCurrent = False
+                    , taskDetailCurrent = False
                     }
                     { project = Dict.get projectSummary.id afterLateDetails.projects |> Maybe.map (\value -> { name = value.name, status = value.status, priority = value.priority, description = value.description })
                     , task = Dict.get taskSummary.id afterLateDetails.tasks |> Maybe.map (\value -> { title = value.title, status = value.status, priority = value.priority, description = value.description })
@@ -3672,6 +3675,209 @@ suite =
                 Expect.equal { offsets = Just ( 50, 50 ), pass = Just ( True, 50 ), freshIdentity = True, displayed = ( 51, 51 ), completed = ( 51, 51 ), oldRetained = False, freshComplete = True }
                     (reopenFailedBranchScenario True)
         ]
+
+
+signedOriginTest : Test
+signedOriginTest =
+    test "signed pre-origin receipts survive measurements and canonical layout rebuilds with bounded index lookup" <| \_ ->
+        let
+            seed = presentationSeed
+            viewport = seed.cards.viewport
+            receipt = Encode.object
+                [ ( "workspace", Encode.string workspaceId ), ( "epoch", Encode.int seed.sessionRequestEpoch )
+                , ( "generation", Encode.int seed.dataLoading.navigationGeneration ), ( "revision", Encode.int viewport.revision )
+                , ( "top", Encode.float -19.375 ), ( "height", Encode.float 1000 )
+                , ( "measurements", Encode.list identity [ Encode.object [ ( "key", Encode.string "project:display-project" ), ( "height", Encode.float 160 ) ] ] )
+                ]
+            measured = Cards.updateViewport receipt seed |> Tuple.first
+            refreshing = measured |> DataLoading.preserveCardDetailPresentation |> DataLoading.invalidateNavigationRequests
+            rebuilt = Cards.refreshViewport measured ( refreshing, Cmd.none ) |> Tuple.first
+        in
+        Expect.equal { measured = -19.375, rebuilt = -19.375, first = 0, bounded = True }
+            { measured = measured.cards.viewport.top, rebuilt = rebuilt.cards.viewport.top
+            , first = Viewport.positionAt rebuilt.cards.viewport.top rebuilt.cards.viewport.index
+            , bounded = List.length (Cards.mountedViewportKeys rebuilt) <= 25 }
+
+
+presentationTests : Test
+presentationTests =
+    describe "same-authority detail presentation"
+        [ test "resync retains read-only descriptions and known eligibility while admitting fresh details" <| \_ ->
+            let
+                source = presentationSeed
+                retained = source |> DataLoading.preserveCardDetailPresentation |> DataLoading.invalidateNavigationRequests
+                dependencies = retained.dependencies
+                socket = retained.webSocket
+                refreshing = { retained | dependencies = Dependencies.resetCache dependencies, webSocket = { socket | state = Types.Connecting } }
+                admitted = painted refreshing
+            in
+            Expect.all
+                [ \_ -> Cards.viewProjectsTree workspaceId refreshing |> Query.fromHtml |> Query.has [ Selector.text "Confirmed project description", Selector.text "Confirmed task description" ]
+                , \_ -> Cards.viewProjectsTree workspaceId refreshing |> Query.fromHtml |> Query.hasNot [ Selector.text "Prerequisite eligibility is unavailable. Refresh to retry." ]
+                , \_ -> Expect.equal Nothing (Helpers.taskOwnOpenDependencyCount refreshing "display-task")
+                , \_ -> Expect.equal True (Dict.get "display-project" admitted.dataLoading.projectCardDetailRequests |> Maybe.map (\request -> request.inFlight && not request.succeeded) |> Maybe.withDefault False)
+                , \_ -> Expect.equal True (Set.size admitted.dataLoading.cardDetailAdmissions <= 6)
+                ] ()
+        , test "fresh explicit clears replace retained text and owned errors retire it" <| \_ ->
+            let
+                refreshing = presentationSeed |> DataLoading.preserveCardDetailPresentation |> DataLoading.invalidateNavigationRequests |> painted
+                request = Dict.get "display-project" refreshing.dataLoading.projectCardDetailRequests
+                cleared = case request of
+                    Just owned -> DataLoading.update (GotProjectCardDetail owned "display-project" (Ok (Api.projectFromCardSummary (project "display-project" Nothing)))) refreshing |> Tuple.first
+                    Nothing -> refreshing
+                failed = case request of
+                    Just owned -> DataLoading.update (GotProjectCardDetail owned "display-project" (Err (Http.BadStatus 404))) refreshing |> Tuple.first
+                    Nothing -> refreshing
+            in
+            Expect.equal { empty = Just Nothing, error = Nothing }
+                { empty = DataLoading.cardDetailPresentation "project" "display-project" cleared |> Maybe.map .description
+                , error = DataLoading.cardDetailPresentation "project" "display-project" failed }
+        , test "inactive same-epoch writer reader writer retires old proof and rejects its delayed callback" <| \_ ->
+            let
+                pending = presentationSeed |> DataLoading.preserveCardDetailPresentation |> DataLoading.invalidateNavigationRequests |> painted
+                oldRequest = Dict.get "display-project" pending.dataLoading.projectCardDetailRequests
+                inactive = { pending | activeTab = SessionsTab }
+                reader = { editorSession | workspace = editorSession.workspace |> Maybe.map (\permission -> { permission | canEdit = False, role = Just "reader" }) }
+                downgraded = Main.update (GotSessionContext inactive.sessionRequestEpoch (Just workspaceId) (Ok reader)) inactive |> Tuple.first
+                restored = Main.update (GotSessionContext downgraded.sessionRequestEpoch (Just workspaceId) (Ok editorSession)) downgraded |> Tuple.first
+                late = case oldRequest of
+                    Just owned -> DataLoading.update (GotProjectCardDetail owned "display-project" (Ok (let value = Api.projectFromCardSummary (project "display-project" Nothing) in { value | description = Just "Forbidden old callback" }))) restored |> Tuple.first
+                    Nothing -> restored
+                captured = DataLoading.preserveCardDetailPresentation late
+                lateFocus = late.focus
+                resumed = { late | activeTab = ProjectsTab, focus = { lateFocus | focusedEntity = Just ( "project", "display-project" ) } } |> painted |> DataLoading.ensurePresentedCardDetails |> Tuple.first
+                current = Dict.get "display-project" resumed.dataLoading.projectCardDetailRequests
+                fresh = case current of
+                    Just owned -> Main.update (GotProjectCardDetail owned "display-project" (Ok (let value = Api.projectFromCardSummary (project "display-project" Nothing) in { value | description = Just "Fresh owner description" }))) resumed |> Tuple.first
+                    Nothing -> resumed
+            in
+            Expect.all
+                [ \_ -> Expect.equal pending.sessionRequestEpoch restored.sessionRequestEpoch
+                , \_ -> Expect.equal { entries = 0, requests = 0, physical = pending.dataLoading.cardDetailAdmissions, next = pending.dataLoading.nextCardDetailRequestId } { entries = Dict.size restored.dataLoading.cardDetailPresentations, requests = Dict.size restored.dataLoading.projectCardDetailRequests, physical = restored.dataLoading.cardDetailAdmissions, next = restored.dataLoading.nextCardDetailRequestId }
+                , \_ -> Expect.equal Nothing (DataLoading.cardDetailPresentation "project" "display-project" captured)
+                , \_ -> Expect.equal False (Dict.get "display-project" late.projects |> Maybe.andThen .description |> (==) (Just "Forbidden old callback"))
+                , \_ -> Expect.equal { newer = True, fresh = Just "Fresh owner description" }
+                    { newer = Maybe.map2 (\old new -> new.requestId > old.requestId) oldRequest current |> Maybe.withDefault False
+                    , fresh = Dict.get "display-project" fresh.projects |> Maybe.andThen .description }
+                ] ()
+        , test "description cache is bounded, omits oversized content intact and prunes departed demand" <| \_ ->
+            let
+                source = presentationSeed
+                loading = source.dataLoading
+                oversized = Dict.update "display-project" (Maybe.map (\value -> { value | description = Just (String.repeat (2 * 1024 * 1024) "x") })) source.projects
+                retained = DataLoading.preserveCardDetailPresentation { source | projects = oversized }
+                pruned = DataLoading.ensureVisibleCardDetails workspaceId source.sessionRequestEpoch loading.navigationGeneration Set.empty Set.empty retained |> Tuple.first
+            in
+            Expect.equal { huge = Nothing, small = Just (Just "Confirmed task description"), pruned = 0 }
+                { huge = DataLoading.cardDetailPresentation "project" "display-project" retained
+                , small = DataLoading.cardDetailPresentation "task" "display-task" retained |> Maybe.map .description
+                , pruned = Dict.size pruned.dataLoading.cardDetailPresentations }
+        , test "missing authority and canonical missing membership retire private descriptions" <| \_ ->
+            let
+                retained = DataLoading.preserveCardDetailPresentation presentationSeed
+                denied = { retained | sessionContext = Nothing }
+                missing = DataLoading.markMissingNavigationSummaries [ "display-project" ] [ "display-task" ] retained
+            in
+            Expect.equal ( Nothing, Nothing, 0 )
+                ( DataLoading.cardDetailPresentation "project" "display-project" denied
+                , DataLoading.cardDetailPresentation "task" "display-task" denied
+                , Dict.size missing.dataLoading.cardDetailPresentations )
+        , test "mounted snapshot entry count remains finite even for excessive demand" <| \_ ->
+            let
+                source = presentationSeed
+                loading = source.dataLoading
+                owned = Dict.get "display-project" loading.projectCardDetailRequests
+                ids = List.range 1 40 |> List.map (\index -> "bounded-" ++ String.fromInt index)
+                projects = List.foldl (\id values -> let value = Api.projectFromCardSummary (project id Nothing) in Dict.insert id { value | description = Just "Small confirmed description" } values) Dict.empty ids
+                requests = owned |> Maybe.map (\request -> List.foldl (\id values -> Dict.insert id request values) Dict.empty ids) |> Maybe.withDefault Dict.empty
+                captured = DataLoading.preserveCardDetailPresentation { source | projects = projects, dataLoading = { loading | projectCardDetailRequests = requests, taskCardDetailRequests = Dict.empty, visibleDetailDemand = Just ( Set.fromList ids, Set.empty ) } }
+            in
+            Expect.equal 32 (Dict.size captured.dataLoading.cardDetailPresentations)
+        , test "changed summaries cannot replace confirmed text with an unconfirmed empty description" <| \_ ->
+            let
+                retained = DataLoading.preserveCardDetailPresentation presentationSeed
+                changed = let value = project "display-project" Nothing in { value | updatedAt = "2026-02-01T00:00:00Z" }
+                recaptured = DataLoading.mergeNavigationSummaries [ changed ] [] retained |> DataLoading.preserveCardDetailPresentation
+            in
+            Expect.equal (Just (Just "Confirmed project description")) (DataLoading.cardDetailPresentation "project" "display-project" recaptured |> Maybe.map .description)
+        , test "fresh unknown eligibility stays unknown across a second resync and failures restore the warning" <| \_ ->
+            let
+                retained = DataLoading.preserveCardDetailPresentation presentationSeed
+                dependencies = retained.dependencies
+                unknown = Dict.update "display-task" (Maybe.map (\rollup -> { rollup | ownOpenDependencyCount = Nothing })) dependencies.taskReadinessRollups
+                pendingLoading = retained.dataLoading
+                confirmedUnknown = { retained | dependencies = { dependencies | taskReadinessRollups = unknown }, dataLoading = { pendingLoading | taskCardDetailRequests = Dict.map (\_ request -> { request | inFlight = True, succeeded = False }) pendingLoading.taskCardDetailRequests } } |> DataLoading.preserveCardDetailPresentation
+                reset = { confirmedUnknown | dependencies = Dependencies.resetCache dependencies } |> DataLoading.preserveCardDetailPresentation
+                knownAgain = { confirmedUnknown | dependencies = dependencies } |> DataLoading.preserveCardDetailPresentation
+                knownReset = { knownAgain | dependencies = Dependencies.resetCache dependencies } |> DataLoading.preserveCardDetailPresentation
+                loading = retained.dataLoading
+                socket = retained.webSocket
+                failed = { retained | dependencies = Dependencies.resetCache dependencies, webSocket = { socket | state = Types.Connecting }, dataLoading = { loading | navigationPasses = Dict.singleton "workspace_root" { refreshing = True, rootDemand = Nothing, projects = Dict.empty, tasks = Dict.empty, projectError = Nothing, taskError = Just "Navigation failed" } } }
+            in
+            Expect.all
+                [ \_ -> Expect.equal (Just False) (DataLoading.cardDetailPresentation "task" "display-task" reset |> Maybe.map .eligibilityKnown)
+                , \_ -> Expect.equal (Just True) (DataLoading.cardDetailPresentation "task" "display-task" knownReset |> Maybe.map .eligibilityKnown)
+                , \_ -> Cards.viewProjectsTree workspaceId failed |> Query.fromHtml |> Query.has [ Selector.text "Prerequisite eligibility is unavailable. Refresh to retry." ]
+                ] ()
+        , test "active description drafts remain intact during same-authority refresh" <| \_ ->
+            let
+                editing = Main.update (StartEdit "project" "display-project" "description" "Confirmed project description") presentationSeed |> Tuple.first |> Main.update (EditInput "Unsaved draft") |> Tuple.first
+                refreshed = editing |> DataLoading.preserveCardDetailPresentation |> DataLoading.invalidateNavigationRequests
+            in
+            Expect.all
+                [ \_ -> Expect.equal (Just "Unsaved draft") (Helpers.editingValue refreshed "display-project" "description")
+                , \_ -> Cards.viewProjectsTree workspaceId refreshed |> Query.fromHtml |> Query.has [ Selector.attribute (Attributes.value "Unsaved draft") ]
+                ] ()
+        ]
+
+
+mutationPresentationTest : Test
+mutationPresentationTest =
+    test "delayed unstamped acknowledgement requires fresh detail confirmation" <| \_ ->
+        let
+            source = presentationSeed
+            ( issued, _ ) = Helpers.beginProjectRequest source.selectedWorkspaceId source.sessionRequestEpoch "entity:project:display-project" (\_ -> Cmd.none) source
+            guard = { scopeKey = "workspace:" ++ workspaceId, targetKey = "entity:project:display-project", targetGeneration = 1, sessionEpoch = source.sessionRequestEpoch, routeWorkspace = source.selectedWorkspaceId, audienceId = editorSession.principal.actorId }
+            inactive = { issued | activeTab = SessionsTab }
+            reader = { editorSession | workspace = editorSession.workspace |> Maybe.map (\permission -> { permission | canEdit = False }) }
+            downgraded = Main.update (GotSessionContext inactive.sessionRequestEpoch (Just workspaceId) (Ok reader)) inactive |> Tuple.first
+            restored = Main.update (GotSessionContext downgraded.sessionRequestEpoch (Just workspaceId) (Ok editorSession)) downgraded |> Tuple.first
+            detail = let value = Api.projectFromCardSummary (project "display-project" Nothing) in { value | description = Just "Accepted unstamped acknowledgement" }
+            acknowledged = Mutations.update (ProjectUpdated guard (Ok { project = detail, pauseEffects = Nothing })) restored |> Tuple.first
+            loading = acknowledged.dataLoading
+            noSummary = { acknowledged | dataLoading = { loading | projectCardSummaries = Dict.empty } }
+            captured = DataLoading.preserveCardDetailPresentation noSummary
+            membership = DataLoading.mergeNavigationSummaries [ project "display-project" Nothing ] [] noSummary
+            focus = membership.focus
+            pending = { membership | activeTab = ProjectsTab, focus = { focus | focusedEntity = Just ( "project", "display-project" ) } } |> DataLoading.ensurePresentedCardDetails |> Tuple.first
+            confirmed = case Dict.get "display-project" pending.dataLoading.projectCardDetailRequests of
+                Just request -> Main.update (GotProjectCardDetail request "display-project" (Ok { detail | description = Just "Fresh detail confirmation" })) pending |> Tuple.first
+                Nothing -> pending
+        in
+        Expect.all
+            [ \_ -> Expect.equal { accepted = Just "Accepted unstamped acknowledgement", proof = Nothing, captured = Nothing, confirmed = Just "Fresh detail confirmation" }
+            { accepted = Dict.get "display-project" acknowledged.projects |> Maybe.andThen .description
+            , proof = Dict.get "display-project" acknowledged.dataLoading.projectCardDetailRequests |> Maybe.andThen .presentationOwner
+            , captured = DataLoading.cardDetailPresentation "project" "display-project" captured
+            , confirmed = Dict.get "display-project" confirmed.projects |> Maybe.andThen .description }
+            , \_ -> Cards.viewProjectsTree workspaceId { noSummary | activeTab = ProjectsTab, dataLoading = { loading | projectCardSummaries = Dict.empty, navigationVisibilityActive = False } } |> Query.fromHtml |> Query.hasNot [ Selector.text "Accepted unstamped acknowledgement" ]
+            ] ()
+
+
+presentationSeed : Model
+presentationSeed =
+    let
+        projectSummary = project "display-project" Nothing
+        taskSummary = let value = task "display-task" Nothing in { value | projectId = Nothing }
+        requested = loadRoot workspaceId [ projectSummary ] [ taskSummary ] model
+        projectDetail = let value = Api.projectFromCardSummary projectSummary in { value | description = Just "Confirmed project description" }
+        taskDetail = let value = Api.taskFromCardSummary taskSummary in { value | description = Just "Confirmed task description" }
+        hydrated = case ( Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests, Dict.get taskSummary.id requested.dataLoading.taskCardDetailRequests ) of
+            ( Just projectRequest, Just taskRequest ) -> requested |> paintUpdate (GotProjectCardDetail projectRequest projectSummary.id (Ok projectDetail)) |> Tuple.first |> paintUpdate (GotTaskCardDetail taskRequest taskSummary.id (Ok taskDetail)) |> Tuple.first
+            _ -> requested
+        loading = hydrated.dataLoading
+    in
+    { hydrated | dataLoading = { loading | visibleDetailDemand = Just ( Set.singleton projectSummary.id, Set.singleton taskSummary.id ) } }
 
 
 workspaceId : String

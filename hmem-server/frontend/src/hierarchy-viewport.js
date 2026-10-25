@@ -164,7 +164,7 @@ export function installHierarchyViewport(app, options = {}) {
       if (scroller.dataset?.searchViewportEditing !== 'true' && !pendingLayout.preserveScroll && currentTarget && (layoutScrollTop == null || scroller.scrollTop === layoutScrollTop)) {
         if (pendingLayout.target && rowFor(pendingLayout.target)) { /* Reveal below only if its header is outside the viewport. */ }
         else if (anchor) scroller.scrollTop = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + pendingLayout.delta
-        else scroller.scrollTop = origin() + Math.max(0, pendingLayout.top)
+        else scroller.scrollTop = Math.max(0, origin() + pendingLayout.top)
       }
       if (pendingLayout.target && currentTarget) {
         latestTargetAdmission = pendingLayoutTargetAdmission
@@ -200,7 +200,7 @@ export function installHierarchyViewport(app, options = {}) {
     const focused = doc.activeElement?.closest?.('[data-hierarchy-key]')
     const pins = focused && active.has(focused) ? [focused.dataset.hierarchyKey] : []
     const receipt = { workspace: stamp.workspace, epoch: stamp.epoch, generation: stamp.generation, revision: stamp.revision,
-      top: Math.max(0, scroller.scrollTop - origin()), height: scroller.clientHeight, measurements, pins,
+      top: scroller.scrollTop - origin(), height: scroller.clientHeight, measurements, pins,
       request: pendingTarget?.key || null, acknowledged }
     if (paintedPermit && paintLayout?.paintReady && visibleViewport(rows) && sameStamp(paintedPermit.stamp, stamp) && permitKey(paintLayout) === paintedPermit.key) {
       receipt.paintNonce = paintedPermit.nonce; receipt.paintFilter = paintedPermit.filter

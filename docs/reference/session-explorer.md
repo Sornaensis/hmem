@@ -45,6 +45,17 @@ and local fragments; raw HTML is not executed and images display their alt text.
   replace it. The dock exposes refresh through `aria-busy` without inserting a
   temporary row above the transcript. Transport byte payloads and their bounded
   range history are discarded on canonical refresh, not reused as metadata.
+- Mounted project/task descriptions retain a separate read-only refresh snapshot
+  for up to 32 demanded or pinned cards and 2 MiB of estimated UTF-16 key/content
+  storage plus fixed metadata. Oversized descriptions are omitted intact.
+  Confirmed empty descriptions remain empty; fresh details, errors and deletion
+  replace or retire the snapshot. Active editing drafts stay independent. Known
+  eligibility only suppresses a temporary body warning while canonical reads are
+  pending; disabled actions still require fresh readiness. Principal or workspace
+  permission changes retire display and logical detail proofs, including changes
+  that preserve the session epoch. Physical request occupancy remains unchanged.
+  Hierarchy restoration retains signed displacement above the hierarchy origin;
+  row lookups and native scrolling retain their independent nonnegative bounds.
 - The live presentation retains the latest 100 prose-bearing occurrences and
   latest 100 activity-only occurrences independently, each bounded to 2 MiB of
   original record bytes (combined 200/4 MiB), plus a 1 MiB incomplete-record carry.

@@ -16,6 +16,7 @@ module Feature.Editing exposing
     , viewCreateFormModal
     , viewEditableText
     , viewEditableTextarea
+    , viewMarkdownContent
     , viewImportanceSelect
     , viewInlineCreateInput
     , viewInlineCreateInputForParent

@@ -284,6 +284,8 @@ type alias DataLoadingModel =
     , projectCardDetailRequests : Dict String CardDetailRequest
     , taskCardDetailRequests : Dict String CardDetailRequest
     , nextCardDetailRequestId : Int
+    , cardDetailPresentationOwner : Maybe CardDetailPresentationOwner
+    , cardDetailPresentations : Dict String CardDetailPresentation
 
     -- The bounded navigation API is authoritative for which cached cards are
     -- currently visible. Entity dictionaries may also contain detail/focus
@@ -338,7 +340,19 @@ type alias CardDetailRequest =
     , expectedUpdatedAt : String
     , inFlight : Bool
     , succeeded : Bool
+    , presentationOwner : Maybe CardDetailPresentationOwner
     }
+
+
+{-| Display provenance includes permissions because a same-actor downgrade may
+preserve the session epoch. Logical request proofs retire on every transition.
+-}
+type alias CardDetailPresentationOwner =
+    { workspaceId : String, sessionEpoch : Int, session : Api.SessionContext }
+
+
+type alias CardDetailPresentation =
+    { description : Maybe String, eligibilityKnown : Bool }
 
 
 {-| A fresh membership pass is independent of the displayed cache. Each kind

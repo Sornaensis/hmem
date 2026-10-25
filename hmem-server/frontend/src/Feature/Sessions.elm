@@ -2,7 +2,6 @@ module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTa
 
 import Api
 import Browser.Navigation as Nav
-import ActorAttribution
 import SessionActivityLight
 import SessionTranscript as Transcript
 import Dict
@@ -113,7 +112,7 @@ reconcile ( model, command ) =
                 if cursor /= Nothing || filters.state /= "active" || not (List.member task taskIds) then accumulated else
                 case resource ws target model of
                     Just entry ->
-                        if entry.error /= Nothing then Dict.insert task {active=False,error=True,epoch=hintEpoch} accumulated else if entry.dirty /= entry.settled then accumulated else
+                        if entry.error /= Nothing then Dict.insert task {active=False,error=True,epoch=hintEpoch} accumulated else if not entry.proven then accumulated else
                         case entry.data of
                             Just (Delivery.SessionsPage page) -> Dict.insert task {active=not (List.isEmpty page.items),error=False,epoch=hintEpoch} accumulated
                             _ -> if entry.error /= Nothing then Dict.insert task {active=False,error=True,epoch=hintEpoch} accumulated else accumulated
@@ -142,7 +141,7 @@ reconcile ( model, command ) =
             case resource ws target model of
                 Just entry ->
                     if entry.error /= Nothing then Dict.insert (sectionIdentity target) {result=Err "Sessions could not be loaded.",epoch=hintEpoch,cursor=sectionCursor target} accumulatedPages
-                    else if entry.dirty /= entry.settled then accumulatedPages else
+                    else if not entry.proven then accumulatedPages else
                     case entry.data of
                         Just (Delivery.SessionsPage page) -> Dict.insert (sectionIdentity target) {result=Ok page,epoch=hintEpoch,cursor=sectionCursor target} accumulatedPages
                         _ -> accumulatedPages
@@ -170,7 +169,7 @@ reconcile ( model, command ) =
                 { withDownloads | generation = old.generation + 1, pending = False }
             else
                 withDownloads
-        metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen (\entry -> if entry.error == Nothing && entry.dirty == entry.settled then entry.data else Nothing) |> Maybe.andThen (\value -> case value of
+        metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen (\entry -> if entry.error == Nothing && entry.proven then entry.data else Nothing) |> Maybe.andThen (\value -> case value of
             Delivery.Metadata session -> Just session
             _ -> Nothing)) workspace selected |> Maybe.withDefault Nothing
         beforeArchive = case metadata of
@@ -356,7 +355,11 @@ receiveBridge value model =
     if kind == "archive-http" then receiveArchiveHttp value model
     else if kind == "heartbeat-status" && stamp == state.stamp then
         case Decode.decodeValue (Decode.field "statuses" (Decode.dict Decode.string)) value of
-            Ok statuses -> if Dict.size statuses <= 52 then ( {model | sessions = {state | heartbeats = statuses, today = field "today" Decode.string state.today}}, Cmd.none ) else (model,Cmd.none)
+            Ok statuses -> if Dict.size statuses <= 52 then
+                let crossed = Dict.toList statuses |> List.any (\(id,status) -> Dict.get id state.heartbeats |> Maybe.map ((/=) status) |> Maybe.withDefault False)
+                in ( {model | sessions = {state | heartbeats = statuses, today = field "today" Decode.string state.today}
+                    , sessionDelivery = if crossed && model.activeTab == SessionsTab && state.filters.freshness /= "" then state.workspace |> Maybe.map (\ws -> Delivery.invalidateLists ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery else model.sessionDelivery}, Cmd.none )
+                else (model,Cmd.none)
             Err _ -> (model,Cmd.none)
     else if kind == "save-capability" then
         ( {model | sessions = {state | saveCapability = Just (field "supported" Decode.bool False)}}, Cmd.none )
@@ -485,10 +488,15 @@ viewFacet workspace model kind =
 
 viewSessionTree : String -> Model -> List Api.AgentSession -> Html Msg
 viewSessionTree workspace model sessions =
+    sessionTree (sessionSummary workspace model) sessions
+
+
+sessionTree : (Api.AgentSession -> Html Msg) -> List Api.AgentSession -> Html Msg
+sessionTree card sessions =
     let ids = List.map .id sessions
         render visited session =
             li [class "session-tree-node"]
-                [ sessionSummary workspace model session
+                [ card session
                 , let children = List.filter (\child -> child.parentSessionId == Just session.id && not (List.member child.id visited)) sessions in
                   if List.isEmpty children then text "" else ul [class ("session-tree-children" ++ (if List.length visited >= 2 then " session-tree-flat" else ""))] (List.map (render (session.id :: visited)) children) ]
         roots = List.filter (\session -> session.parentSessionId |> Maybe.map (\parent -> not (List.member parent ids)) |> Maybe.withDefault True) sessions
@@ -502,15 +510,24 @@ sessionTitle session = Maybe.withDefault session.formatLabel session.title
 
 sessionSummary : String -> Model -> Api.AgentSession -> Html Msg
 sessionSummary workspace model session =
-    div [ class ("card clickable session-summary" ++ (if model.sessions.selected == Just session.id then " selected" else "") ++ (if session.state == Api.SessionActive then " is-active" else "")) ]
-        [ a [ href (sessionUrl workspace session.id ++ filterSuffix model.sessions.projectFilter model.sessions.taskFilter), class "session-summary-link" ]
-            [ if List.isEmpty session.ancestors then text "" else
-                let path = (if session.ancestorsTruncated then "Earlier ancestors omitted (16-level context limit) › " else "") ++ "Parent: " ++ String.join " › " (List.map (\ancestor -> Maybe.withDefault ancestor.formatLabel ancestor.title) session.ancestors)
-                in span [class "session-parent-context",Html.Attributes.title path] [text path]
-            , span [class "session-summary-heading"] [strong [Html.Attributes.title (sessionTitle session)] [text (sessionTitle session)], span [class "session-state-dot",attribute "aria-label" (if session.state == Api.SessionActive then "Active" else "Terminated")] []]
-            , viewSessionIdentity session
-            , span [class "card-meta"] [text (String.fromInt session.committedRecords ++ " records · " ++ (if session.state == Api.SessionTerminated then "Saved" else Dict.get session.id model.sessions.heartbeats |> Maybe.map (\status -> if status == "Fresh" then "Live" else if status == "Stale (30s)" then "Quiet" else "Active") |> Maybe.withDefault "Active"))]
-            , span [class "session-latest-activity"] [text "Last activity · ",time [attribute "datetime" session.lastSeenAt] [text (compactTimestamp model session.lastSeenAt)]] ] ]
+    compactSessionCard model session "session-summary" (a [href (sessionUrl workspace session.id ++ filterSuffix model.sessions.projectFilter model.sessions.taskFilter),class "session-summary-link"]) []
+
+
+compactSessionCard : Model -> Api.AgentSession -> String -> (List (Html Msg) -> Html Msg) -> List (Html Msg) -> Html Msg
+compactSessionCard model session extra link actions =
+    let
+        path = (if session.ancestorsTruncated then "Earlier ancestors omitted (16-level context limit) › " else "") ++ "Parent: " ++ String.join " › " (List.map (\ancestor -> Maybe.withDefault ancestor.formatLabel ancestor.title) session.ancestors)
+        active = session.state == Api.SessionActive
+    in
+    div [class ("card clickable session-card " ++ extra ++ (if model.sessions.selected == Just session.id then " selected" else "") ++ (if active then " is-active" else ""))]
+        (link
+            [span [class "session-summary-heading"]
+                [span [class "session-state-dot",attribute "aria-label" (if active then "Active" else "Terminated")] [],strong [Html.Attributes.title (sessionTitle session)] [text (sessionTitle session)]]
+            ,if List.isEmpty session.ancestors then text "" else span [class "session-parent-context",Html.Attributes.title path] [text path]
+            ,viewSessionIdentity session
+            ,span [class "session-latest-activity"]
+                [text "Last activity · ",time [attribute "datetime" (sessionActivity session)] [text (compactTimestamp model (sessionActivity session))]]
+            ] :: actions)
 
 
 viewSessionIdentity : Api.AgentSession -> Html Msg
@@ -518,15 +535,12 @@ viewSessionIdentity session =
     let
         runtime = session.runtimeIdentity |> Maybe.map (\identity -> String.join " · " (List.filterMap identityValue [Just identity.model,identity.provider,identity.reasoning])) |> Maybe.withDefault "Unknown"
         identityValue value = value |> Maybe.andThen (\content -> if content == "" then Nothing else Just content)
-        label = if session.state == Api.SessionActive then "Running model" else "Session model"
-        unknownCallerType = session.creator.actorType == Nothing && session.creator.actorLabel == Nothing && session.creator.botIdentity == Nothing
-        caller = if unknownCallerType then Maybe.withDefault "Unknown" session.creator.actorId else ActorAttribution.label session.creator
+        label = if session.state == Api.SessionActive then "Running agent" else "Session agent"
+        role = session.runtimeIdentity |> Maybe.andThen .role |> identityValue |> Maybe.withDefault "Unknown role"
     in
     span [class "session-identity"]
-        [span [class "session-runtime",Html.Attributes.title (label ++ ": " ++ runtime ++ (if session.runtimeIdentity == Nothing then ". No runtime declaration is available." else ". Explicit declaration; execution is not independently verified."))]
-            [span [class "session-identity-label"] [text (label ++ " · ")],span [class "session-runtime-value"] [text runtime],if session.runtimeIdentity == Nothing then text "" else span [class "session-runtime-source"] [text "Declared"]]
-        ,span [class "session-connection",Html.Attributes.title (caller ++ ". Original connection caller that created the session metadata; a later resuming manager does not replace this attribution.")]
-            [span [class "session-identity-label"] [text "Connected by · "],if unknownCallerType then text caller else ActorAttribution.viewInline session.creator]]
+        [span [class "session-runtime actor-attribution-kind",attribute "aria-label" (label ++ ": " ++ role ++ ". " ++ runtime),Html.Attributes.title (label ++ ": " ++ role ++ " · " ++ runtime)]
+            [span [class "session-runtime-value"] [text role]]]
 
 
 viewDetail : String -> Model -> String -> Html Msg
@@ -590,7 +604,7 @@ freshTaskPage : Bool -> String -> Model -> String -> Maybe Api.SessionPage
 freshTaskPage evidence workspace model task =
     case resource workspace (sectionTarget evidence model task) model of
         Just entry ->
-            if entry.error /= Nothing || entry.dirty /= entry.settled then Nothing else
+            if entry.error /= Nothing || not entry.proven then Nothing else
             case entry.data of
                 Just (Delivery.SessionsPage page) -> Just page
                 _ -> Nothing
@@ -610,12 +624,12 @@ viewTaskIcon workspace model task =
     let
         hint = Dict.get task model.sessions.taskHints
         count = hint |> Maybe.andThen (\value -> if value.error then Nothing else Just (if value.active then 1 else 0))
-        label = "Active Agent →" ++ (case hint of
+        label = (if count == Just 1 then "Active Agent →" else "Agent activity") ++ (case hint of
             Just current -> if current.error then " · activity unavailable" else if current.active then " · active sessions" ++ (if current.epoch /= model.sessionDelivery.listInvalidation then " · refreshing" else "") else if current.epoch /= model.sessionDelivery.listInvalidation then " · checking activity" else " · no active sessions"
             Nothing -> " · checking activity")
     in
     button [class ("btn btn-secondary btn-sm task-sessions-icon" ++ (if Maybe.withDefault 0 count > 0 then " has-active-sessions" else "")),disabled (count /= Just 1 && model.sessions.taskPanel /= Just task),attribute "aria-label" label,attribute "aria-expanded" (if model.sessions.taskPanel == Just task then "true" else "false"),Html.Attributes.title label,stopPropagationOn "click" (Decode.succeed (SessionsToggleDock task,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
-        [SessionActivityLight.view (count == Just 1) label,text "Active Agent →"]
+        [if count == Just 1 then SessionActivityLight.view True label else span [class "session-state-dot session-state-inactive",attribute "aria-hidden" "true"] [],if count == Just 1 then text "Active Agent →" else text ""]
 
 
 viewTaskPanel : String -> Model -> String -> Html Msg
@@ -637,7 +651,7 @@ viewTaskActive workspace model task =
     in
     aside [class "task-session-dock",attribute "aria-label" "Task active agents",attribute "aria-busy" (if fresh then "false" else "true"),stopPropagationOn "click" (Decode.succeed (NoOp,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
         [div [class "task-session-dock-header"] [strong [] [text "Active agents"],button [class "btn btn-secondary btn-sm",attribute "aria-label" "Close active agents",onClick (SessionsToggleDock task)] [text "✕"]]
-        ,div [class "task-session-picker"] (List.map (\session -> button [class ("btn btn-secondary task-session-choice" ++ (if model.sessions.selected == Just session.id then " selected" else "")),disabled (not fresh),attribute "aria-pressed" (if model.sessions.selected == Just session.id then "true" else "false"),onClick (SessionsSelectDock task session.id)] [SessionActivityLight.view True "Active",span [] [text (sessionTitle session)],span [class "card-meta"] [text ("Last activity · " ++ TimestampDisplay.lookup model.timestamps (sessionActivity session))]]) sessions)
+        ,div [class "task-session-picker"] [sessionTree (\session -> compactSessionCard model session "task-session-choice" (button [class "session-summary-link",disabled (not fresh),attribute "aria-pressed" (if model.sessions.selected == Just session.id then "true" else "false"),onClick (SessionsSelectDock task session.id)]) []) sessions]
         ,if page == Nothing || failed then p [attribute "role" (if failed then "alert" else "status")] [text (if failed then "Active sessions could not be loaded." else "Loading active sessions…"),if failed then button [class "btn btn-secondary btn-sm",onClick SessionsRetry] [text "Retry"] else text ""] else if List.isEmpty sessions then p [class "card-meta"] [text "No active sessions for this task."] else text ""
         ,div [class "sessions-pagination"] [if taskCursor model key /= Nothing then button [class "btn btn-sm",onClick (SessionsTaskPreviousPage key)] [text "Newer sessions"] else text "",page |> Maybe.andThen .nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsTaskNextPage key cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "")]
         ,model.sessions.selected |> Maybe.map (\id -> div [class "task-session-transcript"] [a [class "btn btn-sm",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"],viewRecords workspace model id]) |> Maybe.withDefault (text "")]
@@ -664,7 +678,7 @@ viewTaskSection evidence workspace model task =
         ,if evidence then viewArchive model task else text ""
         ,if page == Nothing then p [class "card-meta"] [text (if cachedError /= Nothing then "Sessions could not be loaded." else "Loading sessions…"),if cachedError /= Nothing then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""]
          else if List.isEmpty sessions then p [class "card-meta"] [text ("No " ++ String.toLower heading ++ " on this page.")]
-         else div [class "task-session-cards"] (List.map (\session -> div [class "card task-session-card"] [a [href (sessionUrl workspace session.id)] [strong [] [text (sessionTitle session)],viewSessionIdentity session,span [class "card-meta"] [text ("Last activity · " ++ TimestampDisplay.lookup model.timestamps (sessionActivity session))]],if evidence then viewSave model session else span [class "session-state-dot",attribute "aria-label" "Active"] []]) sessions)
+         else div [class "task-session-cards"] (List.map (\session -> compactSessionCard model session "task-session-card" (a [class "session-summary-link",href (sessionUrl workspace session.id)]) (if evidence then [viewSave model session] else [])) sessions)
         ,div [class "sessions-pagination"]
             [if taskCursor model key /= Nothing then button [class "btn btn-sm",onClick (SessionsTaskPreviousPage key)] [text "Newer sessions"] else text ""
             ,page |> Maybe.andThen .nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsTaskNextPage key cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "")]
@@ -683,8 +697,7 @@ viewRecords workspace model id =
     in
     section [class "session-viewer",attribute "aria-label" "Session transcript"]
         [div [class "sessions-toolbar"]
-            [h4 [] [text "Transcript"]
-            ,session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
+            [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
         ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "aria-label" "Bounded transcript records"]
             (List.map (\item -> let (key,node) = viewTranscriptItem model item in (state.stamp ++ ":" ++ key,node)) (Transcript.project state.rows))

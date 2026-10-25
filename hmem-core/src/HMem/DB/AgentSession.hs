@@ -80,6 +80,8 @@ createSession pool input = do
     found <- S.statement (input.workspaceId,input.id) (getStatement True)
     existing <- case found of
       Just row -> pure (Right (Just row))
+      Nothing | maybe False (not . runtimeDeclarationValid) input.initialRuntimeIdentity ->
+        pure $ problem SessionInvalidInput "A new runtime declaration requires the running agent role"
       Nothing -> do
         target <- S.statement (input.workspaceId,input.id,input.taskId) taskAssociationStatement
         case target of
@@ -128,6 +130,8 @@ setRuntimeIdentity pool workspace identifier input = do
       Just row
         | row.runtimeRevision == input.expectedRuntimeRevision ->
             if row.runtimeIdentity == input.runtimeIdentity then pure (Right row)
+            else if maybe False (not . runtimeDeclarationValid) input.runtimeIdentity
+              then pure $ problem SessionInvalidInput "A new runtime declaration requires the running agent role"
             else do
               updated <- S.statement (workspace,identifier,input.runtimeIdentity) $ St.Statement
                 "UPDATE sessions s SET runtime_identity=$3,runtime_revision=runtime_revision+1 WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s) || hmem_session_ancestor_context(s.id)"

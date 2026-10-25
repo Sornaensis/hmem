@@ -1473,6 +1473,7 @@ type Msg
     | SessionActivityTick Time.Posix
     | SessionActivityVisibility Bool
     | SessionActivityFetched Int (Result Http.Error Api.SessionActivityResponse)
+    | SessionActivityPush Encode.Value
     | SessionsTick Time.Posix
     | SessionsCancelSave
     | SessionsTaskNextPage String Api.SessionCursor

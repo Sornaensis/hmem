@@ -100,10 +100,14 @@ revision, newline status and any final byte count/SHA-256. Results keep immutabl
 from the caller or format. All new session results include `structuredContent`.
 
 `initial_runtime_identity` initializes NEW sessions only, for example
-`{"model":"actual-target-model"}`; `provider` and `reasoning` are optional known
-values. Model names contain 1–256 UTF-8 bytes; optional values contain 1–128.
+`{"model":"actual-target-model","role":"developer"}`; `provider` and `reasoning`
+are optional known values. New nonnull declarations require the running agent's
+actual role, independently of the caller. Model names contain 1–256 UTF-8 bytes;
+role and optional values contain 1–128.
 Values must be trimmed and nonblank. Omitted/null means unknown. Creation
 retries preserve and return canonical runtime, including after later switches.
+Legacy roleless declarations remain readable and resumable without a backfill;
+append, heartbeat, flush/stop and sealing continue to preserve their evidence.
 The accepted MCP identity still describes the caller, not necessarily the target.
 
 `session_set_runtime` requires `expected_runtime_revision` and an explicit
@@ -173,8 +177,8 @@ path; paths, credentials and raw errors never appear in receipts or HTTP metadat
 An existing active session is resumed only after its entire committed prefix
 matches the source. A second active follower for the same UUID is refused.
 
-Optional `initial_runtime_identity` describes the actual target model when a
-new session is created. Resume preserves canonical runtime even if its startup
+Optional `initial_runtime_identity` describes the actual target model and agent
+role when a new session is created. Resume preserves canonical runtime even if its startup
 declaration is older; it never reasserts that declaration after a model switch.
 Use `session_set_runtime` for existing-session declarations or changes. Uploader
 status reports the last acknowledged remote `runtime_identity` and

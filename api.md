@@ -38,7 +38,8 @@ file path or reads the caller's filesystem.
 
 | Method and path suffix | Request or query | Response |
 | --- | --- | --- |
-| POST `/sessions` | `id` (caller UUID), required `task_id`, `format_label` (1–128 UTF-8 bytes), `title` (1–80 UTF-8 bytes), optional `parent_session_id` | Empty active session and its initial task link, or identical create retry |
+| POST `/sessions` | `id` (caller UUID), required `task_id`, `format_label` (1–128 UTF-8 bytes), `title` (1–80 UTF-8 bytes), optional `parent_session_id` and `initial_runtime_identity` | Empty active session and its initial task link, or identical create retry |
+| PUT `/sessions/{sessionId}/runtime` | `expected_runtime_revision`, explicit nullable `runtime_identity` | Guarded active runtime declaration; separate from transcript revision |
 | GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness`/`project_id`/`task_id` | `items`, optional `next_cursor` |
 | GET `/sessions/filters` | `kind=projects` or `kind=tasks`, optional `project_id`, `after_id`, `selected_id`, `limit` | Active-session options, `next_id`, validated `selected` |
 | GET `/sessions/{sessionId}` | — | Canonical metadata, counters, state and final receipt when sealed |
@@ -173,8 +174,47 @@ Active means explicit session state, independently of freshness and planning
 status. Projects include all live descendant project/task links, including
 null-project subtasks; workspaces include unlinked sessions. Traversal stays
 server-side and cycle-safe. No transcript, descendants, counts or presentation
-state is stored or returned. Rendered-card clients poll about every ten seconds
-and refresh selected-workspace changes promptly under one coalesced probe.
+state is stored or returned. Clients establish a baseline when targets mount,
+become visible or reconnect, then coalesce probes on server activity hints.
+Selected-workspace durable invalidations remain canonical. For authorized
+unselected workspaces, the existing canonical socket emits
+`{type:"session_activity_changed",schema_version:1,workspace_id:"UUID"}` after
+current workspace-read authorization. These serialized workspace-only wakeups
+carry no boolean, entity details or transcript bytes and advance no resume
+cursor. Creation, termination, task links and hierarchy changes trigger them;
+append, heartbeat and runtime-only changes do not. Hints may be coalesced or
+lost on disconnect, so mount/reconnect/resync baselines remain required.
+
+Home uses `POST /api/v1/session-activity/ticket` when no canonical socket covers
+activity. It requires an authenticated current principal and cookie CSRF, without
+granting Global stream access. The existing `{ticket, expires_at}` response grants
+one use of `/api/v1/ws?ticket=...` within 60 seconds. This separate connection emits
+only activity/membership controls. Its first frame is
+`{type:"session_activity_ready",schema_version:1}` after registration; clients
+refresh their canonical activity baseline on ready, including reconnects. The
+connection expires at a fixed deadline of at most 5 minutes after ticket creation;
+output does not renew it. At expiry, `session_activity_expired` (schema version 1) requests a fresh activity
+ticket before the server closes the socket; it does not revoke user access.
+Close notification has a bounded one-second cleanup budget; the delivery deadline
+continues to reject hints during cleanup.
+The expiry worker belongs to the connection and is joined on exit. An expired
+peer that does not acknowledge Close retains its counted physical slot until the
+handler finishes; logical expiry never creates capacity for another socket.
+Pending tickets and live/reserved connections each have caps of 128 globally and
+8 per principal audience. Overflow returns 503 with
+`Retry-After: 1`. Disabled users are retired, and workspace hints recheck read
+permission immediately before each serialized send. There are no transcript
+records, snapshots, replay tokens or cursor checkpoints on this channel.
+Global workspace lifecycle records may omit `workspace_id`; only a canonical
+workspace entity UUID is used as the candidate for the same reader-authorized
+hint. A successful projection omits deleted targets, clearing activity to unknown;
+restoration can establish activity again without treating omission as inactivity.
+
+New nonnull session runtime declarations require `model` and the actual running
+agent's `role`; provider/reasoning are optional. Role is a trimmed nonblank string
+of at most 128 UTF-8 bytes, independent of the immutable connection caller.
+V046 preserves legacy roleless declarations and their append, heartbeat, resume
+and sealed-evidence lifecycle. No role is inferred or backfilled.
 
 ## Declared attribution
 

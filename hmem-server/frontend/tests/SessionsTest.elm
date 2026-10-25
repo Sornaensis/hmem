@@ -42,7 +42,7 @@ suite =
                 explicit=canonicalPage |> String.replace "\"state\":\"active\"" "\"state\":\"active\",\"runtime_identity\":{\"model\":\"Actual target\"},\"runtime_revision\":3"
                 known=Decode.decodeString Api.sessionPageDecoder explicit |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
             in
-            Expect.equal ((Just Nothing,Just 0),(Just (Just {model="Actual target",provider=Nothing,reasoning=Nothing}),Just 3,Just (Just "Sandbox Superadmin")))
+            Expect.equal ((Just Nothing,Just 0),(Just (Just {model="Actual target",provider=Nothing,reasoning=Nothing,role=Nothing}),Just 3,Just (Just "Sandbox Superadmin")))
                 ((Maybe.map .runtimeIdentity absent,Maybe.map .runtimeRevision absent),(Maybe.map .runtimeIdentity known,Maybe.map .runtimeRevision known,Maybe.map (.creator >> .actorLabel) known))
         , test "present malformed optional fields remain errors" <| \_ ->
             case Decode.decodeString Api.sessionPageDecoder (String.replace "\"state\":\"active\"" "\"state\":\"active\",\"final_bytes\":\"invalid\"" canonicalPage) of
@@ -166,7 +166,7 @@ suite =
                         reading = {entered | sessions={old | start=Just 0,offset=32,end=64,rows=[sampleRecord],pending=True,resetPending=False}}
                         resync = Sessions.reconcile ({reading | sessionDelivery=Delivery.invalidateWorkspace workspace reading.sessionDelivery},Cmd.none) |> Tuple.first
                         delivery = resync.sessionDelivery
-                        settled = {delivery | resources=Dict.update (Delivery.key workspace (Delivery.SessionMetadata sessionId)) (Maybe.map (\entry -> {entry | data=Just (Delivery.Metadata {metadata | committedBytes=128}),settled=entry.dirty})) delivery.resources}
+                        settled = {delivery | resources=Dict.update (Delivery.key workspace (Delivery.SessionMetadata sessionId)) (Maybe.map (\entry -> {entry | data=Just (Delivery.Metadata {metadata | committedBytes=128}),settled=entry.dirty,proven=True})) delivery.resources}
                         renewed = Sessions.reconcile ({resync | sessionDelivery=settled},Cmd.none) |> Tuple.first
                     in
                     Expect.equal (32,64,Nothing)
@@ -342,7 +342,7 @@ metadataPresentationTests =
         detailTarget = Delivery.SessionMetadata sessionId
         windowTarget = Delivery.SessionWindow sessionId 0 32 False
         legacyTarget = Delivery.SessionBytes sessionId 0 False
-        entry target value = {workspace=workspace,target=target,dirty=0,settled=0,data=Just value,ranges=[],error=Nothing}
+        entry target value = {workspace=workspace,target=target,dirty=0,settled=0,data=Just value,ranges=[],error=Nothing,proven=True}
         ready session =
             let initial=Delivery.init
                 range={session=session,offset=0,nextOffset=3,dataBase64="e30K",hasMore=True}
@@ -352,7 +352,24 @@ metadataPresentationTests =
         payload target state = Dict.get (Delivery.key workspace target) state.resources |> Maybe.andThen .data
         requestFor target requests = List.filter (.target >> (==) target) requests |> List.head
     in
-    [ test "canonical refresh retains bounded metadata display but clears bytes and waits for fresh read authority" <| withMetadata (\session ->
+    [ test "continuous output admits a canonical read prefix while retaining newer refresh demand" <| withMetadata (\session ->
+        let
+            initial=Delivery.demand workspace windowTarget Delivery.init
+            (busy,requests)=Delivery.admit workspace initial
+            dirty=List.foldl (\_ -> Delivery.invalidateSession workspace sessionId) busy (List.range 1 100)
+            settled=requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata session)) dirty) |> Maybe.withDefault dirty
+            (_,next)=Delivery.admit workspace settled
+            detail=Dict.get (Delivery.key workspace detailTarget) settled.resources
+        in Expect.equal (True,Just True,Just True)
+            (List.any (.target >> (==) windowTarget) next,Maybe.map .proven detail,Maybe.map (\currentEntry -> currentEntry.dirty /= currentEntry.settled) detail))
+    , test "prefix admission cannot regress sealed state, transcript revision or runtime revision" <| withMetadata (\session ->
+        let
+            sealed={session | state=Api.SessionTerminated,runtimeRevision=2}
+            (busy,requests)=Delivery.invalidateSession workspace sessionId (ready sealed) |> Delivery.admit workspace
+            dirty=Delivery.invalidateSession workspace sessionId busy
+            settled=requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata session)) dirty) |> Maybe.withDefault dirty
+        in Expect.equal (Just (Delivery.Metadata sealed),Just Nothing) (payload detailTarget settled,Dict.get (Delivery.key workspace detailTarget) settled.resources |> Maybe.map .error))
+    , test "canonical refresh retains bounded metadata display but clears bytes and waits for fresh read authority" <| withMetadata (\session ->
         let refreshed=Delivery.invalidateWorkspace workspace (ready session)
             (_,requests)=Delivery.admit workspace refreshed
             global=Delivery.invalidateAll (ready session)
@@ -371,7 +388,7 @@ metadataPresentationTests =
         in Expect.equal (Just (Delivery.Metadata session),Just Nothing,1)
             (payload detailTarget completed,Dict.get (Delivery.key workspace detailTarget) completed.resources |> Maybe.map .error,Dict.size completed.physical))
     , test "fresh empty membership and cleared runtime replace old presentation instead of falling back" <| withMetadata (\session ->
-        let initial={session | runtimeIdentity=Just {model="Previous runtime",provider=Nothing,reasoning=Nothing}}
+        let initial={session | runtimeIdentity=Just {model="Previous runtime",provider=Nothing,reasoning=Nothing,role=Nothing}}
             (busy,requests)=Delivery.invalidateWorkspace workspace (ready initial) |> Delivery.admit workspace
             changed={session | state=Api.SessionTerminated,runtimeIdentity=Nothing,runtimeRevision=1}
             settled=List.foldl (\request current -> if request.target==detailTarget then Delivery.settle request.id True (Ok (Delivery.Metadata changed)) current else if request.target==listTarget then Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) current else current) busy requests
@@ -413,10 +430,10 @@ dockTests =
     [ test "invalidated membership cannot admit a new viewer or manually select a stale card" <| \_ ->
         let
             initial = dockFixture
-            stale = {initial | sessionDelivery=Delivery.invalidateLists workspace initial.sessionDelivery}
+            stale = {initial | sessionDelivery=Delivery.invalidateWorkspace workspace initial.sessionDelivery}
             opened = Sessions.update (SessionsToggleDock "one") stale |> Sessions.reconcile |> Tuple.first
             admitted = Sessions.update (SessionsToggleDock "one") initial |> Sessions.reconcile |> Tuple.first
-            refreshed = {admitted | sessionDelivery=Delivery.invalidateLists workspace admitted.sessionDelivery}
+            refreshed = {admitted | sessionDelivery=Delivery.invalidateWorkspace workspace admitted.sessionDelivery}
             attempted = Sessions.update (SessionsSelectDock "one" "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") refreshed |> Sessions.reconcile |> Tuple.first
             metadataDemand current = List.any (\(_,target) -> case target of
                 Delivery.SessionMetadata _ -> True

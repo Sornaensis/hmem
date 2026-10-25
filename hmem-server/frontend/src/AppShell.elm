@@ -48,6 +48,7 @@ type AppShellOwnedMsg
     = SelectWorkspaceMsg String
     | SwitchTabMsg WorkspaceTab
     | RetryMembershipAuthorizationMsg
+    | RefreshSessionAuthorityMsg
     | SessionContextLoadedMsg Int (Maybe String) (Result Http.Error Api.SessionContext)
     | AuthUnauthorizedMsg
     | AuthTokenChangedMsg Bool
@@ -157,6 +158,14 @@ prepareOwned ownedMsg model =
 handleOwnedRaw : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
 handleOwnedRaw ownedMsg model =
     case ownedMsg of
+        RefreshSessionAuthorityMsg ->
+            let
+                expectedWorkspace = currentSessionWorkspace model
+                cleared = clearSessionScopedState {model | auth={status=AuthBooting,mode=model.auth.mode},sessionContext=Nothing}
+                prepared = {cleared | sessionRequestEpoch=model.sessionRequestEpoch+1,dataLoading=Feature.DataLoading.prepareForPageLoad model.page cleared.dataLoading}
+            in
+            (prepared,Cmd.batch [disconnectWebSocket (),Api.fetchSessionContext model.flags.apiUrl expectedWorkspace (GotSessionContext prepared.sessionRequestEpoch expectedWorkspace)])
+
         RetryMembershipAuthorizationMsg ->
             case ( model.workspaceAdmin.authorizationFailure, model.selectedWorkspaceId, model.page ) of
                 ( Just workspaceId, Just selectedId, WorkspacePage pageId ) ->

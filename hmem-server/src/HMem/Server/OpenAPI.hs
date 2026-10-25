@@ -220,14 +220,14 @@ instance ToSchema AgentSession.RuntimeIdentity where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy
     pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
-      & description ?~ "Explicit declaration about the target session model, not connection caller attribution or independently observed execution. Model alone is sufficient; provider and reasoning are optional.")
+      & description ?~ "Explicit running-agent role and model, separate from connection caller attribution. New nonnull declarations require role and model; legacy stored declarations may lack role. Provider and reasoning are optional.")
 instance ToSchema AgentSession.SetRuntimeIdentity where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy
     NamedSchema _ runtimeSchema <- declareNamedSchema (Proxy @AgentSession.RuntimeIdentity)
     pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
       & required .~ ["expected_runtime_revision","runtime_identity"]
-      & properties . at "runtime_identity" ?~ Inline (runtimeSchema & nullable ?~ True)
+      & properties . at "runtime_identity" ?~ Inline (runtimeSchema & required .~ ["model","role"] & nullable ?~ True)
       & description ?~ "Active-session runtime declaration CAS, separate from the transcript revision. Explicit null clears it to unknown. Does not update activity or transcript bytes.")
 instance ToSchema AgentSession.SessionAncestor where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema AgentSession.SessionFacet where declareNamedSchema = genericDeclareNamedSchema opts
@@ -241,7 +241,7 @@ instance ToSchema SessionWire.CreateSessionRequest where
     NamedSchema _ runtimeSchema <- declareNamedSchema (Proxy @AgentSession.RuntimeIdentity)
     pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
       & description ?~ "Create a new session and its required task_id association atomically. The same-workspace task must be in_progress. Identical existing-session retries preserve canonical metadata and links without revalidating task status."
-      & properties . at "initial_runtime_identity" ?~ Inline (runtimeSchema & nullable ?~ True))
+      & properties . at "initial_runtime_identity" ?~ Inline (runtimeSchema & required .~ ["model","role"] & nullable ?~ True))
 instance ToSchema SessionWire.AppendSessionRequest where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy

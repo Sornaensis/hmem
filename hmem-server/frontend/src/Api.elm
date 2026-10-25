@@ -2495,6 +2495,7 @@ type CanonicalFrame
     = CanonicalChange CanonicalEnvelope
     | CanonicalCheckpoint String
     | CanonicalAccessGranted String
+    | CanonicalSessionActivityChanged String
     | CanonicalAccessRevoked (Maybe String)
     | CanonicalResyncRequired
     | CanonicalScoped ChangeStreamScope CanonicalFrame
@@ -2763,6 +2764,9 @@ canonicalWireFrameDecoder =
                                 "access_granted" ->
                                     D.map CanonicalAccessGranted (D.field "workspace_id" nonEmptyStringDecoder)
 
+                                "session_activity_changed" ->
+                                    D.map CanonicalSessionActivityChanged (D.field "workspace_id" activityWorkspaceDecoder)
+
                                 "access_revoked" ->
                                     D.map CanonicalAccessRevoked (optionalNonEmptyField "workspace_id")
 
@@ -2773,6 +2777,15 @@ canonicalWireFrameDecoder =
                                     D.fail "unknown change-stream frame"
                         )
             )
+
+
+activityWorkspaceDecoder : Decoder String
+activityWorkspaceDecoder =
+    D.string |> D.andThen (\value ->
+        case String.split "-" value of
+            [a,b,c,d,e] ->
+                if List.map String.length [a,b,c,d,e] == [8,4,4,4,12] && List.all (String.all (\ch -> String.contains (String.fromChar ch) "0123456789abcdef")) [a,b,c,d,e] then D.succeed value else D.fail "invalid activity workspace"
+            _ -> D.fail "invalid activity workspace")
 
 
 canonicalTransportDecoder : Decoder CanonicalFrame
@@ -4404,7 +4417,7 @@ type alias AgentSession =
 
 
 type alias SessionRuntimeIdentity =
-    { model : String, provider : Maybe String, reasoning : Maybe String }
+    { model : String, provider : Maybe String, reasoning : Maybe String, role : Maybe String }
 
 
 type alias SessionAncestor =
@@ -4471,7 +4484,7 @@ agentSessionDecoder =
         |> optional "parent_session_id" (D.nullable D.string) Nothing
         |> optional "ancestors" (D.list (D.map5 SessionAncestor (D.field "id" D.string) (nullableSessionField "title" D.string) (D.field "format_label" D.string) (D.field "state" D.string) (nullableSessionField "parent_session_id" D.string))) []
         |> optional "ancestors_truncated" D.bool False
-        |> optional "runtime_identity" (D.nullable (D.map3 SessionRuntimeIdentity (D.field "model" D.string) (nullableSessionField "provider" D.string) (nullableSessionField "reasoning" D.string))) Nothing
+        |> optional "runtime_identity" (D.nullable (D.map4 SessionRuntimeIdentity (D.field "model" D.string) (nullableSessionField "provider" D.string) (nullableSessionField "reasoning" D.string) (nullableSessionField "role" D.string))) Nothing
         |> optional "runtime_revision" (D.int |> D.andThen (\revision -> if revision >= 0 then D.succeed revision else D.fail "Invalid runtime revision")) 0
 
 

@@ -216,8 +216,8 @@ spec = do
       updater <- either (fail . T.unpack) pure (mkBotIdentity "Manager" "codex:another-connection-model:low")
       let actor = EffectiveActor ActorBot "connector" "Connector" (Just caller)
           manager = EffectiveActor ActorBot "manager" "Manager" (Just updater)
-          first = RuntimeIdentity "actual-model-a" Nothing Nothing
-          second = RuntimeIdentity "actual-model-b" (Just "Known provider") (Just "high")
+          first = RuntimeIdentity "actual-model-a" Nothing Nothing (Just "developer")
+          second = RuntimeIdentity "actual-model-b" (Just "Known provider") (Just "high") (Just "reviewer")
           input = CreateSession identifier workspace.id "jsonl" "Separate runtime identity" Nothing (Just first) initial.id
           body = "{\"text\":\"original bytes\"}\r\n"
           stable row = ((row.creatorActorType,row.creatorActorId,row.creatorActorLabel,row.creatorBotIdentity),
@@ -257,7 +257,7 @@ spec = do
 
     it "serializes competing runtime changes with append and sealing without sharing transcript revisions" $ \env -> do
       (workspace,row) <- fresh env
-      let a=RuntimeIdentity "Model A" Nothing Nothing; b=RuntimeIdentity "Model B" Nothing Nothing
+      let a=RuntimeIdentity "Model A" Nothing Nothing (Just "developer"); b=RuntimeIdentity "Model B" Nothing Nothing (Just "developer")
       bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \firstPool ->
         bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \secondPool ->
           bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \probePool -> do
@@ -304,6 +304,58 @@ spec = do
         final.finalSha256 `shouldBe` Just (sessionSha256 body)
         final.revision `shouldBe` 2
 
+    it "requires a runtime role prospectively while preserving populated roleless lifecycle and evidence" $ \_ ->
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir=sandbox.sandboxRoot </> "before-v046"
+              upgradeDir=sandbox.sandboxRoot </> "only-v046"
+              filename="V046__session_runtime_roles.sql"
+              env=TestEnv pool sandbox db
+              legacy=RuntimeIdentity "Legacy runtime" Nothing Nothing Nothing
+              declared=legacy {role=Just "developer"}
+              body="{\"message\":\"legacy bytes\"}\r\n"
+          createDirectory beforeDir
+          createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V046" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
+          workspace <- createTestWorkspace env "legacy-role-upgrade"
+          task <- makeTask env workspace.id "Legacy running agent"
+          activeId <- UUID.nextRandom
+          sealedId <- UUID.nextRandom
+          forM_ [activeId,sealedId] $ \identifier ->
+            execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,runtime_identity) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Legacy agent role','{\"model\":\"Legacy runtime\"}'); INSERT INTO task_sessions(workspace_id,task_id,session_id) VALUES ('"<>uuid workspace.id<>"','"<>uuid task.id<>"','"<>uuid identifier<>"')")
+          Just activeBefore <- getSession pool workspace.id activeId
+          Just sealedEmpty <- getSession pool workspace.id sealedId
+          sealedBefore <- terminateSession pool workspace.id sealedId (receipt sealedEmpty "")
+          execute env "CREATE TABLE role_upgrade_audit_expected AS SELECT count(*) AS n FROM audit_log"
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [filename])
+          getSession pool workspace.id activeId `shouldReturn` Just activeBefore
+          getSession pool workspace.id sealedId `shouldReturn` Just sealedBefore
+          boolean env "SELECT (SELECT count(*) FROM audit_log)=(SELECT n FROM role_upgrade_audit_expected)" `shouldReturn` True
+          execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+          createSession pool (CreateSession activeId workspace.id "jsonl" "Legacy agent role" Nothing (Just legacy) task.id) `shouldReturn` activeBefore
+          setRuntimeIdentity pool workspace.id activeId (SetRuntimeIdentity 0 (Just legacy)) `shouldReturn` activeBefore
+          appended <- (.session) <$> append env workspace.id activeBefore body False
+          beat <- heartbeatSession pool workspace.id activeId
+          beat.runtimeIdentity `shouldBe` Just legacy
+          rejected <- UUID.nextRandom
+          expectCode SessionInvalidInput $ createSession pool (CreateSession rejected workspace.id "jsonl" "Missing runtime role" Nothing (Just legacy) task.id)
+          expectCode SessionInvalidInput $ setRuntimeIdentity pool workspace.id activeId (SetRuntimeIdentity 0 (Just (legacy {model="Other"})))
+          rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,runtime_identity) VALUES ('"<>uuid rejected<>"','"<>uuid workspace.id<>"','jsonl','Missing runtime role','{\"model\":\"Other\"}')")
+          forM_ ["null","\"\"","\" developer \"","123","\""<>B8.replicate 129 'x'<>"\""] $ \roleValue ->
+            rejectDb $ execute env ("UPDATE sessions SET runtime_identity='{\"model\":\"Other\",\"role\":"<>roleValue<>"}',runtime_revision=runtime_revision+1 WHERE id='"<>uuid activeId<>"'")
+          updated <- setRuntimeIdentity pool workspace.id activeId (SetRuntimeIdentity 0 (Just declared))
+          updated.runtimeIdentity `shouldBe` Just declared
+          (updated.committedBytes,updated.revision,updated.lastSeenAt) `shouldBe` (appended.committedBytes,beat.revision,beat.lastSeenAt)
+          sealed <- terminateSession pool workspace.id activeId (receipt updated body)
+          allBytes env workspace.id activeId `shouldReturn` body
+          sealed.runtimeIdentity `shouldBe` Just declared
+          expectCode SessionTerminated $ setRuntimeIdentity pool workspace.id sealedId (SetRuntimeIdentity 0 (Just declared))
+          createSession pool (CreateSession sealedId workspace.id "jsonl" "Legacy agent role" Nothing (Just declared) task.id) `shouldReturn` sealedBefore
+
     it "upgrades populated V043 runtime to unknown without altering caller, active bytes or sealed receipts" $ \_ ->
       withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
         bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
@@ -338,8 +390,11 @@ spec = do
           upgraded.failed `shouldBe` Nothing
           upgraded.applied `shouldBe` [filename]
           boolean env "SELECT NOT EXISTS(SELECT 1 FROM sessions s JOIN runtime_legacy_expected e USING(id) WHERE (to_jsonb(s)-ARRAY['runtime_identity','runtime_revision']) IS DISTINCT FROM e.value OR s.runtime_identity IS NOT NULL OR s.runtime_revision<>0) AND (SELECT count(*) FROM audit_log)=(SELECT n FROM runtime_legacy_audit_expected)" `shouldReturn` True
+          -- Continue the lifecycle against the current prospective contracts;
+          -- the preservation assertion above still isolates the V044 upgrade.
+          Migration.runMigrations pool source >>= (\result -> result.failed `shouldBe` Nothing)
           Just original <- getSession pool workspace.id activeId
-          let declaration=RuntimeIdentity "Known actual runtime" Nothing Nothing
+          let declaration=RuntimeIdentity "Known actual runtime" Nothing Nothing (Just "developer")
           resumed <- withEffectiveActorContext (Just actor) $ createSession pool (CreateSession activeId workspace.id "jsonl" "Legacy runtime capture" Nothing (Just declaration) workspace.id)
           resumed `shouldBe` original
           resumed.runtimeIdentity `shouldBe` Nothing

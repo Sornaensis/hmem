@@ -39,8 +39,12 @@ and local fragments; raw HTML is not executed and images display their alt text.
   stay paused until retry or invalidation. Workspace/authority epochs clear caches.
   Same-authority canonical refresh retains the last admitted metadata pages in
   that bounded cache, so lists, linked tasks and model labels do not flash to
-  loading placeholders or move the transcript. Dirty metadata is display-only:
-  byte reads and new dock selections still require fresh successful authority.
+  loading placeholders or move the transcript. Ordinary output refresh can admit a
+  monotonic canonical metadata prefix while newer demand remains outstanding, so
+  a busy producer cannot starve initial lists, links or byte reads. Membership
+  changes, canonical resync and authority transitions retire this read proof;
+  pre-retirement callbacks cannot restore it. Mutations keep their independent
+  fresh-authority checks.
   Current errors clear the stale payload; successful empty or changed results
   replace it. The dock exposes refresh through `aria-busy` without inserting a
   temporary row above the transcript. Transport byte payloads and their bounded
@@ -82,15 +86,11 @@ Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.
 The active-state and Live/Quiet activity predicates apply before pagination; Live
 is the default. Saved sessions remain reachable through task Evidence links.
-Runtime labels use the separate nullable `runtime_identity` declaration; they
-never infer a model from creator attribution, transcript format or content.
-`Connected by` retains the original `creator_*` attribution, including after a
-different manager resumes capture. Both labels keep complete values available
-through selectable text/tooltips, with compact card presentation. Saved sessions
-say `Session model` rather than implying current execution. Ordinary session
-metadata invalidation refreshes declarations; identity updates do not invalidate
-active hierarchy membership or change heartbeat freshness. Event times and list
-activity use the bounded local timestamp cache; the browser-local day decides
+Runtime labels show the explicit `runtime_identity.role`, with complete model,
+provider and reasoning values in accessible tooltips. Legacy roleless metadata
+shows `Unknown role`; creator attribution is retained in storage and hidden from
+these views. Runtime changes refresh these labels without changing heartbeat
+freshness. Event times and list activity use the bounded local timestamp cache; the browser-local day decides
 whether to omit the date. Linked-task cards show two items initially, then one
 bounded page on expansion.
 
@@ -112,8 +112,11 @@ retrieval interface independently of the browser explorer.
 
 
 Task-card sections use compact responsive grids. Active activity is `lastSeenAt`;
-Evidence uses `terminatedAt`, falling back to `lastSeenAt`. Declared creator role
-and model identity remain complete and selectable.
+Evidence uses `terminatedAt`, falling back to `lastSeenAt`. Runtime role badges and
+the same compact card renderer are shared with the Sessions tree and task dock.
+An open dock grows the task card to about 1.4 times its normal maximum width,
+clamped to the viewport, and stacks on narrow screens. The transcript stays inside
+the card.
 
 Evidence **Download all** requests one authenticated task-scoped binary response.
 The server walks all linked terminated sessions in pages of 50 independently of
@@ -161,12 +164,31 @@ The client probes rendered workspace/project cards and expanded sidebar workspac
 entries, deduplicates grouped
 workspaces, and fairly rotates batches under one physical request. Retired
 requests retain their occupancy until the exact callback; authority, visibility
-and target generations reject stale replies. Idle probes refresh about every ten
-seconds; selected-workspace session/link and hierarchy events or reconnects
-request a coalesced refresh, at most once a second for already loaded targets.
-Unselected workspace cards converge through polling without broadening global
-change events or snapshots. Hidden pages and unmounted cards do not poll.
+and target generations reject stale replies. Activity HTTP probes follow server hints, with initial/mount/visibility/reconnect
+baselines and one-second coalescing for loaded targets. There is no periodic
+activity polling. Membership-affecting session/link/hierarchy events wake the
+selected workspace. Authorized `session_activity_changed` controls contain only
+a workspace UUID and wake rendered targets in other workspaces; ordinary
+append/heartbeat/runtime changes do not trigger activity probes. Hints never
+advance a canonical cursor or prove that a target is inactive.
 
+Readers without a covering canonical socket use one separate control-only
+subscription. `POST /api/v1/session-activity/ticket` applies normal authentication
+and cookie CSRF, returning a one-use, 60-second ticket for the existing WebSocket
+URL. This capability grants no global canonical scope, snapshot or resume token.
+The server registers the client before `session_activity_ready`; that frame
+forces another baseline to cover the initial HTTP-to-subscribe gap.
+The five-minute delivery capability expires with `session_activity_expired` and a
+Close frame. The server stops hints; a cooperative client reconnects with a new
+ticket and readiness baseline. A peer that does not complete Close retains its
+physical slot until the handler exits.
+Ticket and live-client registries each cap at 128 globally and eight per principal.
+Each hint rechecks workspace read access; own membership controls refresh session
+and catalogue authority. The client bounds ticket and ready/handshake phases to
+15 seconds, retains the physical fetch admission through its callback, and uses
+one retry timer with capped backoff. Hiding, leaving or changing identity retires
+the subscription and rejects late callbacks. Unknown controls close the channel.
+Global change permissions, envelopes and snapshots remain unchanged.
 The Projects **Has Active Session** filter is evaluated in server navigation
 queries, including unloaded descendants and ancestor retention. It combines with
 status, priority, query, show-only and empty-project predicates. Canonical

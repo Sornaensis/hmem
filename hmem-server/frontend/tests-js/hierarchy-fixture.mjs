@@ -91,7 +91,7 @@ const socketScript = () => {
   const sockets = []
   class FixtureSocket {
     static OPEN = 1; static CONNECTING = 0; static CLOSED = 3
-    constructor(url) { this.url = url; this.readyState = 0; sockets.push(this); setTimeout(() => { this.readyState = 1; this.onopen?.({ type: 'open' }); setTimeout(() => this.emit({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'browser-ready' }), 0) }, 0) }
+    constructor(url) { this.url = url; this.readyState = 0; sockets.push(this); setTimeout(() => { this.readyState = 1; this.onopen?.({ type: 'open' }); setTimeout(() => this.emit(new URL(this.url).searchParams.get('ticket')==='70000000-0000-4000-8000-000000000001'?{schema_version:1,type:'session_activity_ready'}:{ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'browser-ready' }), 0) }, 0) }
     send() {}
     close() { this.readyState = 3; this.onclose?.({ code: 1000, reason: 'fixture' }) }
     addEventListener(type, fn) { this['on' + type] = fn }
@@ -102,6 +102,8 @@ const socketScript = () => {
   // Explicit raw frames allow tests to observe a non-live phase before a later
   // checkpoint. The established helpers below retain their automatic checkpoint.
   window.pushHierarchyRawFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1)) for (const frame of frames) socket.emit(frame) }
+  window.closeActivityStream = () => { for (const socket of sockets.filter(s => s.readyState === 1 && new URL(s.url).searchParams.get('ticket') === '70000000-0000-4000-8000-000000000001')) socket.close() }
+  window.pushActivityFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1 && new URL(s.url).searchParams.get('ticket') === '70000000-0000-4000-8000-000000000001')) for (const frame of frames) socket.emit(frame) }
   window.pushHierarchyGlobalFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1 && new URL(s.url).searchParams.get('ticket') === 'global-ticket')) { for (const frame of frames) socket.emit(frame); socket.emit({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'global-refresh' }) } }
   window.pushHierarchyFrames = frames => { for (const socket of sockets.filter(s => s.readyState === 1)) { for (const frame of frames) socket.emit(frame); socket.emit({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'browser-next' }) } }
   const NativeObserver = window.ResizeObserver
@@ -175,6 +177,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           value={workspaces:workspaces.filter(id=>fixtures.some(value=>value.workspace.id===id&&!value.workspace.deleted_at)).map(id=>({id,active:false})),projects:projects.filter(id=>projectScope?.projects.some(row=>row.id===id&&!row.deleted_at)).map(id=>({id,active:false}))}
         }
         else if (path === '/api/v1/change-stream/resync') { const body = request.postDataJSON(); assert.equal(body.scope.workspace_id, fixture.workspace.id); value = { snapshot_profile: 'workspace_shell_v1', items: workspaceShellSnapshotItems(fixture), has_more: false, resume_token: 'browser-shell' } }
+        else if (path === '/api/v1/session-activity/ticket') value = {ticket:'70000000-0000-4000-8000-000000000001',expires_at:'2099-01-01T00:00:00Z'}
         else if (path === '/api/v1/change-stream/ticket') value = { ticket: 'browser-ticket', expires_at: '2099-01-01T00:00:00Z' }
         else if (path === '/api/v1/workspaces') value = { items: fixtures.map(value => value.workspace), has_more: false }
         else if (path === '/api/v1/workspaces/' + fixture.workspace.id) value = fixture.workspace

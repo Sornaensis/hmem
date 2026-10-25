@@ -4814,6 +4814,29 @@ textarea.observation-edit-content {
 .task-session-transcript > a { margin:.5rem 0; }
 .task-session-dock .session-records { height:440px; min-height:180px; max-height:65vh; }
 .task-session-dock .sessions-toolbar { align-items:flex-start; flex-wrap:wrap; }
+
+/* A dock uses the available extra width while ordinary cards keep their measure. */
+.hierarchy-viewport:has(.task-card-with-dock) { max-width:109.2rem; }
+.hierarchy-viewport:has(.task-card-with-dock) .hierarchy-row > .card:not(.task-card-with-dock) { max-width:78rem; }
+.task-card-with-dock { grid-template-columns:minmax(0,1fr) minmax(360px,1.3fr); }
+.session-card { padding:0; min-width:0; background:var(--bg-surface); transition:border-color .15s; }
+.session-card:hover,.session-card.selected { border-color:var(--accent); }
+.session-card .session-summary-link { display:flex; flex-direction:column; align-items:stretch; gap:.35rem!important; width:100%; min-width:0; box-sizing:border-box; padding:.6rem .7rem!important; text-align:left; font:inherit; color:inherit; background:transparent; border:0; border-radius:inherit; text-decoration:none; cursor:pointer; }
+.session-card .session-summary-heading { justify-content:flex-start; gap:.5rem; }
+.session-card .session-summary-heading strong { font-size:.8rem; }
+.session-card .session-identity { text-align:left; align-self:stretch; }
+.session-card .session-latest-activity { margin-top:.15rem; font-size:.68rem; color:var(--text-muted); }
+.session-card .session-parent-context { font-size:.62rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.session-runtime.actor-attribution-kind { display:inline-flex; align-self:flex-start; max-width:100%; background:var(--bg-elevated,var(--bg-surface)); color:var(--text-muted); font-size:.68rem; font-weight:500; padding:.1rem .4rem; border-radius:4px; box-sizing:border-box; }
+.session-runtime-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.task-session-card .session-download { margin:0 .6rem .5rem; }
+.task-session-picker { display:block; max-height:270px; overflow:auto; }
+.task-session-picker > .session-summaries { display:block; width:100%; }
+.task-session-choice { display:block; width:300px; max-width:100%; padding:0; margin-bottom:.4rem; }
+.task-session-choice .session-summary-link:disabled { opacity:.7; cursor:default; }
+.task-sessions-icon:not(.has-active-sessions) { border-color:transparent; padding:.35rem; opacity:1; }
+.task-sessions-icon .session-state-inactive { background:var(--text-muted); opacity:.5; }
+.session-viewer > .sessions-toolbar { margin-bottom:.35rem; }
 @media (max-width:1000px) {
     .task-card-with-dock { display:block; }
     .task-session-dock { border-left:0; border-top:1px solid var(--border); padding:1rem 0 0; margin-top:.75rem; }

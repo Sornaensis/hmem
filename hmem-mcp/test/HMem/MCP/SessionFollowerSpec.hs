@@ -105,8 +105,8 @@ spec = describe "Session follower" $ do
   it "preserves canonical runtime switches and unknown clearing through stale-start declarations and continuing capture" $
     withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withRegistry fast $ \registry -> do
       sid <- UUID.nextRandom
-      let a=Core.RuntimeIdentity "Target runtime A" Nothing Nothing
-          b=Core.RuntimeIdentity "Target runtime B" Nothing (Just "high")
+      let a=Core.RuntimeIdentity "Target runtime A" Nothing Nothing (Just "developer")
+          b=Core.RuntimeIdentity "Target runtime B" Nothing (Just "high") (Just "reviewer")
           upload=payload <$> handleUploadTool registry manager base Nothing identity "session_upload_start"
             (object ["workspace_id" .= wid,"session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a,"task_id" .= wid])
       _ <- upload
@@ -143,6 +143,8 @@ spec = describe "Session follower" $ do
     withManager $ \manager -> withRegistry fast $ \registry -> do
       let [definition]=[value | value <- uploadToolDefinitions,field "name" value==Just (String "session_upload_start")]
       nested ["inputSchema","required"] definition `shouldBe` Just (toJSON (["session_id","path","format_label","title","task_id"] :: [Text]))
+      definition `shouldSatisfy` contains "Actual running agent role"
+      definition `shouldSatisfy` contains "\"model\",\"role\""
       result <- handleUploadTool registry manager "http://unused.invalid" Nothing identity "session_upload_start"
         (object ["workspace_id" .= workspace,"session_id" .= workspace,"path" .= ("source.jsonl" :: Text),"format_label" .= ("jsonl" :: Text)])
       nested ["error","code"] (payload result) `shouldBe` Just (String "invalid_arguments")

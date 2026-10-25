@@ -107,6 +107,9 @@ route msg model =
         SessionActivityTick _ -> Ok (Feature.SessionActivity.update msg model)
         SessionActivityVisibility _ -> Ok (Feature.SessionActivity.update msg model)
         SessionActivityFetched _ _ -> Ok (Feature.SessionActivity.update msg model)
+        SessionActivityPush value ->
+            if Feature.SessionActivity.authorityRefresh value model then Err (HandleInAppShell AppShell.RefreshSessionAuthorityMsg)
+            else Ok (Feature.SessionActivity.update msg model)
         SessionsTick _ -> Ok (Feature.Sessions.update msg model)
         SessionsCancelSave -> Ok (Feature.Sessions.update msg model)
         SessionsTaskNextPage _ _ -> Ok (Feature.Sessions.update msg model)

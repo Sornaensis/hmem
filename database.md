@@ -391,3 +391,8 @@ creation check. The existing task-link guard holds its task lock through commit.
 Historical orphans are retained; later task completion/deletion and session
 append/heartbeat/sealing remain independent. The guard and migration ledger
 commit atomically. See the [schema reference](docs/reference/schema.md#initial-session-task-v045).
+
+V046 adds an optional stored runtime `role` (1–128 trimmed UTF-8 bytes) and a
+prospective guard requiring it on new nonnull runtime declarations. Existing
+roleless values and evidence are preserved; unrelated lifecycle writes and
+resume remain valid. See the [schema reference](docs/reference/schema.md#session-runtime-roles-v046).

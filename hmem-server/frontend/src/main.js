@@ -7,6 +7,7 @@ import { installObservationViewport } from './observation-viewport.js'
 import { installObservationPreferences } from './observation-preferences.js'
 import { installTimestampDisplay } from './timestamp-display.js'
 import { installSessionBridge } from './session-save.js'
+import { createSessionActivityStream } from './session-activity-stream.js'
 import { Elm } from './Main.elm'
 import { installNativeDialog } from './native-dialog.js'
 
@@ -584,9 +585,26 @@ const canonicalStreams = createChangeStreamManager({
   onFrame: function (scope, workspaceId, frame) {
     let parsedFrame = null
     try { parsedFrame = JSON.parse(frame) } catch (_) { /* Elm fails closed below. */ }
-    canonicalFrameBatcher.queue(scope, workspaceId, parsedFrame)
+    if(parsedFrame?.schema_version===1&&parsedFrame.type==='session_activity_changed') {
+      // This authorized hint is outside canonical event/checkpoint delivery.
+      // Do not flush or leave an unfinished canonical batch waiting on it.
+      app.ports.wsMessage.send(JSON.stringify({transport:'frame',schema_version:1,scope:scope==='global'?{scope:'global'}:{scope:'workspace',workspace_id:workspaceId},frame:parsedFrame}))
+    }else canonicalFrameBatcher.queue(scope, workspaceId, parsedFrame)
   }
 })
+
+const activityStream=createSessionActivityStream({
+  wsUrl:new URL(wsUrl,apiUrl).toString(),
+  async fetchTicket({signal}) {
+    const generation=authTokenGeneration,signature=authTokenSignature()
+    const response=await fetch(apiResourceUrl('/api/v1/session-activity/ticket'),{method:'POST',credentials:'include',headers:{...authHeaderObject(),...csrfHeaderObject()},signal})
+    if(response.status===401&&generation===authTokenGeneration&&signature===authTokenSignature())notifyUnauthorized()
+    return response
+  },
+  onFrame(value){app.ports.sessionActivityStreamEvent.send(value)}
+})
+app.ports.sessionActivityStreamCommand.subscribe(config=>activityStream.configure(config?.owner))
+window.addEventListener('pagehide',()=>activityStream.close())
 
 app.ports.connectWebSocket.subscribe(function (config) {
   if (!config || (config.scope !== 'global' && (!config.workspaceId || config.scope !== 'workspace'))) return

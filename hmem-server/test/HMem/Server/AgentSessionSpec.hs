@@ -83,13 +83,14 @@ spec = describe "Agent session HTTP" $ do
       let env=ctx.localEnv; app=ctx.localApplication
           declared=object ["role" .= ("Connector" :: Text),"model-id" .= ("codex:connection-model:high" :: Text)]
           headers=[("X-HMem-Bot-Identity",LBS.toStrict (encode declared))]
-          a=Core.RuntimeIdentity "actual-target-a" Nothing Nothing
-          b=Core.RuntimeIdentity "actual-target-b" (Just "Provider") Nothing
+          a=Core.RuntimeIdentity "actual-target-a" Nothing Nothing (Just "developer")
+          b=Core.RuntimeIdentity "actual-target-b" (Just "Provider") Nothing (Just "reviewer")
       workspace <- createTestWorkspace env "http-runtime"
       initial <- makeTask env workspace.id
       identifier <- UUID.nextRandom
       let root=sessions workspace.id; target=root<>"/"<>uuid identifier
           input=CreateSessionRequest identifier "jsonl" "Separate model identities" Nothing (Just a) initial.id
+      post app root headers (toJSON (input {initialRuntimeIdentity=Just (a {Core.role=Nothing})})) >>= status status400
       created <- post app root headers (toJSON input) >>= decoded @Core.AgentSession
       created.runtimeIdentity `shouldBe` Just a
       field ["creator_bot_identity","model-id"] (toJSON created) `shouldBe` Just (String "codex:connection-model:high")
@@ -98,6 +99,7 @@ spec = describe "Agent session HTTP" $ do
       changed.revision `shouldBe` 0
       changed.lastSeenAt `shouldBe` created.lastSeenAt
       changed.creatorBotIdentity `shouldBe` created.creatorBotIdentity
+      call app methodPut (target<>"/runtime") headers (encode (Core.SetRuntimeIdentity 1 (Just (b {Core.role=Nothing})))) >>= status status400
       post app root headers (toJSON input) >>= decoded @Core.AgentSession >>= (\row -> row.runtimeIdentity `shouldBe` Just b)
       conflict <- call app methodPut (target<>"/runtime") headers (encode (Core.SetRuntimeIdentity 0 (Just a)))
       simpleStatus conflict `shouldBe` status409
@@ -516,6 +518,8 @@ spec = describe "Agent session HTTP" $ do
         field (base<>["nullable"]) document `shouldBe` Just (Bool True)
         field (base<>["allOf"]) document `shouldBe` Nothing
       field ["components","schemas","SetRuntimeIdentity","required"] document `shouldBe` Just (toJSON (["expected_runtime_revision","runtime_identity"] :: [Text]))
+      forM_ [("SetRuntimeIdentity","runtime_identity"),("CreateSessionRequest","initial_runtime_identity")] $ \(schema,property) ->
+        field ["components","schemas",schema,"properties",property,"required"] document `shouldBe` Just (toJSON (["model","role"] :: [Text]))
       field ["components","schemas","CreateSessionRequest","required"] document `shouldBe` Just (toJSON (["id","format_label","title","task_id"] :: [Text]))
 
 sessions :: UUID -> BS.ByteString

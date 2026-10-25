@@ -158,6 +158,14 @@ in the `X-CSRF-Token` header. If you customize the server's CSRF names, match th
 with frontend `csrfCookieName` and `csrfHeaderName`. Keep `cors.allowed_origins`
 restricted to trusted frontend origins; leave it empty for same-origin hosting.
 
+The Home activity socket uses a separate authenticated, CSRF-protected
+`POST /api/v1/session-activity/ticket`. Its short-lived one-use ticket permits
+metadata controls only and does not grant the canonical Global stream. Each
+workspace hint checks current read access; a disabled user loses delivery.
+`session_activity_expired` retires only that fixed activity capability and asks
+the browser to obtain another ticket; it does not revoke the user's access.
+See [activity connection limits and recovery](api.md#session-activity-projection).
+
 An explicit bearer token takes precedence over a session cookie, even if the
 token is invalid. Remove an old bearer token before relying on cookie login.
 For browser bearer fallback, return tokens in URL fragments, never query strings.

@@ -40,11 +40,11 @@ type Payload
 
 type alias Resource =
     { workspace : String, target : Target, dirty : Int, settled : Int
-    , data : Maybe Payload, ranges : List Api.SessionRange, error : Maybe String }
+    , data : Maybe Payload, ranges : List Api.SessionRange, error : Maybe String, proven : Bool }
 
 
 type alias Request =
-    { id : Int, key : String, workspace : String, target : Target, dirty : Int }
+    { id : Int, key : String, workspace : String, target : Target, dirty : Int, retirement : Int }
 
 
 type alias State =
@@ -138,7 +138,7 @@ demandOne workspace target state =
         Nothing ->
             if Dict.size state.resources >= 16 then { state | admissionError = Just "demand_limit" }
             else { state | version = version, admissionError = Nothing, order = state.order ++ [identity]
-                , resources = Dict.insert identity (Resource workspace target version 0 Nothing [] Nothing) state.resources }
+                , resources = Dict.insert identity (Resource workspace target version 0 Nothing [] Nothing False) state.resources }
 
 
 removeDemand : String -> Target -> State -> State
@@ -171,16 +171,17 @@ invalidateWorkspace : String -> State -> State
 invalidateWorkspace workspace =
     invalidate (\resource -> resource.workspace == workspace)
         >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource ->
-            if resource.workspace == workspace then { resource | data = retainedMetadata resource.data, ranges = [] } else resource) state.resources })
+            if resource.workspace == workspace then { resource | data = retainedMetadata resource.data, ranges = [], proven = False } else resource) state.resources })
 
 
 invalidateAll : State -> State
 invalidateAll =
-    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource -> { resource | data = retainedMetadata resource.data, ranges = [] }) state.resources })
+    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource -> { resource | data = retainedMetadata resource.data, ranges = [], proven = False }) state.resources })
 
 
 -- Same-authority refresh keeps the last admitted presentation in this existing
--- bounded cache. Dirty metadata is not authority for a paired byte request.
+-- bounded cache. Resync retires its read proof; ordinary output invalidations
+-- retain the admitted canonical prefix while a newer refresh is outstanding.
 retainedMetadata : Maybe Payload -> Maybe Payload
 retainedMetadata value =
     case value of
@@ -195,7 +196,7 @@ invalidateSession : String -> String -> State -> State
 invalidateSession workspace id =
     invalidate (\resource -> resource.workspace == workspace && (case resource.target of
         SessionMetadata actual -> actual == id
-        SessionTasks actual _ -> actual == id
+        SessionTasks _ _ -> False
         WorkspaceSessions _ -> True
         WorkspaceSessionsFiltered _ _ -> True
         ScopedSessions _ _ _ _ -> True
@@ -251,13 +252,13 @@ admit workspace state =
         occupied identity = Dict.values state.physical |> List.any (\request -> request.key == identity)
         metadataReady resource = case pairedId resource.target of
             Just id -> Dict.get (key workspace (SessionMetadata id)) state.resources
-                |> Maybe.map (\detail -> detail.dirty == detail.settled && detail.error == Nothing && detail.data /= Nothing) |> Maybe.withDefault False
+                |> Maybe.map (\detail -> detail.proven && detail.error == Nothing && detail.data /= Nothing) |> Maybe.withDefault False
             Nothing -> True
         ready = state.order |> List.filterMap (\identity -> Dict.get identity state.resources |> Maybe.map (Tuple.pair identity)) |> List.filter (\( identity, resource ) ->
             resource.workspace == workspace && resource.dirty /= resource.settled && resource.error == Nothing && not (occupied identity) && metadataReady resource)
         selected = List.take (max 0 (2 - Dict.size state.physical)) ready
         add ( identity, resource ) ( current, requests ) =
-            let request = Request current.nextId identity workspace resource.target resource.dirty in
+            let request = Request current.nextId identity workspace resource.target resource.dirty current.retirement in
             ( { current | nextId = current.nextId + 1, physical = Dict.insert request.id request current.physical, order = List.filter ((/=) identity) current.order ++ [identity] }, requests ++ [request] )
     in
     List.foldl add ( state, [] ) selected
@@ -272,15 +273,36 @@ settle id authorized result state =
             case Dict.get request.key state.resources of
                 Nothing -> released
                 Just resource ->
-                    if not authorized || resource.dirty /= request.dirty then released
+                    if not authorized || request.retirement /= state.retirement || resource.target /= request.target then released
+                    else if resource.dirty /= request.dirty && (case result of
+                        Ok (Metadata _) -> False
+                        Ok (SessionsPage _) -> False
+                        Ok (TasksPage _) -> False
+                        Ok (FacetsPage _) -> False
+                        _ -> True) then released
                     else case result of
                         Err _ ->
-                            { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "refresh_failed" } released.resources }
+                            { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "refresh_failed", proven = False } released.resources }
                         Ok payload ->
                             if not (valid request payload) then
-                                { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "invalid_response" } released.resources }
+                                { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "invalid_response", proven = False } released.resources }
+                            else if not (monotonic resource.data payload) then released
                             else
                                 apply request resource payload released
+
+
+-- One physical metadata read per key plus these monotonic guards prevents an
+-- older canonical prefix from reopening a sealed session or rewinding bytes.
+monotonic : Maybe Payload -> Payload -> Bool
+monotonic previous incoming =
+    case (previous,incoming) of
+        (Just (Metadata old),Metadata next) ->
+            next.committedBytes >= old.committedBytes && next.revision >= old.revision
+                && next.runtimeRevision >= old.runtimeRevision
+                && (old.state /= Api.SessionTerminated || next.state == Api.SessionTerminated)
+        (Just (SessionsPage old),SessionsPage next) ->
+            List.all (\session -> old.items |> List.filter (.id >> (==) session.id) |> List.head |> Maybe.map (\prior -> monotonic (Just (Metadata prior)) (Metadata session)) |> Maybe.withDefault True) next.items
+        _ -> True
 
 
 valid : Request -> Payload -> Bool
@@ -342,7 +364,7 @@ base64ByteLength encoded =
 apply : Request -> Resource -> Payload -> State -> State
 apply request resource payload state =
     let
-        cached = { resource | data = Just payload, settled = request.dirty, error = Nothing }
+        cached = { resource | data = Just payload, settled = request.dirty, error = Nothing, proven = True }
         updated = { state | resources = Dict.insert request.key cached state.resources }
     in
     case payload of

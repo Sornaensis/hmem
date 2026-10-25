@@ -13,7 +13,25 @@ import Types exposing (..)
 import Url
 
 suite = describe "bounded activity probes"
-    [ test "ordinary catalogue members converge beyond fifty targets without duplicate group probes" <| \_ ->
+    [ test "an omitted projected workspace replaces confirmed activity with unknown rather than false" <| \_ ->
+        let
+            first=pump home
+            rows=first.sessionActivity.pending |> Maybe.map (.keys >> List.map (String.dropLeft 10 >> (\id -> (id,True))) >> Dict.fromList) |> Maybe.withDefault Dict.empty
+            positive=Activity.update (SessionActivityFetched 1 (Ok {workspaces=rows,projects=Dict.empty})) first |> Activity.reconcile first |> Tuple.first |> finish
+            timed=Activity.update (SessionActivityTick (Time.millisToPosix 1001)) positive |> Activity.reconcile positive |> Tuple.first
+            pending=Activity.invalidateWorkspace "w1" timed |> pump
+            missing=Activity.update (SessionActivityFetched 3 (Ok {workspaces=Dict.empty,projects=Dict.empty})) pending |> Activity.reconcile pending |> Tuple.first
+        in Expect.equal {positive=True,missing=Just Nothing,green=False}
+            {positive=Activity.active "workspace:w1" positive,missing=Dict.get "workspace:w1" missing.sessionActivity.cache |> Maybe.map .active,green=Activity.active "workspace:w1" missing}
+    , test "control-only readiness forces a post-registration baseline and old owners cannot invalidate it" <| \_ ->
+        let
+            settled=finish (finish (pump home))
+            timed=Activity.update (SessionActivityTick (Time.millisToPosix 1001)) settled |> Activity.reconcile settled |> Tuple.first
+            event stamp=SessionActivityPush (Encode.object [("owner",Encode.string stamp),("frame",Encode.object [("schema_version",Encode.int 1),("type",Encode.string "session_activity_ready")])])
+            stale=Activity.update (event "retired") timed |> Activity.reconcile timed |> Tuple.first
+            ready=Activity.update (event timed.sessionActivity.owner) stale |> Activity.reconcile stale |> Tuple.first
+        in Expect.equal (Nothing,Just 3) (stale.sessionActivity.pending |> Maybe.map .id,ready.sessionActivity.pending |> Maybe.map .id)
+    , test "ordinary catalogue members converge beyond fifty targets without duplicate group probes" <| \_ ->
         let
             first=pump home
             one=finish first
@@ -53,14 +71,14 @@ suite = describe "bounded activity probes"
             state=home.sessionActivity
             hidden=pump {home | sessionActivity={state | visible=Activity.initialVisibility (Encode.object [("documentVisible",Encode.bool False)])}}
         in Expect.equal (Nothing,[],True) (hidden.sessionActivity.pending,hidden.sessionActivity.order,Activity.initialVisibility (Encode.object []))
-    , test "ten-second polling and invalidations coalesce into one physical probe" <| \_ ->
+    , test "time never polls settled activity and push invalidations coalesce into one physical probe" <| \_ ->
         let
             settled=finish (finish (pump home))
             early=Activity.update (SessionActivityTick (Time.millisToPosix 9999)) settled |> Activity.reconcile settled |> Tuple.first
-            due=Activity.update (SessionActivityTick (Time.millisToPosix 10000)) early |> Activity.reconcile early |> Tuple.first
-            state=due.sessionActivity
-            repeated=List.foldl (\_ model -> pump {model | sessionActivity={state | version=state.version+1}}) due (List.range 1 20)
-        in Expect.equal (Nothing,Just 3,4) (early.sessionActivity.pending |> Maybe.map .id,repeated.sessionActivity.pending |> Maybe.map .id,repeated.sessionActivity.nextId)
+            due=Activity.update (SessionActivityTick (Time.millisToPosix 100000)) early |> Activity.reconcile early |> Tuple.first
+            hinted=Activity.invalidateWorkspace "w1" due |> pump
+            repeated=List.foldl (\_ model -> Activity.invalidateWorkspace "w1" model |> pump) hinted (List.range 1 20)
+        in Expect.equal ((Nothing,Nothing),(Just 3,4)) ((early.sessionActivity.pending |> Maybe.map .id,due.sessionActivity.pending |> Maybe.map .id),(repeated.sessionActivity.pending |> Maybe.map .id,repeated.sessionActivity.nextId))
     , test "failed and omitted results remain unknown and do not retry before cadence" <| \_ ->
         let
             first=pump home

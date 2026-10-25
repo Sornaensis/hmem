@@ -7,7 +7,7 @@ import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 const until=async(fn)=>{const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,25))}throw new Error('Explorer did not converge')}
 
 test('active filters, linked task focus, encrypted thinking and local-day timestamps form a compact transcript',{timeout:45000},async()=>{
- const h=await openSessionExplorer({activeCount:2,linkedCount:3,encrypted:true,timezoneId:'Europe/Copenhagen',eventTimes:['2026-10-24T22:01:00Z','2026-10-24T22:01:00Z','2026-10-24T21:59:00Z']})
+ const h=await openSessionExplorer({activeCount:2,linkedCount:3,encrypted:true,runtime:{model:'Actual runtime',role:'Developer'},timezoneId:'Europe/Copenhagen',eventTimes:['2026-10-24T22:01:00Z','2026-10-24T22:01:00Z','2026-10-24T21:59:00Z']})
  const {page}=h
  try{
   await page.clock.setFixedTime(new Date('2026-10-24T22:05:00Z'))
@@ -30,7 +30,7 @@ test('active filters, linked task focus, encrypted thinking and local-day timest
   await until(async()=>await page.locator('.session-event-time').first().innerText()==='00:01')
   assert.equal(await page.locator('.session-event-time').nth(1).innerText(),'2026-10-24 23:59')
   const identityText=await page.locator('.session-viewer .session-identity').innerText()
-  assert.ok(identityText.includes('codex:gpt-6.1-sol:high'),identityText)
+  assert.ok(identityText.includes('Developer'),identityText)
   const latest=page.locator('.session-latest-activity time')
   assert.equal(await latest.getAttribute('datetime'),h.active.last_seen_at)
   assert.notEqual(h.active.created_at,h.active.last_seen_at)
@@ -177,17 +177,17 @@ test('zero-byte evidence completes when writer acquisition outlives card collaps
 test('conversation flow preserves declared identity and wraps long model names without inventing missing metadata', {timeout:60000},async()=>{
  const cases=[{creator:{creator_actor_type:'bot',creator_bot_identity:{role:'Developer','model-id':'declared-harness:actual-model:high'}},width:1440},{creator:{creator_actor_type:'bot',creator_bot_identity:{role:'Reviewer','model-id':'declared-harness:'+ 'long-model-name-'.repeat(12)+':high'}},width:430},{creator:null,width:430}]
  for(const scenario of cases){
-  const h=await openSessionExplorer({creator:scenario.creator});const {page}=h
+  const h=await openSessionExplorer({creator:scenario.creator,runtime:scenario.creator?{model:scenario.creator.creator_bot_identity['model-id'],role:scenario.creator.creator_bot_identity.role}:null});const {page}=h
   try{
    await page.setViewportSize({width:scenario.width,height:1000});await h.start();await h.idle()
    await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor()
    const selected=page.locator('.session-summary a').filter({hasText:'Codex'})
    if(scenario.creator){assert.match(await selected.locator('.session-identity').innerText(),new RegExp(scenario.creator.creator_bot_identity.role));assert.ok(await selected.locator('.actor-attribution-kind').evaluate(el=>el.getBoundingClientRect().height<24),'Model badge stays on one line')}
-   else assert.match(await selected.locator('.session-connection').innerText(),/Unknown/)
+   else assert.match(await selected.locator('.session-runtime-value').innerText(),/Unknown role/)
    await selected.click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
    const identity=page.locator('.session-viewer .session-identity')
-   if(scenario.creator){const declared=scenario.creator.creator_bot_identity;assert.ok((await identity.innerText()).includes(declared['model-id']));assert.ok((await identity.innerText()).includes(declared.role));assert.equal(await identity.evaluate(el=>getComputedStyle(el).userSelect),'text')}
-   else assert.match(await identity.locator('.session-connection').innerText(),/Unknown/)
+   if(scenario.creator){const declared=scenario.creator.creator_bot_identity;assert.ok((await identity.locator('.session-runtime').getAttribute('title')).includes(declared['model-id']));assert.ok((await identity.innerText()).includes(declared.role));assert.equal(await identity.evaluate(el=>getComputedStyle(el).userSelect),'text')}
+   else assert.match(await identity.locator('.session-runtime-value').innerText(),/Unknown role/)
    const user=page.locator('.session-role-user:not(.session-record-activity)').first(),assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
    assert.notEqual(await user.evaluate(el=>getComputedStyle(el).borderRadius),'0px')
    assert.equal(await assistant.evaluate(el=>getComputedStyle(el).borderTopWidth),'0px')
@@ -201,7 +201,7 @@ test('conversation flow preserves declared identity and wraps long model names w
     const taskCard=page.locator('#entity-'+h.fixture.tasks[0].id);await taskCard.locator('.btn-extras-toggle').click();await h.idle()
     await taskCard.locator('.task-sessions-icon').click();await taskCard.locator('.task-session-evidence summary').click();await taskCard.locator('.session-viewer .session-identity').waitFor()
     assert.equal(await taskCard.locator('.task-session-card .session-identity,.task-session-dock .session-viewer .session-identity').count(),2)
-    for(const label of await taskCard.locator('.task-session-card .session-identity,.task-session-dock .session-viewer .session-identity').allTextContents())assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
+    for(const label of await taskCard.locator('.task-session-card .session-runtime,.task-session-dock .session-viewer .session-runtime').evaluateAll(nodes=>nodes.map(node=>node.title)))assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
    }
    assert.deepEqual(h.errors,[])
   }finally{await h.close()}

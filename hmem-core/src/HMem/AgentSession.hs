@@ -1,7 +1,7 @@
 -- | Provider-neutral metadata and byte-oriented agent session inputs.
 module HMem.AgentSession
   ( SessionState(..), SessionFreshness(..), SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..)
-  , AppendSession(..), TerminateSession(..), SessionAppendResult(..), RuntimeIdentity(..), SetRuntimeIdentity(..), runtimeIdentityValid
+  , AppendSession(..), TerminateSession(..), SessionAppendResult(..), RuntimeIdentity(..), SetRuntimeIdentity(..), runtimeIdentityValid, runtimeDeclarationValid
   , SessionPageCursor(..), SessionPage(..), SessionTask(..), SessionTaskPage(..), SessionAncestor(..), SessionFacet(..), SessionFacetPage(..)
   , SessionRange(..), SessionException(..), SessionErrorCode(..)
   , maxSessionChunkBytes, maxSessionRecordBytes, maxSessionRangeBytes, maxSessionPageSize
@@ -47,21 +47,25 @@ defaultSessionFilter :: SessionFilter
 defaultSessionFilter = SessionFilter Nothing Nothing Nothing Nothing
 
 -- | A declaration about the target session, never the connecting actor.
--- A model name alone is useful; missing provider/reasoning are not invented.
+-- Legacy declarations may have no role; new declarations identify the running
+-- agent's role independently of the immutable connection caller.
 data RuntimeIdentity = RuntimeIdentity
-  { model :: !Text, provider :: !(Maybe Text), reasoning :: !(Maybe Text)
+  { model :: !Text, provider :: !(Maybe Text), reasoning :: !(Maybe Text), role :: !(Maybe Text)
   } deriving stock (Show, Eq, Generic)
 instance ToJSON RuntimeIdentity where toJSON = genericToJSON jsonOptions
 instance FromJSON RuntimeIdentity where
   parseJSON = withObject "RuntimeIdentity" $ \o -> do
-    unless (all (`elem` ["model","provider","reasoning"]) (KM.keys o)) (fail "Unsupported runtime identity fields")
-    identity <- RuntimeIdentity <$> o .: "model" <*> o .:? "provider" <*> o .:? "reasoning"
+    unless (all (`elem` ["model","provider","reasoning","role"]) (KM.keys o)) (fail "Unsupported runtime identity fields")
+    identity <- RuntimeIdentity <$> o .: "model" <*> o .:? "provider" <*> o .:? "reasoning" <*> o .:? "role"
     unless (runtimeIdentityValid identity) (fail "Runtime identity requires a short model name and valid optional metadata")
     pure identity
 
 runtimeIdentityValid :: RuntimeIdentity -> Bool
-runtimeIdentityValid identity = valid 256 identity.model && all (maybe True (valid 128)) [identity.provider,identity.reasoning]
+runtimeIdentityValid identity = valid 256 identity.model && all (maybe True (valid 128)) [identity.provider,identity.reasoning,identity.role]
   where valid limit value = not (T.null value) && value == T.strip value && not (T.any (== '\0') value) && BS.length (TE.encodeUtf8 value) <= limit
+
+runtimeDeclarationValid :: RuntimeIdentity -> Bool
+runtimeDeclarationValid identity = runtimeIdentityValid identity && maybe False (const True) identity.role
 
 data SetRuntimeIdentity = SetRuntimeIdentity
   { expectedRuntimeRevision :: !Int64, runtimeIdentity :: !(Maybe RuntimeIdentity)

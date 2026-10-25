@@ -229,3 +229,19 @@ identity or a new association request. The migration adds no columns, changes
 no historical evidence/audit/outbox records, and installs its function, trigger
 and version-45 ledger entry in one transaction.
 
+## Session runtime roles (V046)
+
+Runtime declarations now include the running agent's `role`, a trimmed nonblank
+string of at most 128 UTF-8 bytes. The stored JSON validator accepts roleless
+legacy values; the insert/runtime-change guard requires a role for each genuinely
+new nonnull declaration. Null still means unknown. No caller identity, title or
+transcript supplies a guessed role. No rows or historical events are rewritten.
+Append, heartbeat, resume and sealing retain legacy values unchanged. Runtime
+updates keep V044's independent revision, retry and sealed-immutability rules.
+The function, prospective trigger and version-46 ledger entry commit atomically.
+
+Deploy V046 with the updated HTTP server before producers send roles, then update
+MCP and frontend clients. Older servers reject the new JSON field; after V046,
+new model-only declarations are refused. Existing unknown/roleless sessions keep
+their lifecycle and receipts during the coordinated upgrade.
+

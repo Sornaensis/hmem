@@ -135,3 +135,9 @@ port sessionBridgeCommand : Encode.Value -> Cmd msg
 
 
 port sessionBridgeEvent : (Encode.Value -> msg) -> Sub msg
+
+
+port sessionActivityStreamCommand : Encode.Value -> Cmd msg
+
+
+port sessionActivityStreamEvent : (Encode.Value -> msg) -> Sub msg

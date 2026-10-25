@@ -1,4 +1,4 @@
-module Feature.SessionActivity exposing (init, initialVisibility, reconcile, update, targets, active)
+module Feature.SessionActivity exposing (init, initialVisibility, reconcile, update, targets, active, invalidateWorkspace, authorityRefresh)
 
 {-| One physical boolean probe, independent of transcript/session delivery.
 Logical retirement prunes cache/demand but retains occupancy until its callback.
@@ -7,7 +7,9 @@ import Api
 import Dict
 import Http
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Permissions
+import Ports
 import Set
 import Task
 import Time
@@ -65,6 +67,44 @@ active key model =
     owner model /= "" && model.sessionActivity.owner == owner model && (Dict.get key model.sessionActivity.cache |> Maybe.andThen .active) == Just True
 
 
+invalidateWorkspace : String -> Model -> Model
+invalidateWorkspace workspace model =
+    let
+        state = model.sessionActivity
+        version = state.version + 1
+        affected key = key == "workspace:" ++ workspace || (model.selectedWorkspaceId == Just workspace && String.startsWith "project:" key)
+        demanded = targets model
+    in
+    if not (List.any affected demanded) then model else
+    {model | sessionActivity={state | version=version, cache=Dict.map (\key entry -> if not (affected key) && entry.version == state.version then {entry | version=version} else entry) state.cache}}
+
+
+streamOwner : Model -> String
+streamOwner model =
+    case model.page of
+        WorkspacePage _ -> ""
+        _ ->
+            if model.groups.catalogueOwner |> Maybe.map (.globalPermissions >> .superadmin) |> Maybe.withDefault False then "" else owner model
+
+
+pushFrame : Decode.Value -> Model -> Maybe (String, Maybe String)
+pushFrame value model =
+    let
+        decoder=Decode.map4 (\stamp version kind workspace -> {stamp=stamp,version=version,kind=kind,workspace=workspace})
+            (Decode.field "owner" Decode.string)
+            (Decode.at ["frame","schema_version"] Decode.int)
+            (Decode.at ["frame","type"] Decode.string)
+            (Decode.oneOf [Decode.at ["frame","workspace_id"] (Decode.nullable Decode.string),Decode.succeed Nothing])
+    in
+    Decode.decodeValue decoder value |> Result.toMaybe |> Maybe.andThen (\frame ->
+        if frame.stamp /= "" && frame.stamp == streamOwner model && frame.stamp == model.sessionActivity.owner && frame.version == 1 then Just (frame.kind,frame.workspace) else Nothing)
+
+
+authorityRefresh : Decode.Value -> Model -> Bool
+authorityRefresh value model =
+    pushFrame value model |> Maybe.map (Tuple.first >> (\kind -> List.member kind ["access_granted","access_revoked"])) |> Maybe.withDefault False
+
+
 reconcile : Model -> (Model,Cmd Msg) -> (Model,Cmd Msg)
 reconcile previous (model,command) =
     let
@@ -72,17 +112,18 @@ reconcile previous (model,command) =
         authority=owner model
         keys=targets model
         changed=state.owner /= authority
-        invalidated=state.sessionVersion /= model.sessionDelivery.listInvalidation || previous.webSocket.state /= model.webSocket.state
+        invalidated=previous.webSocket.state /= model.webSocket.state
         version=state.version + (if invalidated then 1 else 0)
         generation=state.generation + (if changed || Set.fromList keys /= Set.fromList state.order then 1 else 0)
         cache=if changed then Dict.empty else Dict.filter (\key _ -> List.member key keys) state.cache
         order=List.filter (\key -> List.member key keys) state.order ++ List.filter (\key -> not (List.member key state.order)) keys
-        due key=Dict.get key cache |> Maybe.map (\entry -> entry.version < version || state.now-entry.checked >= 10000) |> Maybe.withDefault True
+        due key=Dict.get key cache |> Maybe.map (\entry -> entry.version < version) |> Maybe.withDefault True
         chosen=List.filter due order |> List.take 50
         ready={state | owner=authority,cache=cache,order=order,version=version,generation=generation,sessionVersion=model.sessionDelivery.listInvalidation}
         mayStart=List.any (\key -> not (Dict.member key cache)) chosen || state.now-state.lastProbe >= 1000
+        commands=Cmd.batch [command,Ports.sessionActivityStreamCommand (Encode.object [("owner",if List.isEmpty keys || streamOwner model == "" then Encode.null else Encode.string (streamOwner model))])]
     in
-    if authority == "" || state.pending /= Nothing || List.isEmpty chosen || not mayStart then ({model | sessionActivity=ready},command)
+    if authority == "" || state.pending /= Nothing || List.isEmpty chosen || not mayStart then ({model | sessionActivity=ready},commands)
     else
         let
             scope=case model.page of
@@ -92,13 +133,18 @@ reconcile previous (model,command) =
             identifiers prefix=chosen |> List.filter (String.startsWith prefix) |> List.map (String.dropLeft (String.length prefix))
             next={ready | pending=Just request,nextId=state.nextId+1,lastProbe=state.now,order=List.filter (\key -> not (List.member key chosen)) order ++ chosen}
         in
-        ({model | sessionActivity=next},Cmd.batch [command,Api.fetchSessionActivity model.flags.apiUrl (identifiers "workspace:") scope (identifiers "project:") (SessionActivityFetched request.id)])
+        ({model | sessionActivity=next},Cmd.batch [commands,Api.fetchSessionActivity model.flags.apiUrl (identifiers "workspace:") scope (identifiers "project:") (SessionActivityFetched request.id)])
 
 
 update : Msg -> Model -> (Model,Cmd Msg)
 update msg model =
     let state=model.sessionActivity in
     case msg of
+        SessionActivityPush value ->
+            case pushFrame value model of
+                Just ("session_activity_ready",_) -> ({model | sessionActivity={state | version=state.version+1}},Cmd.none)
+                Just ("session_activity_changed",Just workspace) -> (invalidateWorkspace workspace model,Cmd.none)
+                _ -> (model,Cmd.none)
         SessionActivityTick time -> ({model | sessionActivity={state | now=toFloat (Time.posixToMillis time)}},Cmd.none)
         SessionActivityVisibility visible -> ({model | sessionActivity={state | visible=visible,version=state.version+1}},Cmd.none)
         SessionActivityFetched id result ->

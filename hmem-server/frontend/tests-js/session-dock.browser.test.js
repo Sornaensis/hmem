@@ -8,7 +8,7 @@ const agent=(h,index)=>card(h,index).locator(':scope > .card-header .task-sessio
 const changed=async(h,session)=>h.page.evaluate(({workspace,session})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'dock-change-'+Date.now(),scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'dock-change',cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace}]}}]),{workspace:h.fixture.workspace.id,session})
 
 test('task-owned Active Agent dock retains task context, grouped transcript, evidence and a single viewer across switches',{timeout:60000},async()=>{
- const h=await openSessionExplorer({activeCount:2,runtime:{model:'Dock runtime',reasoning:'high'}}),{page}=h
+ const h=await openSessionExplorer({activeCount:2,runtime:{model:'Dock runtime',role:'Developer',reasoning:'high'}}),{page}=h
  const other=h.activeSessions[1],bytes=Buffer.from(JSON.stringify({type:'response_item',timestamp:new Date().toISOString(),payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'The second agent transcript.'}]}})+'\n')
  Object.assign(other,{committed_bytes:bytes.length,committed_records:1});h.content.set(other.id,bytes)
  try{
@@ -21,7 +21,7 @@ test('task-owned Active Agent dock retains task context, grouped transcript, evi
   assert.equal(await card(h,0).locator('.task-session-dock').count(),1);assert.equal(await card(h,0).getAttribute('draggable'),'false');assert.equal(await page.locator('#session-records').count(),1)
   assert.equal(await card(h,0).locator('.card-extras').count(),0,'dock is independent of extras')
   assert.equal(await card(h,0).locator('.task-session-choice').count(),2,'quiet active sessions remain available')
-  assert.ok((await page.locator('.session-viewer .session-identity').innerText()).includes('Dock runtime'))
+  assert.ok((await page.locator('.session-viewer .session-runtime').getAttribute('title')).includes('Dock runtime'))
   const group=page.locator('.session-activity-group').first();assert.equal(await group.getAttribute('open'),null);await group.locator(':scope > summary').click();assert.equal(await group.getAttribute('open'),'')
   await card(h,0).locator('.task-session-choice').nth(1).locator('span').last().click();await page.getByText('The second agent transcript.',{exact:true}).waitFor()
   assert.equal(await page.getByRole('heading',{name:'A calmer session explorer'}).count(),0)

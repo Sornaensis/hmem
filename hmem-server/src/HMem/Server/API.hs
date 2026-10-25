@@ -27,7 +27,7 @@ module HMem.Server.API
   ) where
 
 import Control.Exception (try, throwIO)
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM, forM_, when, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
 import Data.Aeson qualified as Aeson
@@ -38,7 +38,7 @@ import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Int (Int64)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isNothing, fromMaybe, mapMaybe, catMaybes)
+import Data.Maybe (isNothing, isJust, fromMaybe, mapMaybe, catMaybes)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -88,6 +88,7 @@ type HMemAPI = "api" :> "v1" :>
   :<|> "session-activity" :> QueryParams "workspace_id" Text :> QueryParam "project_workspace_id" Text :> QueryParams "project_id" Text
          :> Description "Boolean active-session projection for at most 50 combined unique workspace/project targets. Workspace targets must be readable; project targets require an explicit readable same-workspace scope and include all live project/task descendants. Missing or denied targets are omitted, never reported inactive. No freshness or task/project status filter."
          :> Get '[JSON] Value
+  :<|> "session-activity" :> "ticket" :> Post '[JSON] WebSocketTicketResponse
   :<|> "workspaces"   :> WorkspaceAPI
   :<|> "groups"       :> WorkspaceGroupAPI
   :<|> "observations" :> ObservationAPI
@@ -699,6 +700,7 @@ serverWithDiscovery authConfig changeStreamConfig discovery pool tracker wsState
        health pool tracker
   :<|> session authConfig pool
   :<|> sessionActivity pool
+  :<|> activityTicket pool wsState
   :<|> workspaces pool
   :<|> groups pool
   :<|> observations pool
@@ -1563,6 +1565,17 @@ audit pool = listH :<|> revertH :<|> getH where
         requireWorkspace pool workspace Auth.WorkspaceRoleAdmin
     pure workspace
   unsupportedObservation = err409 { errBody = Aeson.encode (object ["error" .= ("unsupported_entity" :: Text), "message" .= ("Observation audit entries cannot be reverted" :: Text)]) }
+
+activityTicket :: Pool Hasql.Connection -> WS.WSState -> Handler WebSocketTicketResponse
+activityTicket pool state = do
+  principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
+  allowed <- liftIO $ case principal.authority of
+    PrincipalSyntheticLocalSuperadmin -> pure True
+    PrincipalGrantUser user -> isJust <$> Auth.getUserGrants pool user
+    _ -> pure False
+  unless allowed $ throwError err401
+  issued <- liftIO $ WS.createActivityTicket state principal
+  maybe (throwError err503 {errHeaders=[("Retry-After","1")]}) pure issued
 
 ticket :: Pool Hasql.Connection -> WS.WSState -> WebSocketTicketRequest -> Handler WebSocketTicketResponse
 ticket pool state request = do

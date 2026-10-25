@@ -17,7 +17,14 @@ import Url
 suite : Test
 suite =
     describe "canonical change stream policy"
-        [ test "session wire names decode and duplicated out-of-order metadata/link events coalesce into dedicated scoped refreshes" <|
+        [ test "activity controls validate workspace identity without advancing canonical events or checkpoint" <| \_ ->
+            let
+                workspace="90000000-0000-4000-8000-000000000001"
+                initial=ChangeStream.init ChangeStream.Global []
+                (next,actions)=ChangeStream.reduceFrame (Api.CanonicalSessionActivityChanged workspace) initial
+                malformed=Api.decodeCanonicalFrame """{"type":"session_activity_changed","schema_version":1,"workspace_id":"invalid"}"""
+            in Expect.equal (initial,[ChangeStream.RefreshSessionActivity workspace],Nothing) (next,actions,malformed)
+        , test "session wire names decode and duplicated out-of-order metadata/link events coalesce into dedicated scoped refreshes" <|
             \_ ->
                 let
                     linked = sessionEvent True
@@ -42,7 +49,7 @@ suite =
                     reduced event = ChangeStream.reduceFrame (Api.CanonicalChange event) (ChangeStream.init (if event.scope == Api.GlobalScope then ChangeStream.Global else ChangeStream.Workspace "w") []) |> Tuple.second
                 in
                 Expect.equal (List.repeat 4 [ChangeStream.BeginResync]) (List.map reduced bad)
-        , test "new demand enters the fair queue once and an invalidation cannot release or satisfy an in-flight read" <|
+        , test "new demand enters once and progress invalidation preserves a proven page without releasing physical occupancy" <|
             \_ ->
                 let
                     target = Delivery.WorkspaceSessions Nothing
@@ -57,7 +64,7 @@ suite =
                             released = Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) blocked
                             ( fresh, refreshed ) = Delivery.admit "w" released
                         in
-                        Expect.equal { queued = 1, occupied = 1, duplicateReads = 0, cached = Nothing, refreshes = 1, remaining = 1 }
+                        Expect.equal { queued = 1, occupied = 1, duplicateReads = 0, cached = Just (Delivery.SessionsPage {items=[],nextCursor=Nothing}), refreshes = 1, remaining = 1 }
                             { queued = List.length wanted.order, occupied = Dict.size blocked.physical, duplicateReads = List.length duplicates
                             , cached = Dict.get request.key released.resources |> Maybe.andThen .data
                             , refreshes = List.length refreshed, remaining = Dict.size fresh.physical }

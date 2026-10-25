@@ -123,11 +123,11 @@ test('successful canonical empty membership and runtime clearing replace retaine
  try{
   await enter(h);await h.idle()
   h.active.runtime_identity=null;h.active.runtime_revision++
-  await resync(h);await until(async()=>await page.locator('.session-viewer .session-runtime-value').innerText()==='Unknown')
+  await resync(h);await until(async()=>await page.locator('.session-viewer .session-runtime-value').innerText()==='Unknown role')
   h.sessionLinks.get(h.active.id).clear();await resync(h)
   assert.equal(await page.locator('.session-task-card').count(),0);await page.getByText('No linked tasks.',{exact:true}).waitFor()
   h.active.state='terminated';h.active.terminated_at=new Date().toISOString();h.active.final_bytes=h.active.committed_bytes;h.active.final_sha256=createHash('sha256').update(h.content.get(h.active.id)).digest('hex')
-  await resync(h);assert.equal(await page.locator('.session-summary').count(),0);assert.equal(await page.getByText('Saved session',{exact:true}).textContent(),'Saved session');assert.ok((await page.locator('.session-viewer .session-runtime .session-identity-label').innerText()).includes('Session model'))
+  await resync(h);assert.equal(await page.locator('.session-summary').count(),0);assert.equal(await page.getByText('Saved session',{exact:true}).textContent(),'Saved session');assert.ok((await page.locator('.session-viewer .session-runtime').getAttribute('title')).includes('Session agent'))
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })

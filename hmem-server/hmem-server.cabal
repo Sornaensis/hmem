@@ -63,6 +63,7 @@ data-files:
     migrations/V043__session_hierarchy_and_titles.sql
     migrations/V044__session_runtime_identity.sql
     migrations/V045__session_initial_task.sql
+    migrations/V046__session_runtime_roles.sql
 
 library
   exposed-modules:

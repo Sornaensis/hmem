@@ -1,9 +1,9 @@
 module HMem.Server.ChangeStreamSpec (spec) where
 
 import Control.Concurrent (Chan, MVar, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryTakeMVar, writeChan)
-import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch)
+import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
 import Control.Exception (AsyncException(..), MaskingState(..), SomeException, bracket, catch, fromException, getMaskingState, mask, throwIO, try)
-import Control.Monad (forM_, replicateM_)
+import Control.Monad (forM_, replicateM_, replicateM, forever, void)
 import Data.Aeson (FromJSON, Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -15,7 +15,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
-import Data.Time (getCurrentTime)
+import Data.Time (getCurrentTime, addUTCTime)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUIDV4
 import Hasql.Decoders qualified as Dec
@@ -39,6 +39,7 @@ import HMem.DB.Auth qualified as Auth
 import HMem.AgentSession qualified as Agent
 import HMem.AgentSession.Transport qualified as AgentWire
 import HMem.DB.Task qualified as TaskDB
+import HMem.DB.AgentSession qualified as AgentDB
 import HMem.DB.ChangeStream
 import HMem.DB.Pool (runSession)
 import HMem.DB.Pool qualified as DBPool
@@ -51,11 +52,234 @@ import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), cre
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure)
+import HMem.Server.WebSocket (newWSState, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
 spec :: Spec
 spec = describe "canonical change-stream loopback" $ do
+  it "bounds activity ticket retention globally and prunes expired capabilities" $ do
+    state <- newWSState
+    first <- grantPrincipal <$> UUIDV4.nextRandom
+    others <- replicateM 15 (grantPrincipal <$> UUIDV4.nextRandom)
+    overflow <- grantPrincipal <$> UUIDV4.nextRandom
+    forM_ (first:others) $ \principal ->
+      replicateM_ 8 (createActivityTicketWithTtl state 60 principal >>= (`shouldSatisfy` isJust))
+    createActivityTicketWithTtl state 60 overflow >>= (`shouldSatisfy` (not . isJust))
+    expiring <- newWSState
+    replicateM_ 8 (createActivityTicketWithTtl expiring 0 first >>= (`shouldSatisfy` isJust))
+    createActivityTicketWithTtl expiring 60 first >>= (`shouldSatisfy` isJust)
+
+  it "serves bounded activity-only Home sockets without granting canonical Global access" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "home-activity"
+      forbidden <- createTestWorkspace ctx.deployedEnv "home-forbidden"
+      user <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
+      token <- issueDeployedSandboxPAT ctx.deployedEnv user "Home activity"
+      now <- getCurrentTime
+      _ <- Auth.createAuthSession ctx.deployedEnv.pool user "home-cookie" "home-csrf" (addUTCTime 300 now)
+      let endpoint="/api/v1/session-activity/ticket"
+          headers=authHeaders token.rawToken
+          issue=apiRequest ctx.deployedApplication methodPost endpoint headers ""
+          cookies=[("Cookie","hmem_session=home-cookie; hmem_csrf=home-csrf")]
+          readFrame frames=declaredPhase "activity-only frame" (readChan frames >>= decodeFrame)
+          ready=object ["type" .= ("session_activity_ready" :: Text),"schema_version" .= (1::Int)]
+          hint=object ["type" .= ("session_activity_changed" :: Text),"schema_version" .= (1::Int),"workspace_id" .= workspace.id]
+          scope=WorkspaceScope workspace.id
+          cursor=maybe 0 (.outboxCursor) . safeLast <$> listOutboxAfter ctx.deployedEnv.pool scope 0 1000
+          dispatchAfter before=listOutboxAfter ctx.deployedEnv.pool scope before 1000 >>= dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState
+      responseStatus <$> apiRequest ctx.deployedApplication methodPost endpoint [] "" `shouldReturn` HTTP.status401
+      responseStatus <$> apiRequest ctx.deployedApplication methodPost endpoint cookies "" `shouldReturn` HTTP.status403
+      responseStatus <$> apiRequest ctx.deployedApplication methodPost "/api/v1/change-stream/ticket" headers (encode (object ["scope" .= object ["scope" .= ("global" :: Text)],"resume_token" .= ("not-global" :: Text)])) `shouldReturn` HTTP.status403
+      task <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask workspace.id Nothing Nothing "Home running task" Nothing Nothing Nothing)
+      later <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask workspace.id Nothing Nothing "Home later task" Nothing Nothing Nothing)
+      runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE workspace_id='"<>Text.encodeUtf8 (UUID.toText workspace.id)<>"'")
+      issuedResponse <- apiRequest ctx.deployedApplication methodPost endpoint (cookies<>[("X-CSRF-Token","home-csrf")]) ""
+      responseStatus issuedResponse `shouldBe` status200
+      issued <- decodedTicket issuedResponse
+      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+        withActivityFrames port issued.ticket $ \frames -> do
+          readFrame frames `shouldReturn` ready
+          identifier <- UUIDV4.nextRandom
+          before <- cursor
+          row <- AgentDB.createSession ctx.deployedEnv.pool (Agent.CreateSession identifier workspace.id "jsonl" "Home activity stream" Nothing Nothing task.id)
+          dispatchAfter before
+          readFrame frames `shouldReturn` hint
+          beforeLink <- cursor
+          AgentDB.associateSessionTask ctx.deployedEnv.pool workspace.id identifier later.id
+          dispatchAfter beforeLink
+          readFrame frames `shouldReturn` hint
+          beforeSeal <- cursor
+          _ <- AgentDB.terminateSession ctx.deployedEnv.pool workspace.id identifier (Agent.TerminateSession 0 row.revision 0 (Agent.sessionSha256 ""))
+          dispatchAfter beforeSeal
+          readFrame frames `shouldReturn` hint
+          -- A hidden foreign mutation must not precede the subscriber's next
+          -- own-membership control, proving absence without a timing assertion.
+          _ <- Project.createProject ctx.deployedEnv.pool (CreateProject forbidden.id Nothing "Hidden activity" Nothing Nothing Nothing)
+          hidden <- latestOutbox ctx (WorkspaceScope forbidden.id)
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [hidden]
+          Auth.deleteWorkspaceMembership ctx.deployedEnv.pool workspace.id user `shouldReturn` True
+          revoked <- latestOutbox ctx scope
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [revoked]
+          readFrame frames `shouldReturn` object ["type" .= ("access_revoked" :: Text),"schema_version" .= (1::Int),"workspace_id" .= workspace.id]
+          runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE users SET disabled_at=clock_timestamp() WHERE id='"<>Text.encodeUtf8 (UUID.toText user)<>"'")
+          reauthorizeCanonicalConnections ctx.deployedEnv.pool ctx.deployedWSState
+          readFrame frames `shouldReturn` object ["type" .= ("access_revoked" :: Text),"schema_version" .= (1::Int)]
+        -- Use a fresh enabled user for independent capacity and expiry checks.
+        boundedUser <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership boundedUser Auth.WorkspaceRoleRead) Nothing
+        boundedToken <- issueDeployedSandboxPAT ctx.deployedEnv boundedUser "Bounded Home"
+        let boundedIssue=apiRequest ctx.deployedApplication methodPost endpoint (authHeaders boundedToken.rawToken) ""
+        pending <- replicateM 8 (boundedIssue >>= decodedTicket)
+        overflow <- boundedIssue
+        responseStatus overflow `shouldBe` HTTP.status503
+        lookup "Retry-After" (WaiTest.simpleHeaders overflow) `shouldBe` Just "1"
+        forM_ pending $ \entry -> WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket="<>showTicket entry.ticket) $ \conn -> do
+          (WS.receiveData conn >>= decodeFrame) `shouldReturn` ready
+          WS.sendClose conn ("capacity ticket consumed" :: Text)
+          _ <- try @WS.ConnectionException (WS.receiveData conn :: IO Text)
+          pure ()
+        reused <- try @SomeException $ WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket="<>showTicket issued.ticket) $ \conn -> WS.sendClose conn ("unexpected reuse" :: Text)
+        reused `shouldSatisfy` either (const True) (const False)
+        Just short <- createActivityTicketWithTtl ctx.deployedWSState 0.2 (grantPrincipal boundedUser)
+        peerReady <- newEmptyMVar; releasePeer <- newEmptyMVar
+        peerExpired <- newEmptyMVar; serverClose <- newEmptyMVar
+        peer <- asyncWithUnmask $ \unmask -> unmask $
+          WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket="<>showTicket short.ticket) $ \conn -> do
+            WS.receiveData conn >>= putMVar peerReady
+            -- Do not acknowledge or even read expiry until capacity is checked.
+            takeMVar releasePeer
+            WS.receiveData conn >>= putMVar peerExpired
+            message <- WS.receive conn
+            case message of
+              WS.ControlMessage (WS.Close _ _) -> putMVar serverClose True
+              _ -> fail "expiry did not send a server-initiated close frame"
+            WS.sendClose conn ("acknowledge server expiry" :: Text)
+            ended <- try @WS.ConnectionException (WS.receive conn)
+            ended `shouldSatisfy` either (const True) (const False)
+        withDeclaredClient (pure peer) $ \_ -> do
+          awaitFrame peerReady `shouldReturn` ready
+          threadDelay 300000
+          let live 0=do
+                denied <- boundedIssue
+                responseStatus denied `shouldBe` HTTP.status503
+                lookup "Retry-After" (WaiTest.simpleHeaders denied) `shouldBe` Just "1"
+                -- The expired, unacknowledged physical peer still owns one of
+                -- eight slots. A later real mutation must not enqueue a hint.
+                marker <- Project.createProject ctx.deployedEnv.pool (CreateProject workspace.id Nothing "After activity expiry" Nothing Nothing Nothing)
+                record <- latestOutbox ctx scope
+                dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record]
+                marker.id `seq` putMVar releasePeer ()
+                awaitFrame peerExpired `shouldReturn` object ["type" .= ("session_activity_expired" :: Text),"schema_version" .= (1::Int)]
+                declaredPhase "server activity Close before peer acknowledgement" (takeMVar serverClose) `shouldReturn` True
+                timeout 2000000 (wait peer) `shouldReturn` Just ()
+              live count=do
+                entry <- boundedIssue >>= decodedTicket
+                withActivityFrames port entry.ticket $ \frames -> do
+                  readFrame frames `shouldReturn` ready
+                  live (count-1)
+          live (7::Int)
+
+  it "pushes Global workspace delete and restore only to readable activity observers" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "activity-workspace-lifecycle"
+      other <- createTestWorkspace ctx.deployedEnv "activity-observer-marker"
+      member <- createDeployedSandboxUser ctx.deployedEnv False False
+      outsider <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership member Auth.WorkspaceRoleRead) Nothing
+      memberToken <- issueDeployedSandboxPAT ctx.deployedEnv member "Readable activity"
+      outsideToken <- issueDeployedSandboxPAT ctx.deployedEnv outsider "Hidden activity"
+      task <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask workspace.id Nothing Nothing "Workspace agent" Nothing Nothing Nothing)
+      runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>Text.encodeUtf8 (UUID.toText task.id)<>"'")
+      identifier <- UUIDV4.nextRandom
+      _ <- AgentDB.createSession ctx.deployedEnv.pool (Agent.CreateSession identifier workspace.id "jsonl" "Workspace lifecycle agent" Nothing Nothing task.id)
+      let issue token=apiRequest ctx.deployedApplication methodPost "/api/v1/session-activity/ticket" (authHeaders token) "" >>= decodedTicket
+          receive frames=declaredPhase "workspace lifecycle control" (readChan frames >>= decodeFrame)
+          ready=object ["type" .= ("session_activity_ready" :: Text),"schema_version" .= (1::Int)]
+          hint=object ["type" .= ("session_activity_changed" :: Text),"schema_version" .= (1::Int),"workspace_id" .= workspace.id]
+          projection=apiRequest ctx.deployedApplication methodGet ("/api/v1/session-activity?workspace_id="<>Text.encodeUtf8 (UUID.toText workspace.id)) (authHeaders memberToken.rawToken) "" >>= decodeResponse @Value
+      permitted <- issue memberToken.rawToken
+      denied <- issue outsideToken.rawToken
+      testWithApplication (pure ctx.deployedApplication) $ \port ->
+        withActivityFrames port permitted.ticket $ \memberFrames -> withActivityFrames port denied.ticket $ \outsideFrames -> do
+          receive memberFrames `shouldReturn` ready
+          receive outsideFrames `shouldReturn` ready
+          runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE workspaces SET deleted_at=clock_timestamp() WHERE id='"<>Text.encodeUtf8 (UUID.toText workspace.id)<>"'")
+          deleted <- latestOutbox ctx GlobalScope
+          jsonField "workspace_id" deleted.outboxEnvelope `shouldBe` Just Null
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [deleted]
+          receive memberFrames `shouldReturn` hint
+          projection >>= (\value -> jsonField "workspaces" value `shouldBe` Just (toJSON ([]::[Value])))
+          runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE workspaces SET deleted_at=NULL WHERE id='"<>Text.encodeUtf8 (UUID.toText workspace.id)<>"'")
+          restored <- latestOutbox ctx GlobalScope
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [restored]
+          receive memberFrames `shouldReturn` hint
+          projection >>= (\value -> jsonField "workspaces" value `shouldBe` Just (toJSON [object ["id" .= workspace.id,"active" .= True]]))
+          _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool other.id (Auth.UpsertWorkspaceMembership outsider Auth.WorkspaceRoleRead) Nothing
+          marker <- latestOutbox ctx (WorkspaceScope other.id)
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [marker]
+          receive outsideFrames `shouldReturn` object ["type" .= ("access_granted" :: Text),"schema_version" .= (1::Int),"workspace_id" .= other.id]
+
+  it "pushes authorized unselected activity membership hints without leaking or waking on transcript output" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      current <- createTestWorkspace ctx.deployedEnv "activity-current"
+      target <- createTestWorkspace ctx.deployedEnv "activity-unselected"
+      user <- createDeployedSandboxUser ctx.deployedEnv False False
+      outsider <- createDeployedSandboxUser ctx.deployedEnv False False
+      forM_ [(current.id,user),(current.id,outsider),(target.id,user)] $ \(workspace,member) -> do
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace (Auth.UpsertWorkspaceMembership member Auth.WorkspaceRoleRead) Nothing
+        pure ()
+      task <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask target.id Nothing Nothing "Running unselected agent" Nothing Nothing Nothing)
+      later <- TaskDB.createTask ctx.deployedEnv.pool (CreateTask target.id Nothing Nothing "Later unselected link" Nothing Nothing Nothing)
+      runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id IN ('"<>Text.encodeUtf8 (UUID.toText task.id)<>"','"<>Text.encodeUtf8 (UUID.toText later.id)<>"')")
+      let scope=WorkspaceScope current.id
+          targetScope=WorkspaceScope target.id
+          ticket member=canonicalTicketFor ctx (grantPrincipal member) scope (AuthenticatedAudience (UUID.toText member) member)
+          cursor=maybe 0 (.outboxCursor) . safeLast <$> listOutboxAfter ctx.deployedEnv.pool targetScope 0 1000
+          dispatchAfter before=listOutboxAfter ctx.deployedEnv.pool targetScope before 1000 >>= dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState
+          assertHint frame=frame `shouldBe` object ["type" .= ("session_activity_changed" :: Text),"schema_version" .= (1::Int),"workspace_id" .= target.id]
+      deniedTicket <- ticket outsider
+      testWithApplication (pure ctx.deployedApplication) $ \port ->
+        bracket (startOneFrameClient port deniedTicket.ticket) (\client -> joinClient "denied activity client" client.clientWorker) $ \denied -> do
+          frameType <$> awaitFrame denied.clientInitial `shouldReturn` Just "checkpoint"
+          let hinted :: IO a -> IO a
+              hinted action=do
+                issued <- ticket user
+                bracket (startOneFrameClient port issued.ticket) (\client -> joinClient "activity hint client" client.clientWorker) $ \client -> do
+                  frameType <$> awaitFrame client.clientInitial `shouldReturn` Just "checkpoint"
+                  before <- cursor
+                  result <- action
+                  dispatchAfter before
+                  awaitFrame client.clientObserved >>= assertHint
+                  wait client.clientWorker
+                  pure result
+          identifier <- UUIDV4.nextRandom
+          created <- hinted (AgentDB.createSession ctx.deployedEnv.pool (Agent.CreateSession identifier target.id "jsonl" "Unselected running agent" Nothing Nothing task.id))
+          -- A second socket must see its own canonical marker next, despite
+          -- genuine append/heartbeat/runtime events in the readable other scope.
+          quietTicket <- ticket user
+          bracket (startOneFrameClient port quietTicket.ticket) (\client -> joinClient "ordinary output client" client.clientWorker) $ \quiet -> do
+            frameType <$> awaitFrame quiet.clientInitial `shouldReturn` Just "checkpoint"
+            before <- cursor
+            let body="{\"message\":\"private output\"}\n"
+            _ <- AgentDB.appendSession ctx.deployedEnv.pool target.id created.id (Agent.AppendSession 0 0 body False)
+            _ <- AgentDB.heartbeatSession ctx.deployedEnv.pool target.id created.id
+            _ <- AgentDB.setRuntimeIdentity ctx.deployedEnv.pool target.id created.id (Agent.SetRuntimeIdentity 0 (Just (Agent.RuntimeIdentity "Actual runtime" Nothing Nothing (Just "developer"))))
+            dispatchAfter before
+            marker <- Project.createProject ctx.deployedEnv.pool (CreateProject current.id Nothing "Selected marker" Nothing Nothing Nothing)
+            record <- latestOutbox ctx scope
+            dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record]
+            awaitFrame quiet.clientObserved >>= assertChangeIdentity record marker.id
+            awaitFrame denied.clientObserved >>= assertChangeIdentity record marker.id
+            wait quiet.clientWorker
+            wait denied.clientWorker
+          _ <- hinted (AgentDB.associateSessionTask ctx.deployedEnv.pool target.id identifier later.id)
+          project <- Project.createProject ctx.deployedEnv.pool (CreateProject target.id Nothing "Activity parent" Nothing Nothing Nothing)
+          _ <- hinted (runSession ctx.deployedEnv.pool $ Session.sql ("UPDATE tasks SET project_id='"<>Text.encodeUtf8 (UUID.toText project.id)<>"' WHERE id='"<>Text.encodeUtf8 (UUID.toText task.id)<>"'"))
+          Just final <- AgentDB.getSession ctx.deployedEnv.pool target.id identifier
+          _ <- hinted (AgentDB.terminateSession ctx.deployedEnv.pool target.id identifier (Agent.TerminateSession final.committedBytes final.revision final.committedBytes (Agent.sessionSha256 "{\"message\":\"private output\"}\n")))
+          pure ()
+
   it "delivers session metadata through replay and live HTTP without evidence bytes, duplicate effects or cross-workspace leakage" $
     withDeployedSandboxAppContext $ \ctx -> do
       workspace <- createTestWorkspace ctx.deployedEnv "session-stream"
@@ -588,8 +812,7 @@ spec = describe "canonical change-stream loopback" $ do
         memberClient <- startOneFrameClient port memberTicket.ticket
         adminClient <- startOneFrameClient port adminTicket.ticket
         unrelatedClient <- startOneFrameClient port unrelatedTicket.ticket
-        globalClient <- startOneFrameClient port globalTicket.ticket
-        mapM_ (awaitFrame . (.clientInitial)) [memberClient, adminClient, unrelatedClient, globalClient]
+        mapM_ (awaitFrame . (.clientInitial)) [memberClient, adminClient, unrelatedClient]
 
         projectA <- Project.createProject ctx.deployedEnv.pool CreateProject
           { workspaceId = workspaceA.id, parentId = Nothing, name = "audience A"
@@ -608,6 +831,11 @@ spec = describe "canonical change-stream loopback" $ do
         unrelatedFrame <- awaitFrame unrelatedClient.clientObserved
         assertChangeIdentity recordB projectB.id unrelatedFrame
 
+        -- Global sockets now intentionally receive authorized workspace-only
+        -- activity wakeups. Establish this canonical global-event observer
+        -- after those separately qualified cross-scope dispatches.
+        globalClient <- startOneFrameClient port globalTicket.ticket
+        frameType <$> awaitFrame globalClient.clientInitial `shouldReturn` Just "checkpoint"
         group <- WorkspaceGroup.createGroup ctx.deployedEnv.pool (CreateWorkspaceGroup "global audience" Nothing)
         globalRecord <- latestOutbox ctx GlobalScope
         dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [globalRecord]
@@ -992,6 +1220,32 @@ startOneFrameClient port ticket = do
     WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
   pure OneFrameClient { clientWorker = worker, clientInitial = initial, clientObserved = observed }
 
+withActivityFrames :: Int -> Text -> (Chan Text -> IO a) -> IO a
+withActivityFrames port ticket use = mask $ \restore -> do
+  frames <- newChan
+  stop <- newEmptyMVar
+  worker <- asyncWithUnmask $ \unmask -> unmask $
+    (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket="<>showTicket ticket) $ \conn ->
+      withAsync (forever (WS.receiveData conn >>= writeChan frames)) $ \reader -> do
+        takeMVar stop
+        WS.sendClose conn ("activity fixture complete" :: Text)
+        void (waitCatch reader)) `catch` \(_ :: WS.ConnectionException) -> pure ()
+  primary <- try @SomeException (restore (use frames))
+  putMVar stop ()
+  cleanup <- timeout 2000000 (waitCatch worker)
+  let failure=case cleanup of
+        Nothing -> Just "activity-only client did not join within two seconds after graceful close"
+        Just (Left exception) -> Just ("activity-only client cleanup failed: "<>show exception)
+        Just (Right ()) -> Nothing
+  case primary of
+    Left exception -> maybe (pure ()) (hPutStrLn stderr) failure >> throwIO exception
+    Right result -> maybe (pure result) fail failure
+
+decodedTicket :: WaiTest.SResponse -> IO WebSocketTicketResponse
+decodedTicket response = do
+  responseStatus response `shouldBe` status200
+  decodeResponse response
+
 assertChangeIdentity :: OutboxRecord -> UUID.UUID -> Value -> Expectation
 assertChangeIdentity record entityId frame = do
   frameType frame `shouldBe` Just "change"
@@ -1097,7 +1351,21 @@ awaitChangeChan frames projectId = timeout 5000000 consume >>= \case
           | (jsonField "event" frame >>= jsonField "entity" >>= jsonField "id") == Just (String (UUID.toText projectId)) -> pure ()
           | otherwise -> consume
         Just "checkpoint" -> consume
-        other -> fail $ "expected canonical change frame, got " <> show other
+        Just "session_activity_changed" -> do
+          -- These out-of-band wakeups have no canonical replay/checkpoint
+          -- meaning. Validate the complete narrow control before continuing
+          -- to require the exact expected canonical project event.
+          frame `shouldSatisfy` (\value -> case value of
+            Object fields -> KeyMap.size fields==3
+              && jsonField "schema_version" value==Just (toJSON (1::Int))
+              && case jsonField "workspace_id" value of
+                Just (String workspace) -> isJust (UUID.fromText workspace)
+                _ -> False
+            _ -> False)
+          consume
+        other -> do
+          hPutStrLn stderr ("canonical marker wait received unexpected control: "<>show other)
+          fail $ "expected canonical change frame, got " <> show other
 
 decodeFrame :: Text -> IO Value
 decodeFrame text = case decode (LBS.fromStrict $ Text.encodeUtf8 text) of

@@ -9,6 +9,8 @@ module HMem.Server.WebSocket
   , createCanonicalTicket
   , createCanonicalTicketWithTtl
   , createCanonicalTicketWithExpiry
+  , createActivityTicket
+  , createActivityTicketWithTtl
   , consumeTicket
   , ticketEventVisible
   , eventVisibleToSubscription
@@ -22,7 +24,8 @@ module HMem.Server.WebSocket
   , wsMiddleware
   ) where
 
-import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, takeMVar, tryPutMVar, withMVar)
+import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, takeMVar, tryPutMVar, withMVar, threadDelay)
+import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, modifyTVar')
 import Control.Concurrent.STM qualified as STM
 import Control.Exception (AsyncException, catch, finally, fromException, throwIO)
@@ -69,6 +72,8 @@ data WSState = WSState
   , tickets     :: !(TVar (Map Text WebSocketTicket))
   , canonicalTickets :: !(TVar (Map Text CanonicalWebSocketTicket))
   , canonicalConnections :: !(TVar (Map UUID CanonicalClient))
+  , activityTickets :: !(TVar (Map Text ActivityTicket))
+  , activityConnections :: !(TVar (Map UUID ActivityClient))
   }
 
 data WSClient = WSClient
@@ -116,9 +121,25 @@ data CanonicalClient = CanonicalClient
   , canonicalClientSendLock :: !(MVar ())
   }
 
+data ActivityTicket = ActivityTicket
+  { activityTicketPrincipal :: !Principal
+  , activityTicketExpiresAt :: !UTCTime
+  , activityDeliveryExpiresAt :: !UTCTime
+  }
+
+-- Nothing reserves a bounded slot during the WebSocket handshake. The slot is
+-- never a delivery target until its connection has been registered.
+data ActivityClient = ActivityClient
+  { activityConnection :: !(Maybe WS.Connection)
+  , activityPrincipal :: !Principal
+  , activityExpiresAt :: !UTCTime
+  , activitySendLock :: !(MVar ())
+  , activityRetired :: !(TVar Bool)
+  }
+
 -- | Create a fresh (empty) WebSocket state.
 newWSState :: IO WSState
-newWSState = WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
+newWSState = WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
 
 -- | Number of currently connected clients.
 connectionCount :: WSState -> IO Int
@@ -306,6 +327,70 @@ consumeCanonicalTicket st ticketId = do
     STM.writeTVar st.canonicalTickets (Map.delete ticketId pruned)
     pure found
 
+createActivityTicket :: WSState -> Principal -> IO (Maybe WebSocketTicketResponse)
+createActivityTicket st = createActivityTicketWithTtl st 300
+
+createActivityTicketWithTtl :: WSState -> NominalDiffTime -> Principal -> IO (Maybe WebSocketTicketResponse)
+createActivityTicketWithTtl st requestedTtl principal = do
+  now <- getCurrentTime
+  ticketId <- UUID.toText <$> UUIDv4.nextRandom
+  let deliveryExpires = addUTCTime (max 0 (min 300 requestedTtl)) now
+      expires = min deliveryExpires (addUTCTime ticketTtlSeconds now)
+  STM.atomically $ do
+    pending <- Map.filter ((> now) . (.activityTicketExpiresAt)) <$> STM.readTVar st.activityTickets
+    live <- STM.readTVar st.activityConnections
+    let sameAudience other = audienceFor other == audienceFor principal
+        full entries own = Map.size entries >= 128 || length (filter own (Map.elems entries)) >= 8
+    if full pending (sameAudience . (.activityTicketPrincipal)) || full live (sameAudience . (.activityPrincipal))
+      then STM.writeTVar st.activityTickets pending >> pure Nothing
+      else do
+        STM.writeTVar st.activityTickets (Map.insert ticketId (ActivityTicket principal expires deliveryExpires) pending)
+        pure (Just WebSocketTicketResponse {ticket=ticketId,expiresAt=expires})
+
+consumeActivityTicket :: WSState -> Text -> IO (Maybe ActivityTicket)
+consumeActivityTicket st identifier = do
+  now <- getCurrentTime
+  STM.atomically $ do
+    tickets' <- Map.filter ((> now) . (.activityTicketExpiresAt)) <$> STM.readTVar st.activityTickets
+    STM.writeTVar st.activityTickets (Map.delete identifier tickets')
+    pure (Map.lookup identifier tickets')
+
+reserveActivityClient :: WSState -> ActivityTicket -> IO (Maybe (UUID, ActivityClient))
+reserveActivityClient st ticket = do
+  identifier <- UUIDv4.nextRandom
+  lock <- newMVar ()
+  retired <- newTVarIO False
+  let client=ActivityClient Nothing ticket.activityTicketPrincipal ticket.activityDeliveryExpiresAt lock retired
+  STM.atomically $ do
+    clients <- STM.readTVar st.activityConnections
+    if Map.size clients >= 128 || length (filter ((== audienceFor ticket.activityTicketPrincipal) . audienceFor . (.activityPrincipal)) (Map.elems clients)) >= 8
+      then pure Nothing
+      else STM.writeTVar st.activityConnections (Map.insert identifier client clients) >> pure (Just (identifier,client))
+
+removeActivityClient :: WSState -> UUID -> IO ()
+removeActivityClient st identifier = STM.atomically $ modifyTVar' st.activityConnections (Map.delete identifier)
+
+retireActivityClient :: ActivityClient -> IO ()
+retireActivityClient client = STM.atomically $ STM.writeTVar client.activityRetired True
+
+activityPrincipalValid :: Pool Hasql.Connection -> Principal -> IO Bool
+activityPrincipalValid _ principal | isTrusted principal = pure True
+activityPrincipalValid pool principal = case principal.authority of
+  PrincipalGrantUser user -> isJust <$> Auth.getUserGrants pool user
+  _ -> pure False
+
+activityBeforeDeadline :: ActivityClient -> IO Bool
+activityBeforeDeadline client = (< client.activityExpiresAt) <$> getCurrentTime
+
+-- Authorization queries may themselves cross the delivery deadline. The last
+-- clock check belongs immediately before each frame, not once per batch.
+activityMaySend :: Pool Hasql.Connection -> ActivityClient -> IO Bool
+activityMaySend pool client = do
+  valid <- activityPrincipalValid pool client.activityPrincipal
+  retired <- readTVarIO client.activityRetired
+  beforeDeadline <- activityBeforeDeadline client
+  pure (valid && not retired && beforeDeadline)
+
 -- | The event-visibility decision retained in a deployed ticket.  Keeping
 -- this next to ticket consumption makes the global-superadmin grant boundary
 -- testable without exposing ticket internals.
@@ -355,7 +440,9 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
     canonical <- consumeCanonicalTicket st (TE.decodeUtf8Lenient ticketText)
     case canonical of
       Just canonicalTicket -> acceptCanonical canonicalTicket
-      Nothing -> acceptLegacyTicket ticketText
+      Nothing -> consumeActivityTicket st (TE.decodeUtf8Lenient ticketText) >>= \case
+        Just activityTicket -> acceptActivity activityTicket
+        Nothing -> acceptLegacyTicket ticketText
   Nothing -> acceptWithoutTicket
   where
     acceptLegacyTicket ticketText
@@ -395,6 +482,37 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
           finished <- newEmptyMVar
           _ <- forkIO $ expireCanonicalConnection st connId client finished
           sinkMessages conn `finally` (void (tryPutMVar finished ()) >> removeCanonicalConnection st connId)
+
+    acceptActivity activityTicket = do
+      allowed <- activityPrincipalValid pool activityTicket.activityTicketPrincipal
+      if not allowed then WS.rejectRequest pending "Unauthorized" else do
+        reserved <- reserveActivityClient st activityTicket
+        case reserved of
+          Nothing -> WS.rejectRequestWith pending WS.defaultRejectRequest
+            { WS.rejectCode=503, WS.rejectMessage="Service Unavailable", WS.rejectHeaders=[("Retry-After","1")] }
+          Just (identifier,reservation) -> flip finally
+            (withMVar reservation.activitySendLock $ \_ -> retireActivityClient reservation >> removeActivityClient st identifier) $ do
+            conn <- WS.acceptRequest pending
+            let client=reservation {activityConnection=Just conn}
+            -- Independent expiry output wakes native reads through the close
+            -- handshake. Keep the physical slot until the owning application
+            -- actually finishes; an expired non-acknowledging peer cannot free
+            -- capacity for another physical connection.
+            withAsync (expireActivity conn client) $ \_ -> do
+              withMVar client.activitySendLock $ \_ -> do
+                STM.atomically $ modifyTVar' st.activityConnections (Map.insert identifier client)
+                live <- activityMaySend pool client
+                when live $ sendFrameUnlocked conn (object ["type" .= ("session_activity_ready" :: Text),"schema_version" .= (1::Int)])
+              WS.withPingThread conn 30 (pure ()) (sinkMessages conn)
+
+    expireActivity conn client = do
+      now <- getCurrentTime
+      threadDelay (floor (max 0 (diffUTCTime client.activityExpiresAt now)*1000000))
+      retireActivityClient client
+      void $ timeout 1000000 $ ignoreSynchronous $
+        withMVar client.activitySendLock $ \_ -> do
+          sendFrameUnlocked conn (object ["type" .= ("session_activity_expired" :: Text),"schema_version" .= (1::Int)])
+          WS.sendClose conn ("activity capability expired" :: Text)
 
 addCanonicalConnection :: WSState -> WS.Connection -> Principal -> ChangeScope -> ResumeToken -> NominalDiffTime -> UTCTime -> IO UUID
 addCanonicalConnection st conn principal scope token resumeTtl expiresAt = do
@@ -502,6 +620,7 @@ replaceInvalidations value _ = value
 -- process memory, eliminating the fetch/subscribe race on reconnect.
 dispatchCanonicalOutbox :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
 dispatchCanonicalOutbox pool st records = do
+  dispatchActivityClients pool st records
   clients <- Map.toList <$> readTVarIO st.canonicalConnections
   forM_ clients $ \(connId, _) -> dispatchClient connId records
   where
@@ -513,6 +632,10 @@ dispatchCanonicalOutbox pool st records = do
           applyAccessControls pool st connId client batch
         stillConnected <- Map.member connId <$> readTVarIO st.canonicalConnections
         when stillConnected $ do
+          -- Selected-scope changes already replay canonically. Cross-scope
+          -- hints wake bounded catalogue probes without widening that replay.
+          handleCanonicalDispatchFailure (removeCanonicalConnection st connId) $
+            sendActivityHints pool client batch
           visible <- anyM (isVisible client) (filter (recordInScope client.canonicalClientScope) batch)
           -- A single replay drains the batch through a fixed high-water and
           -- emits one visible replacement checkpoint. Hidden-only activity is
@@ -524,6 +647,71 @@ dispatchCanonicalOutbox pool st records = do
               rebaseCanonicalClient pool st connId client record.outboxCursor
 
     isVisible client record = isJust <$> projectRecord pool client.canonicalClientPrincipal client.canonicalClientScope record
+
+dispatchActivityClients :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
+dispatchActivityClients pool st records = do
+  clients <- Map.toList <$> readTVarIO st.activityConnections
+  forM_ clients $ \(identifier,client) -> forM_ client.activityConnection $ \conn ->
+    handleCanonicalDispatchFailure (retireActivityClient client) $
+      withMVar client.activitySendLock $ \_ -> do
+        retired <- readTVarIO client.activityRetired
+        valid <- activityPrincipalValid pool client.activityPrincipal
+        now <- getCurrentTime
+        if retired then pure () else if not valid || now >= client.activityExpiresAt
+          then do
+            retireActivityClient client
+            beforeDeadline <- activityBeforeDeadline client
+            when (not valid && beforeDeadline) $ sendFrameUnlocked conn (object ["type" .= ("access_revoked" :: Text),"schema_version" .= (1::Int)])
+            ignoreSynchronous $ WS.sendClose conn ("activity capability retired" :: Text)
+          else do
+            -- A user may learn about changes to their own membership even
+            -- after losing read access; another user's controls remain hidden.
+            forM_ (nub (concatMap targetedWorkspaceUsers records)) $ \(workspace,user) ->
+              when (client.activityPrincipal.authority == PrincipalGrantUser user) $ do
+                allowed <- scopeAuthorized pool client.activityPrincipal (WorkspaceScope workspace)
+                live <- activityMaySend pool client
+                when live $ sendFrameUnlocked conn (accessFrame (if allowed then "access_granted" else "access_revoked") workspace)
+            forM_ (nub (catMaybes (map activityWorkspace records))) $ \workspace -> do
+              allowed <- scopeAuthorized pool client.activityPrincipal (WorkspaceScope workspace)
+              live <- activityMaySend pool client
+              when (allowed && live) $ sendFrameUnlocked conn $
+                object ["type" .= ("session_activity_changed" :: Text),"schema_version" .= (1::Int),"workspace_id" .= workspace]
+
+-- Hints are lossy wakeups, never cursor advancement or canonical activity facts.
+-- Each dispatcher batch is bounded; retain no subscription or historical IDs.
+-- Check current authority immediately before the serialized write. Mount and
+-- reconnect always establish the corresponding canonical HTTP baseline.
+sendActivityHints :: Pool Hasql.Connection -> CanonicalClient -> [OutboxRecord] -> IO ()
+sendActivityHints pool client records =
+  forM_ (nub (catMaybes (map activityWorkspace records))) $ \workspace ->
+    unless (workspace `elem` covered) $
+      withMVar client.canonicalClientSendLock $ \_ -> do
+        allowed <- scopeAuthorized pool client.canonicalClientPrincipal (WorkspaceScope workspace)
+        remaining <- remainingCanonicalTtl client
+        when (allowed && remaining > 0) $ sendFrameUnlocked client.canonicalClientConnection $
+          object ["type" .= ("session_activity_changed" :: Text), "schema_version" .= (1 :: Int), "workspace_id" .= workspace]
+  where
+    covered=nub (catMaybes (map activityWorkspace (filter (recordInScope client.canonicalClientScope) records)))
+
+activityWorkspace :: OutboxRecord -> Maybe UUID
+activityWorkspace record = do
+  workspace <- case lookupValue "workspace_id" record.outboxEnvelope of
+    Just (String value) -> UUID.fromText value
+    Nothing -> workspaceEntity
+    Just Null -> workspaceEntity
+    _ -> Nothing
+  let membershipChanged = case lookupValue "invalidations" record.outboxEnvelope of
+        Just (Array values) -> any ((== Just ("active_sessions:" <> UUID.toText workspace)) . jsonText "target") (foldr (:) [] values)
+        _ -> False
+      structural = entityType record.outboxEnvelope `elem` map Just ["workspace","project","task"]
+  if membershipChanged || structural then Just workspace else Nothing
+  where
+    -- Workspace lifecycle records belong to the Global outbox and therefore
+    -- have no workspace_id. Derive only this canonical UUID, never a project,
+    -- task or arbitrary malformed scope, before the usual read authorization.
+    workspaceEntity
+      | entityType record.outboxEnvelope == Just "workspace" = entityId record.outboxEnvelope >>= UUID.fromText
+      | otherwise = Nothing
 
 rebaseCanonicalClient :: Pool Hasql.Connection -> WSState -> UUID -> CanonicalClient -> Int64 -> IO ()
 rebaseCanonicalClient pool st connId client hiddenThrough = withMVar client.canonicalClientSendLock $ \_ -> do
@@ -652,6 +840,17 @@ targetedWorkspaceUsers record = case jsonText "workspace_id" record.outboxEnvelo
 
 reauthorizeCanonicalConnections :: Pool Hasql.Connection -> WSState -> IO ()
 reauthorizeCanonicalConnections pool st = do
+  activity <- Map.toList <$> readTVarIO st.activityConnections
+  forM_ activity $ \(identifier,client) -> forM_ client.activityConnection $ \conn ->
+    handleCanonicalDispatchFailure (retireActivityClient client) $
+      withMVar client.activitySendLock $ \_ -> do
+        retired <- readTVarIO client.activityRetired
+        valid <- activityPrincipalValid pool client.activityPrincipal
+        when (not valid && not retired) $ do
+          retireActivityClient client
+          beforeDeadline <- activityBeforeDeadline client
+          when beforeDeadline $ sendFrameUnlocked conn (object ["type" .= ("access_revoked" :: Text),"schema_version" .= (1::Int)])
+          ignoreSynchronous $ WS.sendClose conn ("activity access revoked" :: Text)
   clients <- Map.toList <$> readTVarIO st.canonicalConnections
   forM_ clients $ \(connId, client) -> do
     allowed <- scopeAuthorized pool client.canonicalClientPrincipal client.canonicalClientScope

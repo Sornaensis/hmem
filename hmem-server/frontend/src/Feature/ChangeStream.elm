@@ -65,6 +65,7 @@ type Action
     | RefreshAgentSession String String
     | RefreshAgentSessionList String
     | RefreshSessionActivityMembership String
+    | RefreshSessionActivity String
     | RefreshTaskSessions String String
     | AccessGranted String
     | ClearWorkspace String
@@ -150,6 +151,9 @@ reduceFrame frame state =
 
         Api.CanonicalAccessGranted workspaceId ->
             ( state, [ AccessGranted workspaceId, RefreshCatalogue, RefreshSessionAuthorization ] )
+
+        Api.CanonicalSessionActivityChanged workspaceId ->
+            ( state, [ RefreshSessionActivity workspaceId ] )
 
         Api.CanonicalAccessRevoked maybeWorkspace ->
             case ( state.scope, maybeWorkspace ) of
@@ -594,6 +598,9 @@ coalesce actions =
 
                 RefreshSessionActivityMembership workspace ->
                     "session-activity-membership:" ++ workspace
+
+                RefreshSessionActivity workspace ->
+                    "session-activity:" ++ workspace
 
                 RefreshTaskSessions workspace task ->
                     "task-sessions:" ++ workspace ++ ":" ++ task

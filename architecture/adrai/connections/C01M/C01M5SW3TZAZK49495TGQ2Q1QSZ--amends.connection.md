@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5SW3TZAZK49495TGQ2Q1QSZ"
+relation = "amends"
+from_record = "R01M5SW3TZAJAZBYRT269WRT846"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M5SAVGZDDSBZH7Z2PWM2Z2VM"]
++++
+
+Authorize bounded asynchronous prefix proofs and reusable isolated work-conserving follower transport
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiY29kZXg6Z3B0LTYuMS1zb2w6aGlnaCJ9LCJiIjoiYmE5N2Q4NGY0YTI0OGQ2YTgyOWJjMjNmZGE3MjQwOGE4NDU5NWExNiIsImkiOiJzaGEyNTY6QnJIOTFwTkZvQ2M3azB2cEl3UlRUQWtLYUVvZkljRWxiSUZ2cEd2UVY1ayIsImsiOiJjb25uZWN0aW9uLmFtZW5kcyIsIm8iOiJDMDFNNVNXM1RaQVpLNDk0OTVUR1EyUTFRU1oiLCJvcCI6Ik8wMU01U1czVFpBSkFaQllSVDI2OVdSVDg0NiIsInAiOlsiUjAxTTVTQVZHWkREU0JaSDdaMlBXTTJaMlZNIl0sInIiOiJtYXN0ZXIiLCJzIjoic2hhMjU2OjNtdnVjREhMMXp1ZzFnZUFpZWxwRk5lR1BTTWViS0g2UllkcU1uSmFXcHciLCJ0IjoxNzkyOTQzNDUxMTE0LCJ2IjoxLCJ4IjoiYWRyYWkvMS4wLjAifQ -->

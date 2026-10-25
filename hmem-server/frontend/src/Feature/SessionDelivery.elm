@@ -171,12 +171,24 @@ invalidateWorkspace : String -> State -> State
 invalidateWorkspace workspace =
     invalidate (\resource -> resource.workspace == workspace)
         >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource ->
-            if resource.workspace == workspace then { resource | data = Nothing } else resource) state.resources })
+            if resource.workspace == workspace then { resource | data = retainedMetadata resource.data, ranges = [] } else resource) state.resources })
 
 
 invalidateAll : State -> State
 invalidateAll =
-    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource -> { resource | data = Nothing }) state.resources })
+    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource -> { resource | data = retainedMetadata resource.data, ranges = [] }) state.resources })
+
+
+-- Same-authority refresh keeps the last admitted presentation in this existing
+-- bounded cache. Dirty metadata is not authority for a paired byte request.
+retainedMetadata : Maybe Payload -> Maybe Payload
+retainedMetadata value =
+    case value of
+        Just (SessionsPage _) -> value
+        Just (Metadata _) -> value
+        Just (TasksPage _) -> value
+        Just (FacetsPage _) -> value
+        _ -> Nothing
 
 
 invalidateSession : String -> String -> State -> State
@@ -239,7 +251,7 @@ admit workspace state =
         occupied identity = Dict.values state.physical |> List.any (\request -> request.key == identity)
         metadataReady resource = case pairedId resource.target of
             Just id -> Dict.get (key workspace (SessionMetadata id)) state.resources
-                |> Maybe.map (\detail -> detail.dirty == detail.settled && detail.data /= Nothing) |> Maybe.withDefault False
+                |> Maybe.map (\detail -> detail.dirty == detail.settled && detail.error == Nothing && detail.data /= Nothing) |> Maybe.withDefault False
             Nothing -> True
         ready = state.order |> List.filterMap (\identity -> Dict.get identity state.resources |> Maybe.map (Tuple.pair identity)) |> List.filter (\( identity, resource ) ->
             resource.workspace == workspace && resource.dirty /= resource.settled && resource.error == Nothing && not (occupied identity) && metadataReady resource)
@@ -263,10 +275,10 @@ settle id authorized result state =
                     if not authorized || resource.dirty /= request.dirty then released
                     else case result of
                         Err _ ->
-                            { released | resources = Dict.insert request.key { resource | error = Just "refresh_failed" } released.resources }
+                            { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "refresh_failed" } released.resources }
                         Ok payload ->
                             if not (valid request payload) then
-                                { released | resources = Dict.insert request.key { resource | error = Just "invalid_response" } released.resources }
+                                { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "invalid_response" } released.resources }
                             else
                                 apply request resource payload released
 

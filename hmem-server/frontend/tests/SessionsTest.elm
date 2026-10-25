@@ -20,6 +20,7 @@ suite : Test.Test
 suite =
     describe "Sessions production wire contract"
         [ describe "card-owned dock authority" dockTests
+        , describe "same-authority metadata presentation" metadataPresentationTests
         , test "session and authority changes restore the compact linked-task default" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -328,6 +329,68 @@ sessionModel =
 canonicalPage : String
 canonicalPage =
     """{"items":[{"committed_bytes":92,"committed_records":2,"created_at":"2026-10-23T20:46:19.453875Z","creator_actor_id":"43db6893-cc92-4daa-bcf9-51e13c444501","creator_actor_label":"Sandbox Superadmin","creator_actor_type":"user","ends_with_newline":true,"format_label":"Provider-neutral JSONL","id":"4eccfa7f-e68c-41fe-8598-eb1533152190","last_seen_at":"2026-10-23T20:46:19.470361Z","revision":1,"state":"active","workspace_id":"f96e817f-9981-4178-8611-37a4e42b0896"}]}"""
+
+
+metadataPresentationTests : List Test.Test
+metadataPresentationTests =
+    let
+        metadata = Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
+        withMetadata check = \_ -> case metadata of
+            Just session -> check session
+            Nothing -> Expect.fail "Invalid canonical metadata fixture"
+        listTarget = Delivery.WorkspaceSessions Nothing
+        detailTarget = Delivery.SessionMetadata sessionId
+        windowTarget = Delivery.SessionWindow sessionId 0 32 False
+        legacyTarget = Delivery.SessionBytes sessionId 0 False
+        entry target value = {workspace=workspace,target=target,dirty=0,settled=0,data=Just value,ranges=[],error=Nothing}
+        ready session =
+            let initial=Delivery.init
+                range={session=session,offset=0,nextOffset=3,dataBase64="e30K",hasMore=True}
+                legacy=entry legacyTarget (Delivery.Bytes range)
+                resources=[entry detailTarget (Delivery.Metadata session),entry listTarget (Delivery.SessionsPage {items=[session],nextCursor=Nothing}),entry windowTarget (Delivery.Bytes range),{legacy | ranges=[range]}]
+            in {initial | resources=Dict.fromList (List.map (\resource -> (Delivery.key workspace resource.target,resource)) resources),order=List.map (.target >> Delivery.key workspace) resources}
+        payload target state = Dict.get (Delivery.key workspace target) state.resources |> Maybe.andThen .data
+        requestFor target requests = List.filter (.target >> (==) target) requests |> List.head
+    in
+    [ test "canonical refresh retains bounded metadata display but clears bytes and waits for fresh read authority" <| withMetadata (\session ->
+        let refreshed=Delivery.invalidateWorkspace workspace (ready session)
+            (_,requests)=Delivery.admit workspace refreshed
+            global=Delivery.invalidateAll (ready session)
+        in Expect.equal {detail=Just (Delivery.Metadata session),page=Just (Delivery.SessionsPage {items=[session],nextCursor=Nothing}),bytes=Nothing,admitted=False,global=Just (Delivery.Metadata session),legacyRanges=Just [],globalRanges=Just []}
+            {detail=payload detailTarget refreshed,page=payload listTarget refreshed,bytes=payload windowTarget refreshed,admitted=List.any (.target >> (==) windowTarget) requests,global=payload detailTarget global,legacyRanges=Dict.get (Delivery.key workspace legacyTarget) refreshed.resources |> Maybe.map .ranges,globalRanges=Dict.get (Delivery.key workspace legacyTarget) global.resources |> Maybe.map .ranges})
+    , test "owned refresh errors clear stale display without admitting paired byte reads" <| withMetadata (\session ->
+        let (busy,requests)=Delivery.invalidateWorkspace workspace (ready session) |> Delivery.admit workspace
+            failed=requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Err (Http.BadStatus 404)) busy) |> Maybe.withDefault busy
+            (_,next)=Delivery.admit workspace failed
+        in Expect.equal (Nothing,Just (Just "refresh_failed"),False)
+            (payload detailTarget failed,Dict.get (Delivery.key workspace detailTarget) failed.resources |> Maybe.map .error,List.any (.target >> (==) windowTarget) next))
+    , test "a retired response error cannot clear retained metadata or release another request" <| withMetadata (\session ->
+        let (busy,requests)=Delivery.invalidateWorkspace workspace (ready session) |> Delivery.admit workspace
+            newer=Delivery.invalidateWorkspace workspace busy
+            completed=requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Err Http.Timeout) newer) |> Maybe.withDefault newer
+        in Expect.equal (Just (Delivery.Metadata session),Just Nothing,1)
+            (payload detailTarget completed,Dict.get (Delivery.key workspace detailTarget) completed.resources |> Maybe.map .error,Dict.size completed.physical))
+    , test "fresh empty membership and cleared runtime replace old presentation instead of falling back" <| withMetadata (\session ->
+        let initial={session | runtimeIdentity=Just {model="Previous runtime",provider=Nothing,reasoning=Nothing}}
+            (busy,requests)=Delivery.invalidateWorkspace workspace (ready initial) |> Delivery.admit workspace
+            changed={session | state=Api.SessionTerminated,runtimeIdentity=Nothing,runtimeRevision=1}
+            settled=List.foldl (\request current -> if request.target==detailTarget then Delivery.settle request.id True (Ok (Delivery.Metadata changed)) current else if request.target==listTarget then Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) current else current) busy requests
+        in Expect.equal (Just (Delivery.Metadata changed),Just (Delivery.SessionsPage {items=[],nextCursor=Nothing})) (payload detailTarget settled,payload listTarget settled))
+    , test "authority retirement clears all retained display while stale callbacks only release their physical slots" <| withMetadata (\session ->
+        let (busy,requests)=Delivery.invalidateWorkspace workspace (ready session) |> Delivery.admit workspace
+            retired=Delivery.retireWorkspace workspace busy
+            drained=List.foldl (\request current -> Delivery.settle request.id False (Ok (Delivery.Metadata session)) current) retired requests
+        in Expect.equal {resources=0,physical=2,drainedResources=0,drainedPhysical=0} {resources=Dict.size retired.resources,physical=Dict.size retired.physical,drainedResources=Dict.size drained.resources,drainedPhysical=Dict.size drained.physical})
+    , test "stale display cannot choose a new initial transcript window" <| withMetadata (\session ->
+        let entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+            delivery=entered.sessionDelivery
+            seeded={delivery | resources=Dict.update (Delivery.key workspace detailTarget) (Maybe.map (\resource -> {resource | data=Just (Delivery.Metadata session),settled=resource.dirty})) delivery.resources}
+            stale=Sessions.reconcile ({entered | sessionDelivery=Delivery.invalidateWorkspace workspace seeded},Cmd.none) |> Tuple.first
+        in Expect.equal {start=Nothing,offset=0,end=0,window=False,metadata=Just (Delivery.Metadata session)}
+            {start=stale.sessions.start,offset=stale.sessions.offset,end=stale.sessions.end,window=List.any (\(_,target) -> case target of
+                Delivery.SessionWindow _ _ _ _ -> True
+                _ -> False) stale.sessions.owned,metadata=payload detailTarget stale.sessionDelivery})
+    ]
 
 
 

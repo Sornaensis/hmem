@@ -37,6 +37,14 @@ and local fragments; raw HTML is not executed and images display their alt text.
   Pending physical requests retain their admissions until their exact callbacks.
   Invalidation makes cached results stale and queues a canonical refresh; errors
   stay paused until retry or invalidation. Workspace/authority epochs clear caches.
+  Same-authority canonical refresh retains the last admitted metadata pages in
+  that bounded cache, so lists, linked tasks and model labels do not flash to
+  loading placeholders or move the transcript. Dirty metadata is display-only:
+  byte reads and new dock selections still require fresh successful authority.
+  Current errors clear the stale payload; successful empty or changed results
+  replace it. The dock exposes refresh through `aria-busy` without inserting a
+  temporary row above the transcript. Transport byte payloads and their bounded
+  range history are discarded on canonical refresh, not reused as metadata.
 - The live presentation retains the latest 100 prose-bearing occurrences and
   latest 100 activity-only occurrences independently, each bounded to 2 MiB of
   original record bytes (combined 200/4 MiB), plus a 1 MiB incomplete-record carry.

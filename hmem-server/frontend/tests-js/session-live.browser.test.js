@@ -12,6 +12,79 @@ const until=async fn=>{const end=Date.now()+12000;while(Date.now()<end){if(await
 const enter=async(h,dock=false)=>{await h.start();await h.idle();if(dock){const button=h.page.locator('#entity-'+h.fixture.tasks[0].id+' .task-sessions-icon');await until(()=>button.isEnabled());await button.click()}else{await h.page.getByRole('button',{name:'Sessions',exact:true}).click();await h.page.locator('.session-summary a').first().click()}await h.page.locator('.session-record:not(.session-record-activity) .session-record-text').first().waitFor()}
 const resync=async h=>{const response=h.page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/change-stream/resync'&&response.request().method()==='POST');await h.page.evaluate(()=>window.pushHierarchyFrames([{schema_version:1,type:'resync_required'}]));await response;await h.idle()}
 
+for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sessions'} metadata chrome and transcript geometry while independent responses are pending`,{timeout:60000},async()=>{
+ const h=await openSessionExplorer({runtime:{model:'Stable runtime',reasoning:'high'}}),{page}=h
+ let heldKind=null
+ const releases=[]
+ const kind=path=>path.endsWith('/filters')?'facets':path.endsWith('/sessions')?'list':path.endsWith('/tasks')?'links':path.endsWith(h.active.id)?'metadata':null
+ try{
+  await page.route('**/api/v1/**',async route=>{if(heldKind&&kind(new URL(route.request().url()).pathname)===heldKind)await new Promise(resolve=>releases.push(resolve));await route.fallback()})
+  await enter(h,dock);await h.idle()
+  const group=page.locator('.session-activity-group').first();await group.locator(':scope > summary').click();await group.locator('.session-content-tool summary').first().click();await h.idle()
+  await page.evaluate(()=>{
+   const root=document.getElementById('session-records')
+   window.chromeNodes=[root,root.querySelector('[data-block-key]'),root.querySelector('.session-activity-group'),root.querySelector('.session-content-tool'),document.querySelector('.session-viewer .session-runtime-value'),...document.querySelectorAll('.session-summary,.session-detail-title,.session-task-card')]
+   window.chromeLost=false
+   window.chromeObserver=new MutationObserver(()=>{if(window.chromeNodes.some(node=>!node.isConnected)||!window.chromeNodes[2].open||!window.chromeNodes[3].open)window.chromeLost=true})
+   window.chromeObserver.observe(document,{childList:true,subtree:true})
+  })
+  const snapshot=async()=>({titles:await page.locator('.session-detail-title').allTextContents(),summaries:await page.locator('.session-summary').allTextContents(),links:await page.locator('.session-task-card').allTextContents(),runtime:await page.locator('.session-viewer .session-runtime-value').innerText(),owner:dock?await page.locator('.task-session-dock').boundingBox():{y:0},viewer:await page.locator('#session-records').boundingBox(),prose:await page.locator('.session-record-text').first().boundingBox()})
+  const before=await snapshot()
+  for(const pendingKind of (dock?['metadata','list']:['metadata','list','links','facets'])){
+   heldKind=pendingKind
+   const response=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/change-stream/resync'&&response.request().method()==='POST')
+   await page.evaluate(()=>window.pushHierarchyFrames([{schema_version:1,type:'resync_required'}]));await response;await until(()=>releases.length>0)
+   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+   const pending=await snapshot()
+   assert.deepEqual([pending.titles,pending.summaries,pending.links,pending.runtime],[before.titles,before.summaries,before.links,before.runtime],pendingKind+' must retain admitted metadata display')
+   assert.ok(Math.abs((pending.viewer.y-pending.owner.y)-(before.viewer.y-before.owner.y))<=1,pendingKind+' moved the viewer within its owner')
+   assert.ok(Math.abs((pending.prose.y-pending.owner.y)-(before.prose.y-before.owner.y))<=1,pendingKind+' moved admitted prose within its owner')
+   if(dock)assert.equal(pending.owner.height,before.owner.height,pendingKind+' changed dock height')
+   assert.equal(await page.getByText(/Loading sessions|Loading session…|Loading linked tasks|Refreshing active sessions/).count(),0)
+   assert.equal(await page.evaluate(()=>window.chromeLost),false)
+   heldKind=null;for(const release of releases.splice(0))release();await h.idle()
+  }
+  assert.equal(await page.evaluate(()=>window.chromeLost),false)
+  assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+ }finally{heldKind=null;for(const release of releases.splice(0))release();await h.close()}
+})
+
+test('successful canonical empty membership and runtime clearing replace retained metadata',{timeout:60000},async()=>{
+ const h=await openSessionExplorer({runtime:{model:'Previous runtime'}}),{page}=h
+ try{
+  await enter(h);await h.idle()
+  h.active.runtime_identity=null;h.active.runtime_revision++
+  await resync(h);await until(async()=>await page.locator('.session-viewer .session-runtime-value').innerText()==='Unknown')
+  h.sessionLinks.get(h.active.id).clear();await resync(h)
+  assert.equal(await page.locator('.session-task-card').count(),0);await page.getByText('No linked tasks.',{exact:true}).waitFor()
+  h.active.state='terminated';h.active.terminated_at=new Date().toISOString();h.active.final_bytes=h.active.committed_bytes;h.active.final_sha256=createHash('sha256').update(h.content.get(h.active.id)).digest('hex')
+  await resync(h);assert.equal(await page.locator('.session-summary').count(),0);assert.equal(await page.getByText('Saved session',{exact:true}).textContent(),'Saved session');assert.ok((await page.locator('.session-viewer .session-runtime .session-identity-label').innerText()).includes('Session model'))
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+test('current metadata errors clear stale chrome and workspace refusal retires admitted private display',{timeout:60000},async()=>{
+ const h=await openSessionExplorer({runtime:{model:'Private runtime'}}),{page}=h
+ let refusal=0
+ try{
+  await page.route('**/api/v1/**',async route=>{
+   const path=new URL(route.request().url()).pathname
+   if(refusal&&path.endsWith('/sessions/'+h.active.id))return route.fulfill({status:refusal,json:{error:'current metadata refused'}})
+   if(refusal===403&&path==='/api/v1/session')return route.fulfill({json:{auth_mode:'local',principal:{actor_type:'user',actor_id:'fixture-user',actor_label:'Fixture User',authority:'local',grant_user_id:null},global_permissions:{create_workspace:false,superadmin:false},workspace:{workspace_id:h.fixture.workspace.id,role:null,can_read:false,can_edit:false,can_admin:false}}})
+   await route.fallback()
+  })
+  await enter(h);await h.idle();await page.locator('#session-records').evaluate(node=>window.privateRoot=node)
+  refusal=404;await resync(h)
+  await page.getByRole('alert').filter({hasText:'Session could not be loaded.'}).waitFor()
+  assert.equal(await page.locator('.session-detail-title,.session-viewer .session-runtime-value').count(),0)
+  refusal=403;await page.getByRole('alert').filter({hasText:'Session could not be loaded.'}).getByRole('button',{name:'Retry',exact:true}).click()
+  await until(async()=>await page.locator('#session-records').count()===0)
+  assert.equal(await page.evaluate(()=>window.privateRoot.isConnected),false)
+  assert.equal(await page.locator('.session-summary,.session-task-card').count(),0)
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
 for(const dock of [false,true])test(`live ${dock?'task dock':'Sessions'} retains admitted prose and outer/nested disclosure nodes through noise, head eviction and canonical resync`,{timeout:60000},async()=>{
  const h=await openSessionExplorer({extraRecords:[message('Admitted before the noisy tool run.'),call('first')]}),{page}=h
  try{

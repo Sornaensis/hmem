@@ -170,7 +170,7 @@ reconcile ( model, command ) =
                 { withDownloads | generation = old.generation + 1, pending = False }
             else
                 withDownloads
-        metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.andThen (\value -> case value of
+        metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen (\entry -> if entry.error == Nothing && entry.dirty == entry.settled then entry.data else Nothing) |> Maybe.andThen (\value -> case value of
             Delivery.Metadata session -> Just session
             _ -> Nothing)) workspace selected |> Maybe.withDefault Nothing
         beforeArchive = case metadata of
@@ -635,10 +635,10 @@ viewTaskActive workspace model task =
             Ok _ -> False) |> Maybe.withDefault False)
         key = sectionKey False task
     in
-    aside [class "task-session-dock",attribute "aria-label" "Task active agents",stopPropagationOn "click" (Decode.succeed (NoOp,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
+    aside [class "task-session-dock",attribute "aria-label" "Task active agents",attribute "aria-busy" (if fresh then "false" else "true"),stopPropagationOn "click" (Decode.succeed (NoOp,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
         [div [class "task-session-dock-header"] [strong [] [text "Active agents"],button [class "btn btn-secondary btn-sm",attribute "aria-label" "Close active agents",onClick (SessionsToggleDock task)] [text "✕"]]
         ,div [class "task-session-picker"] (List.map (\session -> button [class ("btn btn-secondary task-session-choice" ++ (if model.sessions.selected == Just session.id then " selected" else "")),disabled (not fresh),attribute "aria-pressed" (if model.sessions.selected == Just session.id then "true" else "false"),onClick (SessionsSelectDock task session.id)] [SessionActivityLight.view True "Active",span [] [text (sessionTitle session)],span [class "card-meta"] [text ("Last activity · " ++ TimestampDisplay.lookup model.timestamps (sessionActivity session))]]) sessions)
-        ,if page == Nothing || failed then p [attribute "role" (if failed then "alert" else "status")] [text (if failed then "Active sessions could not be loaded." else "Loading active sessions…"),if failed then button [class "btn btn-secondary btn-sm",onClick SessionsRetry] [text "Retry"] else text ""] else if not fresh then p [class "card-meta",attribute "role" "status"] [text "Refreshing active sessions…"] else if List.isEmpty sessions then p [class "card-meta"] [text "No active sessions for this task."] else text ""
+        ,if page == Nothing || failed then p [attribute "role" (if failed then "alert" else "status")] [text (if failed then "Active sessions could not be loaded." else "Loading active sessions…"),if failed then button [class "btn btn-secondary btn-sm",onClick SessionsRetry] [text "Retry"] else text ""] else if List.isEmpty sessions then p [class "card-meta"] [text "No active sessions for this task."] else text ""
         ,div [class "sessions-pagination"] [if taskCursor model key /= Nothing then button [class "btn btn-sm",onClick (SessionsTaskPreviousPage key)] [text "Newer sessions"] else text "",page |> Maybe.andThen .nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsTaskNextPage key cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "")]
         ,model.sessions.selected |> Maybe.map (\id -> div [class "task-session-transcript"] [a [class "btn btn-sm",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"],viewRecords workspace model id]) |> Maybe.withDefault (text "")]
 

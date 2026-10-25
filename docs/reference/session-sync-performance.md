@@ -360,3 +360,102 @@ seeded canonical binding, with the atomically linked task and initialized MCP
 workspace. A causal binding test and the first real local case now guard admission
 of an expensive large fixture. The failure receipt and its classification remain
 separate from the completed component observations.
+
+Explicit database sealing now snapshots the caller's exact active cursor, hashes
+immutable bytes without a session row lock, then locks and rechecks the same
+workspace/session/count/revision before publishing. A racing append wins with a
+conflict; an exact already completed seal remains retry-safe. Runtime metadata
+and task eligibility stay independent of the explicit seal. Idle cleanup retains
+its additional activity and linked-task checks. Hashing reads at most four
+1 MiB windows per pipeline and returns the pool lease before hashing callbacks
+or the next group. A range read freezes its metadata boundary and reads immutable
+bytes without a SHARE row lock; gaps fail closed. These are structural bounds,
+not measured lock-duration or peak-contention claims.
+
+The optional native protocol measurement compares equal 1 MiB prefixes. It
+counts PostgreSQL frontend Sync/simple-query and backend ReadyForQuery frames
+while discarding every payload byte; these are not TCP packets or network RTTs.
+`session-sync.db.cycles-before.json` and `session-sync.db.cycles-after.json`
+retain commands, source/binary inputs, exact cache state and counts. With 1,024
+1 KiB chunks, completed synchronization cycles fell from 1,035 to 31. A single
+1 MiB chunk rose from 15 to 33 cycles because snapshot, group and final-check
+transactions add fixed request-context work. No universal cycle reduction is
+claimed. Node is required only for the explicitly enabled measurement; ordinary
+core regression leaves that telemetry case pending.
+
+The core regression also exposed two inherited creation-race tests that held the
+fixture's only connection and then reused that pool for their observer or
+independent winner. Exact base `2e27f89` contains both defects. The repair uses a
+third pool and finite phase waits while retaining the original ordering and
+refusal assertions. The hung test's exact process and native PostgreSQL sandbox
+were verified, stopped and joined before disposal. This was test supervision,
+not a production sealing failure. The renewed creation cases passed, followed
+by 50 agent-session examples with zero failures and one optional telemetry
+pending; this does not substitute for the large native performance cases.
+The additional later-pipeline SQL-error case separately passed, restored its
+isolated schema fixture, kept the active cursor unchanged and completed an exact
+subsequent seal.
+
+The database component command requires a completed build pairing:
+
+```text
+node hmem-server/frontend/perf/session-sync.mjs db --base-sha <exact-launch-base> --task-id e04fbd45-9e61-405b-9196-c51a153f8cd8 --scratch .scratch/responsive-sessions-db-e04fbd45 --build-inputs hmem-server/frontend/perf/session-sync.db.build-inputs.json --output hmem-server/frontend/perf/session-sync.db.json
+```
+
+Capture production source/package inputs before the coordinated native compile,
+freeze them through its actual successful completion, then bind the installed
+MCP, harness and normal server hashes. Launch refuses drift or an incomplete
+build receipt. The retained receipt also classifies failed build attempts without
+claiming native or timing success. Fixture COPY and guarded insertion calls each
+contain at most 4 MiB and 256 rows under their existing 30-second SQL deadline;
+the 20-minute suite guard does not extend that deadline. Temporary staging and
+COPY files are disposed independently. Maintainers retain compact database
+receipts until the corresponding qualification is superseded.
+
+The completed native database component receipt is `session-sync.db.json`, with
+its compact accounting in `session-sync.db.summary.json`. Its three single
+attempts used exact `N=B` boundaries and no pending tail:
+
+| Prefix / chunk size | Guarded seed | Seal HTTP/MCP call | Frozen seal limit | Authorized range-read p95 |
+| --- | --- | --- | --- | --- |
+| 1 MiB / 1 KiB | 0.667 s | 60.551 ms | 5,064.116 ms | 307.235 ms |
+| 100 MiB / 1 MiB | 2.734 s | 649.967 ms | 8,313.019 ms | 402.409 ms |
+| 1 GiB / 64 KiB | 28.153 s | 6,222.369 ms | 40,302.109 ms | 236.154 ms |
+
+All three independent canonical seal hashes and all 16 active/evidence range
+reads matched local source bytes. Seal call times exclude local hash preparation
+and subsequent canonical readback, which the receipt records separately.
+The first two paths were loopback; the 1 GiB case shaped only HTTP/WS traffic at
+50 ms RTT and a shared 100 Mbit/s per direction. PostgreSQL observer connections,
+server database hashing and local source hashing remained local and unshaped.
+The complete 1 GiB prefix was not transferred across that HTTP link to seal it.
+
+Actual custom/generic prepared plans covered active/fresh lists, historical task
+membership and descendant project/task activity. Their largest execution time
+was 15.177 ms for historical membership; all other measured plans were at most
+2.088 ms. These observations did not justify an index or schema change. Logical
+statement counts include context and background work and remain distinct from
+the opt-in synchronization-cycle comparison.
+
+Resource sampling returned only 1/1/2 observations, with a 5.650 s interval in
+the large case. These samples do not establish peak use or size-independent
+memory. Bounded hash memory follows the four-window implementation and causal
+pool-release checks; combined resource and end-to-end qualification remain open.
+The three-case run completed without a retry or guard extension and removed its
+owned scratch after independent cleanup. Native build pairing, later diagnostic
+test binaries, retained earlier failures and topology are identified separately
+in the compact summary. This component result does not claim the final five
+warm/three fresh-process or 100-independent-cohort acceptance.
+
+After the shared native test fixture changed, the directly paired core executable
+reran the complete agent-session and migration groups: 51 examples, zero failures,
+one optional protocol-telemetry pending, in 91.905 seconds. A fresh paired MCP
+test executable then passed the seven selected database integration cases:
+four prefix-proof integrity cases, lost-ack replay/restart/mismatch, a finite stop
+boundary during verification, and explicit live termination. Their four filters
+took 31.052 / 12.173 / 10.784 / 5.164 seconds, with zero failures or pending cases.
+Every direct process joined and each owned fixture directory was empty after
+teardown. These tests use accelerated correctness polling and a default backend
+without WebSocket traffic; they do not qualify dispatch lifecycle or performance.
+Their input and binary bindings are separate from the earlier component build in
+`session-sync.db.summary.json`; the original component receipts remain unchanged.

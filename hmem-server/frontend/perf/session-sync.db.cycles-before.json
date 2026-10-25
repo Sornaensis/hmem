@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "task": "e04fbd45-9e61-405b-9196-c51a153f8cd8",
+  "baseSha": "2e27f89cefbc064b62afa5290d6068fb734f02df",
+  "owner": "repository maintainers",
+  "retention": "until corresponding database qualification evidence is superseded",
+  "command": "stack exec node -- .scratch/responsive-sessions-db-e04fbd45/cycles.mjs",
+  "measurement": "Opt-in native Hasql1.9.1.2 TCP relay; counts frontend Sync/simple Query and backend ReadyForQuery, not TCP packets or inferred SQL/network latency",
+  "sourceInputs": {
+    "core": "0caea762ddb92369d813f0ff8a5a561f18bd5249a0b2a72e2c373879b4f135f1",
+    "test": "55d0aaf5bbedb6b83bac67aa019d0bdb11a3683bd99a09f07e6bfb97a9829dfa",
+    "observer": "8beca73bb196e0d517d56013b03e41a89fadd27f41f7e590171dfc6c419d254d"
+  },
+  "cases": [
+    {
+      "prefixBytes": 1048576,
+      "chunkBytes": 1048576,
+      "chunks": 1,
+      "frontendSync": 13,
+      "frontendSimpleQuery": 2,
+      "frontendExecute": 10,
+      "backendReady": 15,
+      "unsupported": 0,
+      "state": "first seal on primed single-pool connection; hash/seal statements may prepare"
+    },
+    {
+      "prefixBytes": 1048576,
+      "chunkBytes": 1024,
+      "chunks": 1024,
+      "frontendSync": 1033,
+      "frontendSimpleQuery": 2,
+      "frontendExecute": 1033,
+      "backendReady": 1035,
+      "unsupported": 0,
+      "state": "same warm pool, new independent source/session; statements already prepared"
+    }
+  ],
+  "validation": "Both final receipts match independently constructed raw prefix SHA256; all database guards retained; observer/pool/native sandbox joined",
+  "limitations": [
+    "These are causal driver-cycle measurements, not performance percentiles or a large-prefix qualification.",
+    "Raw wire payloads, generated transcript fixtures and SQL logs are not retained.",
+    "Earlier optional-probe failures were private CRLF control framing and multirow fixture visibility, not production seal failures; resolved before this receipt."
+  ]
+}

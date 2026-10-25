@@ -1,0 +1,392 @@
+{
+  "schema": 1,
+  "task": "e04fbd45-9e61-405b-9196-c51a153f8cd8",
+  "owner": "repository maintainers",
+  "retention": "until corresponding database qualification evidence is superseded",
+  "baseSha": "a630f23a23b39a9872efd21f8b9042e6d2a4b2a5",
+  "capturedAt": "2026-10-25T22:49:45.114Z",
+  "command": "stack exec stack -- build hmem-mcp:exe:hmem-mcp hmem-server:exe:hmem-test-harness hmem-server:exe:hmem-server hmem-core:test:hmem-core-test hmem-server:test:hmem-server-test --fast --no-run-tests",
+  "productionInputs": {
+    "hmem-core/hmem-core.cabal": "e9892786b61e2654e0d2a39ba77e621d92abbf61581b3ded8df6087417bf3002",
+    "hmem-core/package.yaml": "31dfc211c1d38d977f61f44917cf5964bf3cadfe71ddde1dd285e6be2eb0840c",
+    "hmem-core/src/HMem/AgentSession.hs": "62ebd945f9fd387f1a0e95e99893caac20d157756dc44d31fa48134b6f767171",
+    "hmem-core/src/HMem/AgentSession/Transport.hs": "cc32adad3bed8d471035e8fd46ee9384723b6ad297b1448717314f48f094c320",
+    "hmem-core/src/HMem/BotIdentity.hs": "d80ee51a8543ca179781d7599639154041f95622b92b0680043db6c0bbf050ee",
+    "hmem-core/src/HMem/Config.hs": "3230576110405d7dd2445f5326e8a8cf8eb14c7575c662128dee0e17dff248d3",
+    "hmem-core/src/HMem/DB/AgentSession.hs": "ce39e633d7bf51b9120545bfeb58faf03d80d9cdaaa4d34d3e5fc26704e616df",
+    "hmem-core/src/HMem/DB/Audit.hs": "f826eb98faaaa744fceac377b8b7799262f6f68927a3f510031d3c416635e560",
+    "hmem-core/src/HMem/DB/Auth.hs": "3f8115641cffd485392f9394f9ba4ca1aa2d8ee5c04e19a5ec2fb7cead9f43e3",
+    "hmem-core/src/HMem/DB/ChangeStream.hs": "ae61963f58df4cf7b190029841a9d96a7046454ec5ce221fc513bcfe52b3dc55",
+    "hmem-core/src/HMem/DB/Embedding.hs": "a1e3c2fbdf8af7eb47c9975ac9c8932fb193debf9ac39b2076402b2210b7fac3",
+    "hmem-core/src/HMem/DB/Migration.hs": "b0addc35d9c3699d676441911bde00cbb682688f95a799503f773b6a797ca009",
+    "hmem-core/src/HMem/DB/Observation.hs": "6dfdad91545c2ffd63644f8d486f6f81aa205afc22f80aad62f573a28989227e",
+    "hmem-core/src/HMem/DB/Overview.hs": "7c5e55f256d84fb05102cb60827d477206b7d34eb82c3e58829ebfc4d53758a0",
+    "hmem-core/src/HMem/DB/Pool.hs": "abcae475b4886185f76b13234713138acd5153a2939dd9c4d39e6f16cbca0400",
+    "hmem-core/src/HMem/DB/Project.hs": "aacaa94b182d1cd31564e6153d366bbab16c5b8899d3e9f381d6f230ab8d64ce",
+    "hmem-core/src/HMem/DB/RequestContext.hs": "7ec93933b259bc6dcd9987366eeec54739e8dece049f65f9298708f148492e84",
+    "hmem-core/src/HMem/DB/SavedView.hs": "babe1fe7be67456da7816041cd426331a956e18d2ea2ab7da91f18588bb0f44b",
+    "hmem-core/src/HMem/DB/Schema.hs": "6ecdda63e3243a2e20422219cc593e982e7dbb89bad7ac6d6b5bf69ecd35333a",
+    "hmem-core/src/HMem/DB/Search.hs": "502a95e6aa074d4a967dff6b3df044926f3a5fb5512d1976f76d8187e7627a2f",
+    "hmem-core/src/HMem/DB/Task.hs": "33cc5227161c3b87f5b93c27069b0e2acee2847e8e02f8587479387eabacf9a8",
+    "hmem-core/src/HMem/DB/TestHarness.hs": "4dd5ae148c70f4f920c99d68d14d1c160711b324a9553bb6c2a2f7fff9a5193c",
+    "hmem-core/src/HMem/DB/Timeline.hs": "57a72cc5f0ead6189e1e7557f213bdace640c2c3b952f086acde1694fa0a6720",
+    "hmem-core/src/HMem/DB/Workspace.hs": "2bbfea643fb6d2029291c197c84753f7e6a02ab54a2279c8ec1950787ea1ef29",
+    "hmem-core/src/HMem/DB/WorkspaceGroup.hs": "2917da7bbf0957d9aeeb89f401dac5e54257285a32817f5446731f12f5e47f4e",
+    "hmem-core/src/HMem/Types.hs": "a8f28e570f7343d6265954f1a9e532eb65c48855877c3287f5c1465f2f643c70",
+    "hmem-mcp/app/Main.hs": "f8930e515a4b8b8f301e2c7c601966fb73f3aac552f988195b9d0e8272c3ccbd",
+    "hmem-mcp/cbits/session_file.c": "68201a2a75de7dc1f71835c2feebe435fdd922d7eeff75b44380fc291fb1d9a5",
+    "hmem-mcp/cbits/session_process.c": "fbb08aeecc341c4645baee8cff90f0827b95d692e4e098b41eda16f72d0e02ad",
+    "hmem-mcp/hmem-mcp.cabal": "549d1a4a801d6710215669f8a4305198420ed38da6fb41fa295384f313794ac7",
+    "hmem-mcp/package.yaml": "9db81beb363dc3c1c6a11bdf218f5324e745b7d996c206196fb09fddeecd02fb",
+    "hmem-mcp/src/HMem/MCP/Config.hs": "e00fb66eb67ac613ec588faef2f06d8d3d4e4dd5f68081527c6aa1d561c3092d",
+    "hmem-mcp/src/HMem/MCP/Server.hs": "d56712e77f8bb826311b211a57caf36248ad720c0378d2baed9766f8d02c66a2",
+    "hmem-mcp/src/HMem/MCP/SessionFile.hs": "a08a77dce4ce85ccccfd31eb7a05626cefd3d7671cc44879737b7426c7118e2a",
+    "hmem-mcp/src/HMem/MCP/SessionFollower.hs": "9b494b289a9f964fa88e181c2be9b70e6905656a49ed51d6deeefd9590db76e8",
+    "hmem-mcp/src/HMem/MCP/SessionHTTP.hs": "4d918c69d31de493cb50faaa3fa646afc08bce7661ebcc18684cd5c5798cff6a",
+    "hmem-mcp/src/HMem/MCP/SessionProcess.hs": "ddae0647e5a80e1353e592bf83e524dc206f77e16b287c0410b4390afe094400",
+    "hmem-mcp/src/HMem/MCP/Tools.hs": "da90483819e03b8785460ba0a63d4f182456379ae01af6370f4524e08e72f268",
+    "hmem-server/app-harness/Main.hs": "0894e6a94d9bfb27177deacc04f8fbbca0c7860519ea80f062e8d3395ef89b12",
+    "hmem-server/app/BuildFrontend.hs": "5488bb32cbafc9b007201b3eeac8c127f2eccd1d0b8ac7c508849b813933793a",
+    "hmem-server/app/Main.hs": "022f12fa2bc3e3f60fe42041b620b93d6c54c9ce354b7439030ff4211d38dd9e",
+    "hmem-server/hmem-server.cabal": "8916be08dd6b12adb0e3013b7db70618845be204eb785846f5974427e369e371",
+    "hmem-server/package.yaml": "fc61bd7ad7f4feca291dd5603771fc9514668c265500963552cb37ef914dd1ac",
+    "hmem-server/src/HMem/Server/AccessTracker.hs": "a00ddd027b5749358cb4d04867c40284b7af9fa2d2c8136932ced979fbc8b495",
+    "hmem-server/src/HMem/Server/API.hs": "ca8fa550f9daa399bce739d0eebe19d80d63c2a2293260e9c1cb3255ccdd08ff",
+    "hmem-server/src/HMem/Server/App.hs": "013dd0170c6ba2dd51d4d3ad845dc4d1b5cb0b2246d8058232149efa22d9175b",
+    "hmem-server/src/HMem/Server/AuthBootstrap.hs": "54b7c3e020cb7a1157390a1fd8148275945e0856250b19115dad1f9ddca185e0",
+    "hmem-server/src/HMem/Server/AuthTokens.hs": "06dac866da3ae47dfe9d0ebff476ff0150a6513098ca383657a6f5c4bdae8109",
+    "hmem-server/src/HMem/Server/AuthUsers.hs": "1342bf11829a2301e7cb2e84c3675b585ef436c5450c044ad0ac0c2a832c7756",
+    "hmem-server/src/HMem/Server/BotIdentity.hs": "97e1685dd4ae5df92a584996222e4e88101f469fc75404c86db8611aa8e4d442",
+    "hmem-server/src/HMem/Server/ChangeStream.hs": "ca06e52b90e0bd73265db0239f32a3279236fe67e549fd028e85a801fa0d6f60",
+    "hmem-server/src/HMem/Server/CtlEmbeddings.hs": "28f47b73bdf0b64f0f487e0f180361fb5eec98a540364f48650f71748a241949",
+    "hmem-server/src/HMem/Server/CtlEmbeddingsCli.hs": "c37bffbee6022bc95000969afc0d584abe7060c190de17f91892ef008a5ef3d2",
+    "hmem-server/src/HMem/Server/CtlMigrate.hs": "31d1a8be02cf39d6f101199b5497ad1f893777b4db8411d78d4dcf3973f0ad8b",
+    "hmem-server/src/HMem/Server/CtlPaths.hs": "5287204a7933e88d78c6ffe24f3d6ce77ad546fd49626d46037dfbdbfefbd285",
+    "hmem-server/src/HMem/Server/CtlPgvector.hs": "6d655460ca49bf5f7e6cc577a1af93b1ad900e832b38b987837ecfe199d29654",
+    "hmem-server/src/HMem/Server/CtlPgvectorCli.hs": "ca77f82265fad8b6fb0ab3bccb4cc8005a124cae93cd373e6072b0c236e0bbae",
+    "hmem-server/src/HMem/Server/Embedding/GteQwen2.hs": "c94b4a159a7983ed30e650a033b7488e292f228e9ce076b1832af42b8f16bc37",
+    "hmem-server/src/HMem/Server/Embedding/Http.hs": "2249d5ab59c62fa4ce5affe9b6b30a9ae18694b0a19fe38351ed42d507050592",
+    "hmem-server/src/HMem/Server/Embedding/ManagedTei.hs": "2c5d8615a52c8aef232c6019e5574f5a0c76ace7fb82c674992fe941210d8280",
+    "hmem-server/src/HMem/Server/Embedding/Provider.hs": "65a6ba5a5c2fd980733c60ad3bb86af75773f380dddcc615ccad0446b99e3f2e",
+    "hmem-server/src/HMem/Server/Embedding/Worker.hs": "d617b80e495a75524311c79a87eb524cf7d5fc7655efde3eb93ec787deb776e1",
+    "hmem-server/src/HMem/Server/Event.hs": "80aab470eb2a54953599287ce56bc909ecfdf7564144693a161a59e7033e1a58",
+    "hmem-server/src/HMem/Server/Exception.hs": "95b6dc8ac738874e59459a9f4781be3e0b532616ac08d89d4bf9ca7cbae9180a",
+    "hmem-server/src/HMem/Server/Logging.hs": "f69ef71e1a3b8ba920270d5ebe350b51de3957aa70739ea09cabbf8564049d77",
+    "hmem-server/src/HMem/Server/LogRotation.hs": "ba140630389ab3b2b257e8e571692fd0b62b6685b80093d188236f222eb358f8",
+    "hmem-server/src/HMem/Server/ObservationDiscovery.hs": "c5503afacb8247373fb84415ae7d234a455ed47ed4c7d0b72546e0524542ccbb",
+    "hmem-server/src/HMem/Server/OpenAPI.hs": "66f0f85b33bcd4b9f5653f3bbe46564102a88c27fb56f9358fbcf29d042cf49a",
+    "hmem-server/src/HMem/Server/SessionArchive.hs": "678da7d2b5982f5360e9bf67efa426a708d5bd2e09a69a7cf12562ef864c1633",
+    "hmem-server/src/HMem/Server/SessionPrefix.hs": "08f12e30aac59c88dca03bffb14852b41219342242c3622bbfd746727511f282",
+    "hmem-server/src/HMem/Server/SessionReaper.hs": "dc87a3e748a0f64ef8934286f8b048537c51e2ea4bfcad230a9744d3dc47c2d7",
+    "hmem-server/src/HMem/Server/Snapshot.hs": "4f91ad63f9023fad96e1fa8f288e853a08ba9ea7ec6166c85e5141f706da9be1",
+    "hmem-server/src/HMem/Server/Static.hs": "c8e90faf2c6649bc706548bcdc66284c7602ca3f1f248cb370c3adc443bc6023",
+    "hmem-server/src/HMem/Server/WebSocket.hs": "321c3a09b14e964d845a31287f12a39c42c73602884de11a8dccad13b81002c3",
+    "stack.yaml": "a7bfaea8ae5dee69350c7e39a1246ab9e0e3d6cc1a34fcc81cc0a0bb8056f4fd",
+    "stack.yaml.lock": "862716fdd2413305885b94d3482793221f41ebb7d62c9f2df2e9c4ba88391556"
+  },
+  "testInputs": {
+    "hmem-core/test/HMem/BotIdentitySpec.hs": "a554386175629081b412d730bdcf10e44e3578e9d9d3be9d68d1347f46496aa7",
+    "hmem-core/test/HMem/ConfigSpec.hs": "927b9e90aee013ae30759d40ab1b2f5794cd9eb0f88b57d306293101bfb54e3e",
+    "hmem-core/test/HMem/DB/AgentSessionSpec.hs": "97ca1600385563d4d496e660e69befda30c864ad5b238c254d24aecad21c6b9a",
+    "hmem-core/test/HMem/DB/AuditSpec.hs": "c94e6d33af541db6a9c7b78630c0e506b59ae3c8ee32aa239827e47a3d697b97",
+    "hmem-core/test/HMem/DB/AuthSpec.hs": "64232025b19e533fcc84b334f909605e42dc8d80a405f8a75b46cbff8aeca830",
+    "hmem-core/test/HMem/DB/BotIdentitySpec.hs": "8b51bb42ae490df057cae11a9b039a6c36a1c2d7e8ce52e659165b1d9c4620b6",
+    "hmem-core/test/HMem/DB/ChangeStreamSpec.hs": "d6df842406c8bb3b8910e50952b94b6b972dedab2f3971e36db7cf65604fd6a8",
+    "hmem-core/test/HMem/DB/EmbeddingSpec.hs": "e60b81c03b9535aea64c34f2fe18e59a468eab0b0223bd0e953aadca0c23cfe7",
+    "hmem-core/test/HMem/DB/ObservationDiscoverySpec.hs": "39a7e2b7ab4e8489d943c5cc876191f82ec508c8db9fd44e9b61afebda1a4b07",
+    "hmem-core/test/HMem/DB/ObservationFixture.hs": "9504cfb34f0f7e33e2e68c4453f66599f7d031f4cf43867f2094e033a0bc6a46",
+    "hmem-core/test/HMem/DB/ObservationRevisionSpec.hs": "e5988543b1430c8984f96093be93a5cdbd3cc61503b4f716d9a80f4addf1d16f",
+    "hmem-core/test/HMem/DB/ObservationSpec.hs": "7d5f0ca06318d20233ba69ac817fd96d648ba4fb844079fa661371985667ca00",
+    "hmem-core/test/HMem/DB/ObservationVersionSpec.hs": "0b010d1bfa4e667c421c00b9297f321f4edc4c14d92cf445294d4928c24419ec",
+    "hmem-core/test/HMem/DB/OverviewSpec.hs": "3013a422876f2d87691ca32643f1f521929ba76ad584444060fd2a10dbe551fc",
+    "hmem-core/test/HMem/DB/ProjectSpec.hs": "d5ae6b0001589981158a9a42f4756b434186e91ad248ec5fcf1cf3d5e0dcf3b2",
+    "hmem-core/test/HMem/DB/SearchSpec.hs": "658aad1f9f3433581a8dbdf48367ce5c142d6b48c055334e22da47d508e0aedd",
+    "hmem-core/test/HMem/DB/TaskSpec.hs": "8a82626f54b1953b91857371ccbf9fda1fba74a81f6db74c2b322938ca557fd1",
+    "hmem-core/test/HMem/DB/TestHarnessSpec.hs": "28c2f69b88ec455493196874faaafab442e9b87e77bfdc9181e04cf4fbd34285",
+    "hmem-core/test/HMem/DB/TimelineSpec.hs": "53f478d9c8232c1a5799788cb338c7ba27802e86deda712a89cb6d3708bf895f",
+    "hmem-core/test/HMem/DB/WorkspaceSpec.hs": "1061d3285ef881d4d7401ddce8369827349225fe7ac29890112d67666f7a700a",
+    "hmem-core/test/HMem/ObservationSubjectMatchCorpus.hs": "d9d1d301707c5143fb0770ce6521904d5627b783f9332d5ceb381970554c2d2e",
+    "hmem-core/test/HMem/TypesSpec.hs": "21c9cdfe0d8907cad30427e51e2100db4c72ac8f35ef8187187cf66413358843",
+    "hmem-core/test/Spec.hs": "2fbd14b119a40eaca54f6255686c7cfbe8ff26a9c18d79ec474a61225232d324",
+    "hmem-core/test/SpecHook.hs": "03b3db3ec39509bf343257e6fb4241192a83aa40857ed08c3208b38ed48df66d",
+    "hmem-mcp/test/HMem/MCP/ServerSpec.hs": "18a5a5179c70054542fa2acf99172ea3e1c7ad7d1279068f7b7a2b31b48c0e4e",
+    "hmem-mcp/test/HMem/MCP/SessionFollowerSpec.hs": "6d0048ca80bc7acd55c7a4d94189e724679cc0923b9f286717d74ffb60e0c156",
+    "hmem-mcp/test/HMem/MCP/ToolsSpec.hs": "8807055b6df2c8d4188b1c33ac7db08d1dd22445fac5f6180818583b73e9d41b",
+    "hmem-mcp/test/Spec.hs": "2fbd14b119a40eaca54f6255686c7cfbe8ff26a9c18d79ec474a61225232d324",
+    "hmem-server/test/HMem/Server/AccessTrackerSpec.hs": "288914a43fe3a34426caf44bcb6de7afec421c3f33b2983a0ef8d5f2ff54f817",
+    "hmem-server/test/HMem/Server/AgentSessionSpec.hs": "e476e6477b707bac1b0ab55cd1c7927daf17991127ab2624debbdbadbf87df5f",
+    "hmem-server/test/HMem/Server/APISpec.hs": "38cf7e8042ba4baaa901bb27d33e42c00e99518fc6886e3c7f856f5dbc62cea7",
+    "hmem-server/test/HMem/Server/AuthBootstrapSpec.hs": "0ef8efcc5d2ef1e242a2adea2238fc556d4726d2763e7e8f364b502dd624168e",
+    "hmem-server/test/HMem/Server/AuthTokensSpec.hs": "5c0e1c83109ac99169341d07565b094ef317e58c31235eada411852780f3d6ca",
+    "hmem-server/test/HMem/Server/AuthUsersSpec.hs": "d02ed3f493f6e330dba26cb4c528cfcc9904915956652f662778c0eada94a152",
+    "hmem-server/test/HMem/Server/BotIdentitySpec.hs": "f35232287ba05bd720d61ee3ac9a44b29b5501910ac58af878e91841455c1118",
+    "hmem-server/test/HMem/Server/ChangeStreamSpec.hs": "2e256405baae385d00f70d05b95be27c8e50d9b99f79becb2e526fb09e023984",
+    "hmem-server/test/HMem/Server/ConfiguredObservationDiscoverySpec.hs": "02460641a755ac375d2ee2c3b94bb49b74559e227976181b25617681b3800d7c",
+    "hmem-server/test/HMem/Server/CtlEmbeddingsCliSpec.hs": "7130199aadc5b151e3c2b1bdf0ec55a286486890700c3a6b9661bbbc27429a4a",
+    "hmem-server/test/HMem/Server/CtlEmbeddingsSpec.hs": "37c46c930b5d388777ecff0db6a9b9fb24565342208694bf172fd9ca47599d43",
+    "hmem-server/test/HMem/Server/CtlMigrateSpec.hs": "7e04fc541b862be1d588b4ff69cb04f16a6a7575050d211aec8d7f55ddfbb870",
+    "hmem-server/test/HMem/Server/CtlPathsSpec.hs": "e47bb201cf097600e40af99bfc257947925dd87f8076b97a47096d8d429902cb",
+    "hmem-server/test/HMem/Server/CtlPgvectorCliSpec.hs": "b2862b0415a27e0c63a49bb85bbbd5a1831beafb3bb107ee84173b4bb7585901",
+    "hmem-server/test/HMem/Server/CtlPgvectorSpec.hs": "75be58a0df85fbbd5616f022a42482e76964dc8239e89aff6b9f3b4ed6699fa5",
+    "hmem-server/test/HMem/Server/DeployedSandboxSpec.hs": "1279c0ab5fdb31620306bc562605110a2dbce82ec63349973f5b2fdc0fe43c06",
+    "hmem-server/test/HMem/Server/Embedding/GteQwen2Spec.hs": "aac3de456f5e37f8c8fa7395756bb0bf0c0d8e026b63c9530e0a099ed1bee825",
+    "hmem-server/test/HMem/Server/Embedding/HttpSpec.hs": "66cb51b9bfa8ef8ea2b4968205e1026c50d4a212c20122459b5b0df0ffc04634",
+    "hmem-server/test/HMem/Server/Embedding/ManagedTeiSpec.hs": "1713085fe4de997b9667405a84ea76c87a23cf5ec2caed4b13ea4215579e71b6",
+    "hmem-server/test/HMem/Server/Embedding/ProviderSpec.hs": "9b5f139d05518afc13062a2d758788fa38dfa7b691c38b27ecb2a8afaf7098a0",
+    "hmem-server/test/HMem/Server/Embedding/WorkerSpec.hs": "948049ca673deadc8faa142d191af0b4a70b17b95ddf564b9a48bbddacdcb1c2",
+    "hmem-server/test/HMem/Server/KeycloakHarness.hs": "fc1f9789f7e70588b5a49592de2de80e46d4a76d36d1dbdd847ea19d9da8cdf2",
+    "hmem-server/test/HMem/Server/KeycloakHarnessSpec.hs": "53dc2af3a503c7e4d0470f89ba8a1427926598de408c01eba062952ab8ebeebe",
+    "hmem-server/test/HMem/Server/LocalSandboxSpec.hs": "1d141738dab10c69b06f8016d17fe322725779b6592f37a66cfd0b3ff386ab66",
+    "hmem-server/test/HMem/Server/LogRotationSpec.hs": "e4249304ea33c285c4195a9b12e68cea1eb4ad1041be8f983491ac06cb217d04",
+    "hmem-server/test/HMem/Server/ObservationDiscoverySpec.hs": "23fbe656658cfc6b59ed8f0c7111a1a8af0244fd62729b76fcc0a8e414b7b093",
+    "hmem-server/test/HMem/Server/PgvectorEmbeddingWorkflowSpec.hs": "19c3b4e737710c543a0f4ecae85f9052db13ae4f178766cb394a637668994a43",
+    "hmem-server/test/HMem/Server/SessionPrefixSpec.hs": "817cee81dc5cc20f968eaaf664ea60d3be2a3da6075891ee01434b4792fbd696",
+    "hmem-server/test/HMem/Server/SessionReaperSpec.hs": "af0f6f8c3f4359643a474718a011ed79e063c8bc1204a112ed8afb93556ea177",
+    "hmem-server/test/HMem/Server/TestHarness.hs": "a4335adbe83c79444e2630f28e264f82cec298f7c54c94b6af89cb47a126ae58",
+    "hmem-server/test/Spec.hs": "2fbd14b119a40eaca54f6255686c7cfbe8ff26a9c18d79ec474a61225232d324",
+    "hmem-server/test/SpecHook.hs": "03b3db3ec39509bf343257e6fb4241192a83aa40857ed08c3208b38ed48df66d"
+  },
+  "builtAt": "2026-10-25T22:51:01.000Z",
+  "buildExitCode": 0,
+  "binaries": {
+    "harness": "c3615df2a645820aa9f25e27993b030d846975abbeeba6c7c79deb1bfe97c64f",
+    "mcp": "b0c9e638f3fbb4544b3a9fc4936e230b072bcce893fad0a967cfcaf68cfbc666",
+    "server": "49ea4f5f8ea43df06e26b05a47803a237a46f8b834d9795f98ee94fae59d077e",
+    "coreTest": "ad8e25c85498c12d99074a3f64843822c0a64ad70f44174ecd57758db1037c0e",
+    "serverTest": "f6ba11193001340a0c1152162354d72a562ae4bc1c1b886f952db3e00228bdb9"
+  },
+  "priorBuildAttempts": [
+    {
+      "label": "compile22",
+      "prebuildReceiptSha256": "a82a460a64ffdca47fbd88e99a25f0f08baff8459d3841d415b09ebd506a3110",
+      "capturedAt": "2026-10-25T19:04:29.386Z",
+      "exitCode": 1,
+      "classification": "dispatch core test shouldBe/>> precedence compile error; no native success or performance claim",
+      "changedInputs": [
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/src/HMem/Server/WebSocket.hs",
+          "before": "d286e6070d448a5b957a8a49f58b97e5d2be9dca97e73a4bf311b2aa4a910b5a",
+          "after": "96b6ed4ec4d9e26f274a2b7201b97124b7686abb862dfd2ebebe1ade5f2630a6"
+        },
+        {
+          "kind": "testInputs",
+          "path": "hmem-core/test/HMem/DB/ChangeStreamSpec.hs",
+          "before": "08a4aea6a7fa9b9ce286f348b486ec2df6596b23d56533a39df93a64b8d3b241",
+          "after": "d6df842406c8bb3b8910e50952b94b6b972dedab2f3971e36db7cf65604fd6a8"
+        },
+        {
+          "kind": "testInputs",
+          "path": "hmem-server/test/HMem/Server/ChangeStreamSpec.hs",
+          "before": "a55787688b2f97e64417c9471cd50b2447fa900d6f6c96f4bc5cb9f25014840d",
+          "after": "d1ebcceb432ea0d1fcaa9f7ed943c7974bee7a7c649be4b8d095bed36f8b75de"
+        }
+      ]
+    },
+    {
+      "label": "compile23",
+      "prebuildReceiptSha256": "1144d6847b6d0c8e102a260ba26c28ed8018a06ef74b5252cf9ecf46045a4c8d",
+      "capturedAt": "2026-10-25T19:10:45.027Z",
+      "exitCode": 1,
+      "classification": "dispatch server test missing global readFrame helper compile error; no native success or performance claim",
+      "changedInputs": [
+        {
+          "kind": "testInputs",
+          "path": "hmem-server/test/HMem/Server/ChangeStreamSpec.hs",
+          "before": "d1ebcceb432ea0d1fcaa9f7ed943c7974bee7a7c649be4b8d095bed36f8b75de",
+          "after": "5f9000e489cf4de86f2da2eca1838ab2822157e3446ead094c10c6086c4ee3cc"
+        }
+      ]
+    },
+    {
+      "label": "compile24",
+      "receiptSha256": "cb016a4c738acbde8201600272b2f293ba9a88d883ae53d8a578aea90686e71e",
+      "prebuildReceiptSha256": "82c4dc0e215e1aada9351cda0d0fdb85cc7ec94659fb3f6fd0a567201b1ef32d",
+      "capturedAt": "2026-10-25T19:17:27.448Z",
+      "builtAt": "2026-10-25T19:21:48.113Z",
+      "baseSha": "28717a7f5c92c65c06c177e9888414bcbf4fa6be",
+      "exitCode": 0,
+      "coordinatorBuild": "compile24 actual exit0; all five targets completed",
+      "binaries": {
+        "harness": "6dd0adea073b173edfb7bebe8a6e89dcd0d443487f2dcfe6393798e010b886d8",
+        "mcp": "a39decbbfb66ea19a01888e373af47e1dd01855b4954fc509765204e7eccc921",
+        "server": "4d4ebb92c1418e11775a43d922cca88e3d7866e12425d6363a3fe6294850472e",
+        "coreTest": "3db088d99ef9d640af402f8556f9df086e167e8d1fe3c58a7c3b6a8e25dc2908",
+        "serverTest": "c99366a247443f092b41d2678d255fa75118654bd12cf0e7f4f92ee99d6f10a8"
+      },
+      "classification": "actual completed five-target native build; later server loopback 24 examples/2 failures prompted native lifecycle repair; historical build only, no performance qualification",
+      "changedInputs": [
+        {
+          "kind": "productionInputs",
+          "path": "hmem-core/src/HMem/DB/TestHarness.hs",
+          "before": "89060eb8aeaaac65bf6dc139f56c998d420035e7e2f6b793a61cf3507c34fee4",
+          "after": "058b7b4c108633c37b8471d23c51241e619767057bbe076ae4aa4f398bca3da9"
+        },
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/app-harness/Main.hs",
+          "before": "babda8f25ccfcd5b5bb59553bfcf2d145b6e76c98ecaaa9aa8802a3719491721",
+          "after": "8b28f9b0cc9710d011842a347d1a2b64c5133357efa09a0244fa3404d29bd91f"
+        },
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/app/Main.hs",
+          "before": "4ff43ae49fd2841808d991c217113fcb2c8409c0c60a8d0a5d6c7500fea08211",
+          "after": "13a5eed032c08ef6ad9ebbd1083c68afd936b03da36c3f14f5e53219e0dbe441"
+        },
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/src/HMem/Server/WebSocket.hs",
+          "before": "96b6ed4ec4d9e26f274a2b7201b97124b7686abb862dfd2ebebe1ade5f2630a6",
+          "after": "2ed2b4e4b22c38566bcc601c446d5f33e58423f98286139723a754c63639f3b6"
+        },
+        {
+          "kind": "testInputs",
+          "path": "hmem-server/test/HMem/Server/ChangeStreamSpec.hs",
+          "before": "5f9000e489cf4de86f2da2eca1838ab2822157e3446ead094c10c6086c4ee3cc",
+          "after": "fda5ad56c8b0fa47e870c8977606b6e6e1811c46fd80e4435cbe2c01749c9667"
+        },
+        {
+          "kind": "testInputs",
+          "path": "hmem-server/test/HMem/Server/TestHarness.hs",
+          "before": "0d62b595919be3c1f8445b5742052d7061bac214da5300bcf73ccf35d6f7ad3e",
+          "after": "7ea8e59a455927c7e5b5fbb0ef3957342ce4a25c2eac0f1798f292002db2bb2e"
+        }
+      ]
+    },
+    {
+      "label": "native-lifecycle-prebuild-unbuilt",
+      "receiptSha256": "d037fe6934ae0744d38602390777a2fbb2b5ec8554c187a38765028cc38ccc53",
+      "capturedAt": "2026-10-25T20:53:53.749Z",
+      "baseSha": "a630f23a23b39a9872efd21f8b9042e6d2a4b2a5",
+      "exitCode": null,
+      "classification": "compiler dispatch aborted before launch after source audit findings: startup worker-completion/late-callback storage, ordinary HTTP abort ownership, legacy authorized anonymous behavior; no build/runtime/performance claim; later repaired frozen inputs captured separately",
+      "changedInputs": [
+        {
+          "kind": "productionInputs",
+          "path": "hmem-core/src/HMem/DB/TestHarness.hs",
+          "before": "058b7b4c108633c37b8471d23c51241e619767057bbe076ae4aa4f398bca3da9",
+          "after": "d46879cd166e8f3baf9aaa727108d45d0860d7c35c9ae2b743ae91f1c8e43c61"
+        },
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/app-harness/Main.hs",
+          "before": "8b28f9b0cc9710d011842a347d1a2b64c5133357efa09a0244fa3404d29bd91f",
+          "after": "94b1771ce0990dcd198aedb28432e7d29f3d5b5f815d676376cb4d5d749e7f75"
+        },
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/app/Main.hs",
+          "before": "13a5eed032c08ef6ad9ebbd1083c68afd936b03da36c3f14f5e53219e0dbe441",
+          "after": "022f12fa2bc3e3f60fe42041b620b93d6c54c9ce354b7439030ff4211d38dd9e"
+        },
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/src/HMem/Server/WebSocket.hs",
+          "before": "2ed2b4e4b22c38566bcc601c446d5f33e58423f98286139723a754c63639f3b6",
+          "after": "805253ae82b053c122d92962fdfb7a0b8d24a15cb3e3c3a8f7c90027f39bcfb3"
+        },
+        {
+          "kind": "testInputs",
+          "path": "hmem-server/test/HMem/Server/ChangeStreamSpec.hs",
+          "before": "fda5ad56c8b0fa47e870c8977606b6e6e1811c46fd80e4435cbe2c01749c9667",
+          "after": "82c24b9f47b6fba1e629e38d8e116b00486c6ba11b6c5716ae6893964e7361e5"
+        },
+        {
+          "kind": "testInputs",
+          "path": "hmem-server/test/HMem/Server/TestHarness.hs",
+          "before": "7ea8e59a455927c7e5b5fbb0ef3957342ce4a25c2eac0f1798f292002db2bb2e",
+          "after": "a4335adbe83c79444e2630f28e264f82cec298f7c54c94b6af89cb47a126ae58"
+        }
+      ]
+    },
+    {
+      "label": "compile79",
+      "prebuildReceiptSha256": "d82ff253f45ebe8d9a1f050a515f248451aa16984d72b5b55d5c6830d5ade21d",
+      "capturedAt": "2026-10-25T22:17:40.705Z",
+      "baseSha": "a630f23a23b39a9872efd21f8b9042e6d2a4b2a5",
+      "exitCode": 1,
+      "classification": "actual core compile failure: ambiguous Rel8.filter; no test or completed native build success; frozen retry qualifies List.filter and app-harness SomeAsyncException rethrow",
+      "changedInputs": [
+        {
+          "kind": "productionInputs",
+          "path": "hmem-core/src/HMem/DB/TestHarness.hs",
+          "before": "d46879cd166e8f3baf9aaa727108d45d0860d7c35c9ae2b743ae91f1c8e43c61",
+          "after": "4dd5ae148c70f4f920c99d68d14d1c160711b324a9553bb6c2a2f7fff9a5193c"
+        },
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/app-harness/Main.hs",
+          "before": "94b1771ce0990dcd198aedb28432e7d29f3d5b5f815d676376cb4d5d749e7f75",
+          "after": "0894e6a94d9bfb27177deacc04f8fbbca0c7860519ea80f062e8d3395ef89b12"
+        }
+      ]
+    },
+    {
+      "label": "compile81",
+      "prebuildReceiptSha256": "6b9684207af9d5513ff30e3c84541f597d401df6266f5ce26ebe35e08eef252c",
+      "capturedAt": "2026-10-25T22:21:13.377Z",
+      "baseSha": "a630f23a23b39a9872efd21f8b9042e6d2a4b2a5",
+      "exitCode": 1,
+      "classification": "actual incomplete five-target compile: core and MCP linked; server WebSocket readMVar import missing; no complete native pairing or test assertion claim; retry changes only import",
+      "changedInputs": [
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/src/HMem/Server/WebSocket.hs",
+          "before": "805253ae82b053c122d92962fdfb7a0b8d24a15cb3e3c3a8f7c90027f39bcfb3",
+          "after": "1da85296f98dee7b712d591e6229b6f2011916c6cd96ed57e529856c6cccd019"
+        }
+      ]
+    },
+    {
+      "label": "compile82",
+      "receiptSha256": "94f95c6c7ce7379759100d29d84d70d3ec1e42f5adea291e4135cdd7a70a0ec1",
+      "prebuildReceiptSha256": "484690fcaf3557bfd7551853d527910b432d1f44b5e323027b0307d3bd043fa1",
+      "capturedAt": "2026-10-25T22:26:09.952Z",
+      "builtAt": "2026-10-25T22:28:05.000Z",
+      "verifiedAt": "2026-10-25T22:30:02.797Z",
+      "baseSha": "a630f23a23b39a9872efd21f8b9042e6d2a4b2a5",
+      "exitCode": 0,
+      "coordinatorBuild": "compile82 actual exit0; all five targets completed; runtime assertions not yet executed",
+      "binaries": {
+        "harness": "651a1827c386ce790e6bd86c24739080efd6efc2fc4ce33aea80b9ced2387ac7",
+        "mcp": "b0c9e638f3fbb4544b3a9fc4936e230b072bcce893fad0a967cfcaf68cfbc666",
+        "server": "eca9864aacda097d7ad731d8cc54c25878bccc1a188b6bc6d5a9cb0b739ba84b",
+        "coreTest": "ad8e25c85498c12d99074a3f64843822c0a64ad70f44174ecd57758db1037c0e",
+        "serverTest": "4cc6a5fcee261705dbd0176f160d1f91f90e5b6e3abeed5b645663f4708ae5c2"
+      },
+      "binaryPaths": {
+        "harness": ".stack-work/install/c66173c6/bin/hmem-test-harness.exe",
+        "mcp": ".stack-work/install/c66173c6/bin/hmem-mcp.exe",
+        "server": ".stack-work/install/c66173c6/bin/hmem-server.exe",
+        "coreTest": "hmem-core/.stack-work/dist/56bb250d/build/hmem-core-test/hmem-core-test.exe",
+        "serverTest": "hmem-server/.stack-work/dist/56bb250d/build/hmem-server-test/hmem-server-test.exe"
+      },
+      "classification": "actual completed five-target native build; lifecycle26 passed, later runtime startup88 exposed acceptor-map forkclaim race before HTTP/WS onOpen; DB three-case remained unrun, no DB performance claim; later frozen source repair captured separately",
+      "changedInputs": [
+        {
+          "kind": "productionInputs",
+          "path": "hmem-server/src/HMem/Server/WebSocket.hs",
+          "before": "1da85296f98dee7b712d591e6229b6f2011916c6cd96ed57e529856c6cccd019",
+          "after": "321c3a09b14e964d845a31287f12a39c42c73602884de11a8dccad13b81002c3"
+        },
+        {
+          "kind": "testInputs",
+          "path": "hmem-server/test/HMem/Server/ChangeStreamSpec.hs",
+          "before": "82c24b9f47b6fba1e629e38d8e116b00486c6ba11b6c5716ae6893964e7361e5",
+          "after": "2e256405baae385d00f70d05b95be27c8e50d9b99f79becb2e526fb09e023984"
+        }
+      ]
+    }
+  ],
+  "coordinatorBuild": "compile89 actual exit0; all five targets completed; runtime assertions not yet executed",
+  "prebuildReceiptSha256": "5d628c3b5e145ddd4c2a423711467f30edee447f66bcc5b99d07e781c1e06e79",
+  "verifiedAt": "2026-10-25T22:51:34.850Z",
+  "binaryPaths": {
+    "harness": ".stack-work/install/c66173c6/bin/hmem-test-harness.exe",
+    "mcp": ".stack-work/install/c66173c6/bin/hmem-mcp.exe",
+    "server": ".stack-work/install/c66173c6/bin/hmem-server.exe",
+    "coreTest": "hmem-core/.stack-work/dist/56bb250d/build/hmem-core-test/hmem-core-test.exe",
+    "serverTest": "hmem-server/.stack-work/dist/56bb250d/build/hmem-server-test/hmem-server-test.exe"
+  }
+}

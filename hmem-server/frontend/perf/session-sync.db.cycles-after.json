@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "task": "e04fbd45-9e61-405b-9196-c51a153f8cd8",
+  "baseSha": "2e27f89cefbc064b62afa5290d6068fb734f02df",
+  "owner": "repository maintainers",
+  "retention": "until corresponding database qualification evidence is superseded",
+  "command": "stack exec node -- .scratch/responsive-sessions-db-e04fbd45/cycles.mjs (executes captured compiled core-test binary)",
+  "measurement": "Opt-in native Hasql1.9.1.2; frontend Sync/simple Query/Execute and backend ReadyForQuery, not TCP packets or latency percentiles",
+  "sourceInputs": {
+    "core": "ce39e633d7bf51b9120545bfeb58faf03d80d9cdaaa4d34d3e5fc26704e616df",
+    "test": "fdb8907bdc8c531e2f9a1581fddbadbb7b7492afed71cdd49f495e05e037f3f5",
+    "observer": "8beca73bb196e0d517d56013b03e41a89fadd27f41f7e590171dfc6c419d254d",
+    "testBinary": "41b23dbc2e817eada17a1fd243667a2eeaa637389ffc804cb5ea4f29d87d4149"
+  },
+  "cases": [
+    {
+      "prefixBytes": 1048576,
+      "chunkBytes": 1048576,
+      "chunks": 1,
+      "frontendSync": 27,
+      "frontendSimpleQuery": 6,
+      "frontendExecute": 25,
+      "backendReady": 33,
+      "unsupported": 0,
+      "state": "first seal on primed pool; snapshot/group/final CAS each uses transaction with normal context"
+    },
+    {
+      "prefixBytes": 1048576,
+      "chunkBytes": 1024,
+      "chunks": 1024,
+      "frontendSync": 25,
+      "frontendSimpleQuery": 6,
+      "frontendExecute": 25,
+      "backendReady": 31,
+      "unsupported": 0,
+      "state": "same warm pool; new source/session, all SQL statements prepared"
+    }
+  ],
+  "comparison": {
+    "smallChunkReadyBefore": 1035,
+    "smallChunkReadyAfter": 31,
+    "smallChunkCycleReductionFraction": 0.970048309178744,
+    "maxChunkReadyBefore": 15,
+    "maxChunkReadyAfter": 33,
+    "tradeoff": "Snapshot/group/final transactions add fixed context/transaction work for one-window max-chunk cases; no universal roundtrip reduction claim"
+  },
+  "validation": "Both receipt hashes match independently constructed raw prefix; native pool/counter/sandbox joined",
+  "limitations": [
+    "Causal driver-cycle measurements, not large-prefix performance qualification.",
+    "Fixed four-window groups use at most4MiB raw window results; large native measurement follows separately."
+  ]
+}

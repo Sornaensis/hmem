@@ -332,13 +332,34 @@ async function checkedExec(command, args, options = {}) {
 
 // Kept separate from correctness fixtures: this owns its entire sandbox and
 // returns only non-secret coordinates. The bearer stays in this closure.
-export async function startStack(scratch, diagnostics = true, { frontendAssets = true } = {}) {
+export async function nativeProductionInputs() {
+  const inputs = {}
+  for (const directory of ['hmem-core/src', 'hmem-server/src', 'hmem-server/app', 'hmem-server/app-harness', 'hmem-mcp/src', 'hmem-mcp/app', 'hmem-mcp/cbits']) {
+    for (const name of await readdir(join(repo, directory), { recursive: true })) if (/\.(hs|c|h)$/.test(name)) {
+      const path = join(directory, name).replaceAll('\\', '/'); inputs[path] = sha(await readFile(join(repo, path)))
+    }
+  }
+  for (const path of ['stack.yaml', 'stack.yaml.lock', ...['hmem-core', 'hmem-server', 'hmem-mcp'].flatMap(directory => [directory + '/package.yaml', directory + '/' + directory + '.cabal'])]) inputs[path] = sha(await readFile(join(repo, path)))
+  return Object.fromEntries(Object.entries(inputs).sort(([a], [b]) => a.localeCompare(b)))
+}
+export function verifyNativeBuild(expectedBuild, nativeInputs, binaries) {
+  assert.equal(expectedBuild.task, 'e04fbd45-9e61-405b-9196-c51a153f8cd8'); assert.equal(expectedBuild.buildExitCode, 0, 'completed native build receipt')
+  assert.ok(Number.isFinite(Date.parse(expectedBuild.capturedAt)) && Date.parse(expectedBuild.builtAt) >= Date.parse(expectedBuild.capturedAt), 'ordered prebuild/build timestamps')
+  assert.deepEqual(nativeInputs, expectedBuild.productionInputs, 'launch sources/packages equal prebuild frozen inputs')
+  for (const name of ['harness', 'mcp', 'server']) assert.equal(binaries[name], expectedBuild.binaries[name], 'built ' + name + ' pairing')
+}
+export async function startStack(scratch, diagnostics = true, { frontendAssets = true, expectedBuild = null } = {}) {
   const { stdout } = await checkedExec('stack', ['path', '--local-install-root'], { cwd: repo, env: scratch.env })
   const bin = join(stdout.trim(), 'bin'), extension = process.platform === 'win32' ? '.exe' : ''
   const executable = join(bin, 'hmem-test-harness' + extension), mcpExecutable = join(bin, 'hmem-mcp' + extension)
   const provenance = { harness: sha(await readFile(executable)), mcp: sha(await readFile(mcpExecutable)), sources: {
     runner: loadedMethodSha256, sessionMcpHelper: sha(await readFile(join(frontend, 'tests-js/support/session-mcp.js'))), nativeHarness: sha(await readFile(join(repo, 'hmem-core/src/HMem/DB/TestHarness.hs'))) } }
   for (const path of ['hmem-mcp/src/HMem/MCP/SessionFollower.hs', 'hmem-mcp/src/HMem/MCP/SessionHTTP.hs', 'hmem-mcp/src/HMem/MCP/SessionProcess.hs', 'hmem-mcp/src/HMem/MCP/SessionFile.hs', 'hmem-mcp/cbits/session_process.c', 'hmem-core/src/HMem/AgentSession/Transport.hs', 'hmem-core/src/HMem/DB/AgentSession.hs', 'hmem-server/src/HMem/Server/SessionPrefix.hs', 'hmem-server/src/HMem/Server/API.hs', 'hmem-server/src/HMem/Server/App.hs', 'hmem-server/app-harness/Main.hs']) provenance.sources[path] = sha(await readFile(join(repo, path)))
+  const nativeInputs = await nativeProductionInputs(); Object.assign(provenance.sources, nativeInputs)
+  if (expectedBuild) {
+    verifyNativeBuild(expectedBuild, nativeInputs, { harness: provenance.harness, mcp: provenance.mcp, server: sha(await readFile(join(bin, 'hmem-server' + extension))) })
+    provenance.buildReceipt = { sha256: expectedBuild.receiptSha256, capturedAt: expectedBuild.capturedAt, builtAt: expectedBuild.builtAt, command: expectedBuild.command, baseSha: expectedBuild.baseSha }
+  }
   const probe = net.createServer(); await new Promise(done => probe.listen(0, '127.0.0.1', done)); const port = probe.address().port; await new Promise(done => probe.close(done))
   const managed = runChild(executable, ['deployed', '--interactive', '--port', String(port)], {
     cwd: repo, env: { ...scratch.env, HMEM_TEST_SESSION_DIAGNOSTICS: diagnostics ? '1' : '0' },
@@ -480,6 +501,69 @@ export function browserObserver() {
   document.addEventListener('DOMContentLoaded', () => new MutationObserver(() => requestAnimationFrame(collect)).observe(document.body, { childList: true, subtree: true, characterData: true }))
 }
 
+// Discards every payload byte. Counts PostgreSQL protocol synchronization
+// cycles, not TCP packets, SQL contents, credentials or claimed network RTTs.
+export class PostgresFrames {
+  constructor(observe, { startup = false } = {}) { this.observe = observe; this.startup = startup; this.header = Buffer.alloc(8); this.used = 0; this.skip = 0 }
+  push(bytes) {
+    let offset = 0
+    while (offset < bytes.length) {
+      if (this.skip) { const count = Math.min(this.skip, bytes.length - offset); offset += count; this.skip -= count; continue }
+      const size = this.startup ? 8 : 5, count = Math.min(size - this.used, bytes.length - offset)
+      bytes.copy(this.header, this.used, offset, offset + count); this.used += count; offset += count
+      if (this.used !== size) continue
+      const length = this.header.readUInt32BE(this.startup ? 0 : 1)
+      if (length < (this.startup ? 8 : 4) || length > 16777216) throw new Error('Unsupported PostgreSQL observation frame')
+      const kind = this.startup ? this.header.readUInt32BE(4) : String.fromCharCode(this.header[0])
+      this.observe(kind); this.skip = length - (this.startup ? 8 : 4); this.used = 0
+      if (this.startup && kind === 196608) this.startup = false
+      else if (this.startup && ![80877103, 80877104].includes(kind)) throw new Error('Unsupported PostgreSQL startup')
+    }
+  }
+}
+export async function postgresCycleProxy(port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid sandbox PostgreSQL port')
+  const sockets = new Set(), counts = { connections: 0, frontendSync: 0, frontendSimpleQuery: 0, frontendExecute: 0, backendReady: 0, unsupported: 0 }
+  const server = net.createServer(socket => {
+    if (++counts.connections > 8) { socket.destroy(); return }
+    const upstream = net.connect(port, '127.0.0.1'); sockets.add(socket); sockets.add(upstream)
+    let negotiation = false
+    const input = new PostgresFrames(kind => { if ([80877103, 80877104].includes(kind)) negotiation = true; if (kind === 'S') counts.frontendSync++; if (kind === 'Q') counts.frontendSimpleQuery++; if (kind === 'E') counts.frontendExecute++ }, { startup: true })
+    const output = new PostgresFrames(kind => { if (kind === 'Z') counts.backendReady++ })
+    const fail = () => { counts.unsupported++; socket.destroy(); upstream.destroy() }
+    socket.on('data', bytes => { try { input.push(bytes) } catch { fail() } })
+    upstream.on('data', bytes => {
+      try {
+        if (negotiation) { negotiation = false; if (bytes[0] !== 78) throw new Error('Encrypted protocol observation unavailable'); bytes = bytes.subarray(1) }
+        output.push(bytes)
+      } catch { fail() }
+    })
+    socket.on('error', () => upstream.destroy()); upstream.on('error', () => socket.destroy())
+    socket.on('close', () => { sockets.delete(socket); upstream.destroy() }); upstream.on('close', () => { sockets.delete(upstream); socket.destroy() })
+    socket.pipe(upstream); upstream.pipe(socket)
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  return { port: server.address().port, snapshot: () => ({ ...counts }), async close() { for (const socket of sockets) socket.destroy(); await bounded(new Promise(done => server.close(done)), 5000, 'PostgreSQL observer join') } }
+}
+async function postgresCounterMain() {
+  const proxy = await postgresCycleProxy(Number(process.argv[3]))
+  console.log(JSON.stringify({ port: proxy.port }))
+  process.stdin.setEncoding('utf8'); let pending = '', closing
+  const close = () => closing ||= proxy.close().then(() => { process.stdin.pause(); process.stdin.destroy() })
+  process.stdin.on('data', bytes => {
+    pending += bytes
+    if (pending.length > 128) { close().catch(() => { process.exitCode = 1 }); return }
+    let at
+    while ((at = pending.indexOf('\n')) >= 0) {
+      const command = pending.slice(0, at).replace(/\r$/, ''); pending = pending.slice(at + 1)
+      if (command === 'snapshot') console.log(JSON.stringify(proxy.snapshot()))
+      else if (command === 'close') close().catch(() => { process.exitCode = 1 })
+      else { process.exitCode = 1; close().catch(() => {}) }
+    }
+  })
+  process.stdin.on('end', () => close().catch(() => { process.exitCode = 1 }))
+}
+
 export class DatabaseObserver {
   constructor(db, env, logPath = null) {
     if (!db.name.startsWith('hmem_test_') || !Number.isInteger(db.port)) throw new Error('Refusing non-sandbox database')
@@ -504,7 +588,7 @@ export class DatabaseObserver {
     const operation = this.chain.then(() => { checkRunDeadline(); return bounded(new Promise((resolve, reject) => {
       const marker = '__session_sync_' + (++this.sequence)
       this.current = { marker, lines: [], resolve, reject }
-      this.managed.child.stdin.write('/*session-sync-observer*/ ' + sql + ';\n\\echo ' + marker + '\n')
+      this.managed.child.stdin.write((sql.startsWith('\\copy ') ? sql : '/*session-sync-observer*/ ' + sql + ';') + '\n\\echo ' + marker + '\n')
     }), Math.min(30000, Math.max(1, runDeadline - now())), 'DB observation') })
     this.chain = operation.catch(() => {})
     return operation
@@ -1074,6 +1158,128 @@ async function standaloneLive(stack, scratch) {
   return liveProfile(stack, scratch, { name: 'local-one-follower-three-browser', work, inputs: [{ source, session: seeded.session, fixture }] })
 }
 
+// COPY stages bounded, unique random source chunks; separate INSERT statements
+// then execute every ordinary evidence guard/counter/audit/outbox transition.
+// Fixture setup has no HTTP timing claim and never disables production guards.
+export async function seedDatabaseChunks(stack, observer, scratch, work, source, bytes, chunkBytes) {
+  if (!Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 1073741824 || !Number.isInteger(chunkBytes) || chunkBytes < 1024 || chunkBytes > 1048576) throw new Error('Invalid bounded database fixture')
+  const created = await seedSession(stack, work.workspace, work.task, source, 0)
+  const path = ownedPath(scratch.root, source + '.copy')
+  const header = Buffer.alloc(19); Buffer.from('PGCOPY\n\xff\r\n\0', 'binary').copy(header)
+  const buffer = Buffer.alloc(chunkBytes), rowsPerBatch = Math.min(256, Math.floor(4194304 / chunkBytes)), start = now()
+  let input, failure, offset = 0, revision = 0, batches = 0, largestBatchBytes = 0, largestBatchRows = 0
+  try {
+    input = await open(source, 'r')
+    await observer.raw("SET log_statement='none'; CREATE TEMP TABLE session_sync_seed(start_offset bigint,revision bigint,data bytea)")
+    while (offset < bytes) {
+      checkRunDeadline()
+      const output = await open(path, 'wx'), boundary = offset
+      let rows = 0
+      async function put(value) { for (let at = 0; at < value.length;) { const result = await output.write(value, at, value.length - at); if (!result.bytesWritten) throw new Error('COPY fixture write stalled'); at += result.bytesWritten } }
+      try {
+        await put(header)
+        while (offset < bytes && rows < rowsPerBatch) {
+          const wanted = Math.min(chunkBytes, bytes - offset)
+          let bytesRead = 0
+          while (bytesRead < wanted) { const part = await input.read(buffer, bytesRead, wanted - bytesRead, offset + bytesRead); if (!part.bytesRead) throw new Error('COPY source truncated'); bytesRead += part.bytesRead }
+          const row = Buffer.alloc(30); row.writeInt16BE(3); row.writeInt32BE(8, 2); row.writeBigInt64BE(BigInt(offset), 6); row.writeInt32BE(8, 14); row.writeBigInt64BE(BigInt(++revision), 18); row.writeInt32BE(bytesRead, 26)
+          await put(row); await put(buffer.subarray(0, bytesRead)); offset += bytesRead; rows++
+        }
+        await put(Buffer.from([255, 255]))
+      } finally { await output.close() }
+      await observer.raw("\\copy session_sync_seed FROM '" + path.replaceAll('\\', '/').replaceAll("'", "''") + "' WITH (FORMAT binary)")
+      await observer.raw("DO $$ DECLARE chunk record; BEGIN FOR chunk IN SELECT * FROM session_sync_seed ORDER BY start_offset LOOP INSERT INTO session_chunks(session_id,start_offset,revision,data,allow_final_record,record_count,ends_with_newline) VALUES ('" + created.session.id + "',chunk.start_offset,chunk.revision,chunk.data,false,0,false); END LOOP; END $$; TRUNCATE session_sync_seed")
+      await rm(path); batches++; largestBatchBytes = Math.max(largestBatchBytes, offset - boundary); largestBatchRows = Math.max(largestBatchRows, rows)
+      if (offset % 67108864 === 0 || offset === bytes) console.log(JSON.stringify({ phase: 'database-seed-progress', bytes: offset, targetBytes: bytes, chunks: revision, completedBatches: batches, elapsedMs: now() - start }))
+    }
+    const session = await stack.call('/api/v1/workspaces/' + work.workspace + '/sessions/' + created.session.id)
+    assert.equal(session.committed_bytes, bytes); assert.equal(session.revision, revision)
+    return { session, bytes, chunkBytes, chunks: revision, batches, largestBatchBytes, largestBatchRows, milliseconds: now() - start, setup: 'each COPY and guarded INSERT call <=4MiB/<=256rows with ordinary30s deadline; sequential statements preserve every guard; fixture setup excluded from performance windows' }
+  } catch (error) { failure = error; throw error }
+  finally { await disposeAll([['COPY source', async () => { if (input) await input.close() }], ['COPY fixture removal', () => rm(path, { force: true })], ['temporary staging table', () => observer.raw("DROP TABLE IF EXISTS session_sync_seed; SET log_statement='all'")]], failure) }
+}
+export function sourceSql(source, name) {
+  const at = source.indexOf(name + ' = St.Statement')
+  const fragment = source.slice(at < 0 ? source.indexOf(name + ' pool ') : at)
+  const match = /sql = "([^"\r\n]*(?:\\\r?\n[ \t]*\\[^"\r\n]*)*)"/.exec(fragment)
+  if (!match) throw new Error('Current SQL binding unavailable: ' + name)
+  return match[1].replace(/\\\r?\n[ \t]*\\/g, '')
+}
+function compactPlan(value) {
+  const root = value[0], nodes = []
+  function visit(plan) { nodes.push({ node: plan['Node Type'], relation: plan['Relation Name'], index: plan['Index Name'], actualRows: plan['Actual Rows'], loops: plan['Actual Loops'], removed: plan['Rows Removed by Filter'], sharedHit: plan['Shared Hit Blocks'], sharedRead: plan['Shared Read Blocks'] }); for (const child of plan.Plans || []) visit(child) }
+  visit(root.Plan)
+  if (nodes.length > 128) throw new Error('Plan observation exceeds bound')
+  return { planningMs: root['Planning Time'], executionMs: root['Execution Time'], nodes }
+}
+async function databasePlans(observer, work) {
+  const source = await readFile(join(repo, 'hmem-core/src/HMem/DB/AgentSession.hs'), 'utf8'), list = sourceSql(source, 'listStatement'), activity = sourceSql(source, 'projectSessionActivity')
+  const literal = value => "'" + value + "'", ws = literal(work.workspace), project = literal(work.project), task = literal(work.task), rootTask = literal(work.rootTask)
+  await observer.raw('PREPARE session_sync_list(uuid,timestamptz,uuid,uuid,int,text,bool,uuid,uuid) AS ' + list)
+  await observer.raw('PREPARE session_sync_activity(uuid,uuid[]) AS ' + activity)
+  const queries = { activeFreshList: 'EXECUTE session_sync_list(' + ws + ",NULL,NULL,NULL,51,'active',true,NULL,NULL)", historicalTaskMembership: 'EXECUTE session_sync_list(' + ws + ",NULL,NULL," + rootTask + ",51,'terminated',NULL,NULL,NULL)", descendantProjectList: 'EXECUTE session_sync_list(' + ws + ',NULL,NULL,NULL,51,NULL,NULL,' + project + ',' + task + ')', descendantProjectActivity: 'EXECUTE session_sync_activity(' + ws + ',ARRAY[' + project + ']::uuid[])', descendantTaskActivity: 'SELECT hmem_task_has_active_session(' + rootTask + '::uuid)' }
+  const plans = {}
+  await observer.raw('ANALYZE sessions; ANALYZE task_sessions; ANALYZE tasks; ANALYZE projects')
+  for (const mode of ['force_custom_plan', 'force_generic_plan']) {
+    await observer.raw("SET plan_cache_mode='" + mode + "'")
+    plans[mode] = {}
+    for (const [name, query] of Object.entries(queries)) {
+      const lines = await observer.raw('EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ' + query)
+      const encoded = lines.join('\n'); if (encoded.length > 262144) throw new Error('Plan JSON exceeds observation bound')
+      plans[mode][name] = compactPlan(JSON.parse(encoded))
+    }
+  }
+  await observer.raw("SET plan_cache_mode='auto'; DEALLOCATE session_sync_list; DEALLOCATE session_sync_activity")
+  return { sourceSha256: sha(Buffer.from(source)), plans, scope: 'actual prepared query shapes with custom and generic plans at analyzed isolated metadata population; descendant functions included; not a claim about which cache mode production selected' }
+}
+async function databaseComponents(stack, scratch) {
+  const reference = JSON.parse(await readFile(join(frontend, 'perf/session-sync.profile.json'))), work = await makeWork(stack, 'Database session evidence components')
+  await history(stack, work)
+  const root = await stack.call('/api/v1/projects', 'POST', { workspace_id: work.workspace, name: 'Evidence root' })
+  const child = await stack.call('/api/v1/projects', 'POST', { workspace_id: work.workspace, name: 'Evidence descendant', parent_id: root.id })
+  await stack.call('/api/v1/tasks/' + work.task, 'PUT', { project_id: child.id })
+  const subtask = await stack.call('/api/v1/tasks', 'POST', { workspace_id: work.workspace, project_id: child.id, parent_id: work.task, title: 'Evidence descendant task' })
+  await stack.call('/api/v1/tasks/' + subtask.id, 'PUT', { status: 'in_progress' })
+  work.rootTask = work.task; work.task = subtask.id; work.project = root.id
+  const peers = []
+  for (let index = 0; index < 3; index++) peers.push(await createSession(stack, work))
+  const observer = new DatabaseObserver(stack.coordinates.db, scratch.env, stack.coordinates.pgLog), profiles = []
+  let manager, sampler, failure
+  try {
+    manager = await stack.mcp(work.workspace, { role: 'Synchronization manager' }); const measurement = await observer.initialize()
+    for (const [bytes, chunkBytes] of [[1048576, 1024], [104857600, 1048576], [1073741824, 65536]]) {
+      stack.setNetwork({})
+      const source = join(scratch.root, 'database-' + bytes + '.jsonl'), fixture = await writePrefix(source, bytes, chunkBytes)
+      const seeded = await seedDatabaseChunks(stack, observer, scratch, work, source, bytes, chunkBytes)
+      console.log(JSON.stringify({ phase: 'database-seeded', bytes, chunkBytes, chunks: seeded.chunks, milliseconds: seeded.milliseconds }))
+      for (const peer of peers) await stack.call('/api/v1/workspaces/' + work.workspace + '/sessions/' + peer.id + '/heartbeat', 'POST')
+      const population = await observer.counts(work.workspace), plans = await databasePlans(observer, work)
+      const network = bytes === 1073741824 ? CONTRACT.network : {}; stack.setNetwork(network)
+      const before = await observer.stats(); sampler = startResourceSampler(() => stack.ownedPids(), { descendants: true })
+      const reads = [], path = '/api/v1/workspaces/' + work.workspace + '/sessions/' + seeded.session.id
+      async function ranges(kind) {
+        for (const offset of [...new Set([0, Math.floor(bytes / 2), Math.max(0, bytes - 1048576)])]) {
+          const start = now(), result = await stack.call(path + '/' + kind + '?offset=' + offset + '&limit=1048576'), milliseconds = now() - start
+          const actual = Buffer.from(result.data_base64, 'base64'), expected = Buffer.alloc(Math.min(1048576, bytes - offset)), file = await open(source, 'r')
+          try { assert.equal((await file.read(expected, 0, expected.length, offset)).bytesRead, expected.length) } finally { await file.close() }
+          assert.deepEqual(actual, expected); reads.push({ kind, offset, bytes: actual.length, milliseconds, sha256: sha(actual), verified: true })
+        }
+      }
+      await ranges('transcript')
+      const seal = await sealPrefix(manager, work, { source, session: seeded.session })
+      await ranges('evidence')
+      const after = await observer.stats(), resources = await sampler.stop(); sampler = null
+      const target = reference.verifiedPrefixTargets.find(value => value.N === bytes)
+      profiles.push({ bytes, chunkBytes, chunks: seeded.chunks, fixture, seed: { milliseconds: seeded.milliseconds, batches: seeded.batches, largestBatchBytes: seeded.largestBatchBytes, largestBatchRows: seeded.largestBatchRows, scope: seeded.setup }, population, network, N: bytes, B: bytes, pendingBytes: 0, plans, reads, seal,
+        finiteTargetMs: target.finiteTargetMs, sealWithinFrozenTarget: seal.complete && seal.hashVerified && seal.milliseconds <= target.finiteTargetMs, readScope: 'client-observed authorized HTTP plus JSON/disposal time; independent raw comparison after timing',
+        database: { logicalStatementCalls: (after.statements?.calls || 0) - (before.statements?.calls || 0), scope: 'actual native operation window incl managed request context and unrelated background work; protocol cycles measured separately by the opt-in native core fixture' }, resources })
+      console.log(JSON.stringify({ phase: 'database-component', bytes, sealMs: seal.milliseconds, hashVerified: seal.hashVerified, finiteTargetMs: target.finiteTargetMs, readP95Ms: percentile(reads.map(value => value.milliseconds)), resources: resources.samples }))
+    }
+    return { measurement, profiles, sourceScope: 'zero browsers/followers; three empty active metadata peers plus current seeded target, independent normal managing MCP seal, public active/evidence range reads, unique random bytes and guarded canonical chunks', limitations: ['Single component attempt per size/chunk profile; no final five-warm/three-cold or100-independent-sample qualification.', 'No matched whole-browser RSS/CPU/regression pass from these component windows.', 'Statement counts are logical work; actual Sync/Ready protocol-cycle evidence is separate, never TCP packet count.'] }
+  } catch (error) { failure = error; throw error }
+  finally { await disposeAll([['database resource sampler', async () => { if (sampler) await sampler.stop() }], ['database manager', async () => { if (manager) await manager.close() }], ['database observer', () => observer.close()]], failure) }
+}
+
 // Task-local native/MCP evidence. Browser delivery and whole-profile acceptance
 // are deliberately measured by the separate combined qualification modes.
 export function componentUploadArguments(input, work) {
@@ -1208,7 +1414,7 @@ async function sealPrefix(manager, work, input) {
   const start = now()
   const acknowledgment = await manager.tool('session_terminate', { session_id: input.session.id, expected_offset: length, expected_revision: canonical.revision, final_bytes: length, final_sha256: hash.sha256 })
   const replyAt = now(), summary = acknowledgment.summary || acknowledgment, sealed = await manager.tool('session_detail', { session_id: input.session.id })
-  return { complete: summary.state === 'terminated' && sealed.state === 'terminated', milliseconds: replyAt - start, readbackMs: now() - replyAt, sessionId: input.session.id, N: length, B: boundary, pendingBytes: boundary - length, expectedRevision: canonical.revision,
+  return { complete: summary.state === 'terminated' && sealed.state === 'terminated', milliseconds: replyAt - start, localHashPreparationMs: hash.milliseconds, localHashPreparationBytes: length, readbackMs: now() - replyAt, sessionId: input.session.id, N: length, B: boundary, pendingBytes: boundary - length, expectedRevision: canonical.revision,
     finalRevision: sealed.revision, sha256: sealed.final_sha256, locallyReconstructedSha256: hash.sha256, hashVerified: sealed.final_sha256 === hash.sha256 && sealed.final_bytes === length,
     scope: 'independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N' }
 }
@@ -1361,17 +1567,25 @@ async function main() {
   for (let i = 0; i < args.length; i += 2) { if (!args[i]?.startsWith('--') || args[i + 1] === undefined) throw new Error('Use --name value'); options[args[i].slice(2)] = args[i + 1] }
   if (options['independent-min'] !== undefined) { const value = Number(options['independent-min']); if (!Number.isInteger(value) || value < 0 || value > 1000) throw new Error('Invalid independent cohort minimum'); liveSampling.independentMinimum = value }
   if (options['max-live-ms'] !== undefined) { const value = Number(options['max-live-ms']); if (!Number.isInteger(value) || value < 1000 || value > 600000) throw new Error('Invalid maximum live duration'); liveSampling.maxLiveMs = value }
-  if (!['probe', 'calibrate', 'overhead', 'live', 'finite', 'seal-revalidate', 'repair', 'resources', 'mcp'].includes(mode)) throw new Error('Expected a documented session synchronization measurement mode')
+  if (!['probe', 'calibrate', 'overhead', 'live', 'finite', 'seal-revalidate', 'repair', 'resources', 'mcp', 'db'].includes(mode)) throw new Error('Expected a documented session synchronization measurement mode')
   if (!/^[0-9a-f]{40}$/.test(options['base-sha'] || '')) throw new Error('Exact --base-sha required from coordinator')
   if (mode === 'mcp' && (!options.scratch || options['task-id'] !== '6e70b1ee-a329-4b22-95a6-cc49d3474499')) throw new Error('MCP mode requires its explicit task UUID and scratch root')
+  if (mode === 'db' && (!options.scratch || options['task-id'] !== 'e04fbd45-9e61-405b-9196-c51a153f8cd8')) throw new Error('Database mode requires its explicit task UUID and scratch root')
+  let expectedBuild = null
+  if (mode === 'db') {
+    if (!options['build-inputs']) throw new Error('Database mode requires a completed --build-inputs receipt captured before native compilation')
+    const bytes = await readFile(ownedPath(join(frontend, 'perf'), resolve(options['build-inputs'])))
+    if (bytes.length > 262144) throw new Error('Build input receipt exceeds bound')
+    expectedBuild = { ...JSON.parse(bytes), receiptSha256: sha(bytes) }
+  }
   const scratch = await makeScratch(options.scratch || join(repo, '.scratch/responsive-sessions-baseline-6bfb2638'), options['task-id'] || CONTRACT.task)
   runDeadline = now() + 20 * 60 * 1000
   let stack, output, failure
   try {
-    const start = now(); if (mode !== 'overhead') stack = await startStack(scratch, true, { frontendAssets: mode !== 'mcp' })
+    const start = now(); if (mode !== 'overhead') stack = await startStack(scratch, true, { frontendAssets: !['mcp','db'].includes(mode), expectedBuild })
     console.log(JSON.stringify({ phase: 'setup', milliseconds: now() - start, phaseWallGuardMs: 1200000, maximumSuiteWallMs: ['repair', 'resources'].includes(mode) ? 4800000 : 1200000, cleanupBudgetMs: 180000 }))
     output = { schema: 1, mode, qualificationStatus: 'not_qualified', baseSha: options['base-sha'], measuredAt: new Date().toISOString(), environment: await environmentFingerprint(), provenance: stack?.provenance || null,
-      task: options['task-id'] || CONTRACT.task, methodSha256: loadedMethodSha256, result: mode === 'mcp' ? await mcpComponents(stack, scratch) : mode === 'probe' ? await probeStack(stack, scratch) : mode === 'calibrate' ? await calibrate(stack, scratch) : mode === 'live' ? await standaloneLive(stack, scratch) : mode === 'finite' || mode === 'seal-revalidate' ? await standaloneFinite(stack, scratch, mode === 'seal-revalidate') : mode === 'repair' ? await repairedSuite(stack, scratch) : mode === 'resources' ? await resourceSuite(stack, scratch) : await overhead(scratch) }
+      task: options['task-id'] || CONTRACT.task, methodSha256: loadedMethodSha256, result: mode === 'db' ? await databaseComponents(stack, scratch) : mode === 'mcp' ? await mcpComponents(stack, scratch) : mode === 'probe' ? await probeStack(stack, scratch) : mode === 'calibrate' ? await calibrate(stack, scratch) : mode === 'live' ? await standaloneLive(stack, scratch) : mode === 'finite' || mode === 'seal-revalidate' ? await standaloneFinite(stack, scratch, mode === 'seal-revalidate') : mode === 'repair' ? await repairedSuite(stack, scratch) : mode === 'resources' ? await resourceSuite(stack, scratch) : await overhead(scratch) }
   } catch (error) { failure = error }
   finally { failure = await cleanupRun(stack, scratch, failure) }
   if (failure) throw failure
@@ -1382,5 +1596,5 @@ async function main() {
   console.log(JSON.stringify({ phase: 'complete', mode, output: options.output || null, summary: mode === 'calibrate' ? { absoluteOneGiBFiniteTargetMs: output.result.freeze.absoluteOneGiBFiniteTargetMs, sustainableBytesPerSecond: output.result.freeze.sustainableBytesPerSecond } : mode === 'overhead' ? { medianOverheadFraction: output.result.medianOverheadFraction } : mode === 'live' ? { samples: output.result.samples, censored: output.result.censored } : mode === 'probe' ? { resumedMs: output.result.resumedMs, visible: output.result.direct.render.map(value => value.complete) } : { completed: true } }))
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch(error => { console.error(JSON.stringify({ phase: 'failure', error: error.message })); process.exitCode = 1 })
+  (process.argv[2] === 'pg-counter' ? postgresCounterMain() : main()).catch(error => { console.error(JSON.stringify({ phase: 'failure', error: error.message })); process.exitCode = 1 })
 }

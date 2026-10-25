@@ -3,13 +3,14 @@ module HMem.DB.AgentSession
   ( createSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
   , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
   , workspaceSessionActivity, projectSessionActivity, listSessionFacets
-  , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange, setRuntimeIdentity
+  , appendSession, heartbeatSession, associateSessionTask, terminateSession, terminateSessionWithHook, readSessionRange, setRuntimeIdentity
   , IdleSessionCursor, listIdleSessionCandidates, sealIdleSession, sealIdleSessionWithHook
   , listIdleSessionCandidatesAt, sealIdleSessionWithClock
   , validateSessionPrefixBoundary, readSessionPrefixWindow
   ) where
 
 import Control.Exception (throwIO)
+import Control.Monad (foldM)
 import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
 import Data.Aeson (FromJSON, Result(..), fromJSON, toJSON)
 import Data.ByteString (ByteString)
@@ -26,6 +27,7 @@ import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Session qualified as S
+import Hasql.Pipeline qualified as P
 import Hasql.Statement qualified as St
 
 import HMem.AgentSession
@@ -351,8 +353,9 @@ readSessionRange pool workspace identifier offset limit = do
     then invalid "Range requires nonnegative offset and 1 to 1048576 bytes"
     else pure ()
   checked pool $ do
-    -- SHARE holds a consistent cursor while append/terminate waits.
-    current <- S.statement (workspace,identifier) $ St.Statement (sessionSelect <> " FOR SHARE OF s") pairParams (D.rowMaybe jsonRow) True
+    -- The metadata read freezes the visible prefix. Chunks below that boundary
+    -- are immutable; later append/seal cannot change these returned raw bytes.
+    current <- S.statement (workspace,identifier) (getStatement False)
     case current of
       Nothing -> pure $ problem SessionNotFound "Session not found"
       Just session
@@ -360,51 +363,62 @@ readSessionRange pool workspace identifier offset limit = do
         | otherwise -> do
           let end = offset + min (session.committedBytes-offset) (fromIntegral limit)
           bytes <- S.statement (identifier,offset,end) rangeStatement
-          let nextOffset = offset+fromIntegral (BS.length bytes)
-              hasMore = nextOffset < session.committedBytes
-          pure $ Right SessionRange{..}
+          if fromIntegral (BS.length bytes) /= end-offset
+            then pure $ problem SessionInvalidInput "Committed prefix is missing or discontinuous"
+            else do
+              let nextOffset = offset+fromIntegral (BS.length bytes)
+                  hasMore = nextOffset < session.committedBytes
+              pure $ Right SessionRange{..}
 
 terminateSession :: Pool Hasql.Connection -> UUID -> UUID -> TerminateSession -> IO AgentSession
-terminateSession pool workspace identifier input = do
+terminateSession pool = terminateSessionWithHook pool (pure ())
+
+-- Hashing never owns the final session row lock. The hook observes a completed
+-- bounded group after its pool lease has been returned, for causal race tests.
+terminateSessionWithHook :: Pool Hasql.Connection -> IO () -> UUID -> UUID -> TerminateSession -> IO AgentSession
+terminateSessionWithHook pool duringHash workspace identifier input = do
   if input.expectedOffset < 0 || input.expectedRevision < 0 || input.finalBytes < 0
     || T.length input.finalSha256 /= 64 || T.any (\c -> not (c `elem` ("0123456789abcdef" :: String))) input.finalSha256
     then invalid "Termination requires nonnegative cursor/count and lowercase SHA-256"
     else pure ()
-  checked pool $ do
-    current <- S.statement (workspace,identifier) (getStatement True)
-    case current of
-      Nothing -> pure $ problem SessionNotFound "Session not found"
-      Just row
-        | row.state == Terminated -> pure $
+  let validate row
+        | row.state == Terminated =
             if input.expectedOffset == row.committedBytes && input.expectedRevision == row.revision-1
               && Just input.finalBytes == row.finalBytes && Just input.finalSha256 == row.finalSha256
             then Right row else problem SessionConflict "Termination receipt conflicts with the sealed session"
         | row.committedBytes /= input.expectedOffset || row.revision /= input.expectedRevision
-          || row.committedBytes /= input.finalBytes -> pure $ problem SessionConflict "Termination cursor/count does not match the committed session"
-        | otherwise -> do
-          digest <- hashCommitted identifier row.committedBytes 0 (hashInit :: Context SHA256)
-          if digest /= input.finalSha256
-            then pure $ problem SessionConflict "Termination SHA-256 does not match the committed prefix"
-            else do
-              sealed <- S.statement (workspace,identifier,input.finalSha256) $ St.Statement
-                "UPDATE sessions s SET state='terminated',terminated_at=clock_timestamp(),final_bytes=committed_bytes,final_sha256=$3,revision=revision+1 WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s)"
-                (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.text)
-                (D.singleRow jsonRow) True
-              pure (Right sealed)
+          || row.committedBytes /= input.finalBytes = problem SessionConflict "Termination cursor/count does not match the committed session"
+        | otherwise = Right row
+      checkedRow = maybe (problem SessionNotFound "Session not found") validate
+  initial <- getSession pool workspace identifier >>= either throwIO pure . checkedRow
+  if initial.state == Terminated then pure initial else do
+    digest <- hashCommitted pool identifier initial.committedBytes duringHash
+    if digest /= input.finalSha256 then throwIO (SessionException SessionConflict "Termination SHA-256 does not match the committed prefix") else
+      checked pool $ do
+        current <- S.statement (workspace,identifier) (getStatement True)
+        case checkedRow current of
+          Left failure -> pure (Left failure)
+          Right row | row.state == Terminated -> pure (Right row)
+          Right _ -> Right <$> S.statement (workspace,identifier,digest) sealStatement
 
--- Fetch exactly one indexed chunk per step, without retaining the transcript.
--- Counters and chunk continuity are also enforced by the insertion guards.
-hashCommitted :: UUID -> Int64 -> Int64 -> Context SHA256 -> S.Session Text
-hashCommitted identifier end offset context
-  | offset == end = pure (T.pack (show (hashFinalize context :: Digest SHA256)))
-  | otherwise = do
-      chunks <- S.statement (identifier,offset) $ St.Statement
-        "SELECT data FROM session_chunks WHERE session_id=$1 AND start_offset=$2"
-        (param fst E.uuid <> param snd E.int8)
-        (D.singleRow (D.column (D.nonNullable D.bytea))) True
-      let next = offset+fromIntegral (BS.length chunks)
-          updated = hashUpdate context chunks
-      updated `seq` hashCommitted identifier end next updated
+-- Four independent <=1MiB queries share one pipeline. The fixed <=4MiB group
+-- releases its connection before hashing/observer callbacks and the next group.
+-- No transcript-sized result, cursor, transaction or exclusive lock is retained.
+hashCommitted :: Pool Hasql.Connection -> UUID -> Int64 -> IO () -> IO Text
+hashCommitted pool identifier end duringHash = go 0 (hashInit :: Context SHA256)
+  where
+    go offset context
+      | offset == end = pure (T.pack (show (hashFinalize context :: Digest SHA256)))
+      | otherwise = do
+          let starts = take 4 (iterate (\start -> start+min 1048576 (end-start)) offset)
+              ranges = [(start,start+min 1048576 (end-start)) | start <- starts, start < end]
+              nextOffset = offset+min 4194304 (end-offset)
+          windows <- runSession pool $ S.pipeline $ traverse (\(start,stop) -> P.statement (identifier,start,stop) rangeStatement) ranges
+          updated <- foldM (\digest ((start,stop),bytes) ->
+            if fromIntegral (BS.length bytes) /= stop-start then invalid "Committed prefix is missing or discontinuous"
+            else let next = hashUpdate digest bytes in next `seq` pure next) context (zip ranges windows)
+          duringHash
+          updated `seq` go nextOffset updated
 
 -- | A fair, bounded metadata scan. Apply eligibility after this page, rather
 -- than making PostgreSQL walk an unbounded population of old unfinished tasks.
@@ -442,7 +456,7 @@ sealIdleSessionWithCutoff pool cutoffClock duringHash snapshot = do
   cutoff <- sequence cutoffClock
   eligible <- runSession pool $ S.statement (snapshot.id,cutoff) eligibleStatement
   if not eligible || snapshot.state /= Active then pure Nothing else do
-    digest <- hashPrefix 0 (hashInit :: Context SHA256)
+    digest <- hashCommitted pool snapshot.id snapshot.committedBytes duringHash
     finalCutoff <- sequence cutoffClock
     runTransaction pool $ do
       current <- S.statement (snapshot.workspaceId,snapshot.id) $ St.Statement
@@ -462,21 +476,6 @@ sealIdleSessionWithCutoff pool cutoffClock duringHash snapshot = do
               Just <$> S.statement (row.workspaceId,row.id,digest) sealStatement
             else pure Nothing
         _ -> pure Nothing
-  where
-    hashPrefix offset context
-      | offset == snapshot.committedBytes = pure (T.pack (show (hashFinalize context :: Digest SHA256)))
-      | otherwise = do
-          bytes <- runSession pool $ S.statement (snapshot.id,offset) $ St.Statement
-            "SELECT data FROM session_chunks WHERE session_id=$1 AND start_offset=$2"
-            (param fst E.uuid <> param snd E.int8)
-            (D.singleRow (D.column (D.nonNullable D.bytea))) True
-          let next = offset + fromIntegral (BS.length bytes)
-              updated = hashUpdate context bytes
-          if BS.null bytes || BS.length bytes > maxSessionChunkBytes || next > snapshot.committedBytes
-            then invalid "Committed session chunk does not match the verified prefix"
-            else do
-              duringHash
-              updated `seq` hashPrefix next updated
 
 eligibleStatement :: St.Statement (UUID,Maybe UTCTime) Bool
 eligibleStatement = St.Statement

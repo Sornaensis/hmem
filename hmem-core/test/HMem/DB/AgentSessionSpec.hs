@@ -2,12 +2,14 @@ module HMem.DB.AgentSessionSpec (spec) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel, concurrently, waitCatch, withAsync)
-import Control.Exception (SomeException, bracket, bracket_, try, finally, onException)
+import Control.Exception (SomeException, AsyncException(..), bracket, bracket_, try, finally, onException, catch, throwIO, displayException)
 import Control.Monad (forM_, forM, foldM, replicateM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
-import Data.Pool (destroyAllResources)
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Types (parseEither)
+import Data.Pool (Pool, destroyAllResources)
 import Data.IORef (newIORef, atomicModifyIORef')
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -15,19 +17,24 @@ import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
 import Data.Time (addUTCTime)
 import Hasql.Decoders qualified as D
+import Hasql.Connection qualified as Hasql
 import Hasql.Encoders qualified as E
 import Hasql.Session qualified as S
 import Hasql.Statement qualified as St
 import System.Directory (copyFile, createDirectory, listDirectory)
 import System.FilePath ((</>))
 import System.Timeout (timeout)
+import System.Environment (lookupEnv)
+import System.Process
+import System.IO (hGetLine, hPutStrLn, hFlush, hClose)
+import System.Exit (ExitCode(..))
 import Test.Hspec
 
 import HMem.AgentSession
 import HMem.BotIdentity (mkBotIdentity)
 import HMem.DB.AgentSession
 import HMem.DB.Migration qualified as Migration
-import HMem.DB.Pool (DBException(..), createPool, runSession, runTransaction, withConn)
+import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, createPool, runSession, runTransaction, withConn)
 import HMem.DB.RequestContext
 import HMem.DB.Task qualified as Task
 import HMem.DB.Project qualified as Project
@@ -37,6 +44,121 @@ import HMem.Types qualified as Types
 spec :: Spec
 spec = do
   around withTestEnv $ describe "Agent sessions" $ do
+    it "SealCAS releases each bounded group lease and refuses an append winner" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      let record = BS.replicate 1022 32 <> "0\n"; chunk = BS.concat (replicate 1024 record)
+      current <- foldM (\prior _ -> (.session) <$> append env workspace prior chunk False) row [1..5 :: Int]
+      calls <- newIORef (0 :: Int)
+      let during = do
+            metrics <- getPoolMetrics
+            metrics.activeConnections `shouldBe` 0
+            index <- atomicModifyIORef' calls (\n -> (n+1,n))
+            if index /= 0 then pure () else do
+              result <- timeout 1000000 (append env workspace current "[]\n" False)
+              result `shouldSatisfy` maybe False (const True)
+      expectCode SessionConflict $ terminateSessionWithHook env.pool during workspace row.id (receipt current (BS.concat (replicate 5 chunk)))
+      Just after <- getSession env.pool workspace row.id
+      after.state `shouldBe` Active
+      after.committedBytes `shouldBe` current.committedBytes+3
+
+    it "SealCAS preserves an exact concurrent seal and the latest independent runtime metadata" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      uploaded <- append env workspace row "{}\r\n" False
+      let input = receipt uploaded.session "{}\r\n"
+          during = do
+            _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "actual" Nothing Nothing (Just "Developer"))))
+            _ <- terminateSession env.pool workspace row.id input
+            pure ()
+      sealed <- terminateSessionWithHook env.pool during workspace row.id input
+      sealed.state `shouldBe` Terminated
+      sealed.runtimeRevision `shouldBe` 1
+      sealed.finalSha256 `shouldBe` Just (sessionSha256 "{}\r\n")
+      terminateSession env.pool workspace row.id input `shouldReturn` sealed
+      expectCode SessionTerminated $ append env workspace sealed "[]\n" False
+
+    it "SealCAS rolls back a late publication failure and retains the verified active prefix" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      uploaded <- append env workspace row "{}\n" False
+      execute env "CREATE TABLE seal_failure_counts AS SELECT (SELECT count(*) FROM audit_log) AS audits,(SELECT count(*) FROM change_stream_outbox) AS events"
+      bracket_
+        (execute env "CREATE FUNCTION session_seal_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='terminated' THEN RAISE EXCEPTION USING ERRCODE='23514',MESSAGE='injected seal publication failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER zz_session_seal_failure AFTER UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION session_seal_failure()")
+        (execute env "DROP TRIGGER zz_session_seal_failure ON sessions; DROP FUNCTION session_seal_failure()") $ do
+          rejectDb $ terminateSession env.pool workspace row.id (receipt uploaded.session "{}\n")
+          getSession env.pool workspace row.id `shouldReturn` Just uploaded.session
+          boolean env "SELECT (SELECT count(*) FROM audit_log)=(SELECT audits FROM seal_failure_counts) AND (SELECT count(*) FROM change_stream_outbox)=(SELECT events FROM seal_failure_counts)" `shouldReturn` True
+      terminateSession env.pool workspace row.id (receipt uploaded.session "{}\n") >>= (\sealed -> sealed.state `shouldBe` Terminated)
+
+    it "SealCAS releases a cancelled group and fails a missing prefix window without publishing" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      uploaded <- append env workspace row "{}\n" False
+      result <- try @AsyncException $ terminateSessionWithHook env.pool (throwIO ThreadKilled) workspace row.id (receipt uploaded.session "{}\n")
+      result `shouldSatisfy` either (==ThreadKilled) (const False)
+      getPoolMetrics >>= (\metrics -> metrics.activeConnections `shouldBe` 0)
+      getSession env.pool workspace row.id `shouldReturn` Just uploaded.session
+      bracket_ (execute env "ALTER TABLE session_chunks DISABLE TRIGGER session_chunk_guard") (execute env "ALTER TABLE session_chunks ENABLE TRIGGER session_chunk_guard") $
+        execute env ("DELETE FROM session_chunks WHERE session_id='"<>uuid row.id<>"'")
+      expectCode SessionInvalidInput $ terminateSession env.pool workspace row.id (receipt uploaded.session "{}\n")
+      expectCode SessionInvalidInput $ readSessionRange env.pool workspace row.id 0 maxSessionRangeBytes
+      getSession env.pool workspace row.id `shouldReturn` Just uploaded.session
+
+    it "SealCAS reads the immutable committed window without waiting on an uncommitted append" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      uploaded <- append env workspace row "{}\n" False
+      bracket (createPool env.testDb.testDbConnStr 1 5 30000) destroyAllResources $ \pool -> withConn pool $ \connection -> do
+        let sql command = S.run (S.sql command) connection >>= either (fail . show) pure
+        sql ("BEGIN; INSERT INTO session_chunks(session_id,start_offset,revision,data,allow_final_record,record_count,ends_with_newline) VALUES ('"<>uuid row.id<>"',3,2,convert_to(E'[]\\n','UTF8'),false,0,false)")
+        (do
+          value <- timeout 1000000 (readSessionRange env.pool workspace row.id 0 maxSessionRangeBytes)
+          fmap (.bytes) value `shouldBe` Just "{}\n"
+          fmap ((.committedBytes) . (.session)) value `shouldBe` Just uploaded.session.committedBytes
+          sql "COMMIT") `onException` sql "ROLLBACK"
+      allBytes env workspace row.id `shouldReturn` "{}\n[]\n"
+
+    it "SealCAS rolls back a later pipeline SQL error and keeps the lease reusable" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      let chunk = BS.concat (replicate 1024 (BS.replicate 1022 32 <> "0\n"))
+          body = BS.concat (replicate 5 chunk)
+      current <- foldM (\prior _ -> (.session) <$> append env workspace prior chunk False) row [1..5 :: Int]
+      once <- newIORef False
+      let during = do
+            changed <- atomicModifyIORef' once (\old -> (True,old))
+            if changed then pure () else execute env "ALTER TABLE session_chunks RENAME COLUMN data TO pipeline_fixture_data"
+          restore = execute env "DO $$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='session_chunks' AND column_name='pipeline_fixture_data') THEN ALTER TABLE session_chunks RENAME COLUMN pipeline_fixture_data TO data; END IF; END $$"
+      outcome <- try @SomeException $ do
+        result <- try @DBException $ terminateSessionWithHook env.pool during workspace row.id (receipt current body)
+        result `shouldSatisfy` either (\case DBOtherError _ -> True; _ -> False) (const False)
+        getPoolMetrics >>= (\metrics -> metrics.activeConnections `shouldBe` 0)
+        getSession env.pool workspace row.id `shouldReturn` Just current
+      restored <- try @SomeException restore
+      case (outcome,restored) of
+        (Left primary,Left cleanup) -> fail ("Pipeline assertion: "<>displayException primary<>"; restoration: "<>displayException cleanup)
+        (Left primary,_) -> throwIO primary
+        (_,Left cleanup) -> throwIO cleanup
+        _ -> pure ()
+      timeout 1000000 (getSession env.pool workspace row.id) `shouldReturn` Just (Just current)
+      terminateSession env.pool workspace row.id (receipt current body) >>= (\sealed -> sealed.finalSha256 `shouldBe` Just (sessionSha256 body))
+
+    it "DBCycleMeasurement reports optional native driver protocol cycles without retaining payloads" $ \env -> do
+      enabled <- lookupEnv "HMEM_SESSION_DB_CYCLES"
+      if enabled /= Just "1" then pendingWith "opt-in PostgreSQL protocol measurement; Node is not a core CI prerequisite" else
+        withCycleCounter env $ \pool snapshot -> do
+          forM_ [1048576,1024] $ \chunkSize -> do
+            (workspace,_,row) <- reaperFixture env
+            let total = 1048576; record = BS.replicate 1022 32 <> "0\n"
+                body = BS.concat (replicate 1024 record)
+                count = total `div` chunkSize
+                expression = "convert_to(repeat(repeat(' ',1022)||E'0\\n',"<>B8.pack (show (chunkSize `div` 1024))<>"),'UTF8')"
+            execute env ("DO $$ DECLARE n integer; BEGIN FOR n IN 0.."<>B8.pack(show(count-1))<>" LOOP INSERT INTO session_chunks(session_id,start_offset,revision,data,allow_final_record,record_count,ends_with_newline) VALUES ('"<>uuid row.id<>"',n*"<>B8.pack(show chunkSize)<>",n+1,"<>expression<>",false,0,false); END LOOP; END $$")
+            Just current <- getSession env.pool workspace row.id
+            current.committedBytes `shouldBe` fromIntegral total
+            _ <- getSession pool workspace row.id -- prime pool/startup outside the measured operation
+            beforeCycles <- snapshot
+            sealed <- terminateSession pool workspace row.id (receipt current body)
+            afterCycles <- snapshot
+            sealed.finalSha256 `shouldBe` Just (sessionSha256 body)
+            putStrLn ("[session-db-cycles] "<>show chunkSize<>" "<>show (zipWith (-) afterCycles beforeCycles))
+            last afterCycles `shouldBe` 0
+
     it "PrefixProof accepts only scoped exact append boundaries through later growth" $ \env -> do
       (workspace,_,row) <- reaperFixture env
       let first = "{\"text\":\"first\"}\r\n"; second = "{\"text\":\"second\"}\r\n"
@@ -261,19 +383,19 @@ spec = do
       workspace <- createTestWorkspace env "creation-task-race"
       task <- makeTask env workspace.id "Racing initial task"
       identifier <- UUID.nextRandom
-      bracket (createPool env.testDb.testDbConnStr 2 30 30000) destroyAllResources $ \peer -> do
-        -- Observe through the independent fixture pool: a blocked actor must
-        -- not starve its own observer on resource-pool's per-capability stripe.
-        let probe=env
+      withSessionRacePools env $ \peer probePool -> do
+        -- The fixture connection is held by the blocker. The third pool keeps
+        -- both observation and the independent winner outside that lease.
+        let probe=env {pool=probePool}
             input=CreateSession identifier workspace.id "jsonl" "Race task capture" Nothing Nothing task.id
         withConn env.pool $ \connection -> do
           let sql command=S.run (S.sql command) connection >>= either (fail . show) pure
           sql ("BEGIN; UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
           withAsync (try @SessionException $ createSession peer input) $ \worker ->
             (do
-              waitForLock probe "SELECT t.status%" `shouldReturn` True
+              withinSessionRace (waitForLock probe "SELECT t.status%") `shouldReturn` True
               sql "COMMIT"
-              result <- waitCatch worker >>= either (fail . show) pure
+              result <- withinSessionRace (waitCatch worker) >>= either (fail . show) pure
               fmap (.code) (either Just (const Nothing) result) `shouldBe` Just (SessionTaskNotInProgress "done")
               getSession peer workspace.id identifier `shouldReturn` Nothing) `finally` sql "ROLLBACK"
         execute env ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid task.id<>"'")
@@ -282,9 +404,9 @@ spec = do
           sql ("BEGIN; INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Race task capture'); INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace.id<>"','"<>uuid identifier<>"','"<>uuid task.id<>"')")
           withAsync (execute (env {pool=peer}) ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")) $ \worker ->
             (do
-              waitForLock probe "UPDATE tasks SET status=%" `shouldReturn` True
+              withinSessionRace (waitForLock probe "UPDATE tasks SET status=%") `shouldReturn` True
               sql "COMMIT"
-              waitCatch worker >>= either (fail . show) pure) `finally` sql "ROLLBACK"
+              withinSessionRace (waitCatch worker) >>= either (fail . show) pure) `finally` sql "ROLLBACK"
         Just row <- getSession peer workspace.id identifier
         createSession peer input `shouldReturn` row
 
@@ -293,8 +415,8 @@ spec = do
       waiting <- makeTask env workspace.id "Waiting retry task"
       winning <- makeTask env workspace.id "Winning creation task"
       identifier <- UUID.nextRandom
-      bracket (createPool env.testDb.testDbConnStr 2 30 30000) destroyAllResources $ \peer -> do
-        let probe=env
+      withSessionRacePools env $ \peer probePool -> do
+        let probe=env {pool=probePool}
             input=CreateSession identifier workspace.id "jsonl" "Retry racing creation" Nothing Nothing waiting.id
         withConn env.pool $ \connection -> do
           let sql command=S.run (S.sql command) connection >>= either (fail . show) pure
@@ -303,11 +425,11 @@ spec = do
           sql ("BEGIN; SELECT 1 FROM tasks WHERE id='"<>uuid waiting.id<>"' FOR UPDATE")
           withAsync (createSession peer input) $ \worker ->
             (do
-              waitForLock probe "SELECT t.status%" `shouldReturn` True
-              canonical <- createSession env.pool input {taskId=winning.id}
+              withinSessionRace (waitForLock probe "SELECT t.status%") `shouldReturn` True
+              canonical <- withinSessionRace (createSession probePool input {taskId=winning.id})
               sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid waiting.id<>"'")
               sql "COMMIT"
-              waitCatch worker >>= either (fail . show) (`shouldBe` canonical)
+              withinSessionRace (waitCatch worker) >>= either (fail . show) (`shouldBe` canonical)
               links <- listSessionTasks peer workspace.id identifier Nothing 50
               map (.id) links.items `shouldBe` [winning.id]) `finally` sql "ROLLBACK"
 
@@ -1148,3 +1270,44 @@ awaitCleanupSleep env attempts = do
   if sleeping then pure ()
   else if attempts <= 0 then expectationFailure "Cleanup did not reach the synchronized trigger wait"
   else threadDelay 10000 >> awaitCleanupSleep env (attempts-1)
+
+withSessionRacePools :: TestEnv -> (Pool Hasql.Connection -> Pool Hasql.Connection -> IO a) -> IO a
+withSessionRacePools env action =
+  bracket (createPool env.testDb.testDbConnStr 2 30 30000) destroyAllResources $ \peer ->
+    bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \probe -> action peer probe
+
+withinSessionRace :: IO a -> IO a
+withinSessionRace action = timeout 6000000 action >>= maybe (fail "Session creation race phase exceeded six seconds") pure
+
+-- Optional measurement only. Every owner is joined independently; the observer
+-- emits numeric frame counts, never PostgreSQL packet contents or credentials.
+withCycleCounter :: TestEnv -> (Pool Hasql.Connection -> IO [Int] -> IO a) -> IO a
+withCycleCounter env action = bracket acquire cleanup $ \(input,output,process,port) ->
+  bracket (createPool ("host=127.0.0.1 port="<>T.pack(show port)<>" dbname="<>env.testDb.testDbName) 1 5 30000) destroyAllResources $ \pool ->
+    (action pool $ do
+      hPutStrLn input "snapshot"; hFlush input
+      line <- timeout 5000000 (hGetLine output) >>= maybe (fail "PostgreSQL counter snapshot deadline") pure
+      value <- either fail pure (Aeson.eitherDecodeStrict' (B8.pack line))
+      either fail pure $ parseEither (Aeson.withObject "cycle counts" $ \o -> sequence [o Aeson..: "frontendSync",o Aeson..: "frontendSimpleQuery",o Aeson..: "frontendExecute",o Aeson..: "backendReady",o Aeson..: "unsupported"]) value)
+      `catch` \(failure :: SomeException) -> putStrLn ("[session-db-counter-primary] "<>take 1200 (displayException failure)) >> throwIO failure
+  where
+    acquire = do
+      let path = env.testSandbox.sandboxRepoRoot </> "hmem-server" </> "frontend" </> "perf" </> "session-sync.mjs"
+      (Just input,Just output,_,process) <- createProcess (proc "node" [path,"pg-counter",show env.testDb.testDbPort]) {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit,create_group=True}
+      let readPort :: IO Int
+          readPort = do
+            line <- timeout 10000000 (hGetLine output) >>= maybe (fail "PostgreSQL counter startup deadline") pure
+            value <- either fail pure (Aeson.eitherDecodeStrict' (B8.pack line))
+            either fail pure $ parseEither (Aeson.withObject "counter startup" (Aeson..: "port")) value
+      port <- readPort `onException` (try @SomeException (cleanup (input,output,process,0)) >> pure ())
+      pure (input,output,process,port)
+    cleanup (input,output,process,_) = do
+      _ <- try @SomeException (hPutStrLn input "close" >> hFlush input >> hClose input)
+      joined <- timeout 7000000 (waitForProcess process)
+      case joined of
+        Just ExitSuccess -> hClose output
+        _ -> do
+          terminateProcess process
+          final <- timeout 5000000 (waitForProcess process)
+          hClose output
+          case final of Nothing -> fail "PostgreSQL counter process did not join"; _ -> fail "PostgreSQL counter cleanup failed"

@@ -9,7 +9,80 @@ import { finiteTargets, fixtureRecord, networkProxy, ownedPath, percentile, scan
 import { chromium } from '@playwright/test'
 import { Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { componentUploadArguments } from './session-sync.mjs'
+import { componentUploadArguments, PostgresFrames, sourceSql, seedDatabaseChunks, verifyNativeBuild } from './session-sync.mjs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { createInterface } from 'node:readline'
+
+test('native admission rejects source drift, uncompleted builds and mismatched compiled binaries', () => {
+  const inputs = { 'core.hs': 'a'.repeat(64) }, binaries = { harness: 'b'.repeat(64), mcp: 'c'.repeat(64), server: 'd'.repeat(64) }
+  const receipt = { task: 'e04fbd45-9e61-405b-9196-c51a153f8cd8', buildExitCode: 0, capturedAt: '2026-10-25T18:00:00Z', builtAt: '2026-10-25T18:01:00Z', productionInputs: inputs, binaries }
+  verifyNativeBuild(receipt, inputs, binaries)
+  assert.throws(() => verifyNativeBuild(receipt, { 'core.hs': 'e'.repeat(64) }, binaries), /prebuild frozen inputs/)
+  assert.throws(() => verifyNativeBuild(receipt, inputs, { ...binaries, harness: 'f'.repeat(64) }), /harness pairing/)
+  assert.throws(() => verifyNativeBuild({ ...receipt, buildExitCode: null }, inputs, binaries), /completed native build/)
+})
+
+test('database fixture COPY batches preserve exact source bytes, global cursor and bounded admission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'session-sync-db-copy-')), source = join(root, 'source.jsonl')
+  const state = { id: '01234567-0000-0000-0000-000000000000', committed_bytes: 0, revision: 0 }, batches = []
+  let rows = [], copiedBytes = 0; const digest = createHash('sha256')
+  try {
+    const fixture = await writePrefix(source, 5242880, 1048576)
+    const stack = { async call(path, method) { return { ...state } } }
+    const observer = { async raw(sql) {
+      if (sql.startsWith('\\copy ')) {
+        const value = await readFile(source + '.copy'); assert.equal(value.subarray(0, 11).toString('binary'), 'PGCOPY\n\xff\r\n\0')
+        let at = 19, total = 0; rows = []
+        while (value.readInt16BE(at) !== -1) {
+          assert.equal(value.readInt16BE(at), 3); assert.equal(value.readInt32BE(at + 2), 8); assert.equal(value.readInt32BE(at + 14), 8)
+          const offset = Number(value.readBigInt64BE(at + 6)), revision = Number(value.readBigInt64BE(at + 18)), length = value.readInt32BE(at + 26)
+          const bytes = value.subarray(at + 30, at + 30 + length); assert.equal(bytes.length, length); rows.push({ offset, revision, bytes }); total += length; at += 30 + length
+        }
+        assert.equal(at + 2, value.length); assert.ok(total <= 4194304 && rows.length <= 256); batches.push({ bytes: total, rows: rows.length })
+      } else if (sql.startsWith('DO $$ DECLARE chunk record;')) {
+        for (const row of rows) { assert.equal(row.offset, state.committed_bytes); assert.equal(row.revision, state.revision + 1); state.committed_bytes += row.bytes.length; state.revision++; digest.update(row.bytes); copiedBytes += row.bytes.length }; rows = []
+      }
+      return []
+    } }
+    const result = await seedDatabaseChunks(stack, observer, { root }, { workspace: 'workspace', task: 'task' }, source, fixture.bytes, 1048576)
+    assert.equal(copiedBytes, fixture.bytes); assert.equal(digest.digest('hex'), fixture.sha256)
+    assert.deepEqual(batches, [{ bytes: 4194304, rows: 4 }, { bytes: 1048576, rows: 1 }]); assert.equal(result.chunks, 5); assert.equal(result.batches, 2)
+    await assert.rejects(stat(source + '.copy'), error => error.code === 'ENOENT')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('native counter accepts Windows CRLF control lines and joins without a database connection', async () => {
+  const child = spawn(process.execPath, [resolve(import.meta.dirname, 'session-sync.mjs'), 'pg-counter', '1'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  child.stderr.resume(); const closed = once(child, 'close', { signal: AbortSignal.timeout(10000) }), lines = createInterface({ input: child.stdout })
+  try {
+    const [ready] = await once(lines, 'line', { signal: AbortSignal.timeout(5000) }); assert.ok(JSON.parse(ready).port > 0)
+    const next = once(lines, 'line', { signal: AbortSignal.timeout(5000) }); child.stdin.write('snapshot\r\n')
+    const [line] = await next; const counts = JSON.parse(line); assert.equal(counts.backendReady, 0); assert.equal(counts.unsupported, 0)
+    child.stdin.end('close\r\n'); const [code] = await closed; assert.equal(code, 0)
+  } finally { lines.close(); if (child.exitCode === null && child.signalCode === null) { const joined = once(child, 'close', { signal: AbortSignal.timeout(5000) }); child.kill(); await joined }; child.stdin.destroy(); child.stdout.destroy() }
+})
+
+test('plan collection reads exact current list and descendant SQL including Haskell string gaps', async () => {
+  const source = await readFile(resolve(import.meta.dirname, '../../../hmem-core/src/HMem/DB/AgentSession.hs'), 'utf8')
+  const list = sourceSql(source, 'listStatement'), activity = sourceSql(source, 'projectSessionActivity')
+  assert.ok(list.includes('ORDER BY s.created_at DESC,s.id DESC LIMIT $5'))
+  assert.ok(list.includes('hmem_session_project_tasks($1,$8)'))
+  assert.ok(activity.startsWith('WITH RECURSIVE project_tree(root,id)'))
+  assert.ok(activity.includes('task_tree(root,id)')); assert.ok(!activity.includes('\\\n'))
+  assert.throws(() => sourceSql(source, 'missingBinding'), /unavailable/)
+})
+
+test('PostgreSQL cycle observation discards fragmented payloads and counts protocol frames only', () => {
+  const seen = [], frames = new PostgresFrames(value => seen.push(value), { startup: true })
+  const start = Buffer.alloc(8); start.writeUInt32BE(8); start.writeUInt32BE(196608, 4)
+  const frame = (kind, bytes) => { const header = Buffer.alloc(5); header[0] = kind.charCodeAt(0); header.writeUInt32BE(bytes + 4, 1); return Buffer.concat([header, Buffer.alloc(bytes, 83)]) }
+  const bytes = Buffer.concat([start, frame('Q', 12000), frame('S', 0), frame('E', 12)])
+  for (let offset = 0; offset < bytes.length; offset += 3) frames.push(bytes.subarray(offset, offset + 3))
+  assert.deepEqual(seen, [196608, 'Q', 'S', 'E'])
+  assert.equal(frames.header.length, 8); assert.equal(frames.skip, 0)
+  const invalid = Buffer.from([81, 127, 255, 255, 255]); assert.throws(() => frames.push(invalid), /Unsupported/)
+})
 
 test('component uploader preserves the complete immutable seed binding before any large fixture', () => {
   const work = { workspace: 'workspace', task: 'task' }

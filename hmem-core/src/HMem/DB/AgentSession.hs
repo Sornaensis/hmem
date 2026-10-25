@@ -6,6 +6,7 @@ module HMem.DB.AgentSession
   , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange, setRuntimeIdentity
   , IdleSessionCursor, listIdleSessionCandidates, sealIdleSession, sealIdleSessionWithHook
   , listIdleSessionCandidatesAt, sealIdleSessionWithClock
+  , validateSessionPrefixBoundary, readSessionPrefixWindow
   ) where
 
 import Control.Exception (throwIO)
@@ -315,6 +316,34 @@ rangeStatement = St.Statement
   "SELECT coalesce(string_agg(substring(data FROM (greatest($2,start_offset)-start_offset+1)::integer FOR (least($3,start_offset+octet_length(data))-greatest($2,start_offset))::integer),''::bytea ORDER BY start_offset),''::bytea) FROM session_chunks WHERE session_id=$1 AND start_offset >= coalesce((SELECT max(start_offset) FROM session_chunks WHERE session_id=$1 AND start_offset <= $2),0) AND start_offset < $3"
   (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.int8 <> param (\(_,_,c) -> c) E.int8)
   (D.singleRow (D.column (D.nonNullable D.bytea))) True
+
+-- Immutable append boundaries remain valid after append-only growth or seal.
+-- The existing unique (session_id,revision) index bounds this lookup. Runtime
+-- and terminal metadata revisions never impersonate an append boundary.
+validateSessionPrefixBoundary :: Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int64 -> IO Bool
+validateSessionPrefixBoundary pool workspace identifier end revision
+  | end < 0 || revision < 0 = pure False
+  | otherwise = runSession pool $ S.statement (workspace,identifier,end,revision) $ St.Statement
+      "SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND w.deleted_at IS NULL AND $3<=s.committed_bytes AND (($3=0 AND $4=0) OR EXISTS(SELECT 1 FROM session_chunks c WHERE c.session_id=s.id AND c.revision=$4 AND c.start_offset+octet_length(c.data)=$3)))"
+      (param (\(a,_,_,_) -> a) E.uuid <> param (\(_,b,_,_) -> b) E.uuid <> param (\(_,_,c,_) -> c) E.int8 <> param (\(_,_,_,d) -> d) E.int8)
+      (D.singleRow (D.column (D.nonNullable D.bool))) True
+
+-- One bounded ordered byte window, with no session lock or connection retained
+-- by its caller between steps. Never read past the frozen immutable target.
+readSessionPrefixWindow :: Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int64 -> IO ByteString
+readSessionPrefixWindow pool workspace identifier end offset
+  | offset < 0 || end < offset = invalid "Invalid prefix window"
+  | offset == end = pure BS.empty
+  | otherwise = do
+      bytes <- runSession pool $ do
+        exists <- S.statement (workspace,identifier,end) $ St.Statement
+          "SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND w.deleted_at IS NULL AND s.committed_bytes >= $3)"
+          (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.int8)
+          (D.singleRow (D.column (D.nonNullable D.bool))) True
+        if exists then S.statement (identifier,offset,offset+min 1048576 (end-offset)) rangeStatement else pure BS.empty
+      if fromIntegral (BS.length bytes) /= min 1048576 (end-offset)
+        then invalid "Committed prefix is missing or discontinuous"
+        else pure bytes
 
 readSessionRange :: Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int -> IO SessionRange
 readSessionRange pool workspace identifier offset limit = do

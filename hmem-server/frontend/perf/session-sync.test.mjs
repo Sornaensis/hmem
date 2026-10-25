@@ -9,6 +9,16 @@ import { finiteTargets, fixtureRecord, networkProxy, ownedPath, percentile, scan
 import { chromium } from '@playwright/test'
 import { Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { componentUploadArguments } from './session-sync.mjs'
+
+test('component uploader preserves the complete immutable seed binding before any large fixture', () => {
+  const work = { workspace: 'workspace', task: 'task' }
+  const input = { source: 'source.jsonl', session: { id: 'session', workspace_id: work.workspace, state: 'active', title: 'Synchronization baseline', format_label: 'Bounded benchmark JSONL', parent_session_id: 'parent' } }
+  assert.deepEqual(componentUploadArguments(input, work), { workspace_id: 'workspace', session_id: 'session', path: 'source.jsonl', task_id: 'task', title: input.session.title, format_label: input.session.format_label, parent_session_id: 'parent' })
+  assert.equal(componentUploadArguments({ ...input, session: { ...input.session, parent_session_id: null } }, work).parent_session_id, null)
+  assert.throws(() => componentUploadArguments(input, { ...work, workspace: 'foreign' }), /workspace/)
+  assert.throws(() => componentUploadArguments({ ...input, session: { ...input.session, title: null } }, work), /binding/)
+})
 
 test('cohort stop during a wait excludes the unwritten record and counts short writes exactly', async () => {
   const root = await mkdtemp(join(tmpdir(), 'session-sync-producer-')), source = join(root, 'source.jsonl')

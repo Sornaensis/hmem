@@ -20,6 +20,7 @@ module HMem.Server.API
   , server
   , serverWithChangeStream
   , serverWithDiscovery
+  , serverWithPrefixProofs
   , prepareObservationDiscovery
   , AgentSessionRequest
   , authorizeAgentSessionWrite
@@ -74,6 +75,7 @@ import HMem.DB.Workspace qualified as Workspace
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.AccessTracker (AccessTracker, bufferSize)
 import HMem.Server.ObservationDiscovery qualified as Discovery
+import HMem.Server.SessionPrefix qualified as Prefix
 import HMem.Server.WebSocket qualified as WS
 import HMem.Server.Snapshot (materializeSnapshotWithProfile)
 import HMem.Types
@@ -161,6 +163,8 @@ type AgentSessionAPI =
   :<|> Capture "sessionId" UUID :> "terminate" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.TerminateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> "transcript" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Get '[JSON] SessionWire.SessionRangeResponse
   :<|> Capture "sessionId" UUID :> "evidence" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Get '[JSON] SessionWire.SessionRangeResponse
+  :<|> Capture "sessionId" UUID :> "prefix-verifications" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.PrefixProofRequest) :> Post '[JSON] SessionWire.PrefixProofResponse
+  :<|> Capture "sessionId" UUID :> "prefix-verifications" :> Capture "operationId" UUID :> Get '[JSON] SessionWire.PrefixProofResponse
 
 type WorkspaceGroupAPI =
        QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult WorkspaceGroup)
@@ -600,11 +604,40 @@ sessionRequest (AgentSessionRequest result) = either (const $ throwError $ sessi
 sessionIO :: Pool Hasql.Connection -> UUID -> IO a -> Handler a
 sessionIO _ workspace = handleSessionErrors . withWorkspaceIdContext (Just workspace)
 
-agentSessions :: Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
-agentSessions pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated
+agentSessions :: Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
+agentSessions prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated :<|> proofH :<|> proofResultH
   where
     readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
     writeAccess = authorizeAgentSessionWrite pool workspace
+    proofRegistry = maybe (throwError $ sessionError err503 "verification_unavailable" "Prefix verification service unavailable") pure prefixes
+    proofAudience = do
+      principal <- liftIO currentPrincipal
+      case principal of
+        Just original | PrincipalGrantUser identifier <- original.authority ->
+          pure ("grant-user:" <> UUID.toText identifier <> ":" <> actorTypeToText original.actorType <> ":" <> original.actorId)
+        Just original | PrincipalSyntheticLocalSuperadmin <- original.authority ->
+          pure ("local-superadmin:" <> actorTypeToText original.actorType <> ":" <> original.actorId)
+        _ -> throwError $ sessionError err401 "unauthorized" "Authentication required"
+    proofH identifier request = do
+      writeAccess
+      _ <- requireAgentSession pool workspace identifier
+      audience <- proofAudience
+      input <- sessionRequest request
+      registry <- proofRegistry
+      result <- sessionIO pool workspace $ Prefix.submitPrefixProof registry (Prefix.PrefixTarget workspace identifier audience input)
+      either (throwError . proofError) pure result
+    proofResultH identifier operation = do
+      writeAccess
+      _ <- requireAgentSession pool workspace identifier
+      audience <- proofAudience
+      registry <- proofRegistry
+      result <- liftIO $ Prefix.lookupPrefixProof registry workspace identifier audience operation
+      maybe (throwError $ sessionError err404 "verification_unknown" "Prefix verification operation unknown; revalidate source with a new operation") pure result
+    proofError = \case
+      Prefix.PrefixInvalid -> sessionError err400 "verification_target_invalid" "Prefix target must be an exact committed append boundary and SHA-256"
+      Prefix.PrefixConflict -> sessionError err409 "verification_operation_conflict" "Operation UUID is already bound to another target"
+      Prefix.PrefixBusy -> sessionError err503 "verification_busy" "Prefix verification admission is full"
+      Prefix.PrefixClosed -> sessionError err503 "verification_unavailable" "Prefix verification service unavailable"
     listH rawLimit timestamp identifier rawState rawFreshness project task = do
       readAccess
       limit <- sessionLimit rawLimit
@@ -696,12 +729,15 @@ serverWithChangeStream :: Config.AuthConfig -> Config.ChangeStreamConfig -> Pool
 serverWithChangeStream authConfig changeStreamConfig = serverWithDiscovery authConfig changeStreamConfig Nothing
 
 serverWithDiscovery :: Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe Discovery.ObservationDiscovery -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
-serverWithDiscovery authConfig changeStreamConfig discovery pool tracker wsState _ =
+serverWithDiscovery = serverWithPrefixProofs Nothing
+
+serverWithPrefixProofs :: Maybe Prefix.PrefixRegistry -> Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe Discovery.ObservationDiscovery -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
+serverWithPrefixProofs prefixes authConfig changeStreamConfig discovery pool tracker wsState _ =
        health pool tracker
   :<|> session authConfig pool
   :<|> sessionActivity pool
   :<|> activityTicket pool wsState
-  :<|> workspaces pool
+  :<|> workspaces prefixes pool
   :<|> groups pool
   :<|> observations pool
   :<|> discoveryH pool discovery
@@ -835,8 +871,8 @@ navigationOwnerOutcomes requests readOwner = forM requests $ \item -> do
     Left failure -> NavigationBatchOutcome { requestId = item.requestId, parent = item.parent, status = errHTTPCode failure, response = Nothing
       , error = Just (if errHTTPCode failure == 404 then "Navigation owner was not found" else "Navigation owner read failed") }
 
-workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> navigationBatchH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH :<|> agentSessions pool :<|> taskAgentSessions pool where
+workspaces :: Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> Server WorkspaceAPI
+workspaces prefixes pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> navigationBatchH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH :<|> agentSessions prefixes pool :<|> taskAgentSessions pool where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.

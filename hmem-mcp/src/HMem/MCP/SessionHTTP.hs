@@ -42,7 +42,7 @@ followerHTTPDeadlineMicros = 5000000
 followerRequest :: CapturedHTTP -> ByteString -> String -> Maybe Value -> IO (Either HTTPFault Value)
 followerRequest (CapturedHTTP scope helper base headers) verb path body = do
   let payload = BL.toStrict (encode (object ["url" .= (base <> path),"method" .= TE.decodeUtf8 verb,"headers" .= headers,"body" .= body]))
-  response <- runHelper scope helper (const (pure ())) (const (pure ())) payload
+  response <- runReusableHelper scope helper (const (pure ())) (const (pure ())) payload
   pure $ case response of
     Left _ -> Left HTTPUnavailable
     Right bytes -> case BS.uncons bytes of
@@ -79,17 +79,21 @@ runSessionHTTPHelper = do
   owned <- watchParent
   unless (owned == 1) exitFailure
   writeFrame "HMSESSION1"
-  outcome <- try @SomeException $ do
-    input <- readFrame
-    value <- either (const $ throwIO ProcessProtocol) pure (eitherDecodeStrict' input)
-    request <- either (const $ throwIO ProcessProtocol) pure (parseEither parseCall value)
-    perform request
-  writeFrame (either (const (BS.singleton 2)) id outcome)
+  manager <- newManager tlsManagerSettings {managerConnCount=1,managerIdleConnectionCount=1}
+  let loop = do
+        outcome <- try @SomeException $ do
+          input <- readFrame
+          value <- either (const $ throwIO ProcessProtocol) pure (eitherDecodeStrict' input)
+          request <- either (const $ throwIO ProcessProtocol) pure (parseEither parseCall value)
+          perform manager request
+        writeFrame (either (const (BS.singleton 2)) id outcome)
+        case outcome of Left _ -> exitFailure; Right _ -> loop
+  loop `finally` closeManager manager
   where
     parseCall = withObject "helper call" $ \fields -> do
       url <- fields .: "url"; verb <- fields .: "method"; headers <- fields .: "headers"; body <- fields .:? "body"; probe <- fields .:? "probe"
       pure (url,verb,headers,body,probe)
-    perform (url,verb,headers,body,probe) = do
+    perform manager (url,verb,headers,body,probe) = do
       -- Internal native blocking seam, never accepted by uploader tools or HTTP.
       case probe :: Maybe Text of
         Just phase | phase `elem` ["dns","connect","tls","body"] && url == "http://127.0.0.1:0/" -> do
@@ -101,7 +105,6 @@ runSessionHTTPHelper = do
       let request = initial {method=TE.encodeUtf8 verb, requestHeaders=[(CI.mk (TE.encodeUtf8 name),TE.encodeUtf8 value) | (name,value) <- headers]
             , requestBody=maybe (RequestBodyBS mempty) (RequestBodyLBS . encode) (body :: Maybe Value)
             , responseTimeout=responseTimeoutMicro followerHTTPDeadlineMicros}
-      manager <- newManager tlsManagerSettings {managerIdleConnectionCount=0}
       response <- timeout followerHTTPDeadlineMicros $ withResponse request manager $ \reply -> do
         let status = statusCode (responseStatus reply)
         bytes <- readBody (responseBody reply) 2097152 []

@@ -3,18 +3,20 @@
 module HMem.MCP.SessionProcess
   ( ProcessScope, ProcessFault(..), newProcessScope, newProcessScopeWithReapHook, closeProcessScope, cancelProcessScope, scopePoisoned
   , runHelper, processMetrics, nativeProcessCount, processAlive, watchParent
+  , runReusableHelper
   , frameHeader, parseFrameHeader, frameCap
   , attributeFailureProbe
   , killProcessId, childProcessIds, processImage, blockChildProbe
   ) where
 
 import Control.Concurrent
-import Control.Concurrent.Async (async, asyncBound, cancel, waitCatch, waitCatchSTM)
+import Control.Concurrent.Async (async, asyncBound, asyncWithUnmask, cancel, waitCatch, waitCatchSTM)
 import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad (forM_, unless, void, when)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
+import Data.IORef
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word8, Word64)
@@ -61,13 +63,18 @@ data ProcessFault = ProcessUnavailable | ProcessProtocol | ProcessDeadline | Pro
   deriving (Eq, Show)
 instance Exception ProcessFault
 data Lease = Lease { cancelled :: TVar Bool, result :: MVar (Either ProcessFault BS.ByteString) }
+data Exchange = Exchange
+  { payload :: BS.ByteString, cancelled :: TVar Bool, result :: MVar (Either ProcessFault BS.ByteString), cutoff :: Word64
+  , onSpawn :: Int -> IO (), onPhase :: T.Text -> IO () }
+data Reusable = Reusable
+  { key :: Int, executable :: FilePath, lease :: Lease, request :: TMVar Exchange, busy :: TVar Bool }
 data ProcessScope = ProcessScope
-  { leases :: TVar (Map.Map Int Lease), sequenceNumber :: TVar Int, poisoned :: TVar Bool, pipes :: TVar Int, closing :: TVar Bool, afterReap :: IO () }
+  { leases :: TVar (Map.Map Int Lease), sequenceNumber :: TVar Int, poisoned :: TVar Bool, pipes :: TVar Int, closing :: TVar Bool, afterReap :: IO (), reusable :: TVar [Reusable] }
 
 newProcessScope :: IO ProcessScope
 newProcessScope = newProcessScopeWithReapHook (pure ())
 newProcessScopeWithReapHook :: IO () -> IO ProcessScope
-newProcessScopeWithReapHook hook = ProcessScope <$> newTVarIO Map.empty <*> newTVarIO 0 <*> newTVarIO False <*> newTVarIO 0 <*> newTVarIO False <*> pure hook
+newProcessScopeWithReapHook hook = ProcessScope <$> newTVarIO Map.empty <*> newTVarIO 0 <*> newTVarIO False <*> newTVarIO 0 <*> newTVarIO False <*> pure hook <*> newTVarIO []
 scopePoisoned :: ProcessScope -> STM Bool
 scopePoisoned scope = readTVar scope.poisoned
 nativeProcessCount :: IO Int
@@ -89,6 +96,172 @@ cancelProcessScope :: ProcessScope -> STM ()
 cancelProcessScope scope = do
   writeTVar scope.closing True
   readTVar scope.leases >>= mapM_ (\lease -> writeTVar lease.cancelled True)
+
+-- Two process-owned transports retain native ownership while idle. Every
+-- borrowed exchange still includes startup/recovery and kill/reap/pipe joins
+-- within its five-second deadline. Failed joins quarantine the scope.
+runReusableHelper :: ProcessScope -> FilePath -> (Int -> IO ()) -> (T.Text -> IO ()) -> BS.ByteString -> IO (Either ProcessFault BS.ByteString)
+runReusableHelper scope executable onSpawn onPhase payload = mask $ \restore -> do
+  start <- getMonotonicTimeNSec
+  let deadline = start+5000000000; cutoff = deadline-1000000000
+  valid <- if isAbsolute executable then doesFileExist executable else pure False
+  canonical <- if valid then canonicalizePath executable else pure ""
+  if not valid || canonical /= executable || BS.length payload > frameCap then pure (Left ProcessUnavailable) else do
+    ownerResult <- newEmptyMVar
+    remainingAdmission <- remaining cutoff
+    acquired <- timeout remainingAdmission $ atomically $ do
+      poisoned <- readTVar scope.poisoned; closing <- readTVar scope.closing
+      when poisoned $ throwSTM ProcessOwnership
+      when closing $ throwSTM ProcessUnavailable
+      assets <- readTVar scope.reusable
+      unless (all ((==executable) . (.executable)) assets) $ throwSTM ProcessUnavailable
+      states <- mapM (readTVar . (.busy)) assets
+      case [asset | (asset,False) <- zip assets states] of
+        asset:_ -> writeTVar asset.busy True >> pure (asset,False)
+        [] -> do
+          check (length assets < 2)
+          key <- readTVar scope.sequenceNumber
+          writeTVar scope.sequenceNumber (key+1)
+          cancelled <- newTVar False; request <- newEmptyTMVar; busy <- newTVar True
+          let lease = Lease cancelled ownerResult
+              asset = Reusable key executable lease request busy
+          modifyTVar' scope.leases (Map.insert key lease)
+          writeTVar scope.reusable (assets<>[asset])
+          pure (asset,True)
+    case acquired of
+      Nothing -> pure (Left ProcessDeadline)
+      Just (asset,fresh) -> do
+        when fresh $ do
+          _ <- asyncBound (reusableOwner scope asset) `onException` atomically (do
+            modifyTVar' scope.leases (Map.delete asset.key)
+            modifyTVar' scope.reusable (filter ((/=asset.key) . (.key))))
+          pure ()
+        cancelled <- newTVarIO False; result <- newEmptyMVar
+        let exchange = Exchange payload cancelled result cutoff onSpawn onPhase
+            await = do
+              left <- remaining deadline
+              observed <- timeout left (readMVar result)
+              case observed of
+                Just value -> pure value
+                Nothing -> atomically (writeTVar scope.poisoned True) >> throwIO ProcessOwnership
+            cancelAndJoin = atomically (writeTVar cancelled True) >> await
+            release = atomically $ do
+              poisoned <- readTVar scope.poisoned
+              unless poisoned $ writeTVar asset.busy False
+        (do atomically $ do
+              closing <- readTVar scope.closing
+              when closing $ throwSTM ProcessUnavailable
+              putTMVar asset.request exchange
+            left <- remaining cutoff
+            observed <- restore (timeout left (readMVar result)) `onException` (cancelAndJoin >> pure ())
+            maybe cancelAndJoin pure observed) `finally` release
+
+-- The bound owner keeps the native pointer until child death and all pipe
+-- owners are confirmed. It also owns recovery; no caller can release a broken
+-- transport while cleanup is still running.
+reusableOwner :: ProcessScope -> Reusable -> IO ()
+reusableOwner scope asset = mask_ $ do
+  native <- newIORef Nothing
+  pipe <- newIORef Nothing
+  active <- newIORef Nothing
+  let retire = do
+        current <- readIORef native
+        case current of
+          Nothing -> pure ()
+          Just pointer -> do
+            let reap = do
+                  _ <- killNative pointer
+                  exited <- waitNative pointer 100
+                  unless (exited == 1) (threadDelay 1000 >> reap)
+            reap
+            _ <- try @SomeException scope.afterReap
+            pipeOwner <- readIORef pipe
+            case pipeOwner of
+              Nothing -> pure ()
+              Just task -> cancel task >> waitCatch task >> writeIORef pipe Nothing
+            let destroy = do
+                  released <- destroyNative pointer
+                  unless (released == 1) $ do
+                    atomically $ writeTVar scope.poisoned True
+                    threadDelay 1000 >> destroy
+            destroy
+            writeIORef native Nothing
+      answer :: Exchange -> Either ProcessFault BS.ByteString -> IO ()
+      answer exchange value = do
+        _ <- tryPutMVar exchange.result value
+        writeIORef active Nothing
+      loop = do
+        next <- atomically $ do
+          closing <- readTVar scope.closing
+          cancelled <- readTVar asset.lease.cancelled
+          poisoned <- readTVar scope.poisoned
+          if closing || cancelled || poisoned then pure Nothing else Just <$> takeTMVar asset.request
+        case next of
+          Nothing -> pure ()
+          Just exchange -> do
+            writeIORef active (Just exchange)
+            current <- readIORef native
+            (pointer,fresh,code) <- case current of
+              Just pointer -> pure (pointer,False,1)
+              Nothing -> BS.useAsCString (TE.encodeUtf8 (T.pack asset.executable)) $ \path -> alloca $ \out -> do
+                poke out nullPtr
+                code <- spawnNative path out
+                pointer <- peek out
+                when (pointer /= nullPtr) $ writeIORef native (Just pointer)
+                pure (pointer,True,code)
+            if pointer == nullPtr || code /= 1 then do
+              retire
+              answer exchange (Left ProcessUnavailable)
+            else do
+              atomically $ modifyTVar' scope.pipes (+1)
+              task <- asyncWithUnmask (\unmask -> unmask (do
+                when fresh $ do
+                  pid <- fromIntegral <$> nativePid pointer
+                  exchange.onSpawn pid
+                  ready <- receiveFrame pointer
+                  unless (ready == "HMSESSION1") $ throwIO ProcessProtocol
+                sendFrame pointer exchange.payload
+                let receive count = do
+                      bytes <- receiveFrame pointer
+                      if "PHASE:" `BS.isPrefixOf` bytes && BS.length bytes <= 64 then do
+                        when (count >= (8 :: Int)) $ throwIO ProcessProtocol
+                        exchange.onPhase (TE.decodeUtf8 (BS.drop 6 bytes))
+                        receive (count+1)
+                      else pure bytes
+                receive 0) `finally` atomically (modifyTVar' scope.pipes (subtract 1)))
+                `onException` atomically (modifyTVar' scope.pipes (subtract 1))
+              writeIORef pipe (Just task)
+              let waiting = do
+                    closing <- readTVar scope.closing
+                    cancelled <- readTVar exchange.cancelled
+                    ownerCancelled <- readTVar asset.lease.cancelled
+                    poisoned <- readTVar scope.poisoned
+                    if closing || cancelled || ownerCancelled || poisoned then pure Nothing else Just <$> waitCatchSTM task
+              left <- remaining exchange.cutoff
+              observed <- timeout left (atomically waiting)
+              case observed of
+                Just (Just (Right bytes)) -> do
+                  -- waitCatchSTM observes the complete pipe-owner finalizer.
+                  _ <- waitCatch task
+                  writeIORef pipe Nothing
+                  answer exchange (Right bytes)
+                _ -> do
+                  retire
+                  answer exchange (Left ProcessDeadline)
+            loop
+  outcome <- try @SomeException loop
+  -- No exception from setup or an exchange may skip native retirement.
+  retire
+  current <- readIORef active
+  forM_ current $ \exchange -> answer exchange (Left ProcessProtocol)
+  queued <- atomically $ tryTakeTMVar asset.request
+  forM_ queued $ \exchange -> answer exchange (Left ProcessUnavailable)
+  atomically $ do
+    when (either (const True) (const False) outcome) $ writeTVar scope.poisoned True
+    modifyTVar' scope.leases (Map.delete asset.key)
+    modifyTVar' scope.reusable (filter ((/=asset.key) . (.key)))
+  _ <- tryPutMVar asset.lease.result (either (const (Left ProcessProtocol)) (const (Right BS.empty)) outcome)
+  pure ()
 
 -- Five seconds includes startup, readiness, HTTP, bounded IPC and cleanup.
 -- One second is reserved for kill/reap and pipe-owner join. If the OS fails to

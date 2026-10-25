@@ -267,3 +267,96 @@ and stack cleanup have separate finite bounds totaling at most three minutes.
 Cleanup failure retains the owned
 scratch with `sync_developer` responsible for resolution; it never deletes an
 unjoined sandbox or adopts an existing scratch directory.
+
+The native MCP component mode uses an explicit task and scratch owner:
+
+```powershell
+node hmem-server/frontend/perf/session-sync.mjs mcp --base-sha <exact-coordinator-base> --task-id 6e70b1ee-a329-4b22-95a6-cc49d3474499 --scratch .scratch/responsive-sessions-mcp-6e70b1ee --output hmem-server/frontend/perf/session-sync.mcp.json
+```
+
+This mode starts the real native server and MCP without frontend assets or
+browsers. It measures a local 1 MiB follower and a controlled-link 1 GiB primary
+with three independent 1 MiB peers, alongside ordinary MCP calls. Seeding occurs
+before each measured wire profile. Resume has `N=B`; each later flush/stop adds
+a fresh complete 4 KiB tail and records pre-control canonical `N`, frozen source
+`B`, pending bytes, reply time, completion, locally checked receipt and independent
+seal. Its completion cap uses the frozen 1 GiB zero-tail target plus twice the
+pending bytes at the frozen 183,500.8 B/s reference. This conservative component
+cap is not a tighter small-prefix target or a full-backlog promise.
+
+Concurrent producers divide that aggregate sustainable rate among followers;
+each offers 100 source records without waiting for observation. Canonical commit
+cohorts count independently of source markers. Sampled native process resources,
+HTTP requests, proxy connection reuse and ordinary MCP latency retain their
+explicit scopes. These zero-browser components do not establish combined browser
+visibility, interaction, matched combined resource limits, or the final required
+five warm/three fresh-process and independent latency sample counts. The mode
+uses one 20-minute cooperative suite guard and the existing finite cleanup bounds.
+New component receipts use `session-sync.mcp*.json`; committed baseline receipts
+and the frozen profile remain unchanged.
+
+The task-local result is retained in
+`hmem-server/frontend/perf/session-sync.mcp.json` (SHA-256
+`4204fa18635c173c27d21a3bc45c3f91900c6e24ea9b2ab7f67579a11ad483b9`).
+It records launch base `6586c58`, loaded runner `b61342dc…`, native binary and
+source hashes, and the frozen baseline input. The later client-only commit
+`9cbfcd83` did not change these backend inputs. Maintainers own these compact
+benchmark receipts until the corresponding qualification evidence is superseded.
+Generated JSONL sources, database, private logs and processes were joined and
+removed after the run; no raw transcript fixture or diagnostic log is retained.
+
+| Component observation | Local, one follower | Controlled link, four followers |
+| --- | ---: | ---: |
+| Initial committed prefixes | 1 MiB | 1 GiB + three independent 1 MiB peers |
+| Resume, `N=B`, zero pending bytes | 1,196.861 ms | 14,902.129 ms |
+| Actual aggregate production rate | 183,466.10 B/s | 183,495.70 B/s |
+| Source events committed | 100/100 | 400/400 |
+| Independent commit cohorts | 13 | 32 / 27 / 25 / 28 |
+| Source-to-commit p95 | 999.099 ms | 1,104.842 / 1,212.145 / 1,213.274 / 1,049.675 ms |
+| Flush reply / completed receipt | 371.924 / 371.935 ms | 901.680 / 14,450.082 ms |
+| Stop reply / completed receipt | 909.415 / 1,017.770 ms | 914.067 / 14,515.756 ms |
+| Ordinary MCP calls, failures | 13, zero | 81, zero |
+| Ordinary MCP p95 / maximum | 52.967 / 52.967 ms | 99.480 / 1,350.367 ms |
+| Completed follower HTTP requests | 32 | 594 |
+| Peak overlapping completed follower requests | 1 | 2 |
+| Full raw transcript HTTP reads | zero | zero |
+
+Every finite control added 4,096 source bytes. For the large case flush froze
+`N=1,075,457,024`, `B=1,075,461,120`; stop froze `N=1,075,461,120`,
+`B=1,075,465,216`. All four control receipts matched independent local SHA-256,
+exact boundaries/revisions and `pending_tail=false`. All five independent seals
+matched the canonical immutable hash; the large seal took 5,643.974 ms. Seed time
+(142.035 s for 1 GiB) is separate from verification. The fresh workspace started
+with 53 terminated history sessions; by construction the large case also included
+the already sealed local predecessor. Source commit totals were read directly
+after the bounded drain; the runner does not serialize an exact drain completion
+timestamp, and no drain-latency claim is made.
+
+The observed reply and source-commit values meet their named component targets,
+but this is not final sampling qualification. Each individual follower has fewer
+than 100 independent commit cohorts; the four-follower aggregate has 112. There
+are no browser/render/interaction samples or five-warm/three-fresh-process finite
+series. Ordinary MCP results are not a matched before/after regression comparison;
+the observed 1.350 s maximum remains visible. The HTTP overlap is a lower bound
+from completed physical request intervals, supported by separate causal admission
+and cancellation tests, not an inferred total helper count.
+
+Sampled zero-browser working-set peaks were 749,469,696 and 1,521,475,584 bytes
+from 4 and 21 observations, with no sampling failures. Requested pauses were
+500 ms, but actual intervals included inventory work (up to 4.944 / 6.700 s).
+The windows include benchmark verification and independent sealing, and differ
+in follower count and prefix/load size. They neither establish prefix-independent
+memory nor a matched combined resource or CPU/SQL regression pass. Those remain
+part of final qualification after the separately owned sealing work.
+
+The preceding 15,542-byte
+`hmem-server/frontend/perf/session-sync.mcp.setup-failed.json` receipt (SHA-256
+`7c7ec567a96894f294843345bbf78b1419f26a8e8f3e6b87fed7ea033322ec91`)
+is retained under the same owner/expiry. Its loaded runner `ccd232e7…` supplied
+a title different from the canonical immutable title. The uploader rejected that
+binding before verification; its failed resume timings are setup evidence only.
+The corrected helper takes title, format, parent, session and workspace from the
+seeded canonical binding, with the atomically linked task and initialized MCP
+workspace. A causal binding test and the first real local case now guard admission
+of an expensive large fixture. The failure receipt and its classification remain
+separate from the completed component observations.

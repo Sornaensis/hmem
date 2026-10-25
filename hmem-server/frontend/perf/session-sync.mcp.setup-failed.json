@@ -1,0 +1,413 @@
+{
+  "schema": 1,
+  "mode": "mcp",
+  "qualificationStatus": "not_qualified",
+  "baseSha": "6586c58b7986326edb5005c664347cace7dd628e",
+  "measuredAt": "2026-10-25T17:25:40.649Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 27913703424,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": {
+    "harness": "3490f5246c2926f8d4d91d7e8d93a2a105b430bf224011d683cb04089577ba0c",
+    "mcp": "d8817b35f32d2a9123dfddb56f55878c97ae393bef981f5f222bc1a5926d5cee",
+    "sources": {
+      "runner": "ccd232e72768712ad1d6d519aa492362d6fa4ff52e88a249922b0e8af39f3e17",
+      "sessionMcpHelper": "65e8643a08b66429005856a6878245ec10732a61bfd9eb7fff3d60592727cb66",
+      "nativeHarness": "89060eb8aeaaac65bf6dc139f56c998d420035e7e2f6b793a61cf3507c34fee4",
+      "hmem-mcp/src/HMem/MCP/SessionFollower.hs": "9b494b289a9f964fa88e181c2be9b70e6905656a49ed51d6deeefd9590db76e8",
+      "hmem-mcp/src/HMem/MCP/SessionHTTP.hs": "4d918c69d31de493cb50faaa3fa646afc08bce7661ebcc18684cd5c5798cff6a",
+      "hmem-mcp/src/HMem/MCP/SessionProcess.hs": "ddae0647e5a80e1353e592bf83e524dc206f77e16b287c0410b4390afe094400",
+      "hmem-mcp/src/HMem/MCP/SessionFile.hs": "a08a77dce4ce85ccccfd31eb7a05626cefd3d7671cc44879737b7426c7118e2a",
+      "hmem-mcp/cbits/session_process.c": "fbb08aeecc341c4645baee8cff90f0827b95d692e4e098b41eda16f72d0e02ad",
+      "hmem-core/src/HMem/AgentSession/Transport.hs": "cc32adad3bed8d471035e8fd46ee9384723b6ad297b1448717314f48f094c320",
+      "hmem-core/src/HMem/DB/AgentSession.hs": "0caea762ddb92369d813f0ff8a5a561f18bd5249a0b2a72e2c373879b4f135f1",
+      "hmem-server/src/HMem/Server/SessionPrefix.hs": "08f12e30aac59c88dca03bffb14852b41219342242c3622bbfd746727511f282",
+      "hmem-server/src/HMem/Server/API.hs": "ca8fa550f9daa399bce739d0eebe19d80d63c2a2293260e9c1cb3255ccdd08ff",
+      "hmem-server/src/HMem/Server/App.hs": "013dd0170c6ba2dd51d4d3ad845dc4d1b5cb0b2246d8058232149efa22d9175b",
+      "hmem-server/app-harness/Main.hs": "babda8f25ccfcd5b5bb59553bfcf2d145b6e76c98ecaaa9aa8802a3719491721"
+    },
+    "frontend": "not built or used: backend-only MCP evidence"
+  },
+  "task": "6e70b1ee-a329-4b22-95a6-cc49d3474499",
+  "methodSha256": "ccd232e72768712ad1d6d519aa492362d6fa4ff52e88a249922b0e8af39f3e17",
+  "result": {
+    "profiles": [
+      {
+        "name": "local-one",
+        "network": {},
+        "browserClients": 0,
+        "followers": 1,
+        "measurement": {
+          "commit": "pg_xact_commit_timestamp(session_chunks.xmin)",
+          "statements": "parameter-suppressed sandbox log statement count",
+          "locks": "sampled pg_stat_activity/pg_locks; wait-time estimate is sampling resolution limited",
+          "postgres": "PostgreSQL 18.2 on x86_64-windows, compiled by gcc-15.2.0, 64-bit"
+        },
+        "prefixBytes": [
+          1048576
+        ],
+        "seed": [
+          {
+            "milliseconds": 168.73388671875,
+            "requests": 1
+          }
+        ],
+        "resume": {
+          "complete": false,
+          "observedMs": 541.43994140625,
+          "capMs": 40302.10889609375,
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 1.488037109375,
+            "median": 1.488037109375,
+            "p95": 1.488037109375,
+            "max": 1.488037109375
+          },
+          "boundaries": [
+            {
+              "sessionId": "5b16e067-2d23-4d03-916f-ce0eeee525ed",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            }
+          ],
+          "states": [
+            {
+              "status": "failed",
+              "committedOffset": null,
+              "error": "source_identity_or_prefix_changed"
+            }
+          ],
+          "scope": "fresh MCP/follower/hash/transport state; seeded warm server/DB and uncontrolled OS cache; actual production intervals"
+        },
+        "load": {
+          "requestedAggregateBytesPerSecond": 183500.8,
+          "actualAggregateBytesPerSecond": 0,
+          "generatedBytes": 0,
+          "sourceEvents": [],
+          "perFollower": []
+        },
+        "sourceCommits": [],
+        "controls": [],
+        "seals": [
+          {
+            "complete": true,
+            "milliseconds": 59.017333984375,
+            "readbackMs": 30.21923828125,
+            "sessionId": "5b16e067-2d23-4d03-916f-ce0eeee525ed",
+            "N": 1048576,
+            "B": 1048576,
+            "pendingBytes": 0,
+            "expectedRevision": 1,
+            "finalRevision": 2,
+            "sha256": "00402276a4e1b67debfef23d2e2ec90cbbd66c311fad7c99d77e07fdf2e46091",
+            "locallyReconstructedSha256": "00402276a4e1b67debfef23d2e2ec90cbbd66c311fad7c99d77e07fdf2e46091",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          }
+        ],
+        "ordinaryMcp": {
+          "samples": 1,
+          "failed": 0,
+          "latencyMs": {
+            "samples": 1,
+            "min": 44.200439453125,
+            "median": 44.200439453125,
+            "p95": 44.200439453125,
+            "max": 44.200439453125
+          }
+        },
+        "database": {
+          "logicalStatementCalls": 322
+        },
+        "resources": {
+          "samples": 1,
+          "peakRssBytes": 638443520,
+          "cpuSeconds": 0,
+          "samplingWaitMs": 500,
+          "actualIntervalsMs": {
+            "samples": 0,
+            "min": null,
+            "median": null,
+            "p95": null,
+            "max": null
+          },
+          "peakObservedPids": 24,
+          "failures": 0,
+          "method": "sampled owned process tree including Chromium descendants and PostgreSQL workers; sampler PowerShell excluded; short-lived helpers may be missed"
+        },
+        "transport": {
+          "downstreamConnections": 3,
+          "upstreamHttpConnections": 0,
+          "reusedUpstreamHttpRequests": 5,
+          "webSocketConnections": 0,
+          "successfulFollowerHttp": 1
+        },
+        "http": {
+          "completed": 5,
+          "completedFollowerRequests": 1,
+          "peakAmongCompletedFollowerRequests": 1,
+          "prefixProofRequests": 0,
+          "rawTranscriptRequests": 0,
+          "proofReplyMs": {
+            "samples": 0,
+            "min": null,
+            "median": null,
+            "p95": null,
+            "max": null
+          }
+        },
+        "limitations": [
+          "Zero browser component evidence; no combined visibility/interaction/resource qualification claim.",
+          "Source markers coalesced into one commit are one independent latency cohort.",
+          "Helpers/CPU are sampled; transient peaks may be missed.",
+          "No five-warm/three-cold or 100-independent-cohort final-matrix claim."
+        ]
+      },
+      {
+        "name": "controlled-mixed-large",
+        "network": {
+          "rttMs": 50,
+          "bitsPerSecond": 100000000
+        },
+        "browserClients": 0,
+        "followers": 4,
+        "measurement": {
+          "commit": "pg_xact_commit_timestamp(session_chunks.xmin)",
+          "statements": "parameter-suppressed sandbox log statement count",
+          "locks": "sampled pg_stat_activity/pg_locks; wait-time estimate is sampling resolution limited",
+          "postgres": "PostgreSQL 18.2 on x86_64-windows, compiled by gcc-15.2.0, 64-bit"
+        },
+        "prefixBytes": [
+          1073741824,
+          1048576,
+          1048576,
+          1048576
+        ],
+        "seed": [
+          {
+            "milliseconds": 143612.13745117188,
+            "requests": 1024
+          },
+          {
+            "milliseconds": 138.327880859375,
+            "requests": 1
+          },
+          {
+            "milliseconds": 138.98486328125,
+            "requests": 1
+          },
+          {
+            "milliseconds": 77.68310546875,
+            "requests": 1
+          }
+        ],
+        "resume": {
+          "complete": false,
+          "observedMs": 1518.089599609375,
+          "capMs": 40302.10889609375,
+          "registrationReplyMs": {
+            "samples": 4,
+            "min": 0.4609375,
+            "median": 0.623291015625,
+            "p95": 0.771728515625,
+            "max": 0.771728515625
+          },
+          "boundaries": [
+            {
+              "sessionId": "86d3876f-1d4a-42f0-b01f-b8e660832a12",
+              "N": 1073741824,
+              "B": 1073741824,
+              "pendingBytes": 0
+            },
+            {
+              "sessionId": "299ec5d0-7c2f-47b4-9765-898d22c6da13",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            },
+            {
+              "sessionId": "b0c62754-ee63-46a7-a7bb-3c938a0a9666",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            },
+            {
+              "sessionId": "fb313b70-a773-426e-9e1e-8cf646995342",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            }
+          ],
+          "states": [
+            {
+              "status": "failed",
+              "committedOffset": null,
+              "error": "source_identity_or_prefix_changed"
+            },
+            {
+              "status": "failed",
+              "committedOffset": null,
+              "error": "source_identity_or_prefix_changed"
+            },
+            {
+              "status": "failed",
+              "committedOffset": null,
+              "error": "source_identity_or_prefix_changed"
+            },
+            {
+              "status": "validating",
+              "committedOffset": null,
+              "error": null
+            }
+          ],
+          "scope": "fresh MCP/follower/hash/transport state; seeded warm server/DB and uncontrolled OS cache; actual production intervals"
+        },
+        "load": {
+          "requestedAggregateBytesPerSecond": 183500.8,
+          "actualAggregateBytesPerSecond": 0,
+          "generatedBytes": 0,
+          "sourceEvents": [],
+          "perFollower": []
+        },
+        "sourceCommits": [],
+        "controls": [],
+        "seals": [
+          {
+            "complete": true,
+            "milliseconds": 5745.65478515625,
+            "readbackMs": 76.468017578125,
+            "sessionId": "86d3876f-1d4a-42f0-b01f-b8e660832a12",
+            "N": 1073741824,
+            "B": 1073741824,
+            "pendingBytes": 0,
+            "expectedRevision": 1024,
+            "finalRevision": 1025,
+            "sha256": "5ca87436fd68e37d5483b2ae51b39c3e216ff02260765557562efbe0977a3a3f",
+            "locallyReconstructedSha256": "5ca87436fd68e37d5483b2ae51b39c3e216ff02260765557562efbe0977a3a3f",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          },
+          {
+            "complete": true,
+            "milliseconds": 119.573486328125,
+            "readbackMs": 94.099365234375,
+            "sessionId": "299ec5d0-7c2f-47b4-9765-898d22c6da13",
+            "N": 1048576,
+            "B": 1048576,
+            "pendingBytes": 0,
+            "expectedRevision": 1,
+            "finalRevision": 2,
+            "sha256": "bb723ef03ac7e87538cf22fc81b0b99838ca6b321b078ffa2519b0c03f690572",
+            "locallyReconstructedSha256": "bb723ef03ac7e87538cf22fc81b0b99838ca6b321b078ffa2519b0c03f690572",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          },
+          {
+            "complete": true,
+            "milliseconds": 109.419921875,
+            "readbackMs": 75.64990234375,
+            "sessionId": "b0c62754-ee63-46a7-a7bb-3c938a0a9666",
+            "N": 1048576,
+            "B": 1048576,
+            "pendingBytes": 0,
+            "expectedRevision": 1,
+            "finalRevision": 2,
+            "sha256": "f99330c2defdb42076d013a01056e3778eb9bf97de8b71f0d51473c52276b077",
+            "locallyReconstructedSha256": "f99330c2defdb42076d013a01056e3778eb9bf97de8b71f0d51473c52276b077",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          },
+          {
+            "complete": true,
+            "milliseconds": 153.9609375,
+            "readbackMs": 76.706787109375,
+            "sessionId": "fb313b70-a773-426e-9e1e-8cf646995342",
+            "N": 1048576,
+            "B": 1048576,
+            "pendingBytes": 0,
+            "expectedRevision": 1,
+            "finalRevision": 2,
+            "sha256": "f1cb1da2001473ed3d4b4a0370946df1131fd564fe12778d8921899a010875d2",
+            "locallyReconstructedSha256": "f1cb1da2001473ed3d4b4a0370946df1131fd564fe12778d8921899a010875d2",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          }
+        ],
+        "ordinaryMcp": {
+          "samples": 9,
+          "failed": 0,
+          "latencyMs": {
+            "samples": 9,
+            "min": 62.682373046875,
+            "median": 93.143798828125,
+            "p95": 103.34033203125,
+            "max": 103.34033203125
+          }
+        },
+        "database": {
+          "logicalStatementCalls": 2793
+        },
+        "resources": {
+          "samples": 3,
+          "peakRssBytes": 1138778112,
+          "cpuSeconds": 3.828125,
+          "samplingWaitMs": 500,
+          "actualIntervalsMs": {
+            "samples": 2,
+            "min": 3626.495361328125,
+            "median": 3626.495361328125,
+            "p95": 5377.857421875,
+            "max": 5377.857421875
+          },
+          "peakObservedPids": 28,
+          "failures": 0,
+          "method": "sampled owned process tree including Chromium descendants and PostgreSQL workers; sampler PowerShell excluded; short-lived helpers may be missed"
+        },
+        "transport": {
+          "downstreamConnections": 4,
+          "upstreamHttpConnections": 1,
+          "reusedUpstreamHttpRequests": 24,
+          "webSocketConnections": 0,
+          "successfulFollowerHttp": 4
+        },
+        "http": {
+          "completed": 25,
+          "completedFollowerRequests": 4,
+          "peakAmongCompletedFollowerRequests": 2,
+          "prefixProofRequests": 0,
+          "rawTranscriptRequests": 0,
+          "proofReplyMs": {
+            "samples": 0,
+            "min": null,
+            "median": null,
+            "p95": null,
+            "max": null
+          }
+        },
+        "limitations": [
+          "Zero browser component evidence; no combined visibility/interaction/resource qualification claim.",
+          "Source markers coalesced into one commit are one independent latency cohort.",
+          "Helpers/CPU are sampled; transient peaks may be missed.",
+          "No five-warm/three-cold or 100-independent-cohort final-matrix claim."
+        ]
+      }
+    ],
+    "baselineReference": {
+      "sha256": "bf8e80a96a52942273617cd41a795b930454cd5d770d6114d0fd5a18ae3d2196",
+      "task": "6bfb2638-0f93-4169-81cf-cbdef3bcc52d"
+    },
+    "scope": "Native/MCP local acceptance components; final combined profile qualification remains separate."
+  }
+}

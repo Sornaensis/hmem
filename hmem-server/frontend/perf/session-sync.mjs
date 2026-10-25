@@ -236,6 +236,8 @@ export async function networkProxy(target, initialPolicy = {}, observe = () => {
     const { rttMs, bitsPerSecond } = policy
     const admitted = now(), path = new URL(req.url, target).pathname
     const client = clientOf(req)
+    let follower = false
+    try { follower = JSON.parse(req.headers['x-hmem-bot-identity'] || '{}').role === 'Synchronization performance' && path.includes('/sessions') } catch {}
     const timer = setTimeout(() => {
       pending.delete(timer)
       const upstream = http.request({ hostname: origin.hostname, port: origin.port, method: req.method, path: req.url,
@@ -246,7 +248,7 @@ export async function networkProxy(target, initialPolicy = {}, observe = () => {
         res.once('finish', () => {
           downstreamEnded = true
           try { if (JSON.parse(req.headers['x-hmem-bot-identity'] || '{}').role === 'Synchronization performance' && path.includes('/sessions') && response.statusCode < 400) counts.successfulFollowerHttp++ } catch {}
-          observe({ phase: 'downstream-finish', client, method: req.method, path, admitted, responseAt, upstreamReadEnd, completed: now(), status: response.statusCode })
+          observe({ phase: 'downstream-finish', client, follower, method: req.method, path, admitted, responseAt, upstreamReadEnd, completed: now(), status: response.statusCode })
         })
         res.once('close', () => { if (!downstreamEnded) observe({ phase: 'downstream-close', method: req.method, path, admitted, completed: now(), status: response.statusCode }) })
         const responseTimer = setTimeout(() => {
@@ -299,17 +301,18 @@ export async function networkProxy(target, initialPolicy = {}, observe = () => {
     async close() { for (const timer of pending) clearTimeout(timer); for (const socket of sockets) socket.destroy(); agent.destroy(); upload.close(); download.close(); await bounded(new Promise(done => server.close(done)), 5000, 'proxy cleanup') } }
 }
 
-export async function makeScratch(path) {
+export async function makeScratch(path, task = CONTRACT.task) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw new Error('Explicit scratch task UUID required')
   const root = resolve(path)
   ownedPath(join(repo, '.scratch'), root)
   await mkdir(dirname(root), { recursive: true })
   await mkdir(root) // Never adopt a preexisting directory.
-  await writeFile(join(root, 'owner.json'), JSON.stringify({ task: CONTRACT.task, owner: 'sync_developer', pid: process.pid, created: new Date().toISOString() }))
+  await writeFile(join(root, 'owner.json'), JSON.stringify({ task, owner: 'sync_developer', pid: process.pid, created: new Date().toISOString() }))
   await mkdir(join(root, 'tmp'))
   return { root, env: { ...process.env, TEMP: join(root, 'tmp'), TMP: join(root, 'tmp'), TMPDIR: join(root, 'tmp'), HMEM_TEST_POSTGRES_BACKEND: 'native' },
     async clean() {
       const owner = JSON.parse(await readFile(join(root, 'owner.json'), 'utf8'))
-      if (owner.task !== CONTRACT.task || owner.pid !== process.pid) throw new Error('Scratch ownership changed')
+      if (owner.task !== task || owner.pid !== process.pid) throw new Error('Scratch ownership changed')
       ownedPath(join(repo, '.scratch'), root)
       await rm(root, { recursive: true, force: false, maxRetries: 3, retryDelay: 200 })
       await assert.rejects(access(root), error => error.code === 'ENOENT')
@@ -329,12 +332,13 @@ async function checkedExec(command, args, options = {}) {
 
 // Kept separate from correctness fixtures: this owns its entire sandbox and
 // returns only non-secret coordinates. The bearer stays in this closure.
-export async function startStack(scratch, diagnostics = true) {
+export async function startStack(scratch, diagnostics = true, { frontendAssets = true } = {}) {
   const { stdout } = await checkedExec('stack', ['path', '--local-install-root'], { cwd: repo, env: scratch.env })
   const bin = join(stdout.trim(), 'bin'), extension = process.platform === 'win32' ? '.exe' : ''
   const executable = join(bin, 'hmem-test-harness' + extension), mcpExecutable = join(bin, 'hmem-mcp' + extension)
   const provenance = { harness: sha(await readFile(executable)), mcp: sha(await readFile(mcpExecutable)), sources: {
     runner: loadedMethodSha256, sessionMcpHelper: sha(await readFile(join(frontend, 'tests-js/support/session-mcp.js'))), nativeHarness: sha(await readFile(join(repo, 'hmem-core/src/HMem/DB/TestHarness.hs'))) } }
+  for (const path of ['hmem-mcp/src/HMem/MCP/SessionFollower.hs', 'hmem-mcp/src/HMem/MCP/SessionHTTP.hs', 'hmem-mcp/src/HMem/MCP/SessionProcess.hs', 'hmem-mcp/src/HMem/MCP/SessionFile.hs', 'hmem-mcp/cbits/session_process.c', 'hmem-core/src/HMem/AgentSession/Transport.hs', 'hmem-core/src/HMem/DB/AgentSession.hs', 'hmem-server/src/HMem/Server/SessionPrefix.hs', 'hmem-server/src/HMem/Server/API.hs', 'hmem-server/src/HMem/Server/App.hs', 'hmem-server/app-harness/Main.hs']) provenance.sources[path] = sha(await readFile(join(repo, path)))
   const probe = net.createServer(); await new Promise(done => probe.listen(0, '127.0.0.1', done)); const port = probe.address().port; await new Promise(done => probe.close(done))
   const managed = runChild(executable, ['deployed', '--interactive', '--port', String(port)], {
     cwd: repo, env: { ...scratch.env, HMEM_TEST_SESSION_DIAGNOSTICS: diagnostics ? '1' : '0' },
@@ -380,8 +384,10 @@ export async function startStack(scratch, diagnostics = true) {
     const buildEnv = { ...scratch.env, VITE_HMEM_API_URL: origin, VITE_HMEM_WS_URL: origin.replace('http:', 'ws:') + '/api/v1/ws', VITE_HMEM_AUTH_MODE: 'deployed' }
     const pathKey = Object.keys(buildEnv).find(key => key.toLowerCase() === 'path') || 'PATH'
     buildEnv[pathKey] = join(frontend, 'node_modules/.bin') + delimiter + (buildEnv[pathKey] || '')
-    await checkedExec(process.execPath, ['node_modules/vite/bin/vite.js', 'build', '--outDir', coordinates.static, '--emptyOutDir'], { cwd: frontend, env: buildEnv, timeout: 90000 })
-    provenance.assets = Object.fromEntries(await Promise.all((await readdir(join(coordinates.static, 'assets'))).map(async name => [name, sha(await readFile(join(coordinates.static, 'assets', name)))])))
+    if (frontendAssets) {
+      await checkedExec(process.execPath, ['node_modules/vite/bin/vite.js', 'build', '--outDir', coordinates.static, '--emptyOutDir'], { cwd: frontend, env: buildEnv, timeout: 90000 })
+      provenance.assets = Object.fromEntries(await Promise.all((await readdir(join(coordinates.static, 'assets'))).map(async name => [name, sha(await readFile(join(coordinates.static, 'assets', name)))])))
+    } else provenance.frontend = 'not built or used: backend-only MCP evidence'
     api = await playwrightRequest.newContext({ baseURL: origin, extraHTTPHeaders: { Authorization: 'Bearer ' + token, 'X-HMem-Bot-Identity': JSON.stringify({ role: 'Synchronization baseline', 'model-id': 'test:production:default' }) } })
     async function call(path, method = 'GET', data) {
       checkRunDeadline()
@@ -1068,6 +1074,128 @@ async function standaloneLive(stack, scratch) {
   return liveProfile(stack, scratch, { name: 'local-one-follower-three-browser', work, inputs: [{ source, session: seeded.session, fixture }] })
 }
 
+// Task-local native/MCP evidence. Browser delivery and whole-profile acceptance
+// are deliberately measured by the separate combined qualification modes.
+export function componentUploadArguments(input, work) {
+  assert.equal(input.session.workspace_id, work.workspace, 'seed and uploader workspace')
+  assert.equal(input.session.state, 'active', 'seed is active')
+  assert.ok(input.session.id && input.session.title && input.session.format_label && input.source && work.task, 'complete immutable seed/uploader binding')
+  return { workspace_id: work.workspace, session_id: input.session.id, path: input.source, task_id: work.task,
+    title: input.session.title, format_label: input.session.format_label, parent_session_id: input.session.parent_session_id || null }
+}
+async function mcpComponents(stack, scratch) {
+  const work = await makeWork(stack, 'Native synchronization component evidence')
+  await history(stack, work)
+  const reference = JSON.parse(await readFile(join(frontend, 'perf/session-sync.profile.json')))
+  const profiles = []
+  for (const [name, prefixBytes, followers, network] of [
+    ['local-one', 1048576, 1, {}], ['controlled-mixed-large', 1073741824, 4, CONTRACT.network],
+  ]) {
+    const inputs = []
+    stack.setNetwork({}) // Fixture creation is outside the measured wire profile.
+    for (let index = 0; index < followers; index++) {
+      const source = join(scratch.root, name + '-' + index + '.jsonl')
+      const fixture = await writePrefix(source, index ? 1048576 : prefixBytes)
+      const seed = await seedSession(stack, work.workspace, work.task, source, fixture.bytes)
+      inputs.push({ source, fixture, session: seed.session, seed: { milliseconds: seed.milliseconds, requests: seed.requests } })
+      console.log(JSON.stringify({ phase: 'mcp-component-seeded', name, index, bytes: fixture.bytes, milliseconds: seed.milliseconds }))
+    }
+    stack.setNetwork(network)
+    const observer = new DatabaseObserver(stack.coordinates.db, scratch.env, stack.coordinates.pgLog)
+    let client, manager, sampler, observing = true, failure, ordinaryWork
+    const ordinary = []
+    try {
+      client = await stack.mcp(work.workspace); manager = await stack.mcp(work.workspace, { role: 'Synchronization manager' })
+      sampler = startResourceSampler(() => stack.ownedPids(), { descendants: true })
+      const measurement = await observer.initialize(), before = await observer.stats(), transportBefore = stack.transportMetrics(), eventStart = stack.proxyEvents.length
+      ordinaryWork = (async () => {
+        while (observing) {
+          const at = now()
+          try { await client.tool('task_detail', { task_id: work.task }); ordinary.push({ at, milliseconds: now() - at, complete: true }) }
+          catch { ordinary.push({ at, milliseconds: now() - at, complete: false }) }
+          await delay(1000)
+        }
+      })()
+      const start = now(), registration = []
+      for (const input of inputs) {
+        const at = now()
+        await client.tool('session_upload_start', componentUploadArguments(input, work))
+        registration.push(now() - at)
+      }
+      const finiteCapMs = reference.zeroBrowserReference.absoluteOneGiBFiniteTargetMs
+      let states = [], resumed = false
+      do {
+        await delay(100)
+        states = await Promise.all(inputs.map(input => client.tool('session_upload_status', { session_id: input.session.id })))
+        if (states.some(value => value.status === 'failed')) break
+        resumed = states.every((value, index) => value.status === 'caught_up' && value.committed_offset === inputs[index].fixture.bytes)
+      } while (!resumed && now() - start < finiteCapMs)
+      const resume = { complete: resumed, observedMs: now() - start, capMs: finiteCapMs, registrationReplyMs: summary(registration),
+        boundaries: inputs.map(input => ({ sessionId: input.session.id, N: input.fixture.bytes, B: input.fixture.bytes, pendingBytes: 0 })),
+        states: states.map(value => ({ status: value.status, committedOffset: value.committed_offset, error: value.error || null })),
+        scope: 'fresh MCP/follower/hash/transport state; seeded warm server/DB and uncontrolled OS cache; actual production intervals' }
+      console.log(JSON.stringify({ phase: 'mcp-component-resume', name, complete: resumed, observedMs: resume.observedMs }))
+      const controls = [], sourceCommits = [], generated = []
+      if (resumed) {
+        const productionStart = now(), aggregateRate = 183500.8
+        generated.push(...await Promise.all(inputs.map(input => produce(input, aggregateRate / followers, productionStart, 100))))
+        const drainStart = now()
+        do {
+          states = await Promise.all(inputs.map(input => client.tool('session_upload_status', { session_id: input.session.id })))
+          if (states.some(value => value.status === 'failed') || states.every((value, index) => value.committed_offset === generated[index].frozenBoundary)) break
+          await delay(100)
+        } while (now() - drainStart < finiteCapMs)
+        for (let index = 0; index < inputs.length; index++) {
+          const input = inputs[index], events = generated[index].events
+          const commits = await observer.commits(input.session.id, { after: input.fixture.bytes })
+          const cohorts = commits.map(commit => {
+            const covered = events.filter(event => event.end > commit.offset && event.end <= commit.end)
+            return covered.length ? { revision: commit.revision, end: commit.end, representedSourceEvents: covered.length, milliseconds: commit.commit_ms - covered[0].sourceAt } : null
+          }).filter(Boolean)
+          sourceCommits.push({ sessionId: input.session.id, sourceEvents: events.length, committedEvents: events.filter(event => commits.some(commit => commit.end >= event.end)).length,
+            uniqueCommits: commits.length, independentSourceToCommitCohorts: cohorts, sourceToCommitMs: summary(cohorts.map(value => value.milliseconds)) })
+        }
+        for (const operation of ['session_upload_flush', 'session_upload_stop']) {
+          await appendFile(inputs[0].source, fixtureRecord(4096, operation))
+          const boundary = (await stat(inputs[0].source)).size, canonical = await manager.tool('session_detail', { session_id: inputs[0].session.id })
+          const pendingBytes = boundary - canonical.committed_bytes, transferReferenceMs = pendingBytes * 1000 / reference.zeroBrowserReference.sustainableBytesPerSecond[name === 'local-one' ? 'local' : 'controlled']
+          const capMs = finiteCapMs + 2 * transferReferenceMs
+          const control = await finiteReceipt(client, inputs[0].session.id, operation, capMs)
+          controls.push({ operation, boundary: { N: canonical.committed_bytes, B: boundary, pendingBytes }, finiteTargetMs: capMs, pendingTransferReferenceMs: transferReferenceMs,
+            targetScope: 'Conservative frozen 1GiB prefix target plus twice pending bytes at the measured sustainable reference rate; smaller prefixes receive the same declared cap, not a claimed tighter target.', ...control,
+            receiptVerification: await receiptProof(control.receipt, inputs[0].source, boundary) })
+          console.log(JSON.stringify({ phase: 'mcp-component-control', name, operation, complete: control.complete, replyMs: control.replyMs, completionMs: control.completionMs }))
+        }
+      }
+      const seals = []
+      for (const input of inputs) seals.push(await sealPrefix(manager, work, input))
+      observing = false; await ordinaryWork
+      const after = await observer.stats(), resources = await sampler.stop()
+      const events = stack.proxyEvents.slice(eventStart).filter(value => value.phase === 'downstream-finish')
+      const followerIntervals = events.filter(value => value.follower).flatMap(value => [{ at: value.admitted, delta: 1 }, { at: value.completed, delta: -1 }]).sort((a, b) => a.at - b.at || a.delta - b.delta)
+      let active = 0, peak = 0
+      for (const event of followerIntervals) { active += event.delta; peak = Math.max(peak, active) }
+      profiles.push({ name, network, browserClients: 0, followers, measurement, prefixBytes: inputs.map(input => input.fixture.bytes), seed: inputs.map(input => input.seed), resume,
+        load: { requestedAggregateBytesPerSecond: 183500.8, actualAggregateBytesPerSecond: generated.reduce((total, value) => total + value.bytes, 0) * 1000 / Math.max(1, ...generated.map(value => value.elapsedMs)),
+          generatedBytes: generated.reduce((total, value) => total + value.bytes, 0), sourceEvents: generated.map(value => value.events.length), perFollower: generated.map(value => ({ bytes: value.bytes, elapsedMs: value.elapsedMs, B: value.frozenBoundary, rate: value.actualBytesPerSecond })) },
+        sourceCommits, controls, seals, ordinaryMcp: { samples: ordinary.length, failed: ordinary.filter(value => !value.complete).length, latencyMs: summary(ordinary.filter(value => value.complete).map(value => value.milliseconds)) },
+        database: { logicalStatementCalls: (after.statements?.calls || 0) - (before.statements?.calls || 0) }, resources, transport: deltaMetrics(transportBefore, stack.transportMetrics()),
+        http: { completed: events.length, completedFollowerRequests: events.filter(value => value.follower).length, peakAmongCompletedFollowerRequests: peak, prefixProofRequests: events.filter(value => value.path.includes('/prefix-verifications')).length, rawTranscriptRequests: events.filter(value => value.path.endsWith('/transcript')).length,
+          proofReplyMs: summary(events.filter(value => value.path.includes('/prefix-verifications')).map(value => value.completed - value.admitted)) },
+        limitations: ['Zero browser component evidence; no combined visibility/interaction/resource qualification claim.', 'Source markers coalesced into one commit are one independent latency cohort.', 'Helpers/CPU are sampled; transient peaks may be missed.', 'No five-warm/three-cold or 100-independent-cohort final-matrix claim.'] })
+    } catch (error) { failure = error; throw error }
+    finally {
+      observing = false
+      await disposeAll([['ordinary MCP observer', async () => { if (ordinaryWork) await bounded(ordinaryWork, 65000, 'ordinary MCP join') }], ['component resource sampler', async () => { if (sampler) await sampler.stop() }], ['component uploader', async () => { if (client) await client.close({ hard: true }) }], ['component manager', async () => { if (manager) await manager.close() }], ['component DB observer', () => observer.close()]], failure)
+    }
+    // The first real small case also validates the shared fixture/start binding.
+    // Preserve its failed receipt and stop rather than seed an expensive repeat.
+    if (!profiles.at(-1).resume.complete) break
+  }
+  return { profiles, baselineReference: { sha256: sha(await readFile(join(frontend, 'perf/session-sync.profile.json'))), task: reference.task },
+    scope: 'Native/MCP local acceptance components; final combined profile qualification remains separate.' }
+}
+
 async function receiptProof(receipt, source, boundary) {
   if (!receipt) return { checked: false, reason: 'no_completed_receipt' }
   const hash = await scanPrefix(source, receipt.committed_offset)
@@ -1233,16 +1361,17 @@ async function main() {
   for (let i = 0; i < args.length; i += 2) { if (!args[i]?.startsWith('--') || args[i + 1] === undefined) throw new Error('Use --name value'); options[args[i].slice(2)] = args[i + 1] }
   if (options['independent-min'] !== undefined) { const value = Number(options['independent-min']); if (!Number.isInteger(value) || value < 0 || value > 1000) throw new Error('Invalid independent cohort minimum'); liveSampling.independentMinimum = value }
   if (options['max-live-ms'] !== undefined) { const value = Number(options['max-live-ms']); if (!Number.isInteger(value) || value < 1000 || value > 600000) throw new Error('Invalid maximum live duration'); liveSampling.maxLiveMs = value }
-  if (!['probe', 'calibrate', 'overhead', 'live', 'finite', 'seal-revalidate', 'repair', 'resources'].includes(mode)) throw new Error('Expected a documented session synchronization measurement mode')
+  if (!['probe', 'calibrate', 'overhead', 'live', 'finite', 'seal-revalidate', 'repair', 'resources', 'mcp'].includes(mode)) throw new Error('Expected a documented session synchronization measurement mode')
   if (!/^[0-9a-f]{40}$/.test(options['base-sha'] || '')) throw new Error('Exact --base-sha required from coordinator')
-  const scratch = await makeScratch(options.scratch || join(repo, '.scratch/responsive-sessions-baseline-6bfb2638'))
+  if (mode === 'mcp' && (!options.scratch || options['task-id'] !== '6e70b1ee-a329-4b22-95a6-cc49d3474499')) throw new Error('MCP mode requires its explicit task UUID and scratch root')
+  const scratch = await makeScratch(options.scratch || join(repo, '.scratch/responsive-sessions-baseline-6bfb2638'), options['task-id'] || CONTRACT.task)
   runDeadline = now() + 20 * 60 * 1000
   let stack, output, failure
   try {
-    const start = now(); if (mode !== 'overhead') stack = await startStack(scratch)
+    const start = now(); if (mode !== 'overhead') stack = await startStack(scratch, true, { frontendAssets: mode !== 'mcp' })
     console.log(JSON.stringify({ phase: 'setup', milliseconds: now() - start, phaseWallGuardMs: 1200000, maximumSuiteWallMs: ['repair', 'resources'].includes(mode) ? 4800000 : 1200000, cleanupBudgetMs: 180000 }))
     output = { schema: 1, mode, qualificationStatus: 'not_qualified', baseSha: options['base-sha'], measuredAt: new Date().toISOString(), environment: await environmentFingerprint(), provenance: stack?.provenance || null,
-      methodSha256: loadedMethodSha256, result: mode === 'probe' ? await probeStack(stack, scratch) : mode === 'calibrate' ? await calibrate(stack, scratch) : mode === 'live' ? await standaloneLive(stack, scratch) : mode === 'finite' || mode === 'seal-revalidate' ? await standaloneFinite(stack, scratch, mode === 'seal-revalidate') : mode === 'repair' ? await repairedSuite(stack, scratch) : mode === 'resources' ? await resourceSuite(stack, scratch) : await overhead(scratch) }
+      task: options['task-id'] || CONTRACT.task, methodSha256: loadedMethodSha256, result: mode === 'mcp' ? await mcpComponents(stack, scratch) : mode === 'probe' ? await probeStack(stack, scratch) : mode === 'calibrate' ? await calibrate(stack, scratch) : mode === 'live' ? await standaloneLive(stack, scratch) : mode === 'finite' || mode === 'seal-revalidate' ? await standaloneFinite(stack, scratch, mode === 'seal-revalidate') : mode === 'repair' ? await repairedSuite(stack, scratch) : mode === 'resources' ? await resourceSuite(stack, scratch) : await overhead(scratch) }
   } catch (error) { failure = error }
   finally { failure = await cleanupRun(stack, scratch, failure) }
   if (failure) throw failure

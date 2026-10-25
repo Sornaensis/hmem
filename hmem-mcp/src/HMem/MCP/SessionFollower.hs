@@ -47,7 +47,7 @@ data FollowerOptions = FollowerOptions
   , processScopeFactory :: IO ProcessScope
   }
 defaultFollowerOptions :: FollowerOptions
-defaultFollowerOptions = FollowerOptions getCurrentTime 1000000 1000000 2000000 Nothing forkIOWithUnmask (const (pure ())) getExecutablePath newProcessScope
+defaultFollowerOptions = FollowerOptions getCurrentTime 1000000 900000 2000000 Nothing forkIOWithUnmask (const (pure ())) getExecutablePath newProcessScope
 
 data Registry = Registry
   { jobs :: TVar (Map.Map UUID Job), order :: TVar [UUID], closed :: TVar Bool
@@ -63,7 +63,15 @@ data Job = Job
 data Control = Control
   { operationId :: UUID, stop :: Bool, boundary :: Maybe Int64, result :: Maybe Value, completion :: TMVar Value }
 data SweepPurpose = Resume | Periodic | Receipt deriving (Eq)
-data Sweep = Sweep !SweepPurpose !Int64 !Int64 !(Context SHA256)
+-- A sweep belongs to this job's one stable opened Source generation. No digest
+-- or proof survives source closure/reopen. Server bytes are immutable at N/R.
+data Sweep = Sweep
+  { purpose :: !SweepPurpose, end :: !Int64, revision :: !Int64, offset :: !Int64
+  , context :: !(Context SHA256), proof :: !(Maybe Wire.PrefixProofRequest)
+  , audience :: !(Maybe Text), submitted :: !Bool, proven :: !Bool, nextPoll :: !(Maybe UTCTime) }
+
+newSweep :: SweepPurpose -> Core.AgentSession -> Sweep
+newSweep purpose session = Sweep purpose session.committedBytes session.revision 0 hashInit Nothing Nothing False False Nothing
 data JobState = JobState
   { phase :: Text, source :: Maybe Source, remote :: Maybe Core.AgentSession
   , createNeeded :: Bool, sweep :: Maybe Sweep, verifyNext :: Bool
@@ -73,6 +81,7 @@ data JobState = JobState
   , observedSize :: Int64
   , lastHeartbeat :: Maybe UTCTime
   , failureDetails :: Maybe Value
+  , nextVerification :: UTCTime, lastProof :: Maybe (Wire.PrefixProofRequest,Text)
   }
 
 isUploadTool :: Text -> Bool
@@ -192,7 +201,12 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
       "session_upload_start" -> do
         captured <- captureHTTP registry.processScope registry.helperPath base token identity
         time <- registry.options.now
-        state <- newTVarIO (JobState "validating" Nothing Nothing False Nothing False Nothing False time Nothing 0 Nothing Nothing Nothing 0 Nothing Nothing)
+        state <- newTVarIO JobState
+          { phase = "validating", source = Nothing, remote = Nothing, createNeeded = False
+          , sweep = Nothing, verifyNext = False, pending = Nothing, reconcile = False, due = time
+          , lastAck = Nothing, failures = 0, failure = Nothing, completedAt = Nothing, receipt = Nothing
+          , observedSize = 0, lastHeartbeat = Nothing, failureDetails = Nothing
+          , nextVerification = time, lastProof = Nothing }
         control <- newTVarIO Nothing; busy <- newTVarIO False
         let job = Job sid workspace path label title parentSessionId initialRuntimeIdentity taskId captured state control busy
         result <- atomically $ do
@@ -342,7 +356,7 @@ request registry job verb suffix body = bracket_ acquire release $ do
       if poisoned then writeTVar registry.closed True else modifyTVar' registry.slots (subtract 1)
 
 -- Each fair turn performs at most one HTTP request and at most one 1 MiB
--- source read. Verification pages are 64 KiB and freeze their end cursor.
+-- source read. Hash sweeps use local 1 MiB windows and freeze their N/R target.
 turn :: Registry -> Job -> IO ()
 turn registry job = do
   state <- readTVarIO job.state
@@ -350,13 +364,24 @@ turn registry job = do
   let settled :: UTCTime -> JobState -> JobState -> JobState
       settled completed updated current = updated
         { observedSize = max current.observedSize updated.observedSize
-        , due = addUTCTime (fromIntegral registry.options.intervalMicros / 1000000) completed }
+        , due = completed }
+      verificationDelay = fromIntegral registry.options.intervalMicros / 100000
+      pollDelay = min 0.05 (fromIntegral registry.options.intervalMicros / 1000000)
+      saveAt due updated = do
+        completed <- registry.options.now
+        atomically $ do
+          control <- readTVar job.control
+          let uncaptured = maybe False (\c -> c.result == Nothing && c.boundary == Nothing) control
+          modifyTVar' job.state (\current -> (settled completed updated current) {due = if uncaptured then completed else due})
       save updated = do
         completed <- registry.options.now
         atomically $ modifyTVar' job.state (settled completed updated)
       acknowledge updated = do
         completed <- registry.options.now
         atomically $ modifyTVar' job.state (settled completed updated {lastAck = Just completed, failures = 0, failure = Nothing})
+      acknowledgeAt due updated = do
+        completed <- registry.options.now
+        saveAt due updated {lastAck = Just completed, failures = 0, failure = Nothing}
       mutated updated = do
         completed <- registry.options.now
         atomically $ modifyTVar' job.state (settled completed updated {lastAck = Just completed, lastHeartbeat = Just completed, failures = 0, failure = Nothing})
@@ -381,7 +406,7 @@ turn registry job = do
         unless ((session :: Core.AgentSession).id == job.sid && session.workspaceId == job.workspace && session.formatLabel == job.formatLabel && session.parentSessionId == job.parentSessionId && maybe True (==job.title) session.title) $ throwIO SourceChanged
         pure session
       begin session = if session.state == Core.Terminated then retire registry job "terminated" "session_terminated"
-        else acknowledge state {remote = Just session, createNeeded = False, sweep = Just (Sweep Resume session.committedBytes 0 hashInit), phase = "validating"}
+        else acknowledge state {remote = Just session, createNeeded = False, sweep = Just (newSweep Resume session), phase = "validating"}
   case state.source of
     Nothing -> mask_ $ do
       source <- openSource job.sourcePath
@@ -411,7 +436,7 @@ turn registry job = do
             if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated"
             else mutated state {remote = Just canonical
               , phase = if canonical.committedBytes /= session.committedBytes then "validating" else state.phase
-              , sweep = if canonical.committedBytes /= session.committedBytes then Just (Sweep Resume canonical.committedBytes 0 hashInit) else state.sweep}) result
+              , sweep = if canonical.committedBytes /= session.committedBytes || canonical.revision /= session.revision then Just (newSweep Resume canonical) else state.sweep}) result
         Just session -> case state.pending of
           Just append | not state.reconcile -> do
             result <- request registry job "POST" "/append" (Just (toJSON append))
@@ -423,60 +448,104 @@ turn registry job = do
                 if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated" else
                   mutated state {remote = Just canonical, pending = Nothing, phase = "following"
                     , sweep = if response.replayed || canonical.committedBytes /= append.expectedOffset + fromIntegral (either (const 0) BS.length (Wire.decodeSessionBytes append.dataBase64))
-                        then Just (Sweep Resume canonical.committedBytes 0 hashInit)
-                        else case state.sweep of Nothing -> Just (Sweep Periodic canonical.committedBytes 0 hashInit); existing -> existing}
+                        then Just (newSweep Resume canonical)
+                        else case state.sweep of Nothing | time >= state.nextVerification -> Just (newSweep Periodic canonical); existing -> existing}
           _ -> case state.sweep of
-            Just (Sweep purpose end offset context) | purpose /= Periodic || state.verifyNext -> do
-              if offset == end then do
-                _ <- checkSource source (max end (maybe end id (control >>= (.boundary))))
-                let digest = T.pack (show (hashFinalize context :: Digest SHA256))
-                if purpose == Receipt then do
-                  result <- request registry job "GET" "" Nothing
-                  case result of
-                    Left fault -> failHTTP fault
-                    Right value -> do
-                      canonical <- acceptSession value
-                      if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated"
-                      else if canonical.committedBytes /= end || canonical.revision /= session.revision
-                        then case control >>= (.boundary) of
-                          Just boundary | canonical.committedBytes > boundary -> retire registry job "failed" "capture_boundary_conflict"
-                          _ -> acknowledge state {remote = Just canonical, sweep = Just (Sweep Receipt canonical.committedBytes 0 hashInit)}
+            Just verify | verify.purpose /= Periodic || state.verifyNext && maybe True (<=time) verify.nextPoll -> do
+              case verify.nextPoll of
+                Just due | due > time -> saveAt due state
+                _ | verify.offset < verify.end -> do
+                  let count = fromIntegral (min 1048576 (verify.end-verify.offset))
+                  bytes <- readSource source verify.offset count
+                  unless (BS.length bytes == count) $ throwIO SourceTruncated
+                  let updated = hashUpdate verify.context bytes
+                  updated `seq` registry.options.transition "local_prefix_page"
+                  save state {sweep = Just verify {offset = verify.offset+fromIntegral count, context = updated}, verifyNext = False}
+                _ | verify.proven -> do
+                  let digest = T.pack (show (hashFinalize verify.context :: Digest SHA256))
+                  proof <- maybe (throwIO SourceUnavailable) pure verify.proof
+                  unless (proof.sha256 == digest) $ throwIO SourceChanged
+                  _ <- checkSource source (max verify.end (maybe verify.end id (control >>= (.boundary))))
+                  if verify.purpose == Periodic then
+                    save state {sweep = Nothing, verifyNext = False, nextVerification = addUTCTime verificationDelay time}
+                  else do
+                    -- This existing write-authorized endpoint supplies one latest
+                    -- cursor checkpoint after the final local pass. A downgraded
+                    -- read-only credential cannot complete a finite receipt.
+                    result <- request registry job "POST" "/heartbeat" Nothing
+                    case result of
+                      Left fault -> failHTTP fault
+                      Right value -> do
+                        canonical <- acceptSession value
+                        if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated"
+                        else if maybe False (canonical.committedBytes >) (control >>= (.boundary)) then retire registry job "failed" "capture_boundary_conflict"
+                        else if canonical.committedBytes /= verify.end || canonical.revision /= verify.revision then
+                          mutated state {remote = Just canonical, sweep = Just (newSweep verify.purpose canonical)}
+                        else if verify.purpose == Resume then
+                          mutated state {remote = Just canonical, sweep = Nothing, pending = if state.reconcile then Nothing else state.pending
+                            , reconcile = False, phase = "following", verifyNext = False, nextVerification = addUTCTime verificationDelay time}
                         else do
-                          let resultValue = object ["committed_offset" .= end, "revision" .= canonical.revision, "sha256" .= digest
-                                , "capture_boundary" .= (control >>= (.boundary)), "pending_tail" .= maybe False (> end) (control >>= (.boundary))
-                                , "source_verified" .= True]
+                          let resultValue = object ["committed_offset" .= verify.end, "revision" .= canonical.revision, "sha256" .= digest
+                                , "capture_boundary" .= (control >>= (.boundary)), "pending_tail" .= maybe False (> verify.end) (control >>= (.boundary)), "source_verified" .= True]
                           completed <- registry.options.now
                           stopNow <- atomically $ do
                             latest <- readTVar job.control
                             let stopping = maybe False (.stop) latest
-                            if stopping then modifyTVar' job.state (\s -> s {phase = "finalizing"})
-                            else do
+                            if stopping then modifyTVar' job.state (\s -> s {phase = "finalizing"}) else do
                               completeControl job resultValue
-                              modifyTVar' job.state (settled completed state {remote = Just canonical, receipt = Just resultValue, sweep = Nothing, phase = "caught_up", lastAck = Just completed, failures = 0, failure = Nothing})
+                              modifyTVar' job.state (settled completed state {remote = Just canonical, receipt = Just resultValue, sweep = Nothing, phase = "caught_up"
+                                , lastAck = Just completed, lastHeartbeat = Just completed, failures = 0, failure = Nothing, nextVerification = addUTCTime verificationDelay completed})
                             pure stopping
-                          if stopNow then do
+                          when stopNow $ do
                             registry.options.transition "stop_finalizing"
                             closeSource source
                             stoppedAt <- registry.options.now
                             atomically $ do
                               completeControl job resultValue
-                              modifyTVar' job.state (settled stoppedAt state {phase = "stopped", remote = Just canonical, source = Nothing, receipt = Just resultValue, completedAt = Just stoppedAt, sweep = Nothing, pending = Nothing, lastAck = Just completed, failures = 0, failure = Nothing})
-                          else pure ()
-                else save state {sweep = Nothing, pending = if state.reconcile then Nothing else state.pending, reconcile = False, phase = "following", verifyNext = False}
-              else do
-                let count = fromIntegral (min 65536 (end-offset))
-                result <- request registry job "GET" ("/transcript?offset=" <> show offset <> "&limit=" <> show count) Nothing
-                case result of
-                  Left fault -> failHTTP fault
-                  Right value -> do
-                    range <- decodeValue value :: IO Wire.SessionRangeResponse
-                    canonical <- acceptSession (toJSON range.session)
-                    bytes <- either (const $ throwIO SourceUnavailable) pure (Wire.decodeSessionBytes range.dataBase64)
-                    unless (range.offset == offset && not (BS.null bytes) && BS.length bytes <= count && range.nextOffset == offset+fromIntegral (BS.length bytes)) $ throwIO SourceChanged
-                    local <- readSource source offset (BS.length bytes)
-                    unless (bytes == local) $ throwIO SourceChanged
-                    if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated"
-                    else acknowledge state {sweep = Just (Sweep purpose end range.nextOffset (hashUpdate context bytes)), verifyNext = False}
+                              modifyTVar' job.state (settled stoppedAt state {phase = "stopped", remote = Just canonical, source = Nothing, receipt = Just resultValue
+                                , completedAt = Just stoppedAt, sweep = Nothing, pending = Nothing, lastAck = Just completed, failures = 0, failure = Nothing})
+                _ -> case verify.proof of
+                  Nothing -> do
+                    let digest = T.pack (show (hashFinalize verify.context :: Digest SHA256))
+                        reusable = case state.lastProof of
+                          Just (proof,audience) | proof.expectedOffset == verify.end && proof.expectedRevision == verify.revision && proof.sha256 == digest -> Just (proof,audience)
+                          _ -> Nothing
+                    case reusable of
+                      Just (proof,audience) -> save state {sweep = Just verify {proof = Just proof, audience = Just audience, submitted = True}}
+                      Nothing -> do
+                        operation <- UUID.nextRandom
+                        save state {sweep = Just verify {proof = Just (Wire.PrefixProofRequest operation verify.end verify.revision digest)}}
+                  Just proof -> do
+                    result <- if verify.submitted then request registry job "GET" ("/prefix-verifications/" <> show proof.operationId) Nothing
+                      else request registry job "POST" "/prefix-verifications" (Just (toJSON proof))
+                    case result of
+                      Left (HTTPStatus 404) | verify.submitted ->
+                        save state {sweep = Just verify {offset = 0, context = hashInit, proof = Nothing, audience = Nothing, submitted = False, nextPoll = Nothing}, lastProof = Nothing}
+                      Left (HTTPStatus 409) -> retire registry job "failed" "verification_operation_conflict"
+                      Left (HTTPStatus 400) -> retire registry job "failed" "verification_target_invalid"
+                      Left fault -> failHTTP fault
+                      Right value -> do
+                        reply <- decodeValue value :: IO Wire.PrefixProofResponse
+                        unless (reply.workspaceId == job.workspace && reply.sessionId == job.sid && reply.operationId == proof.operationId
+                          && reply.expectedOffset == verify.end && reply.expectedRevision == verify.revision && reply.sha256 == proof.sha256
+                          && not (T.null reply.audience) && BS.length (TE.encodeUtf8 reply.audience) <= 512
+                          && maybe True (==reply.audience) verify.audience) $ throwIO SourceChanged
+                        case reply.state of
+                          "verified" -> do
+                            unless (reply.error == Nothing) $ throwIO SourceChanged
+                            -- A second bounded local pass catches persistent mutation
+                            -- during remote verification before resume/finite receipt.
+                            let checked = verify {audience = Just reply.audience, submitted = True, proven = True, nextPoll = Nothing
+                                  , offset = if verify.purpose == Periodic then verify.offset else 0
+                                  , context = if verify.purpose == Periodic then verify.context else hashInit}
+                            acknowledge state {sweep = Just checked, lastProof = Just (proof,reply.audience)}
+                          "pending" -> do
+                            let due = addUTCTime pollDelay time
+                                updated = state {sweep = Just verify {audience = Just reply.audience, submitted = True, nextPoll = Just due}, verifyNext = False}
+                            if verify.purpose == Periodic then acknowledge updated else acknowledgeAt due updated
+                          "mismatch" -> throwIO SourceChanged
+                          "failed" -> retire registry job "failed" "verification_unavailable"
+                          _ -> throwIO SourceUnavailable
             _ -> do
               let boundary = maybe size id (control >>= (.boundary))
                   activeControl = maybe False (not . isJust . (.result)) control
@@ -488,9 +557,11 @@ turn registry job = do
               if not (BS.null upload) then
                 save state {pending = Just (Wire.AppendSessionRequest session.committedBytes session.revision (Wire.encodeSessionBytes upload) (BS.last upload /= 10)), verifyNext = True, phase = "following"}
               else if BS.length bytes == 1048576 && available > 1048576 then retire registry job "failed" "record_too_large"
-              else if activeControl then save state {sweep = Just (Sweep Receipt session.committedBytes 0 hashInit), phase = "validating"}
-              else save state {phase = if BS.null bytes then "caught_up" else "pending_tail", verifyNext = True
-                , sweep = case state.sweep of Nothing -> Just (Sweep Periodic session.committedBytes 0 hashInit); existing -> existing}
+              else if activeControl then save state {sweep = Just (newSweep Receipt session), phase = "validating"}
+              else do
+                let next = case state.sweep of Nothing | time >= state.nextVerification -> Just (newSweep Periodic session); existing -> existing
+                    due = case next of Just verify -> maybe time id verify.nextPoll; Nothing -> addUTCTime (fromIntegral registry.options.intervalMicros / 1000000) time
+                saveAt due state {phase = if BS.null bytes then "caught_up" else "pending_tail", verifyNext = True, sweep = next}
 
 validFinal :: ByteString -> Bool
 validFinal bytes = not (BS.null bytes) && case TE.decodeUtf8' bytes of

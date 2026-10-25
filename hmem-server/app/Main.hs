@@ -31,7 +31,8 @@ import HMem.DB.Pool qualified as Pool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
 import HMem.Types (parseEmbeddingSpaceFingerprint)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
-import HMem.Server.App (mkAppWithChangeStream, mkAppWithDiscovery)
+import HMem.Server.App (mkAppWithPrefixProofs)
+import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscoveryProvider)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
@@ -176,8 +177,9 @@ runDevMode opts = do
         exitFailure
       Nothing -> pure ()
 
-    app <- mkAppWithChangeStream Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
-    bracket (startSessionReaper pool) stopSessionReaper (\_ -> runSettings settings app) `finally` shutdown
+    (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> do
+      app <- mkAppWithPrefixProofs prefixes Nothing Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
+      bracket (startSessionReaper pool) stopSessionReaper (\_ -> runSettings settings app)) `finally` shutdown
 
 -- | Seed some sample data for dev mode so the UI has something to show.
 seedDevData :: Pool Hasql.Connection -> IO ()
@@ -402,7 +404,7 @@ runNormalMode opts = do
         { clearTargetBeforeLaunch = Embedding.disableEmbeddingTarget pool
         , activateGeneration = \_ endpointValue remaining register -> activate (Just endpointValue) remaining register
         }
-      runWarp = do
+      runWarp prefixes = do
         logInfo logger $ "hmem-server listening on " <> cfg.server.host <> ":" <> T.pack (show port)
         logInfo logger $ "Logging to: " <> T.pack logPath
         logInfo logger $ "Rotation: " <> T.pack (show cfg.logging.maxSizeMB) <> " MB, " <> T.pack (show cfg.logging.backupCount) <> " backups"
@@ -417,7 +419,7 @@ runNormalMode opts = do
         let originsAreLocal = not (null cfg.cors.allowedOrigins) && not (Config.corsAllowsRemoteOrigins cfg.cors)
         when (not (Config.serverHostIsLoopback cfg.server.host) && originsAreLocal) $
           logWarn logger $ "CORS allowedOrigins are localhost-only but server is bound to " <> cfg.server.host <> " — remote clients will be rejected by CORS"
-        app <- mkAppWithDiscovery discovery cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
+        app <- mkAppWithPrefixProofs prefixes (Just discovery) cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
         let runServer = case (mTlsCert, mTlsKey) of
               (Just cert, Just key) -> logInfo logger ("TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key) >> runTLS (tlsSettings cert key) settings app
               (Just _, Nothing) -> logWarn logger "--tls-cert provided without --tls-key; running plain HTTP" >> runSettings settings app
@@ -459,5 +461,5 @@ runNormalMode opts = do
           [ mapM_ stopManagedTei managed
           , mapM_ (\task -> cancel task >> void (waitCatch task)) external
           ]
-    withPreservingCleanup (restore (bracket (startSessionReaper pool) stopSessionReaper (\_ -> runWarp))) shutdownVectors
+    withPreservingCleanup (restore (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> bracket (startSessionReaper pool) stopSessionReaper (\_ -> runWarp prefixes))) shutdownVectors
     ) shutdownDatabase

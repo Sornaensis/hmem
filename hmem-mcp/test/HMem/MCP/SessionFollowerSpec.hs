@@ -5,7 +5,7 @@ import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception
-import Control.Monad (forM, forM_, replicateM, unless, void, (>=>))
+import Control.Monad (forM, forM_, replicateM, unless, when, void, (>=>))
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Key qualified as Key
@@ -17,6 +17,8 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time
 import Data.Maybe (fromMaybe)
+import Data.List (nub)
+import Data.Map.Strict qualified as Map
 import Data.Char (toLower)
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
@@ -39,7 +41,8 @@ import HMem.MCP.SessionProcess
 import HMem.MCP.Server (MCPContext(..), handleStdioLineWithRegistry, runMCPServerWithHandlesObservedWithFollowerOptions)
 import HMem.MCP.Tools (handleToolCall)
 import HMem.Server.AccessTracker (newAccessTracker)
-import HMem.Server.App (mkAppWithChangeStream)
+import HMem.Server.App (mkAppWithPrefixProofs)
+import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.WebSocket (newWSState)
 import HMem.Types (Workspace(..))
 import Network.HTTP.Client (Manager, newManager, closeManager, defaultManagerSettings, managerIdleConnectionCount)
@@ -61,6 +64,143 @@ import Text.Read (readMaybe)
 
 spec :: Spec
 spec = describe "Session follower" $ do
+  it "Reusable transport retains one helper and HTTP connection across exchanges, then joins it" $ do
+    peers <- newTVarIO ([] :: [String])
+    let app request respond = do
+          atomically $ modifyTVar' peers (<>[show (Wai.remoteHost request)])
+          respond (Wai.responseLBS status200 [] "{}")
+    testWithApplication (pure app) $ \port -> do
+      scope <- newProcessScope; executable <- testHelperExecutable
+      captured <- captureHTTP scope executable ("http://127.0.0.1:"<>show port) Nothing identity
+      flip finally (closeProcessScope scope 2000000 >>= (`shouldBe` True)) $ do
+        forM_ [1..3 :: Int] $ \_ -> followerRequest captured "GET" "/reuse" Nothing `shouldReturn` Right (object [])
+        processMetrics scope `shouldReturn` (1,0,False)
+        nativeProcessCount `shouldReturn` 1
+        addresses <- readTVarIO peers
+        length addresses `shouldBe` 3
+        length (nub addresses) `shouldBe` 1
+      nativeProcessCount `shouldReturn` 0
+
+  it "Reusable transport cancels native waits before reuse and restarts without stale frames" $ do
+    let app _ respond = respond (Wai.responseLBS status200 [] "{}")
+    testWithApplication (pure app) $ \port -> do
+      executable <- testHelperExecutable
+      forM_ ["dns","connect","tls","body"] $ \phase -> do
+        scope <- newProcessScope
+        pid <- newEmptyMVar; entered <- newEmptyMVar; done <- newEmptyMVar
+        let action = try @SomeException (runReusableHelper scope executable (putMVar pid) (putMVar entered) (helperProbe phase)) >>= putMVar done
+        flip finally (closeProcessScope scope 2000000 >>= (`shouldBe` True)) $ do
+          tid <- forkIO action
+          timeout 3000000 (readMVar entered) `shouldReturn` Just phase
+          _ <- forkIO (killThread tid)
+          result <- timeout 2000000 (readMVar done)
+          result `shouldSatisfy` maybe False (either (\failure -> case fromException failure :: Maybe AsyncException of Just ThreadKilled -> True; _ -> False) (const False))
+          readMVar pid >>= (processAlive >=> (`shouldBe` False))
+          nativeProcessCount `shouldReturn` 0
+          captured <- captureHTTP scope executable ("http://127.0.0.1:"<>show port) Nothing identity
+          followerRequest captured "GET" "/restarted" Nothing `shouldReturn` Right (object [])
+          processMetrics scope `shouldReturn` (1,0,False)
+        nativeProcessCount `shouldReturn` 0
+
+  it "PrefixProofClient rejects forged target and audience results before any append" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n" $ \path -> withCapturedHTTP base $ \captured -> do
+      foreignId <- UUID.nextRandom
+      let changes = [("workspace_id",toJSON foreignId),("session_id",toJSON foreignId),("operation_id",toJSON foreignId)
+            ,("expected_offset",Number 1),("expected_revision",Number 99),("sha256",String (Core.sessionSha256 "wrong")),("audience",String "foreign-principal")]
+      forM_ changes $ \(key,replacement) -> do
+        sid <- UUID.nextRandom
+        appends <- newTVarIO (0 :: Int)
+        let action verb target body = do
+              when ("/append" `T.isSuffixOf` T.pack target) $ atomically $ modifyTVar' appends (+1)
+              result <- followerRequest captured verb target body
+              pure $ case result of
+                Right (Object fields) | "/prefix-verifications" `T.isInfixOf` T.pack target && (key /= "audience" || verb == "GET") ->
+                  Right (Object (KM.insert (Key.fromText key) replacement fields))
+                _ -> result
+        withRegistry fast {requestOverride = Just action} $ \registry -> do
+          _ <- start registry manager base wid sid path
+          failed <- await registry manager base wid sid (hasStatus "failed")
+          field "error" failed `shouldBe` Just (String "source_identity_or_prefix_changed")
+          readTVarIO appends `shouldReturn` 0
+          Just canonical <- Sessions.getSession env.pool wid sid
+          canonical.committedBytes `shouldBe` 0
+
+  it "PrefixProofClient rehashes with a new UUID after operation loss" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withCapturedHTTP base $ \captured -> do
+      sid <- UUID.nextRandom
+      _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
+      _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 "{}\n" False)
+      missing <- newTVarIO False; operations <- newTVarIO ([] :: [Value]); pages <- newTVarIO (0 :: Int)
+      let action verb target body = do
+            when (verb == "POST" && "/prefix-verifications" `T.isSuffixOf` T.pack target) $
+              atomically $ modifyTVar' operations (<> maybe [] (maybe [] pure . field "operation_id") body)
+            lose <- if verb == "GET" && "/prefix-verifications/" `T.isInfixOf` T.pack target
+              then atomically $ do old <- readTVar missing; writeTVar missing True; pure (not old)
+              else pure False
+            if lose then pure (Left (HTTPStatus 404)) else followerRequest captured verb target body
+          page name = when (name == "local_prefix_page") $ atomically $ modifyTVar' pages (+1)
+      withRegistry fast {requestOverride = Just action, transition = page} $ \registry -> do
+        _ <- start registry manager base wid sid path
+        _ <- await registry manager base wid sid (\value -> hasOffset 6 value && hasStatus "caught_up" value)
+        ids <- readTVarIO operations
+        length ids `shouldSatisfy` (>=2)
+        length (nub (take 2 ids)) `shouldBe` 2
+        readTVarIO pages >>= (`shouldSatisfy` (>=3))
+        part <- Sessions.readSessionRange env.pool wid sid 0 100
+        part.bytes `shouldBe` "{}\n[]\n"
+
+  it "PrefixProofClient catches mutation of an already-hashed page before resumed append" $
+    withBackend $ \env wid manager base -> do
+      let chunk=BS.concat (replicate 30 ("\""<>BS.replicate 32765 97<>"\"\n")); original=chunk<>chunk
+      withSourceFile (original<>"[]\n") $ \path -> withCapturedHTTP base $ \captured -> do
+        sid <- UUID.nextRandom
+        _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
+        first <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 chunk False)
+        _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession first.session.committedBytes first.session.revision chunk False)
+        changed <- newTVarIO False; verified <- newTVarIO False; appends <- newTVarIO (0 :: Int)
+        let page name = when (name == "local_prefix_page") $ do
+              firstPage <- atomically $ do old <- readTVar changed; writeTVar changed True; pure (not old)
+              when firstPage $ withBinaryFile path ReadWriteMode $ \handle -> hSeek handle AbsoluteSeek 0 >> BS.hPut handle "["
+            action verb target body = do
+              when ("/append" `T.isSuffixOf` T.pack target) $ atomically $ modifyTVar' appends (+1)
+              result <- followerRequest captured verb target body
+              case result of Right value | "/prefix-verifications/" `T.isInfixOf` T.pack target && field "state" value == Just (String "verified") -> atomically $ writeTVar verified True; _ -> pure ()
+              pure result
+        withRegistry fast {requestOverride = Just action, transition = page} $ \registry -> do
+          _ <- start registry manager base wid sid path
+          _ <- await registry manager base wid sid (hasStatus "failed")
+          readTVarIO verified `shouldReturn` True
+          readTVarIO appends `shouldReturn` 0
+          Just canonical <- Sessions.getSession env.pool wid sid
+          canonical.committedBytes `shouldBe` fromIntegral (BS.length original)
+
+  it "PrefixProofClient reconciles the latest canonical cursor before dispatching resumed tail bytes" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n[]\ntrue\n" $ \path -> withCapturedHTTP base $ \captured -> do
+      sid <- UUID.nextRandom
+      _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
+      _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 "{}\n" False)
+      grew <- newTVarIO False; offsets <- newTVarIO ([] :: [Value]); proofTargets <- newTVarIO ([] :: [Value])
+      let action verb target body = do
+            when (verb == "POST" && "/append" `T.isSuffixOf` T.pack target) $
+              atomically $ modifyTVar' offsets (<> maybe [] (maybe [] pure . field "expected_offset") body)
+            when (verb == "POST" && "/prefix-verifications" `T.isSuffixOf` T.pack target) $
+              atomically $ modifyTVar' proofTargets (<> maybe [] (maybe [] pure . field "expected_offset") body)
+            result <- followerRequest captured verb target body
+            case result of
+              Right value | verb == "GET" && "/prefix-verifications/" `T.isInfixOf` T.pack target && field "state" value == Just (String "verified") -> do
+                first <- atomically $ do old <- readTVar grew; writeTVar grew True; pure (not old)
+                when first $ do _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession 3 1 "[]\n" False); pure ()
+              _ -> pure ()
+            pure result
+      withRegistry fast {requestOverride = Just action} $ \registry -> do
+        _ <- start registry manager base wid sid path
+        _ <- await registry manager base wid sid (\value -> hasOffset 11 value && hasStatus "caught_up" value)
+        readTVarIO offsets `shouldReturn` [Number 6]
+        targets <- readTVarIO proofTargets
+        take 2 targets `shouldBe` [Number 3,Number 6]
+        part <- Sessions.readSessionRange env.pool wid sid 0 100
+        part.bytes `shouldBe` "{}\n[]\ntrue\n"
+
   it "rejects initial-task validation terminally without orphan sessions, handles or occupied capacity and can retry" $
     withBackend $ \env wid manager base -> withSourceFile "{}\n" $ \path -> withRegistry fast $ \registry -> do
       baseline <- openSourceCount
@@ -189,13 +329,14 @@ spec = describe "Session follower" $ do
   it "poisons follower admission and retains its slot until an unconfirmed helper owner finishes cleanup" $
     withSourceFile "" $ \path -> withManager $ \manager -> do
       entered <- newEmptyMVar; release <- newEmptyMVar
+      requestRelease <- newEmptyMVar
       scope <- newProcessScopeWithReapHook (putMVar entered () >> readMVar release)
       sid <- UUID.nextRandom
-      let app _ respond = respond (Wai.responseLBS status200 [] (encode (fakeMetadata sid 0)))
-      testWithApplication (pure app) $ \port -> withRegistry fast {processScopeFactory = pure scope} $ \registry -> do
+      let app _ respond = readMVar requestRelease >> respond (Wai.responseLBS status200 [] (encode (fakeMetadata sid 0)))
+      testWithApplication (pure app) $ \port -> withRegistry fast {processScopeFactory = pure scope} $ \registry -> flip finally (void (tryPutMVar release ()) >> void (tryPutMVar requestRelease ())) $ do
         let base = "http://127.0.0.1:" <> show port
         _ <- start registry manager base workspace sid path
-        timeout 3000000 (readMVar entered) >>= (`shouldSatisfy` isJustValue)
+        timeout 6000000 (readMVar entered) >>= (`shouldSatisfy` isJustValue)
         flip finally (void (tryPutMVar release ())) $ do
           _ <- await registry manager base workspace sid (hasStatus "failed")
           (slots,_,_) <- registryMetrics registry
@@ -251,6 +392,8 @@ spec = describe "Session follower" $ do
       raw <- runHelper scope executable (const (pure ())) (const (pure ())) (BL.toStrict $ encode $ object
         ["url" .= (base <> "/exponent"),"method" .= ("GET" :: Text),"headers" .= ([] :: [(Text,Text)]),"body" .= Null])
       fmap (BS.drop 3) raw `shouldBe` Right "1e10000000"
+      processMetrics scope `shouldReturn` (1,0,False)
+      closeProcessScope scope 2000000 `shouldReturn` True
       processMetrics scope `shouldReturn` (0,0,False)
       nativeProcessCount `shouldReturn` 0
 
@@ -386,9 +529,8 @@ spec = describe "Session follower" $ do
         field "error" changed `shouldBe` Just (String "source_identity_or_prefix_changed")
 
   it "retries an exact lost-ack append, verifies the full prefix on restart, and refuses a mismatched resume" $
-    withBackend $ \env wid manager base -> withSourceFile "{}\n" $ \path -> do
+    withBackend $ \env wid manager base -> withSourceFile "{}\n" $ \path -> withCapturedHTTP base $ \captured -> do
       sid <- UUID.nextRandom
-      captured <- captureTestHTTP base
       lost <- newTVarIO False
       sent <- newTVarIO ([] :: [Value])
       let action verb target body = do
@@ -465,14 +607,13 @@ spec = describe "Session follower" $ do
   it "freezes a stop boundary during long verification and returns pending instead of a premature receipt" $
     withBackend $ \env wid manager base -> do
       let original = BS.concat (replicate 80000 "{}\n")
-      withSourceFile original $ \path -> do
+      withSourceFile original $ \path -> withCapturedHTTP base $ \captured -> do
         sid <- UUID.nextRandom
         _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
         _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 original False)
-        captured <- captureTestHTTP base
         seen <- newEmptyMVar; release <- newEmptyMVar; blocked <- newTVarIO False
         let action verb target body = do
-              first <- if "/transcript?" `T.isInfixOf` T.pack target then atomically $ do previous <- readTVar blocked; writeTVar blocked True; pure (not previous) else pure False
+              first <- if "/prefix-verifications" `T.isInfixOf` T.pack target then atomically $ do previous <- readTVar blocked; writeTVar blocked True; pure (not previous) else pure False
               if first then putMVar seen () >> readMVar release else pure ()
               followerRequest captured verb target body
         withRegistry fast {requestOverride = Just action} $ \registry -> do
@@ -492,10 +633,9 @@ spec = describe "Session follower" $ do
           canonical.state `shouldBe` Core.Active
 
   it "fairly progresses four jobs through create/read/append/verification/heartbeat under the shared gate" $
-    withBackend $ \_ wid manager base -> withSourceFile (BS.concat (replicate 30000 "{}\n")) $ \path -> do
+    withBackend $ \_ wid manager base -> withSourceFile (BS.concat (replicate 30000 "{}\n")) $ \path -> withCapturedHTTP base $ \captured -> do
       offset <- newTVarIO (0 :: NominalDiffTime)
       calls <- newTVarIO ([] :: [(BS.ByteString,String)])
-      captured <- captureTestHTTP base
       let clock = do delta <- readTVarIO offset; addUTCTime delta <$> getCurrentTime
           action verb target body = do
             atomically $ modifyTVar' calls (<> [(verb,target)])
@@ -516,14 +656,14 @@ spec = describe "Session follower" $ do
         peak `shouldSatisfy` (\n -> n >= 1 && n <= 2)
         total `shouldBe` 4
         observed <- readTVarIO calls
-        forM_ ["/sessions","/append","/heartbeat","/transcript?"] $ \category ->
+        forM_ ["/sessions","/append","/heartbeat","/prefix-verifications"] $ \category ->
           observed `shouldSatisfy` any (T.isInfixOf category . T.pack . snd)
+        observed `shouldSatisfy` all (not . T.isInfixOf "/transcript?" . T.pack . snd)
 
   it "fails closed on revoked permissions, reports staleness independently, and bounds terminal retention" $
-    withBackend $ \_ wid manager base -> withSourceFile "{}\n" $ \path -> do
+    withBackend $ \_ wid manager base -> withSourceFile "{}\n" $ \path -> withCapturedHTTP base $ \captured -> do
       offset <- newTVarIO (0 :: NominalDiffTime)
       revoked <- newTVarIO False
-      captured <- captureTestHTTP base
       let clock = do delta <- readTVarIO offset; addUTCTime delta <$> getCurrentTime
           action verb target body = do
             deny <- readTVarIO revoked
@@ -630,17 +770,12 @@ spec = describe "Session follower" $ do
         offset <- newTVarIO (0 :: NominalDiffTime)
         beats <- newTVarIO (0 :: Int)
         let clock = do delta <- readTVarIO offset; addUTCTime delta <$> getCurrentTime
-            action _ target _ = do
-              if "/transcript?" `T.isInfixOf` T.pack target then atomically $ modifyTVar' offset (+1) else pure ()
+            metadata _ target _ = do
               if "/heartbeat" `T.isSuffixOf` T.pack target then atomically $ modifyTVar' beats (+1) else pure ()
-              let startOffset = queryNumber "offset" target
-                  count = queryNumber "limit" target
-                  bytes = BS.take count (BS.drop startOffset original)
-              pure $ Right $ if "/transcript?" `T.isInfixOf` T.pack target then object
-                ["session" .= fakeMetadata sid (BS.length original), "offset" .= startOffset, "next_offset" .= (startOffset + BS.length bytes)
-                , "data_base64" .= Wire.encodeSessionBytes bytes, "has_more" .= (startOffset + BS.length bytes < BS.length original)]
-                else fakeMetadata sid (BS.length original)
-        withRegistry fast {requestOverride = Just action, now = clock} $ \registry -> do
+              pure (Right (fakeMetadata sid (BS.length original)))
+            page name = when (name == "local_prefix_page") $ atomically $ modifyTVar' offset (+6)
+        action <- fakeProofTransport sid original "pending" metadata
+        withRegistry fast {requestOverride = Just action, now = clock, transition = page} $ \registry -> do
           _ <- start registry manager base wid sid path
           waitUntil $ (>= 2) <$> readTVarIO beats
           state <- control registry manager base wid sid "session_upload_status"
@@ -652,13 +787,20 @@ spec = describe "Session follower" $ do
       clock <- newTVarIO epoch
       gotMetadata <- newEmptyMVar; finishMetadata <- newEmptyMVar
       gotHeartbeat <- newEmptyMVar; finishHeartbeat <- newEmptyMVar
+      gotProof <- newEmptyMVar; finishProof <- newEmptyMVar; blockedProof <- newTVarIO False
       beats <- newTVarIO (0 :: Int)
-      let action _ target _
+      let metadata _ target _
             | "/heartbeat" `T.isSuffixOf` T.pack target = do
                 n <- atomically $ do n <- readTVar beats; writeTVar beats (n+1); pure n
                 if n == 0 then putMVar gotHeartbeat () >> readMVar finishHeartbeat else pure ()
                 pure (Right (fakeMetadata sid 0))
             | otherwise = putMVar gotMetadata () >> readMVar finishMetadata >> pure (Right (fakeMetadata sid 0))
+      proof <- fakeProofTransport sid "" "verified" metadata
+      let action verb target body = do
+            when (verb == "GET" && "/prefix-verifications/" `T.isInfixOf` T.pack target) $ do
+              first <- atomically $ do old <- readTVar blockedProof; writeTVar blockedProof True; pure (not old)
+              when first $ putMVar gotProof () >> readMVar finishProof
+            proof verb target body
           options = fast {intervalMicros = 0, now = readTVarIO clock, requestOverride = Just action}
       withRegistry options $ \registry -> do
         _ <- start registry manager "http://unused.invalid" workspace sid path
@@ -671,13 +813,17 @@ spec = describe "Session follower" $ do
         atomically $ writeTVar clock (addUTCTime 10 epoch)
         putMVar finishHeartbeat ()
         _ <- await registry manager "http://unused.invalid" workspace sid (\s -> field "last_ack_at" s == Just (toJSON (addUTCTime 10 epoch)))
+        timeout 2000000 (readMVar gotProof) >>= (`shouldSatisfy` isJustValue)
         atomically $ writeTVar clock (addUTCTime 19 epoch)
         threadDelay 80000
-        readTVarIO beats `shouldReturn` 1
+        -- The additional authorized resume checkpoint has also completed;
+        -- the pending proof read and local saves do not refresh its deadline.
+        readTVarIO beats `shouldReturn` 2
         local <- control registry manager "http://unused.invalid" workspace sid "session_upload_status"
         field "last_ack_at" local `shouldBe` Just (toJSON (addUTCTime 10 epoch))
         atomically $ writeTVar clock (addUTCTime 20 epoch)
-        waitUntil $ (== 2) <$> readTVarIO beats
+        putMVar finishProof ()
+        waitUntil $ (== 3) <$> readTVarIO beats
       attempts <- newTVarIO (0 :: Int)
       began <- newEmptyMVar; finish <- newEmptyMVar
       atomically $ writeTVar clock epoch
@@ -733,7 +879,8 @@ spec = describe "Session follower" $ do
       finalizing <- newEmptyMVar; publishStop <- newEmptyMVar
       clock <- newTVarIO epoch
       let stopHook name = if name == "stop_finalizing" then atomically (writeTVar clock (addUTCTime 10 epoch)) >> putMVar finalizing () >> readMVar publishStop else pure ()
-      withRegistry fast {intervalMicros = 0, now = readTVarIO clock, requestOverride = Just (\_ _ _ -> pure (Right (fakeMetadata lastSid 0))), transition = stopHook} $ \registry -> do
+      stopAction <- fakeProofTransport lastSid "" "verified" (\_ _ _ -> pure (Right (fakeMetadata lastSid 0)))
+      withRegistry fast {intervalMicros = 0, now = readTVarIO clock, requestOverride = Just stopAction, transition = stopHook} $ \registry -> do
         _ <- start registry manager base workspace lastSid path
         _ <- await registry manager base workspace lastSid (hasStatus "caught_up")
         reply <- newEmptyMVar
@@ -846,11 +993,10 @@ testHelperExecutable = do
   directory <- Paths.getBinDir
   canonicalizePath (directory </> if os == "mingw32" then "hmem-mcp.exe" else "hmem-mcp")
 
-captureTestHTTP :: String -> IO CapturedHTTP
-captureTestHTTP base = do
-  scope <- newProcessScope
+withCapturedHTTP :: String -> (CapturedHTTP -> IO a) -> IO a
+withCapturedHTTP base action = bracket newProcessScope (\scope -> closeProcessScope scope 2000000 >>= (`shouldBe` True)) $ \scope -> do
   helper <- testHelperExecutable
-  captureHTTP scope helper base Nothing identity
+  captureHTTP scope helper base Nothing identity >>= action
 workspace :: UUID
 workspace = read "11111111-2222-3333-4444-555555555555"
 identity :: BotIdentity
@@ -862,6 +1008,25 @@ epoch = UTCTime (fromGregorian 2026 1 1) 0
 fakeMetadata :: UUID -> Int -> Value
 fakeMetadata sid count = toJSON (Core.AgentSession sid workspace "jsonl" Nothing Nothing [] False Core.Active Nothing Nothing Nothing Nothing Nothing 0
   epoch epoch (fromIntegral count) 0 0 True Nothing Nothing Nothing)
+
+-- Controlled HTTP fixture for tests of local scheduling/receipts. Canonical
+-- boundary validation and authenticated audiences are separately exercised by
+-- the actual backend tests; this still checks the submitted raw-prefix hash.
+fakeProofTransport :: UUID -> BS.ByteString -> Text -> (BS.ByteString -> String -> Maybe Value -> IO (Either HTTPFault Value))
+  -> IO (BS.ByteString -> String -> Maybe Value -> IO (Either HTTPFault Value))
+fakeProofTransport sid canonical state fallback = do
+  operations <- newTVarIO Map.empty
+  pure $ \verb target body -> if not ("/prefix-verifications" `T.isInfixOf` T.pack target) then fallback verb target body else do
+    proof <- if verb == "POST" then case body >>= \value -> case fromJSON value of Success request -> Just (request :: Wire.PrefixProofRequest); Error _ -> Nothing of
+      Just request -> atomically (modifyTVar' operations (Map.insert request.operationId request)) >> pure (Just request)
+      Nothing -> pure Nothing
+      else do
+        values <- readTVarIO operations
+        pure $ readMaybe (reverse (takeWhile (/='/') (reverse target))) >>= (`Map.lookup` values)
+    pure $ case proof of
+      Nothing -> Left (HTTPStatus 404)
+      Just request -> Right $ toJSON $ Wire.PrefixProofResponse workspace sid "test-original-principal" request.operationId request.expectedOffset request.expectedRevision request.sha256
+        (if request.sha256 == Core.sessionSha256 (BS.take (fromIntegral request.expectedOffset) canonical) then state else "mismatch") Nothing
 
 queryNumber :: BS.ByteString -> String -> Int
 queryNumber name target = fromMaybe 0 $ do
@@ -964,5 +1129,6 @@ serveBackend env wid action = do
   let cfg = Config.defaultConfig {Config.auth = Config.defaultConfig.auth {Config.mode = Config.AuthModeDeployed, Config.enabled = False}}
       principal = Principal ActorBot "follower-tests" "Follower test" PrincipalSyntheticLocalSuperadmin
       authorized app req respond = withPrincipalContext (Just principal) (app req respond)
-  app <- mkAppWithChangeStream cfg.changeStream authorized cfg.auth cfg.cors cfg.rateLimit env.pool tracker websocket Nothing True
-  testWithApplication (pure app) $ \port -> withManager $ \manager -> action env wid manager ("http://127.0.0.1:" <> show port)
+  bracket (newPrefixRegistry env.pool) closePrefixRegistry $ \prefixes -> do
+    app <- mkAppWithPrefixProofs prefixes Nothing cfg.changeStream authorized cfg.auth cfg.cors cfg.rateLimit env.pool tracker websocket Nothing True
+    testWithApplication (pure app) $ \port -> withManager $ \manager -> action env wid manager ("http://127.0.0.1:" <> show port)

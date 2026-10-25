@@ -1,4 +1,4 @@
-/* MPL-2.0. Owned per-request helper: no shell, private pipes, death-on-owner. */
+/* MPL-2.0. Owned helper: no shell, private pipes, death-on-owner. */
 #ifndef _WIN32
 #define _GNU_SOURCE
 #else

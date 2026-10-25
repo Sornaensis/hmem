@@ -3,6 +3,7 @@ module HMem.AgentSession.Transport
   ( CreateSessionRequest(..), AppendSessionRequest(..), TerminateSessionRequest(..)
   , AppendSessionResponse(..), SessionPageResponse(..), SessionTaskPageResponse(..)
   , SessionRangeResponse(..), SessionTransportError(..), decodeSessionBytes, encodeSessionBytes
+  , PrefixProofRequest(..), PrefixProofResponse(..)
   , maxSessionRequestBytes, maxSessionBase64Chars, defaultSessionRangeBytes
   ) where
 
@@ -43,6 +44,24 @@ instance ToJSON TerminateSessionRequest where toJSON = genericToJSON jsonOptions
 instance FromJSON TerminateSessionRequest where
   parseJSON = strictObject "TerminateSessionRequest" ["expected_offset","expected_revision","final_bytes","final_sha256"] $ \o ->
     TerminateSessionRequest <$> o .: "expected_offset" <*> o .: "expected_revision" <*> o .: "final_bytes" <*> o .: "final_sha256"
+
+-- Proof operations contain no source path or local identity. The uploader binds
+-- the returned target to its own still-open source generation.
+data PrefixProofRequest = PrefixProofRequest
+  { operationId :: !UUID, expectedOffset :: !Int64, expectedRevision :: !Int64, sha256 :: !Text }
+  deriving stock (Show, Eq, Generic)
+instance ToJSON PrefixProofRequest where toJSON = genericToJSON jsonOptions
+instance FromJSON PrefixProofRequest where
+  parseJSON = strictObject "PrefixProofRequest" ["operation_id","expected_offset","expected_revision","sha256"] $ \o ->
+    PrefixProofRequest <$> o .: "operation_id" <*> o .: "expected_offset" <*> o .: "expected_revision" <*> o .: "sha256"
+
+data PrefixProofResponse = PrefixProofResponse
+  { workspaceId :: !UUID, sessionId :: !UUID, audience :: !Text, operationId :: !UUID
+  , expectedOffset :: !Int64, expectedRevision :: !Int64, sha256 :: !Text
+  , state :: !Text, error :: !(Maybe Text) }
+  deriving stock (Show, Eq, Generic)
+instance ToJSON PrefixProofResponse where toJSON = genericToJSON jsonOptions
+instance FromJSON PrefixProofResponse where parseJSON = genericParseJSON jsonOptions
 
 strictObject :: String -> [Key] -> (Object -> Parser a) -> Value -> Parser a
 strictObject name allowed parse = withObject name $ \o -> do

@@ -2,6 +2,7 @@ module HMem.Server.App
   ( mkApp
   , mkAppWithChangeStream
   , mkAppWithDiscovery
+  , mkAppWithPrefixProofs
   , mkAppWithOidcCodeExchange -- ^ Test-only seam; production callers should use 'mkApp'.
   , OidcCodeExchange -- ^ Test-only injected OIDC code exchange type.
   , requestIdMiddleware
@@ -52,7 +53,8 @@ import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, resolveEffectiveActor, withEffectiveActorContext, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
-import HMem.Server.API (HMemAPI, serverWithDiscovery, authorizeAgentSessionWrite)
+import HMem.Server.API (HMemAPI, serverWithPrefixProofs, authorizeAgentSessionWrite)
+import HMem.Server.SessionPrefix (PrefixRegistry)
 import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
 import HMem.Server.OpenAPI (openApiSpec)
@@ -71,7 +73,11 @@ mkAppWithChangeStream = mkAppWithOidcCodeExchangeAndChangeStream defaultOidcCode
 
 -- | Production shares the lifecycle-owned validated provider with discovery.
 mkAppWithDiscovery :: ObservationDiscovery -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
-mkAppWithDiscovery discovery = mkAppWithServices (Just discovery) defaultOidcCodeExchange
+mkAppWithDiscovery discovery = mkAppWithServices Nothing (Just discovery) defaultOidcCodeExchange
+
+-- The caller owns and joins proof workers before releasing the database pool.
+mkAppWithPrefixProofs :: PrefixRegistry -> Maybe ObservationDiscovery -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithPrefixProofs prefixes discovery = mkAppWithServices (Just prefixes) discovery defaultOidcCodeExchange
 
 type OidcCodeExchange = DeployedAuthConfig -> Text -> IO (Maybe Text)
 
@@ -84,10 +90,10 @@ mkAppWithOidcCodeExchange :: OidcCodeExchange -> Middleware -> AuthConfig -> Cor
 mkAppWithOidcCodeExchange oidcCodeExchange = mkAppWithOidcCodeExchangeAndChangeStream oidcCodeExchange Config.defaultConfig.changeStream
 
 mkAppWithOidcCodeExchangeAndChangeStream :: OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
-mkAppWithOidcCodeExchangeAndChangeStream = mkAppWithServices Nothing
+mkAppWithOidcCodeExchangeAndChangeStream = mkAppWithServices Nothing Nothing
 
-mkAppWithServices :: Maybe ObservationDiscovery -> OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
-mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
+mkAppWithServices :: Maybe PrefixRegistry -> Maybe ObservationDiscovery -> OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithServices prefixes discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   discoveryService <- maybe (newObservationDiscovery False) pure discovery
   rateLimit <- rateLimitMiddleware rateLimitCfg
   archive <- newArchiveMiddleware pool
@@ -106,7 +112,7 @@ mkAppWithServices discovery oidcCodeExchange changeStreamConfig logger authCfg c
         $ agentSessionBodyLimit pool
         $ openApiMiddleware
         $ normalizeObservationIfMatch
-         $ serve (Proxy @HMemAPI) (serverWithDiscovery authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
+         $ serve (Proxy @HMemAPI) (serverWithPrefixProofs prefixes authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
 
 -- Authorize before inspecting either declared size or streamed body content.
 -- Read at most 2 MiB before JSON/base64 decoding, including chunked requests.
@@ -141,7 +147,7 @@ sessionMutationWorkspace :: Wai.Request -> Maybe UUID.UUID
 sessionMutationWorkspace req = case (Wai.requestMethod req, dropWhileEnd T.null (Wai.pathInfo req)) of
   ("POST", ["api","v1","workspaces",workspace,"sessions"]) -> UUID.fromText workspace
   ("POST", ["api","v1","workspaces",workspace,"sessions",_,operation])
-    | operation `elem` ["append","heartbeat","terminate"] -> UUID.fromText workspace
+    | operation `elem` ["append","heartbeat","terminate","prefix-verifications"] -> UUID.fromText workspace
   ("PUT", ["api","v1","workspaces",workspace,"sessions",_,"tasks",_]) -> UUID.fromText workspace
   ("PUT", ["api","v1","workspaces",workspace,"sessions",_,"runtime"]) -> UUID.fromText workspace
   _ -> Nothing

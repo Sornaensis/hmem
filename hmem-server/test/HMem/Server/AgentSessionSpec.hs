@@ -2,6 +2,8 @@ module HMem.Server.AgentSessionSpec (spec) where
 
 import Control.Concurrent.Async (concurrently, withAsync, cancel, waitCatch)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (threadDelay)
+import System.Timeout (timeout)
 import Control.Exception (bracket, throwIO, try, SomeException, displayException)
 import System.Directory (getTemporaryDirectory, removeFile, listDirectory)
 import System.IO (openBinaryTempFile, hClose)
@@ -36,11 +38,81 @@ import HMem.DB.Task qualified as Task
 import HMem.DB.Project qualified as Project
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
+import HMem.Server.AuthTokens qualified as AuthTokens
+import HMem.Server.AccessTracker (newAccessTracker)
+import HMem.Server.App (mkAppWithPrefixProofs)
+import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.TestHarness
 import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+  it "PrefixProof binds historical raw prefixes and retains ordinary caller compatibility" $
+    withLocalSandboxAppContext $ \ctx -> bracket (newPrefixRegistry ctx.localEnv.pool) closePrefixRegistry $ \registry -> do
+      let env=ctx.localEnv; cfg=ctx.localConfig
+      tracker <- newAccessTracker env.pool 3600
+      app <- mkAppWithPrefixProofs registry Nothing cfg.changeStream id cfg.auth cfg.cors cfg.rateLimit env.pool tracker ctx.localWSState cfg.web.webStaticDir True
+      workspace <- createTestWorkspace env "http-prefix-proof"
+      row <- seed env workspace.id
+      let bytes="{\"text\":\"raw\"}\r\n"
+      appended <- DB.appendSession env.pool workspace.id row.id (Core.AppendSession 0 0 bytes False)
+      _ <- DB.appendSession env.pool workspace.id row.id (Core.AppendSession appended.session.committedBytes appended.session.revision "[]\n" False)
+      operation <- UUID.nextRandom
+      let path=sessions workspace.id<>"/"<>uuid row.id<>"/prefix-verifications"
+          input=PrefixProofRequest operation appended.session.committedBytes appended.session.revision (Core.sessionSha256 bytes)
+      _ <- post app path [] (toJSON input) >>= decoded @PrefixProofResponse
+      result <- awaitHttpProof app (path<>"/"<>uuid operation) []
+      result.state `shouldBe` "verified"
+      (result.workspaceId,result.sessionId,result.operationId,result.expectedOffset,result.expectedRevision,result.sha256) `shouldBe`
+        (workspace.id,row.id,operation,appended.session.committedBytes,appended.session.revision,Core.sessionSha256 bytes)
+      retried <- post app path [identityHeader] (toJSON input) >>= decoded @PrefixProofResponse
+      retried.audience `shouldBe` result.audience
+      post app path [] (toJSON (PrefixProofRequest operation (input.expectedOffset-1) input.expectedRevision input.sha256)) >>= status status400
+      next <- UUID.nextRandom
+      let mismatched=PrefixProofRequest next input.expectedOffset input.expectedRevision (Core.sessionSha256 "wrong")
+      _ <- post app path [] (toJSON mismatched) >>= decoded @PrefixProofResponse
+      awaitHttpProof app (path<>"/"<>uuid next) [] >>= (\value -> value.state `shouldBe` "mismatch")
+      -- Compatibility constructors preserve old resources without starting an
+      -- unowned worker service in an application with no release interface.
+      post ctx.localApplication path [] (toJSON input) >>= status status503
+
+  it "PrefixProof isolates credentials sharing grants and reauthorizes before decode and result" $
+    withDeployedSandboxAppContext $ \ctx -> bracket (newPrefixRegistry ctx.deployedEnv.pool) closePrefixRegistry $ \registry -> do
+      let env=ctx.deployedEnv; cfg=ctx.deployedConfig
+      tracker <- newAccessTracker env.pool 3600
+      app <- mkAppWithPrefixProofs registry Nothing cfg.changeStream id cfg.auth cfg.cors cfg.rateLimit env.pool tracker ctx.deployedWSState cfg.web.webStaticDir True
+      workspace <- createTestWorkspace env "http-prefix-audience"
+      row <- seed env workspace.id
+      user <- createDeployedSandboxUser env False False
+      _ <- Auth.upsertWorkspaceMembership env.pool workspace.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleEdit) Nothing
+      tokenA <- issueDeployedSandboxPAT env user "proof-a"
+      tokenB <- issueDeployedSandboxPAT env user "proof-b"
+      let headers :: IssuedAccessToken -> [Header]
+          headers token=[identityHeader,("Authorization","Bearer "<>TE.encodeUtf8 token.rawToken)]
+          path=sessions workspace.id<>"/"<>uuid row.id<>"/prefix-verifications"
+      operation <- UUID.nextRandom
+      let input=PrefixProofRequest operation 0 0 (Core.sessionSha256 "")
+          resultPath=path<>"/"<>uuid operation
+      _ <- post app path (headers tokenA) (toJSON input) >>= decoded @PrefixProofResponse
+      a <- awaitHttpProof app resultPath (headers tokenA)
+      call app methodGet resultPath (headers tokenB) "" >>= status status404
+      post app path (headers tokenB) (toJSON input) >>= status status409
+      operationB <- UUID.nextRandom
+      _ <- post app path (headers tokenB) (toJSON (PrefixProofRequest operationB input.expectedOffset input.expectedRevision input.sha256)) >>= decoded @PrefixProofResponse
+      b <- awaitHttpProof app (path<>"/"<>uuid operationB) (headers tokenB)
+      a.audience `shouldNotBe` b.audience
+      _ <- createDeployedSandboxAuthSession env user "proof-cookie" "proof-csrf"
+      let auth=cfg.auth.deployed
+          cookies=[("Cookie",TE.encodeUtf8 (auth.sessionCookieName<>"=proof-cookie; "<>auth.csrfCookieName<>"=proof-csrf"))]
+      call app methodPost path cookies "{" >>= status status403
+      call app methodPost path (cookies<>[("X-CSRF-Token","proof-csrf")]) "{" >>= status status400
+      _ <- Auth.upsertWorkspaceMembership env.pool workspace.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
+      call app methodGet resultPath (headers tokenA) "" >>= status status403
+      rawWithLength app path (headers tokenA) "{" (Wai.KnownLength (fromIntegral maxSessionRequestBytes+1)) >>= status status403
+      _ <- Auth.upsertWorkspaceMembership env.pool workspace.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleEdit) Nothing
+      _ <- AuthTokens.revokeAccessToken env.pool tokenA.tokenId
+      call app methodGet resultPath (headers tokenA) "" >>= status status401
+
   it "requires a live in_progress initial task and rejects creation atomically with clear guidance" $
     withLocalSandboxAppContext $ \ctx -> do
       let env=ctx.localEnv; app=ctx.localApplication
@@ -561,6 +633,15 @@ makeTask env workspace = do
   Task.getTask env.pool task.id >>= maybe (fail "Missing test task") pure
 identityHeader :: Header
 identityHeader=("X-HMem-Bot-Identity","{\"role\":\"Session API Test\",\"model-id\":\"test:fixture:default\"}")
+
+awaitHttpProof :: Wai.Application -> BS.ByteString -> [Header] -> IO PrefixProofResponse
+awaitHttpProof app path headers = do
+  result <- timeout 2000000 loop
+  maybe (fail "HTTP prefix proof did not finish") pure result
+  where
+    loop = do
+      value <- call app methodGet path headers "" >>= decoded @PrefixProofResponse
+      if value.state == "pending" then threadDelay 1000 >> loop else pure value
 audience :: DeployedSandboxApp -> UUID -> Maybe Auth.WorkspaceRole -> Bool -> IO [Header]
 audience ctx workspace role superadmin = do
   user <- createDeployedSandboxUser ctx.deployedEnv False superadmin

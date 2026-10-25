@@ -30,8 +30,8 @@ credential only when required by the server.
 
 ## Agent sessions
 
-Session routes are scoped by `/api/v1/workspaces/{workspaceId}`. All GETs require
-read access; POST/PUT require edit access, normal cookie CSRF and automated caller
+Session routes are scoped by `/api/v1/workspaces/{workspaceId}`. Ordinary GETs require
+read access; prefix-proof GETs and POST/PUT require edit access, normal cookie CSRF for mutations and automated caller
 declaration. Managing agent is workflow/attribution, not a creator-only permission.
 A different editor may terminate a session. The server never accepts a local
 file path or reads the caller's filesystem.
@@ -45,6 +45,8 @@ file path or reads the caller's filesystem.
 | GET `/sessions/{sessionId}` | — | Canonical metadata, counters, state and final receipt when sealed |
 | POST `/sessions/{sessionId}/append` | `expected_offset`, `expected_revision`, `data_base64`, optional `allow_final_record` (false) | `session`, `replayed` |
 | POST `/sessions/{sessionId}/heartbeat` | No body | Active session with refreshed `last_seen_at`; revision unchanged |
+| POST `/sessions/{sessionId}/prefix-verifications` | `operation_id` (fresh UUID), `expected_offset`, `expected_revision`, `sha256` (lowercase SHA-256) | Bound asynchronous proof status |
+| GET `/sessions/{sessionId}/prefix-verifications/{operationId}` | No body; fresh edit authorization | Bound asynchronous proof status |
 | GET `/sessions/{sessionId}/tasks` | `limit`, `after_task_id` | Task references, optional `next_task_id` |
 | PUT `/sessions/{sessionId}/tasks/{taskId}` | No body | Idempotent same-workspace association |
 | GET `/tasks/{taskId}/sessions` | Session list queries | Linked sessions, optional `next_cursor` |
@@ -52,6 +54,34 @@ file path or reads the caller's filesystem.
 | POST `/sessions/{sessionId}/terminate` | `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Immutable terminated metadata |
 | GET `/sessions/{sessionId}/transcript` | `offset`, `limit` | Bounded active transcript range |
 | GET `/sessions/{sessionId}/evidence` | `offset`, `limit` | Bounded terminated evidence range |
+
+Prefix proofs verify an existing active session's exact immutable append boundary
+`N/R`, including historical boundaries and `0/0`. They never append bytes or seal.
+Responses bind `workspace_id`, `session_id`, opaque authority-bearing `audience`,
+`operation_id`, `expected_offset`, `expected_revision`, and `sha256`, with `state`
+`pending|verified|mismatch|failed` and optional fixed `error`. Audience uses the
+original authenticated principal/authority, independent of effective bot metadata.
+Every submission and lookup reauthorizes edit access. An identical full-target
+retry coalesces; reusing an operation UUID for a different target returns 409.
+The service owns two workers, four live jobs, sixteen total entries and bounded
+1 MiB hash windows. Capacity returns 503; oldest terminal entries may be evicted
+at admission. Live deadlines and terminal retention are each at most five minutes.
+Missing, evicted or restarted operations return 404: clients must revalidate their
+stable local source and submit a new UUID, never infer success. A verified proof
+alone does not authorize an append at a stale canonical cursor.
+
+Deploy the server proof service before the dependent native MCP binary. Existing
+ordinary session routes remain compatible. Application constructors without a
+lifecycle-owned proof registry return 503 for these new routes; the uploader
+retains verification requirements when the service is unavailable.
+
+The native uploader hashes the complete local prefix through its stable source
+handle, submits only the digest, and checks every response binding. It repeats the
+local pass before resumed append/finite receipt and checks the latest authorized
+canonical cursor, re-proving any changed target. Ongoing bounded sweeps interleave
+with useful upload work. Four followers share two reusable isolated helper/HTTP
+transports. Cancellation retires and joins child/pipe owners before slot reuse;
+context changes do not retarget captured source/workspace/identity/credentials.
 
 Task Evidence ZIP authorizes read access to the active workspace and the visible,
 same-workspace task before listing or temporary storage. It follows all terminated

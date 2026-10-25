@@ -37,6 +37,33 @@ import HMem.Types qualified as Types
 spec :: Spec
 spec = do
   around withTestEnv $ describe "Agent sessions" $ do
+    it "PrefixProof accepts only scoped exact append boundaries through later growth" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      let first = "{\"text\":\"first\"}\r\n"; second = "{\"text\":\"second\"}\r\n"
+      a <- appendSession env.pool workspace row.id (AppendSession 0 0 first False)
+      _ <- appendSession env.pool workspace row.id (AppendSession a.session.committedBytes a.session.revision second False)
+      validateSessionPrefixBoundary env.pool workspace row.id 0 0 `shouldReturn` True
+      validateSessionPrefixBoundary env.pool workspace row.id a.session.committedBytes a.session.revision `shouldReturn` True
+      validateSessionPrefixBoundary env.pool workspace row.id (a.session.committedBytes-1) a.session.revision `shouldReturn` False
+      validateSessionPrefixBoundary env.pool workspace row.id a.session.committedBytes (a.session.revision+1) `shouldReturn` False
+      other <- createTestWorkspace env "prefix-foreign"
+      validateSessionPrefixBoundary env.pool other.id row.id a.session.committedBytes a.session.revision `shouldReturn` False
+      readSessionPrefixWindow env.pool workspace row.id a.session.committedBytes 0 `shouldReturn` first
+
+    it "PrefixProof hashes bounded ordered raw windows across the one MiB boundary" $ \env -> do
+      (workspace,_,row) <- reaperFixture env
+      let record = "{\"text\":\"" <> BS.replicate (65536-13) 97 <> "\"}\r\n"
+          first = BS.concat (replicate 16 record); tailBytes = "{\"text\":\"tail\"}\r\n"
+      BS.length first `shouldBe` 1048576
+      a <- appendSession env.pool workspace row.id (AppendSession 0 0 first False)
+      b <- appendSession env.pool workspace row.id (AppendSession a.session.committedBytes a.session.revision tailBytes False)
+      one <- readSessionPrefixWindow env.pool workspace row.id b.session.committedBytes 0
+      two <- readSessionPrefixWindow env.pool workspace row.id b.session.committedBytes 1048576
+      BS.length one `shouldBe` 1048576
+      one `shouldBe` first
+      two `shouldBe` tailBytes
+      sessionSha256 (one<>two) `shouldBe` sessionSha256 (first<>tailBytes)
+
     it "automatically seals only strictly idle terminal-task sessions with the canonical empty receipt" $ \env -> do
       (workspace,task,row) <- reaperFixture env
       execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")

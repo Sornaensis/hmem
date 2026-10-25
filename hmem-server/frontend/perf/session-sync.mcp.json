@@ -1,0 +1,1417 @@
+{
+  "schema": 1,
+  "mode": "mcp",
+  "qualificationStatus": "not_qualified",
+  "baseSha": "6586c58b7986326edb5005c664347cace7dd628e",
+  "measuredAt": "2026-10-25T17:36:00.061Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 28433338368,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": {
+    "harness": "3490f5246c2926f8d4d91d7e8d93a2a105b430bf224011d683cb04089577ba0c",
+    "mcp": "d8817b35f32d2a9123dfddb56f55878c97ae393bef981f5f222bc1a5926d5cee",
+    "sources": {
+      "runner": "b61342dc7a83913071006c9ec21e13afc3395fa23f469d47d36210bac6930b45",
+      "sessionMcpHelper": "65e8643a08b66429005856a6878245ec10732a61bfd9eb7fff3d60592727cb66",
+      "nativeHarness": "89060eb8aeaaac65bf6dc139f56c998d420035e7e2f6b793a61cf3507c34fee4",
+      "hmem-mcp/src/HMem/MCP/SessionFollower.hs": "9b494b289a9f964fa88e181c2be9b70e6905656a49ed51d6deeefd9590db76e8",
+      "hmem-mcp/src/HMem/MCP/SessionHTTP.hs": "4d918c69d31de493cb50faaa3fa646afc08bce7661ebcc18684cd5c5798cff6a",
+      "hmem-mcp/src/HMem/MCP/SessionProcess.hs": "ddae0647e5a80e1353e592bf83e524dc206f77e16b287c0410b4390afe094400",
+      "hmem-mcp/src/HMem/MCP/SessionFile.hs": "a08a77dce4ce85ccccfd31eb7a05626cefd3d7671cc44879737b7426c7118e2a",
+      "hmem-mcp/cbits/session_process.c": "fbb08aeecc341c4645baee8cff90f0827b95d692e4e098b41eda16f72d0e02ad",
+      "hmem-core/src/HMem/AgentSession/Transport.hs": "cc32adad3bed8d471035e8fd46ee9384723b6ad297b1448717314f48f094c320",
+      "hmem-core/src/HMem/DB/AgentSession.hs": "0caea762ddb92369d813f0ff8a5a561f18bd5249a0b2a72e2c373879b4f135f1",
+      "hmem-server/src/HMem/Server/SessionPrefix.hs": "08f12e30aac59c88dca03bffb14852b41219342242c3622bbfd746727511f282",
+      "hmem-server/src/HMem/Server/API.hs": "ca8fa550f9daa399bce739d0eebe19d80d63c2a2293260e9c1cb3255ccdd08ff",
+      "hmem-server/src/HMem/Server/App.hs": "013dd0170c6ba2dd51d4d3ad845dc4d1b5cb0b2246d8058232149efa22d9175b",
+      "hmem-server/app-harness/Main.hs": "babda8f25ccfcd5b5bb59553bfcf2d145b6e76c98ecaaa9aa8802a3719491721"
+    },
+    "frontend": "not built or used: backend-only MCP evidence"
+  },
+  "task": "6e70b1ee-a329-4b22-95a6-cc49d3474499",
+  "methodSha256": "b61342dc7a83913071006c9ec21e13afc3395fa23f469d47d36210bac6930b45",
+  "result": {
+    "profiles": [
+      {
+        "name": "local-one",
+        "network": {},
+        "browserClients": 0,
+        "followers": 1,
+        "measurement": {
+          "commit": "pg_xact_commit_timestamp(session_chunks.xmin)",
+          "statements": "parameter-suppressed sandbox log statement count",
+          "locks": "sampled pg_stat_activity/pg_locks; wait-time estimate is sampling resolution limited",
+          "postgres": "PostgreSQL 18.2 on x86_64-windows, compiled by gcc-15.2.0, 64-bit"
+        },
+        "prefixBytes": [
+          1048576
+        ],
+        "seed": [
+          {
+            "milliseconds": 185.145751953125,
+            "requests": 1
+          }
+        ],
+        "resume": {
+          "complete": true,
+          "observedMs": 1196.861328125,
+          "capMs": 40302.10889609375,
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.698974609375,
+            "median": 0.698974609375,
+            "p95": 0.698974609375,
+            "max": 0.698974609375
+          },
+          "boundaries": [
+            {
+              "sessionId": "7f9e4246-916e-4160-950a-3498d642719d",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            }
+          ],
+          "states": [
+            {
+              "status": "caught_up",
+              "committedOffset": 1048576,
+              "error": null
+            }
+          ],
+          "scope": "fresh MCP/follower/hash/transport state; seeded warm server/DB and uncontrolled OS cache; actual production intervals"
+        },
+        "load": {
+          "requestedAggregateBytesPerSecond": 183500.8,
+          "actualAggregateBytesPerSecond": 183466.09752456823,
+          "generatedBytes": 1715200,
+          "sourceEvents": [
+            100
+          ],
+          "perFollower": [
+            {
+              "bytes": 1715200,
+              "elapsedMs": 9348.8662109375,
+              "B": 2763776,
+              "rate": 183466.09752456823
+            }
+          ]
+        },
+        "sourceCommits": [
+          {
+            "sessionId": "7f9e4246-916e-4160-950a-3498d642719d",
+            "sourceEvents": 100,
+            "committedEvents": 100,
+            "uniqueCommits": 13,
+            "independentSourceToCommitCohorts": [
+              {
+                "revision": 2,
+                "end": 1188864,
+                "representedSourceEvents": 11,
+                "milliseconds": 999.09912109375
+              },
+              {
+                "revision": 3,
+                "end": 1394688,
+                "representedSourceEvents": 12,
+                "milliseconds": 957.29638671875
+              },
+              {
+                "revision": 4,
+                "end": 1600512,
+                "representedSourceEvents": 12,
+                "milliseconds": 897.689697265625
+              },
+              {
+                "revision": 5,
+                "end": 1806336,
+                "representedSourceEvents": 12,
+                "milliseconds": 851.646728515625
+              },
+              {
+                "revision": 6,
+                "end": 1943552,
+                "representedSourceEvents": 8,
+                "milliseconds": 798.377685546875
+              },
+              {
+                "revision": 7,
+                "end": 2012160,
+                "representedSourceEvents": 4,
+                "milliseconds": 86.682373046875
+              },
+              {
+                "revision": 8,
+                "end": 2149376,
+                "representedSourceEvents": 8,
+                "milliseconds": 793.656494140625
+              },
+              {
+                "revision": 9,
+                "end": 2217984,
+                "representedSourceEvents": 4,
+                "milliseconds": 86.111328125
+              },
+              {
+                "revision": 10,
+                "end": 2355200,
+                "representedSourceEvents": 8,
+                "milliseconds": 785.893310546875
+              },
+              {
+                "revision": 11,
+                "end": 2423808,
+                "representedSourceEvents": 4,
+                "milliseconds": 85.811767578125
+              },
+              {
+                "revision": 12,
+                "end": 2561024,
+                "representedSourceEvents": 8,
+                "milliseconds": 792.1845703125
+              },
+              {
+                "revision": 13,
+                "end": 2629632,
+                "representedSourceEvents": 4,
+                "milliseconds": 105.248291015625
+              },
+              {
+                "revision": 14,
+                "end": 2763776,
+                "representedSourceEvents": 5,
+                "milliseconds": 799.09814453125
+              }
+            ],
+            "sourceToCommitMs": {
+              "samples": 13,
+              "min": 85.811767578125,
+              "median": 793.656494140625,
+              "p95": 999.09912109375,
+              "max": 999.09912109375
+            }
+          }
+        ],
+        "controls": [
+          {
+            "operation": "session_upload_flush",
+            "boundary": {
+              "N": 2763776,
+              "B": 2767872,
+              "pendingBytes": 4096
+            },
+            "finiteTargetMs": 40346.751753236604,
+            "pendingTransferReferenceMs": 22.321428571428573,
+            "targetScope": "Conservative frozen 1GiB prefix target plus twice pending bytes at the measured sustainable reference rate; smaller prefixes receive the same declared cap, not a claimed tighter target.",
+            "complete": true,
+            "accepted": true,
+            "operationId": "795d85e7-df4e-43e6-913d-1de1b05c4017",
+            "replyMs": 371.924072265625,
+            "completionMs": 371.9345703125,
+            "receipt": {
+              "capture_boundary": 2767872,
+              "committed_offset": 2767872,
+              "pending_tail": false,
+              "revision": 15,
+              "sha256": "9d883b233128b354f9d31450355f75713b64ef25bfc42cbebc28c73b06761133",
+              "source_verified": true
+            },
+            "receiptVerification": {
+              "checked": true,
+              "valid": true,
+              "committedOffset": 2767872,
+              "revision": 15,
+              "captureBoundary": 2767872,
+              "pendingTail": false,
+              "sha256": "9d883b233128b354f9d31450355f75713b64ef25bfc42cbebc28c73b06761133",
+              "locallyReconstructedSha256": "9d883b233128b354f9d31450355f75713b64ef25bfc42cbebc28c73b06761133"
+            }
+          },
+          {
+            "operation": "session_upload_stop",
+            "boundary": {
+              "N": 2767872,
+              "B": 2771968,
+              "pendingBytes": 4096
+            },
+            "finiteTargetMs": 40346.751753236604,
+            "pendingTransferReferenceMs": 22.321428571428573,
+            "targetScope": "Conservative frozen 1GiB prefix target plus twice pending bytes at the measured sustainable reference rate; smaller prefixes receive the same declared cap, not a claimed tighter target.",
+            "complete": true,
+            "accepted": true,
+            "operationId": "a1d1aa5c-00cf-4d04-ac86-4c55091cba6f",
+            "replyMs": 909.4150390625,
+            "completionMs": 1017.770263671875,
+            "receipt": {
+              "capture_boundary": 2771968,
+              "committed_offset": 2771968,
+              "pending_tail": false,
+              "revision": 16,
+              "sha256": "3c2f100f8f35fb1c4676728ae992d333d2bc94bddf132387d29728a1221003bf",
+              "source_verified": true
+            },
+            "receiptVerification": {
+              "checked": true,
+              "valid": true,
+              "committedOffset": 2771968,
+              "revision": 16,
+              "captureBoundary": 2771968,
+              "pendingTail": false,
+              "sha256": "3c2f100f8f35fb1c4676728ae992d333d2bc94bddf132387d29728a1221003bf",
+              "locallyReconstructedSha256": "3c2f100f8f35fb1c4676728ae992d333d2bc94bddf132387d29728a1221003bf"
+            }
+          }
+        ],
+        "seals": [
+          {
+            "complete": true,
+            "milliseconds": 74.655029296875,
+            "readbackMs": 31.573486328125,
+            "sessionId": "7f9e4246-916e-4160-950a-3498d642719d",
+            "N": 2771968,
+            "B": 2771968,
+            "pendingBytes": 0,
+            "expectedRevision": 16,
+            "finalRevision": 17,
+            "sha256": "3c2f100f8f35fb1c4676728ae992d333d2bc94bddf132387d29728a1221003bf",
+            "locallyReconstructedSha256": "3c2f100f8f35fb1c4676728ae992d333d2bc94bddf132387d29728a1221003bf",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          }
+        ],
+        "ordinaryMcp": {
+          "samples": 13,
+          "failed": 0,
+          "latencyMs": {
+            "samples": 13,
+            "min": 31.3681640625,
+            "median": 46.318115234375,
+            "p95": 52.966552734375,
+            "max": 52.966552734375
+          }
+        },
+        "database": {
+          "logicalStatementCalls": 3851
+        },
+        "resources": {
+          "samples": 4,
+          "peakRssBytes": 749469696,
+          "cpuSeconds": 1.65625,
+          "samplingWaitMs": 500,
+          "actualIntervalsMs": {
+            "samples": 3,
+            "min": 3336.125244140625,
+            "median": 3928.58935546875,
+            "p95": 4943.677490234375,
+            "max": 4943.677490234375
+          },
+          "peakObservedPids": 26,
+          "failures": 0,
+          "method": "sampled owned process tree including Chromium descendants and PostgreSQL workers; sampler PowerShell excluded; short-lived helpers may be missed"
+        },
+        "transport": {
+          "downstreamConnections": 3,
+          "upstreamHttpConnections": 1,
+          "reusedUpstreamHttpRequests": 49,
+          "webSocketConnections": 0,
+          "successfulFollowerHttp": 32
+        },
+        "http": {
+          "completed": 50,
+          "completedFollowerRequests": 32,
+          "peakAmongCompletedFollowerRequests": 1,
+          "prefixProofRequests": 12,
+          "rawTranscriptRequests": 0,
+          "proofReplyMs": {
+            "samples": 12,
+            "min": 29.8037109375,
+            "median": 46.044921875,
+            "p95": 772.156005859375,
+            "max": 772.156005859375
+          }
+        },
+        "limitations": [
+          "Zero browser component evidence; no combined visibility/interaction/resource qualification claim.",
+          "Source markers coalesced into one commit are one independent latency cohort.",
+          "Helpers/CPU are sampled; transient peaks may be missed.",
+          "No five-warm/three-cold or 100-independent-cohort final-matrix claim."
+        ]
+      },
+      {
+        "name": "controlled-mixed-large",
+        "network": {
+          "rttMs": 50,
+          "bitsPerSecond": 100000000
+        },
+        "browserClients": 0,
+        "followers": 4,
+        "measurement": {
+          "commit": "pg_xact_commit_timestamp(session_chunks.xmin)",
+          "statements": "parameter-suppressed sandbox log statement count",
+          "locks": "sampled pg_stat_activity/pg_locks; wait-time estimate is sampling resolution limited",
+          "postgres": "PostgreSQL 18.2 on x86_64-windows, compiled by gcc-15.2.0, 64-bit"
+        },
+        "prefixBytes": [
+          1073741824,
+          1048576,
+          1048576,
+          1048576
+        ],
+        "seed": [
+          {
+            "milliseconds": 142035.15307617188,
+            "requests": 1024
+          },
+          {
+            "milliseconds": 173.247802734375,
+            "requests": 1
+          },
+          {
+            "milliseconds": 139.153076171875,
+            "requests": 1
+          },
+          {
+            "milliseconds": 154.6318359375,
+            "requests": 1
+          }
+        ],
+        "resume": {
+          "complete": true,
+          "observedMs": 14902.12939453125,
+          "capMs": 40302.10889609375,
+          "registrationReplyMs": {
+            "samples": 4,
+            "min": 0.402099609375,
+            "median": 0.435546875,
+            "p95": 0.717529296875,
+            "max": 0.717529296875
+          },
+          "boundaries": [
+            {
+              "sessionId": "5b84f835-24e4-4ccd-bf7a-b5f1801f766a",
+              "N": 1073741824,
+              "B": 1073741824,
+              "pendingBytes": 0
+            },
+            {
+              "sessionId": "23e13a93-100d-4d60-a8f5-7100a45e1675",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            },
+            {
+              "sessionId": "63a723f1-823a-47be-ba62-b36d67f88118",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            },
+            {
+              "sessionId": "5a7bbc77-435b-49b9-8dd4-6260dd5b6135",
+              "N": 1048576,
+              "B": 1048576,
+              "pendingBytes": 0
+            }
+          ],
+          "states": [
+            {
+              "status": "caught_up",
+              "committedOffset": 1073741824,
+              "error": null
+            },
+            {
+              "status": "caught_up",
+              "committedOffset": 1048576,
+              "error": null
+            },
+            {
+              "status": "caught_up",
+              "committedOffset": 1048576,
+              "error": null
+            },
+            {
+              "status": "caught_up",
+              "committedOffset": 1048576,
+              "error": null
+            }
+          ],
+          "scope": "fresh MCP/follower/hash/transport state; seeded warm server/DB and uncontrolled OS cache; actual production intervals"
+        },
+        "load": {
+          "requestedAggregateBytesPerSecond": 183500.8,
+          "actualAggregateBytesPerSecond": 183495.70422843762,
+          "generatedBytes": 6860800,
+          "sourceEvents": [
+            100,
+            100,
+            100,
+            100
+          ],
+          "perFollower": [
+            {
+              "bytes": 1715200,
+              "elapsedMs": 37389.43115234375,
+              "B": 1075457024,
+              "rate": 45873.926057109406
+            },
+            {
+              "bytes": 1715200,
+              "elapsedMs": 37389.29248046875,
+              "B": 2763776,
+              "rate": 45874.096197353254
+            },
+            {
+              "bytes": 1715200,
+              "elapsedMs": 37389.359619140625,
+              "B": 2763776,
+              "rate": 45874.01382295787
+            },
+            {
+              "bytes": 1715200,
+              "elapsedMs": 37389.41064453125,
+              "B": 2763776,
+              "rate": 45873.95121861524
+            }
+          ]
+        },
+        "sourceCommits": [
+          {
+            "sessionId": "5b84f835-24e4-4ccd-bf7a-b5f1801f766a",
+            "sourceEvents": 100,
+            "committedEvents": 100,
+            "uniqueCommits": 32,
+            "independentSourceToCommitCohorts": [
+              {
+                "revision": 1025,
+                "end": 1073744896,
+                "representedSourceEvents": 3,
+                "milliseconds": 993.998779296875
+              },
+              {
+                "revision": 1026,
+                "end": 1073813504,
+                "representedSourceEvents": 4,
+                "milliseconds": 646.8115234375
+              },
+              {
+                "revision": 1027,
+                "end": 1073882112,
+                "representedSourceEvents": 4,
+                "milliseconds": 274.64111328125
+              },
+              {
+                "revision": 1028,
+                "end": 1073950720,
+                "representedSourceEvents": 4,
+                "milliseconds": 921.56787109375
+              },
+              {
+                "revision": 1029,
+                "end": 1074019328,
+                "representedSourceEvents": 4,
+                "milliseconds": 554.52294921875
+              },
+              {
+                "revision": 1030,
+                "end": 1074087936,
+                "representedSourceEvents": 4,
+                "milliseconds": 382.390869140625
+              },
+              {
+                "revision": 1031,
+                "end": 1074156544,
+                "representedSourceEvents": 4,
+                "milliseconds": 1021.149658203125
+              },
+              {
+                "revision": 1032,
+                "end": 1074223104,
+                "representedSourceEvents": 2,
+                "milliseconds": 80.886962890625
+              },
+              {
+                "revision": 1033,
+                "end": 1074225152,
+                "representedSourceEvents": 2,
+                "milliseconds": 169.42138671875
+              },
+              {
+                "revision": 1034,
+                "end": 1074290688,
+                "representedSourceEvents": 1,
+                "milliseconds": 72.903076171875
+              },
+              {
+                "revision": 1035,
+                "end": 1074293760,
+                "representedSourceEvents": 3,
+                "milliseconds": 147.237060546875
+              },
+              {
+                "revision": 1036,
+                "end": 1074360320,
+                "representedSourceEvents": 2,
+                "milliseconds": 91.075439453125
+              },
+              {
+                "revision": 1037,
+                "end": 1074362368,
+                "representedSourceEvents": 2,
+                "milliseconds": 161.890380859375
+              },
+              {
+                "revision": 1038,
+                "end": 1074430976,
+                "representedSourceEvents": 4,
+                "milliseconds": 148.42822265625
+              },
+              {
+                "revision": 1039,
+                "end": 1074499584,
+                "representedSourceEvents": 4,
+                "milliseconds": 177.565185546875
+              },
+              {
+                "revision": 1040,
+                "end": 1074568192,
+                "representedSourceEvents": 4,
+                "milliseconds": 181.506103515625
+              },
+              {
+                "revision": 1041,
+                "end": 1074635776,
+                "representedSourceEvents": 3,
+                "milliseconds": 117.56591796875
+              },
+              {
+                "revision": 1042,
+                "end": 1074636800,
+                "representedSourceEvents": 1,
+                "milliseconds": 238.71923828125
+              },
+              {
+                "revision": 1043,
+                "end": 1074705408,
+                "representedSourceEvents": 4,
+                "milliseconds": 173.73486328125
+              },
+              {
+                "revision": 1044,
+                "end": 1074772992,
+                "representedSourceEvents": 3,
+                "milliseconds": 130.613037109375
+              },
+              {
+                "revision": 1045,
+                "end": 1074774016,
+                "representedSourceEvents": 1,
+                "milliseconds": 255.200439453125
+              },
+              {
+                "revision": 1046,
+                "end": 1074842624,
+                "representedSourceEvents": 4,
+                "milliseconds": 149.490234375
+              },
+              {
+                "revision": 1047,
+                "end": 1074911232,
+                "representedSourceEvents": 4,
+                "milliseconds": 873.6826171875
+              },
+              {
+                "revision": 1048,
+                "end": 1074979840,
+                "representedSourceEvents": 4,
+                "milliseconds": 1104.842041015625
+              },
+              {
+                "revision": 1049,
+                "end": 1075048448,
+                "representedSourceEvents": 4,
+                "milliseconds": 730.78369140625
+              },
+              {
+                "revision": 1050,
+                "end": 1075117056,
+                "representedSourceEvents": 4,
+                "milliseconds": 376.453369140625
+              },
+              {
+                "revision": 1051,
+                "end": 1075185664,
+                "representedSourceEvents": 4,
+                "milliseconds": 1127.78076171875
+              },
+              {
+                "revision": 1052,
+                "end": 1075254272,
+                "representedSourceEvents": 4,
+                "milliseconds": 778.7412109375
+              },
+              {
+                "revision": 1053,
+                "end": 1075322880,
+                "representedSourceEvents": 4,
+                "milliseconds": 409.166015625
+              },
+              {
+                "revision": 1054,
+                "end": 1075388416,
+                "representedSourceEvents": 1,
+                "milliseconds": 56.1240234375
+              },
+              {
+                "revision": 1055,
+                "end": 1075391488,
+                "representedSourceEvents": 3,
+                "milliseconds": 121.2255859375
+              },
+              {
+                "revision": 1056,
+                "end": 1075457024,
+                "representedSourceEvents": 1,
+                "milliseconds": 70.868408203125
+              }
+            ],
+            "sourceToCommitMs": {
+              "samples": 32,
+              "min": 56.1240234375,
+              "median": 181.506103515625,
+              "p95": 1104.842041015625,
+              "max": 1127.78076171875
+            }
+          },
+          {
+            "sessionId": "23e13a93-100d-4d60-a8f5-7100a45e1675",
+            "sourceEvents": 100,
+            "committedEvents": 100,
+            "uniqueCommits": 27,
+            "independentSourceToCommitCohorts": [
+              {
+                "revision": 2,
+                "end": 1051648,
+                "representedSourceEvents": 3,
+                "milliseconds": 936.4658203125
+              },
+              {
+                "revision": 3,
+                "end": 1120256,
+                "representedSourceEvents": 4,
+                "milliseconds": 595.0751953125
+              },
+              {
+                "revision": 4,
+                "end": 1188864,
+                "representedSourceEvents": 4,
+                "milliseconds": 222.34619140625
+              },
+              {
+                "revision": 5,
+                "end": 1257472,
+                "representedSourceEvents": 4,
+                "milliseconds": 860.608154296875
+              },
+              {
+                "revision": 6,
+                "end": 1326080,
+                "representedSourceEvents": 4,
+                "milliseconds": 495.445556640625
+              },
+              {
+                "revision": 7,
+                "end": 1394688,
+                "representedSourceEvents": 4,
+                "milliseconds": 179.5732421875
+              },
+              {
+                "revision": 8,
+                "end": 1463296,
+                "representedSourceEvents": 4,
+                "milliseconds": 427.71337890625
+              },
+              {
+                "revision": 9,
+                "end": 1531904,
+                "representedSourceEvents": 4,
+                "milliseconds": 1020.42822265625
+              },
+              {
+                "revision": 10,
+                "end": 1600512,
+                "representedSourceEvents": 4,
+                "milliseconds": 683.13720703125
+              },
+              {
+                "revision": 11,
+                "end": 1669120,
+                "representedSourceEvents": 4,
+                "milliseconds": 309.31884765625
+              },
+              {
+                "revision": 12,
+                "end": 1806336,
+                "representedSourceEvents": 8,
+                "milliseconds": 1066.47119140625
+              },
+              {
+                "revision": 13,
+                "end": 1872896,
+                "representedSourceEvents": 2,
+                "milliseconds": 96.275634765625
+              },
+              {
+                "revision": 14,
+                "end": 1874944,
+                "representedSourceEvents": 2,
+                "milliseconds": 192.317138671875
+              },
+              {
+                "revision": 15,
+                "end": 1942528,
+                "representedSourceEvents": 3,
+                "milliseconds": 111.299560546875
+              },
+              {
+                "revision": 16,
+                "end": 1943552,
+                "representedSourceEvents": 1,
+                "milliseconds": 228.353271484375
+              },
+              {
+                "revision": 17,
+                "end": 2012160,
+                "representedSourceEvents": 4,
+                "milliseconds": 1391.2470703125
+              },
+              {
+                "revision": 18,
+                "end": 2080768,
+                "representedSourceEvents": 4,
+                "milliseconds": 1031.478271484375
+              },
+              {
+                "revision": 19,
+                "end": 2149376,
+                "representedSourceEvents": 4,
+                "milliseconds": 658.5029296875
+              },
+              {
+                "revision": 20,
+                "end": 2217984,
+                "representedSourceEvents": 4,
+                "milliseconds": 303.730224609375
+              },
+              {
+                "revision": 21,
+                "end": 2286592,
+                "representedSourceEvents": 4,
+                "milliseconds": 1212.14501953125
+              },
+              {
+                "revision": 22,
+                "end": 2355200,
+                "representedSourceEvents": 4,
+                "milliseconds": 856.2392578125
+              },
+              {
+                "revision": 23,
+                "end": 2423808,
+                "representedSourceEvents": 4,
+                "milliseconds": 496.758544921875
+              },
+              {
+                "revision": 24,
+                "end": 2492416,
+                "representedSourceEvents": 4,
+                "milliseconds": 1066.10498046875
+              },
+              {
+                "revision": 25,
+                "end": 2561024,
+                "representedSourceEvents": 4,
+                "milliseconds": 687.034423828125
+              },
+              {
+                "revision": 26,
+                "end": 2629632,
+                "representedSourceEvents": 4,
+                "milliseconds": 302.35009765625
+              },
+              {
+                "revision": 27,
+                "end": 2698240,
+                "representedSourceEvents": 4,
+                "milliseconds": 921.3203125
+              },
+              {
+                "revision": 28,
+                "end": 2763776,
+                "representedSourceEvents": 1,
+                "milliseconds": 607.861572265625
+              }
+            ],
+            "sourceToCommitMs": {
+              "samples": 27,
+              "min": 96.275634765625,
+              "median": 607.861572265625,
+              "p95": 1212.14501953125,
+              "max": 1391.2470703125
+            }
+          },
+          {
+            "sessionId": "63a723f1-823a-47be-ba62-b36d67f88118",
+            "sourceEvents": 100,
+            "committedEvents": 100,
+            "uniqueCommits": 25,
+            "independentSourceToCommitCohorts": [
+              {
+                "revision": 2,
+                "end": 1051648,
+                "representedSourceEvents": 3,
+                "milliseconds": 268.16162109375
+              },
+              {
+                "revision": 3,
+                "end": 1120256,
+                "representedSourceEvents": 4,
+                "milliseconds": 913.344482421875
+              },
+              {
+                "revision": 4,
+                "end": 1188864,
+                "representedSourceEvents": 4,
+                "milliseconds": 539.35546875
+              },
+              {
+                "revision": 5,
+                "end": 1257472,
+                "representedSourceEvents": 4,
+                "milliseconds": 182.55859375
+              },
+              {
+                "revision": 6,
+                "end": 1326080,
+                "representedSourceEvents": 4,
+                "milliseconds": 820.4990234375
+              },
+              {
+                "revision": 7,
+                "end": 1394688,
+                "representedSourceEvents": 4,
+                "milliseconds": 182.719970703125
+              },
+              {
+                "revision": 8,
+                "end": 1463296,
+                "representedSourceEvents": 4,
+                "milliseconds": 435.98583984375
+              },
+              {
+                "revision": 9,
+                "end": 1531904,
+                "representedSourceEvents": 4,
+                "milliseconds": 1023.118408203125
+              },
+              {
+                "revision": 10,
+                "end": 1600512,
+                "representedSourceEvents": 4,
+                "milliseconds": 685.496337890625
+              },
+              {
+                "revision": 11,
+                "end": 1669120,
+                "representedSourceEvents": 4,
+                "milliseconds": 314.05810546875
+              },
+              {
+                "revision": 12,
+                "end": 1806336,
+                "representedSourceEvents": 8,
+                "milliseconds": 1095.952392578125
+              },
+              {
+                "revision": 13,
+                "end": 1874944,
+                "representedSourceEvents": 4,
+                "milliseconds": 153.990966796875
+              },
+              {
+                "revision": 14,
+                "end": 1943552,
+                "representedSourceEvents": 4,
+                "milliseconds": 934.076171875
+              },
+              {
+                "revision": 15,
+                "end": 2012160,
+                "representedSourceEvents": 4,
+                "milliseconds": 1359.591796875
+              },
+              {
+                "revision": 16,
+                "end": 2080768,
+                "representedSourceEvents": 4,
+                "milliseconds": 1032.392333984375
+              },
+              {
+                "revision": 17,
+                "end": 2149376,
+                "representedSourceEvents": 4,
+                "milliseconds": 657.593505859375
+              },
+              {
+                "revision": 18,
+                "end": 2217984,
+                "representedSourceEvents": 4,
+                "milliseconds": 304.342041015625
+              },
+              {
+                "revision": 19,
+                "end": 2286592,
+                "representedSourceEvents": 4,
+                "milliseconds": 1213.274169921875
+              },
+              {
+                "revision": 20,
+                "end": 2355200,
+                "representedSourceEvents": 4,
+                "milliseconds": 853.242431640625
+              },
+              {
+                "revision": 21,
+                "end": 2423808,
+                "representedSourceEvents": 4,
+                "milliseconds": 808.298828125
+              },
+              {
+                "revision": 22,
+                "end": 2492416,
+                "representedSourceEvents": 4,
+                "milliseconds": 1033.732421875
+              },
+              {
+                "revision": 23,
+                "end": 2561024,
+                "representedSourceEvents": 4,
+                "milliseconds": 647.388427734375
+              },
+              {
+                "revision": 24,
+                "end": 2629632,
+                "representedSourceEvents": 4,
+                "milliseconds": 254.848876953125
+              },
+              {
+                "revision": 25,
+                "end": 2698240,
+                "representedSourceEvents": 4,
+                "milliseconds": 890.4140625
+              },
+              {
+                "revision": 26,
+                "end": 2763776,
+                "representedSourceEvents": 1,
+                "milliseconds": 604.513671875
+              }
+            ],
+            "sourceToCommitMs": {
+              "samples": 25,
+              "min": 153.990966796875,
+              "median": 685.496337890625,
+              "p95": 1213.274169921875,
+              "max": 1359.591796875
+            }
+          },
+          {
+            "sessionId": "5a7bbc77-435b-49b9-8dd4-6260dd5b6135",
+            "sourceEvents": 100,
+            "committedEvents": 100,
+            "uniqueCommits": 28,
+            "independentSourceToCommitCohorts": [
+              {
+                "revision": 2,
+                "end": 1051648,
+                "representedSourceEvents": 3,
+                "milliseconds": 269.264404296875
+              },
+              {
+                "revision": 3,
+                "end": 1120256,
+                "representedSourceEvents": 4,
+                "milliseconds": 904.87841796875
+              },
+              {
+                "revision": 4,
+                "end": 1188864,
+                "representedSourceEvents": 4,
+                "milliseconds": 540.076171875
+              },
+              {
+                "revision": 5,
+                "end": 1257472,
+                "representedSourceEvents": 4,
+                "milliseconds": 183.106689453125
+              },
+              {
+                "revision": 6,
+                "end": 1326080,
+                "representedSourceEvents": 4,
+                "milliseconds": 821.460205078125
+              },
+              {
+                "revision": 7,
+                "end": 1394688,
+                "representedSourceEvents": 4,
+                "milliseconds": 286.308349609375
+              },
+              {
+                "revision": 8,
+                "end": 1463296,
+                "representedSourceEvents": 4,
+                "milliseconds": 802.365966796875
+              },
+              {
+                "revision": 9,
+                "end": 1531904,
+                "representedSourceEvents": 4,
+                "milliseconds": 386.704345703125
+              },
+              {
+                "revision": 10,
+                "end": 1600512,
+                "representedSourceEvents": 4,
+                "milliseconds": 1049.67529296875
+              },
+              {
+                "revision": 11,
+                "end": 1669120,
+                "representedSourceEvents": 4,
+                "milliseconds": 669.157958984375
+              },
+              {
+                "revision": 12,
+                "end": 1737728,
+                "representedSourceEvents": 4,
+                "milliseconds": 411.3173828125
+              },
+              {
+                "revision": 13,
+                "end": 1806336,
+                "representedSourceEvents": 4,
+                "milliseconds": 948.7578125
+              },
+              {
+                "revision": 14,
+                "end": 1874944,
+                "representedSourceEvents": 4,
+                "milliseconds": 575.663818359375
+              },
+              {
+                "revision": 15,
+                "end": 1943552,
+                "representedSourceEvents": 4,
+                "milliseconds": 219.06396484375
+              },
+              {
+                "revision": 16,
+                "end": 2010112,
+                "representedSourceEvents": 2,
+                "milliseconds": 103.944580078125
+              },
+              {
+                "revision": 17,
+                "end": 2012160,
+                "representedSourceEvents": 2,
+                "milliseconds": 152.376220703125
+              },
+              {
+                "revision": 18,
+                "end": 2080768,
+                "representedSourceEvents": 4,
+                "milliseconds": 902.555419921875
+              },
+              {
+                "revision": 19,
+                "end": 2149376,
+                "representedSourceEvents": 4,
+                "milliseconds": 553.1630859375
+              },
+              {
+                "revision": 20,
+                "end": 2217984,
+                "representedSourceEvents": 4,
+                "milliseconds": 196.3408203125
+              },
+              {
+                "revision": 21,
+                "end": 2286592,
+                "representedSourceEvents": 4,
+                "milliseconds": 1104.00634765625
+              },
+              {
+                "revision": 22,
+                "end": 2355200,
+                "representedSourceEvents": 4,
+                "milliseconds": 733.99462890625
+              },
+              {
+                "revision": 23,
+                "end": 2423808,
+                "representedSourceEvents": 4,
+                "milliseconds": 372.450439453125
+              },
+              {
+                "revision": 24,
+                "end": 2492416,
+                "representedSourceEvents": 4,
+                "milliseconds": 208.3466796875
+              },
+              {
+                "revision": 25,
+                "end": 2561024,
+                "representedSourceEvents": 4,
+                "milliseconds": 856.23046875
+              },
+              {
+                "revision": 26,
+                "end": 2629632,
+                "representedSourceEvents": 4,
+                "milliseconds": 473.326171875
+              },
+              {
+                "revision": 27,
+                "end": 2696192,
+                "representedSourceEvents": 2,
+                "milliseconds": 84.416748046875
+              },
+              {
+                "revision": 28,
+                "end": 2698240,
+                "representedSourceEvents": 2,
+                "milliseconds": 152.5205078125
+              },
+              {
+                "revision": 29,
+                "end": 2763776,
+                "representedSourceEvents": 1,
+                "milliseconds": 817.5146484375
+              }
+            ],
+            "sourceToCommitMs": {
+              "samples": 28,
+              "min": 84.416748046875,
+              "median": 473.326171875,
+              "p95": 1049.67529296875,
+              "max": 1104.00634765625
+            }
+          }
+        ],
+        "controls": [
+          {
+            "operation": "session_upload_flush",
+            "boundary": {
+              "N": 1075457024,
+              "B": 1075461120,
+              "pendingBytes": 4096
+            },
+            "finiteTargetMs": 40346.751753236604,
+            "pendingTransferReferenceMs": 22.321428571428573,
+            "targetScope": "Conservative frozen 1GiB prefix target plus twice pending bytes at the measured sustainable reference rate; smaller prefixes receive the same declared cap, not a claimed tighter target.",
+            "complete": true,
+            "accepted": true,
+            "operationId": "2231973c-7e8a-46c2-b883-8c3ac949bdf0",
+            "replyMs": 901.68017578125,
+            "completionMs": 14450.08154296875,
+            "receipt": {
+              "capture_boundary": 1075461120,
+              "committed_offset": 1075461120,
+              "pending_tail": false,
+              "revision": 1057,
+              "sha256": "b2e2d51f5de5cc603b5527b289155ce2d7e68ad52dc12daff9a1d779c8bc261a",
+              "source_verified": true
+            },
+            "receiptVerification": {
+              "checked": true,
+              "valid": true,
+              "committedOffset": 1075461120,
+              "revision": 1057,
+              "captureBoundary": 1075461120,
+              "pendingTail": false,
+              "sha256": "b2e2d51f5de5cc603b5527b289155ce2d7e68ad52dc12daff9a1d779c8bc261a",
+              "locallyReconstructedSha256": "b2e2d51f5de5cc603b5527b289155ce2d7e68ad52dc12daff9a1d779c8bc261a"
+            }
+          },
+          {
+            "operation": "session_upload_stop",
+            "boundary": {
+              "N": 1075461120,
+              "B": 1075465216,
+              "pendingBytes": 4096
+            },
+            "finiteTargetMs": 40346.751753236604,
+            "pendingTransferReferenceMs": 22.321428571428573,
+            "targetScope": "Conservative frozen 1GiB prefix target plus twice pending bytes at the measured sustainable reference rate; smaller prefixes receive the same declared cap, not a claimed tighter target.",
+            "complete": true,
+            "accepted": true,
+            "operationId": "5e71d415-19ff-412a-9da2-052e6398972c",
+            "replyMs": 914.066650390625,
+            "completionMs": 14515.755615234375,
+            "receipt": {
+              "capture_boundary": 1075465216,
+              "committed_offset": 1075465216,
+              "pending_tail": false,
+              "revision": 1058,
+              "sha256": "cb129f3be7fbac8d232ecd4a757fbd791e118c8a4e3b71c5590f2af7deab35f8",
+              "source_verified": true
+            },
+            "receiptVerification": {
+              "checked": true,
+              "valid": true,
+              "committedOffset": 1075465216,
+              "revision": 1058,
+              "captureBoundary": 1075465216,
+              "pendingTail": false,
+              "sha256": "cb129f3be7fbac8d232ecd4a757fbd791e118c8a4e3b71c5590f2af7deab35f8",
+              "locallyReconstructedSha256": "cb129f3be7fbac8d232ecd4a757fbd791e118c8a4e3b71c5590f2af7deab35f8"
+            }
+          }
+        ],
+        "seals": [
+          {
+            "complete": true,
+            "milliseconds": 5643.9736328125,
+            "readbackMs": 77.925048828125,
+            "sessionId": "5b84f835-24e4-4ccd-bf7a-b5f1801f766a",
+            "N": 1075465216,
+            "B": 1075465216,
+            "pendingBytes": 0,
+            "expectedRevision": 1058,
+            "finalRevision": 1059,
+            "sha256": "cb129f3be7fbac8d232ecd4a757fbd791e118c8a4e3b71c5590f2af7deab35f8",
+            "locallyReconstructedSha256": "cb129f3be7fbac8d232ecd4a757fbd791e118c8a4e3b71c5590f2af7deab35f8",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          },
+          {
+            "complete": true,
+            "milliseconds": 107.370361328125,
+            "readbackMs": 91.0380859375,
+            "sessionId": "23e13a93-100d-4d60-a8f5-7100a45e1675",
+            "N": 2763776,
+            "B": 2763776,
+            "pendingBytes": 0,
+            "expectedRevision": 28,
+            "finalRevision": 29,
+            "sha256": "803974e6036359b612f48d7c9403b31be8b00bf6721701796e0d6c494f671405",
+            "locallyReconstructedSha256": "803974e6036359b612f48d7c9403b31be8b00bf6721701796e0d6c494f671405",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          },
+          {
+            "complete": true,
+            "milliseconds": 123.408447265625,
+            "readbackMs": 77.80078125,
+            "sessionId": "63a723f1-823a-47be-ba62-b36d67f88118",
+            "N": 2763776,
+            "B": 2763776,
+            "pendingBytes": 0,
+            "expectedRevision": 26,
+            "finalRevision": 27,
+            "sha256": "d03c2dd40eff47a4b83f3708675c3050d8ce7d37ed5c3e6e479073d8e0b19687",
+            "locallyReconstructedSha256": "d03c2dd40eff47a4b83f3708675c3050d8ce7d37ed5c3e6e479073d8e0b19687",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          },
+          {
+            "complete": true,
+            "milliseconds": 107.042724609375,
+            "readbackMs": 92.9921875,
+            "sessionId": "5a7bbc77-435b-49b9-8dd4-6260dd5b6135",
+            "N": 2763776,
+            "B": 2763776,
+            "pendingBytes": 0,
+            "expectedRevision": 29,
+            "finalRevision": 30,
+            "sha256": "f6898c0305bf11006eefe8703ce4b45c58bb612fbeb6abc712a89185b83dc05b",
+            "locallyReconstructedSha256": "f6898c0305bf11006eefe8703ce4b45c58bb612fbeb6abc712a89185b83dc05b",
+            "hashVerified": true,
+            "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+          }
+        ],
+        "ordinaryMcp": {
+          "samples": 81,
+          "failed": 0,
+          "latencyMs": {
+            "samples": 81,
+            "min": 58.314208984375,
+            "median": 82.871826171875,
+            "p95": 99.480224609375,
+            "max": 1350.36669921875
+          }
+        },
+        "database": {
+          "logicalStatementCalls": 89646
+        },
+        "resources": {
+          "samples": 21,
+          "peakRssBytes": 1521475584,
+          "cpuSeconds": 73.78125,
+          "samplingWaitMs": 500,
+          "actualIntervalsMs": {
+            "samples": 20,
+            "min": 3390.97900390625,
+            "median": 4040.93701171875,
+            "p95": 6021.263427734375,
+            "max": 6700.0029296875
+          },
+          "peakObservedPids": 29,
+          "failures": 0,
+          "method": "sampled owned process tree including Chromium descendants and PostgreSQL workers; sampler PowerShell excluded; short-lived helpers may be missed"
+        },
+        "transport": {
+          "downstreamConnections": 7,
+          "upstreamHttpConnections": 2,
+          "reusedUpstreamHttpRequests": 688,
+          "webSocketConnections": 0,
+          "successfulFollowerHttp": 594
+        },
+        "http": {
+          "completed": 689,
+          "completedFollowerRequests": 594,
+          "peakAmongCompletedFollowerRequests": 2,
+          "prefixProofRequests": 451,
+          "rawTranscriptRequests": 0,
+          "proofReplyMs": {
+            "samples": 451,
+            "min": 59.407470703125,
+            "median": 77.19873046875,
+            "p95": 95.623046875,
+            "max": 1744.372802734375
+          }
+        },
+        "limitations": [
+          "Zero browser component evidence; no combined visibility/interaction/resource qualification claim.",
+          "Source markers coalesced into one commit are one independent latency cohort.",
+          "Helpers/CPU are sampled; transient peaks may be missed.",
+          "No five-warm/three-cold or 100-independent-cohort final-matrix claim."
+        ]
+      }
+    ],
+    "baselineReference": {
+      "sha256": "bf8e80a96a52942273617cd41a795b930454cd5d770d6114d0fd5a18ae3d2196",
+      "task": "6bfb2638-0f93-4169-81cf-cbdef3bcc52d"
+    },
+    "scope": "Native/MCP local acceptance components; final combined profile qualification remains separate."
+  }
+}

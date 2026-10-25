@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5TC2P868BBYDBV33JXHKG7A"
+relation = "amends"
+from_record = "R01M5TC2P862SDDBQZWXN0EH71Q"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M5T4SNH18A7RE3C9WRSGZCC0"]
++++
+
+Own native socket interruption and retain physical admission through transport cleanup
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjI4NzE3YTdmNWM5MmM2NWMwNmMxNzdlOTg4ODQxNGJjYmY0ZmE2YmUiLCJpIjoic2hhMjU2OkpFWnZpbU5PVVM2ZjUtQUg3ZEhldTctdDlNWXkwQURzUEhLU0w1ZlFQT1UiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTVUQzJQODY4QkJZREJWMzNKWEhLRzdBIiwib3AiOiJPMDFNNVRDMlA4NjJTRERCUVpXWE4wRUg3MVEiLCJwIjpbIlIwMU01VDRTTkgxOEE3UkUzQzlXUlNHWkNDMCJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1Njo4NmZDd21UaU1qeUVDNjNDdThfLU0zTDhhb0dCS29fbktnd2lobUJQQVFnIiwidCI6MTc5Mjk2MDE5MDcyNiwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

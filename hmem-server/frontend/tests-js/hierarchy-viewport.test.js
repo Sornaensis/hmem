@@ -282,15 +282,20 @@ test('a pending keyboard target is retired on a filter generation change', () =>
 })
 
 
-test('Markdown links participate in keyboard edges while hidden and negative-tabindex controls do not', () => {
+test('Markdown links and native summaries participate in keyboard edges while closed content does not', () => {
   const h = harness(), first = h.row('project:a', 0, 160, 'project:z')
   const link = { tagName: 'A', tabIndex: 0, closest: selector => selector === '[data-hierarchy-key]' ? first : null, getClientRects: () => [{}] }
   const hidden = { tabIndex: 0, closest: () => null, getClientRects: () => [], style: { display: 'none', visibility: 'visible' } }
   const negative = { tabIndex: -1, closest: () => null, getClientRects: () => [{}] }
-  first.querySelectorAll = selector => { assert.ok(selector.includes('a[href]')); return [first.button, link, hidden, negative] }
+  const disclosure = {querySelector:()=>summary,parentElement:{closest:()=>null}}
+  const summary = {tagName:'SUMMARY',tabIndex:0,closest:selector=>selector==='[data-hierarchy-key]'?first:selector==='details:not([open])'?disclosure:null,getClientRects:()=>[{}],contains:node=>node===summary}
+  const closedContent = {tabIndex:0,closest:selector=>selector==='details:not([open])'?disclosure:null,getClientRects:()=>[{}]}
+  first.querySelectorAll = selector => { assert.ok(selector.includes('a[href]'));assert.ok(selector.includes('summary')); return [first.button, link, summary, closedContent, hidden, negative] }
   h.setRows([first]); h.flush()
   let prevented = false
   h.listeners.get('keydown')({ key: 'Tab', target: link, preventDefault() { prevented = true } }); h.flush()
+  assert.equal(prevented, false,'native Tab can reach Metadata before crossing the row edge')
+  h.listeners.get('keydown')({ key: 'Tab', target: summary, preventDefault() { prevented = true } }); h.flush()
   assert.equal(prevented, true); assert.equal(h.sent.at(-1).request, 'project:z')
   h.bridge.dispose()
 })

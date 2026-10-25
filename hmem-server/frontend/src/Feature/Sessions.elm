@@ -1,4 +1,4 @@
-module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskEvidence, viewTaskIcon, taskActive, timestampSources, olderWindow, viewerReset)
+module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskEvidence, viewTaskIcon, viewWorkspaceInspector, taskActive, timestampSources, olderWindow, viewerReset)
 
 import Api
 import ActorAttribution
@@ -724,11 +724,42 @@ viewTaskActive workspace model task =
         key = sectionKey False task
     in
     aside [class "task-session-dock",attribute "aria-label" "Task active agents",attribute "aria-busy" (if fresh then "false" else "true"),stopPropagationOn "click" (Decode.succeed (NoOp,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
-        [div [class "task-session-dock-header"] [strong [] [text "Active agents"],button [class "btn btn-secondary btn-sm",attribute "aria-label" "Close active agents",onClick (SessionsToggleDock task)] [text "✕"]]
-        ,div [class "task-session-picker"] [sessionTree (\session -> compactSessionCard model session "task-session-choice" (button [class "session-summary-link",disabled (not fresh),attribute "aria-pressed" (if model.sessions.selected == Just session.id then "true" else "false"),onClick (SessionsSelectDock task session.id)]) []) sessions]
+        [div [class "task-session-dock-header"] [div [] [span [class "session-pane-label"] [text "Task context"],strong [class "task-session-context-title"] [text (Dict.get task model.tasks |> Maybe.map .title |> Maybe.withDefault "Task")]],button [class "btn btn-secondary btn-sm",attribute "aria-label" "Close active agents",onClick (SessionsToggleDock task)] [text "✕"]]
+        ,div [class "task-session-context-grid"]
+            [div [class "task-session-context-choices"] [h4 [class "session-pane-label"] [text "Active agents"],div [class "task-session-picker"] [sessionTree (\session -> compactSessionCard model session "task-session-choice" (button [class "session-summary-link",disabled (not fresh),attribute "aria-pressed" (if model.sessions.selected == Just session.id then "true" else "false"),onClick (SessionsSelectDock task session.id)]) []) sessions]
         ,if page == Nothing || failed then p [attribute "role" (if failed then "alert" else "status")] [text (if failed then "Active sessions could not be loaded." else "Loading active sessions…"),if failed then button [class "btn btn-secondary btn-sm",onClick SessionsRetry] [text "Retry"] else text ""] else if List.isEmpty sessions then p [class "card-meta"] [text "No active sessions for this task."] else text ""
         ,div [class "sessions-pagination"] [if taskCursor model key /= Nothing then button [class "btn btn-sm",onClick (SessionsTaskPreviousPage key)] [text "Newer sessions"] else text "",page |> Maybe.andThen .nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsTaskNextPage key cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "")]
-        ,model.sessions.selected |> Maybe.map (\id -> div [class "task-session-transcript"] [a [class "btn btn-sm",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"],viewRecords workspace model id]) |> Maybe.withDefault (text "")]
+            ]
+            ,model.sessions.selected |> Maybe.map (\id -> div [class "task-session-transcript"]
+                [a [class "btn btn-sm",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"]
+                ,resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.map (\payload -> case payload of
+                    Delivery.Metadata session -> div [class "task-session-selected-context"] [h4 [] [text (sessionTitle session)],viewAncestorPath session]
+                    _ -> text "") |> Maybe.withDefault (text "")
+                ,viewRecords workspace model id]) |> Maybe.withDefault (div [class "empty-state"] [text "Select an active session to read its recent conversation."])
+            ]]
+
+
+viewWorkspaceInspector : String -> Model -> Html Msg
+viewWorkspaceInspector workspace model =
+    let
+        task = model.sessions.taskPanel |> Maybe.andThen (\id -> Dict.get id model.tasks)
+        focused = model.focus.focusedEntity
+        returnTarget = task |> Maybe.map .id |> Maybe.withDefault (focused |> Maybe.map Tuple.second |> Maybe.withDefault "")
+        session = model.sessions.selected |> Maybe.andThen (\id -> resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.andThen (\payload -> case payload of
+            Delivery.Metadata value -> Just value
+            _ -> Nothing))
+        taskContext current =
+            [span [class "session-pane-label"] [text "Task"],h3 [] [text current.title],p [class "card-meta"] [text (Api.taskStatusToString current.status ++ " · P" ++ String.fromInt current.priority)]]
+    in
+    aside [class "workspace-context-inspector",attribute "aria-label" "Selected task context"]
+        ([h2 [class "session-pane-label"] [text "Inspector"]
+         ,if returnTarget == "" then text "" else button [class "btn btn-secondary btn-sm workspace-inspector-return",onClick (ScrollToEntity returnTarget)] [text "Return to selected card"]]
+            ++ (case task of
+                Just current -> taskContext current ++ [p [class "card-meta"] [text "The active session preview is open in this task's card."],session |> Maybe.map (\value -> div [class "workspace-inspector-session"] [h4 [] [text (sessionTitle value)],viewSessionIdentity value,viewAncestorPath value]) |> Maybe.withDefault (text "")]
+                Nothing -> case focused of
+                    Just ("task",id) -> Dict.get id model.tasks |> Maybe.map taskContext |> Maybe.withDefault [p [class "card-meta"] [text "Task context is loading or unavailable."]]
+                    Just ("project",id) -> Dict.get id model.projects |> Maybe.map (\project -> [span [class "session-pane-label"] [text "Project"],h3 [] [text project.name],p [class "card-meta"] [text (Api.projectStatusToString project.status ++ " · P" ++ String.fromInt project.priority)]]) |> Maybe.withDefault [p [class "card-meta"] [text "Project context is loading or unavailable."]]
+                    _ -> [p [class "empty-state"] [text "Focus a project or task, or open its active agents, to inspect its context."]]))
 
 
 viewTaskEvidence : String -> Model -> String -> Html Msg

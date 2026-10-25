@@ -255,7 +255,7 @@ update msg model =
                 current =
                     Dict.get entryId model.auditLog.expandedEntries |> Maybe.withDefault False
             in
-            ( updateAuditLogModel (\al -> { al | expandedEntries = Dict.insert entryId (not current) al.expandedEntries }) model
+            ( updateAuditLogModel (\al -> { al | expandedEntries = if current then Dict.empty else Dict.singleton entryId True }) model
             , Cmd.none
             )
 
@@ -442,8 +442,9 @@ viewAuditEntries model emptyMessage =
         div [ class "empty-state" ] [ text emptyMessage ]
 
     else
-        div [ class "audit-log-list" ]
+        div [ class "audit-log-list audit-ledger",attribute "aria-label" "Audit ledger" ]
             (List.map (viewAuditLogEntry model) model.auditLog.entries
+                ++ (if List.any (\entry -> Dict.get entry.id model.auditLog.expandedEntries == Just True) model.auditLog.entries then [] else [aside [class "audit-ledger-empty",style "grid-row" ("1 / span " ++ String.fromInt (Basics.max 1 (List.length model.auditLog.entries)))] [h4 [] [text "Event detail"],p [] [text "Select an event to inspect its recorded changes."]]])
                 ++ (if model.auditLog.hasMore && model.auditLog.loading then
                         [ div [ class "loading-indicator" ] [ text "Loading more audit entries..." ] ]
 
@@ -466,8 +467,8 @@ viewAuditLogFilters model =
     in
     div [ class "audit-log-filters" ]
         [ div [ class "audit-filter-group" ]
-            [ label [] [ text "Entity type" ]
-            , select [ onInput (SetAuditFilter "entityType") ]
+            [ label [for "audit-filter-entity"] [ text "Entity type" ]
+            , select [id "audit-filter-entity", onInput (SetAuditFilter "entityType") ]
                 [ option [ value "", selected (filters.entityType == Nothing) ] [ text "All" ]
                 , option [ value "workspace", selected (filters.entityType == Just "workspace") ] [ text "Workspace" ]
                 , option [ value "project", selected (filters.entityType == Just "project") ] [ text "Project" ]
@@ -477,8 +478,8 @@ viewAuditLogFilters model =
                 ]
             ]
         , div [ class "audit-filter-group" ]
-            [ label [] [ text "Action" ]
-            , select [ onInput (SetAuditFilter "action") ]
+            [ label [for "audit-filter-action"] [ text "Action" ]
+            , select [id "audit-filter-action", onInput (SetAuditFilter "action") ]
                 [ option [ value "", selected (filters.action == Nothing) ] [ text "All" ]
                 , option [ value "create", selected (filters.action == Just "create") ] [ text "Create" ]
                 , option [ value "update", selected (filters.action == Just "update") ] [ text "Update" ]
@@ -486,12 +487,12 @@ viewAuditLogFilters model =
                 ]
             ]
         , div [ class "audit-filter-group" ]
-            [ label [] [ text "Since" ]
-            , input [ type_ "date", value (Maybe.withDefault "" filters.since), onInput (SetAuditFilter "since") ] []
+            [ label [for "audit-filter-since"] [ text "Since" ]
+            , input [id "audit-filter-since", type_ "date", value (Maybe.withDefault "" filters.since), onInput (SetAuditFilter "since") ] []
             ]
         , div [ class "audit-filter-group" ]
-            [ label [] [ text "Until" ]
-            , input [ type_ "date", value (Maybe.withDefault "" filters.until), onInput (SetAuditFilter "until") ] []
+            [ label [for "audit-filter-until"] [ text "Until" ]
+            , input [id "audit-filter-until", type_ "date", value (Maybe.withDefault "" filters.until), onInput (SetAuditFilter "until") ] []
             ]
         , button [ class "btn btn-primary", onClick ApplyAuditFilters ] [ text "Apply" ]
         ]
@@ -1405,9 +1406,9 @@ viewAuditLogEntry model entry =
                 , title entry.entityType
                 ]
     in
-    div [ class "audit-entry" ]
+    div [ class ("audit-entry" ++ (if expanded then " audit-entry-selected" else "")) ]
         [ div [ class "audit-entry-row", onClick (ToggleAuditExpand entry.id) ]
-            [ span [ class "audit-expand-icon" ]
+            [ button [ class "audit-expand-icon",type_ "button",attribute "aria-label" ("Inspect audit event " ++ entitySummary),attribute "aria-expanded" (if expanded then "true" else "false"),stopPropagationOn "click" (Decode.succeed (ToggleAuditExpand entry.id,True)) ]
                 [ text
                     (if expanded then
                         "▾"
@@ -1440,8 +1441,9 @@ viewAuditLogEntry model entry =
                     [ text "View diff" ]) |> Maybe.withDefault (text "")
             ]
         , if expanded then
-            div [ class "audit-entry-detail" ]
-                [ viewAuditContext model entry
+            aside [ class "audit-entry-detail",attribute "aria-label" "Selected audit event",style "grid-row" ("1 / span " ++ String.fromInt (Basics.max 1 (List.length model.auditLog.entries))) ]
+                [ h4 [class "audit-detail-heading"] [text "Event detail"]
+                , viewAuditContext model entry
                 , viewAuditDetailSection model.timestamps "Action details" (auditActionDetailItems entry)
                 , viewAuditEntryChangeDetails model.timestamps entry
                 , div [ class "audit-entry-meta" ]

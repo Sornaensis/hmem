@@ -867,6 +867,7 @@ type alias DependencyMutationCorrelation =
 
 type alias CardsModel =
     { viewport : HierarchyViewportState
+    , taskSections : Dict String String
     , expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
     , deleteConfirmation : Maybe DeleteConfirmation
@@ -1462,6 +1463,7 @@ type Msg
     | SessionsToggleDock String
     | SessionsSelectDock String String
     | SessionsInspect String String
+    | SetTaskCardSection String String
     | SessionsPreviousPage
     | SessionsLinkedPage (Maybe String)
     | SessionsShowAllLinkedTasks

@@ -1,5 +1,14 @@
 # Web interface guide
 
+## Workspace context
+
+The workspace header keeps its identity, totals, section navigation and current
+controls available while scrolling. Open **Workspace details** for IDs, repository
+information and dates. The Inspector follows the focused project or task and the
+task whose active agents are open. On narrow screens, the inspector and session
+preview stack with their related content. Use **Return to selected card** in the
+Inspector to return to its project or task in the tree.
+
 ## Timeline and history
 
 Opening a focused project or task keeps your current hierarchy filters and search
@@ -7,7 +16,7 @@ text. Its contextual controls let you adjust these filters while exploring.
 Switching focus or choosing the same focus link keeps those selections and closes
 previous search results. The focused target stays accessible even when excluded
 by the filters; its descendants follow the selected filters.
-Focused controls replace the workspace filters in the sticky header. Global
+Focused controls replace the workspace filters in the persistent header. Global
 search has a separate input and keeps your focused view for return when cleared.
 Closing focus or returning to its Timeline or Audit source restores your saved
 workspace filters. Focused changes never replace those preferences.
@@ -39,6 +48,10 @@ After values. Empty, absent and unavailable values remain distinguishable;
 Markdown is shown as source. Opening the comparison leaves a collapsed Audit
 entry collapsed, and closing returns focus to the original control.
 
+Audit presents events in a ledger. Select an event to read its recorded changes,
+attribution and copyable IDs in the detail pane. Selecting another event keeps
+the current filters. The detail pane stacks below its event on narrow screens.
+
 **Against current** loads a fixed current snapshot for that opening. Switching
 fields reuses it; **Refresh** replaces it. Check the loaded-at time and entity
 update time. Observed changes mark it stale; disconnection makes freshness
@@ -51,8 +64,8 @@ bar selects Projects, Tasks and, in repositories, Observations. Choices are save
 for the signed-in actor and workspace, separately from hierarchy filters. Selecting
 no types pauses searching. Clearing the query hides the options and returns to
 your previous view; your choices apply to the next query. The project hierarchy
-filter moves with the workspace header, while Search all entities scrolls with
-the page. While updating or after a failure, the last completed
+filter and Search all entities remain separate controls in the workspace header.
+While updating or after a failure, the last completed
 results remain labelled with their query; use **Retry search** to try again.
 
 Results use compact previews with copyable IDs. **Jump To** opens the canonical
@@ -128,11 +141,19 @@ Uncheck **Show empty projects** to require a matching task in the subtree;
 ancestors stay visible.
 Workspace group disclosure is saved globally.
 
+Expand task details to switch between **Work**, **Agents**, **Evidence** and
+**History**. Status, priority and description stay above these local sections;
+creation actions remain available below them. Open **Metadata** in the footer
+for dates and the copyable task ID. Project, memory and Observation cards group
+their existing work, links, history and provenance into named sections.
+
 On task cards, **Active Agent →** opens the task’s active agents and transcript
 in a dock inside the card. Choose an agent to inspect its messages and expand
 grouped activity. Close the dock to return the card to its usual width. The dock
 also works with task extras collapsed; saved transcripts and downloads remain
-under **Evidence** in the extras.
+under **Evidence** in the extras. The selected session's lineage is shown beside
+the preview. Ancestors outside the active results are labeled as context, and
+missing or truncated ancestry is stated explicitly.
 
 Live transcripts keep recent agent messages visible while tool activity arrives.
 Expanded activity and tool details stay open during synchronization. Reading

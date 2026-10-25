@@ -754,6 +754,9 @@ route msg model =
         ToggleCardExpand _ ->
             Ok (Feature.Cards.update msg model)
 
+        SetTaskCardSection _ _ ->
+            Ok (Feature.Cards.update msg model)
+
         LoadNavigationBranchPage _ _ _ ->
             Ok (Feature.Cards.update msg model)
 

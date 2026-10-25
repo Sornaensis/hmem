@@ -10,6 +10,7 @@ module Feature.Memory exposing
     )
 
 import Api
+import CardSections
 import Dict
 import Feature.AuditLog
 import Feature.DragDrop
@@ -470,9 +471,9 @@ viewMemoryCard model memory =
                 ]
             , if extrasExpanded then
                 div [ class "card-extras" ]
-                    [ Feature.Editing.viewTagEditor model memory
-                    , viewMemoryLinkedEntities model memory.id linkedProjects linkedTasks
-                    , Feature.AuditLog.viewEntityHistory model "memory" memory.id
+                    [ CardSections.section "Tags" [Feature.Editing.viewTagEditor model memory]
+                    , CardSections.section "Linked entities" [viewMemoryLinkedEntities model memory.id linkedProjects linkedTasks]
+                    , CardSections.section "History" [Feature.AuditLog.viewEntityHistory model "memory" memory.id]
                     ]
 
               else if not (List.isEmpty linkedProjects) || not (List.isEmpty linkedTasks) then
@@ -484,7 +485,7 @@ viewMemoryCard model memory =
               else
                 text ""
             ]
-        , div [ class "card-meta-group" ]
+        , CardSections.metadata
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps memory.createdAt) ]
                 , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps memory.updatedAt) ]

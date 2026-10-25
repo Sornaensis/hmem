@@ -65,13 +65,13 @@ for (const width of [1440, 320]) test(`production ${width}: 200 pages and author
     assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
     assert.ok(await h.page.evaluate(() => {
       const host = document.getElementById('main-content-scroll'), edge = host.getBoundingClientRect()
-      return host.scrollWidth <= host.clientWidth + 1 && ['.workspace-header-title .editable-text', '.sticky-workspace-summary', '.observation-mode-heading', '#observation-query'].every(selector => {
+      return host.scrollWidth <= host.clientWidth + 1 && ['.workspace-header-title .editable-text', '.workspace-summary', '.observation-mode-heading', '#observation-query'].every(selector => {
         const bounds = document.querySelector(selector).getBoundingClientRect()
         return bounds.left >= edge.left - 1 && bounds.right <= edge.right + 1
       })
     }), 'Workspace name, total and applied-filter controls fit their actual scroll host at enlarged text')
     await h.page.locator('#main-content-scroll').hover(); await h.page.mouse.wheel(0, 1200); await paint(h.page)
-    assert.match(await h.page.locator('.sticky-workspace-bar .workspace-observation-total').textContent(), /265 observations/)
+    assert.match(await h.page.locator('.workspace-context-persistent .workspace-observation-total').textContent(), /265 observations/)
     await h.page.locator('#observation-query').fill('absentword'); await h.page.locator('#observation-query').press('Enter'); await h.idle()
     assert.equal(await h.page.locator('.observation-mode-announcement').textContent(), '0 Observations match')
     assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '265 observations')

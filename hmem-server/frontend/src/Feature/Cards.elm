@@ -35,6 +35,7 @@ module Feature.Cards exposing
 import Api
 import Array
 import Char
+import CardSections
 import Dict
 import Feature.DataLoading
 import Feature.AuditLog
@@ -69,6 +70,7 @@ init =
         , rows = Dict.empty, index = Viewport.build 160 Dict.empty [], projection = Nothing
         , top = 0, height = 800, nativePins = Set.empty, target = Nothing, preserveScroll = False, filterExtent = 0
         }
+    , taskSections = Dict.empty
     , expandedCards = Dict.empty
     , collapsedNodes = Dict.empty
     , deleteConfirmation = Nothing
@@ -102,6 +104,11 @@ focusClickIntervalTriggers deltaMs =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        SetTaskCardSection task section ->
+            if Dict.member task model.tasks && List.member section ["work","agents","evidence","history"] then
+                (updateCardsModel (\state -> {state | taskSections = Dict.insert task section state.taskSections}) model,Cmd.none)
+            else (model,Cmd.none)
+
         RegisterFocusClick entityType entityId timeStampMs ->
             let
                 currentClick =
@@ -1021,7 +1028,7 @@ focusClickDecoder entityType entityId =
 
 focusClickTargetIsInteractive : String -> Bool
 focusClickTargetIsInteractive tagName =
-    List.member (String.toUpper tagName) [ "A", "BUTTON", "INPUT", "OPTION", "SELECT", "TEXTAREA" ]
+    List.member (String.toUpper tagName) [ "A", "BUTTON", "INPUT", "OPTION", "SELECT", "SUMMARY", "TEXTAREA" ]
 
 
 joinHuman : List String -> String
@@ -1429,7 +1436,10 @@ refreshingKnownEligibility model task =
 
 viewProjectsTree : String -> Model -> Html Msg
 viewProjectsTree wsId model =
-    viewHierarchyViewport wsId model
+    div [class "workspace-tree-layout"]
+        [ div [class "workspace-tree-content"] [viewHierarchyViewport wsId model]
+        , Feature.Sessions.viewWorkspaceInspector wsId model
+        ]
 
 
 viewProjectsTreeLegacy : String -> Model -> Html Msg
@@ -1829,8 +1839,8 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     ]
                 , if isExpanded model project.id then
                     div [ class "card-extras" ]
-                        [ viewProjectNextTasksPanel projection model project
-                        , Feature.AuditLog.viewEntityHistory model "project" project.id
+                        [ CardSections.section "Work" [viewProjectNextTasksPanel projection model project]
+                        , CardSections.section "History" [Feature.AuditLog.viewEntityHistory model "project" project.id]
                         ]
 
                   else
@@ -1862,7 +1872,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                 ]
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "project"
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "task"
-            , div [ class "card-meta-group" ]
+            , CardSections.metadata
                 [ div [ class "card-meta-row" ]
                     [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps project.createdAt) ]
                     , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps project.updatedAt) ]
@@ -2418,6 +2428,9 @@ viewTaskCardBody descendants projection showProject model task =
 
             extrasExpanded =
                 isExpanded model task.id
+            currentSection = Dict.get task.id model.cards.taskSections |> Maybe.withDefault "work"
+            panel section content =
+                div [class "card-section-panel",id ("task-" ++ task.id ++ "-" ++ section),attribute "role" "region",attribute "aria-labelledby" ("task-" ++ task.id ++ "-" ++ section ++ "-button"),hidden (currentSection /= section)] content
           in
           div [ class "card-body card-expanded" ]
             [ div [ class "card-desc-row" ]
@@ -2434,7 +2447,9 @@ viewTaskCardBody descendants projection showProject model task =
                 ]
             , if extrasExpanded then
                 div [ class "card-extras" ]
-                    [ if showProject then
+                    [ nav [class "card-local-sections",attribute "aria-label" "Task sections"]
+                        (List.map (\(section,label) -> button [class ("card-section-button" ++ (if currentSection == section then " selected" else "")),type_ "button",id ("task-" ++ task.id ++ "-" ++ section ++ "-button"),attribute "aria-controls" ("task-" ++ task.id ++ "-" ++ section),attribute "aria-pressed" (if currentSection == section then "true" else "false"),onClick (SetTaskCardSection task.id section)] [text label]) [("work","Work"),("agents","Agents"),("evidence","Evidence"),("history","History")])
+                    , panel "work" [if showProject then
                         case projectName of
                             Just pname ->
                                 div [ class "card-meta" ] [ text ("Project: " ++ pname) ]
@@ -2444,9 +2459,13 @@ viewTaskCardBody descendants projection showProject model task =
 
                       else
                         text ""
-                    , Feature.Dependencies.viewTaskDependencies model task.id deps
-                    , Feature.Sessions.viewTaskEvidence task.workspaceId model task.id
-                    , Feature.AuditLog.viewEntityHistory model "task" task.id
+                    , Feature.Dependencies.viewTaskDependencies model task.id deps]
+                    , panel "agents"
+                        [ p [class "card-meta"] [text (if Feature.Sessions.taskActive task.workspaceId model task.id then "Active sessions are available for this task." else "No active sessions are currently known for this task.")]
+                        , button [class "btn btn-secondary btn-sm card-agents-open",type_ "button",disabled (not (Feature.Sessions.taskActive task.workspaceId model task.id) && model.sessions.taskPanel /= Just task.id),onClick (SessionsToggleDock task.id)] [text (if model.sessions.taskPanel == Just task.id then "Close active agents" else "Open in card")]
+                        ]
+                    , panel "evidence" [Feature.Sessions.viewTaskEvidence task.workspaceId model task.id]
+                    , panel "history" [Feature.AuditLog.viewEntityHistory model "task" task.id]
                     ]
 
               else
@@ -2468,7 +2487,7 @@ viewTaskCardBody descendants projection showProject model task =
             ]
         , Feature.Sessions.viewTaskActive task.workspaceId model task.id
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
-        , div [ class "card-meta-group" ]
+        , CardSections.metadata
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps task.createdAt) ]
                 , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps task.updatedAt) ]

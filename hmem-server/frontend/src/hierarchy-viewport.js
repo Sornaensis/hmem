@@ -34,9 +34,20 @@ export function installHierarchyViewport(app, options = {}) {
   const sameStamp = (a, b) => a && b && ['workspace', 'epoch', 'generation', 'revision'].every(key => a[key] === b[key])
   const sameLifetime = (a, b) => a && b && ['workspace', 'epoch', 'generation'].every(key => a[key] === b[key])
   const origin = () => container.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+  const visibleTop = scroll => {
+    const host=scroll.getBoundingClientRect()
+    const context=doc.querySelector?.('.workspace-context-persistent')?.getBoundingClientRect?.()
+    if(!context)return host.top
+    return Math.max(host.top,Math.min(host.top+scroll.clientHeight,context?.bottom??host.top))
+  }
   function tabbable(row) {
-    return Array.from(row.querySelectorAll('a[href],button,input,textarea,select,[tabindex],[contenteditable="true"]')).filter(control => {
+    return Array.from(row.querySelectorAll('a[href],button,input,textarea,select,summary,[tabindex],[contenteditable="true"]')).filter(control => {
       if (control.disabled || control.tabIndex < 0 || control.closest('[hidden],[inert]')) return false
+      let closed=control.closest('details:not([open])')
+      while(closed){
+        if(!closed.querySelector(':scope > summary')?.contains(control))return false
+        closed=closed.parentElement?.closest('details:not([open])')
+      }
       const style = win.getComputedStyle(control)
       return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' && control.getClientRects().length > 0
     })
@@ -100,7 +111,8 @@ export function installHierarchyViewport(app, options = {}) {
           if (scroll) {
             const box = element.getBoundingClientRect(), host = scroll.getBoundingClientRect()
             const headerBottom = box.top + Math.min(box.height, 72)
-            if (box.top < host.top + 12) scroll.scrollTop = Math.max(0, scroll.scrollTop + box.top - host.top - 12)
+            const top=visibleTop(scroll)
+            if (box.top < top + 12) scroll.scrollTop = Math.max(0, scroll.scrollTop + box.top - top - 12)
             else if (headerBottom > host.top + scroll.clientHeight - 12) scroll.scrollTop += headerBottom - host.top - scroll.clientHeight + 12
           }
           focusControl(element)
@@ -109,6 +121,12 @@ export function installHierarchyViewport(app, options = {}) {
       }
     }
     const scroll = doc.getElementById('main-content-scroll')
+    if(scroll?.style?.setProperty){
+      const height=scroll.clientHeight+'px'
+      if(scroll.style.getPropertyValue('--workspace-scroll-height')!==height)scroll.style.setProperty('--workspace-scroll-height',height)
+      const offset=Math.max(0,visibleTop(scroll)-scroll.getBoundingClientRect().top)+'px'
+      if(scroll.style.getPropertyValue('--workspace-context-offset')!==offset)scroll.style.setProperty('--workspace-context-offset',offset)
+    }
     if (!next || !scroll) {
       for (const row of observed) observer?.unobserve(row)
       cancelPaint(); observed.clear(); heights.clear(); context = null; container = null
@@ -179,7 +197,8 @@ export function installHierarchyViewport(app, options = {}) {
       if (target) {
         const box = target.getBoundingClientRect(), host = scroller.getBoundingClientRect()
         const headerBottom = box.top + Math.min(box.height, 72)
-        if (box.top < host.top + 12) scroller.scrollTop = Math.max(0, scroller.scrollTop + box.top - host.top - 12)
+        const top=visibleTop(scroller)
+        if (box.top < top + 12) scroller.scrollTop = Math.max(0, scroller.scrollTop + box.top - top - 12)
         else if (headerBottom > host.top + scroller.clientHeight - 12) scroller.scrollTop += headerBottom - host.top - scroller.clientHeight + 12
         if (pendingTarget.focus) {
           const controls = tabbable(target)

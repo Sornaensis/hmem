@@ -11,7 +11,12 @@ when their parent is outside the selected activity/filter page.
 In the Projects tab, **Has Active Session** shows active-session work and the
 ancestor paths needed to reach it, combined with the other hierarchy filters.
 
-Quiet means there has been no heartbeat for 30 seconds; it does not end a session.
+Quiet means there has been no heartbeat for 30 seconds; it does not itself end a
+session. The server automatically closes a session after more than one hour
+without activity when all its linked tasks are done or cancelled. Sessions with
+no task links also qualify. A task in any other status, including a deleted task,
+keeps the session open. Closing preserves the captured evidence and updates the
+green activity lights.
 
 Session cards show the running agent’s declared role, with its complete model,
 provider and reasoning setting in the label’s tooltip. Missing or historical
@@ -42,7 +47,7 @@ appear as compact cards that focus their tasks.
 
 **Download** retrieves the original saved JSONL and checks its final byte count and
 SHA-256 before handing it to the browser. Keep the page open until the download
-starts. Active sessions remain available for exploration; explicit termination
+starts. Active sessions remain available for exploration; termination
 makes their captured prefix downloadable. See the [explorer reference](../reference/session-explorer.md)
 for retrieval limits and browser storage behavior.
 
@@ -98,7 +103,9 @@ checks that exact server prefix atomically; it does not upload, read the file or
 require the uploader. Another authorized editor may perform it. An exact retry
 uses the original pre-seal expected revision.
 
-Stop, flush, EOF, an idle uploader and MCP process loss never seal the session.
+Stop, flush, EOF, an idle uploader and MCP process loss never themselves seal the
+session. The independent server cleanup policy above may later seal its committed
+prefix; the uploader does not own that decision.
 After a restart, declare context again and explicitly start with the same UUID
 and file to verify the complete committed prefix before resuming. Existing
 followers keep their original workspace and identity when MCP context changes.

@@ -137,12 +137,22 @@ resync, refresh demanded metadata/lists through these bounded HTTP routes, then
 read only missing byte windows from the returned canonical cursor. Heartbeat
 freshness uses `last_seen_at` independently of active/terminated lifecycle.
 
-Only explicit `/terminate` seals already committed server bytes. It atomically
+Explicit `/terminate` seals already committed server bytes. It atomically
 compares the expected cursor/revision, final size and server-computed SHA-256.
 It uploads nothing, requires no live uploader, and changes no task status. Live,
 stale, stopped and absent followers use this same endpoint. EOF, caught-up state,
-flush, stop, disconnect and process loss do not terminate a session. Later harness
+flush, stop, disconnect and process loss do not themselves terminate a session. Later harness
 output, including a termination acknowledgment, is outside the sealed prefix.
+
+An independently owned server worker also seals abandoned sessions after more
+than one hour since canonical `last_seen_at`, provided every explicit linked task
+is done or cancelled. Zero links qualifies; unfinished soft-deleted tasks still
+block cleanup. It hashes the full committed prefix outside the exclusive session
+lock and rechecks activity, transcript cursor and locked task statuses before
+sealing. This policy uploads no bytes, changes no task status, and emits the
+ordinary canonical termination invalidations. It runs at startup and periodically;
+there is no client maintenance endpoint. Followers that observe a sealed session
+stop safely under the existing lifecycle contract.
 
 Create, append and terminate support exact retries after an uncertain response.
 Append replay returns the current canonical session, which can be newer than the

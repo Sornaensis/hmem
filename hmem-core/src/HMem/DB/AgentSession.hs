@@ -4,6 +4,8 @@ module HMem.DB.AgentSession
   , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
   , workspaceSessionActivity, projectSessionActivity, listSessionFacets
   , appendSession, heartbeatSession, associateSessionTask, terminateSession, readSessionRange, setRuntimeIdentity
+  , IdleSessionCursor, listIdleSessionCandidates, sealIdleSession, sealIdleSessionWithHook
+  , listIdleSessionCandidatesAt, sealIdleSessionWithClock
   ) where
 
 import Control.Exception (throwIO)
@@ -17,7 +19,7 @@ import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Time (UTCTime)
+import Data.Time (UTCTime, addUTCTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as D
@@ -374,6 +376,89 @@ hashCommitted identifier end offset context
       let next = offset+fromIntegral (BS.length chunks)
           updated = hashUpdate context chunks
       updated `seq` hashCommitted identifier end next updated
+
+-- | A fair, bounded metadata scan. Apply eligibility after this page, rather
+-- than making PostgreSQL walk an unbounded population of old unfinished tasks.
+type IdleSessionCursor = (UTCTime, UUID)
+
+listIdleSessionCandidates :: Pool Hasql.Connection -> Maybe IdleSessionCursor -> IO [AgentSession]
+listIdleSessionCandidates pool = listIdleSessionCandidatesBefore pool Nothing
+
+listIdleSessionCandidatesAt :: Pool Hasql.Connection -> UTCTime -> Maybe IdleSessionCursor -> IO [AgentSession]
+listIdleSessionCandidatesAt pool now = listIdleSessionCandidatesBefore pool (Just (addUTCTime (-3600) now))
+
+listIdleSessionCandidatesBefore :: Pool Hasql.Connection -> Maybe UTCTime -> Maybe IdleSessionCursor -> IO [AgentSession]
+listIdleSessionCandidatesBefore pool cutoff cursor = runSession pool $ S.statement (cutoff,cursor) $
+  St.Statement
+    "SELECT to_jsonb(s) FROM sessions s WHERE state='active' AND last_seen_at < coalesce($1,statement_timestamp()-interval '1 hour') AND ($2::timestamptz IS NULL OR (last_seen_at,id)>($2,$3)) ORDER BY last_seen_at,id LIMIT 32"
+    (optional fst E.timestamptz <> optional (fmap fst . snd) E.timestamptz <> optional (fmap snd . snd) E.uuid)
+    (D.rowList jsonRow) True
+
+sealIdleSession :: Pool Hasql.Connection -> AgentSession -> IO (Maybe AgentSession)
+sealIdleSession pool = sealIdleSessionWithHook pool (pure ())
+
+-- | Hash immutable committed chunks without a session lock or a retained pool
+-- connection. The hook is also useful to synchronize a concurrent writer in
+-- tests: activity during hashing must survive the final locked recheck.
+sealIdleSessionWithHook :: Pool Hasql.Connection -> IO () -> AgentSession -> IO (Maybe AgentSession)
+sealIdleSessionWithHook pool = sealIdleSessionWithCutoff pool Nothing
+
+-- | The supplied clock makes strict age boundaries deterministic without
+-- weakening evidence guards or moving persisted activity backwards in tests.
+sealIdleSessionWithClock :: Pool Hasql.Connection -> IO UTCTime -> IO () -> AgentSession -> IO (Maybe AgentSession)
+sealIdleSessionWithClock pool clock = sealIdleSessionWithCutoff pool (Just (addUTCTime (-3600) <$> clock))
+
+sealIdleSessionWithCutoff :: Pool Hasql.Connection -> Maybe (IO UTCTime) -> IO () -> AgentSession -> IO (Maybe AgentSession)
+sealIdleSessionWithCutoff pool cutoffClock duringHash snapshot = do
+  cutoff <- sequence cutoffClock
+  eligible <- runSession pool $ S.statement (snapshot.id,cutoff) eligibleStatement
+  if not eligible || snapshot.state /= Active then pure Nothing else do
+    digest <- hashPrefix 0 (hashInit :: Context SHA256)
+    finalCutoff <- sequence cutoffClock
+    runTransaction pool $ do
+      current <- S.statement (snapshot.workspaceId,snapshot.id) $ St.Statement
+        "SELECT to_jsonb(s) FROM sessions s WHERE workspace_id=$1 AND id=$2 FOR UPDATE"
+        pairParams (D.rowMaybe (jsonRow :: D.Row AgentSession)) True
+      case current of
+        Just row | row.state == Active && row.lastSeenAt == snapshot.lastSeenAt
+          && row.committedBytes == snapshot.committedBytes && row.revision == snapshot.revision -> do
+            -- FOR UPDATE above conflicts with the FK KEY SHARE lock taken by
+            -- a new association. Lock every actual linked task, including soft
+            -- deleted rows, to serialize status changes with this decision.
+            terminal <- S.statement row.id $ St.Statement
+              "SELECT coalesce(bool_and(status IN ('done','cancelled')),true) FROM (SELECT t.status FROM tasks t JOIN task_sessions ts ON ts.task_id=t.id WHERE ts.session_id=$1 ORDER BY t.id FOR SHARE OF t) linked"
+              (E.param (E.nonNullable E.uuid)) (D.singleRow (D.column (D.nonNullable D.bool))) True
+            idle <- S.statement (row.id,finalCutoff) eligibleStatement
+            if idle && terminal then
+              Just <$> S.statement (row.workspaceId,row.id,digest) sealStatement
+            else pure Nothing
+        _ -> pure Nothing
+  where
+    hashPrefix offset context
+      | offset == snapshot.committedBytes = pure (T.pack (show (hashFinalize context :: Digest SHA256)))
+      | otherwise = do
+          bytes <- runSession pool $ S.statement (snapshot.id,offset) $ St.Statement
+            "SELECT data FROM session_chunks WHERE session_id=$1 AND start_offset=$2"
+            (param fst E.uuid <> param snd E.int8)
+            (D.singleRow (D.column (D.nonNullable D.bytea))) True
+          let next = offset + fromIntegral (BS.length bytes)
+              updated = hashUpdate context bytes
+          if BS.null bytes || BS.length bytes > maxSessionChunkBytes || next > snapshot.committedBytes
+            then invalid "Committed session chunk does not match the verified prefix"
+            else do
+              duringHash
+              updated `seq` hashPrefix next updated
+
+eligibleStatement :: St.Statement (UUID,Maybe UTCTime) Bool
+eligibleStatement = St.Statement
+  "SELECT EXISTS(SELECT 1 FROM sessions s WHERE s.id=$1 AND s.state='active' AND s.last_seen_at < coalesce($2,clock_timestamp()-interval '1 hour') AND NOT EXISTS(SELECT 1 FROM task_sessions ts JOIN tasks t ON t.id=ts.task_id WHERE ts.session_id=s.id AND t.status NOT IN ('done','cancelled')))"
+  (param fst E.uuid <> optional snd E.timestamptz) (D.singleRow (D.column (D.nonNullable D.bool))) True
+
+sealStatement :: St.Statement (UUID,UUID,Text) AgentSession
+sealStatement = St.Statement
+  "UPDATE sessions s SET state='terminated',terminated_at=clock_timestamp(),final_bytes=committed_bytes,final_sha256=$3,revision=revision+1 WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s)"
+  (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.text)
+  (D.singleRow jsonRow) True
 
 -- Boolean projections only: no transcript or descendant metadata leaves SQL.
 workspaceSessionActivity :: Pool Hasql.Connection -> [UUID] -> IO [(UUID,Bool)]

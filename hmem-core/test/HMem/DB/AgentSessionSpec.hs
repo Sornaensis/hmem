@@ -8,16 +8,19 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.Pool (destroyAllResources)
+import Data.IORef (newIORef, atomicModifyIORef')
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
+import Data.Time (addUTCTime)
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Session qualified as S
 import Hasql.Statement qualified as St
 import System.Directory (copyFile, createDirectory, listDirectory)
 import System.FilePath ((</>))
+import System.Timeout (timeout)
 import Test.Hspec
 
 import HMem.AgentSession
@@ -34,6 +37,115 @@ import HMem.Types qualified as Types
 spec :: Spec
 spec = do
   around withTestEnv $ describe "Agent sessions" $ do
+    it "automatically seals only strictly idle terminal-task sessions with the canonical empty receipt" $ \env -> do
+      (workspace,task,row) <- reaperFixture env
+      execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+      let boundary = addUTCTime 3600 row.lastSeenAt
+      listIdleSessionCandidatesAt env.pool boundary Nothing `shouldReturn` []
+      sealIdleSessionWithClock env.pool (pure boundary) (pure ()) row `shouldReturn` Nothing
+      let after = addUTCTime 0.001 boundary
+      candidates <- listIdleSessionCandidatesAt env.pool after Nothing
+      map (.id) candidates `shouldBe` [row.id]
+      Just sealed <- sealIdleSessionWithClock env.pool (pure after) (pure ()) row
+      sealed.state `shouldBe` Terminated
+      sealed.finalBytes `shouldBe` Just 0
+      sealed.finalSha256 `shouldBe` Just (sessionSha256 "")
+      sealed.lastSeenAt `shouldBe` row.lastSeenAt
+      sealIdleSessionWithClock env.pool (pure after) (pure ()) row `shouldReturn` Nothing
+      workspaceSessionActivity env.pool [workspace] `shouldReturn` [(workspace,False)]
+      getSession env.pool workspace row.id `shouldReturn` Just sealed
+
+    it "uses last activity rather than creation age and keeps unfinished deleted task links conservative" $ \env -> do
+      (workspace,task,row) <- reaperFixture env
+      second <- makeTask env workspace "Unfinished deleted task"
+      associateSessionTask env.pool workspace row.id second.id
+      execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'; UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid second.id<>"'")
+      let clock = pure (addUTCTime 7200 row.lastSeenAt)
+      sealIdleSessionWithClock env.pool clock (pure ()) row `shouldReturn` Nothing
+      execute env ("UPDATE tasks SET status='cancelled' WHERE id='"<>uuid second.id<>"'")
+      Just sealed <- sealIdleSessionWithClock env.pool clock (pure ()) row
+      sealed.state `shouldBe` Terminated
+      -- An old creation time cannot make recent heartbeat activity eligible.
+      identifier <- UUID.nextRandom
+      initial <- makeTask env workspace "Recent old session task"
+      runTransaction env.pool $ S.sql ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid identifier<>"','"<>uuid workspace<>"','jsonl','Recently active old session',clock_timestamp()-interval '2 days',clock_timestamp()); INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace<>"','"<>uuid identifier<>"','"<>uuid initial.id<>"')")
+      execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid initial.id<>"'")
+      Just recent <- getSession env.pool workspace identifier
+      sealIdleSession env.pool recent `shouldReturn` Nothing
+
+    it "hashes every immutable chunk and preserves the latest independent runtime identity" $ \env -> do
+      (workspace,task,initial) <- reaperFixture env
+      first <- append env workspace initial "{\"one\":1}\n" False
+      second <- append env workspace first.session "{\"two\":2}\r\n" False
+      execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+      once <- newIORef False
+      let row = second.session
+          during = do
+            seen <- atomicModifyIORef' once (\old -> (True,old))
+            if seen then pure () else do
+              _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "actual-model" Nothing Nothing (Just "Developer"))))
+              pure ()
+      result <- timeout 5000000 (sealIdleSessionWithClock env.pool (pure (addUTCTime 7200 row.lastSeenAt)) during row)
+      Just (Just sealed) <- pure result
+      sealed.finalSha256 `shouldBe` Just (sessionSha256 "{\"one\":1}\n{\"two\":2}\r\n")
+      sealed.finalBytes `shouldBe` Just 21
+      sealed.runtimeRevision `shouldBe` 1
+      (fmap (.role) sealed.runtimeIdentity) `shouldBe` Just (Just "Developer")
+      allBytes env workspace row.id `shouldReturn` "{\"one\":1}\n{\"two\":2}\r\n"
+
+    it "does not seal after heartbeat, append, new task link or task reopening during hashing" $ \env -> do
+      forM_ ["heartbeat","append","link","reopen"] $ \operation -> do
+        (workspace,task,initial) <- reaperFixture env
+        uploaded <- append env workspace initial "{}\n" False
+        execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+        let row = uploaded.session
+            during = case operation of
+              "heartbeat" -> threadDelay 1000 >> heartbeatSession env.pool workspace row.id >> pure ()
+              "append" -> append env workspace row "{\"later\":true}\n" False >> pure ()
+              "link" -> makeTask env workspace "New linked running task" >>= \new -> associateSessionTask env.pool workspace row.id new.id
+              _ -> execute env ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid task.id<>"'")
+        timeout 5000000 (sealIdleSessionWithClock env.pool (pure (addUTCTime 7200 row.lastSeenAt)) during row) `shouldReturn` Just Nothing
+        Just current <- getSession env.pool workspace row.id
+        current.state `shouldBe` Active
+
+    it "leaves a concurrently explicitly sealed receipt unchanged" $ \env -> do
+      (workspace,task,initial) <- reaperFixture env
+      uploaded <- append env workspace initial "{}\n" False
+      execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+      let row = uploaded.session
+          during = terminateSession env.pool workspace row.id (receipt row "{}\n") >> pure ()
+      timeout 5000000 (sealIdleSessionWithClock env.pool (pure (addUTCTime 7200 row.lastSeenAt)) during row) `shouldReturn` Just Nothing
+      Just sealed <- getSession env.pool workspace row.id
+      sealed.finalSha256 `shouldBe` Just (sessionSha256 "{}\n")
+      sealed.revision `shouldBe` row.revision + 1
+
+    it "installs the idle-session scan index and ledger atomically without rewriting populated sessions" $ \_ ->
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir = sandbox.sandboxRoot </> "before-v047"
+              upgradeDir = sandbox.sandboxRoot </> "only-v047"
+              filename = "V047__idle_session_scan.sql"
+              env = TestEnv pool sandbox db
+          createDirectory beforeDir
+          createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V047" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
+          (workspace,_,row) <- reaperFixture env
+          bracket_
+            (execute env "CREATE FUNCTION idle_index_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=47 THEN RAISE EXCEPTION 'injected idle index ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER idle_index_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION idle_index_ledger_failure()")
+            (execute env "DROP TRIGGER idle_index_ledger_failure ON schema_migrations; DROP FUNCTION idle_index_ledger_failure()") $ do
+              Migration.runMigrations pool upgradeDir >>= (\result -> result.failed `shouldSatisfy` (/=Nothing))
+              boolean env "SELECT to_regclass('sessions_active_last_seen_id_idx') IS NULL AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=47)" `shouldReturn` True
+          upgraded <- Migration.runMigrations pool upgradeDir
+          upgraded.failed `shouldBe` Nothing
+          upgraded.applied `shouldBe` [filename]
+          boolean env "SELECT indisvalid AND indpred IS NOT NULL FROM pg_index WHERE indexrelid='sessions_active_last_seen_id_idx'::regclass" `shouldReturn` True
+          getSession pool workspace row.id `shouldReturn` Just row
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
+
     it "creates the initial running-task link atomically and preserves later completion, retry and sealing" $ \env -> do
       workspace <- createTestWorkspace env "initial-session-task"
       task <- makeTask env workspace.id "Initial running task"
@@ -189,7 +301,9 @@ spec = do
           workspace <- createTestWorkspace env "legacy-orphan-session-upgrade"
           active <- UUID.nextRandom
           sealed <- UUID.nextRandom
+          abandoned <- UUID.nextRandom
           forM_ [active,sealed] $ \identifier -> execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace.id<>"','jsonl','Legacy orphan capture')")
+          execute env ("INSERT INTO sessions(id,workspace_id,format_label,title,last_seen_at) VALUES ('"<>uuid abandoned<>"','"<>uuid workspace.id<>"','jsonl','Idle legacy orphan',clock_timestamp()-interval '2 hours')")
           execute env ("UPDATE sessions SET state='terminated',terminated_at=clock_timestamp(),final_bytes=0,final_sha256='"<>TE.encodeUtf8 (sessionSha256 "")<>"',revision=1 WHERE id='"<>uuid sealed<>"'")
           execute env "CREATE TABLE pre_v045_sessions AS SELECT * FROM sessions; CREATE TABLE pre_v045_counts AS SELECT (SELECT count(*) FROM audit_log) AS audits,(SELECT count(*) FROM change_stream_outbox) AS events"
           bracket_
@@ -204,6 +318,10 @@ spec = do
           Just legacy <- getSession pool workspace.id active
           createSession pool (CreateSession active workspace.id "jsonl" "Legacy orphan capture" Nothing Nothing workspace.id) `shouldReturn` legacy
           terminateSession pool workspace.id active (receipt legacy "") >>= (\row -> row.state `shouldBe` Terminated)
+          Just oldOrphan <- getSession pool workspace.id abandoned
+          Just savedOrphan <- sealIdleSession pool oldOrphan
+          savedOrphan.finalSha256 `shouldBe` Just (sessionSha256 "")
+          savedOrphan.state `shouldBe` Terminated
           newer <- UUID.nextRandom
           rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid newer<>"','"<>uuid workspace.id<>"','jsonl','Rejected orphan capture')")
           Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
@@ -908,6 +1026,14 @@ spec = do
           _ <- Migration.runMigrations pool source
           row <- freshIn env workspace.id
           associateSessionTask pool workspace.id row.id task.id
+
+reaperFixture :: TestEnv -> IO (UUID,Types.Task,AgentSession)
+reaperFixture env = do
+  workspace <- createTestWorkspace env "idle-session-reaper"
+  task <- makeTask env workspace.id "Session reaper fixture"
+  identifier <- UUID.nextRandom
+  row <- createSession env.pool (CreateSession identifier workspace.id "jsonl" "Idle task capture" Nothing Nothing task.id)
+  pure (workspace.id,task,row)
 
 fresh :: TestEnv -> IO (UUID,AgentSession)
 fresh env = do

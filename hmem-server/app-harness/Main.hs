@@ -39,6 +39,7 @@ import HMem.Server.App (mkAppWithChangeStream)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
+import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
 import HMem.Server.Logging (jsonRequestLogger, logInfo, logWarn, newLogger, parseLogLevel)
 import HMem.Server.WebSocket (newWSState)
 
@@ -210,7 +211,7 @@ runHarness opts = withSandboxedTestEnv $ \env -> do
                       _ <- tryPutMVar inputDone ()
                       pure ()
 
-            (bracket
+            (bracket (startSessionReaper env.pool) stopSessionReaper $ \_ -> bracket
                 (forkIO $ try (runSettings settings app) >>= putMVar serverDone)
                 killThread
                 (\serverThread ->

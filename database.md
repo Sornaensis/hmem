@@ -396,3 +396,11 @@ V046 adds an optional stored runtime `role` (1–128 trimmed UTF-8 bytes) and a
 prospective guard requiring it on new nonnull runtime declarations. Existing
 roleless values and evidence are preserved; unrelated lifecycle writes and
 resume remain valid. See the [schema reference](docs/reference/schema.md#session-runtime-roles-v046).
+
+V047 adds the partial active-session `(last_seen_at, id)` index for bounded,
+server-owned cleanup. Sessions idle for more than one hour are sealed only when
+every explicit linked task is done or cancelled (including soft-deleted rows);
+legacy sessions with no links also qualify. The server hashes the committed
+prefix without an exclusive session lock, then rechecks unchanged activity,
+transcript cursor and terminal task statuses under locks before storing the
+immutable receipt. See the [schema reference](docs/reference/schema.md#idle-session-cleanup-v047).

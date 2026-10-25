@@ -86,6 +86,16 @@ Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.
 The active-state and Live/Quiet activity predicates apply before pagination; Live
 is the default. Saved sessions remain reachable through task Evidence links.
+The server reconciles abandoned sessions at startup and periodically. An active
+session qualifies after strictly more than one hour since `last_seen_at` when
+all explicit task links have status `done` or `cancelled`; no links qualifies.
+Unfinished soft-deleted tasks still block cleanup. Creation age and ancestry do
+not affect this policy. Full committed-prefix hashing uses one pooled chunk at
+a time, outside the exclusive session lock. A final transaction locks the
+session and its linked tasks, and rechecks activity and transcript cursors before
+sealing. Heartbeat, append or task changes during hashing prevent a stale seal.
+The ordinary canonical termination event refreshes active-session indicators;
+original bytes, runtime identity, task status and evidence links are preserved.
 Runtime labels show the explicit `runtime_identity.role`, with complete model,
 provider and reasoning values in accessible tooltips. Legacy roleless metadata
 shows `Unknown role`; creator attribution is retained in storage and hidden from

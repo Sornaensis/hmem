@@ -64,6 +64,7 @@ data-files:
     migrations/V044__session_runtime_identity.sql
     migrations/V045__session_initial_task.sql
     migrations/V046__session_runtime_roles.sql
+    migrations/V047__idle_session_scan.sql
 
 library
   exposed-modules:
@@ -93,6 +94,7 @@ library
       HMem.Server.ObservationDiscovery
       HMem.Server.OpenAPI
       HMem.Server.SessionArchive
+      HMem.Server.SessionReaper
       HMem.Server.Snapshot
       HMem.Server.Static
       HMem.Server.WebSocket
@@ -493,6 +495,7 @@ test-suite hmem-server-test
       HMem.Server.LogRotationSpec
       HMem.Server.ObservationDiscoverySpec
       HMem.Server.PgvectorEmbeddingWorkflowSpec
+      HMem.Server.SessionReaperSpec
       HMem.Server.TestHarness
       SpecHook
       Paths_hmem_server

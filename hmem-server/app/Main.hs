@@ -6,7 +6,7 @@ import Data.Text qualified as T
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (AsyncCancelled, asyncWithUnmask, cancel, poll, waitCatch)
 import Control.Concurrent.STM (atomically, newTVarIO, readTVar, writeTVar)
-import Control.Exception (SomeException, catch, finally, fromException, mask, onException, throwIO, try)
+import Control.Exception (SomeException, bracket, catch, finally, fromException, mask, onException, throwIO, try)
 import Control.Monad (void, when)
 import Data.Pool (Pool, destroyAllResources)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -34,6 +34,7 @@ import HMem.Server.AccessTracker (newAccessTracker, flushNow)
 import HMem.Server.App (mkAppWithChangeStream, mkAppWithDiscovery)
 import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscoveryProvider)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
+import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
 import HMem.Server.Embedding.ManagedTei
   ( defaultManagedTeiConfig, defaultManagedTeiDeps, managedTeiEventText
   , ManagedTeiActive(..), ManagedTeiActivationFailure(..), ManagedTeiHooks(..), startManagedTeiWith
@@ -176,7 +177,7 @@ runDevMode opts = do
       Nothing -> pure ()
 
     app <- mkAppWithChangeStream Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
-    runSettings settings app `finally` shutdown
+    bracket (startSessionReaper pool) stopSessionReaper (\_ -> runSettings settings app) `finally` shutdown
 
 -- | Seed some sample data for dev mode so the UI has something to show.
 seedDevData :: Pool Hasql.Connection -> IO ()
@@ -458,5 +459,5 @@ runNormalMode opts = do
           [ mapM_ stopManagedTei managed
           , mapM_ (\task -> cancel task >> void (waitCatch task)) external
           ]
-    withPreservingCleanup (restore runWarp) shutdownVectors
+    withPreservingCleanup (restore (bracket (startSessionReaper pool) stopSessionReaper (\_ -> runWarp))) shutdownVectors
     ) shutdownDatabase

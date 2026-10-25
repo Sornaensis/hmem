@@ -245,3 +245,28 @@ MCP and frontend clients. Older servers reject the new JSON field; after V046,
 new model-only declarations are refused. Existing unknown/roleless sessions keep
 their lifecycle and receipts during the coordinated upgrade.
 
+## Idle session cleanup (V047)
+
+`V047__idle_session_scan.sql` adds a partial index on `(last_seen_at, id)` for
+`state = 'active'`. The index and version-47 ledger entry commit atomically;
+existing sessions, bytes and receipts are not rewritten. Repeated migration is
+a no-op through the migration ledger.
+
+A separate server worker scans at most 32 old active metadata rows per batch,
+then checks their task links. Its keyset advances past unfinished or failed
+candidates and wraps after an empty page. It runs immediately on startup and
+once per minute thereafter, hashes one candidate at a time in chunks no larger
+than 1 MiB, and releases each read connection before the next chunk. Shutdown
+cancels and joins this worker before destroying its pool.
+
+Cleanup requires strictly more than one hour since canonical `last_seen_at` and
+no explicitly linked task outside `done` or `cancelled`. Zero links qualifies;
+soft-deleted unfinished linked rows block cleanup. A final transaction locks the
+session with `FOR UPDATE`, locks linked tasks in ID order with `FOR SHARE`, and
+rechecks the snapshot activity, committed bytes and transcript revision before
+sealing the full verified prefix. New activity, associations or reopened tasks
+during hashing cannot be sealed using the stale eligibility check. Runtime-only
+changes preserve the latest declaration. Existing audit and canonical outbox
+triggers attribute this server operation to absent/system context and publish
+the ordinary termination invalidations. Manual termination remains unchanged.
+

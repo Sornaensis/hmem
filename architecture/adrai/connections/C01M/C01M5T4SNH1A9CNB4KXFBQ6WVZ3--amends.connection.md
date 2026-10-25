@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5T4SNH1A9CNB4KXFBQ6WVZ3"
+relation = "amends"
+from_record = "R01M5T4SNH18A7RE3C9WRSGZCC0"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M39RTP9BBTXR3Y4ZQQY48BRK"]
++++
+
+Bound dispatch work and preserve replay recovery across fair yields
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjJlMjdmODljZWZiYzA2NGI2MmFmYTUyOTBkNjA2OGZiNzM0ZjAyZGYiLCJpIjoic2hhMjU2OnVxQnQxZ2hDNkp6dFY4VTdvR2t0bllrdmlfUzZqdURiYTJOOVZQeGc4NVUiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTVUNFNOSDFBOUNOQjRLWEZCUTZXVlozIiwib3AiOiJPMDFNNVQ0U05IMThBN1JFM0M5V1JTR1pDQzAiLCJwIjpbIlIwMU0zOVJUUDlCQlRYUjNZNFpRUVk0OEJSSyJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpyQnhSMkZydWVLSGJsMWhfcENhWlVYZ1pzbjJKSmRNWm0xdVdJTm5zQzBjIiwidCI6MTc5Mjk1MjU1NTA0MSwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

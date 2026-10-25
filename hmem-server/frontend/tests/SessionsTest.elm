@@ -352,7 +352,26 @@ metadataPresentationTests =
         payload target state = Dict.get (Delivery.key workspace target) state.resources |> Maybe.andThen .data
         requestFor target requests = List.filter (.target >> (==) target) requests |> List.head
     in
-    [ test "continuous output admits a canonical read prefix while retaining newer refresh demand" <| withMetadata (\session ->
+    [ test "membership read barriers reject old responses without retiring download authority" <| withMetadata (\session ->
+        let
+            (busy,requests)=Delivery.demand workspace detailTarget Delivery.init |> Delivery.admit workspace
+            refreshed=Delivery.invalidateReadProof workspace busy
+            rejected=requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata session)) refreshed) |> Maybe.withDefault refreshed
+        in Expect.equal {authority=busy.retirement,proof=True,occupied=1,rejected=Nothing,released=0}
+            {authority=refreshed.retirement,proof=refreshed.proofRetirement>busy.proofRetirement,occupied=Dict.size refreshed.physical,rejected=payload detailTarget rejected,released=Dict.size rejected.physical})
+    , test "membership preserves a task archive while resync and permission revocation still retire it" <| \_ ->
+        let
+            initial=Sessions.reconcile (dockFixture,Cmd.none) |> Tuple.first
+            state=initial.sessions
+            operation=SessionArchiveOperation 1 "one" "Task evidence" "picking"
+            picking={initial | sessions={state | archive=Just operation,nextOperation=2}}
+            membership=Sessions.reconcile ({picking | sessionDelivery=Delivery.invalidateReadProof workspace picking.sessionDelivery},Cmd.none) |> Tuple.first
+            resync=Sessions.reconcile ({picking | sessionDelivery=Delivery.invalidateWorkspace workspace picking.sessionDelivery},Cmd.none) |> Tuple.first
+            context=initial.sessionContext |> Maybe.map (\value -> {value | globalPermissions={createWorkspace=False,superadmin=False},workspace=Maybe.map (\grant -> {grant | canRead=False,canEdit=False}) value.workspace})
+            revoked=Sessions.reconcile ({picking | sessionContext=context},Cmd.none) |> Tuple.first
+        in Expect.equal {kept=Just operation,stable=True,resync=Nothing,revoked=Nothing}
+            {kept=membership.sessions.archive,stable=membership.sessions.downloadStamp==state.downloadStamp,resync=resync.sessions.archive,revoked=revoked.sessions.archive}
+    , test "continuous output admits a canonical read prefix while retaining newer refresh demand" <| withMetadata (\session ->
         let
             initial=Delivery.demand workspace windowTarget Delivery.init
             (busy,requests)=Delivery.admit workspace initial

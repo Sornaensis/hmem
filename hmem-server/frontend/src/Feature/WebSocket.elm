@@ -113,11 +113,11 @@ updateRaw msg model =
                 Err (Http.BadStatus 409) ->
                     case request |> Maybe.map .target of
                         Just (SessionDelivery.SessionBytes session _ _) ->
-                            ( { released | sessionDelivery = SessionDelivery.invalidateWorkspace (Maybe.withDefault "" guard.routeWorkspace) released.sessionDelivery }, Cmd.none )
+                            ( { released | sessionDelivery = SessionDelivery.invalidateReadProof (Maybe.withDefault "" guard.routeWorkspace) released.sessionDelivery }, Cmd.none )
                         Just (SessionDelivery.SessionWindow session _ _ _) ->
                             -- A live range may race sealing. Re-establish canonical
                             -- read proof while preserving the presentation owner.
-                            ( { released | sessionDelivery = SessionDelivery.invalidateWorkspace (Maybe.withDefault "" guard.routeWorkspace) released.sessionDelivery }, Cmd.none )
+                            ( { released | sessionDelivery = SessionDelivery.invalidateReadProof (Maybe.withDefault "" guard.routeWorkspace) released.sessionDelivery }, Cmd.none )
                         _ -> ( released, Cmd.none )
                 _ -> ( released, Cmd.none )
 
@@ -1133,7 +1133,7 @@ applyActions scope actions model =
                 let state = refreshed.sessions in
                 refreshed.selectedWorkspaceId |> Maybe.map (\ws -> SessionActivity.invalidateWorkspace ws {refreshed
                     | sessions = {state | activityDirty = True}
-                    , sessionDelivery = SessionDelivery.invalidateWorkspace ws refreshed.sessionDelivery }) |> Maybe.withDefault refreshed
+                    , sessionDelivery = SessionDelivery.invalidateReadProof ws refreshed.sessionDelivery }) |> Maybe.withDefault refreshed
             else refreshed
     in ( withActivity, Cmd.batch [ actionCmd, readinessCmd ] )
 
@@ -1158,7 +1158,7 @@ applyAction scope action ( model, accumulated ) =
         ChangeStream.RefreshSessionActivityMembership workspace ->
             if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
                 let state = model.sessions in
-                ( SessionActivity.invalidateWorkspace workspace {model | sessionDelivery = SessionDelivery.invalidateWorkspace workspace model.sessionDelivery, sessions = {state | activityDirty = True}}, accumulated )
+                ( SessionActivity.invalidateWorkspace workspace {model | sessionDelivery = SessionDelivery.invalidateReadProof workspace model.sessionDelivery, sessions = {state | activityDirty = True}}, accumulated )
             else (model, accumulated)
 
         ChangeStream.RefreshSessionActivity workspace ->
@@ -1166,14 +1166,14 @@ applyAction scope action ( model, accumulated ) =
 
         ChangeStream.RefreshTaskSessions workspace task ->
             if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
-                ( { model | sessionDelivery = SessionDelivery.invalidateWorkspace workspace model.sessionDelivery }, accumulated )
+                ( { model | sessionDelivery = SessionDelivery.invalidateReadProof workspace model.sessionDelivery }, accumulated )
             else ( model, accumulated )
 
         ChangeStream.RefetchEntity entity identity ->
             let
                 withFacets =
                     if List.member entity ["project","task"] then
-                        model.selectedWorkspaceId |> Maybe.map (\ws -> SessionActivity.invalidateWorkspace ws {model | sessionDelivery = SessionDelivery.invalidateWorkspace ws model.sessionDelivery}) |> Maybe.withDefault model
+                        model.selectedWorkspaceId |> Maybe.map (\ws -> SessionActivity.invalidateWorkspace ws {model | sessionDelivery = SessionDelivery.invalidateReadProof ws model.sessionDelivery}) |> Maybe.withDefault model
                     else
                         model
             in
@@ -1187,7 +1187,7 @@ applyAction scope action ( model, accumulated ) =
                 let
                     withFacets =
                         if List.member entity ["project","task"] && scopeMatchesSelectedWorkspace scope model then
-                            model.selectedWorkspaceId |> Maybe.map (\ws -> SessionActivity.invalidateWorkspace ws {model | sessionDelivery = SessionDelivery.invalidateWorkspace ws model.sessionDelivery}) |> Maybe.withDefault model
+                            model.selectedWorkspaceId |> Maybe.map (\ws -> SessionActivity.invalidateWorkspace ws {model | sessionDelivery = SessionDelivery.invalidateReadProof ws model.sessionDelivery}) |> Maybe.withDefault model
                         else model
                 in
                 removeEntity scope entity identity accumulated withFacets

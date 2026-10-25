@@ -1,6 +1,6 @@
 module Feature.SessionDelivery exposing
     ( State, Target(..), Payload(..), Request, Resource, init, key, demand, removeDemand
-    , invalidateSession, invalidateTask, invalidateLists, invalidateFacets, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
+    , invalidateSession, invalidateTask, invalidateLists, invalidateFacets, invalidateReadProof, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
     , admit, settle, fetch, staleAt, consume
     )
 
@@ -44,17 +44,17 @@ type alias Resource =
 
 
 type alias Request =
-    { id : Int, key : String, workspace : String, target : Target, dirty : Int, retirement : Int }
+    { id : Int, key : String, workspace : String, target : Target, dirty : Int, proofRetirement : Int }
 
 
 type alias State =
     { resources : Dict String Resource, physical : Dict Int Request, order : List String, implicitMetadata : Set String
-    , nextId : Int, version : Int, retirement : Int, listInvalidation : Int, admissionError : Maybe String }
+    , nextId : Int, version : Int, retirement : Int, proofRetirement : Int, listInvalidation : Int, admissionError : Maybe String }
 
 
 init : State
 init =
-    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, listInvalidation = 0, admissionError = Nothing }
+    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, proofRetirement = 0, listInvalidation = 0, admissionError = Nothing }
 
 
 key : String -> Target -> String
@@ -169,14 +169,21 @@ invalidate matches state =
 
 invalidateWorkspace : String -> State -> State
 invalidateWorkspace workspace =
+    invalidateReadProof workspace >> (\state -> {state | retirement=state.retirement+1})
+
+
+-- Membership changes invalidate canonical read proofs, not the independent
+-- authorization/lifetime of an immutable evidence writer or task ZIP export.
+invalidateReadProof : String -> State -> State
+invalidateReadProof workspace =
     invalidate (\resource -> resource.workspace == workspace)
-        >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource ->
+        >> (\state -> { state | proofRetirement = state.proofRetirement + 1, resources = Dict.map (\_ resource ->
             if resource.workspace == workspace then { resource | data = retainedMetadata resource.data, ranges = [], proven = False } else resource) state.resources })
 
 
 invalidateAll : State -> State
 invalidateAll =
-    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, resources = Dict.map (\_ resource -> { resource | data = retainedMetadata resource.data, ranges = [], proven = False }) state.resources })
+    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, proofRetirement = state.proofRetirement + 1, resources = Dict.map (\_ resource -> { resource | data = retainedMetadata resource.data, ranges = [], proven = False }) state.resources })
 
 
 -- Same-authority refresh keeps the last admitted presentation in this existing
@@ -238,12 +245,12 @@ invalidateFacets workspace =
 retireWorkspace : String -> State -> State
 retireWorkspace workspace state =
     let kept = Dict.filter (\_ resource -> resource.workspace /= workspace) state.resources in
-    { state | retirement = state.retirement + 1, resources = kept, order = List.filter (\id -> Dict.member id kept) state.order, implicitMetadata = Set.filter (\id -> Dict.member id kept) state.implicitMetadata }
+    { state | retirement = state.retirement + 1, proofRetirement = state.proofRetirement + 1, resources = kept, order = List.filter (\id -> Dict.member id kept) state.order, implicitMetadata = Set.filter (\id -> Dict.member id kept) state.implicitMetadata }
 
 
 retireAll : State -> State
 retireAll state =
-    { state | retirement = state.retirement + 1, resources = Dict.empty, order = [], implicitMetadata = Set.empty, admissionError = Nothing }
+    { state | retirement = state.retirement + 1, proofRetirement = state.proofRetirement + 1, resources = Dict.empty, order = [], implicitMetadata = Set.empty, admissionError = Nothing }
 
 
 admit : String -> State -> ( State, List Request )
@@ -258,7 +265,7 @@ admit workspace state =
             resource.workspace == workspace && resource.dirty /= resource.settled && resource.error == Nothing && not (occupied identity) && metadataReady resource)
         selected = List.take (max 0 (2 - Dict.size state.physical)) ready
         add ( identity, resource ) ( current, requests ) =
-            let request = Request current.nextId identity workspace resource.target resource.dirty current.retirement in
+            let request = Request current.nextId identity workspace resource.target resource.dirty current.proofRetirement in
             ( { current | nextId = current.nextId + 1, physical = Dict.insert request.id request current.physical, order = List.filter ((/=) identity) current.order ++ [identity] }, requests ++ [request] )
     in
     List.foldl add ( state, [] ) selected
@@ -273,7 +280,7 @@ settle id authorized result state =
             case Dict.get request.key state.resources of
                 Nothing -> released
                 Just resource ->
-                    if not authorized || request.retirement /= state.retirement || resource.target /= request.target then released
+                    if not authorized || request.proofRetirement /= state.proofRetirement || resource.target /= request.target then released
                     else if resource.dirty /= request.dirty && (case result of
                         Ok (Metadata _) -> False
                         Ok (SessionsPage _) -> False

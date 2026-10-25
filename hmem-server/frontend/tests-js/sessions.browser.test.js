@@ -38,7 +38,7 @@ test('production Sessions uses canonical authenticated resources and direct task
   let harness, harnessClosed, build, buildClosed, browser, context, api, sandbox, postgresPid, page
   let failed
   const mcpClients=[]
-  const reads = [];let sessionReadCount=0
+  const reads = [],archiveTransport=[];let sessionReadCount=0
   try {
     const { stdout } = await promisify(execFile)('stack', ['path', '--local-install-root'], { cwd: repo, windowsHide: true, timeout: 30000 })
     const executable = join(stdout.trim(), 'bin', process.platform === 'win32' ? 'hmem-test-harness.exe' : 'hmem-test-harness')
@@ -132,6 +132,12 @@ test('production Sessions uses canonical authenticated resources and direct task
         open(method,url,...rest){this.metricPath=new URL(url,location.href).pathname;return super.open(method,url,...rest)}
         send(...args){if(this.metricPath.includes('/sessions')){this.metricId=++next;active.add(this);metrics.peak=Math.max(metrics.peak,active.size);metrics.events.push({id:this.metricId,phase:'send',path:this.metricPath,time:performance.now()});if(metrics.events.length>64)metrics.events.shift()}return super.send(...args)}
       }
+      const archive=window.__archiveTrace=[],record=phase=>{archive.push(phase);if(archive.length>24)archive.shift()}
+      document.addEventListener('click',event=>{const button=event.target.closest?.('[data-session-archive]');if(button)record({phase:'document-click',enabled:!button.disabled,operation:JSON.parse(button.dataset.sessionArchive).operation})},true)
+      const get=StorageManager.prototype.getDirectory
+      StorageManager.prototype.getDirectory=async function(...args){record({phase:'storage-acquire'});const root=await get.apply(this,args),directory=await root.getDirectoryHandle('hmem-downloads',{create:true}),file=directory.getFileHandle.bind(directory)
+        directory.getFileHandle=async(...fileArgs)=>{const handle=await file(...fileArgs),create=handle.createWritable.bind(handle);handle.createWritable=async(...writeArgs)=>{const writer=await create(...writeArgs),write=writer.write.bind(writer),close=writer.close.bind(writer);writer.write=async bytes=>{await write(bytes);record({phase:'native-write',bytes:bytes.length})};writer.close=async()=>{await close();record({phase:'native-close'})};return writer};return handle};return {getDirectoryHandle:async()=>directory}
+      }
 
     })
     await context.addCookies([{name:'hmem_session',value:'sandbox-session-token',url:origin},{name:'hmem_csrf',value:'sandbox-csrf-token',url:origin}])
@@ -140,6 +146,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     async function completeDocument(label){const metrics=await page.evaluate(()=>window.__sessionHTTPMetrics);assert.ok(metrics.peak<=2,JSON.stringify({label,...metrics}));nativeReceipts.push({label,peak:metrics.peak})}
     page.on('response', response => {
       const path=new URL(response.url()).pathname
+      if(path.endsWith('/evidence.zip'))archiveTransport.push({phase:'response',status:response.status()})
       if(path.includes('/sessions')) { sessionReadCount++;reads.push({path,status:response.status()}); if(reads.length>32) reads.shift() }
       if(path.endsWith('/change-stream/resync')&&response.ok())resyncs++
       if(path.endsWith('/change-stream/ticket')&&response.status()===409)ticketConflicts++
@@ -164,7 +171,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     assert.equal(await page.getByRole('button',{name:'Live',exact:true}).getAttribute('aria-pressed'),'true')
     assert.equal(await page.getByLabel('Status',{exact:true}).count(),0)
     await page.getByRole('link',{name:task.title,exact:false}).waitFor()
-    assert.equal(await page.locator('.session-summary').count(),1)
+    await until(async()=>await page.locator('.session-summary').count()===1,'initial canonical session list')
     await until(async()=>await page.locator('.session-record').count()===1,'initial byte viewer hides unknown JSON')
     assert.equal(await page.locator('.session-record-text').first().innerText(),'Hello from a real session λ')
     const extra=Buffer.from('{"text":"Arrived while following"}\n','utf8')
@@ -370,7 +377,9 @@ test('production Sessions uses canonical authenticated resources and direct task
     await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).waitFor()
     let binaryRequests=0
     const binaryHeaders=[]
-    page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip')){binaryRequests++;binaryHeaders.push(request.allHeaders())}})
+    page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip')){binaryRequests++;binaryHeaders.push(request.allHeaders());archiveTransport.push({phase:'request'})}})
+    page.on('requestfinished',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))archiveTransport.push({phase:'body-finished'})})
+    page.on('requestfailed',request=>{if(new URL(request.url()).pathname.endsWith('/evidence.zip'))archiveTransport.push({phase:'body-failed'})})
     const archiveDownloadEvent=page.waitForEvent('download')
     await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).click()
     const archiveDownload=await archiveDownloadEvent,archivePath=await archiveDownload.path()
@@ -389,12 +398,12 @@ with zipfile.ZipFile(sys.argv[1]) as z:
 print('independently verified 53 DEFLATE entries')`,archivePath,JSON.stringify(archiveExpected)],{windowsHide:true})
     assert.equal(binaryRequests,1,'one task-only server archive request')
     await until(async()=>await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).isEnabled(),'archive completion')
-    console.log(JSON.stringify({phase:'server-DEFLATE-task-evidence',entries:53,binaryRequests,verification:checked.stdout.trim(),zipBytes:(await readFile(archivePath)).length,auth:'bearer-only'}))
+    console.log(JSON.stringify({phase:'server-DEFLATE-task-evidence',entries:53,binaryRequests,verification:checked.stdout.trim(),zipBytes:(await readFile(archivePath)).length,auth:'bearer-only',transport:archiveTransport,native:await page.evaluate(()=>window.__archiveTrace)}))
     assert.deepEqual(errors,[])
     console.log(JSON.stringify({harness:executableHash,mcp:mcpHash,assets,chromium:browser.version(),viewport:[1440,1000],narrow:[430,900],phase:'follower-MCP-browser-resume-independent-seal-and-exact-evidence',savedBytes,sha256:sha(original),largeSavedBytes,largeHash,largeOffset,tailBoundaryOffset,largeRecordBytes:largeRecord.length,resyncs,ticketConflicts,nativeReceipts,playwrightPeak:peakRequests,summaries:53,download:'native-OPFS-and-browser-download'}))
   } catch (error) {
     if(page) {
-      console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-download-status').allTextContents()).slice(0,2)}))
+      console.log(JSON.stringify({phase:'bounded-failure-diagnostic',path:await page.evaluate(()=>location.pathname+location.hash),reads,records:await page.locator('.session-record').count(),summaries:await page.locator('.session-summary').count(),status:(await page.locator('.session-download-status').allTextContents()).slice(0,2),archiveTransport,archiveNative:await page.evaluate(()=>window.__archiveTrace)}))
       if(process.env.SESSION_STACK_DIAGNOSTICS)await page.screenshot({path:join(process.env.SESSION_STACK_DIAGNOSTICS,'sessions-stack-failure.png'),fullPage:true})
     }
     failed = error; throw error

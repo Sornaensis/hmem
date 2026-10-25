@@ -100,6 +100,9 @@ Downloads read the canonical terminated session in chunks of at most 64 KiB,
 checking its immutable receipt on every chunk and its final byte count and
 SHA-256 before completion. The displayed record window is never the download
 source. Workspace, authority or selected-session changes retire the writer.
+Canonical resynchronization also retires downloads. Session membership and
+hierarchy changes retire read proofs independently, preserving a pending native
+writer and its physical HTTP admission through completion.
 
 Where available, browser-private temporary file storage stages the bytes. The
 source and object URL remain available for 60 seconds after the verified browser

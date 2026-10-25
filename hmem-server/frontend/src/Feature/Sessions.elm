@@ -154,8 +154,8 @@ reconcile ( model, command ) =
         sectionReads = (sectionPending ++ List.filter (\target -> not (Dict.member (sectionIdentity target) pages)) orderedSections ++ List.filter sectionUnresolved orderedSections)
             |> List.foldl (\target targets -> if List.member target targets then targets else targets ++ [target]) [] |> List.take 12
         withPanel = { filtered | taskPanel = taskPanel, downloadStamp = downloadStamp, taskHints = hints, hintOrder = nextRotation, taskPages = pages, sectionOrder = List.map sectionIdentity (List.filter (\target -> not (List.member target sectionReads)) orderedSections ++ sectionReads) }
-        transportChanged = old.deliveryRetirement /= model.sessionDelivery.retirement
-        withDownloads = { withPanel | deliveryRetirement = model.sessionDelivery.retirement
+        transportChanged = old.deliveryRetirement /= model.sessionDelivery.proofRetirement
+        withDownloads = { withPanel | deliveryRetirement = model.sessionDelivery.proofRetirement
             , save = if downloadChanged then Nothing else old.save
             , archive = if downloadChanged then Nothing else old.archive
             , saveMessage = if downloadChanged && (old.save /= Nothing || old.archive /= Nothing) then "Save cancelled because its authority changed." else old.saveMessage }
@@ -185,7 +185,7 @@ reconcile ( model, command ) =
         window = Maybe.map2 (\ws session -> (ws,Delivery.SessionWindow session.id current.offset current.end (session.state == Api.SessionTerminated))) workspace metadata
             |> Maybe.andThen (\target -> if current.loadWindow && current.error == Nothing && current.offset < current.end then Just target else Nothing)
         saveTarget = Maybe.map2 (\ws operation -> (ws,Delivery.SessionSave operation.session operation.offset (min 65536 (operation.size-operation.offset)))) workspace current.save
-            |> Maybe.andThen (\target -> current.save |> Maybe.andThen (\operation -> if operation.phase == "writing" && operation.offset < operation.size then Just target else Nothing))
+            |> Maybe.andThen (\target -> current.save |> Maybe.andThen (\operation -> if operation.phase == "writing" && not operation.pending && operation.offset < operation.size then Just target else Nothing))
         archiveTarget = Maybe.map2 (\ws archive -> (ws,Delivery.TaskEvidenceArchive archive.task archive.operation)) workspace current.archive |> Maybe.andThen (\target -> current.archive |> Maybe.andThen (\archive -> if archive.phase == "waiting" then Just target else Nothing))
         desired = workspace |> Maybe.map (\ws ->
             (if model.activeTab == SessionsTab then [(ws,listTarget current),(ws,facetTarget "projects" current),(ws,facetTarget "tasks" current)] else []) ++

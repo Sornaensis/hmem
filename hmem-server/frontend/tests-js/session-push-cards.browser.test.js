@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {createHash} from 'node:crypto'
 import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
+const downloadedBytes=async download=>{const chunks=[];for await(const chunk of await download.createReadStream())chunks.push(chunk);return Buffer.concat(chunks)}
 const until=async fn=>{const end=Date.now()+15000;while(Date.now()<end){if(await fn())return;await sleep(25)}throw Error('Busy session did not converge')}
 const message=text=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})
 for(const dock of [false,true])test(`initial ${dock?'task dock':'Sessions list and links'} loads a latest long transcript while progress invalidates faster than responses`,{timeout:45000},async()=>{
@@ -22,6 +23,19 @@ for(const dock of [false,true])test(`initial ${dock?'task dock':'Sessions list a
   assert.equal(await page.evaluate(()=>window.busyGroup.isConnected&&window.busyGroup.open&&window.busyProse.isConnected),true)
   assert.ok(h.reads.filter(row=>row.path.endsWith('/transcript')).length>=32);assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{running=false;await producer;await h.close()}
+})
+test('membership preserves an immutable session download while its native write acknowledgement is pending',{timeout:20000},async()=>{
+ const bytes=Buffer.from(JSON.stringify({text:'x'.repeat(150000)})+'\n'),h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h
+ try{
+  await page.addInitScript(()=>{const get=StorageManager.prototype.getDirectory;let released=false;const held=new Promise(resolve=>window.releaseSaveWrite=()=>{released=true;resolve()});StorageManager.prototype.getDirectory=async function(...args){const root=await get.apply(this,args),directory=await root.getDirectoryHandle('hmem-downloads',{create:true}),file=directory.getFileHandle.bind(directory);directory.getFileHandle=async(...fileArgs)=>{const handle=await file(...fileArgs),create=handle.createWritable.bind(handle);handle.createWritable=async(...writeArgs)=>{const writer=await create(...writeArgs),write=writer.write.bind(writer);writer.write=async bytes=>{if(!released){window.saveWriteStarted=true;await held}return write(bytes)};return writer};return handle};return {getDirectoryHandle:async()=>directory}}})
+  await h.start();await h.idle();const card=page.locator('#entity-'+h.fixture.tasks[0].id);await card.locator('.btn-extras-toggle').click();const group=card.locator('.task-session-evidence');await group.locator('summary').click();await h.idle()
+  const first=page.waitForEvent('download');await group.getByRole('button',{name:/Download session/}).click();await page.waitForFunction(()=>window.saveWriteStarted)
+  await h.associate(h.fixture.tasks[0].id);await page.waitForTimeout(100);assert.equal(await group.getByText('Save cancelled because its authority changed.',{exact:true}).count(),0)
+  await page.evaluate(()=>window.releaseSaveWrite());assert.deepEqual(await downloadedBytes(await first),bytes)
+  await until(()=>group.getByRole('button',{name:/Download session/}).isEnabled())
+  const offsets=h.reads.filter(row=>row.path.endsWith('/evidence')).map(row=>new URLSearchParams(row.query).get('offset'));assert.deepEqual(offsets,['0','65536','131072'],'the pending write ACK keeps its exact chunk ownership across the read barrier')
+  const second=page.waitForEvent('download');await group.getByRole('button',{name:/Download session/}).click();assert.deepEqual(await downloadedBytes(await second),bytes);assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
 })
 test('shared compact cards retain parent tree inside a forty-percent wider dock and stack narrowly',{timeout:45000},async()=>{
  const h=await openSessionExplorer({activeCount:3,runtime:{model:'Actual running model',role:'Developer'}}),{page}=h
@@ -84,5 +98,19 @@ test('Home clears an omitted workspace activity projection and converges after r
   await page.goto(h.origin+'/');const card=page.locator('.card.clickable').filter({hasText:h.fixture.workspace.name}),light=card.getByRole('img',{name:'Active sessions in this workspace',exact:true});await light.waitFor()
   present=false;await page.evaluate(workspace=>window.pushActivityFrames([{schema_version:1,type:'session_activity_changed',workspace_id:workspace}]),h.fixture.workspace.id);await until(async()=>await light.count()===0);assert.equal(await card.count(),1,'an unknown activity result does not remove catalogue membership')
   present=true;await page.evaluate(workspace=>window.pushActivityFrames([{schema_version:1,type:'session_activity_changed',workspace_id:workspace}]),h.fixture.workspace.id);await light.waitFor();assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+for(const phase of ['acquisition','streaming'])test(`membership read invalidation preserves an evidence archive during ${phase}`,{timeout:20000},async()=>{
+ const h=await openSessionExplorer({savedCount:53}),{page}=h,body=Buffer.alloc(70000,113);let binary=0
+ try{
+  await page.addInitScript(phase=>{const get=StorageManager.prototype.getDirectory;let released=false;const held=new Promise(resolve=>window.releaseArchivePhase=()=>{released=true;resolve()});StorageManager.prototype.getDirectory=async function(...args){if(phase==='acquisition'&&!released){window.archivePhaseStarted=true;await held}const root=await get.apply(this,args);const directory=await root.getDirectoryHandle('hmem-downloads',{create:true});const file=directory.getFileHandle.bind(directory);directory.getFileHandle=async(...fileArgs)=>{const handle=await file(...fileArgs),create=handle.createWritable.bind(handle);handle.createWritable=async(...writeArgs)=>{const writer=await create(...writeArgs),write=writer.write.bind(writer);writer.write=async bytes=>{if(phase==='streaming'&&!released){window.archivePhaseStarted=true;await held}return write(bytes)};return writer};return handle};return {getDirectoryHandle:async()=>directory}}},phase)
+  await page.route('**/evidence.zip',route=>{binary++;return route.fulfill({status:200,headers:{'Content-Type':'application/zip'},body})})
+  await h.start();await h.idle();const card=page.locator('#entity-'+h.fixture.tasks[0].id);await card.locator('.btn-extras-toggle').click();const group=card.locator('.task-session-evidence');await group.locator('summary').click();await h.idle()
+  const first=page.waitForEvent('download');await group.getByRole('button',{name:'↓ Download all',exact:true}).click();await page.waitForFunction(()=>window.archivePhaseStarted)
+  await page.evaluate(({workspace,session})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'archive-membership',scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'archive-membership',cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:h.fixture.workspace.id,session:h.active.id})
+  await page.waitForTimeout(100);assert.equal(await group.getByText('Save cancelled because its authority changed.',{exact:true}).count(),0);assert.equal(binary,phase==='streaming'?1:0)
+  await page.evaluate(()=>window.releaseArchivePhase());const download=await first;assert.deepEqual(await downloadedBytes(download),body)
+  await until(()=>group.getByRole('button',{name:'↓ Download all',exact:true}).isEnabled());assert.equal(binary,1)
+  const second=page.waitForEvent('download');await group.getByRole('button',{name:'↓ Download all',exact:true}).click();await second;assert.equal(binary,2,'the old archive physical admission and writer must complete before reuse');assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })

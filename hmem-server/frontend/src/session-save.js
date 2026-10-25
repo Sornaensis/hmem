@@ -50,6 +50,23 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   let activeSave = null
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))
   let heartbeatKey = ''
+  let viewerScope = '', presentation = null
+  const disclosureKey = node => {
+    const group = node.getAttribute?.('data-group-key')
+    if(group!==null && group!==undefined)return 'group:'+group
+    const event=node.getAttribute?.('data-event-key')
+    return event!==null && event!==undefined ? 'event:'+event : null
+  }
+  const rememberPresentation = event => {
+    const viewport=document.getElementById?.('session-records')
+    if(!viewport?.querySelectorAll || !viewerScope || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp)return
+    const returning=event.type==='click' && (event.target?.closest?.('.task-session-transcript a[href]') || event.target?.closest?.('button.tab')?.textContent?.trim()==='Projects')
+    if(!returning && !(event.type==='scroll' && event.target===viewport) && !(event.type==='toggle' && viewport.contains?.(event.target)))return
+    presentation={scope:viewerScope,top:viewport.scrollTop,disclosures:[...viewport.querySelectorAll('details')].map(node=>[disclosureKey(node),node.open])}
+  }
+  // One bounded snapshot holds only position/disclosure flags, never payloads.
+  // Capture before route handlers replace the task/full-session DOM.
+  for(const event of ['click','scroll','toggle'])document.addEventListener(event,rememberPresentation,true)
   const noteViewerIntent = event => {
     const viewport=document.getElementById?.('session-records')
     if(viewport && (event.target===viewport || viewport.contains?.(event.target))) viewerIntent++
@@ -222,7 +239,29 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   app.ports.sessionBridgeCommand.subscribe(command => {
     const downloadStamp = command.downloadStamp ?? command.stamp
     if (downloadStamp !== stamp) { stamp = downloadStamp; void retireSave() }
-    if (command.stamp !== viewerStamp) { viewerStamp = command.stamp; framer = null; generation = -1 }
+    if (command.stamp !== viewerStamp) {
+      const continuing=command.continueViewer===true && command.viewerScope===viewerScope
+      viewerStamp = command.stamp
+      if(!continuing){framer=null;presentation=null}
+      generation = -1
+      if(continuing && presentation?.scope===viewerScope){
+        const saved=presentation,owner=viewerStamp,scope=viewerScope,intent=viewerIntent,revision=command.generation
+        const queuedViewport=document.getElementById?.('session-records')
+        const queuedTop=queuedViewport?.getAttribute?.('data-viewer-owner')===owner?queuedViewport.scrollTop:0
+        requestAnimationFrame(()=>{
+          if(owner!==viewerStamp || scope!==viewerScope || generation!==revision || viewerIntent!==intent)return
+          const viewport=document.getElementById?.('session-records')
+          if(!viewport?.querySelectorAll || viewport.getAttribute?.('data-viewer-owner')!==owner || Math.abs(viewport.scrollTop-queuedTop)>4)return
+          const states=new Map(saved.disclosures)
+          for(const node of viewport.querySelectorAll('details')){
+            const key=disclosureKey(node)
+            if(states.has(key))node.open=states.get(key)
+          }
+          viewport.scrollTop=saved.top
+        })
+      }
+    }
+    viewerScope=command.viewerScope ?? ''
     if(activeSave && activeSave.operation < command.nextOperation && command.saveOperation !== activeSave.operation) void retireSave()
     if(command.archiveRequest)receiveArchiveRequest(command.archiveRequest)
     if(command.saveChunk && activeSave && activeSave.operation === command.saveOperation && activeSave.writer) {

@@ -21,6 +21,22 @@ suite =
     describe "Sessions production wire contract"
         [ describe "card-owned dock authority" dockTests
         , describe "same-authority metadata presentation" metadataPresentationTests
+        , test "inspected event uses current bounded source and retires with session or authority" <| \_ ->
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                state = entered.sessions
+                row = {sampleRecord | recordType="conversation",content="""[{"kind":"tool","text":"source","label":"Read source"}]"""}
+                reading = {entered | sessions={state | rows=[row]}}
+                inspected = Sessions.update (SessionsInspect state.stamp "0:0:0") reading |> Tuple.first
+                synced = Sessions.reconcile (inspected,Cmd.none) |> Tuple.first
+                stale = Sessions.update (SessionsInspect "retired" "0:0:0") reading |> Tuple.first
+                absent = Sessions.update (SessionsInspect state.stamp "missing") reading |> Tuple.first
+                epoch = Sessions.reconcile ({inspected | sessionRequestEpoch=inspected.sessionRequestEpoch+1},Cmd.none) |> Tuple.first
+                url = inspected.url
+                switched = Sessions.reconcile ({inspected | url={url | fragment=Just "tab=sessions&session=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}},Cmd.none) |> Tuple.first
+            in
+            Expect.equal {synced=Just "0:0:0",stale=Nothing,absent=Nothing,epoch=Nothing,switched=Nothing}
+                {synced=synced.sessions.inspectedEvent,stale=stale.sessions.inspectedEvent,absent=absent.sessions.inspectedEvent,epoch=epoch.sessions.inspectedEvent,switched=switched.sessions.inspectedEvent}
         , test "session and authority changes restore the compact linked-task default" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -446,7 +462,18 @@ dockFixture =
 
 dockTests : List Test.Test
 dockTests =
-    [ test "invalidated membership cannot admit a new viewer or manually select a stale card" <| \_ ->
+    [ test "settled same-authority task/full return keeps bounded viewer presentation and owner fences" <| \_ ->
+        let
+            dock = Sessions.update (SessionsToggleDock "one") dockFixture |> Sessions.reconcile |> Tuple.first
+            state = dock.sessions
+            reading = {dock | sessions={state | start=Just 0,offset=32,end=32,rows=[sampleRecord],following=False,resetPending=False,inspectedEvent=Just "event"}}
+            full = Sessions.reconcile ({reading | activeTab=SessionsTab},Cmd.none) |> Tuple.first
+            returned = Sessions.reconcile ({full | activeTab=ProjectsTab},Cmd.none) |> Tuple.first
+            retired = Sessions.reconcile ({full | sessionRequestEpoch=full.sessionRequestEpoch+1,activeTab=ProjectsTab},Cmd.none) |> Tuple.first
+        in
+        Expect.equal {full=[sampleRecord],returned=[sampleRecord],inspected=Just "event",following=False,owner=True,retired=[]}
+            {full=full.sessions.rows,returned=returned.sessions.rows,inspected=returned.sessions.inspectedEvent,following=returned.sessions.following,owner=full.sessions.stamp/=returned.sessions.stamp,retired=retired.sessions.rows}
+    , test "invalidated membership cannot admit a new viewer or manually select a stale card" <| \_ ->
         let
             initial = dockFixture
             stale = {initial | sessionDelivery=Delivery.invalidateWorkspace workspace initial.sessionDelivery}

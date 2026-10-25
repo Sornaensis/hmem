@@ -1,10 +1,83 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, mkdtemp, rm, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 const until=async(fn)=>{const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,25))}throw new Error('Explorer did not converge')}
+
+test('event inspector follows current authorized source and keeps lineage separate from linked tasks',{timeout:60000},async()=>{
+ const h=await openSessionExplorer({runtime:{model:'Declared runtime',role:'Reviewer'}}),{page}=h
+ try{
+  h.active.title='Inspect session activity'
+  h.active.parent_session_id=h.saved.id
+  h.active.ancestors=[{id:h.saved.id,title:'Completed parent',format_label:'Provider-neutral JSONL',state:'terminated',parent_session_id:null}]
+  h.active.ancestors_truncated=true
+  await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').click()
+  await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
+  const lineage=page.getByRole('region',{name:'Selected session lineage'})
+  assert.match(await lineage.innerText(),/Completed parent.*ancestry context.*terminated/s)
+  assert.match(await lineage.innerText(),/16-level context limit/)
+  assert.equal(await page.locator('.session-summary-heading').filter({hasText:'Completed parent'}).count(),0)
+  assert.ok(!h.reads.some(read=>read.path.endsWith('/sessions/'+h.saved.id)),'context does not fetch an out-of-page parent')
+  const inspector=page.getByRole('complementary',{name:'Event inspector'})
+  assert.equal(await inspector.locator('pre').count(),0)
+  await page.locator('.session-activity-group').first().locator(':scope > summary').click()
+  const inspect=page.locator('.session-content-tool').first().locator('..').getByRole('button',{name:/Inspect event/})
+  await inspect.focus();await page.keyboard.press('Enter')
+  assert.deepEqual(JSON.parse(await inspector.locator('pre').textContent()),{path:'src/Feature/Sessions.elm'})
+  await inspector.getByText('Session identity',{exact:true}).click()
+  assert.match(await inspector.innerText(),/Runtime declaration\s+Reviewer · Declared runtime/)
+  assert.match(await inspector.innerText(),/Created by\s+Unknown/)
+  await page.evaluate(()=>{window.inspectedPayload=document.querySelector('.session-inspected-event pre')})
+  await h.appendRecords({text:'A same-session update keeps the selected event.'})
+  await page.getByText('A same-session update keeps the selected event.',{exact:true}).waitFor({state:'attached'})
+  assert.equal(await inspect.getAttribute('aria-pressed'),'true')
+  assert.ok(await page.evaluate(()=>window.inspectedPayload===document.querySelector('.session-inspected-event pre')))
+  const screenshots=resolve('../../output/ui-refinement');await mkdir(screenshots,{recursive:true})
+  for(const [width,name] of [[1440,'sessions-desktop'],[430,'sessions-narrow']]){
+   await page.setViewportSize({width,height:1000})
+   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))
+   await page.screenshot({path:join(screenshots,name+'.png'),fullPage:true})
+   if(width===430){await page.locator('.session-conversation').scrollIntoViewIfNeeded();await page.screenshot({path:join(screenshots,'sessions-narrow-conversation.png'),fullPage:true});await inspector.scrollIntoViewIfNeeded();await page.screenshot({path:join(screenshots,'sessions-narrow-inspector.png'),fullPage:true})}
+  }
+  await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
+  await page.getByText('Saved session',{exact:true}).waitFor()
+  assert.equal(await page.locator('.session-inspected-event pre').count(),0,'another session never inherits the earlier tool payload')
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+test('authorized task and full-session navigation retains one viewer and valid reading disclosures',{timeout:60000},async()=>{
+ const h=await openSessionExplorer({extraRecords:[{text:Array.from({length:70},(_,i)=>'Reading paragraph '+i+' remains available across session surfaces.').join('\n\n')},{type:'assistant',message:{role:'assistant',content:Array.from({length:410},(_,i)=>({type:'tool_use',id:'call-'+i,name:'Read '+i,input:{path:'source-'+i}}))}}]}),{page}=h
+ try{
+  await h.start();await h.idle()
+  const card=page.locator('#entity-'+h.fixture.tasks[0].id)
+  await until(async()=>await card.locator('.has-active-sessions').count()===1)
+  await card.locator('.task-sessions-icon').click();await page.locator('.session-record').first().waitFor()
+  await page.locator('.session-activity-group').first().locator(':scope > summary').click()
+  await page.locator('.session-content-tool').first().locator('summary').click()
+  await page.locator('.session-activity-group').last().locator(':scope > summary').click()
+  await page.locator('.session-content-tool').last().locator('summary').click()
+  assert.ok(await page.locator('#session-records details').count()>400,'valid admitted source can contain more than 400 disclosures')
+  await page.locator('#session-records').evaluate(node=>{node.scrollTop=40})
+  await card.getByRole('link',{name:'Open full session ↗',exact:true}).click()
+  await page.locator('.session-detail').waitFor();await page.locator('.session-record').first().waitFor()
+  await until(async()=>await page.locator('.session-activity-group').first().getAttribute('open')==='')
+  assert.equal(await page.locator('#session-records').count(),1)
+  assert.equal(await page.locator('.session-activity-group').first().getAttribute('open'),'')
+  assert.equal(await page.locator('.session-content-tool').first().getAttribute('open'),'')
+  assert.equal(await page.locator('.session-content-tool').last().getAttribute('open'),'')
+  assert.ok(await page.locator('#session-records').evaluate(node=>Math.abs(node.scrollTop-40)<=4))
+  await page.getByRole('button',{name:'Projects',exact:true}).click();await card.locator('.task-session-dock').waitFor()
+  await until(async()=>await page.locator('.session-content-tool').first().getAttribute('open')==='')
+  assert.equal(await page.locator('#session-records').count(),1)
+  assert.equal(await page.locator('.session-content-tool').first().getAttribute('open'),'')
+  assert.equal(await page.locator('.session-content-tool').last().getAttribute('open'),'')
+  assert.ok(await page.locator('#session-records').evaluate(node=>Math.abs(node.scrollTop-40)<=4))
+  assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
 
 test('active filters, linked task focus, encrypted thinking and local-day timestamps form a compact transcript',{timeout:45000},async()=>{
  const h=await openSessionExplorer({activeCount:2,linkedCount:3,encrypted:true,runtime:{model:'Actual runtime',role:'Developer'},timezoneId:'Europe/Copenhagen',eventTimes:['2026-10-24T22:01:00Z','2026-10-24T22:01:00Z','2026-10-24T21:59:00Z']})
@@ -38,7 +111,7 @@ test('active filters, linked task focus, encrypted thinking and local-day timest
   assert.ok(await result.locator('.json-key').isVisible())
   assert.deepEqual(JSON.parse(await result.locator('pre').textContent()),{output:'module Feature.Sessions exposing (view)'})
   const assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
-  assert.ok(await assistant.evaluate(el=>el.getBoundingClientRect().width>el.closest('.session-detail').clientWidth*.85),'transcript uses its panel width')
+  assert.ok(await assistant.evaluate(el=>el.getBoundingClientRect().width>el.closest('.session-conversation').clientWidth*.85),'transcript uses its conversation panel width')
   await page.locator('.session-task-card').nth(2).click();await until(()=>page.url().includes('focus=task%3A'+h.fixture.tasks[2].id)||page.url().includes('focus=task:'+h.fixture.tasks[2].id))
   await page.locator('#entity-'+h.fixture.tasks[2].id).waitFor()
   assert.deepEqual(h.errors,[])

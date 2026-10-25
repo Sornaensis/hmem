@@ -4929,3 +4929,30 @@ textarea.observation-edit-content {
 .session-activity-summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .session-activity-records { padding-top:.3rem; }
 .session-activity-group .session-record-activity { border:0; padding:.2rem 0; }
+
+/* The hierarchy, bounded conversation and event inspector share one viewer. */
+.sessions-page .sessions-layout { grid-template-columns:minmax(180px,220px) minmax(0,1fr); gap:1rem; }
+.session-pane-label { font-size:.68rem; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--text-muted); }
+.sessions-list>.session-pane-label { margin:0 0 .65rem; }
+.session-conversation-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(210px,270px); gap:1rem; align-items:start; }
+.session-conversation { min-width:0; }
+.session-detail .session-lifecycle,.session-detail .session-freshness { display:inline-block; margin-top:.3rem; }
+.session-ancestor-path { margin:.85rem 0; padding:.65rem .8rem; border:1px solid var(--border); border-radius:7px; }
+.session-ancestor-path ol { display:flex; flex-wrap:wrap; gap:.25rem .5rem; list-style:none; padding:0; margin:.35rem 0 0; font-size:.72rem; overflow-wrap:anywhere; }
+.session-ancestor-path li+li::before { content:'›'; color:var(--text-muted); margin-right:.5rem; }
+.session-ancestor-path .card-meta { font-size:.65rem; }
+.session-event-inspector { min-width:0; padding:.85rem; border:1px solid var(--border); border-radius:8px; background:var(--bg-elevated,var(--bg-surface)); }
+.session-inspector-heading h4 { margin:0 0 .8rem; font-size:.75rem; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); }
+.session-event-inspector h5 { margin:.25rem 0; font-size:.85rem; overflow-wrap:anywhere; }
+.session-event-inspector .empty-state { padding:.8rem 0; font-size:.75rem; }
+.session-event-inspector pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:48vh; overflow:auto; }
+.session-inspector-identity { margin-top:1rem; padding-top:.75rem; border-top:1px solid var(--border); font-size:.73rem; }
+.session-inspector-identity summary { cursor:pointer; }
+.session-inspector-identity dl { margin:.75rem 0 0; }
+.session-inspector-identity dt { color:var(--text-muted); margin-top:.6rem; }
+.session-inspector-identity dd { margin:.15rem 0 0; overflow-wrap:anywhere; }
+.session-event { position:relative; min-width:0; }
+.session-inspect-event { float:right; margin-left:.5rem; font-size:.65rem; }
+.session-event.is-inspected { border-left:2px solid var(--accent); padding-left:.5rem; }
+@media(max-width:1200px) { .session-conversation-grid { grid-template-columns:minmax(0,1fr); } .session-event-inspector { max-height:none; } }
+@media(max-width:900px) { .sessions-page .sessions-layout { grid-template-columns:minmax(0,1fr); } }

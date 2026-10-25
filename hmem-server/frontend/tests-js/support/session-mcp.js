@@ -4,8 +4,9 @@ import { StringDecoder } from 'node:string_decoder'
 
 // Private, bounded stdio client for the freshly built production executable.
 // Credentials remain in the child environment; stderr is drained, never echoed.
-export async function startSessionMcp({executable,origin,token,workspace,identity,env=process.env,spawnProcess=spawn,cleanupTimeoutMs=15000,forcedCleanupTimeoutMs=10000}) {
+export async function startSessionMcp({executable,origin,token,workspace,identity,env=process.env,spawnProcess=spawn,cleanupTimeoutMs=15000,forcedCleanupTimeoutMs=10000,requestTimeoutMs=15000}) {
   if(!Number.isInteger(cleanupTimeoutMs)||cleanupTimeoutMs<1||cleanupTimeoutMs>15000||!Number.isInteger(forcedCleanupTimeoutMs)||forcedCleanupTimeoutMs<1||forcedCleanupTimeoutMs>10000)throw new Error('Invalid MCP cleanup bounds')
+  if(!Number.isInteger(requestTimeoutMs)||requestTimeoutMs<1||requestTimeoutMs>120000)throw new Error('Invalid MCP observer request timeout')
   const child=spawnProcess(executable,['--server-url',origin],{env:{...env,HMEM_MCP_AUTH_TOKEN:token},windowsHide:true,stdio:['pipe','pipe','pipe']})
   const closed=once(child,'close').then(value=>value,()=>null),pending=new Map(),decoder=new StringDecoder('utf8');let buffer='',next=0,closing=false,cleanupPromise
   child.stderr.resume()
@@ -27,7 +28,7 @@ export async function startSessionMcp({executable,origin,token,workspace,identit
     if(closing||pending.size>=8)throw new Error('MCP client admission closed')
     const id=String(++next)
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{pending.delete(id);reject(new Error('MCP request deadline'))},15000)
+      const timer=setTimeout(()=>{pending.delete(id);reject(new Error('MCP request deadline'))},requestTimeoutMs)
       const finish=callback=>value=>{clearTimeout(timer);callback(value)}
       pending.set(id,{resolve:finish(resolve),reject:finish(reject)})
       child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n',error=>{if(error){pending.delete(id);clearTimeout(timer);reject(new Error('MCP stdin failed'))}})

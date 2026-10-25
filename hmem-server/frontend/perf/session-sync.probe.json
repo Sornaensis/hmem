@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "mode": "probe",
+  "baseSha": "43c52ffd2377e3af82d31f7da82a4bc0c395cc17",
+  "measuredAt": "2026-10-25T12:47:48.688Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 30462152704,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": {
+    "harness": "1013f90081fc62bad9ad77cb7ac647e699053471c929ac366773a5392b6848d0",
+    "mcp": "18594374f1d60e527c24324ff3c671febb06b366d6d36b415384f03b1267fa12",
+    "assets": {
+      "index-CO6LQFhJ.css": "245b3739edd180b76c7075d272a5f9910ca59f613fa995a46f0c6ae1675df5cd",
+      "index-rwg2ssJQ.js": "0f6cc0f6927e902312b290efd8c582f46d42e56b561b62ece1735a7b3fbdfd8c",
+      "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+    }
+  },
+  "result": {
+    "measurement": {
+      "commit": "pg_xact_commit_timestamp(session_chunks.xmin)",
+      "statements": "parameter-suppressed sandbox log statement count",
+      "locks": "sampled pg_stat_activity/pg_locks; wait-time estimate is sampling resolution limited",
+      "postgres": "PostgreSQL 18.2 on x86_64-windows, compiled by gcc-15.2.0, 64-bit"
+    },
+    "initialStats": {
+      "at": 1792932468871.4224,
+      "activity": {
+        "lock_waiters": 0,
+        "active": 0,
+        "connections": 3
+      },
+      "statements": null
+    },
+    "finalStats": {
+      "at": 1792932502354.5344,
+      "activity": {
+        "lock_waiters": 0,
+        "active": 0,
+        "connections": 8
+      },
+      "statements": null
+    },
+    "seed": {
+      "bytes": 1048576,
+      "requests": 1,
+      "milliseconds": 172.427978515625
+    },
+    "resumedMs": 25998.326171875,
+    "follower": {
+      "state": "caught_up",
+      "committedBytes": 1048576
+    },
+    "chromium": "151.0.7922.34",
+    "initialWindows": [
+      1102.45068359375,
+      1013.8310546875,
+      1081.421630859375
+    ],
+    "direct": {
+      "sourceToCommitMs": 1900.187744140625,
+      "commitToRenderedUpperBoundMs": [
+        938.2060546875,
+        959.20947265625,
+        959.170166015625
+      ]
+    },
+    "browser": [
+      {
+        "http": 32,
+        "peak": 3,
+        "longTasks": [
+          97
+        ]
+      },
+      {
+        "http": 33,
+        "peak": 3,
+        "longTasks": [
+          98
+        ]
+      },
+      {
+        "http": 32,
+        "peak": 3,
+        "longTasks": [
+          100
+        ]
+      }
+    ],
+    "limitations": [
+      "Probe is a measurement-validity check, not a calibrated profile or qualification.",
+      "SQL execution counts are not claimed to be physical TCP round trips."
+    ]
+  },
+  "qualificationStatus": "not_qualified",
+  "visibilityEvidenceDisposition": "Superseded: screenshot lacked clipped marker range checks. Original timing values retained but invalid for on-screen visibility acceptance; peak3 was loadend-observer overlap, not accepted admission evidence."
+}

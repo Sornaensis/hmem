@@ -1,0 +1,514 @@
+{
+  "schema": 1,
+  "task": "6bfb2638-0f93-4169-81cf-cbdef3bcc52d",
+  "baseSha": "43c52ffd2377e3af82d31f7da82a4bc0c395cc17",
+  "disposition": "frozen baseline; not performance-qualified",
+  "owner": "repository maintainers",
+  "retention": "until corresponding before/after qualification is superseded",
+  "receiptInputs": [
+    {
+      "method": "80ea82514c56b91413f1817142f28aff93131535e61943692e55e2f4dc11c3a1",
+      "path": "session-sync.repaired-baseline.json",
+      "sha256": "150378b80662c11004a17c4e69201960dc3ffd8131cec7696043a55ca07673c4"
+    },
+    {
+      "method": "8f700c3da8eba84042a4eced7c01a0c07b9f303fbf9c2ea2e901e366192f485a",
+      "path": "session-sync.resources.json",
+      "sha256": "3ab46926e5f4fe5b1dc52ec97c1bbeda6e56787f1c3fb3e49f7b7626bd803265"
+    },
+    {
+      "method": "9c7f9269e82435a939c43a016cc0b29d3811778edf61b8ac29e9702a58a5b9a0",
+      "path": "session-sync.overhead-revalidated.json",
+      "sha256": "1e82b7c7bff1cc36ff9bd0f7247de623baca52d5c4271fd876ddb8a77acc8986"
+    }
+  ],
+  "contract": {
+    "schema": 1,
+    "task": "6bfb2638-0f93-4169-81cf-cbdef3bcc52d",
+    "browsers": 3,
+    "prefixes": [
+      1048576,
+      104857600,
+      1073741824
+    ],
+    "followers": [
+      1,
+      4
+    ],
+    "history": 53,
+    "latencySamples": 100,
+    "warmRuns": 5,
+    "coldRuns": 3,
+    "sustainableFraction": 0.7,
+    "sourceRecordBytes": [
+      1024,
+      65536
+    ],
+    "network": {
+      "rttMs": 50,
+      "bitsPerSecond": 100000000
+    },
+    "budgets": {
+      "sourceCommitP95Ms": 2000,
+      "commitVisibleP95Ms": 2000,
+      "interactionP95Ms": 100,
+      "progressP95Ms": 250,
+      "initialLocalMs": 2000,
+      "initialRemoteMs": 3000,
+      "controlReplyMs": 1000,
+      "finiteCalibrationMultiplier": 2,
+      "finiteOverheadMs": 5000,
+      "unrelatedRegressionFraction": 0.1
+    }
+  },
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 28859215872,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": {
+    "harness": "1013f90081fc62bad9ad77cb7ac647e699053471c929ac366773a5392b6848d0",
+    "mcp": "18594374f1d60e527c24324ff3c671febb06b366d6d36b415384f03b1267fa12",
+    "sources": {
+      "runner": "80ea82514c56b91413f1817142f28aff93131535e61943692e55e2f4dc11c3a1",
+      "sessionMcpHelper": "65e8643a08b66429005856a6878245ec10732a61bfd9eb7fff3d60592727cb66",
+      "nativeHarness": "89060eb8aeaaac65bf6dc139f56c998d420035e7e2f6b793a61cf3507c34fee4"
+    },
+    "assets": {
+      "index-CO6LQFhJ.css": "245b3739edd180b76c7075d272a5f9910ca59f613fa995a46f0c6ae1675df5cd",
+      "index-Ke7Jv9vX.js": "f132811dad9a5fc558d42d868853e1d164b59753e8fd2984293454b6fd71c6db",
+      "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+    }
+  },
+  "workload": {
+    "maximumRecordBytes": 1048576,
+    "maximumRecordDisposition": "generator/byte self-check; actual combined maximum-record qualification remains required",
+    "aggregateRecordsPerSecond": 10.698507462686566,
+    "aggregateBytesPerSecond": 183500.8,
+    "recordPatternBytes": [
+      1024,
+      1024,
+      1024,
+      65536
+    ],
+    "filesystemChunkBytes": 1024,
+    "perFollowerDistribution": "even split; marker bytes included"
+  },
+  "verifiedPrefixTargets": [
+    {
+      "finiteTargetMs": 5064.11579921875,
+      "verifiedReferenceMs": 32.057899609375,
+      "pendingBytes": 0,
+      "B": 1048576,
+      "N": 1048576
+    },
+    {
+      "finiteTargetMs": 8313.0185546875,
+      "verifiedReferenceMs": 1656.50927734375,
+      "pendingBytes": 0,
+      "B": 104857600,
+      "N": 104857600
+    },
+    {
+      "finiteTargetMs": 40302.10889609375,
+      "verifiedReferenceMs": 17651.054448046874,
+      "pendingBytes": 0,
+      "B": 1073741824,
+      "N": 1073741824
+    }
+  ],
+  "pendingTailRule": "2 * (same-profile complete-prefix reference + actual measured pending-byte transfer reference on selected wire path) + 5000 ms; no full-backlog promise from no-tail target",
+  "zeroBrowserReference": {
+    "historicalSessions": 53,
+    "followersPerProcess": [
+      1,
+      4
+    ],
+    "lifecycleActiveSessionCountsAtResume": [
+      9,
+      13,
+      17
+    ],
+    "typicalRecordBytes": [
+      1024,
+      65536
+    ],
+    "appendChunkBytes": 65536,
+    "sustainableBytesPerSecond": {
+      "local": 183500.8,
+      "controlled": 183500.8
+    },
+    "absoluteOneGiBFiniteTargetMs": 40302.10889609375,
+    "rssCeilingBytes": 1246818304,
+    "rssScope": "zero-browser calibration: supervisor/server/PostgreSQL/current MCP stable PIDs; not combined three-browser RSS",
+    "cpuCeilingReference": {
+      "measuredCpuSeconds": 110.859375,
+      "measuredScope": "sampled working set/CPU of explicitly owned stable PIDs; excludes unobserved short-lived helpers",
+      "completedReferenceWorkBytes": 14179106816,
+      "maxSecondsPerReferenceGiB": 10.493815748118841,
+      "scope": "Exact matched zero-browser calibration workflow, normalized by completed reference/seed/source-scan/DB-scan bytes; 25% headroom. Not a whole final-matrix total or unobserved-helper CPU claim."
+    },
+    "databaseStatementCeiling": {
+      "observedCalls": 151429,
+      "completedDatabaseWorkBytes": 3562274816,
+      "maxCallsPerDatabaseMiB": 49.03139303848702,
+      "scope": "Exact matched zero-browser calibration workflow, normalized by completed HTTP reference/seed/DB-scan bytes; 10% headroom. Logical executions include background work, not physical TCP round trips."
+    },
+    "pendingTransferRule": "Finite target = 2 * (verified-prefix reference + bounded measured transfer reference for B-N pending bytes on actual wire profile) + 5000 ms; 1 GiB 40.513 s calibration applies to N=B=1 GiB, zero pending bytes only.",
+    "finiteRunsRequiredAtFinal": {
+      "warm": 5,
+      "cold": 3
+    },
+    "liveSamplesRequiredAtFinal": 100,
+    "measuredRecordDistribution": {
+      "calibration": {
+        "recordBytes": 65536,
+        "fraction": 1
+      },
+      "browserProbeTail": {
+        "recordBytes": 1024,
+        "samples": 1
+      },
+      "maximumRecordBoundary": "supported by generator self-check; not claimed as a completed combined production profile"
+    }
+  },
+  "commonCombinedRssCeilingBytes": 3437732864,
+  "resourceProfileState": "fresh isolated server/DB, warm seeded prefixes, uncontrolled OS cache; actual follower prefix sizes, browser count, metadata counts, link and producer workload matched; non-followed population padding is empty rather than replayed prior calibration/finite payloads",
+  "profiles": [
+    {
+      "uniqueCommitCohorts": 3,
+      "name": "local",
+      "ordinaryMcpP95Ms": 47.725341796875,
+      "resources": {
+        "samples": 22,
+        "peakRssBytes": 2163228672,
+        "cpuSeconds": 31.46875,
+        "samplingWaitMs": 500,
+        "actualIntervalsMs": {
+          "samples": 21,
+          "min": 2286.133056640625,
+          "median": 2545.678466796875,
+          "p95": 2852.085693359375,
+          "max": 2868.60986328125
+        },
+        "peakObservedPids": 36,
+        "failures": 0,
+        "method": "sampled owned process tree including Chromium descendants and PostgreSQL workers; sampler PowerShell excluded; short-lived helpers may be missed",
+        "observedWallMs": 56265.49267578125,
+        "scope": "matching live profile from initial transcript view through resume, concurrent production/ordinary MCP/three browsers and drain; source generation included, seeding excluded"
+      },
+      "resourceCeilings": {
+        "rssBytes": 2771144704,
+        "liveCpuSecondsPerGeneratedMiB": 24.04776119402985,
+        "prefixCpuAllowanceSeconds": 0.010247866941522306,
+        "liveSqlCallsPerGeneratedMiB": 11101.932895522388,
+        "prefixSqlAllowanceCalls": 49.03139303848702,
+        "scope": "same live record/rate/profile; CPU/SQL allowance = per-generated-MiB live allowance plus one linear complete-prefix reference allowance; RSS has 25% plus 64 MiB headroom and never scales with prefix size"
+      },
+      "generatedBytes": 1715200,
+      "prefixBytes": [
+        1048576
+      ],
+      "actualGeneratedRate": 183297.96370447037,
+      "nativeInputTwoFramesP95Ms": 105.0166015625,
+      "selectedPrefixBytes": 1048576,
+      "sourceEvents": 100,
+      "network": {},
+      "renderCohorts": [
+        1,
+        1,
+        1
+      ],
+      "browsers": 3,
+      "uniqueOutboxCohorts": 3,
+      "followers": 1,
+      "population": {
+        "active": 18,
+        "terminated": 53
+      }
+    },
+    {
+      "uniqueCommitCohorts": 11,
+      "name": "controlled",
+      "ordinaryMcpP95Ms": 95.32373046875,
+      "resources": {
+        "samples": 32,
+        "peakRssBytes": 2599251968,
+        "cpuSeconds": 54.96875,
+        "samplingWaitMs": 500,
+        "actualIntervalsMs": {
+          "samples": 31,
+          "min": 2254.776123046875,
+          "median": 2695.726318359375,
+          "p95": 2997.675537109375,
+          "max": 3012.80859375
+        },
+        "peakObservedPids": 34,
+        "failures": 0,
+        "method": "sampled owned process tree including Chromium descendants and PostgreSQL workers; sampler PowerShell excluded; short-lived helpers may be missed",
+        "observedWallMs": 85311.3125,
+        "scope": "matching live profile from initial transcript view through resume, concurrent production/ordinary MCP/three browsers and drain; source generation included, seeding excluded"
+      },
+      "resourceCeilings": {
+        "rssBytes": 3316173824,
+        "liveCpuSecondsPerGeneratedMiB": 10.501492537313434,
+        "prefixCpuAllowanceSeconds": 0.040991467766089223,
+        "liveSqlCallsPerGeneratedMiB": 5701.097074626867,
+        "prefixSqlAllowanceCalls": 196.12557215394807,
+        "scope": "same live record/rate/profile; CPU/SQL allowance = per-generated-MiB live allowance plus one linear complete-prefix reference allowance; RSS has 25% plus 64 MiB headroom and never scales with prefix size"
+      },
+      "generatedBytes": 6860800,
+      "prefixBytes": [
+        1048576,
+        1048576,
+        1048576,
+        1048576
+      ],
+      "actualGeneratedRate": 183454.20793629653,
+      "nativeInputTwoFramesP95Ms": 129.436279296875,
+      "selectedPrefixBytes": 1048576,
+      "sourceEvents": 100,
+      "network": {
+        "rttMs": 50,
+        "bitsPerSecond": 100000000
+      },
+      "renderCohorts": [
+        6,
+        6,
+        5
+      ],
+      "browsers": 3,
+      "uniqueOutboxCohorts": 11,
+      "followers": 4,
+      "population": {
+        "active": 22,
+        "terminated": 71
+      }
+    },
+    {
+      "uniqueCommitCohorts": 8,
+      "name": "mixed-large-catchup",
+      "ordinaryMcpP95Ms": 97.718017578125,
+      "resources": {
+        "samples": 30,
+        "peakRssBytes": 2696499200,
+        "cpuSeconds": 48.34375,
+        "samplingWaitMs": 500,
+        "actualIntervalsMs": {
+          "samples": 29,
+          "min": 2296.71875,
+          "median": 2656.705810546875,
+          "p95": 2913.11376953125,
+          "max": 3018.097900390625
+        },
+        "peakObservedPids": 35,
+        "failures": 0,
+        "method": "sampled owned process tree including Chromium descendants and PostgreSQL workers; sampler PowerShell excluded; short-lived helpers may be missed",
+        "observedWallMs": 78236.02001953125,
+        "scope": "matching live profile from initial transcript view through resume, concurrent production/ordinary MCP/three browsers and drain; source generation included, seeding excluded"
+      },
+      "resourceCeilings": {
+        "rssBytes": 3437732864,
+        "liveCpuSecondsPerGeneratedMiB": 9.235820895522387,
+        "prefixCpuAllowanceSeconds": 11.539098176154116,
+        "liveSqlCallsPerGeneratedMiB": 5177.237014925373,
+        "prefixSqlAllowanceCalls": 55209.34856133638,
+        "scope": "same live record/rate/profile; CPU/SQL allowance = per-generated-MiB live allowance plus one linear complete-prefix reference allowance; RSS has 25% plus 64 MiB headroom and never scales with prefix size"
+      },
+      "generatedBytes": 6860800,
+      "prefixBytes": [
+        1073741824,
+        104857600,
+        1048576,
+        1048576
+      ],
+      "actualGeneratedRate": 183425.28627356293,
+      "nativeInputTwoFramesP95Ms": 115.5927734375,
+      "selectedPrefixBytes": 1048576,
+      "sourceEvents": 100,
+      "network": {
+        "rttMs": 50,
+        "bitsPerSecond": 100000000
+      },
+      "renderCohorts": [
+        4,
+        4,
+        4
+      ],
+      "browsers": 3,
+      "uniqueOutboxCohorts": 8,
+      "followers": 4,
+      "population": {
+        "active": 24,
+        "terminated": 143
+      }
+    }
+  ],
+  "diagnosticsOverheadFraction": 0.010132811573579925,
+  "finiteDisposition": "48 primary flush/stop attempts (5 warm/3 reset each kind/profile) capped pending at 8 s; all independent primary seals verified; 6 extra 1 KiB receipt witnesses verified; actual 1 GiB canonical seal verified separately",
+  "limitations": [
+    "source markers, commits, outbox and raster cohorts are counted separately; three browsers never multiply independent source samples",
+    "same-profile CPU/SQL formula adds linear complete-prefix allowance to per-generated-MiB live allowance; fixed RSS ceiling applies to every size",
+    "logical SQL executions and sampled lock waiters are not physical TCP round trips or exact cumulative lock waits",
+    "process-tree sampling intervals are actual measured 2.255-3.018 s; short-lived helpers may be missed",
+    "old visible progress can remain censored with viewport present and scroll position behind; no forced marker scrolling",
+    "existing 100 ms local interaction gate and full optimized qualification remain mandatory",
+    "repaired baseline text quotes historical 40.513 s; numeric target 40302.10889609375 ms is authoritative"
+  ],
+  "correctedVisibilityAccounting": [
+    {
+      "receipt": "session-sync.repaired-baseline.json",
+      "profile": "local",
+      "browsers": [
+        {
+          "censored": 0,
+          "superseded": 97,
+          "represented": 100,
+          "displayed": 3
+        },
+        {
+          "censored": 0,
+          "superseded": 97,
+          "represented": 100,
+          "displayed": 3
+        },
+        {
+          "censored": 0,
+          "superseded": 97,
+          "represented": 100,
+          "displayed": 3
+        }
+      ]
+    },
+    {
+      "receipt": "session-sync.repaired-baseline.json",
+      "profile": "controlled",
+      "browsers": [
+        {
+          "censored": 45,
+          "superseded": 49,
+          "represented": 55,
+          "displayed": 6
+        },
+        {
+          "censored": 45,
+          "superseded": 49,
+          "represented": 55,
+          "displayed": 6
+        },
+        {
+          "censored": 45,
+          "superseded": 50,
+          "represented": 55,
+          "displayed": 5
+        }
+      ]
+    },
+    {
+      "receipt": "session-sync.repaired-baseline.json",
+      "profile": "mixed-large-catchup",
+      "browsers": [
+        {
+          "censored": 69,
+          "superseded": 29,
+          "represented": 31,
+          "displayed": 2
+        },
+        {
+          "censored": 0,
+          "superseded": 91,
+          "represented": 100,
+          "displayed": 9
+        },
+        {
+          "censored": 0,
+          "superseded": 91,
+          "represented": 100,
+          "displayed": 9
+        }
+      ]
+    },
+    {
+      "receipt": "session-sync.resources.json",
+      "profile": "local",
+      "browsers": [
+        {
+          "censored": 77,
+          "superseded": 22,
+          "represented": 23,
+          "displayed": 1
+        },
+        {
+          "censored": 77,
+          "superseded": 22,
+          "represented": 23,
+          "displayed": 1
+        },
+        {
+          "censored": 77,
+          "superseded": 22,
+          "represented": 23,
+          "displayed": 1
+        }
+      ]
+    },
+    {
+      "receipt": "session-sync.resources.json",
+      "profile": "controlled",
+      "browsers": [
+        {
+          "censored": 45,
+          "superseded": 49,
+          "represented": 55,
+          "displayed": 6
+        },
+        {
+          "censored": 45,
+          "superseded": 49,
+          "represented": 55,
+          "displayed": 6
+        },
+        {
+          "censored": 45,
+          "superseded": 50,
+          "represented": 55,
+          "displayed": 5
+        }
+      ]
+    },
+    {
+      "receipt": "session-sync.resources.json",
+      "profile": "mixed-large-catchup",
+      "browsers": [
+        {
+          "censored": 45,
+          "superseded": 51,
+          "represented": 55,
+          "displayed": 4
+        },
+        {
+          "censored": 45,
+          "superseded": 51,
+          "represented": 55,
+          "displayed": 4
+        },
+        {
+          "censored": 45,
+          "superseded": 51,
+          "represented": 55,
+          "displayed": 4
+        }
+      ]
+    }
+  ],
+  "visibilityAccountingClarification": "Original receipts retain exact measured bytes/hashes. Their supersededIntermediateSequences field means not individually displayed and includes censored events. correctedVisibilityAccounting derives disjoint represented/superseded/censored counts from retained displayedSourceSequences; current runner emits corrected labels."
+}

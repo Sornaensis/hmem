@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "mode": "overhead",
+  "qualificationStatus": "not_qualified",
+  "baseSha": "43c52ffd2377e3af82d31f7da82a4bc0c395cc17",
+  "measuredAt": "2026-10-25T15:17:08.348Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 30403796992,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": null,
+  "methodSha256": "9c7f9269e82435a939c43a016cc0b29d3811778edf61b8ac29e9702a58a5b9a0",
+  "result": {
+    "disabled": {
+      "appendMs": {
+        "samples": 8,
+        "min": 62.2578125,
+        "median": 123.5302734375,
+        "p95": 160.859375,
+        "max": 160.859375
+      },
+      "bytesPerAppend": 1048576,
+      "sha256": "34bd328c1bc74d10a4eaaddf0f806f7b7f0e9c390af6a401f3d0e93fbd04df16",
+      "provenance": {
+        "harness": "1013f90081fc62bad9ad77cb7ac647e699053471c929ac366773a5392b6848d0",
+        "mcp": "18594374f1d60e527c24324ff3c671febb06b366d6d36b415384f03b1267fa12",
+        "sources": {
+          "runner": "9c7f9269e82435a939c43a016cc0b29d3811778edf61b8ac29e9702a58a5b9a0",
+          "sessionMcpHelper": "65e8643a08b66429005856a6878245ec10732a61bfd9eb7fff3d60592727cb66",
+          "nativeHarness": "89060eb8aeaaac65bf6dc139f56c998d420035e7e2f6b793a61cf3507c34fee4"
+        },
+        "assets": {
+          "index-CO6LQFhJ.css": "245b3739edd180b76c7075d272a5f9910ca59f613fa995a46f0c6ae1675df5cd",
+          "index-D2MdFfJM.js": "4170bd194baf9f0ca4c75d94e49b0370591800d9797e7445e75394713f82e833",
+          "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+        }
+      },
+      "scope": "ordinary native sandbox defaults; no DB/resource observer"
+    },
+    "enabled": {
+      "appendMs": {
+        "samples": 8,
+        "min": 63.175537109375,
+        "median": 124.781982421875,
+        "p95": 482.281494140625,
+        "max": 482.281494140625
+      },
+      "bytesPerAppend": 1048576,
+      "sha256": "34bd328c1bc74d10a4eaaddf0f806f7b7f0e9c390af6a401f3d0e93fbd04df16",
+      "provenance": {
+        "harness": "1013f90081fc62bad9ad77cb7ac647e699053471c929ac366773a5392b6848d0",
+        "mcp": "18594374f1d60e527c24324ff3c671febb06b366d6d36b415384f03b1267fa12",
+        "sources": {
+          "runner": "9c7f9269e82435a939c43a016cc0b29d3811778edf61b8ac29e9702a58a5b9a0",
+          "sessionMcpHelper": "65e8643a08b66429005856a6878245ec10732a61bfd9eb7fff3d60592727cb66",
+          "nativeHarness": "89060eb8aeaaac65bf6dc139f56c998d420035e7e2f6b793a61cf3507c34fee4"
+        },
+        "assets": {
+          "index-CO6LQFhJ.css": "245b3739edd180b76c7075d272a5f9910ca59f613fa995a46f0c6ae1675df5cd",
+          "index-DMAJ0RZ4.js": "89d4251d17a660945ad1019610711065d7f6b897013d24120215f47323a6eeeb",
+          "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+        }
+      },
+      "scope": "sandbox diagnostics plus baseline resource observer"
+    },
+    "medianOverheadFraction": 0.010132811573579925,
+    "limitations": [
+      "Eight actual 1 MiB authorized appends per arm; separate fresh isolated clusters, same source bytes. This estimates DB/resource observation overhead, not browser-screenshot overhead or a throughput qualification."
+    ]
+  }
+}

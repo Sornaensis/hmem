@@ -1346,6 +1346,29 @@ startEphemeralPgInSandbox sandbox = do
     , "listen_addresses = 'localhost'"
     ]
 
+  -- Opt-in measurements belong only to this freshly created native sandbox.
+  -- Production configuration and ordinary tests retain their existing defaults.
+  diagnostics <- lookupEnv "HMEM_TEST_SESSION_DIAGNOSTICS"
+  when (diagnostics == Just "1") $ do
+    postgres <- findExecutable "postgres"
+    let libraryCandidates = case postgres of
+          Nothing -> []
+          Just executable ->
+            [ takeDirectory executable </> ".." </> "lib" </> filename
+            | filename <- ["pg_stat_statements.dll", "pg_stat_statements.so"]
+            ]
+    libraries <- mapM doesFileExist libraryCandidates
+    appendFile (dataDir </> "postgresql.conf") $ unlines $
+      [ "track_commit_timestamp = on"
+      , "track_io_timing = on"
+      , "log_parameter_max_length = 0"
+      , "log_parameter_max_length_on_error = 0"
+      ] <> if Prelude.or libraries
+        then [ "shared_preload_libraries = 'pg_stat_statements'"
+             , "pg_stat_statements.track = all"
+             ]
+        else [ "log_statement = 'all'" ]
+
   (startedPort, process) <- startPostgresWithRetries dataDir logFile port 5
   let pg = EphemeralPg
         { epTmpDir  = sandbox.sandboxRoot

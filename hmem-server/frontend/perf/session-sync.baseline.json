@@ -1,0 +1,715 @@
+{
+  "schema": 1,
+  "mode": "calibrate",
+  "baseSha": "43c52ffd2377e3af82d31f7da82a4bc0c395cc17",
+  "measuredAt": "2026-10-25T13:10:10.595Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 30325645312,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": {
+    "harness": "1013f90081fc62bad9ad77cb7ac647e699053471c929ac366773a5392b6848d0",
+    "mcp": "18594374f1d60e527c24324ff3c671febb06b366d6d36b415384f03b1267fa12",
+    "assets": {
+      "index-CO6LQFhJ.css": "245b3739edd180b76c7075d272a5f9910ca59f613fa995a46f0c6ae1675df5cd",
+      "index-D686486I.js": "2371338d1b1621adbfbcaf4e306f94c14d9408867b8bb95245c72a2dc51ceba5",
+      "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+    }
+  },
+  "methodSha256": "e9dbba0c1b47e9cad8dd904c6607956abe67b023c1da7e52a5bf4c10be092149",
+  "result": {
+    "measurement": {
+      "commit": "pg_xact_commit_timestamp(session_chunks.xmin)",
+      "statements": "parameter-suppressed sandbox log statement count",
+      "locks": "sampled pg_stat_activity/pg_locks; wait-time estimate is sampling resolution limited",
+      "postgres": "PostgreSQL 18.2 on x86_64-windows, compiled by gcc-15.2.0, 64-bit"
+    },
+    "reference": {
+      "local": {
+        "trials": [
+          {
+            "targetBytesPerSecond": 262144,
+            "bytes": 1245184,
+            "requests": 19,
+            "durationMs": 5008.646728515625,
+            "offeredRecords": 20,
+            "missedRecords": 1,
+            "completedBytesPerSecond": 248606.872772803,
+            "maximumVirtualBacklogBytes": 193009.47199999995,
+            "stable": true,
+            "requestLatencyMs": {
+              "samples": 19,
+              "min": 47.057861328125,
+              "median": 63.31103515625,
+              "p95": 726.7177734375,
+              "max": 726.7177734375
+            },
+            "admissionLatenessMs": {
+              "samples": 19,
+              "min": 0,
+              "median": 9.550537109375,
+              "p95": 500.823974609375,
+              "max": 500.823974609375
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          },
+          {
+            "targetBytesPerSecond": 1048576,
+            "bytes": 4390912,
+            "requests": 67,
+            "durationMs": 5027.429443359375,
+            "offeredRecords": 80,
+            "missedRecords": 13,
+            "completedBytesPerSecond": 873391.0738021123,
+            "maximumVirtualBacklogBytes": 864683.0080000004,
+            "stable": false,
+            "requestLatencyMs": {
+              "samples": 67,
+              "min": 35.39990234375,
+              "median": 62.364501953125,
+              "p95": 64.218994140625,
+              "max": 78.29736328125
+            },
+            "admissionLatenessMs": {
+              "samples": 67,
+              "min": 13.787841796875,
+              "median": 366.958740234375,
+              "p95": 703.904541015625,
+              "max": 761.115966796875
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          },
+          {
+            "targetBytesPerSecond": 4194304,
+            "bytes": 3538944,
+            "requests": 54,
+            "durationMs": 5021.343017578125,
+            "offeredRecords": 320,
+            "missedRecords": 266,
+            "completedBytesPerSecond": 704780.3720262253,
+            "maximumVirtualBacklogBytes": 17461911.552,
+            "stable": false,
+            "requestLatencyMs": {
+              "samples": 54,
+              "min": 31.658447265625,
+              "median": 62.135986328125,
+              "p95": 278.145751953125,
+              "max": 404.05322265625
+            },
+            "admissionLatenessMs": {
+              "samples": 54,
+              "min": 8.600830078125,
+              "median": 1871.688232421875,
+              "p95": 3979.498779296875,
+              "max": 4102.473876953125
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          },
+          {
+            "targetBytesPerSecond": 8388608,
+            "bytes": 3670016,
+            "requests": 56,
+            "durationMs": 5048.826904296875,
+            "offeredRecords": 640,
+            "missedRecords": 584,
+            "completedBytesPerSecond": 726904.6987680607,
+            "maximumVirtualBacklogBytes": 38561351.68,
+            "stable": false,
+            "requestLatencyMs": {
+              "samples": 56,
+              "min": 17.725830078125,
+              "median": 62.11962890625,
+              "p95": 77.780517578125,
+              "max": 1035.046142578125
+            },
+            "admissionLatenessMs": {
+              "samples": 56,
+              "min": 6.473876953125,
+              "median": 1749.85693359375,
+              "p95": 4382.557861328125,
+              "max": 4535.826416015625
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          }
+        ],
+        "stableBytesPerSecond": 262144,
+        "sustainableBytesPerSecond": 183500.8,
+        "fraction": 0.7,
+        "measuredScope": "Direct authorized HTTP reference; zero followers and browser clients, not combined qualification",
+        "activeSessionCounts": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "historySessions": 53
+      },
+      "controlled": {
+        "trials": [
+          {
+            "targetBytesPerSecond": 262144,
+            "bytes": 1245184,
+            "requests": 19,
+            "durationMs": 5006.83740234375,
+            "offeredRecords": 20,
+            "missedRecords": 1,
+            "completedBytesPerSecond": 248696.71210355606,
+            "maximumVirtualBacklogBytes": 36118.46399999998,
+            "stable": true,
+            "requestLatencyMs": {
+              "samples": 19,
+              "min": 93.663330078125,
+              "median": 109.9033203125,
+              "p95": 124.51220703125,
+              "max": 124.51220703125
+            },
+            "admissionLatenessMs": {
+              "samples": 19,
+              "min": 0,
+              "median": 6.143310546875,
+              "p95": 13.822021484375,
+              "max": 13.822021484375
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          },
+          {
+            "targetBytesPerSecond": 1048576,
+            "bytes": 2555904,
+            "requests": 39,
+            "durationMs": 5035.75634765625,
+            "offeredRecords": 80,
+            "missedRecords": 41,
+            "completedBytesPerSecond": 507551.164819476,
+            "maximumVirtualBacklogBytes": 2710354.432,
+            "stable": false,
+            "requestLatencyMs": {
+              "samples": 39,
+              "min": 94.022216796875,
+              "median": 109.2236328125,
+              "p95": 140.36083984375,
+              "max": 251.5830078125
+            },
+            "admissionLatenessMs": {
+              "samples": 39,
+              "min": 14.362548828125,
+              "median": 1332.852783203125,
+              "p95": 2409.23828125,
+              "max": 2472.154296875
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          },
+          {
+            "targetBytesPerSecond": 4194304,
+            "bytes": 2686976,
+            "requests": 41,
+            "durationMs": 5002.194580078125,
+            "offeredRecords": 320,
+            "missedRecords": 279,
+            "completedBytesPerSecond": 537159.4321222975,
+            "maximumVirtualBacklogBytes": 18231478.272,
+            "stable": false,
+            "requestLatencyMs": {
+              "samples": 41,
+              "min": 87.54296875,
+              "median": 108.621826171875,
+              "p95": 112.234619140625,
+              "max": 126.907958984375
+            },
+            "admissionLatenessMs": {
+              "samples": 41,
+              "min": 14.549072265625,
+              "median": 2109.357666015625,
+              "p95": 4019.443359375,
+              "max": 4237.787841796875
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          },
+          {
+            "targetBytesPerSecond": 8388608,
+            "bytes": 2555904,
+            "requests": 39,
+            "durationMs": 5035.468994140625,
+            "offeredRecords": 640,
+            "missedRecords": 601,
+            "completedBytesPerSecond": 507580.12867800443,
+            "maximumVirtualBacklogBytes": 39615862.784,
+            "stable": false,
+            "requestLatencyMs": {
+              "samples": 39,
+              "min": 91.27587890625,
+              "median": 109.581298828125,
+              "p95": 127.486083984375,
+              "max": 418.494873046875
+            },
+            "admissionLatenessMs": {
+              "samples": 39,
+              "min": 7.140869140625,
+              "median": 2203.06640625,
+              "p95": 4513.373779296875,
+              "max": 4628.2373046875
+            },
+            "method": "fixed five-second offered 64 KiB-record schedule; serial authorized HTTP; virtual offered backlog is not an uploaded file"
+          }
+        ],
+        "stableBytesPerSecond": 262144,
+        "sustainableBytesPerSecond": 183500.8,
+        "fraction": 0.7,
+        "measuredScope": "Direct authorized HTTP reference; zero followers and browser clients, not combined qualification",
+        "activeSessionCounts": [
+          5,
+          6,
+          7,
+          8
+        ],
+        "historySessions": 53
+      }
+    },
+    "prefixes": [
+      {
+        "bytes": 1048576,
+        "fixture": {
+          "bytes": 1048576,
+          "records": 16,
+          "sha256": "d8e6f4b2c93e56425d43a7af5a0a05d37b35df5c5bef4e7854a9f45f0d2f7ec7",
+          "milliseconds": 5.489013671875,
+          "maxWorkingBufferBytes": 65536
+        },
+        "seed": {
+          "requests": 1,
+          "milliseconds": 133.3984375
+        },
+        "sourceWarmMs": {
+          "samples": 5,
+          "min": 0.515380859375,
+          "median": 0.539306640625,
+          "p95": 0.581298828125,
+          "max": 0.581298828125
+        },
+        "sourceFreshProcessMs": {
+          "samples": 3,
+          "min": 3.0066999999999986,
+          "median": 3.0143999999999984,
+          "p95": 3.0364000000000004,
+          "max": 3.0364000000000004
+        },
+        "databaseScans": [
+          {
+            "bytes": 1048576,
+            "sha256": "d8e6f4b2c93e56425d43a7af5a0a05d37b35df5c5bef4e7854a9f45f0d2f7ec7",
+            "milliseconds": 14.11669921875,
+            "queries": 1,
+            "maxRawBatchBytes": 1048576,
+            "scope": "bounded independent DB scan over actual immutable chunks; no production follower pacing"
+          },
+          {
+            "bytes": 1048576,
+            "sha256": "d8e6f4b2c93e56425d43a7af5a0a05d37b35df5c5bef4e7854a9f45f0d2f7ec7",
+            "milliseconds": 37.0205078125,
+            "queries": 1,
+            "maxRawBatchBytes": 1048576,
+            "scope": "bounded independent DB scan over actual immutable chunks; no production follower pacing"
+          }
+        ],
+        "referenceVerifiedPrefixMs": 40.0569078125,
+        "absoluteFiniteTargetMs": 5080.113815625,
+        "calibrationIncludes": "complete local source SHA256 plus complete independent bounded DB SHA256; metadata proof RTT fits fixed overhead, no raw-prefix HTTP-transfer mandate",
+        "productionResume": {
+          "complete": true,
+          "milliseconds": 25208.07080078125,
+          "observedMs": 25208.076416015625,
+          "capMs": 35000,
+          "startReplyMs": {
+            "samples": 1,
+            "min": 0.377685546875,
+            "median": 0.377685546875,
+            "p95": 0.377685546875,
+            "max": 0.377685546875
+          },
+          "followers": 1,
+          "states": [
+            {
+              "status": "caught_up",
+              "committedBytes": 1048576,
+              "error": null
+            }
+          ],
+          "scope": "actual production follower interval and authorized transports; incomplete runs have no completion percentile"
+        },
+        "canonicalCommittedBytes": 1048576,
+        "frozenSourceBoundary": 1048576,
+        "pendingSourceBytes": 0,
+        "actualProfile": {
+          "lifecycleActiveSessions": 9,
+          "browserClients": 0,
+          "network": {
+            "rttMs": 0,
+            "bitsPerSecond": null
+          },
+          "terminatedHistory": 53,
+          "peerPrefixBytes": null,
+          "primaryPrefixBytes": 1048576,
+          "productionFollowers": 1
+        }
+      },
+      {
+        "bytes": 104857600,
+        "fixture": {
+          "bytes": 104857600,
+          "records": 1600,
+          "sha256": "b957d7d5ded043214eb196fe4c29325afd30f94d53b68352d7306e022596402e",
+          "milliseconds": 396.392578125,
+          "maxWorkingBufferBytes": 65536
+        },
+        "seed": {
+          "requests": 100,
+          "milliseconds": 15467.710205078125
+        },
+        "sourceWarmMs": {
+          "samples": 5,
+          "min": 40.572998046875,
+          "median": 45.076416015625,
+          "p95": 56.719482421875,
+          "max": 56.719482421875
+        },
+        "sourceFreshProcessMs": {
+          "samples": 3,
+          "min": 69.135,
+          "median": 69.44980000000001,
+          "p95": 72.4273,
+          "max": 72.4273
+        },
+        "databaseScans": [
+          {
+            "bytes": 104857600,
+            "sha256": "b957d7d5ded043214eb196fe4c29325afd30f94d53b68352d7306e022596402e",
+            "milliseconds": 1773.136962890625,
+            "queries": 100,
+            "maxRawBatchBytes": 1048576,
+            "scope": "bounded independent DB scan over actual immutable chunks; no production follower pacing"
+          },
+          {
+            "bytes": 104857600,
+            "sha256": "b957d7d5ded043214eb196fe4c29325afd30f94d53b68352d7306e022596402e",
+            "milliseconds": 1693.34033203125,
+            "queries": 100,
+            "maxRawBatchBytes": 1048576,
+            "scope": "bounded independent DB scan over actual immutable chunks; no production follower pacing"
+          }
+        ],
+        "referenceVerifiedPrefixMs": 1845.564262890625,
+        "absoluteFiniteTargetMs": 8691.12852578125,
+        "calibrationIncludes": "complete local source SHA256 plus complete independent bounded DB SHA256; metadata proof RTT fits fixed overhead, no raw-prefix HTTP-transfer mandate",
+        "productionResume": {
+          "complete": false,
+          "milliseconds": null,
+          "observedMs": 20075.07666015625,
+          "capMs": 20000,
+          "startReplyMs": {
+            "samples": 4,
+            "min": 0.329345703125,
+            "median": 0.357421875,
+            "p95": 32.408935546875,
+            "max": 32.408935546875
+          },
+          "followers": 4,
+          "states": [
+            {
+              "status": "validating",
+              "committedBytes": 104857600,
+              "error": null
+            },
+            {
+              "status": "validating",
+              "committedBytes": 1048576,
+              "error": null
+            },
+            {
+              "status": "validating",
+              "committedBytes": 1048576,
+              "error": null
+            },
+            {
+              "status": "validating",
+              "committedBytes": 1048576,
+              "error": null
+            }
+          ],
+          "scope": "actual production follower interval and authorized transports; incomplete runs have no completion percentile"
+        },
+        "canonicalCommittedBytes": 104857600,
+        "frozenSourceBoundary": 104857600,
+        "pendingSourceBytes": 0,
+        "actualProfile": {
+          "lifecycleActiveSessions": 13,
+          "browserClients": 0,
+          "network": {
+            "rttMs": 0,
+            "bitsPerSecond": null
+          },
+          "terminatedHistory": 53,
+          "peerPrefixBytes": [
+            1048576,
+            1048576,
+            1048576
+          ],
+          "primaryPrefixBytes": 104857600,
+          "productionFollowers": 4
+        }
+      },
+      {
+        "bytes": 1073741824,
+        "fixture": {
+          "bytes": 1073741824,
+          "records": 16384,
+          "sha256": "76fe5475e80ab0722af5a1b6ef68cede01287b577dc20345b7ad4725c0798964",
+          "milliseconds": 4249.4345703125,
+          "maxWorkingBufferBytes": 65536
+        },
+        "seed": {
+          "requests": 1024,
+          "milliseconds": 168604.251953125
+        },
+        "sourceWarmMs": {
+          "samples": 5,
+          "min": 466.035888671875,
+          "median": 523.2001953125,
+          "p95": 1590.8515625,
+          "max": 1590.8515625
+        },
+        "sourceFreshProcessMs": {
+          "samples": 3,
+          "min": 710.4299,
+          "median": 731.6048000000001,
+          "p95": 740.568,
+          "max": 740.568
+        },
+        "databaseScans": [
+          {
+            "bytes": 1073741824,
+            "sha256": "76fe5475e80ab0722af5a1b6ef68cede01287b577dc20345b7ad4725c0798964",
+            "milliseconds": 16165.557373046875,
+            "queries": 1024,
+            "maxRawBatchBytes": 1048576,
+            "scope": "bounded independent DB scan over actual immutable chunks; no production follower pacing"
+          },
+          {
+            "bytes": 1073741824,
+            "sha256": "76fe5475e80ab0722af5a1b6ef68cede01287b577dc20345b7ad4725c0798964",
+            "milliseconds": 16072.12060546875,
+            "queries": 1024,
+            "maxRawBatchBytes": 1048576,
+            "scope": "bounded independent DB scan over actual immutable chunks; no production follower pacing"
+          }
+        ],
+        "referenceVerifiedPrefixMs": 17756.408935546875,
+        "absoluteFiniteTargetMs": 40512.81787109375,
+        "calibrationIncludes": "complete local source SHA256 plus complete independent bounded DB SHA256; metadata proof RTT fits fixed overhead, no raw-prefix HTTP-transfer mandate",
+        "productionResume": {
+          "complete": false,
+          "milliseconds": null,
+          "observedMs": 20204.4931640625,
+          "capMs": 20000,
+          "startReplyMs": {
+            "samples": 4,
+            "min": 0.3125,
+            "median": 0.349365234375,
+            "p95": 0.67578125,
+            "max": 0.67578125
+          },
+          "followers": 4,
+          "states": [
+            {
+              "status": "validating",
+              "committedBytes": 1073741824,
+              "error": null
+            },
+            {
+              "status": "validating",
+              "committedBytes": 1048576,
+              "error": null
+            },
+            {
+              "status": "validating",
+              "committedBytes": 1048576,
+              "error": null
+            },
+            {
+              "status": "validating",
+              "committedBytes": 1048576,
+              "error": null
+            }
+          ],
+          "scope": "actual production follower interval and authorized transports; incomplete runs have no completion percentile"
+        },
+        "canonicalCommittedBytes": 1073741824,
+        "frozenSourceBoundary": 1073741824,
+        "pendingSourceBytes": 0,
+        "actualProfile": {
+          "lifecycleActiveSessions": 17,
+          "browserClients": 0,
+          "network": {
+            "rttMs": 50,
+            "bitsPerSecond": 100000000
+          },
+          "terminatedHistory": 53,
+          "peerPrefixBytes": [
+            1048576,
+            1048576,
+            1048576
+          ],
+          "primaryPrefixBytes": 1073741824,
+          "productionFollowers": 4
+        }
+      }
+    ],
+    "coldDefinition": "Local scan: fresh Node process/source handle, three runs; warm: same process, five runs. OS filesystem cache is uncontrolled. Database scan runs are repeated warm scans; no cold-disk claim.",
+    "limitations": [
+      "SQL execution counts are logical database work, not physical TCP round trips.",
+      "Resource working sets sample explicitly owned stable processes; short-lived helper CPU/peaks are not fully captured."
+    ],
+    "database": {
+      "at": 1792934162341.469,
+      "activity": {
+        "lock_waiters": 0,
+        "active": 1,
+        "connections": 4
+      },
+      "statements": {
+        "calls": 148938,
+        "logBytes": 18830407,
+        "method": "parameter-suppressed-log",
+        "physicalRoundTrips": null
+      }
+    },
+    "resources": {
+      "samples": 300,
+      "peakRssBytes": 967258112,
+      "cpuSeconds": 116.46875,
+      "samplingWaitMs": 500,
+      "actualIntervalsMs": {
+        "samples": 299,
+        "min": 905.515380859375,
+        "median": 1000.551025390625,
+        "p95": 1967.78271484375,
+        "max": 2628.48193359375
+      },
+      "failures": 0,
+      "method": "sampled working set/CPU of explicitly owned stable PIDs; excludes unobserved short-lived helpers"
+    },
+    "freeze": {
+      "historicalSessions": 53,
+      "typicalRecordBytes": [
+        1024,
+        65536
+      ],
+      "appendChunkBytes": 65536,
+      "sustainableBytesPerSecond": {
+        "local": 183500.8,
+        "controlled": 183500.8
+      },
+      "absoluteOneGiBFiniteTargetMs": 40512.81787109375,
+      "rssCeilingBytes": 1276181504,
+      "cpuCeilingReference": {
+        "completedReferenceWorkBytes": 14177665024.0,
+        "measuredScope": "sampled working set/CPU of explicitly owned stable PIDs; excludes unobserved short-lived helpers",
+        "scope": "Exact matched zero-browser calibration workflow; normalized completed reference/seed/source-scan/DB-scan bytes; 25% headroom; not whole final-matrix or unobserved-helper CPU",
+        "measuredCpuSeconds": 116.46875,
+        "maxSecondsPerReferenceGiB": 11.025913633548125
+      },
+      "databaseStatementCeiling": {
+        "observedCalls": 148938,
+        "completedDatabaseWorkBytes": 3560833024.0,
+        "maxCallsPerDatabaseMiB": 48.24435528398425,
+        "scope": "Exact matched zero-browser calibration workflow; normalized completed reference/seed/DB-scan bytes; 10% headroom; logical SQL, not TCP round trips"
+      },
+      "finiteRunsRequiredAtFinal": {
+        "warm": 5,
+        "cold": 3
+      },
+      "liveSamplesRequiredAtFinal": 100,
+      "followersPerProcess": [
+        1,
+        4
+      ],
+      "lifecycleActiveSessionCountsAtResume": [
+        9,
+        13,
+        17
+      ],
+      "rssScope": "Zero-browser calibration supervisor/server/PostgreSQL/current MCP stable PIDs; not combined three-browser RSS",
+      "pendingTransferRule": "Finite target = 2 * (verified-prefix reference + bounded measured transfer reference for pending B-N bytes on actual wire profile) + 5000 ms. Frozen 40.513 s applies only to N=B=1 GiB, pending=0.",
+      "measuredRecordDistribution": {
+        "maximumRecordBoundary": "Generator self-check only; not a completed combined production profile",
+        "calibration": {
+          "fraction": 1,
+          "recordBytes": 65536
+        },
+        "browserProbeTail": {
+          "samples": 1,
+          "recordBytes": 1024
+        }
+      }
+    },
+    "qualificationContract": {
+      "schema": 1,
+      "task": "6bfb2638-0f93-4169-81cf-cbdef3bcc52d",
+      "browsers": 3,
+      "prefixes": [
+        1048576,
+        104857600,
+        1073741824
+      ],
+      "followers": [
+        1,
+        4
+      ],
+      "history": 53,
+      "latencySamples": 100,
+      "warmRuns": 5,
+      "coldRuns": 3,
+      "sustainableFraction": 0.7,
+      "sourceRecordBytes": [
+        1024,
+        65536
+      ],
+      "network": {
+        "rttMs": 50,
+        "bitsPerSecond": 100000000
+      },
+      "budgets": {
+        "sourceCommitP95Ms": 2000,
+        "commitVisibleP95Ms": 2000,
+        "interactionP95Ms": 100,
+        "progressP95Ms": 250,
+        "initialLocalMs": 2000,
+        "initialRemoteMs": 3000,
+        "controlReplyMs": 1000,
+        "finiteCalibrationMultiplier": 2,
+        "finiteOverheadMs": 5000,
+        "unrelatedRegressionFraction": 0.1
+      }
+    },
+    "measuredScope": "Direct HTTP reference calibration and zero-browser production MCP resume cases; separate three-browser one-marker probes are not combined qualification.",
+    "actualSampleCounts": {
+      "productionResumeRuns": 3,
+      "sourceWarmScans": 15,
+      "sourceFreshProcessScans": 9,
+      "directReferenceHttpRequests": 334.0,
+      "completedProductionResumeRuns": 1,
+      "databasePrefixScans": 6,
+      "combinedThreeBrowserLiveLatencySamples": 0
+    }
+  },
+  "qualificationStatus": "not_qualified",
+  "metadataReconciliation": "Measurement values unchanged; explicit actual profile/sample/normalization fields derived from successful recorded setup operations. Wall guard added after this measured run; no claim it protected this earlier run."
+}

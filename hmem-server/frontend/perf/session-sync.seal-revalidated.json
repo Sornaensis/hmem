@@ -1,0 +1,1199 @@
+{
+  "schema": 1,
+  "mode": "seal-revalidate",
+  "qualificationStatus": "not_qualified",
+  "baseSha": "43c52ffd2377e3af82d31f7da82a4bc0c395cc17",
+  "measuredAt": "2026-10-25T14:35:11.959Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 28520005632,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": {
+    "harness": "1013f90081fc62bad9ad77cb7ac647e699053471c929ac366773a5392b6848d0",
+    "mcp": "18594374f1d60e527c24324ff3c671febb06b366d6d36b415384f03b1267fa12",
+    "assets": {
+      "index-BRbBbbIs.js": "e38b0bf508a5186f23dee332db300f45439349c78c7884247d162b0ba65da298",
+      "index-CO6LQFhJ.css": "245b3739edd180b76c7075d272a5f9910ca59f613fa995a46f0c6ae1675df5cd",
+      "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+    }
+  },
+  "methodSha256": "aee1cfc5514a845ea52ab50f6525f89835d09b33aa819b264394ee03acbdfe1f",
+  "result": {
+    "name": "local-finite",
+    "network": {},
+    "sealOnly": true,
+    "ledger": [
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "d9906350-f84a-4535-978c-c0678d9ea193",
+        "index": 0,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224056",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.5595703125,
+            "median": 0.5595703125,
+            "p95": 0.5595703125,
+            "max": 0.5595703125
+          },
+          "observedThroughControlMs": 1212.0634765625,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 58.500244140625,
+          "readbackMs": 38.62158203125,
+          "sessionId": "d9906350-f84a-4535-978c-c0678d9ea193",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1068.552978515625
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "a76862da-e5ea-4797-8c9e-5e57690d2561",
+        "index": 0,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224061",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.4599609375,
+            "median": 0.4599609375,
+            "p95": 0.4599609375,
+            "max": 0.4599609375
+          },
+          "observedThroughControlMs": 1154.630615234375,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 44.382568359375,
+          "readbackMs": 11.94384765625,
+          "sessionId": "a76862da-e5ea-4797-8c9e-5e57690d2561",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1070.74267578125
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "643a0ef2-7c88-4978-a53c-52f990e3d99a",
+        "index": 1,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224064",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.431640625,
+            "median": 0.431640625,
+            "p95": 0.431640625,
+            "max": 0.431640625
+          },
+          "observedThroughControlMs": 1132.195556640625,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 26.82373046875,
+          "readbackMs": 14.3701171875,
+          "sessionId": "643a0ef2-7c88-4978-a53c-52f990e3d99a",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1072.635009765625
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "746312b3-fa19-4956-8ef4-7666e93291e0",
+        "index": 1,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224065",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.305419921875,
+            "median": 0.305419921875,
+            "p95": 0.305419921875,
+            "max": 0.305419921875
+          },
+          "observedThroughControlMs": 1239.6689453125,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 76.534912109375,
+          "readbackMs": 46.932373046875,
+          "sessionId": "746312b3-fa19-4956-8ef4-7666e93291e0",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1068.203857421875
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "c0d43a53-c7ce-4d05-8c50-a8e6732804f3",
+        "index": 2,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224070",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.374755859375,
+            "median": 0.374755859375,
+            "p95": 0.374755859375,
+            "max": 0.374755859375
+          },
+          "observedThroughControlMs": 1136.61767578125,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 36.95849609375,
+          "readbackMs": 14.453857421875,
+          "sessionId": "c0d43a53-c7ce-4d05-8c50-a8e6732804f3",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1060.8115234375
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "a6f60839-23f2-47e8-862e-a81a88fc8f81",
+        "index": 2,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224071",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.322998046875,
+            "median": 0.322998046875,
+            "p95": 0.322998046875,
+            "max": 0.322998046875
+          },
+          "observedThroughControlMs": 1114.80615234375,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 23.7734375,
+          "readbackMs": 12.3603515625,
+          "sessionId": "a6f60839-23f2-47e8-862e-a81a88fc8f81",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1063.67919921875
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "2b02565e-d8f5-4f08-89e7-a5553a34d999",
+        "index": 3,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224072",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.3232421875,
+            "median": 0.3232421875,
+            "p95": 0.3232421875,
+            "max": 0.3232421875
+          },
+          "observedThroughControlMs": 1166.2001953125,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 30.59423828125,
+          "readbackMs": 16.00341796875,
+          "sessionId": "2b02565e-d8f5-4f08-89e7-a5553a34d999",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1076.727783203125
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "2d42891d-f706-4459-bfcd-511545e47018",
+        "index": 3,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "3940649674224073",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.453857421875,
+            "median": 0.453857421875,
+            "p95": 0.453857421875,
+            "max": 0.453857421875
+          },
+          "observedThroughControlMs": 1086.43896484375,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 45.427734375,
+          "readbackMs": 47.202392578125,
+          "sessionId": "2d42891d-f706-4459-bfcd-511545e47018",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 956.582275390625
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "0daeafe4-44cf-470c-b4a7-483002a428dd",
+        "index": 4,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "5348024557777377",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.604736328125,
+            "median": 0.604736328125,
+            "p95": 0.604736328125,
+            "max": 0.604736328125
+          },
+          "observedThroughControlMs": 1140.39306640625,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 25.9345703125,
+          "readbackMs": 9.72021484375,
+          "sessionId": "0daeafe4-44cf-470c-b4a7-483002a428dd",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1077.551513671875
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "320b6cf6-101c-4a81-b3f7-b4ddef3ffa25",
+        "index": 4,
+        "state": "warm",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 77744,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "same warm process across cases; distinct new follower jobs",
+          "browser": "warm browser process",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "7599824371462712",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.36083984375,
+            "median": 0.36083984375,
+            "p95": 0.36083984375,
+            "max": 0.36083984375
+          },
+          "observedThroughControlMs": 1121.620849609375,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 60.468994140625,
+          "readbackMs": 45.139892578125,
+          "sessionId": "320b6cf6-101c-4a81-b3f7-b4ddef3ffa25",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 971.279296875
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "1d4e6f2c-ad0d-433a-83bf-5bacedad8025",
+        "index": 5,
+        "state": "fresh-process",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 142620,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "fresh process",
+          "browser": "fresh browser process/contexts",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "5910974511198783",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.5478515625,
+            "median": 0.5478515625,
+            "p95": 0.5478515625,
+            "max": 0.5478515625
+          },
+          "observedThroughControlMs": 1122.506103515625,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 59.697265625,
+          "readbackMs": 46.01611328125,
+          "sessionId": "1d4e6f2c-ad0d-433a-83bf-5bacedad8025",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 970.020751953125
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "059aa17b-1877-420f-bf68-8eb4ee019787",
+        "index": 5,
+        "state": "fresh-process",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 83596,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "fresh process",
+          "browser": "fresh browser process/contexts",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "9288674231726667",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.562255859375,
+            "median": 0.562255859375,
+            "p95": 0.562255859375,
+            "max": 0.562255859375
+          },
+          "observedThroughControlMs": 1192.744140625,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 45.98486328125,
+          "readbackMs": 45.010498046875,
+          "sessionId": "059aa17b-1877-420f-bf68-8eb4ee019787",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1064.723388671875
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "6d2a819f-8ab2-4d97-b1b4-0978034559ad",
+        "index": 6,
+        "state": "fresh-process",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 272636,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "fresh process",
+          "browser": "fresh browser process/contexts",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "7318349394752112",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.596435546875,
+            "median": 0.596435546875,
+            "p95": 0.596435546875,
+            "max": 0.596435546875
+          },
+          "observedThroughControlMs": 1522.559814453125,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 45.25732421875,
+          "readbackMs": 41.337890625,
+          "sessionId": "6d2a819f-8ab2-4d97-b1b4-0978034559ad",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 1394.012939453125
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "ee2d17e3-f3d3-4db2-9390-a2beb27c37ff",
+        "index": 6,
+        "state": "fresh-process",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 213908,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "fresh process",
+          "browser": "fresh browser process/contexts",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "6192449487909492",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.516357421875,
+            "median": 0.516357421875,
+            "p95": 0.516357421875,
+            "max": 0.516357421875
+          },
+          "observedThroughControlMs": 1106.629638671875,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 60.931884765625,
+          "readbackMs": 27.21240234375,
+          "sessionId": "ee2d17e3-f3d3-4db2-9390-a2beb27c37ff",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 983.771484375
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "flush",
+        "sessionId": "45843970-56dd-4d0b-a5e2-88e12cf49cdc",
+        "index": 7,
+        "state": "fresh-process",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 98204,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "fresh process",
+          "browser": "fresh browser process/contexts",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "12947848928965317",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.7626953125,
+            "median": 0.7626953125,
+            "p95": 0.7626953125,
+            "max": 0.7626953125
+          },
+          "observedThroughControlMs": 1108.429931640625,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 60.1494140625,
+          "readbackMs": 30.570068359375,
+          "sessionId": "45843970-56dd-4d0b-a5e2-88e12cf49cdc",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 968.151611328125
+      },
+      {
+        "operation": "seal-only",
+        "sourceControlKind": "stop",
+        "sessionId": "3cd0b183-a56d-418c-8839-7a2b20d4c392",
+        "index": 7,
+        "state": "fresh-process",
+        "witness": false,
+        "followers": 1,
+        "mcpPid": 280244,
+        "managerPid": 281176,
+        "reset": {
+          "mcpAndFollowerVerificationAndTransport": "fresh process",
+          "browser": "fresh browser process/contexts",
+          "nativeServerDatabase": "retained warm instance",
+          "osCache": "uncontrolled"
+        },
+        "boundary": {
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096
+        },
+        "sourceIdentity": {
+          "device": "1246800844",
+          "inode": "5910974511198924",
+          "unchanged": true
+        },
+        "resume": {
+          "registrationReplyMs": {
+            "samples": 1,
+            "min": 0.55810546875,
+            "median": 0.55810546875,
+            "p95": 0.55810546875,
+            "max": 0.55810546875
+          },
+          "observedThroughControlMs": 1121.492919921875,
+          "fullyReconciled": false
+        },
+        "control": {
+          "complete": false,
+          "accepted": false,
+          "reason": "seal-only revalidation; control not remeasured"
+        },
+        "receiptVerification": {
+          "checked": false,
+          "reason": "no_completed_receipt"
+        },
+        "primarySeal": {
+          "complete": true,
+          "milliseconds": 44.14501953125,
+          "readbackMs": 47.187255859375,
+          "sessionId": "3cd0b183-a56d-418c-8839-7a2b20d4c392",
+          "N": 1048576,
+          "B": 1052672,
+          "pendingBytes": 4096,
+          "expectedRevision": 1,
+          "finalRevision": 2,
+          "sha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "locallyReconstructedSha256": "b4ad465d45488da202aac69711c5baaa1091efca2572b2e4a9117da468b77179",
+          "hashVerified": true,
+          "scope": "independent ordinary managing MCP; seals only canonical committed N, not unuploaded source B-N"
+        },
+        "peerSeals": [],
+        "uploaderAfterIndependentSeal": [
+          {
+            "status": "terminated",
+            "committedBytes": null
+          }
+        ],
+        "retireObservedMs": 978.751220703125
+      }
+    ],
+    "witnesses": [],
+    "counts": {
+      "flush": {
+        "warm": {
+          "attempts": 0,
+          "accepted": 0,
+          "completed": 0,
+          "censored": 0,
+          "independentlySealed": 0
+        },
+        "fresh-process": {
+          "attempts": 0,
+          "accepted": 0,
+          "completed": 0,
+          "censored": 0,
+          "independentlySealed": 0
+        }
+      },
+      "stop": {
+        "warm": {
+          "attempts": 0,
+          "accepted": 0,
+          "completed": 0,
+          "censored": 0,
+          "independentlySealed": 0
+        },
+        "fresh-process": {
+          "attempts": 0,
+          "accepted": 0,
+          "completed": 0,
+          "censored": 0,
+          "independentlySealed": 0
+        }
+      }
+    },
+    "sealingCounts": {
+      "warm": 10,
+      "freshProcess": 6,
+      "additionalSmallWitnesses": 0
+    },
+    "scope": "five warm and three genuinely reset MCP/browser runs OF EACH control kind; each has an independent canonical-prefix seal; capped controls have no invented completion percentile"
+  }
+}

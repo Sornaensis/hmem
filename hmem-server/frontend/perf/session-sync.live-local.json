@@ -1,0 +1,2967 @@
+{
+  "schema": 1,
+  "mode": "live",
+  "qualificationStatus": "not_qualified",
+  "baseSha": "43c52ffd2377e3af82d31f7da82a4bc0c395cc17",
+  "measuredAt": "2026-10-25T14:15:07.117Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "node": "v24.15.0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520,
+    "freeMemoryBytes": 29543215104,
+    "versions": {
+      "ghc": "The Glorious Glasgow Haskell Compilation System, version 9.10.2",
+      "psql": "psql (PostgreSQL) 18.2"
+    }
+  },
+  "provenance": {
+    "harness": "1013f90081fc62bad9ad77cb7ac647e699053471c929ac366773a5392b6848d0",
+    "mcp": "18594374f1d60e527c24324ff3c671febb06b366d6d36b415384f03b1267fa12",
+    "assets": {
+      "index-CJkJad_q.js": "87a1b0bb2d69ea8d383706b8c3c3ca6b1440171a28e2efb61c7e03d6a0a91dd0",
+      "index-CO6LQFhJ.css": "245b3739edd180b76c7075d272a5f9910ca59f613fa995a46f0c6ae1675df5cd",
+      "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+    }
+  },
+  "methodSha256": "d055383135b956ac5fe7b474228192c08c76766d67e0d8dcf9c70711d79c2f47",
+  "result": {
+    "name": "local-one-follower-three-browser",
+    "scopeCounts": {
+      "active": 1,
+      "terminated": 53
+    },
+    "followers": 1,
+    "browserClients": 3,
+    "selectedPrefixBytes": 1048576,
+    "prefixBytes": [
+      1048576
+    ],
+    "network": {},
+    "chromium": "151.0.7922.34",
+    "initialViews": [
+      {
+        "milliseconds": 1049.489990234375,
+        "geometry": {
+          "top": 264.515625,
+          "bottom": 999.515625,
+          "viewport": 1000,
+          "scrollTop": 224707,
+          "scrollHeight": 225442,
+          "clientHeight": 735
+        }
+      },
+      {
+        "milliseconds": 1029.31494140625,
+        "geometry": {
+          "top": 264.515625,
+          "bottom": 999.515625,
+          "viewport": 1000,
+          "scrollTop": 224707,
+          "scrollHeight": 225442,
+          "clientHeight": 735
+        }
+      },
+      {
+        "milliseconds": 1011.40966796875,
+        "geometry": {
+          "top": 264.515625,
+          "bottom": 999.515625,
+          "viewport": 1000,
+          "scrollTop": 224707,
+          "scrollHeight": 225442,
+          "clientHeight": 735
+        }
+      }
+    ],
+    "resume": {
+      "complete": true,
+      "observedMs": 25616.2783203125,
+      "capMs": 35000,
+      "startReplyMs": {
+        "samples": 1,
+        "min": 0.5673828125,
+        "median": 0.5673828125,
+        "p95": 0.5673828125,
+        "max": 0.5673828125
+      }
+    },
+    "load": {
+      "requestedAggregateBytesPerSecond": 183500.8,
+      "requestedPerFollowerBytesPerSecond": 183500.8,
+      "elapsedMs": 9350.453857421875,
+      "generatedBytes": 1715200,
+      "actualAggregateBytesPerSecond": 183434.94616986628,
+      "producers": [
+        {
+          "initialBoundary": 1048576,
+          "frozenBoundary": 2763776,
+          "bytes": 1715200,
+          "filesystemChunks": 1675,
+          "elapsedMs": 9350.453857421875,
+          "actualBytesPerSecond": 183434.94616986628,
+          "offeredBytesPerSecond": 183500.8,
+          "admissionLatenessMs": {
+            "samples": 100,
+            "min": 0,
+            "median": 7.795654296875,
+            "p95": 21.341796875,
+            "max": 30.89892578125
+          }
+        }
+      ],
+      "pattern": [
+        1024,
+        1024,
+        1024,
+        65536
+      ],
+      "filesystemChunkBytes": 1024,
+      "markersIncludedInRate": true
+    },
+    "samples": {
+      "independentSourceEvents": 100,
+      "uniqueCommittedChunks": 3,
+      "uniqueOutboxEvents": 3,
+      "representedPaintFrames": [
+        3,
+        3,
+        3
+      ],
+      "displayedSourceSequences": [
+        [
+          20,
+          70,
+          99
+        ],
+        [
+          20,
+          70,
+          99
+        ],
+        [
+          20,
+          70,
+          99
+        ]
+      ],
+      "supersededIntermediateSequences": [
+        97,
+        97,
+        97
+      ],
+      "ordinaryMcpCalls": 100
+    },
+    "sourceToCommitMs": {
+      "samples": 100,
+      "min": 1241.40185546875,
+      "median": 3305.859619140625,
+      "p95": 5350.68017578125,
+      "max": 5745.80908203125
+    },
+    "representedCommitToVisibleMs": [
+      {
+        "samples": 100,
+        "min": 1214.061279296875,
+        "median": 1488.302978515625,
+        "p95": 1905.208984375,
+        "max": 1905.208984375
+      },
+      {
+        "samples": 100,
+        "min": 1213.96435546875,
+        "median": 1464.366455078125,
+        "p95": 1796.382080078125,
+        "max": 1796.382080078125
+      },
+      {
+        "samples": 100,
+        "min": 1213.765625,
+        "median": 1464.481689453125,
+        "p95": 1796.03515625,
+        "max": 1796.03515625
+      }
+    ],
+    "ordinaryMcpMs": {
+      "samples": 100,
+      "min": 14.814697265625,
+      "median": 38.827392578125,
+      "p95": 47.912841796875,
+      "max": 62.4814453125
+    },
+    "progressReplyMs": {
+      "samples": 100,
+      "min": 0.221435546875,
+      "median": 0.299560546875,
+      "p95": 0.732421875,
+      "max": 1.265380859375
+    },
+    "nativeInputToTwoFrameMs": {
+      "samples": 100,
+      "min": 20.58349609375,
+      "median": 33.554931640625,
+      "p95": 132.89208984375,
+      "max": 215.051025390625
+    },
+    "inputScope": "actual Shift key on the focused product transcript to two animation frames, including driver/native main-thread delay; does not replace the existing frontend local-interaction suite",
+    "censored": {
+      "sourceCommit": 0,
+      "representedVisibleProgress": [
+        0,
+        0,
+        0
+      ]
+    },
+    "observations": [
+      {
+        "sequence": 0,
+        "sourceAt": 1792937746512.7937,
+        "sourceWriteFinishedAt": 1792937746513.0322,
+        "sourceEnd": 1049600,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 1,
+        "sourceAt": 1792937746513.1052,
+        "sourceWriteFinishedAt": 1792937746513.1758,
+        "sourceEnd": 1050624,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 2,
+        "sourceAt": 1792937746527.9011,
+        "sourceWriteFinishedAt": 1792937746528.018,
+        "sourceEnd": 1051648,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 3,
+        "sourceAt": 1792937746881.0417,
+        "sourceWriteFinishedAt": 1792937746884.1511,
+        "sourceEnd": 1117184,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 4,
+        "sourceAt": 1792937746888.4941,
+        "sourceWriteFinishedAt": 1792937746888.5452,
+        "sourceEnd": 1118208,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 5,
+        "sourceAt": 1792937746896.1833,
+        "sourceWriteFinishedAt": 1792937746896.2388,
+        "sourceEnd": 1119232,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 6,
+        "sourceAt": 1792937746911.3845,
+        "sourceWriteFinishedAt": 1792937746911.522,
+        "sourceEnd": 1120256,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 7,
+        "sourceAt": 1792937747248.9304,
+        "sourceWriteFinishedAt": 1792937747250.4941,
+        "sourceEnd": 1185792,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 8,
+        "sourceAt": 1792937747255.599,
+        "sourceWriteFinishedAt": 1792937747255.6472,
+        "sourceEnd": 1186816,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 9,
+        "sourceAt": 1792937747264.9924,
+        "sourceWriteFinishedAt": 1792937747265.2368,
+        "sourceEnd": 1187840,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 10,
+        "sourceAt": 1792937747279.9692,
+        "sourceWriteFinishedAt": 1792937747280.4849,
+        "sourceEnd": 1188864,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 11,
+        "sourceAt": 1792937747632.4636,
+        "sourceWriteFinishedAt": 1792937747634.9993,
+        "sourceEnd": 1254400,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 12,
+        "sourceAt": 1792937747640.258,
+        "sourceWriteFinishedAt": 1792937747640.2986,
+        "sourceEnd": 1255424,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 13,
+        "sourceAt": 1792937747648.0798,
+        "sourceWriteFinishedAt": 1792937747648.3174,
+        "sourceEnd": 1256448,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 14,
+        "sourceAt": 1792937747649.8901,
+        "sourceWriteFinishedAt": 1792937747649.9246,
+        "sourceEnd": 1257472,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 15,
+        "sourceAt": 1792937748001.4712,
+        "sourceWriteFinishedAt": 1792937748003.4497,
+        "sourceEnd": 1323008,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 16,
+        "sourceAt": 1792937748016.395,
+        "sourceWriteFinishedAt": 1792937748016.569,
+        "sourceEnd": 1324032,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 17,
+        "sourceAt": 1792937748022.0278,
+        "sourceWriteFinishedAt": 1792937748022.0881,
+        "sourceEnd": 1325056,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 18,
+        "sourceAt": 1792937748031.8867,
+        "sourceWriteFinishedAt": 1792937748032.4963,
+        "sourceEnd": 1326080,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 19,
+        "sourceAt": 1792937748375.3313,
+        "sourceWriteFinishedAt": 1792937748377.6707,
+        "sourceEnd": 1391616,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 20,
+        "sourceAt": 1792937748382.332,
+        "sourceWriteFinishedAt": 1792937748382.3718,
+        "sourceEnd": 1392640,
+        "committedRevision": 2,
+        "canonicalChunkEnd": 1392640,
+        "commitAt": 1792937750872.13,
+        "visibleProgress": [
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752360.4329,
+            "commitToVisibleMs": 1488.302978515625
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.4963,
+            "commitToVisibleMs": 1464.366455078125
+          },
+          {
+            "representedBySequence": 20,
+            "renderedUpperBoundAt": 1792937752336.6116,
+            "commitToVisibleMs": 1464.481689453125
+          }
+        ]
+      },
+      {
+        "sequence": 21,
+        "sourceAt": 1792937748391.504,
+        "sourceWriteFinishedAt": 1792937748391.6423,
+        "sourceEnd": 1393664,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 22,
+        "sourceAt": 1792937748406.585,
+        "sourceWriteFinishedAt": 1792937748406.712,
+        "sourceEnd": 1394688,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 23,
+        "sourceAt": 1792937748756.3123,
+        "sourceWriteFinishedAt": 1792937748758.4614,
+        "sourceEnd": 1460224,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 24,
+        "sourceAt": 1792937748763.7993,
+        "sourceWriteFinishedAt": 1792937748763.838,
+        "sourceEnd": 1461248,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 25,
+        "sourceAt": 1792937748771.666,
+        "sourceWriteFinishedAt": 1792937748771.7017,
+        "sourceEnd": 1462272,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 26,
+        "sourceAt": 1792937748786.6328,
+        "sourceWriteFinishedAt": 1792937748787.294,
+        "sourceEnd": 1463296,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 27,
+        "sourceAt": 1792937749122.0132,
+        "sourceWriteFinishedAt": 1792937749123.901,
+        "sourceEnd": 1528832,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 28,
+        "sourceAt": 1792937749129.0146,
+        "sourceWriteFinishedAt": 1792937749129.0586,
+        "sourceEnd": 1529856,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 29,
+        "sourceAt": 1792937749138.1335,
+        "sourceWriteFinishedAt": 1792937749138.486,
+        "sourceEnd": 1530880,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 30,
+        "sourceAt": 1792937749139.1035,
+        "sourceWriteFinishedAt": 1792937749139.1338,
+        "sourceEnd": 1531904,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 31,
+        "sourceAt": 1792937749492.507,
+        "sourceWriteFinishedAt": 1792937749494.8047,
+        "sourceEnd": 1597440,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 32,
+        "sourceAt": 1792937749498.298,
+        "sourceWriteFinishedAt": 1792937749498.3467,
+        "sourceEnd": 1598464,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 33,
+        "sourceAt": 1792937749507.7004,
+        "sourceWriteFinishedAt": 1792937749507.775,
+        "sourceEnd": 1599488,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 34,
+        "sourceAt": 1792937749523.0337,
+        "sourceWriteFinishedAt": 1792937749523.1484,
+        "sourceEnd": 1600512,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 35,
+        "sourceAt": 1792937749875.93,
+        "sourceWriteFinishedAt": 1792937749880.3843,
+        "sourceEnd": 1666048,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 36,
+        "sourceAt": 1792937749884.1833,
+        "sourceWriteFinishedAt": 1792937749884.2288,
+        "sourceEnd": 1667072,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 37,
+        "sourceAt": 1792937749891.1313,
+        "sourceWriteFinishedAt": 1792937749891.3687,
+        "sourceEnd": 1668096,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 38,
+        "sourceAt": 1792937749893.1655,
+        "sourceWriteFinishedAt": 1792937749893.208,
+        "sourceEnd": 1669120,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 39,
+        "sourceAt": 1792937750245.662,
+        "sourceWriteFinishedAt": 1792937750248.3577,
+        "sourceEnd": 1734656,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 40,
+        "sourceAt": 1792937750252.11,
+        "sourceWriteFinishedAt": 1792937750252.2717,
+        "sourceEnd": 1735680,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 41,
+        "sourceAt": 1792937750260.6826,
+        "sourceWriteFinishedAt": 1792937750260.7314,
+        "sourceEnd": 1736704,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 42,
+        "sourceAt": 1792937750261.4841,
+        "sourceWriteFinishedAt": 1792937750261.5173,
+        "sourceEnd": 1737728,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 43,
+        "sourceAt": 1792937750615.8083,
+        "sourceWriteFinishedAt": 1792937750618.0361,
+        "sourceEnd": 1803264,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 44,
+        "sourceAt": 1792937750623.797,
+        "sourceWriteFinishedAt": 1792937750623.8345,
+        "sourceEnd": 1804288,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 45,
+        "sourceAt": 1792937750631.1782,
+        "sourceWriteFinishedAt": 1792937750631.425,
+        "sourceEnd": 1805312,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 46,
+        "sourceAt": 1792937750632.9805,
+        "sourceWriteFinishedAt": 1792937750633.0317,
+        "sourceEnd": 1806336,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 47,
+        "sourceAt": 1792937750984.1882,
+        "sourceWriteFinishedAt": 1792937750987.0264,
+        "sourceEnd": 1871872,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 48,
+        "sourceAt": 1792937750991.0208,
+        "sourceWriteFinishedAt": 1792937750991.2764,
+        "sourceEnd": 1872896,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 49,
+        "sourceAt": 1792937750997.4993,
+        "sourceWriteFinishedAt": 1792937750997.5876,
+        "sourceEnd": 1873920,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 50,
+        "sourceAt": 1792937751012.4563,
+        "sourceWriteFinishedAt": 1792937751012.5818,
+        "sourceEnd": 1874944,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 51,
+        "sourceAt": 1792937751361.8337,
+        "sourceWriteFinishedAt": 1792937751364.634,
+        "sourceEnd": 1940480,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 52,
+        "sourceAt": 1792937751367.3572,
+        "sourceWriteFinishedAt": 1792937751367.4353,
+        "sourceEnd": 1941504,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 53,
+        "sourceAt": 1792937751370.8005,
+        "sourceWriteFinishedAt": 1792937751370.8662,
+        "sourceEnd": 1942528,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 54,
+        "sourceAt": 1792937751383.176,
+        "sourceWriteFinishedAt": 1792937751383.4475,
+        "sourceEnd": 1943552,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 55,
+        "sourceAt": 1792937751736.4404,
+        "sourceWriteFinishedAt": 1792937751738.2922,
+        "sourceEnd": 2009088,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 56,
+        "sourceAt": 1792937751742.3088,
+        "sourceWriteFinishedAt": 1792937751742.377,
+        "sourceEnd": 2010112,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 57,
+        "sourceAt": 1792937751752.5774,
+        "sourceWriteFinishedAt": 1792937751752.6406,
+        "sourceEnd": 2011136,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 58,
+        "sourceAt": 1792937751768.0547,
+        "sourceWriteFinishedAt": 1792937751768.6003,
+        "sourceEnd": 2012160,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 59,
+        "sourceAt": 1792937752106.3787,
+        "sourceWriteFinishedAt": 1792937752108.3887,
+        "sourceEnd": 2077696,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 60,
+        "sourceAt": 1792937752112.373,
+        "sourceWriteFinishedAt": 1792937752112.4265,
+        "sourceEnd": 2078720,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 61,
+        "sourceAt": 1792937752120.8975,
+        "sourceWriteFinishedAt": 1792937752120.984,
+        "sourceEnd": 2079744,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 62,
+        "sourceAt": 1792937752123.998,
+        "sourceWriteFinishedAt": 1792937752124.3723,
+        "sourceEnd": 2080768,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 63,
+        "sourceAt": 1792937752490.9277,
+        "sourceWriteFinishedAt": 1792937752493.5833,
+        "sourceEnd": 2146304,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 64,
+        "sourceAt": 1792937752506.7134,
+        "sourceWriteFinishedAt": 1792937752506.8281,
+        "sourceEnd": 2147328,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 65,
+        "sourceAt": 1792937752521.6536,
+        "sourceWriteFinishedAt": 1792937752521.7307,
+        "sourceEnd": 2148352,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 66,
+        "sourceAt": 1792937752529.2007,
+        "sourceWriteFinishedAt": 1792937752529.2505,
+        "sourceEnd": 2149376,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 67,
+        "sourceAt": 1792937752862.9758,
+        "sourceWriteFinishedAt": 1792937752867.2139,
+        "sourceEnd": 2214912,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 68,
+        "sourceAt": 1792937752878.673,
+        "sourceWriteFinishedAt": 1792937752878.7722,
+        "sourceEnd": 2215936,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 69,
+        "sourceAt": 1792937752894.7468,
+        "sourceWriteFinishedAt": 1792937752894.9238,
+        "sourceEnd": 2216960,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 70,
+        "sourceAt": 1792937752895.9111,
+        "sourceWriteFinishedAt": 1792937752895.9602,
+        "sourceEnd": 2217984,
+        "committedRevision": 3,
+        "canonicalChunkEnd": 2217984,
+        "commitAt": 1792937754137.313,
+        "visibleProgress": [
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937756042.522,
+            "commitToVisibleMs": 1905.208984375
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.695,
+            "commitToVisibleMs": 1796.382080078125
+          },
+          {
+            "representedBySequence": 70,
+            "renderedUpperBoundAt": 1792937755933.3481,
+            "commitToVisibleMs": 1796.03515625
+          }
+        ]
+      },
+      {
+        "sequence": 71,
+        "sourceAt": 1792937753233.483,
+        "sourceWriteFinishedAt": 1792937753236.1003,
+        "sourceEnd": 2283520,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 72,
+        "sourceAt": 1792937753249.0117,
+        "sourceWriteFinishedAt": 1792937753249.351,
+        "sourceEnd": 2284544,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 73,
+        "sourceAt": 1792937753250.4321,
+        "sourceWriteFinishedAt": 1792937753250.4736,
+        "sourceEnd": 2285568,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 74,
+        "sourceAt": 1792937753263.357,
+        "sourceWriteFinishedAt": 1792937753263.5667,
+        "sourceEnd": 2286592,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 75,
+        "sourceAt": 1792937753602.4849,
+        "sourceWriteFinishedAt": 1792937753604.5557,
+        "sourceEnd": 2352128,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 76,
+        "sourceAt": 1792937753611.307,
+        "sourceWriteFinishedAt": 1792937753611.3652,
+        "sourceEnd": 2353152,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 77,
+        "sourceAt": 1792937753617.7295,
+        "sourceWriteFinishedAt": 1792937753617.806,
+        "sourceEnd": 2354176,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 78,
+        "sourceAt": 1792937753632.8762,
+        "sourceWriteFinishedAt": 1792937753633.0022,
+        "sourceEnd": 2355200,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 79,
+        "sourceAt": 1792937753976.1367,
+        "sourceWriteFinishedAt": 1792937753982.4631,
+        "sourceEnd": 2420736,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 80,
+        "sourceAt": 1792937753983.1057,
+        "sourceWriteFinishedAt": 1792937753983.1353,
+        "sourceEnd": 2421760,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 81,
+        "sourceAt": 1792937753988.8792,
+        "sourceWriteFinishedAt": 1792937753989.1685,
+        "sourceEnd": 2422784,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 82,
+        "sourceAt": 1792937754003.9644,
+        "sourceWriteFinishedAt": 1792937754004.1123,
+        "sourceEnd": 2423808,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 83,
+        "sourceAt": 1792937754355.9246,
+        "sourceWriteFinishedAt": 1792937754357.3691,
+        "sourceEnd": 2489344,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 84,
+        "sourceAt": 1792937754371.5583,
+        "sourceWriteFinishedAt": 1792937754371.6433,
+        "sourceEnd": 2490368,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 85,
+        "sourceAt": 1792937754377.8428,
+        "sourceWriteFinishedAt": 1792937754377.9558,
+        "sourceEnd": 2491392,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 86,
+        "sourceAt": 1792937754386.5625,
+        "sourceWriteFinishedAt": 1792937754387.2341,
+        "sourceEnd": 2492416,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 87,
+        "sourceAt": 1792937754727.5696,
+        "sourceWriteFinishedAt": 1792937754730.257,
+        "sourceEnd": 2557952,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 88,
+        "sourceAt": 1792937754741.1536,
+        "sourceWriteFinishedAt": 1792937754741.2722,
+        "sourceEnd": 2558976,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 89,
+        "sourceAt": 1792937754743.518,
+        "sourceWriteFinishedAt": 1792937754743.6648,
+        "sourceEnd": 2560000,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 90,
+        "sourceAt": 1792937754744.2217,
+        "sourceWriteFinishedAt": 1792937754744.2693,
+        "sourceEnd": 2561024,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 91,
+        "sourceAt": 1792937755112.4927,
+        "sourceWriteFinishedAt": 1792937755114.159,
+        "sourceEnd": 2626560,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 92,
+        "sourceAt": 1792937755123.2202,
+        "sourceWriteFinishedAt": 1792937755123.2808,
+        "sourceEnd": 2627584,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 93,
+        "sourceAt": 1792937755127.4167,
+        "sourceWriteFinishedAt": 1792937755127.515,
+        "sourceEnd": 2628608,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 94,
+        "sourceAt": 1792937755128.7046,
+        "sourceWriteFinishedAt": 1792937755128.9072,
+        "sourceEnd": 2629632,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 95,
+        "sourceAt": 1792937755472.9744,
+        "sourceWriteFinishedAt": 1792937755477.1807,
+        "sourceEnd": 2695168,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 96,
+        "sourceAt": 1792937755481.1384,
+        "sourceWriteFinishedAt": 1792937755481.5957,
+        "sourceEnd": 2696192,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 97,
+        "sourceAt": 1792937755485.7183,
+        "sourceWriteFinishedAt": 1792937755486.031,
+        "sourceEnd": 2697216,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 98,
+        "sourceAt": 1792937755496.5974,
+        "sourceWriteFinishedAt": 1792937755496.687,
+        "sourceEnd": 2698240,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      },
+      {
+        "sequence": 99,
+        "sourceAt": 1792937755848.0542,
+        "sourceWriteFinishedAt": 1792937755849.7104,
+        "sourceEnd": 2763776,
+        "committedRevision": 4,
+        "canonicalChunkEnd": 2763776,
+        "commitAt": 1792937757677.418,
+        "visibleProgress": [
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.4792,
+            "commitToVisibleMs": 1214.061279296875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.3823,
+            "commitToVisibleMs": 1213.96435546875
+          },
+          {
+            "representedBySequence": 99,
+            "renderedUpperBoundAt": 1792937758891.1836,
+            "commitToVisibleMs": 1213.765625
+          }
+        ]
+      }
+    ],
+    "delivery": [
+      {
+        "eventId": "79a59de1-ad7f-478c-9732-01fa9e79a72c",
+        "commitRevision": 2,
+        "commitAt": 1792937750872.13,
+        "clients": [
+          {
+            "client": 0,
+            "dispatchLoopbackUpperBoundMs": 966.3291015625,
+            "proxyToBrowserMs": 3.341064453125,
+            "commitToBrowserMs": 969.670166015625
+          },
+          {
+            "client": 1,
+            "dispatchLoopbackUpperBoundMs": 969.8203125,
+            "proxyToBrowserMs": 1.64990234375,
+            "commitToBrowserMs": 971.47021484375
+          },
+          {
+            "client": 2,
+            "dispatchLoopbackUpperBoundMs": 963.526123046875,
+            "proxyToBrowserMs": 4.14404296875,
+            "commitToBrowserMs": 967.670166015625
+          }
+        ]
+      },
+      {
+        "eventId": "50b4042f-366e-4b75-b086-ed06fa122877",
+        "commitRevision": 3,
+        "commitAt": 1792937754137.313,
+        "clients": [
+          {
+            "client": 0,
+            "dispatchLoopbackUpperBoundMs": 779.36181640625,
+            "proxyToBrowserMs": 2.025146484375,
+            "commitToBrowserMs": 781.386962890625
+          },
+          {
+            "client": 1,
+            "dispatchLoopbackUpperBoundMs": 782.389404296875,
+            "proxyToBrowserMs": 2.09765625,
+            "commitToBrowserMs": 784.487060546875
+          },
+          {
+            "client": 2,
+            "dispatchLoopbackUpperBoundMs": 776.404052734375,
+            "proxyToBrowserMs": 4.8828125,
+            "commitToBrowserMs": 781.286865234375
+          }
+        ]
+      },
+      {
+        "eventId": "c89ae425-ae54-4301-bab8-9f0768e423e0",
+        "commitRevision": 4,
+        "commitAt": 1792937757677.418,
+        "clients": [
+          {
+            "client": 0,
+            "dispatchLoopbackUpperBoundMs": 309.710205078125,
+            "proxyToBrowserMs": 16.171875,
+            "commitToBrowserMs": 325.882080078125
+          },
+          {
+            "client": 1,
+            "dispatchLoopbackUpperBoundMs": 312.81298828125,
+            "proxyToBrowserMs": 42.569091796875,
+            "commitToBrowserMs": 355.382080078125
+          },
+          {
+            "client": 2,
+            "dispatchLoopbackUpperBoundMs": 304.8427734375,
+            "proxyToBrowserMs": 6.2392578125,
+            "commitToBrowserMs": 311.08203125
+          }
+        ]
+      }
+    ],
+    "slowObserver": {
+      "transitions": [],
+      "scope": "server-side proxy socket read pause/disconnection; not a claim of kernel send-buffer saturation"
+    },
+    "client": [
+      {
+        "nativeSessionHttpPeak": 2,
+        "completedSessionHttp": 67,
+        "byteDeliveryRequests": 44,
+        "longTaskMs": {
+          "samples": 7,
+          "min": 50,
+          "median": 59,
+          "p95": 211,
+          "max": 211
+        },
+        "heapBytes": 50400000
+      },
+      {
+        "nativeSessionHttpPeak": 2,
+        "completedSessionHttp": 69,
+        "byteDeliveryRequests": 44,
+        "longTaskMs": {
+          "samples": 7,
+          "min": 50,
+          "median": 56,
+          "p95": 225,
+          "max": 225
+        },
+        "heapBytes": 37300000
+      },
+      {
+        "nativeSessionHttpPeak": 2,
+        "completedSessionHttp": 71,
+        "byteDeliveryRequests": 44,
+        "longTaskMs": {
+          "samples": 5,
+          "min": 50,
+          "median": 111,
+          "p95": 233,
+          "max": 233
+        },
+        "heapBytes": 37300000
+      }
+    ],
+    "transport": {
+      "downstreamConnections": 13,
+      "upstreamHttpConnections": 0,
+      "reusedUpstreamHttpRequests": 213,
+      "webSocketConnections": 0,
+      "successfulFollowerHttp": 7
+    },
+    "inferredHelperStarts": {
+      "successfulFollowerHttp": 7,
+      "basis": "current one-helper-per-successful-follower-HTTP mapping; failures before network are unobserved"
+    },
+    "boundary": {
+      "N": 2763776,
+      "B": 2763776,
+      "pendingBytes": 0,
+      "revision": 4,
+      "uploaderStatus": "following"
+    },
+    "limitations": [
+      "Three witnesses are correlated views of the same 100 source events, not 300 independent samples.",
+      "Visible high water represents coalesced committed progress; intermediate sequences may be superseded.",
+      "Missing old-path progress remains censored; no completion percentile is invented.",
+      "Dispatch measurement includes server dispatch plus loopback receipt and is not an exact send timestamp."
+    ]
+  }
+}

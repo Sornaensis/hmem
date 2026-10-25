@@ -28,3 +28,17 @@ test('repeated close shares the complete finite cleanup promise even after nativ
   assert.equal(ends,1);assert.equal(kills,1)
   // No OS process or pipe was created by this controlled spawn seam.
 })
+
+test('benchmark request deadlines are explicit, bounded, and do not change the default',async()=>{
+  let spawned=0
+  for(const requestTimeoutMs of [0,-1,120001,1.5])await assert.rejects(startSessionMcp({requestTimeoutMs,spawnProcess(){spawned++;throw new Error('must not spawn')}}),/observer request timeout/)
+  assert.equal(spawned,0)
+  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stderr.resume=()=>{}
+  child.stdin={end(){},write(line,callback){const request=JSON.parse(line);if(request.method!=='tools/call'||request.params.name!=='held')queueMicrotask(()=>child.stdout.emit('data',Buffer.from(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{}})+'\n')));callback()}}
+  child.kill=()=>true
+  const client=await startSessionMcp({executable:'controlled',origin:'http://127.0.0.1',token:'fixture',workspace:'w',identity:{},spawnProcess:()=>child,requestTimeoutMs:20,cleanupTimeoutMs:10,forcedCleanupTimeoutMs:10})
+  const start=performance.now()
+  await assert.rejects(client.tool('held'),/MCP request deadline/)
+  assert.ok(performance.now()-start>=15)
+  await assert.rejects(client.close(),/cleanup deadline/)
+})

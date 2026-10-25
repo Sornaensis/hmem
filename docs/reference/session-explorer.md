@@ -49,6 +49,14 @@ and local fragments; raw HTML is not executed and images display their alt text.
   replace it. The dock exposes refresh through `aria-busy` without inserting a
   temporary row above the transcript. Transport byte payloads and their bounded
   range history are discarded on canonical refresh, not reused as metadata.
+- Ordinary session updates reuse a demanded session metadata read and patch its
+  existing proven page entries. Without that demand, only pages displaying the
+  session refresh. Missing fresh-filter members and stale-filter membership still
+  require canonical reads; freshness timers retain their boundary checks. Pages
+  keep their immutable created-at/ID ordering. Creation, lifecycle, task-link,
+  hierarchy and authorization changes retain conservative membership invalidation.
+  Metadata and transcript reads receive at most three consecutive admissions
+  before the oldest waiting background resource, within the same two slots.
 - Mounted project/task descriptions retain a separate read-only refresh snapshot
   for up to 32 demanded or pinned cards and 2 MiB of estimated UTF-16 key/content
   storage plus fixed metadata. Oversized descriptions are omitted intact.

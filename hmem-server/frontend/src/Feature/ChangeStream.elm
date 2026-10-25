@@ -63,6 +63,7 @@ type Action
     | RefreshMemberships String
     | RefreshSessionAuthorization
     | RefreshAgentSession String String
+    | RefreshAgentSessionProgress String String
     | RefreshAgentSessionList String
     | RefreshSessionActivityMembership String
     | RefreshSessionActivity String
@@ -299,6 +300,14 @@ timelineEligible envelope =
             False
 
 
+-- The canonical membership marker covers creation, lifecycle and task-link
+-- changes. Ordinary updates still require a fresh authorized metadata read.
+sessionProgress : Api.CanonicalEnvelope -> Bool
+sessionProgress envelope =
+    envelope.entityType == "agent_session" && envelope.entityAction == "updated"
+        && not (List.any (\item -> String.startsWith "active_sessions:" item.target) envelope.invalidations)
+
+
 invalidationActions : Api.CanonicalEnvelope -> Api.CanonicalInvalidation -> List Action
 invalidationActions envelope invalidation =
     let
@@ -357,7 +366,8 @@ invalidationActions envelope invalidation =
             if workspace == expected && List.member envelope.entityType ["agent_session","task_session"] then [RefreshSessionActivityMembership workspace] else [BeginResync]
 
         ( Api.WorkspaceScope workspace, "entity", [ "agent_session", id ] ) ->
-            if List.member envelope.entityType [ "agent_session", "task_session" ] then [ RefreshAgentSession workspace id ] else [ BeginResync ]
+            if sessionProgress envelope then [ RefreshAgentSessionProgress workspace id ]
+            else if List.member envelope.entityType [ "agent_session", "task_session" ] then [ RefreshAgentSession workspace id ] else [ BeginResync ]
 
         ( Api.WorkspaceScope workspace, "entity", [ "task_session", id, task ] ) ->
             if envelope.entityType == "task_session" && envelope.entityId == id ++ ":" ++ task then
@@ -366,7 +376,7 @@ invalidationActions envelope invalidation =
 
         ( Api.WorkspaceScope workspace, "collection", [ "sessions", expected ] ) ->
             if workspace == expected && List.member envelope.entityType [ "agent_session", "task_session" ] then
-                [ RefreshAgentSessionList workspace ]
+                if sessionProgress envelope then [] else [ RefreshAgentSessionList workspace ]
             else [ BeginResync ]
 
         ( Api.WorkspaceScope workspace, "collection", [ "task_sessions", task ] ) ->
@@ -593,6 +603,9 @@ coalesce actions =
                 RefreshAgentSession workspace id ->
                     "agent-session:" ++ workspace ++ ":" ++ id
 
+                RefreshAgentSessionProgress workspace id ->
+                    "agent-session-progress:" ++ workspace ++ ":" ++ id
+
                 RefreshAgentSessionList workspace ->
                     "agent-session-list:" ++ workspace
 
@@ -656,7 +669,9 @@ coalesce actions =
                 target =
                     key finalAction
             in
-            if clearSuperseded action || Set.member target seen then
+            if clearSuperseded action || Set.member target seen || (case finalAction of
+                RefreshAgentSessionProgress workspace id -> List.member (RefreshAgentSession workspace id) actions
+                _ -> False) then
                 ( seen, kept )
 
             else

@@ -38,6 +38,14 @@ suite =
                 Expect.equal
                     { decoded = [True,True], actions = [ ChangeStream.RefreshAgentSession "w" agentId, ChangeStream.RefreshTaskSessions "w" linkedTaskId, ChangeStream.RefreshAgentSessionList "w" ] }
                     { decoded = List.map (wire >> Api.decodeCanonicalFrame >> (/=) Nothing) [linked,metadata], actions = actions }
+        , test "ordinary session updates refresh progress without broad membership or activity reads" <| \_ ->
+            let
+                event = sessionEvent False
+                progress = ChangeStream.reduceFrame (Api.CanonicalChange event) (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+                membership = {event | invalidations=event.invalidations ++ [{kind="collection",target="active_sessions:w"}]}
+                changed = ChangeStream.reduceFrame (Api.CanonicalChange membership) (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+            in Expect.equal {progress=[ChangeStream.RefreshAgentSessionProgress "w" agentId],lists=True,activity=True,membershipProgress=False}
+                {progress=progress,lists=List.member (ChangeStream.RefreshAgentSessionList "w") changed,activity=List.member (ChangeStream.RefreshSessionActivityMembership "w") changed,membershipProgress=List.member (ChangeStream.RefreshAgentSessionProgress "w" agentId) changed}
         , test "session composites, invalidation ownership and global scope fail closed without generic entity reads" <|
             \_ ->
                 let

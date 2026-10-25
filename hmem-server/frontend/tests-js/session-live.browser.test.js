@@ -12,6 +12,33 @@ const until=async fn=>{const end=Date.now()+12000;while(Date.now()<end){if(await
 const enter=async(h,dock=false)=>{await h.start();await h.idle();if(dock){const button=h.page.locator('#entity-'+h.fixture.tasks[0].id+' .task-sessions-icon');await until(()=>button.isEnabled());await button.click()}else{await h.page.getByRole('button',{name:'Sessions',exact:true}).click();await h.page.locator('.session-summary a').first().click()}await h.page.locator('.session-record:not(.session-record-activity) .session-record-text').first().waitFor()}
 const resync=async h=>{const response=h.page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/change-stream/resync'&&response.request().method()==='POST');await h.page.evaluate(()=>window.pushHierarchyFrames([{schema_version:1,type:'resync_required'}]));await response;await h.idle()}
 
+for(const dock of [false,true])test(`progress coalesces ${dock?'dock':'Sessions'} reads without refreshing unrelated membership`,{timeout:45000},async t=>{
+ const h=await openSessionExplorer(),{page}=h
+ let activityReads=0
+ try{
+  page.on('request',request=>{if(new URL(request.url()).pathname==='/api/v1/session-activity')activityReads++})
+  await enter(h,dock);await page.waitForTimeout(1200);await h.idle()
+  const initialReads=h.reads.length,initialActivity=activityReads
+  // Keep several canonical updates ahead of the HTTP response. The producer is
+  // independent of visibility; only the final coalesced record is awaited.
+  await page.route('**/api/v1/**/sessions/'+h.active.id,async route=>{await new Promise(resolve=>setTimeout(resolve,90));await route.fallback()})
+  const started=performance.now()
+  for(let index=0;index<24;index++){
+   await h.appendRecords(message('Coalesced progress '+index))
+   await new Promise(resolve=>setTimeout(resolve,15))
+  }
+  const produced=performance.now()
+  await page.getByText('Coalesced progress 23',{exact:true}).waitFor()
+  const converged=performance.now();await h.idle()
+  const reads=h.reads.slice(initialReads),metadata=reads.filter(row=>row.path.endsWith('/sessions/'+h.active.id)),ranges=reads.filter(row=>row.path.endsWith('/transcript'))
+  t.diagnostic(JSON.stringify({mode:dock?'dock':'sessions',events:24,paths:reads.reduce((counts,row)=>({...counts,[row.path]:(counts[row.path]||0)+1}),{}),activityBefore:initialActivity,activityAfter:activityReads,peak:h.peak(),producerMs:produced-started,tailDomConvergenceMs:converged-produced,scope:'intercepted HTTP/WS production assets; DOM witness, not paint or real backend qualification'}))
+  assert.equal(reads.filter(row=>row.path.endsWith('/sessions')||row.path.endsWith('/filters')||row.path.endsWith('/tasks')).length,0,'output does not re-read lists, facets or links')
+  assert.equal(activityReads,initialActivity,'output does not probe active-session projections')
+  assert.ok(metadata.length>0&&metadata.length<24,'pending progress coalesces into fewer metadata reads than events')
+  assert.ok(ranges.length>0);assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
 for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sessions'} metadata chrome and transcript geometry while independent responses are pending`,{timeout:60000},async()=>{
  const h=await openSessionExplorer({runtime:{model:'Stable runtime',reasoning:'high'}}),{page}=h
  let heldKind=null

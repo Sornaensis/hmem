@@ -1,6 +1,6 @@
 module Feature.SessionDelivery exposing
     ( State, Target(..), Payload(..), Request, Resource, init, key, demand, removeDemand
-    , invalidateSession, invalidateTask, invalidateLists, invalidateFacets, invalidateReadProof, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
+    , invalidateSession, invalidateProgress, invalidateTask, invalidateLists, invalidateFacets, invalidateReadProof, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
     , admit, settle, fetch, staleAt, consume
     )
 
@@ -49,12 +49,12 @@ type alias Request =
 
 type alias State =
     { resources : Dict String Resource, physical : Dict Int Request, order : List String, implicitMetadata : Set String
-    , nextId : Int, version : Int, retirement : Int, proofRetirement : Int, listInvalidation : Int, admissionError : Maybe String }
+    , nextId : Int, version : Int, retirement : Int, proofRetirement : Int, listInvalidation : Int, foregroundStreak : Int, admissionError : Maybe String }
 
 
 init : State
 init =
-    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, proofRetirement = 0, listInvalidation = 0, admissionError = Nothing }
+    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, proofRetirement = 0, listInvalidation = 0, foregroundStreak = 0, admissionError = Nothing }
 
 
 key : String -> Target -> String
@@ -216,6 +216,35 @@ invalidateSession workspace id =
         TaskEvidenceArchive _ _ -> False))
 
 
+-- Progress does not change task/list membership. Reuse the selected session's
+-- metadata read; otherwise refresh only pages that actually display it. Freshness
+-- filters can gain a missing member on heartbeat. An existing fresh member is
+-- stable under a newer heartbeat; quiet membership still needs a canonical read.
+invalidateProgress : String -> String -> State -> State
+invalidateProgress workspace id state =
+    let
+        version = state.version + 1
+        hasMetadata = Dict.member (key workspace (SessionMetadata id)) state.resources
+        matches resource =
+            case resource.target of
+                SessionMetadata actual -> actual == id
+                _ ->
+                    let
+                        contains = case resource.data of
+                            Just (SessionsPage page) -> List.any (.id >> (==) id) page.items
+                            _ -> False
+                        freshnessChanged filters = filters.freshness /= "" && (filters.freshness /= "fresh" || not contains)
+                        freshness = case resource.target of
+                            WorkspaceSessionsFiltered filters _ -> freshnessChanged filters
+                            ScopedSessions _ _ filters _ -> freshnessChanged filters
+                            TaskSessionsFiltered _ filters _ -> freshnessChanged filters
+                            _ -> False
+                    in freshness || (not hasMetadata && contains)
+    in
+    { state | version = version, resources = Dict.map (\_ resource ->
+        if resource.workspace == workspace && matches resource then { resource | dirty = version, error = Nothing } else resource) state.resources }
+
+
 invalidateTask : String -> String -> State -> State
 invalidateTask workspace task =
     invalidate (\resource -> resource.workspace == workspace && (case resource.target of
@@ -263,12 +292,34 @@ admit workspace state =
             Nothing -> True
         ready = state.order |> List.filterMap (\identity -> Dict.get identity state.resources |> Maybe.map (Tuple.pair identity)) |> List.filter (\( identity, resource ) ->
             resource.workspace == workspace && resource.dirty /= resource.settled && resource.error == Nothing && not (occupied identity) && metadataReady resource)
-        selected = List.take (max 0 (2 - Dict.size state.physical)) ready
+        foreground (_, resource) = case resource.target of
+            SessionMetadata _ -> True
+            SessionBytes _ _ _ -> True
+            SessionWindow _ _ _ _ -> True
+            _ -> False
+        choose remaining available current requests =
+            if remaining <= 0 then (current, requests) else
+            let
+                urgent = List.filter foreground available
+                background = List.filter (not << foreground) available
+                candidate = if current.foregroundStreak < 3 || List.isEmpty background then
+                    case List.head urgent of
+                        Just item -> Just item
+                        Nothing -> List.head background
+                    else List.head background
+            in
+            case candidate of
+                Nothing -> (current, requests)
+                Just item ->
+                    let
+                        (next, admitted) = add item (current, requests)
+                        paced = {next | foregroundStreak = if foreground item then min 3 (current.foregroundStreak + 1) else 0}
+                    in choose (remaining - 1) (List.filter (Tuple.first >> (/=) (Tuple.first item)) available) paced admitted
         add ( identity, resource ) ( current, requests ) =
             let request = Request current.nextId identity workspace resource.target resource.dirty current.proofRetirement in
             ( { current | nextId = current.nextId + 1, physical = Dict.insert request.id request current.physical, order = List.filter ((/=) identity) current.order ++ [identity] }, requests ++ [request] )
     in
-    List.foldl add ( state, [] ) selected
+    choose (max 0 (2 - Dict.size state.physical)) ready state []
 
 
 settle : Int -> Bool -> Result Http.Error Payload -> State -> State
@@ -293,7 +344,7 @@ settle id authorized result state =
                         Ok payload ->
                             if not (valid request payload) then
                                 { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "invalid_response", proven = False } released.resources }
-                            else if not (monotonic resource.data payload) then released
+                            else if not (monotonic resource.data payload && monotonicCached request payload state) then released
                             else
                                 apply request resource payload released
 
@@ -306,9 +357,43 @@ monotonic previous incoming =
         (Just (Metadata old),Metadata next) ->
             next.committedBytes >= old.committedBytes && next.revision >= old.revision
                 && next.runtimeRevision >= old.runtimeRevision
+                && heartbeatMonotonic old.lastSeenAt next.lastSeenAt
                 && (old.state /= Api.SessionTerminated || next.state == Api.SessionTerminated)
         (Just (SessionsPage old),SessionsPage next) ->
             List.all (\session -> old.items |> List.filter (.id >> (==) session.id) |> List.head |> Maybe.map (\prior -> monotonic (Just (Metadata prior)) (Metadata session)) |> Maybe.withDefault True) next.items
+        _ -> True
+
+
+-- A first detail read can race a newer list response, and vice versa. Both
+-- transcript and runtime revisions remain floors across these bounded caches.
+monotonicCached : Request -> Payload -> State -> Bool
+monotonicCached request payload state =
+    case payload of
+        Metadata session ->
+            Dict.values state.resources |> List.filter (\entry -> entry.workspace == request.workspace && entry.proven)
+                |> List.all (\entry -> case entry.data of
+                    Just (SessionsPage page) -> page.items |> List.filter (.id >> (==) session.id) |> List.all (\old -> monotonic (Just (Metadata old)) payload)
+                    _ -> True)
+        SessionsPage page ->
+            List.all (\session -> Dict.get (key request.workspace (SessionMetadata session.id)) state.resources
+                |> Maybe.map (\entry -> not entry.proven || monotonic entry.data (Metadata session)) |> Maybe.withDefault True) page.items
+        _ -> True
+
+
+-- Canonical server timestamps use UTC Z with optional fractional seconds. Pad
+-- the fraction before comparison so whole-second and fractional forms agree.
+heartbeatMonotonic : String -> String -> Bool
+heartbeatMonotonic old next =
+    let
+        stamp value =
+            if not (String.endsWith "Z" value) then Nothing else
+            case String.split "." (String.dropRight 1 value) of
+                [ seconds ] -> Just (seconds, String.repeat 12 "0")
+                [ seconds, fraction ] -> Just (seconds, String.padRight 12 '0' fraction)
+                _ -> Nothing
+    in
+    case (stamp old,stamp next) of
+        (Just before,Just after) -> before <= after
         _ -> True
 
 
@@ -377,17 +462,34 @@ apply request resource payload state =
     case payload of
         Metadata session ->
             let
+                changed old = old.state /= session.state || old.title /= session.title || old.parentSessionId /= session.parentSessionId
+                previous = case resource.data of
+                    Just (Metadata old) -> [old]
+                    _ -> []
+                pageEntries = Dict.values state.resources |> List.filter (\entry -> entry.workspace == request.workspace && entry.proven)
+                    |> List.concatMap (\entry -> case entry.data of
+                        Just (SessionsPage page) -> List.filter (.id >> (==) session.id) page.items
+                        _ -> [])
+                membershipChanged = List.any changed (previous ++ pageEntries)
+                patchPage entry =
+                    if entry.workspace /= request.workspace || not entry.proven then entry else
+                    case entry.data of
+                        Just (SessionsPage page) ->
+                            {entry | data = Just (SessionsPage {page | items = List.map (\old -> if old.id == session.id && monotonic (Just (Metadata old)) (Metadata session) then session else old) page.items})}
+                        _ -> entry
+                synchronized = {updated | resources = Dict.map (\_ entry -> patchPage entry) updated.resources}
+                refreshed = if membershipChanged then invalidateLists request.workspace synchronized else synchronized
                 rangeKey = key request.workspace (SessionBytes session.id 0 False)
                 updateRange old =
                     case old.target of
                         SessionBytes id offset sealed ->
-                            if sealed /= (session.state == Api.SessionTerminated) || (session.committedBytes > offset && not (Dict.values updated.physical |> List.any (\pending -> pending.key == rangeKey))) then
-                                { old | target = SessionBytes id offset (session.state == Api.SessionTerminated), dirty = updated.version + 1, error = Nothing }
+                            if sealed /= (session.state == Api.SessionTerminated) || (session.committedBytes > offset && not (Dict.values refreshed.physical |> List.any (\pending -> pending.key == rangeKey))) then
+                                { old | target = SessionBytes id offset (session.state == Api.SessionTerminated), dirty = refreshed.version + 1, error = Nothing }
                             else if session.committedBytes == offset then { old | settled = old.dirty }
                             else old
                         _ -> old
             in
-            { updated | version = updated.version + 1, resources = Dict.update rangeKey (Maybe.map updateRange) updated.resources }
+            { refreshed | version = refreshed.version + 1, resources = Dict.update rangeKey (Maybe.map updateRange) refreshed.resources }
         Bytes range ->
             if pairedId request.target /= Nothing && (case request.target of
                 SessionBytes _ _ _ -> False

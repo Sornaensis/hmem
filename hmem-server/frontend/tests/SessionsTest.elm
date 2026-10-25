@@ -371,6 +371,88 @@ metadataPresentationTests =
             revoked=Sessions.reconcile ({picking | sessionContext=context},Cmd.none) |> Tuple.first
         in Expect.equal {kept=Just operation,stable=True,resync=Nothing,revoked=Nothing}
             {kept=membership.sessions.archive,stable=membership.sessions.downloadStamp==state.downloadStamp,resync=resync.sessions.archive,revoked=revoked.sessions.archive}
+    , test "progress coalesces selected metadata and patches proven pages without invalidating membership" <| withMetadata (\session ->
+        let
+            initial = ready session
+            dirty = List.foldl (\_ -> Delivery.invalidateProgress workspace sessionId) initial (List.range 1 100)
+            (busy,requests) = Delivery.admit workspace dirty
+            nextSession = {session | committedBytes=session.committedBytes+3,revision=session.revision+1,runtimeRevision=2}
+            settled = requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata nextSession)) busy) |> Maybe.withDefault busy
+        in Expect.equal {requests=[detailTarget],epoch=initial.listInvalidation,page=Just (Delivery.SessionsPage {items=[nextSession],nextCursor=Nothing}),physical=0}
+            {requests=List.map .target requests,epoch=settled.listInvalidation,page=payload listTarget settled,physical=Dict.size settled.physical})
+    , test "equal transcript revision accepts newer runtime metadata while stale runtime cannot roll it back" <| withMetadata (\session ->
+        let
+            initial = ready session
+            update value current =
+                let (busy,requests) = Delivery.invalidateProgress workspace sessionId current |> Delivery.admit workspace
+                in requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata value)) busy) |> Maybe.withDefault busy
+            newer = {session | runtimeRevision=2}
+            settled = update session (update newer initial)
+        in Expect.equal (Just (Delivery.Metadata newer),Just (Delivery.SessionsPage {items=[newer],nextCursor=Nothing}))
+            (payload detailTarget settled,payload listTarget settled))
+    , test "unselected progress refreshes only its displayed pages and freshness membership" <| withMetadata (\session ->
+        let
+            fresh = Delivery.WorkspaceSessionsFiltered {state="active",freshness="fresh"} Nothing
+            unrelated = Delivery.TaskSessions "unrelated" Nothing
+            seed = ready session |> Delivery.removeDemand workspace windowTarget |> Delivery.removeDemand workspace legacyTarget |> Delivery.removeDemand workspace detailTarget
+            seeded = {seed | resources=seed.resources |> Dict.insert (Delivery.key workspace fresh) (entry fresh (Delivery.SessionsPage {items=[],nextCursor=Nothing})) |> Dict.insert (Delivery.key workspace unrelated) (entry unrelated (Delivery.SessionsPage {items=[],nextCursor=Nothing})), order=seed.order ++ List.map (Delivery.key workspace) [fresh,unrelated]}
+            dirty = Delivery.invalidateProgress workspace sessionId seeded
+            (_,requests) = Delivery.admit workspace dirty
+        in Expect.equal ([listTarget,fresh],seed.listInvalidation) (List.map .target requests,dirty.listInvalidation))
+    , test "metadata and list callback races cannot rewind canonical heartbeat fractions" <| withMetadata (\session ->
+        let
+            newer = {session | lastSeenAt="2026-10-23T20:46:19.5Z"}
+            initial = ready newer
+            (busy,requests) = Delivery.invalidateProgress workspace sessionId initial |> Delivery.admit workspace
+            old = {session | lastSeenAt="2026-10-23T20:46:19Z"}
+            settled = requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata old)) busy) |> Maybe.withDefault busy
+        in Expect.equal (Just (Delivery.Metadata newer),Just (Delivery.SessionsPage {items=[newer],nextCursor=Nothing}))
+            (payload detailTarget settled,payload listTarget settled))
+    , test "fresh metadata revealing a title or lifecycle change conservatively rechecks list membership" <| withMetadata (\session ->
+        let
+            (busy,requests) = Delivery.invalidateProgress workspace sessionId (ready session) |> Delivery.admit workspace
+            settled = requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata {session | title=Just "Changed title"})) busy) |> Maybe.withDefault busy
+            (_,next) = Delivery.admit workspace settled
+        in Expect.equal (True,True) (settled.listInvalidation>busy.listInvalidation,List.any (.target >> (==) listTarget) next))
+    , test "a selected fresh member reuses metadata while quiet and missing-fresh membership recheck" <| withMetadata (\session ->
+        let
+            fresh = Delivery.WorkspaceSessionsFiltered {state="active",freshness="fresh"} Nothing
+            quiet = Delivery.TaskSessionsFiltered "task" {state="active",freshness="stale"} Nothing
+            initial = ready session
+            seeded = {initial | resources=initial.resources |> Dict.insert (Delivery.key workspace fresh) (entry fresh (Delivery.SessionsPage {items=[session],nextCursor=Nothing})) |> Dict.insert (Delivery.key workspace quiet) (entry quiet (Delivery.SessionsPage {items=[session],nextCursor=Nothing})),order=initial.order ++ List.map (Delivery.key workspace) [fresh,quiet]}
+            dirty = Delivery.invalidateProgress workspace sessionId seeded
+            isDirty target = Dict.get (Delivery.key workspace target) dirty.resources |> Maybe.map (\value -> value.dirty /= value.settled)
+        in Expect.equal (Just False,Just True) (isDirty fresh,isDirty quiet))
+    , test "first detail metadata detects structural changes against proven list entries" <| withMetadata (\session ->
+        let
+            initial = ready session |> Delivery.removeDemand workspace windowTarget |> Delivery.removeDemand workspace legacyTarget |> Delivery.removeDemand workspace detailTarget |> Delivery.demand workspace detailTarget
+            changed value =
+                let (busy,requests) = Delivery.admit workspace initial
+                    settled = requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata value)) busy) |> Maybe.withDefault busy
+                in settled.listInvalidation > initial.listInvalidation && (Dict.get (Delivery.key workspace listTarget) settled.resources |> Maybe.map (\entryValue -> entryValue.dirty /= entryValue.settled) |> Maybe.withDefault False)
+        in Expect.equal [True,True,True] (List.map changed [{session | title=Just "New title"},{session | parentSessionId=Just "parent"},{session | state=Api.SessionTerminated}]))
+    , test "first detail and list callbacks cannot regress each other's runtime revision" <| withMetadata (\session ->
+        let
+            newer = {session | runtimeRevision=2}
+            initial = ready newer |> Delivery.removeDemand workspace windowTarget |> Delivery.removeDemand workspace legacyTarget |> Delivery.removeDemand workspace detailTarget |> Delivery.demand workspace detailTarget
+            (busy,requests) = Delivery.admit workspace initial
+            stale = requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata session)) busy) |> Maybe.withDefault busy
+            detail = Dict.get (Delivery.key workspace detailTarget) stale.resources
+            known = ready newer
+            oldPage = {known | resources=Dict.insert (Delivery.key workspace listTarget) (entry listTarget (Delivery.SessionsPage {items=[session],nextCursor=Nothing})) known.resources}
+            refresh = Delivery.invalidateLists workspace oldPage
+            (listBusy,listRequests) = Delivery.admit workspace refresh
+            listStale = requestFor listTarget listRequests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[session],nextCursor=Nothing})) listBusy) |> Maybe.withDefault listBusy
+        in Expect.equal {detail=Nothing,proven=Just False,listPending=Just True}
+            {detail=payload detailTarget stale,proven=Maybe.map .proven detail,listPending=Dict.get (Delivery.key workspace listTarget) listStale.resources |> Maybe.map (\currentEntry -> currentEntry.dirty /= currentEntry.settled)})
+    , test "foreground admissions yield to the oldest background request after three turns" <| withMetadata (\session ->
+        let
+            wanted = List.range 1 6 |> List.foldl (\id -> Delivery.demand workspace (Delivery.SessionMetadata (String.fromInt id))) (Delivery.demand workspace listTarget Delivery.init)
+            (first,firstRequests) = Delivery.admit workspace wanted
+            drained = List.foldl (\request -> Delivery.settle request.id True (Err Http.Timeout)) first firstRequests
+            (_,secondRequests) = Delivery.admit workspace drained
+        in Expect.equal ([Delivery.SessionMetadata "1",Delivery.SessionMetadata "2"],[Delivery.SessionMetadata "3",listTarget])
+            (List.map .target firstRequests,List.map .target secondRequests))
     , test "continuous output admits a canonical read prefix while retaining newer refresh demand" <| withMetadata (\session ->
         let
             initial=Delivery.demand workspace windowTarget Delivery.init

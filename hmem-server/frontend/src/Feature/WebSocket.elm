@@ -1145,6 +1145,11 @@ applyAction scope action ( model, accumulated ) =
             ( nextModel, Cmd.batch [ accumulated, command ] )
     in
     case action of
+        ChangeStream.RefreshAgentSessionProgress workspace id ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                ( { model | sessionDelivery = SessionDelivery.invalidateProgress workspace id model.sessionDelivery }, accumulated )
+            else ( model, accumulated )
+
         ChangeStream.RefreshAgentSession workspace id ->
             if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
                 ( { model | sessionDelivery = SessionDelivery.invalidateSession workspace id model.sessionDelivery }, accumulated )

@@ -1,4 +1,4 @@
-module Feature.Groups exposing (init, update, viewHomePage, viewSidebar)
+module Feature.Groups exposing (init, update, viewHomePage, viewSessionFooter, viewSidebar, viewWorkspaceRail)
 
 import Api
 import Feature.SessionActivity
@@ -249,6 +249,11 @@ update msg model =
 
 viewSidebar : Model -> Html Msg
 viewSidebar model =
+    div [] [ viewWorkspaceRail model, viewSessionFooter model ]
+
+
+viewWorkspaceRail : Model -> Html Msg
+viewWorkspaceRail model =
     let
         allWs =
             Dict.values model.workspaces |> List.sortBy .name
@@ -266,11 +271,7 @@ viewSidebar model =
             model.groups.workspaceGroups |> Dict.values |> List.sortBy .name
     in
     nav [ class "sidebar" ]
-        [ div [ class "sidebar-header" ]
-            [ a [ href "/", class "sidebar-logo" ]
-                [ img [ src "/hmem-logo.svg", alt "hmem", width 183, height 48 ] [] ]
-            ]
-        , if model.dataLoading.loadingWorkspaces then
+        [ if model.dataLoading.loadingWorkspaces then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
                 , div [ class "sidebar-loading" ] [ text "Loading..." ]
@@ -322,7 +323,6 @@ viewSidebar model =
                     text ""
                 ]
             ]
-        , viewSessionFooter model
         ]
 
 

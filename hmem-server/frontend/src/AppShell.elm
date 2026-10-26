@@ -27,7 +27,7 @@ import Feature.WebSocket
 import Feature.WorkspaceAdmin
 import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, pushUrl, replaceFragment)
 import Html exposing (..)
-import Html.Attributes exposing (class, href, id)
+import Html.Attributes exposing (alt, attribute, class, height, href, id, src, width)
 import Html.Events exposing (onClick)
 import Html.Keyed as Keyed
 import Http
@@ -1026,8 +1026,10 @@ viewDocument model =
     { title = "hmem"
     , body =
         [ div [ class "app" ]
-            [ if model.auth.status == AuthReady || (model.auth.status == AuthBooting && model.groups.catalogueOwner /= Nothing) then
-                Feature.Groups.viewSidebar (sidebarModel model)
+            [ viewGlobalNavigation model
+            , Page.Workspace.viewWorkspaceContext model
+            , if model.auth.status == AuthReady || (model.auth.status == AuthBooting && model.groups.catalogueOwner /= Nothing) then
+                Feature.Groups.viewWorkspaceRail (sidebarModel model)
 
               else
                 text ""
@@ -1056,6 +1058,32 @@ viewDocument model =
         ]
     }
 
+
+viewGlobalNavigation : Model -> Html Msg
+viewGlobalNavigation model =
+    let
+        contextVisible =
+            model.auth.status == AuthReady || (model.auth.status == AuthBooting && model.groups.catalogueOwner /= Nothing)
+    in
+    header [ class "global-context", attribute "aria-label" "Application navigation" ]
+        [ a [ class "global-logo", href "/" ] [ img [ src "/hmem-logo.svg", alt "hmem", width 183, height 48 ] [] ]
+        , a [ class "global-home", href "/" ] [ text "Workspaces" ]
+        , case (if contextVisible then model.page else NotFound) of
+            WorkspacePage wsId ->
+                case Dict.get wsId model.workspaces of
+                    Just ws ->
+                        span [ class "global-location" ] [ text ws.name ]
+
+                    Nothing ->
+                        text ""
+
+            AuditLogPage ->
+                span [ class "global-location" ] [ text "Audit Log" ]
+
+            _ ->
+                text ""
+        , if contextVisible then Feature.Groups.viewSessionFooter (sidebarModel model) else text ""
+        ]
 
 viewConnectionStatus : WSState -> Html Msg
 viewConnectionStatus state =
@@ -1112,7 +1140,7 @@ viewPage model =
                     Page.Home.viewHomePage model
 
                 WorkspacePage wsId ->
-                    Page.Workspace.viewWorkspacePage wsId model
+                    Page.Workspace.viewWorkspaceContent wsId model
 
                 AuditLogPage ->
                     Feature.AuditLog.viewAuditLogPage model

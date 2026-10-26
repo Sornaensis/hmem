@@ -1,5 +1,7 @@
 module Page.Workspace exposing
-    ( viewWorkspacePage
+    ( viewWorkspaceContent
+    , viewWorkspaceContext
+    , viewWorkspacePage
     , workspaceSummaryParts
     , workspaceTabLabel
     )
@@ -26,6 +28,21 @@ import Types exposing (..)
 
 viewWorkspacePage : String -> Model -> Html Msg
 viewWorkspacePage wsId model =
+    div []
+        [ case Dict.get wsId model.workspaces of
+            Just ws ->
+                if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                    viewReadableWorkspaceContext model ws
+                else
+                    text ""
+            Nothing ->
+                text ""
+        , viewWorkspaceContent wsId model
+        ]
+
+
+viewWorkspaceContent : String -> Model -> Html Msg
+viewWorkspaceContent wsId model =
     if model.auth.status == AuthReady && not (Permissions.canReadCurrentWorkspace model) then
         viewUnauthorizedWorkspace model
 
@@ -39,16 +56,34 @@ viewWorkspacePage wsId model =
                 viewReadableWorkspacePage wsId model ws
 
 
-viewReadableWorkspacePage : String -> Model -> Api.Workspace -> Html Msg
-viewReadableWorkspacePage wsId model ws =
+viewWorkspaceContext : Model -> Html Msg
+viewWorkspaceContext model =
+    case model.page of
+        WorkspacePage wsId ->
+            if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                case Dict.get wsId model.workspaces of
+                    Just ws ->
+                        viewReadableWorkspaceContext model ws
+
+                    Nothing ->
+                        text ""
+
+            else
+                text ""
+
+        _ ->
+            text ""
+
+
+viewReadableWorkspaceContext : Model -> Api.Workspace -> Html Msg
+viewReadableWorkspaceContext model ws =
     let
         summaryParts =
-            workspaceSummaryParts
-                model.dataLoading.planningCounts
+            workspaceSummaryParts model.dataLoading.planningCounts
     in
-    div [ class "page" ]
-        [ div [class "workspace-context-persistent",attribute "aria-label" "Workspace context"]
-          [ div [ class "workspace-header" ]
+    div [class "workspace-context-persistent",attribute "aria-label" "Workspace context"]
+          [ viewTabs model
+          , div [ class "workspace-header" ]
             [ div [ class "workspace-header-top" ]
                 [ div [ class "workspace-header-title" ]
                     [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
@@ -116,9 +151,13 @@ viewReadableWorkspacePage wsId model ws =
           else
             Feature.Search.viewSearchBar model
         , Feature.Search.viewWorkspaceSearchBar model
-        , viewTabs model
           ]
-        , if not (Permissions.canReadCurrentWorkspace model) then
+
+
+viewReadableWorkspacePage : String -> Model -> Api.Workspace -> Html Msg
+viewReadableWorkspacePage wsId model ws =
+    div [ class "page workspace-page" ]
+        [ if not (Permissions.canReadCurrentWorkspace model) then
             viewUnauthorizedWorkspace model
 
           else

@@ -214,6 +214,16 @@ for (const equivalentZoom of [false, true]) test(equivalentZoom ? 'production 40
     }
     await h.start()
     if (equivalentZoom) await h.page.addStyleTag({ content: 'html { font-size: 200%; }' })
+    if (equivalentZoom) {
+      const settled = await h.page.evaluate(async () => {
+        const sample = () => { const root = document.getElementById('observation-viewport'), host = document.getElementById('main-content-scroll'); return {stamp:root?.dataset.observationViewportContext,ready:root?.dataset.observationLayoutReady,top:host.scrollTop,height:host.clientHeight,scrollHeight:host.scrollHeight,rows:[...root.querySelectorAll('[data-observation-key]')].map(n=>({key:n.dataset.observationPosition,rect:n.getBoundingClientRect().toJSON()}))} }
+        const before=sample(),deadline=performance.now()+1000;let previous='',stable=0,after
+        while(performance.now()<deadline&&stable<3){await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));after=sample();const current=JSON.stringify(after);stable=current===previous?stable+1:0;previous=current}
+        return {before,after,stable}
+      })
+      assert.ok(settled.stable>=3,JSON.stringify(settled))
+    }
+
     const viewport = await h.page.evaluate(() => ({ width: innerWidth, scale: devicePixelRatio }))
     assert.equal(viewport.width, 320)
     if (equivalentZoom) assert.equal(viewport.scale, 4)

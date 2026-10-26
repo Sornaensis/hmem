@@ -4897,8 +4897,7 @@ viewObservationsStateWithPermission display canEdit workspace state =
                             []
                        )
                 )
-                [ viewModeNavigation state
-                , viewFilters state
+                [ div [class "observation-browser-context"] [viewModeNavigation state, viewFilters state]
                 , div
                     [ classList
                         [ ( "observation-layout", True )

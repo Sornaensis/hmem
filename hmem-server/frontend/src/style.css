@@ -2629,12 +2629,21 @@ textarea.observation-edit-content {
   position: static;
 }
 
-/* Keep both navigation and detail reachable in short, enlarged-text layouts. */
-@media (max-width: 700px) and (max-height: 480px) {
-  .app:has(#observation-panel) .sidebar {
-    max-height: 40dvh;
-  }
-
+/* Keep Observation navigation and a boxed reader usable in short viewports. */
+@media (max-width: 650px) and (max-height: 400px) {
+  .app:has(#observation-panel) > .global-context { min-height: 54px; max-height: 54px; overflow: auto; }
+  .app:has(#observation-panel) > .global-context a { display: inline-flex; align-items: center; min-height: 32px; }
+  .app:has(#observation-panel) > .workspace-context-persistent { min-height: 0; max-height: min(30dvh, calc(100dvh - 54px - max(40px, 12dvh) - max(36px, calc(1.5rem + 4px)))); }
+  .app:has(#observation-panel) .sidebar { min-height: 0; max-height: max(40px, 12dvh); }
+  .app:has(#observation-panel) > .workspace-context-persistent > .workspace-tabs { position: static; }
+  .app:has(#observation-panel) .sidebar-section,
+  .app:has(#observation-panel) .sidebar-nav li { flex-basis: 100%; }
+  .app:has(#observation-panel) > .connection-status { top: 8px; right: 8px; bottom: auto; left: auto; padding: 4px 8px; font-size: 11px; }
+}
+@media (max-width: 650px) and (max-height: 400px) and (pointer: coarse) {
+  .app:has(#observation-panel) > .global-context a { min-height: 44px; }
+  .app:has(#observation-panel) > .workspace-context-persistent,
+  .app:has(#observation-panel) .sidebar { max-height: 48px; }
 }
 
 @media (max-width: 800px) {
@@ -5328,4 +5337,43 @@ textarea.observation-edit-content {
 /* Active agent hierarchy belongs with Work; the sole reader stays in context. */
 .task-session-work-context { padding: 14px; border-top: 1px solid var(--border); }
 .task-session-work-context > .session-pane-label { margin: 0 0 8px; }
+
+
+/* Observations use the shared context rows and explicit card sections. */
+.observation-browser-context { width: 100%; max-width: 78rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); min-width: 0; }
+.observation-browser-context .observation-mode-navigation { padding: 10px 14px 0; gap: 8px 14px; border-bottom: 1px solid var(--border); }
+.observation-browser-context .observation-mode-heading { font-size: 18px; line-height: 1.4; font-weight: 500; margin: 0; }
+.observation-browser-context .observation-mode-actions { gap: 6px; }
+.observation-browser-context .observation-mode-button { padding: 9px 8px; border: 0; border-radius: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); font-size: 14px; line-height: 1.5; min-height: 40px; }
+.observation-browser-context .observation-mode-button[aria-pressed="true"] { color: var(--accent-hover); border-bottom-color: var(--accent); }
+.observation-browser-context .observation-mode-announcement { margin-left: auto; font-size: 12px; line-height: 1.5; }
+.observation-browser-context .observation-discovery-controls { padding: 14px; gap: 14px; }
+.observation-browser-context .observation-search { margin: 0; gap: 8px 14px; }
+.observation-browser-context .observation-search > .observation-filter-group { flex: 1 1 240px; }
+.observation-browser-context .observation-filter-input, .observation-browser-context .observation-filter-select { font-size: 14px; line-height: 1.5; min-height: 32px; }
+.observation-browser-context .observation-applied-filters { padding: 0 14px 14px; font-size: 12px; }
+.observation-browser-context .observation-applied-filters:empty { display: none; }
+#observation-panel .observation-result { padding: 0; margin: 0; border-radius: 8px; min-width: 0; }
+#observation-panel .observation-card-header { padding: 10px 14px; margin: 0; gap: 8px; }
+#observation-panel .observation-summary { padding: 10px 14px; font-size: 14px; line-height: 1.5; }
+#observation-panel .observation-card-footer { padding: 12px 14px; margin: 0; border-top: 1px solid var(--border); font-size: 12px; }
+#observation-panel .observation-card-footer .observation-detail-meta { margin: 0; padding: 0; border: 0; }
+#observation-panel .observation-detail-card { padding: 0; margin: 0; border: 0; border-radius: 0 0 8px 8px; background: transparent; }
+#observation-panel .observation-detail-card > .card-content-section { padding: 14px; margin: 0; }
+#observation-panel .observation-detail-card .card-section-heading { font-size: 11px; margin: 0 0 8px; }
+#observation-panel .observation-card-footer > .card-content-section { padding: 0; margin: 0; border: 0; }
+#observation-panel .observation-card-footer .observation-detail-actions { margin-top: 12px; gap: 8px; }
+#observation-panel .observation-retained-editor { padding: 14px; border-top: 1px solid var(--border); }
+#observation-panel .observation-retained-editor h4 { font-size: 14px; margin: 0 0 8px; }
+#observation-panel .observation-tree-path { padding: 10px 14px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
+#observation-panel .observation-subject-group-header, #observation-panel .observation-path-group { padding: 10px 14px; }
+#observation-panel .observation-state { padding: 14px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
+@media (max-width: 650px) {
+  .observation-browser-context .observation-mode-actions { flex: 1 1 100%; }
+  .observation-browser-context .observation-mode-announcement { flex-basis: 100%; margin-left: 0; }
+  #observation-panel :is(input, select, textarea) { font-size: 16px; }
+}
+@media (pointer: coarse) {
+  #observation-panel :is(button:not(.observation-disclosure):not(.observation-tree-chevron), input, select, textarea), #observation-panel .observation-card-provenance summary { min-height: 44px; }
+}
 

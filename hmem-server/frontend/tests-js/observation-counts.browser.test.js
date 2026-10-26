@@ -64,10 +64,11 @@ for (const width of [1440, 320]) test(`production ${width}: 200 pages and author
     await capture(h, `observation-counts-filtered-${width === 320 ? 'narrow' : 'desktop'}`)
     assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
     assert.ok(await h.page.evaluate(() => {
-      const host = document.getElementById('main-content-scroll'), edge = host.getBoundingClientRect()
+      const host = document.getElementById('main-content-scroll')
       return host.scrollWidth <= host.clientWidth + 1 && ['.workspace-header-title .editable-text', '.workspace-summary', '.observation-mode-heading', '#observation-query'].every(selector => {
-        const bounds = document.querySelector(selector).getBoundingClientRect()
-        return bounds.left >= edge.left - 1 && bounds.right <= edge.right + 1
+        const element = document.querySelector(selector), owner = element.closest('.workspace-context-persistent') || host
+        const bounds = element.getBoundingClientRect(), edge = owner.getBoundingClientRect()
+        return owner.scrollWidth <= owner.clientWidth + 1 && bounds.left >= edge.left - 1 && bounds.right <= edge.right + 1
       })
     }), 'Workspace name, total and applied-filter controls fit their actual scroll host at enlarged text')
     await h.page.locator('#main-content-scroll').hover(); await h.page.mouse.wheel(0, 1200); await paint(h.page)

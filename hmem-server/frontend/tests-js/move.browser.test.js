@@ -42,6 +42,7 @@ function authority(data) {
 const visualDirectory = process.env.HMEM_MOVE_VISUAL_DIR || '.task-scratch/move-dialog'
 const dialog = h => h.page.locator('#move-dialog')
 async function open(h,kind,id) {
+  await h.scrollTo(kind+':'+id)
   await h.page.locator('#move-origin-'+kind+'-'+id).click()
   await dialog(h).waitFor()
   await h.idle()

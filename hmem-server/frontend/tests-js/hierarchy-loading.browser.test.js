@@ -777,9 +777,10 @@ test('live create delete and reparent restart offset membership, and sparse resy
     assert.equal(keys.has('project:project-000'),false)
     const moved=await h.scrollTo('task:task-120')
     assert.equal(await moved.locator('.card-subtask').count(),1)
-    assert.equal(await moved.evaluate(element=>element.style.paddingLeft),'20px')
-    assert.equal(await moved.evaluate(element=>element.closest('[data-task-family="task-000"]').style.marginLeft),'20px')
-    assert.equal(await moved.evaluate(element=>parseFloat(element.style.paddingLeft)+parseFloat(element.closest('[data-task-family="task-000"]').style.marginLeft)),40, 'The relative row and family wrapper preserve total nested indentation')
+    assert.equal(await moved.evaluate(element=>getComputedStyle(element).paddingLeft),'14px')
+    assert.equal(await moved.getAttribute('data-hierarchy-depth'),'2')
+    assert.equal(await moved.evaluate(element=>getComputedStyle(element.closest('[data-task-family="task-000"]')).marginLeft),'14px')
+    assert.equal(await moved.evaluate(element=>parseFloat(getComputedStyle(element).paddingLeft)+parseFloat(getComputedStyle(element.closest('[data-task-family="task-000"]')).marginLeft)),28, 'The relative row and family wrapper preserve total nested indentation')
     assert.ok(h.requests.slice(before).some(r=>r.parent==='task-000'&&r.taskIds?.includes('task-120')))
     const resyncBefore=h.requests.filter(r=>r.path.endsWith('/resync')).length
     await h.page.evaluate(() => window.pushHierarchyFrames([{schema_version:1,type:'resync_required'}]))

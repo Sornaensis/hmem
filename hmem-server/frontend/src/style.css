@@ -5199,3 +5199,52 @@ textarea.observation-edit-content {
   .workspace-context-persistent :is(.filter-pill, .search-input, .hierarchy-search-input),
   .global-context .sidebar-session-action { min-height: 44px; }
 }
+
+/* Entity cards share explicit head, facts, work sections and metadata footer. */
+.workspace-tree-content .tree-card { padding: 0; border-radius: 8px; min-width: 0; }
+.workspace-tree-content .tree-card > .card-header { padding: 10px 14px; margin: 0; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
+.workspace-tree-content .tree-card .tree-toggle-row { min-width: 0; flex: 1 1 180px; }
+.workspace-tree-content .tree-card .tree-toggle-row > .editable-text,
+.workspace-tree-content .tree-card .tree-toggle-row > .inline-edit-input { min-width: 0; flex: 1; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.workspace-tree-content .tree-card > .card-header > .card-actions { flex-wrap: wrap; gap: 8px; max-width: 100%; }
+.workspace-tree-content .tree-card > .card-summary { margin: 0; padding: 0 14px 10px; font-size: 12px; }
+.workspace-tree-content .tree-card > .card-body { padding: 0 14px 14px; font-size: 14px; gap: 10px; }
+.workspace-tree-content .card-facts { flex-wrap: wrap; justify-content: flex-start; gap: 8px 14px; }
+.workspace-tree-content .card-fact { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.card-fact-label { color: var(--text-muted); font-size: 12px; }
+.workspace-tree-content .card-desc-row { gap: 6px; min-width: 0; }
+.workspace-tree-content .card-desc-row > .editable-textarea { padding: 0; font-size: 14px; line-height: 1.5; min-height: 24px; }
+.workspace-tree-content .card-extras { margin: 4px -14px -14px; padding: 0; gap: 0; }
+.workspace-tree-content .card-local-sections { margin: 0; padding: 0 14px; gap: 6px; }
+.workspace-tree-content .card-section-button { padding: 9px 8px; font-size: 14px; min-height: 40px; }
+.workspace-tree-content .card-section-panel { padding: 14px; min-width: 0; }
+.workspace-tree-content .card-extras > .card-content-section { margin: 0; padding: 14px; }
+.workspace-tree-content .card-section-heading { font-size: 11px; margin-bottom: 8px; }
+.workspace-tree-content .tree-card > .card-inline-actions { margin: 0; padding: 8px 14px; gap: 8px; flex-wrap: wrap; }
+.workspace-tree-content .card-footer { border-top: 1px solid var(--border); padding: 12px 14px; }
+.workspace-tree-content .card-footer .card-metadata { border: 0; margin: 0; padding: 0; }
+.workspace-tree-content .card-footer .card-metadata > summary { font-size: 12px; min-height: 24px; }
+.workspace-tree-content .card-meta-row { gap: 8px 14px; flex-wrap: wrap; }
+.workspace-tree-content .card-context-selected { outline: 1px solid var(--accent); outline-offset: 0; }
+.workspace-tree-content .hierarchy-row { padding-bottom: 12px; min-width: 0; }
+.workspace-tree-content .hierarchy-task-family > .hierarchy-row > .card-subtask { margin-right: 14px; }
+.workspace-tree-content .hierarchy-task-family { border-radius: 8px; }
+.workspace-tree-content .tree-card :is(.status-select, .priority-select, .btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open) { min-height: 32px; }
+.workspace-tree-content .tree-card .btn-extras-toggle { width: 24px; height: 24px; min-height: 24px; }
+@media (max-width: 650px) {
+  .workspace-tree-content .tree-card > .card-header > .tree-toggle-row { flex-basis: 100%; }
+  .workspace-tree-content .tree-card > .card-header > .card-actions { flex: 1 1 100%; justify-content: flex-end; }
+  .workspace-tree-content .card-section-button { flex: 1 1 auto; }
+  .workspace-tree-content .tree-card :is(select, .inline-edit-input, .inline-edit-textarea) { font-size: 16px; }
+}
+@media (pointer: coarse) {
+  .workspace-tree-content .tree-card :is(.status-select, .priority-select, .btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open, .card-section-button) { min-height: 44px; }
+}
+
+.workspace-tree-content .card-subtask-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.workspace-tree-content .card-subtask-jump { flex: 1 1 140px; text-align: left; background: transparent; color: var(--text); border: 0; padding: 0; font: inherit; overflow-wrap: anywhere; cursor: pointer; }
+.workspace-tree-content .tree-card :is(button:not(.btn-extras-toggle), select) { min-height: 32px; }
+@media (pointer: coarse) {
+  .workspace-tree-content .tree-card :is(button:not(.btn-extras-toggle), select),
+  .workspace-tree-content .card-footer .card-metadata > summary { min-height: 44px; }
+}

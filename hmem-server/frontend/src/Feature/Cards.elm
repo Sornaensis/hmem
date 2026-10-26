@@ -1725,9 +1725,9 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
         projectCreateChildReason =
             "Reopen this project before adding active child projects or open tasks."
     in
-    div [ class "tree-node", style "margin-left" (String.fromInt (depth * 20) ++ "px"), id ("entity-" ++ project.id) ]
+    div [ class "tree-node", style "margin-left" ("min(18%, " ++ String.fromInt (depth * 14) ++ "px)"), id ("entity-" ++ project.id) ]
         [ div
-            [ class ("card tree-card card-project card-status-" ++ Api.projectStatusToString project.status ++ (if maybeProjectRollup |> Maybe.map (\rollup -> rollup.inProgressTaskCount > 0) |> Maybe.withDefault False then " card-project-in-progress" else "") ++ Feature.DragDrop.dragOverClass model project.id)
+            [ class ("card tree-card card-project card-status-" ++ Api.projectStatusToString project.status ++ (if maybeProjectRollup |> Maybe.map (\rollup -> rollup.inProgressTaskCount > 0) |> Maybe.withDefault False then " card-project-in-progress" else "") ++ (if model.focus.focusedEntity == Just ("project", project.id) then " card-context-selected" else "") ++ Feature.DragDrop.dragOverClass model project.id)
             , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
             , on "dragstart" (Decode.succeed (DragStartCard "project" project.id))
             , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard project.id, True ))
@@ -2328,7 +2328,7 @@ viewTaskCardBody descendants projection showProject model task =
                 "Reopen the project before adding open subtasks."
     in
     div
-        ([ class ("card tree-card task-card " ++ cardClass ++ (if model.sessions.taskPanel == Just task.id then " task-card-with-dock" else "") ++ (if Feature.Sessions.taskActive task.workspaceId model task.id then " card-has-active-sessions" else "") ++ taskCardAppearanceClass task.status maybeRollup ++ Feature.DragDrop.dragOverClass model task.id)
+        ([ class ("card tree-card task-card " ++ cardClass ++ (if model.sessions.taskPanel == Just task.id then " task-card-with-dock" else "") ++ (if Feature.Sessions.taskActive task.workspaceId model task.id then " card-has-active-sessions" else "") ++ taskCardAppearanceClass task.status maybeRollup ++ (if model.focus.focusedEntity == Just ("task", task.id) || model.sessions.taskPanel == Just task.id then " card-context-selected" else "") ++ Feature.DragDrop.dragOverClass model task.id)
         , draggable (if Permissions.canEditCurrentWorkspace model && model.sessions.taskPanel /= Just task.id then "true" else "false")
         , id ("entity-" ++ task.id)
         , on "dragstart" (Decode.succeed (if model.sessions.taskPanel == Just task.id then NoOp else DragStartCard "task" task.id))
@@ -2363,8 +2363,6 @@ viewTaskCardBody descendants projection showProject model task =
             , div [ class "card-actions" ]
                 [ Feature.Sessions.viewTaskIcon task.workspaceId model task.id
                 , Feature.Move.viewAction model "task" task.id
-                , Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
-                , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
                     button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]
 
@@ -2433,7 +2431,11 @@ viewTaskCardBody descendants projection showProject model task =
                 div [class "card-section-panel",id ("task-" ++ task.id ++ "-" ++ section),attribute "role" "region",attribute "aria-labelledby" ("task-" ++ task.id ++ "-" ++ section ++ "-button"),hidden (currentSection /= section)] content
           in
           div [ class "card-body card-expanded" ]
-            [ div [ class "card-desc-row" ]
+            [ CardSections.facts
+                [ CardSections.fact "Status" (Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus)
+                , CardSections.fact "Priority" (Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority)
+                ]
+            , div [ class "card-desc-row" ]
                 [ button [ class "btn-extras-toggle", onClick (ToggleCardExpand task.id) ]
                     [ text
                         (if extrasExpanded then
@@ -2459,6 +2461,20 @@ viewTaskCardBody descendants projection showProject model task =
 
                       else
                         text ""
+                    , let
+                        loadedChildren =
+                            childTasksForTask
+                                |> (if applyLocalTreeCriteria then List.filter (\child -> Set.member child.id projection.taskCriteriaMatches) else identity)
+                                |> orderedTasks model
+                      in
+                      CardSections.section "Loaded subtasks"
+                        (List.map (\child -> div [class "card-subtask-summary"]
+                            [ span [class ("badge badge-" ++ Api.taskStatusToString child.status)] [text (Api.taskStatusToString child.status)]
+                            , button [class "card-subtask-jump",type_ "button",onClick (FocusEntity "task" child.id),attribute "aria-label" ("Jump to subtask: " ++ child.title)] [text child.title]
+                            ]) (List.take 3 loadedChildren)
+                            ++ [if List.length loadedChildren > 3 then p [class "card-meta"] [text "Other loaded subtasks are in the hierarchy below."]
+                                else if List.isEmpty loadedChildren then p [class "card-meta"] [text (if hasChildren then "Subtasks are available in the hierarchy below." else "No loaded subtasks.")]
+                                else text ""])
                     , Feature.Dependencies.viewTaskDependencies model task.id deps]
                     , panel "agents"
                         [ p [class "card-meta"] [text (if Feature.Sessions.taskActive task.workspaceId model task.id then "Active sessions are available for this task." else "No active sessions are currently known for this task.")]
@@ -3783,7 +3799,9 @@ viewHierarchyViewport ws incoming =
                     ( key, div [ class "hierarchy-row", attribute "data-hierarchy-key" key, attribute "data-hierarchy-index" (String.fromInt position)
                         , attribute "data-hierarchy-next" (neighborEntity 1 position)
                         , attribute "data-hierarchy-previous" (neighborEntity -1 position)
-                        , style "padding-left" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> Basics.max 0 (depth - baseDepth) * 20)) ++ "px")
+                        , attribute "data-hierarchy-depth" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0))
+                        , attribute "aria-description" ("Hierarchy level " ++ String.fromInt ((row |> Maybe.map .depth |> Maybe.withDefault 0) + 1))
+                        , style "padding-left" ("min(18%, " ++ String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> Basics.max 0 (depth - baseDepth) * 14)) ++ "px)")
                         ] [ row |> Maybe.map content |> Maybe.withDefault (text "") ] )
         pieces = Viewport.window viewport.top viewport.height 300 25 (viewportPins model) viewport.index
         protectedInput =
@@ -3814,7 +3832,7 @@ viewHierarchyViewport ws incoming =
                             in
                             ( family, Keyed.node "div"
                                 [ class ("hierarchy-task-family" ++ familyStatus family), attribute "data-task-family" (String.dropLeft 5 family)
-                                , style "margin-left" (String.fromInt (depth * 20) ++ "px")
+                                , style "margin-left" ("min(18%, " ++ String.fromInt (depth * 14) ++ "px)")
                                 ] (List.map (pieceView depth) members)
                             ) :: groupedPieces following
         segment key contents =

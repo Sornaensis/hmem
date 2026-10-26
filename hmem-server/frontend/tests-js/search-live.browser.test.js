@@ -38,7 +38,7 @@ test('clearing a global query hides entity options and restores saved choices on
   } finally { await h.close() }
 })
 
-for (const focused of [false, true]) test((focused ? 'Focused' : 'Normal') + ' hierarchy controls belong to the sticky header and retain native focus while global search scrolls away', { timeout: 30000 }, async () => {
+for (const focused of [false, true]) test((focused ? 'Focused' : 'Normal') + ' hierarchy controls belong to persistent context and retain native focus while main content scrolls', { timeout: 30000 }, async () => {
   const fixture = hierarchyFixture()
   fixture.projects = fixture.projects.slice(0, 25).map(project => ({ ...project, parent_id: null }))
   fixture.projects[0].name = '000 root'
@@ -50,11 +50,11 @@ for (const focused of [false, true]) test((focused ? 'Focused' : 'Normal') + ' h
     const hierarchy = h.page.getByPlaceholder(focused ? 'Filter focused view...' : 'Filter project hierarchy...')
     assert.equal(await h.page.locator('.hierarchy-search-input').count(), 1)
     if (focused) assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 0)
-    assert.equal(await hierarchy.evaluate(element => !!element.closest('.sticky-workspace-bar')), true)
+    assert.equal(await hierarchy.evaluate(element => !!element.closest('.workspace-context-persistent')), true)
     const element = await hierarchy.elementHandle()
     for (const width of [1440, 390]) {
       await h.page.setViewportSize({ width, height: 700 })
-      await hierarchy.focus()
+      await hierarchy.click()
       await h.page.keyboard.type(' '); await h.idle()
       await h.page.keyboard.press('Backspace'); await h.idle()
       assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
@@ -63,16 +63,16 @@ for (const focused of [false, true]) test((focused ? 'Focused' : 'Normal') + ' h
       assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
       const geometry = await h.page.evaluate(() => {
         const host = document.getElementById('main-content-scroll').getBoundingClientRect()
-        const widget = document.querySelector('.sticky-workspace-bar').getBoundingClientRect()
-        const title = document.querySelector('.sticky-workspace-bar__header').getBoundingClientRect()
-        const hierarchy = document.querySelector('.hierarchy-search-input').getBoundingClientRect()
+        const widget = document.querySelector('.workspace-context-persistent').getBoundingClientRect()
+        const title = document.querySelector('.global-context').getBoundingClientRect()
+        const field = document.querySelector('.hierarchy-search-input'), hierarchy = field.getBoundingClientRect(); let clip = { top: 0, bottom: innerHeight, left: 0, right: innerWidth }; for (let p = field.parentElement; p; p = p.parentElement) { const style = getComputedStyle(p), r = p.getBoundingClientRect(); if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) { clip.top = Math.max(clip.top, r.top); clip.bottom = Math.min(clip.bottom, r.bottom) }; if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) { clip.left = Math.max(clip.left, r.left); clip.right = Math.min(clip.right, r.right) } }; const hit = document.elementFromPoint(hierarchy.left + hierarchy.width / 2, hierarchy.top + hierarchy.height / 2) === field
         const global = document.querySelector('.search-input').getBoundingClientRect()
-        const controls = [...document.querySelectorAll('.sticky-workspace-bar input, .sticky-workspace-bar select, .sticky-workspace-bar button')].map(e => e.getBoundingClientRect())
-        return { host: host.toJSON(), widget: widget.toJSON(), title: title.toJSON(), hierarchy: hierarchy.toJSON(), global: global.toJSON(), fits: controls.every(r => r.left >= widget.left - 1 && r.right <= widget.right + 1 && r.bottom <= widget.bottom + 1) }
+        const controls = [...document.querySelectorAll('.workspace-context-persistent input, .workspace-context-persistent select, .workspace-context-persistent button')].map(e => e.getBoundingClientRect())
+        return { host: host.toJSON(), widget: widget.toJSON(), title: title.toJSON(), hierarchy: hierarchy.toJSON(), clip, hit, global: global.toJSON(), fits: controls.every(r => r.left >= widget.left - 1 && r.right <= widget.right + 1) }
       })
-      assert.ok(Math.abs(geometry.widget.top - geometry.host.top) < 2, JSON.stringify(geometry))
-      assert.ok(geometry.hierarchy.top >= geometry.title.bottom - 1, JSON.stringify(geometry))
-      assert.ok(geometry.global.bottom <= geometry.widget.top, 'Global search scrolls out of the header: ' + JSON.stringify(geometry))
+      assert.ok(geometry.widget.bottom <= geometry.host.top + 1 && geometry.widget.top >= geometry.title.bottom - 1, JSON.stringify(geometry))
+      assert.ok(geometry.hit && geometry.hierarchy.top >= geometry.clip.top - 1 && geometry.hierarchy.bottom <= geometry.clip.bottom + 1, JSON.stringify(geometry))
+      assert.ok(geometry.global.top >= geometry.widget.top - 1 && geometry.global.bottom <= geometry.widget.bottom + 1, 'Global search remains in persistent context: ' + JSON.stringify(geometry))
       assert.ok(geometry.widget.bottom < geometry.host.bottom - 60, 'Header leaves room to browse content: ' + JSON.stringify(geometry))
       assert.ok(geometry.fits, 'All hierarchy controls fit at width ' + width)
       await h.page.locator('#main-content-scroll').evaluate(host => { host.scrollTop = 0 })
@@ -98,7 +98,7 @@ test('global input position and focus stay stable on the first character and key
       await input(h).click()
       const element = await input(h).elementHandle()
       const measure = () => element.evaluate(element => {
-        const r = element.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), bounds = host.getBoundingClientRect()
+        const r = element.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), bounds = element.closest('.workspace-context-persistent').getBoundingClientRect()
         return { top: r.top, bottom: r.bottom, scroll: host.scrollTop, focused: element === document.activeElement, connected: element.isConnected, visible: r.top >= bounds.top && r.bottom <= bounds.bottom }
       })
       const before = await measure()
@@ -265,8 +265,8 @@ test('global and hierarchy inputs share base styles and fit desktop and mobile t
       assert.equal(styles.length, 2)
       assert.deepEqual(styles[1].properties, styles[0].properties, 'Both search controls share base styles at width ' + width)
       assert.equal(styles[1].properties.flexGrow, '1')
-      assert.equal(styles[1].properties.paddingTop, '8px')
-      assert.equal(styles[1].properties.paddingRight, '12px')
+      assert.equal(styles[1].properties.paddingTop, '6px')
+      assert.equal(styles[1].properties.paddingRight, '9px')
       assert.equal(styles[1].properties.borderTopStyle, 'solid')
       assert.equal(styles[1].properties.borderTopWidth, '1px')
       assert.equal(styles[1].properties.minWidth, '0px')

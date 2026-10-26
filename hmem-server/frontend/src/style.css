@@ -5377,3 +5377,60 @@ textarea.observation-edit-content {
   #observation-panel :is(button:not(.observation-disclosure):not(.observation-tree-chevron), input, select, textarea), #observation-panel .observation-card-provenance summary { min-height: 44px; }
 }
 
+
+/* Search uses compact explicit sections without changing keyed hit owners. */
+.unified-search-results { max-width: 78rem; gap: 14px; }
+.search-results-header { padding: 10px 14px; border-radius: 8px; gap: 14px; }
+.search-results-header .search-results-title { font-size: 18px; line-height: 1.4; font-weight: 500; }
+.search-results-count { font-size: 12px; line-height: 1.5; }
+.search-results-section { gap: 8px; }
+.search-section-title { font-size: 11px; }
+.search-result-list { gap: 12px; }
+.search-result-card.search-result-condensed { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 0; gap: 0; align-items: stretch; border-radius: 8px; }
+.search-result-condensed .search-result-main { display: contents; }
+.search-result-condensed .search-result-topline { grid-column: 1 / -1; grid-row: 1; padding: 10px 14px; gap: 8px; }
+.search-result-condensed .search-result-title { font-size: 14px; line-height: 1.5; }
+.search-result-condensed .search-result-summary { grid-column: 1 / -1; grid-row: 2; padding: 0; margin: 0 14px 14px; font-size: 14px; line-height: 1.5; }
+.search-result-condensed .search-result-id { grid-column: 1; grid-row: 3; display: flex; align-items: center; margin: 0; padding: 12px 14px; border-top: 1px solid var(--border); font-size: 12px; }
+.search-result-condensed .search-result-actions { grid-column: 2; grid-row: 3; padding: 12px 14px; border-top: 1px solid var(--border); }
+.search-result-condensed .search-result-action, .search-jump-target > .search-return-button { min-height: 32px; font-size: 14px; }
+.search-jump-target > .search-return-button { margin-bottom: 14px; }
+.search-state-card, .search-empty-state { padding: 14px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
+.focus-breadcrumb-bar { padding: 10px 14px; margin-bottom: 14px; gap: 8px; border-radius: 8px; font-size: 12px; line-height: 1.5; }
+.focus-breadcrumb-bar :is(button, .focus-crumb-link, .focus-crumb-forward) { min-height: 32px; display: inline-flex; align-items: center; }
+.workspace-context-persistent .focused-search-filter-bar { grid-column: 1 / -1; min-width: 0; padding: 6px 16px; border-top: 1px solid var(--border); }
+.workspace-context-persistent .focused-search-filter-bar > .filter-label { font-size: 11px; margin-bottom: 4px; }
+.workspace-context-persistent .focused-search-filter-bar .search-filter-bar { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px 14px; margin: 0; padding: 0; }
+.workspace-context-persistent .focused-search-filter-bar .search-bar { flex: 1 1 280px; margin: 0; }
+.workspace-context-persistent .focused-search-filter-bar .filter-bar { flex: 1 1 100%; margin: 0; padding: 0; border: 0; }
+
+/* Timeline retains its chart canvas and real lifecycle controls inside shared sections. */
+.timeline-panel { max-width: 78rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); min-width: 0; }
+.timeline-panel-header { padding: 10px 14px; margin: 0; border-bottom: 1px solid var(--border); }
+.timeline-panel-header h3 { font-size: 18px; line-height: 1.4; font-weight: 500; }
+.timeline-panel-header p { font-size: 12px; line-height: 1.5; }
+.timeline-panel .timeline-chart-panel { padding: 14px; margin: 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
+.timeline-graph-controls { gap: 8px 14px; margin-bottom: 14px; }
+.timeline-graph-control { font-size: 12px; min-width: 0; flex: 0 1 180px; }
+.timeline-graph-control :is(input, select) { font-size: 14px; min-height: 32px; border-radius: 8px; }
+.timeline-chart-toggles { gap: 8px; margin-bottom: 14px; }
+.timeline-series-toggle { min-height: 32px; font-size: 14px; }
+.timeline-events-section { padding: 14px; min-width: 0; }
+.timeline-events-section .timeline-filter-bar { margin: 0 0 14px; padding: 0; background: transparent; border: 0; }
+.timeline-events-section .timeline-event-list { gap: 14px; }
+.timeline-panel .timeline-state, .timeline-panel .timeline-stale-notice { padding: 14px; }
+@media (max-width: 650px) {
+  .focused-search-filter-bar :is(input, select), .timeline-panel :is(input, select) { font-size: 16px; }
+  .timeline-graph-control { flex: 1 1 120px; }
+}
+@media (pointer: coarse) {
+  .search-result-condensed :is(button, .search-result-id, .search-result-title), .search-jump-target > .search-return-button,
+  .focus-breadcrumb-bar :is(button, .focus-crumb-link, .focus-crumb-forward), .timeline-panel :is(button, input, select) { min-height: 44px; }
+}
+
+
+/* The live global query keeps its vertical origin when entity options appear. */
+@media (min-width: 651px) {
+  .workspace-context-persistent > .global-search-bar { align-self: start; }
+}
+

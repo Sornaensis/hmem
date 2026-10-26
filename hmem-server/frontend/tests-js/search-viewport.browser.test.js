@@ -22,12 +22,14 @@ async function stationary(page, initial) {
 async function focusAtScroll(page, input) {
   await input.click()
   await page.locator('#main-content-scroll').hover(); await page.mouse.wheel(0, -100000); await page.waitForTimeout(250)
-  await page.mouse.wheel(0, 120); await page.waitForTimeout(300); await frames(page)
+  const distance = await input.evaluate(e => { const host = document.getElementById('main-content-scroll'); return host.contains(e) ? Math.min(120, Math.floor(e.getBoundingClientRect().top - host.getBoundingClientRect().top - 12 - 4)) : 120 })
+  assert.ok(distance >= 90, 'Native wheel setup retains a meaningful physical position')
+  await page.mouse.wheel(0, distance); await page.waitForTimeout(300); await frames(page)
   assert.equal(await input.evaluate(e => e === document.activeElement), true)
-  const geometry = await input.evaluate(e => { const r = e.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), h = host.getBoundingClientRect(); return { visible: r.top >= h.top && r.bottom <= h.bottom, input: r.toJSON(), host: h.toJSON(), top: host.scrollTop } })
+  const geometry = await input.evaluate(e => { const r = e.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), h = (host.contains(e) ? host : e.closest('.workspace-context-persistent')).getBoundingClientRect(); return { visible: r.top >= h.top && r.bottom <= h.bottom, input: r.toJSON(), host: h.toJSON(), top: host.scrollTop } })
   assert.ok(geometry.visible, 'Input is visible and focused before the first real key: ' + JSON.stringify(geometry))
   const initial = await observe(page)
-  assert.ok(initial >= 100, 'A nonzero physical position makes restoration observable')
+  assert.ok(initial >= 90, 'A nonzero physical position makes restoration observable')
   return initial
 }
 const populated = values => [...values, ...Array.from({ length: 100 }, (_, i) => ({ ...values[3], id: 'wide-' + i, subjects: [{ subject_kind: 'file', subject: `wide-${i}/Guide.md` }] }))]
@@ -61,9 +63,9 @@ test('delayed and stale search replies preserve newer user wheel intent while th
     let initial = await focusAtScroll(h.page, input)
     const held = h.gate(r => r.payload?.filters?.content_query === 'Cache', { hold: true })
     await h.page.keyboard.type('Cache', { delay: 25 }); await h.bounded(held.arrived, 5000, 'Held search'); await stationary(h.page, initial)
-    await h.page.mouse.wheel(0, 80); await h.page.waitForTimeout(250)
+    await h.page.mouse.wheel(0, -80); await h.page.waitForTimeout(250)
     const moved = await h.page.locator('#main-content-scroll').evaluate(e => e.scrollTop)
-    assert.ok(moved > initial + 50, 'The focused search never locks deliberate scrolling')
+    assert.ok(moved < initial - 50, 'The focused search never locks deliberate scrolling')
     initial = await observe(h.page)
     await h.page.keyboard.press('ControlOrMeta+A'); await h.page.keyboard.type('Documentation', { delay: 20 })
     await h.page.waitForTimeout(600); held.release(); await h.idle(); await stationary(h.page, initial)

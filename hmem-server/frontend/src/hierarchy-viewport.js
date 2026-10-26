@@ -101,11 +101,11 @@ export function installHierarchyViewport(app, options = {}) {
     const next = doc.getElementById('hierarchy-viewport')
     let mountedStamp = null
     try { if (next) mountedStamp = JSON.parse(next.dataset.hierarchyContext) } catch {}
-    if (pendingElement && (!sameLifetime(pendingElement.stamp, lifetime) || (mountedStamp && !sameLifetime(pendingElement.stamp, mountedStamp)))) pendingElement = null
+    if (pendingElement && !sameLifetime(pendingElement.stamp, lifetime)) pendingElement = null
     if (pendingElement) {
       const element = doc.getElementById(pendingElement.id)
       if (Date.now() > pendingElement.expires) pendingElement = null
-      else if (element) {
+      else if (element && (!mountedStamp || sameLifetime(pendingElement.stamp, mountedStamp))) {
         if (pendingElement.id.startsWith('timeline-event-')) {
           const scroll = doc.getElementById('main-content-scroll')
           if (scroll) {

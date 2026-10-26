@@ -1662,7 +1662,7 @@ viewTimelineEvents display wsId timeline =
             groupedEvents =
                 groupTimelineEvents display visibleEvents
         in
-        div []
+        div [class "timeline-events-section"]
             [ viewTimelineSelectionNote display timeline.histogramSelectedBucket
             , viewTimelineFilters timeline
             , if timeline.hasMore then

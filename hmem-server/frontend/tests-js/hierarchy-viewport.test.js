@@ -466,3 +466,46 @@ test('hidden and retired painted layouts cannot open a wave; a fresh visible emp
     h.bridge.dispose()
   }
 })
+
+test('a current non-tree target waits for the previous mounted lifetime without touching its stale matching ID', () => {
+  const h = harness(), next = { ...h.stamp, generation: h.stamp.generation + 1 }
+  h.callbacks.sync({ ...h.stamp, top: 0 }); h.flush()
+  let top = 70, writes = 0, focused = 0
+  Object.defineProperty(h.scroller, 'scrollTop', { get: () => top, set: value => { writes++; top = value } })
+  h.elements.set('timeline-event-source', { getBoundingClientRect: () => ({ top: 1000 - top, height: 2000 }), focus() { focused++ } })
+  h.callbacks.sync({ ...next, top: 0 }); h.callbacks.target('timeline-event-source'); h.flush()
+  assert.equal(writes, 0); assert.equal(focused, 0)
+  h.setStamp(next); h.mutate([]); h.flush()
+  assert.equal(writes, 1); assert.equal(focused, 1)
+  h.flush(); h.mutate([]); h.flush()
+  assert.equal(writes, 1); assert.equal(focused, 1, 'The pending request is consumed once')
+  h.bridge.dispose()
+})
+
+test('a target waiting for its mounted lifetime still retires on authoritative ownership, newer intent and original expiry', () => {
+  for (const retirement of ['workspace', 'epoch', 'generation', 'focus', 'pointer', 'keyboard', 'hashchange', 'popstate', 'expiry']) {
+    const h = harness(), next = { ...h.stamp, generation: h.stamp.generation + 1 }
+    h.callbacks.sync({ ...h.stamp, top: 0 }); h.flush()
+    let top = 70, writes = 0, focused = 0
+    Object.defineProperty(h.scroller, 'scrollTop', { get: () => top, set: value => { writes++; top = value } })
+    h.elements.set('timeline-event-source', { getBoundingClientRect: () => ({ top: 1000 - top, height: 2000 }), focus() { focused++ } })
+    h.callbacks.sync({ ...next, top: 0 }); h.callbacks.target('timeline-event-source'); h.flush()
+    assert.equal(writes, 0); assert.equal(focused, 0)
+    const outside = { closest: () => null }
+    if (['workspace', 'epoch', 'generation'].includes(retirement)) {
+      const retired = { ...next, [retirement]: retirement === 'workspace' ? 'other' : next[retirement] + 1 }
+      h.callbacks.sync({ ...retired, top: 0 })
+    } else if (retirement === 'focus') h.listeners.get('focusin')({ target: outside })
+    else if (retirement === 'pointer') h.listeners.get('pointerdown')({ target: outside })
+    else if (retirement === 'keyboard') h.listeners.get('keydown')({ key: 'ArrowDown', target: outside })
+    else if (retirement !== 'expiry') h.windowListeners.get(retirement)()
+    h.setStamp(next)
+    const now = Date.now
+    try {
+      if (retirement === 'expiry') Date.now = () => now() + 1001
+      h.mutate([]); h.flush()
+    } finally { Date.now = now }
+    assert.equal(writes, 0, retirement); assert.equal(focused, 0, retirement)
+    h.bridge.dispose()
+  }
+})

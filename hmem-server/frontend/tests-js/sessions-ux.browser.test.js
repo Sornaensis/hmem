@@ -166,7 +166,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   await card.locator('.btn-extras-toggle').click();await h.idle()
   const active=card.locator('.task-session-dock'),evidence=card.locator('.task-session-evidence')
   await card.locator('.task-sessions-icon').click();await card.getByRole('button',{name:'Evidence',exact:true}).click();await evidence.locator('summary').click()
-  await active.getByRole('button',{name:/Codex/}).waitFor()
+  await card.locator('.task-session-work-context').getByRole('button',{name:/Codex/}).waitFor()
   assert.equal(await card.locator('.card-extras .task-session-active').count(),0);assert.equal(await card.locator('.card-section-button[aria-pressed="true"]').innerText(),'Evidence');assert.equal(await card.locator('.task-dependencies-section').count(),1)
   const downloadPromise=page.waitForEvent('download');await evidence.getByRole('button',{name:/Download session/}).click();const download=await downloadPromise
   const target=join(scratch,'session.jsonl');await download.saveAs(target);assert.deepEqual(await readFile(target),h.bytes)

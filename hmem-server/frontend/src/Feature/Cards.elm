@@ -2501,7 +2501,8 @@ viewTaskCardBody descendants projection showProject model task =
               else
                 text ""
             ]
-        , Feature.Sessions.viewTaskActive task.workspaceId model task.id
+        , Feature.Sessions.viewTaskActiveChoices task.workspaceId model task.id
+        , Feature.Sessions.viewTaskActiveConversation task.workspaceId model task.id
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
         , CardSections.metadata
             [ div [ class "card-meta-row" ]

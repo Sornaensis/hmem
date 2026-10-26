@@ -5248,3 +5248,84 @@ textarea.observation-edit-content {
   .workspace-tree-content .tree-card :is(button:not(.btn-extras-toggle), select),
   .workspace-tree-content .card-footer .card-metadata > summary { min-height: 44px; }
 }
+
+/* Conversation and inspector: selected context above three explicit panes. */
+.sessions-page .sessions-layout { grid-template-columns: 210px minmax(0, 1fr) 230px; gap: 0; align-items: start; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); }
+.sessions-page .sessions-list { grid-column: 1; grid-row: 4; min-width: 0; padding: 16px 10px; border-right: 1px solid var(--border); }
+.sessions-page .session-detail:has(> .session-conversation-grid),
+.sessions-page .session-conversation-grid,
+.sessions-page .session-conversation { display: contents; }
+.sessions-page .session-detail-header { grid-column: 1 / -1; grid-row: 1; padding: 14px 16px; gap: 12px; border-bottom: 1px solid var(--border); }
+.sessions-page .session-detail-header h3 { font-size: 18px; line-height: 1.4; font-weight: 500; }
+.sessions-page .session-detail > .session-ancestor-path { grid-column: 1 / -1; grid-row: 2; margin: 0; padding: 10px 16px; border-width: 0 0 1px; border-radius: 0; }
+.sessions-page .session-linked-tasks { grid-column: 1 / -1; grid-row: 3; margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.sessions-page .session-task-cards { display: flex; flex-wrap: wrap; gap: 8px; }
+.sessions-page .session-task-card { flex: 0 1 auto; min-width: 0; padding: 6px 10px; font-size: 12px; }
+.sessions-page .session-viewer { grid-column: 2; grid-row: 4; min-width: 0; padding: 16px; }
+.sessions-page .session-event-inspector { grid-column: 3; grid-row: 4; width: 230px; padding: 16px; border-width: 0 0 0 1px; border-radius: 0; background: var(--bg-surface); }
+.sessions-page .session-download-status { grid-column: 1 / -1; grid-row: 5; margin: 0; padding: 0 16px; }
+.sessions-page .session-summary-link { padding: 9px 8px !important; }
+.sessions-page .session-summary { margin-bottom: 6px; }
+.sessions-page .session-summary-heading strong { font-size: 14px; line-height: 1.5; }
+.sessions-page .session-parent-context { white-space: normal; overflow-wrap: anywhere; }
+.sessions-page .session-record-text { font-size: 14px; line-height: 1.5; }
+.sessions-page .session-records { min-width: 0; }
+.sessions-page .sessions-layout:not(:has(.session-conversation-grid)) .sessions-list { grid-row: 1; }
+.sessions-page .sessions-layout > .session-detail.empty-state { grid-column: 2 / -1; grid-row: 1; padding: 16px; }
+.sessions-page :is(button, select, .session-summary-link, .session-task-card) { min-height: 32px; }
+.task-card-with-dock { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 1.1fr); column-gap: 0; }
+.task-card-with-dock > .task-session-dock { grid-column: 2; grid-row: 1 / span 10; padding: 16px; margin: 0; border-top: 0; border-left: 1px solid var(--border); }
+.task-session-context-grid { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.task-session-context-choices { width: 100%; }
+.task-session-context-choices .session-summaries { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; }
+.task-session-context-choices .session-tree-children { margin-left: 8px; padding-left: 8px; }
+.task-session-context-choices .session-tree-flat { margin-left: 0; padding-left: 0; }
+.task-session-context-choices .task-session-choice { width: 100%; margin: 0; }
+.task-session-transcript { width: 100%; min-width: 0; }
+.task-session-transcript .task-session-open-full { display: inline-flex; align-items: center; min-height: 32px; margin-bottom: 10px; }
+.task-session-dock :is(button, select, .session-summary-link) { min-height: 32px; }
+.task-session-dock .session-ancestor-path { margin: 10px 0; padding: 10px; }
+.task-card-with-dock .card-fact select { max-width: 100%; }
+@media (max-width: 850px) {
+  .sessions-page .sessions-layout { grid-template-columns: 180px minmax(0, 1fr); }
+  .sessions-page .session-event-inspector { grid-column: 2; grid-row: 5; width: auto; border-width: 1px 0 0; }
+  .sessions-page .session-download-status { grid-row: 6; }
+}
+@media (max-width: 650px) {
+  .sessions-page .sessions-layout { grid-template-columns: minmax(0, 1fr); }
+  .sessions-page .sessions-list { grid-column: 1; grid-row: 4; max-height: 240px; overflow: auto; border-width: 0 0 1px; }
+  .sessions-page .session-viewer { grid-column: 1; grid-row: 5; padding: 14px; }
+  .sessions-page .session-event-inspector { grid-column: 1; grid-row: 6; padding: 14px; }
+  .sessions-page .session-download-status { grid-row: 7; }
+  .sessions-page .sessions-layout:not(:has(.session-conversation-grid)) .sessions-list { grid-row: 1; }
+  .sessions-page .sessions-layout > .session-detail.empty-state { grid-column: 1; grid-row: 2; }
+  .sessions-page select, .task-session-dock select { font-size: 16px; }
+  .task-card-with-dock { grid-template-columns: minmax(0, 1fr); }
+  .task-card-with-dock > .task-session-dock { grid-column: 1; grid-row: auto; padding: 14px; margin: 0; border-top: 1px solid var(--border); border-left: 0; }
+}
+@media (pointer: coarse) {
+  .sessions-page :is(button, select, .session-summary-link, .session-task-card),
+  .task-session-dock :is(button, select, .session-summary-link, .task-session-open-full) { min-height: 44px; }
+}
+
+/* The dock responds to its available card pane inside the workspace inspector. */
+.workspace-tree-content { container-name: task-work; container-type: inline-size; }
+.sessions-page .session-viewer { margin: 0; }
+.sessions-page .session-summaries { display: block; min-width: 0; }
+.sessions-page .sessions-list .session-card { width: 100%; min-width: 0; }
+@container task-work (max-width: 650px) {
+  .task-card-with-dock { grid-template-columns: minmax(0, 1fr); }
+  .task-card-with-dock > .task-session-dock { grid-column: 1; grid-row: auto; padding: 14px; margin: 0; border-top: 1px solid var(--border); border-left: 0; }
+}
+
+.task-session-context-choices .task-session-picker { max-height: 240px; }
+.task-session-context-choices .task-session-choice { max-width: 430px; }
+
+/* Selected metadata fallbacks occupy the same context row as its loaded header. */
+.sessions-page .session-detail > p:is([role="status"], [role="alert"]):not(.session-download-status) { grid-column: 1 / -1; grid-row: 1; margin: 0; padding: 14px 16px; }
+
+
+/* Active agent hierarchy belongs with Work; the sole reader stays in context. */
+.task-session-work-context { padding: 14px; border-top: 1px solid var(--border); }
+.task-session-work-context > .session-pane-label { margin: 0 0 8px; }
+

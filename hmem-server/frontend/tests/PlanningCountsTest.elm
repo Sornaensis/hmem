@@ -31,7 +31,7 @@ tests =
             in
             Expect.all
                 [ \_ -> view |> Query.find [ Selector.class "workspace-summary" ] |> Query.has [ Selector.text "2 open projects", Selector.text "60 open tasks" ]
-                , \_ -> view |> Query.find [ Selector.class "sticky-workspace-summary" ] |> Query.has [ Selector.text "2 open projects", Selector.text "60 open tasks" ]
+                , \_ -> view |> Query.find [ Selector.class "workspace-context-persistent" ] |> Query.has [ Selector.text "2 open projects", Selector.text "60 open tasks" ]
                 , \_ -> Expect.equal 0 (Dict.size collapsed.tasks)
                 ] ()
         , test "navigation filters, pagination and focus never recompute or request counts" <| \_ ->
@@ -91,13 +91,13 @@ tests =
                 fresh = Main.update (GotWorkspacePlanningCounts (guard released) (Ok { openProjects = 99, openTasks = 99 })) restored |> Tuple.first
             in
             Expect.equal ( Nothing, Nothing, True ) ( released.dataLoading.planningCounts.value, fresh.dataLoading.planningCounts.value, (guard fresh).token > (guard released).token )
-        , test "failed totals expose retry in both header presentations" <| \_ ->
+        , test "failed totals expose retry once in the persistent context" <| \_ ->
             let
                 initial = start ready
                 failed = Main.update (GotWorkspacePlanningCounts (guard initial) (Err Http.Timeout)) initial |> Tuple.first
             in
             Workspace.viewWorkspacePage "workspace-1" failed |> Query.fromHtml
-                |> Query.findAll [ Selector.tag "button", Selector.text "Retry planning totals" ] |> Query.count (Expect.equal 2)
+                |> Query.findAll [ Selector.tag "button", Selector.text "Retry planning totals" ] |> Query.count (Expect.equal 1)
         ]
 
 

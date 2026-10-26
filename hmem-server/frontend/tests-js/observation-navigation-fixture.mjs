@@ -70,6 +70,8 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
       return { release, arrived }
     },
     async start(fragment = 'tab=observations') {
+      // These origin/return scenarios exercise explicit Flat results; bare entries default to Tree.
+      if (!fragment.includes('oq=')) fragment += '&ov=1&oq=' + encodeURIComponent(JSON.stringify(['flat', '', null, '', '', null, null, [], '', '', '']))
       await h.page.goto(h.origin + '/workspace/' + fixture.workspace.id + '#' + fragment)
       await h.page.locator('#observation-panel').waitFor()
       await this.idle()

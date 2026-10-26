@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { installObservationNavigation } from '../src/observation-navigation.js'
 
-function harness({ toolbarEnabled = false, viewportBridge } = {}) {
+function harness({ toolbarEnabled = false, viewportBridge, headerBottom = null } = {}) {
   let subscribed, toolbarSubscribed, captureClick, current = { workspaceId: 'workspace', sessionEpoch: 3, token: 0, selectedId: null }
   const events = new Map()
   const frames = new Map(), elements = new Map(), effects = []
@@ -17,7 +17,7 @@ function harness({ toolbarEnabled = false, viewportBridge } = {}) {
   elements.set(heading.id, heading); elements.set(results.id, results)
   elements.set('first', element('first', true)); elements.set('duplicate', element('duplicate', true))
   elements.set('main-content-scroll', scroll); elements.set('observation-panel', root)
-  const doc = { documentElement: {}, body: {}, activeElement: null, getElementById(id) { return elements.get(id) }, querySelector() { return elements.get('selected-arrow') }, addEventListener(name, fn, capture) { assert.equal(capture, true); if (name === 'click') captureClick = fn; else events.set(name, fn) }, removeEventListener(name, fn) { if (name === 'click') { assert.equal(fn, captureClick); captureClick = null } else events.delete(name) } }
+  const doc = { documentElement: {}, body: {}, activeElement: null, getElementById(id) { return elements.get(id) }, querySelector(selector) { return selector === '.workspace-context-persistent' ? (headerBottom === null ? null : { getBoundingClientRect: () => ({ bottom: headerBottom }) }) : elements.get('selected-arrow') }, addEventListener(name, fn, capture) { assert.equal(capture, true); if (name === 'click') captureClick = fn; else events.set(name, fn) }, removeEventListener(name, fn) { if (name === 'click') { assert.equal(fn, captureClick); captureClick = null } else events.delete(name) } }
   const bridge = installObservationNavigation({ ports: { navigateObservationDetail: { subscribe(fn) { subscribed = fn }, unsubscribe(fn) { assert.equal(fn, subscribed); subscribed = null } },
     ...(toolbarEnabled ? { focusObservationToolbar: { subscribe(fn) { toolbarSubscribed = fn }, unsubscribe(fn) { assert.equal(fn, toolbarSubscribed); toolbarSubscribed = null } } } : {}) } }, {
     document: doc, viewport: viewportBridge, window: { getComputedStyle() { return { display: 'block', visibility: 'visible' } } },
@@ -45,6 +45,16 @@ test('detail and return restore one exact repeated-card origin with preventScrol
   assert.equal(h.effects.at(-1).id, 'duplicate')
   assert.deepEqual(h.effects.at(-1).options, { preventScroll: true })
   assert.equal(h.scroll.scrollTop, 123)
+  h.bridge.dispose()
+})
+
+test('detail and return reveal below measured persistent workspace context', () => {
+  const h = harness({ headerBottom: 180 })
+  h.command('detail', 'duplicate', 'A'); h.flush()
+  assert.equal(h.scroll.scrollTop, 31)
+  h.command('return', 'duplicate', null); h.flush()
+  assert.equal(h.scroll.scrollTop, 31)
+  assert.equal(h.effects.at(-1).id, 'duplicate')
   h.bridge.dispose()
 })
 

@@ -867,6 +867,7 @@ type alias DependencyMutationCorrelation =
 
 type alias CardsModel =
     { viewport : HierarchyViewportState
+    , taskSections : Dict String String
     , expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
     , deleteConfirmation : Maybe DeleteConfirmation
@@ -1296,6 +1297,9 @@ type alias SessionsModel =
     { workspace : Maybe String
     , epoch : Int
     , selected : Maybe String
+    , inspectedEvent : Maybe String
+    , viewerScope : String
+    , returnTaskPanel : Maybe String
     , cursor : Maybe Api.SessionCursor
     , previous : List (Maybe Api.SessionCursor)
     , linksCursor : Maybe String
@@ -1353,7 +1357,7 @@ type alias SessionRecord =
 
 emptySessionsModel : SessionsModel
 emptySessionsModel =
-    { workspace = Nothing, epoch = 0, selected = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
+    { workspace = Nothing, epoch = 0, selected = Nothing, inspectedEvent = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
     , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
@@ -1458,6 +1462,8 @@ type Msg
     | SessionsNextPage Api.SessionCursor
     | SessionsToggleDock String
     | SessionsSelectDock String String
+    | SessionsInspect String String
+    | SetTaskCardSection String String
     | SessionsPreviousPage
     | SessionsLinkedPage (Maybe String)
     | SessionsShowAllLinkedTasks

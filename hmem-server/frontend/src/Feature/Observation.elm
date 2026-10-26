@@ -76,6 +76,7 @@ module Feature.Observation exposing
 
 import ActorAttribution
 import Api
+import CardSections
 import Array
 import Char
 import Dict
@@ -4518,7 +4519,15 @@ hydratePreferences payload model =
                     (if explicit then rememberPreferences ready else ready, Cmd.none)
                 Ok prefs ->
                     let
-                        restoredTree = let tree = accepted.tree in ObservationTree.reconcileSelection { tree | expanded = Set.fromList prefs.paths, focused = prefs.focusedPath
+                        revealPath =
+                            case accepted.tree.revealTarget of
+                                Just target -> Just target.subject.subject
+                                Nothing ->
+                                    if explicit && not accepted.searchOriginDetail && context.fragment.observationId /= Nothing && context.fragment.observationId == accepted.selectedId then
+                                        currentSelectedObservation accepted |> Maybe.map (\observation -> accepted.selectedFacet |> Maybe.map .subject |> Maybe.withDefault observation.subject)
+                                    else Nothing
+                        requiredPaths = revealPath |> Maybe.map (ObservationTree.ancestors >> Set.fromList) |> Maybe.withDefault Set.empty
+                        restoredTree = let tree = accepted.tree in ObservationTree.reconcileSelection { tree | expanded = Set.union (Set.fromList prefs.paths) requiredPaths, focused = prefs.focusedPath
                             , selectedPath = if explicit || tree.revealTarget /= Nothing || tree.selectedPath /= Nothing then tree.selectedPath else prefs.selectedPath }
                         hydrated = { accepted | preferenceValue = {prefs | selectedPath = restoredTree.selectedPath, modeIntent = prefs.modeIntent || explicit, context = if explicit then Just (Helpers.encodeObservationQuery (Helpers.observationAppliedQuery accepted)) else prefs.context}, preferencePendingDetail = prefs.detail /= Nothing, preferenceEntryHistory = accepted.preferenceEntryHistory, expandedSubjects = Dict.fromList (List.map (\key -> ( key, True )) prefs.subjects)
                             , expandedMatchGroups = Dict.fromList (List.map (\key -> ( key, True )) prefs.groups)
@@ -5512,7 +5521,7 @@ viewDetail display canEdit state =
                 , case state.selectedDetail of
                     Just observation ->
                         article [ class "card observation-detail-card" ]
-                            [ viewFullObservationContent observation
+                            [ CardSections.section "Content" [viewFullObservationContent observation]
                             , if canEdit && Maybe.map .observationId state.edit == Just observation.id then
                                 section [ class "observation-retained-editor", attribute "aria-label" "Retained observation draft" ]
                                     [ h4 [] [ text "Retained draft" ]
@@ -5521,14 +5530,14 @@ viewDetail display canEdit state =
                               else text ""
                             , div [ class "observation-card-footer" ]
                                 [ viewMatchContext observation.provenanceMatch
-                                , dl [ class "observation-detail-meta" ]
+                                , CardSections.section "Provenance and metadata" [dl [ class "observation-detail-meta" ]
                                     [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
                                     , viewSubjects (Maybe.withDefault "observation-detached" (selectedOwner state)) observation.id state.expandedSubjects observation.subjects
                                     , viewCurrentProvenance display observation state
                                     , if boundCurrentProvenance observation /= Nothing then viewProvenanceRevision observation.gitSha else text ""
                                     , viewDetailMeta "Created" (TimestampDisplay.lookup display observation.createdAt) ""
                                     , viewDetailMeta "Content updated" (TimestampDisplay.lookup display observation.updatedAt) ""
-                                    ]
+                                    ]]
                                 , if canEdit && state.edit == Nothing then
                                     div [ class "observation-detail-actions" ]
                                         [ button [ id "observation-review", class "btn btn-secondary", type_ "button", onClick StartObservationEdit ] [ text "Review / re-audit" ]

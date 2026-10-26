@@ -47,7 +47,8 @@ viewReadableWorkspacePage wsId model ws =
                 model.dataLoading.planningCounts
     in
     div [ class "page" ]
-        [ div [ class "workspace-header" ]
+        [ div [class "workspace-context-persistent",attribute "aria-label" "Workspace context"]
+          [ div [ class "workspace-header" ]
             [ div [ class "workspace-header-top" ]
                 [ div [ class "workspace-header-title" ]
                     [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
@@ -72,8 +73,10 @@ viewReadableWorkspacePage wsId model ws =
                              else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
                         , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
                   else text "" ]
-            , div [ class "workspace-details" ]
-                [ div [ class "workspace-detail" ]
+            , details [class "workspace-metadata"]
+                [ summary [] [text "Workspace details"]
+                , div [ class "workspace-details" ]
+                  [ div [ class "workspace-detail" ]
                     [ span [ class "workspace-detail-label" ] [ text "ID" ]
                     , Helpers.copyableValue "workspace-detail-value card-id card-id-copy" "workspace ID" ws.id ws.id
                     ]
@@ -105,20 +108,22 @@ viewReadableWorkspacePage wsId model ws =
                     [ span [ class "workspace-detail-label" ] [ text "Updated" ]
                     , span [ class "workspace-detail-value" ] [ text (TimestampDisplay.lookup model.timestamps ws.updatedAt) ]
                     ]
+                  ]
                 ]
             ]
         , if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab || model.activeTab == SessionsTab then
             text ""
           else
             Feature.Search.viewSearchBar model
-        , viewStickyWorkspaceBar model ws summaryParts
+        , Feature.Search.viewWorkspaceSearchBar model
+        , viewTabs model
+          ]
         , if not (Permissions.canReadCurrentWorkspace model) then
             viewUnauthorizedWorkspace model
 
           else
             div []
-                [ viewTabs model
-                , Feature.Search.viewNavigation model (if model.activeTab == AdministrationTab then
+                [ Feature.Search.viewNavigation model (if model.activeTab == AdministrationTab then
                     viewTabContent wsId model
 
                   else if model.dataLoading.loadingWorkspaceData then
@@ -183,46 +188,6 @@ viewUnauthorizedWorkspace model =
             [ h3 [] [ text "No workspace access" ]
             , p [] [ text "You can see this route, but the current session does not have read permission for this workspace." ]
             ]
-
-
-viewStickyWorkspaceBar : Model -> Api.Workspace -> List String -> Html Msg
-viewStickyWorkspaceBar model ws summaryParts =
-    let
-        stickyThreshold =
-            200
-
-        isVisible =
-            model.mainContentScrollY > stickyThreshold
-    in
-    div
-        [ class
-            ("sticky-workspace-bar"
-                ++ (if isVisible then
-                        " sticky-workspace-bar--visible"
-
-                    else
-                        ""
-                   )
-            )
-        ]
-        [ div [ class "sticky-workspace-bar__header" ]
-            [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
-                [ text (Api.workspaceTypeToString ws.workspaceType) ]
-            , span [ class "sticky-workspace-name" ] [ text ws.name ]
-            , span [ class "sticky-workspace-summary" ]
-                [ viewPlanningSummary model summaryParts
-                , if ws.workspaceType == Api.Repository then
-                    let counts = model.observations.workspaceCounts in
-                    span [ class "workspace-observation-total" ]
-                        [ text ((if List.isEmpty summaryParts then "" else " · ") ++
-                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations") |> Maybe.withDefault "Observation total unavailable"
-                             else if counts.error /= Nothing then "Observation total unavailable"
-                             else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
-                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
-                  else text "" ]
-            ]
-        , Feature.Search.viewWorkspaceSearchBar model
-        ]
 
 
 viewCreateButton : WorkspaceTab -> Html Msg

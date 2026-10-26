@@ -202,6 +202,42 @@ liveFilterTests =
             , \_ -> cleared.observations.treeSelectionPending |> Expect.equal False
             , \_ -> cleared.observations.tree.revealTarget |> Expect.equal Nothing
             ] ()
+    , test "explicit linked detail keeps only its reveal chain when preferences arrive before or after detail" <| \_ ->
+        let
+            prepared = project model model
+            query = Helpers.defaultObservationQuery
+            started = {prepared | observations = Helpers.restoreObservationQuery {query | requestMode = ObservationFacetMode} prepared.observations}
+            state = started.observations
+            oldUrl = started.url
+            linked = {started | url = {oldUrl | fragment = Just ("tab=observations&observation=" ++ observationId)}, observations = {state | items = Dict.empty, orderedIds = [], selectedId = Nothing, selectedDetail = Nothing}}
+            requested = O.selectRouteObservation observationId linked |> Tuple.first
+            owner = requested.observations.preferenceOwner |> Maybe.withDefault emptyPreferenceOwner
+            prefs = {preferenceDefaults | paths = ["saved"]}
+            hydrate previous = update (ObservationPreferencesReceived (E.object [("owner", P.ownerValue owner), ("value", P.encode owner prefs)])) previous |> Tuple.first
+            receive previous = previous.observations.activeDetailRequest |> Maybe.map (\request -> update (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Ok (row observationId))) previous |> Tuple.first) |> Maybe.withDefault previous
+            early = receive (hydrate requested)
+            fetched = receive requested
+            fetchedState = fetched.observations
+            fetchedTree = fetchedState.tree
+            settled = {fetched | observations = {fetchedState | tree = {fetchedTree | revealTarget = Nothing, expanded = Set.insert "unrelated" fetchedTree.expanded}}}
+            late = hydrate settled
+            settledState = settled.observations
+            detached = {settled | url = {oldUrl | fragment = Just ("tab=observations&observation=" ++ observationId ++ "&ov=1&oq=" ++ Helpers.encodeObservationQuery (Helpers.observationAppliedQuery settledState) ++ "&search-jump=1")}, observations = {settledState | searchOriginDetail = True}}
+            detachedHydrated = hydrate detached
+            pending = hydrate fetched
+            expected = Set.fromList ["saved", "src", "src/Main.elm"]
+        in Expect.all
+            [ \_ -> requested.observations.activeDetailRequest |> Maybe.map .observationId |> Expect.equal (Just observationId)
+            , \_ -> early.observations.tree.expanded |> Expect.equal expected
+            , \_ -> pending.observations.tree.expanded |> Expect.equal expected
+            , \_ -> late.observations.tree.expanded |> Expect.equal expected
+            , \_ -> late.observations.selectedId |> Expect.equal (Just observationId)
+            , \_ -> late.observations.selectedDetail |> Maybe.map .id |> Expect.equal (Just observationId)
+            , \_ -> Helpers.isObservationSearchUrl detached.url |> Expect.equal True
+            , \_ -> (Helpers.observationUrlContext detached.url).fragment.observationId |> Expect.equal (Just observationId)
+            , \_ -> detachedHydrated.observations.tree.expanded |> Expect.equal (Set.singleton "saved")
+            , \_ -> detachedHydrated.observations.discovery |> Expect.equal detached.observations.discovery
+            ] ()
     , test "selected path preference is optional bounded passive and subordinate to explicit reveal" <| \_ ->
         let
             initial = project model model

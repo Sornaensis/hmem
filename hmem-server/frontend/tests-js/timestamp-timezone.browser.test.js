@@ -133,6 +133,7 @@ for (const [zone, expected, next, live, rangeStart, rangeEnd] of [
     assert.equal(h.bucket.bucket_start, since); assert.equal(h.bucket.series_totals.created, 5)
 
     await h.page.getByLabel('Workspace sections').getByRole('button', { name: 'Observations', exact: true }).click()
+    await h.page.getByRole('button', { name: 'All Observations', exact: true }).click()
     await textIncludes(h.page, '.observation-updated', expected)
     await h.page.locator('.observation-card').first().click()
     await textIncludes(h.page, '.observation-current-provenance', expected)
@@ -153,8 +154,7 @@ for (const [zone, expected, next, live, rangeStart, rangeEnd] of [
   } finally { await h.close() }
 })
 
-test('production per-instant conversion covers summer DST directions offsets and month rollover', { timeout: 60000 }, async () => {
-  for (const [zone, raw, expected] of [
+for (const [zone, raw, expected] of [
     ['Europe/Copenhagen', '2026-07-15T23:45:00.123456Z', '2026-07-16 01:45'],
     ['Europe/Copenhagen', '2026-03-29T00:59:59.999999Z', '2026-03-29 01:59'],
     ['Europe/Copenhagen', '2026-03-29T01:00:00Z', '2026-03-29 03:00'],
@@ -162,14 +162,13 @@ test('production per-instant conversion covers summer DST directions offsets and
     ['Europe/Copenhagen', '2026-10-25T01:00:00Z', '2026-10-25 02:00'],
     ['Asia/Kathmandu', '2026-01-31T23:45:00.123456789Z', '2026-02-01 05:30'],
     ['UTC', '2026-01-01T01:15:00.123456+01:30', '2025-12-31 23:45']
-  ]) {
-    const h = await openTimezone(zone, raw)
-    try {
-      await h.start(); await h.idle()
-      await textEquals(h.page, '.workspace-details .workspace-detail:nth-last-child(2) .workspace-detail-value', expected)
-      assert.equal(h.fixture.workspace.created_at, raw)
-    } finally { await h.close() }
-  }
+]) test(`production per-instant conversion covers ${zone} ${raw}`, { timeout: 60000 }, async () => {
+  const h = await openTimezone(zone, raw)
+  try {
+    await h.start(); await h.idle()
+    await textEquals(h.page, '.workspace-details .workspace-detail:nth-last-child(2) .workspace-detail-value', expected)
+    assert.equal(h.fixture.workspace.created_at, raw)
+  } finally { await h.close() }
 })
 
 test('real formatting replies are presentation only and reload adopts a changed browser timezone', { timeout: 60000 }, async () => {

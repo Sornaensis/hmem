@@ -27,6 +27,8 @@ export function installObservationViewport(app, options = {}) {
   const currentReveal = () => revealOwner && revealOwner.root === root && sameLifetime(revealOwner.stamp, stamp)
     && revealOwner.navigation === navigation() && same(stamp, readStamp(root))
   const origin = () => root.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+  const visibleTop = host => Math.max(host.top, Math.min(host.top + scroller.clientHeight,
+    doc.querySelector?.('.workspace-context-persistent')?.getBoundingClientRect?.().bottom ?? host.top))
   const resize = RO ? new RO(() => schedule()) : null
   function schedule() { if (frame === null) frame = raf(flush) }
   function cancelNativePaint() { if (nativeFrame !== null) cancel(nativeFrame); nativeFrame = null }
@@ -79,8 +81,9 @@ export function installObservationViewport(app, options = {}) {
         const target = pending; pending = null
         const listOrigin = origin()
         const box = row.getBoundingClientRect(), host = scroller.getBoundingClientRect()
+        const top = visibleTop(host)
         const headerBottom = box.top + Math.min(box.height, 72)
-        if (box.top < host.top + 12) scroller.scrollTop = Math.max(0, scroller.scrollTop + box.top - host.top - 12)
+        if (box.top < top + 12) scroller.scrollTop = Math.max(0, scroller.scrollTop + box.top - top - 12)
         else if (headerBottom > host.top + scroller.clientHeight - 12) scroller.scrollTop += headerBottom - host.top - scroller.clientHeight + 12
         const tabbable = controls(row)
         const control = target.edge === 'last' ? tabbable.at(-1) : tabbable[0]
@@ -94,8 +97,9 @@ export function installObservationViewport(app, options = {}) {
       const target = doc.getElementById(revealOwner.targetId)
       const bounds = target?.getBoundingClientRect?.(), host = scroller.getBoundingClientRect()
       if (bounds) {
+        const top = visibleTop(host)
         const bottom = bounds.top + Math.min(bounds.height ?? (bounds.bottom - bounds.top), 72)
-        if (bounds.top < host.top + 12) scroller.scrollTop += bounds.top - host.top - 12
+        if (bounds.top < top + 12) scroller.scrollTop += bounds.top - top - 12
         else if (bottom > host.bottom - 12) scroller.scrollTop += bottom - host.bottom + 12
       }
     }

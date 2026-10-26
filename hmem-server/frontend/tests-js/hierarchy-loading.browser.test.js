@@ -30,7 +30,7 @@ for (const kind of ['task', 'project']) test('focused filters replace the saved 
     assert.equal(await h.page.evaluate(id => localStorage.getItem('hmem-ws-' + id), fixture.workspace.id), saved)
     const focused = h.page.locator('.focused-search-filter-bar')
     const focusedQuery = focused.getByPlaceholder('Filter focused view...')
-    assert.equal(await focused.evaluate(element => !!element.closest('.sticky-workspace-bar')), true)
+    assert.equal(await focused.evaluate(element => !!element.closest('.workspace-context-persistent')), true)
     assert.equal(await focusedQuery.inputValue(), original.query)
     assert.equal(await focused.locator('.filter-select').first().inputValue(), original.priority)
     assert.equal(await focused.getByLabel('Show empty projects').isChecked(), original.empty)
@@ -111,7 +111,7 @@ for (const kind of ['task', 'project']) test('cold focused ' + kind + ' URL inhe
     assert.equal(await focused.getByLabel('Show empty projects').isChecked(), false)
     await h.page.locator('#entity-' + child.id).waitFor({ state: 'visible', timeout: 10000 })
     const branch = h.requests.findLast(r => r.kind === kind && r.parent === target.id)
-    assert.equal(branch.viewport.paintFilter, 'tasks|nonempty|above:5|paused|todo|needle')
+    assert.equal(branch.viewport.paintFilter, 'tasks|any-session|nonempty|above:5|paused|todo|needle')
     assert.deepEqual(await h.page.evaluate(id => JSON.parse(localStorage.getItem('hmem-ws-' + id)), fixture.workspace.id), saved)
     await h.page.locator('.focus-clear-btn').click(); await h.idle()
     assert.equal(await h.page.locator('.workspace-search-filter-bar .filter-select').first().inputValue(), 'above')
@@ -155,7 +155,7 @@ for (const kind of ['task', 'project']) test('Timeline excluded ' + kind + ' sta
     if (kind === 'project') assert.equal(await h.page.locator('#entity-archived-child').count(), 0)
     const branch = h.requests.findLast(r => r.parent === target.id && r.kind === kind)
     assert.ok(branch && branch.query === 'needle' && branch.showOnly === 'tasks' && branch.taskIds.join(',') === children[0].id, JSON.stringify(branch))
-    assert.equal(branch.viewport.paintFilter, 'tasks|nonempty|above:5|active,paused|blocked,in_progress,todo|needle')
+    assert.equal(branch.viewport.paintFilter, 'tasks|any-session|nonempty|above:5|active,paused|blocked,in_progress,todo|needle')
     await h.page.locator('.focused-search-filter-bar .filter-bar').getByRole('button', { name: 'Todo', exact: true }).click(); await h.idle()
     const normalSaved = await h.page.evaluate(id => JSON.parse(localStorage.getItem('hmem-ws-' + id)), fixture.workspace.id)
     assert.equal(normalSaved.searchQuery, 'needle')
@@ -190,7 +190,7 @@ test('uncached external focus and browser history preserve restrictive filters w
       assert.equal(h.requests.slice(before).filter(r => r.path.endsWith('/navigation/focus/task/' + id)).length, 1, 'Only the current focused context may issue target transport')
       assert.equal(await h.page.locator('.focused-search-filter-bar .filter-select').first().inputValue(), 'exact')
       const branch = h.requests.slice(before).find(r => r.kind === 'task' && r.parent === id)
-      assert.ok(branch && branch.viewport.paintFilter === 'projects|empty|exact:5|active,paused|blocked,in_progress,todo|', JSON.stringify(branch))
+      assert.ok(branch && branch.viewport.paintFilter === 'projects|any-session|empty|exact:5|active,paused|blocked,in_progress,todo|', JSON.stringify(branch))
     }
     const historyBefore = await h.page.evaluate(() => ({ length: history.length, url: location.href, state: history.state }))
     const backRequests = h.requests.length
@@ -611,7 +611,12 @@ test('real Markdown and native Tab cross virtual rows, while removing the tab re
     const next = await h.page.evaluate(() => {
       const rows = [...document.querySelectorAll('[data-hierarchy-key]')].filter(row => row.dataset.hierarchyNext && row.querySelector('button'))
       const row = rows.at(-1)
-      const controls = [...row.querySelectorAll('a[href],button,input,textarea,select,[tabindex]')].filter(element => !element.disabled && element.tabIndex >= 0 && element.getClientRects().length)
+      const controls = [...row.querySelectorAll('a[href],button,input,textarea,select,summary,[tabindex]')].filter(element => {
+        if(element.disabled || element.tabIndex<0 || !element.getClientRects().length)return false
+        let closed=element.closest('details:not([open])')
+        while(closed){if(!closed.querySelector(':scope > summary')?.contains(element))return false;closed=closed.parentElement?.closest('details:not([open])')}
+        return true
+      })
       const scroll = document.getElementById('main-content-scroll')
       const beforeTop = scroll.scrollTop
       controls.at(-1).focus({ preventScroll: true })

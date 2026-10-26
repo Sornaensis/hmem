@@ -28,7 +28,9 @@ export function installSearchNavigation(app, { document: doc = document, schedul
       target.tabIndex = -1
       if (!target.hasAttribute('aria-label')) target.setAttribute('aria-label', state.value.label || 'Selected entity')
       const rect = target.getBoundingClientRect(), parent = scroller.getBoundingClientRect()
-      scroller.scrollTop += rect.top - parent.top - 12
+      const context=doc.querySelector('.workspace-context-persistent')?.getBoundingClientRect?.()
+      const visibleTop=context?Math.max(parent.top,Math.min(parent.top+scroller.clientHeight,context.bottom)):parent.top
+      scroller.scrollTop += rect.top - visibleTop - 12
     }
     applying = true
     try { target.focus({ preventScroll: true }) } finally { applying = false }

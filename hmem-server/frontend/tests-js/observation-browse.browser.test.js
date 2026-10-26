@@ -46,11 +46,12 @@ test('Observation mode changes preserve current physical scroll through delayed 
   const h = await openDiscovery({ width: 2560, height: 900 }, wideRoots)
   let held
   try {
-    await h.start(); const positioned = await position(h, 160)
-    assert.ok(positioned > 100)
+    await h.start(); const positioned = await position(h, 40)
+    assert.ok(positioned > 0)
     held = await gateFacets(h)
     const subject = await mode(h, 'Subject Tree').boundingBox()
     const before = await top(h)
+    assert.equal(await mode(h, 'Subject Tree').evaluate(element => { const box = element.getBoundingClientRect(); return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === element }), true, 'the physical mode target is clear of persistent workspace controls')
     await h.page.mouse.click(subject.x + subject.width / 2, subject.y + subject.height / 2)
     await h.bounded(held.arrival, 5000, 'Subject request arrival'); await paint(h.page)
     assert.equal(await top(h), before, 'immediate mode switch retains physical offset')

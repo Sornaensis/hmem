@@ -52,6 +52,7 @@ async function history(h, kind, id) {
   await h.scrollTo(kind + ':' + id)
   const card = h.page.locator('#entity-' + id)
   await card.locator('.btn-extras-toggle').first().click()
+  if(kind==='task')await card.getByRole('button',{name:'History',exact:true}).click()
   await card.locator('.entity-history-toggle').first().click()
   await card.locator('.history-entry').waitFor()
   return card

@@ -23,7 +23,7 @@ function event(data, id, action, sequence) {
 
 const countRead = receipt => receipt.path.endsWith('/planning-counts')
 const both = async (h, text) => {
-  await h.page.waitForFunction(expected => [...document.querySelectorAll('.workspace-planning-total')].length === 2 && [...document.querySelectorAll('.workspace-planning-total')].every(element=>element.textContent.includes(expected)),text)
+  await h.page.waitForFunction(expected => [...document.querySelectorAll('.workspace-context-persistent .workspace-planning-total')].length === 1 && [...document.querySelectorAll('.workspace-context-persistent .workspace-planning-total')].every(element=>element.textContent.includes(expected)),text)
 }
 const push = (h, frames) => h.page.evaluate(frames=>window.pushHierarchyFrames(frames),frames)
 

@@ -92,6 +92,7 @@ route msg model =
         SessionsNextPage _ -> Ok (Feature.Sessions.update msg model)
         SessionsToggleDock _ -> Ok (Feature.Sessions.update msg model)
         SessionsSelectDock _ _ -> Ok (Feature.Sessions.update msg model)
+        SessionsInspect _ _ -> Ok (Feature.Sessions.update msg model)
         SessionsPreviousPage -> Ok (Feature.Sessions.update msg model)
         SessionsLinkedPage _ -> Ok (Feature.Sessions.update msg model)
         SessionsShowAllLinkedTasks -> Ok (Feature.Sessions.update msg model)
@@ -751,6 +752,9 @@ route msg model =
 
         -- Card expand/collapse
         ToggleCardExpand _ ->
+            Ok (Feature.Cards.update msg model)
+
+        SetTaskCardSection _ _ ->
             Ok (Feature.Cards.update msg model)
 
         LoadNavigationBranchPage _ _ _ ->

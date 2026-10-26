@@ -190,6 +190,53 @@ test('queued follow and anchor positioning yield to either scroll direction, dis
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
+test('task/full presentation restoration yields to newer scroll, disclosure and owner intent',async()=>{
+ const previous=globalThis.requestAnimationFrame
+ try{
+  for(const change of ['none','up','down','toggle','owner']){
+   const frames=[],listeners={};let incoming,viewport
+   globalThis.requestAnimationFrame=callback=>frames.push(callback)
+   const node=()=>({open:false,getAttribute:key=>key==='data-group-key'?'kept':null})
+   const view=(owner,top=0)=>({scrollTop:top,querySelectorAll:()=>[disclosure],getAttribute:key=>key==='data-viewer-owner'?owner:null,contains:target=>target===disclosure})
+   let disclosure=node();viewport=view('dock',40);disclosure.open=true
+   const document={addEventListener(name,fn){(listeners[name]??=[]).push(fn)},getElementById:()=>viewport}
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(){}}}},{document,window:{},now:()=>0})
+   incoming({stamp:'dock',viewerScope:'authorized-source',generation:1,reset:0,chunk:null})
+   for(const listener of listeners.scroll)listener({type:'scroll',target:viewport})
+   disclosure=node();viewport=view('full')
+   incoming({stamp:'full',viewerScope:'authorized-source',continueViewer:true,generation:2,reset:null,chunk:null})
+   assert.equal(frames.length,1)
+   if(change==='up')viewport.scrollTop=-20
+   if(change==='down')viewport.scrollTop=20
+   if(change==='toggle'){disclosure.open=true;for(const listener of listeners.toggle)listener({target:disclosure})}
+   if(change==='owner')incoming({stamp:'retired',viewerScope:'new-authority',generation:3,reset:null,chunk:null})
+   frames.shift()()
+   assert.equal(viewport.scrollTop,change==='none'?40:change==='up'?-20:change==='down'?20:0)
+   assert.equal(disclosure.open,change==='none'||change==='toggle')
+  }
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('presentation snapshots scan admitted disclosures once and ignore unrelated document events',()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],listeners={};let incoming,queries=0,keys=0,viewport
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ try{
+  const nodes=Array.from({length:600},(_,index)=>({open:index===599,getAttribute(name){keys++;return name==='data-event-key'?String(index):null},closest(){assert.fail('a stable event key needs no per-detail subtree scan')}}))
+  const view=owner=>({scrollTop:40,getAttribute:()=>owner,contains:target=>nodes.includes(target),querySelectorAll(){queries++;return nodes}})
+  viewport=view('dock')
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(){}}}},{document:{addEventListener(name,fn){(listeners[name]??=[]).push(fn)},getElementById:()=>viewport},window:{},now:()=>0})
+  incoming({stamp:'dock',viewerScope:'source',generation:1,reset:0,chunk:null})
+  for(const type of ['click','scroll','toggle'])for(const listener of listeners[type])listener({type,target:{closest:()=>null}})
+  assert.equal(queries,0,'outside-viewer activity does not snapshot the admitted DOM')
+  for(const listener of listeners.scroll)listener({type:'scroll',target:viewport})
+  assert.equal(queries,1);assert.equal(keys,1200,'two constant-time key reads per admitted detail')
+  viewport=view('full');viewport.scrollTop=0
+  incoming({stamp:'full',viewerScope:'source',continueViewer:true,generation:2,reset:null,chunk:null})
+  frames.shift()()
+  assert.equal(queries,2);assert.equal(keys,2400);assert.equal(nodes[599].open,true)
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
 test('a delayed notification for a scroll settled before framing is not newer user intent',async()=>{
  const previous=globalThis.requestAnimationFrame,frames=[],listeners={};let incoming
  const viewport={scrollTop:600,scrollHeight:900,clientHeight:300}

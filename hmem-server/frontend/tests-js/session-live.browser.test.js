@@ -287,3 +287,54 @@ test('successive proven native Codex byte prefixes retain admitted prose and dis
   console.log(JSON.stringify({native_session:metadata.id,initial_bytes:initialEnd,finite_bytes:bytes.length,sha256:digest,outcome:'actual-source append preserves admitted prose and outer/inner disclosures through canonical resync'}))
  }finally{await h.close()}
 })
+
+for(const following of [true,false])test(`natural byte reserve eviction preserves ${following?'tail following at every append':'a surviving above-tail reading anchor'}`,{timeout:60000},async()=>{
+ const record=(bytes,marker)=>Buffer.from('{"text":"'+marker+'x'.repeat(bytes-marker.length-13)+'"}\r\n')
+ const prefix=Buffer.concat(Array.from({length:16},(_,index)=>record(65536,`prefix-${index}-`)))
+ const added=Array.from({length:100},(_,index)=>record([1024,1024,1024,65536][index%4],`rollover-${index}-`))
+ assert.equal(prefix.length,1048576)
+ const h=await openSessionExplorer({transcriptBytes:prefix}),{page}=h
+ try{
+  await enter(h);await h.idle()
+  const viewport=page.locator('#session-records')
+  const paint=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+  const tail=()=>viewport.evaluate(el=>el.scrollHeight-el.scrollTop-el.clientHeight)
+  await viewport.scrollIntoViewIfNeeded();await viewport.press('End');await paint()
+  assert.ok(await tail()<=2)
+  const append=async(lo,hi)=>{
+   await h.appendBytes(Buffer.concat(added.slice(lo,hi)))
+   await until(()=>viewport.evaluate((el,marker)=>el.textContent.includes(marker),`rollover-${hi-1}-`));await h.idle();await paint()
+   assert.ok(await page.locator('#session-records [data-block-key]').count()<=100,'the prose row reserve stays bounded')
+  }
+  await append(0,55);assert.equal(h.active.committed_bytes,1943552)
+  assert.ok(await tail()<=2,'following reaches the last pre-eviction append')
+  let reading
+  if(!following){
+   reading=await viewport.evaluate(el=>{
+    const row=[...el.querySelectorAll('[data-block-key]')].find(row=>row.textContent.includes('prefix-8-'))
+    if(!row)throw Error('The surviving prefix row must be admitted')
+    el.scrollTop+=row.getBoundingClientRect().top-el.getBoundingClientRect().top-80
+    return {key:row.getAttribute('data-block-key')}
+   })
+   await paint()
+   reading.relative=await viewport.evaluate((el,key)=>[...el.querySelectorAll('[data-block-key]')].find(row=>row.getAttribute('data-block-key')===key).getBoundingClientRect().top-el.getBoundingClientRect().top,reading.key)
+   assert.ok(await tail()>48,'the selected surviving row is above the tail')
+  }
+  await append(55,67);assert.equal(h.active.committed_bytes,2149376)
+  assert.equal(await viewport.evaluate(el=>el.textContent.includes('prefix-0-')),false,'crossing 2MiB actually evicts the old head')
+  if(following){
+   assert.ok(await tail()<=2,'natural byte eviction must not veto tail following without new input')
+   await append(67,100);assert.equal(h.active.committed_bytes,2763776)
+   assert.ok(await tail()<=2,'each settled later append keeps the final committed record visible at the tail')
+  }else{
+   const after=await viewport.evaluate((el,key)=>{
+    const row=[...el.querySelectorAll('[data-block-key]')].find(row=>row.getAttribute('data-block-key')===key)
+    return {key:row?.getAttribute('data-block-key'),relative:row?.getBoundingClientRect().top-el.getBoundingClientRect().top}
+   },reading.key)
+   assert.equal(after.key,reading.key,'the visible row survives head eviction')
+   assert.ok(Math.abs(after.relative-reading.relative)<=2,'explicit anchoring retains the surviving row position through byte eviction')
+   assert.ok(await tail()>48,'an above-tail reader must not be pulled to the new tail')
+  }
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})

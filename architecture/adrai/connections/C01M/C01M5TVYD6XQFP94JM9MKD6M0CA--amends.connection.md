@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5TVYD6XQFP94JM9MKD6M0CA"
+relation = "amends"
+from_record = "R01M5TVYD6XPY5M9A3ZVW7V1BSQ"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M5TC2P862SDDBQZWXN0EH71Q"]
++++
+
+Enforce framed write deadlines from owned parents with generation fencing and lease-before-lock ordering
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjA4OWE4NDMwMzUzYWRmM2Y3ZDgxMWVlMjc3Njk5NWYxMTQ4M2M4ZmUiLCJpIjoic2hhMjU2Om5NLXZ0djRYNWdQeG1CMDBabUNmMEc5LXhLNjBKaDFkTEZkUmE0cVhfTjQiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTVUVllENlhRRlA5NEpNOU1LRDZNMENBIiwib3AiOiJPMDFNNVRWWUQ2WFBZNU05QTNaVlc3VjFCU1EiLCJwIjpbIlIwMU01VEMyUDg2MlNEREJRWldYTjBFSDcxUSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1Njp5aWh5YUxaVTdLaFRZN0ZoTmtveVhsRGxQRkNNZFhuYWFscXBWRkx6NnpnIiwidCI6MTc5Mjk3NjgyNzYxMywidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

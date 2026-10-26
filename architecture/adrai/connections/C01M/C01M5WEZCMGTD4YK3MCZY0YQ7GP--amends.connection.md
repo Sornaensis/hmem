@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5WEZCMGTD4YK3MCZY0YQ7GP"
+relation = "amends"
+from_record = "R01M5WEZCMGT4BTY45S7JW1KJRV"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M5V7SKRW74G7P62S3D5G1SCM"]
++++
+
+Record responsive-sessions guarantees as deferred after recoverable source restoration
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjkzMGRkODcwNzFiMDM3OGRkMGI5OGQzYTRiOTlkYzY4NTliNTEwZDkiLCJpIjoic2hhMjU2OkhhNUVEMFBPZnppcUk4eUVQQk1xazd5RlcySi02N2YtUU00cUlqZnNVTk0iLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTVXRVpDTUdURDRZSzNNQ1pZMFlRN0dQIiwib3AiOiJPMDFNNVdFWkNNR1Q0QlRZNDVTN0pXMUtKUlYiLCJwIjpbIlIwMU01VjdTS1JXNzRHN1A2MlMzRDVHMVNDTSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpPanUxVFF5N1VzREppU1dkd2llVjFHeVBNckpUcEI4RzVBTWROQ0dBNjVvIiwidCI6MTc5MzAzMDMzNzE2OCwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

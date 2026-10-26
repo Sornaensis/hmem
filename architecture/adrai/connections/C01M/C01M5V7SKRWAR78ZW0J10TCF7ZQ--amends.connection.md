@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M5V7SKRWAR78ZW0J10TCF7ZQ"
+relation = "amends"
+from_record = "R01M5V7SKRW74G7P62S3D5G1SCM"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M5TVYD6XPY5M9A3ZVW7V1BSQ"]
++++
+
+Retain explicit suite and database ownership across caught test failures
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjQ1M2RjY2Y1OGMwYTk2ODNmMDM0OWYyZDgyOWVlMmNlMWE1ODQwZjAiLCJpIjoic2hhMjU2OkQ4VnlsVVJTVEl6SWpiZDQ5c2ctcktzOHZ2VG9tdkhkMHBFankxcG9EejAiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTVWN1NLUldBUjc4WlcwSjEwVENGN1pRIiwib3AiOiJPMDFNNVY3U0tSVzc0RzdQNjJTM0Q1RzFTQ00iLCJwIjpbIlIwMU01VFZZRDZYUFk1TTlBM1pWVzdWMUJTUSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpabVpLWEtSMnE0M3o0MFJnMEc5QzdwMFdHOERkQ0RHd1dxd2xXd2YwMVJrIiwidCI6MTc5Mjk4OTI1MzQwNCwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

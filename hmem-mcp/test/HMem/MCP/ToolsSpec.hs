@@ -1135,7 +1135,11 @@ spec = do
           >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "TASK_START_BLOCKED_BY_SUBTASKS" value))
 
     it "keeps the advertised registry parser and dispatch reachability in lockstep" $ do
-      sort toolNames `shouldBe` sort (serverOwnedTools <> map fst toolSamples)
+      sort toolNames `shouldBe` sort (serverOwnedTools <>
+        [ "session_create", "session_list", "session_detail", "session_tasks", "session_associate"
+        , "session_terminate", "session_read", "session_evidence", "session_set_runtime"
+        , "session_upload_start", "session_upload_status", "session_upload_flush", "session_upload_stop"
+        ] <> map fst toolSamples)
       mapM_ (\(name, arguments) -> parseToolCall name arguments `shouldSatisfy` isRight) toolSamples
       requests <- newTVarIO []
       withMock requests $ \manager base ->

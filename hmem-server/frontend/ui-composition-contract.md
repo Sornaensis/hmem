@@ -39,7 +39,9 @@ Production has more real controls than the examples: count/retry states, workspa
 
 ## Current agent association and metadata contract
 
-Keep `View Agents ->` and `<- Hide Agents` exact. A current settled active direct-task page proves association; otherwise a bounded first all-state page uses the existing mounted rotation and shared admission. Do not infer absence from active=false or from contextual ancestors. A current empty direct page suppresses toggle/light; associated inactive sessions show grey. Dirty, failed or retired proofs cannot authorize a closed dock. Preserve the existing active presentation with its refreshing qualifier, and keep an already open close control usable while proof refreshes.
+Keep `View Agents ->` and `<- Hide Agents` exact. A current settled active direct-task page proves association; otherwise a bounded first all-state page uses the existing mounted rotation and shared admission. Do not infer absence from active=false or from contextual ancestors. A current empty direct page shows a disabled `No sessions` control without an activity light; associated inactive sessions show grey. Dirty, failed or retired proofs cannot authorize a closed dock. Preserve the existing active presentation with its refreshing qualifier, and keep an already open close control usable while proof refreshes.
+
+Task headers retain session, Move, Status, Priority and Delete in that order in the original action group. Project and task extras share Work, Evidence and History tabs. History and task Evidence render directly within their tab; project Evidence points to task evidence. Workspace searches span the container above the filter controls, with all-entity search first and project hierarchy search below it. Workspace Delete stays at the far top right of the identity row.
 
 Workspace/project/task/subtask UUID, Created and Updated values are always rendered with honest timestamp fallbacks and native wrapping/copy controls. Remove only the inline reader's X and duplicate task heading; preserve full Sessions navigation and event inspector.
 
@@ -50,7 +52,7 @@ The follow-up evidence uses separate `output/ui-layout-d913653e/` with eight rep
 | Family | Current surfaces and preserved workflows |
 |---|---|
 | Shell/Home | AppShell,Groups,Page.Home,Page.Workspace;grouped workspace picker,identity/totals/tabs,bootstrap/required/failed auth,connection/toasts,NotFound. |
-| Projects | Cards,CardSections,Editing,Dependencies,Move,DragDrop;root/nested/focused hierarchy,readiness,next tasks,Work/Agents/Evidence/History,all create/edit/status/priority/dependency/move/drop/delete confirmations. |
+| Projects | Cards,CardSections,Editing,Dependencies,Move,DragDrop;root/nested/focused hierarchy,readiness,next tasks,Work/Evidence/History,all create/edit/status/priority/dependency/move/drop/delete confirmations. |
 | Sessions | Sessions and viewer bridges;actual lineage/truncation,tree/list/detail/dock/inspector,live/quiet/terminated,runtime versus creator,raw/tool/save/integrity/encrypted/unsupported states. |
 | Observations | Subject Tree/All/Files/query/match,selected/detached detail,drafts,editing/subjects/provenance/history/curation and confirmations. |
 | Search/Timeline | Global/workspace/focused filters,loading/error/results,jump/return/history;ranges/granularity/chart/series/tooltips/events. |

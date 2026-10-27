@@ -198,12 +198,12 @@ test('active hints converge beyond sixteen mounted tasks and refresh after an as
   await last.waitFor();await until(async()=>await last.locator('.has-active-sessions').count()===1)
   assert.ok(h.reads.filter(r=>r.query.includes('state=active')).length>16)
   const first=h.page.locator('#entity-'+h.fixture.tasks[0].id)
-  await first.waitFor();await until(async()=>h.reads.some(read=>read.path.endsWith('/tasks/'+h.fixture.tasks[0].id+'/sessions')&&!new URLSearchParams(read.query).get('state'))&&await first.locator(':scope > .card-header .task-sessions-icon').count()===0)
+  await first.waitFor();await until(async()=>h.reads.some(read=>read.path.endsWith('/tasks/'+h.fixture.tasks[0].id+'/sessions')&&!new URLSearchParams(read.query).get('state'))&&await first.locator(':scope > .card-header .task-sessions-icon').isDisabled()&&await first.locator(':scope > .card-header .task-sessions-icon').innerText()==='No sessions')
   await h.associate(h.fixture.tasks[0].id)
   await until(async()=>await first.locator('.has-active-sessions').count()===1)
   for(const task of h.fixture.tasks)await h.page.locator('#entity-'+task.id+' .btn-extras-toggle').click()
   await until(()=>new Set(h.reads.filter(read=>read.query.includes('state=terminated')).map(read=>read.path)).size===22)
-  await until(async()=>await last.locator('.task-session-evidence summary').innerText()==='Evidence · 1')
+  await last.getByRole('button',{name:'Evidence',exact:true}).click();await until(async()=>await last.locator('.task-session-evidence .card-section-heading').innerText()==='Evidence · 1')
   assert.ok(h.peak()<=2)
  }finally{await h.close()}
 })
@@ -214,7 +214,7 @@ test('card metadata download failures abort staging and permit retry', {timeout:
  try{
   await h.start();await h.idle()
   const card=page.locator('#entity-'+h.fixture.tasks[0].id)
-  await card.locator('.btn-extras-toggle').click();await h.idle();await card.getByRole('button',{name:'Evidence',exact:true}).click();await card.locator('.task-session-evidence summary').click()
+  await card.locator('.btn-extras-toggle').click();await h.idle();await card.getByRole('button',{name:'Evidence',exact:true}).click();await card.locator('.task-session-evidence').waitFor()
   const button=card.getByRole('button',{name:/Download session/})
   const metadataPattern='**/sessions/'+h.saved.id
   await page.route(metadataPattern,route=>route.fulfill({status:503,json:{error:'controlled metadata failure'}}))
@@ -235,7 +235,7 @@ test('zero-byte evidence completes when writer acquisition outlives card collaps
  try{
   await h.start();await h.idle()
   const card=page.locator('#entity-'+h.fixture.tasks[0].id)
-  await card.locator('.btn-extras-toggle').click();await h.idle();await card.getByRole('button',{name:'Evidence',exact:true}).click();await card.locator('.task-session-evidence summary').click()
+  await card.locator('.btn-extras-toggle').click();await h.idle();await card.getByRole('button',{name:'Evidence',exact:true}).click();await card.locator('.task-session-evidence').waitFor()
   const button=card.getByRole('button',{name:/Download session/})
   await page.evaluate(()=>{const original=navigator.storage.getDirectory.bind(navigator.storage);Object.defineProperty(navigator.storage,'getDirectory',{configurable:true,value:()=>new Promise(resolve=>{window.releaseEmptyDownload=async()=>resolve(await original())})})})
   await button.click();await page.waitForFunction(()=>typeof window.releaseEmptyDownload==='function')
@@ -272,7 +272,7 @@ test('conversation flow preserves declared identity and wraps long model names w
    if(scenario.creator&&scenario.width===1440){
     await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle()
     const taskCard=page.locator('#entity-'+h.fixture.tasks[0].id);await taskCard.locator('.btn-extras-toggle').click();await h.idle()
-    await taskCard.locator(':scope > .card-header .task-sessions-icon').click();await taskCard.getByRole('button',{name:'Evidence',exact:true}).click();await taskCard.locator('.task-session-evidence summary').click();await taskCard.locator('.session-viewer .session-identity').waitFor()
+    await taskCard.locator(':scope > .card-header .task-sessions-icon').click();await taskCard.getByRole('button',{name:'Evidence',exact:true}).click();await taskCard.locator('.task-session-evidence').waitFor();await taskCard.locator('.session-viewer .session-identity').waitFor()
     assert.equal(await taskCard.locator('.task-session-card .session-identity,.task-session-dock .session-viewer .session-identity').count(),2)
     for(const label of await taskCard.locator('.task-session-card .session-runtime,.task-session-dock .session-viewer .session-runtime').evaluateAll(nodes=>nodes.map(node=>node.title)))assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
    }

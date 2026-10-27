@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
 const until=async fn=>{const end=Date.now()+15000;while(Date.now()<end){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,25))}throw Error('session cards did not converge')}
-async function openEvidence(h){await h.start();await h.idle();const card=h.page.locator('#entity-'+h.fixture.tasks[0].id);await card.locator('.btn-extras-toggle').click();await h.idle();await card.getByRole('button',{name:'Evidence',exact:true}).click();const group=card.locator('.task-session-evidence');await group.locator('summary').click();return {card,group}}
+async function openEvidence(h){await h.start();await h.idle();const card=h.page.locator('#entity-'+h.fixture.tasks[0].id);await card.locator('.btn-extras-toggle').click();await h.idle();await card.getByRole('button',{name:'Evidence',exact:true}).click();const group=card.locator('.task-session-evidence');await group.waitFor();return {card,group}}
 
 test('task session grids remain compact for one item and display actual last activity at desktop and narrow widths', {timeout:40000},async()=>{
  for(const width of [1440,430]){

@@ -71,7 +71,7 @@ test('production attribution keeps declared, authenticated and historical actors
     await h.start(); await h.idle()
     await assertSessionContext(h.page, 'Local User')
     const project = h.page.locator('#entity-root-project')
-    await project.locator('.btn-extras-toggle').click(); await project.locator('.entity-history-toggle').click()
+    await project.locator('.btn-extras-toggle').click(); await project.getByRole('button',{name:'History',exact:true}).click()
     await project.locator('.history-entry').first().waitFor()
     await assertActors(project.locator('.history-entry'))
     await shot('history-desktop')

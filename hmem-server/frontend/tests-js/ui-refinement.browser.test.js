@@ -40,7 +40,7 @@ test('local card sections retain task operations and a single contextual preview
   assert.equal(await page.locator('#session-records').count(),1)
   assert.match(await dock.getByRole('region',{name:'Selected session lineage'}).innerText(),/Completed parent context.*ancestry context.*terminated/s)
   assert.equal(await dock.locator('.task-session-choice').count(),1,'a contextual ancestor is not an active result')
-  await card.getByRole('button',{name:'Evidence',exact:true}).click();await card.locator('.task-session-evidence summary').click();await card.getByRole('button',{name:/Download session/}).waitFor()
+  await card.getByRole('button',{name:'Evidence',exact:true}).click();await card.locator('.task-session-evidence').waitFor();await card.getByRole('button',{name:/Download session/}).waitFor()
   assert.equal(await page.locator('#session-records').count(),1)
   await screenshot(page,'context-dock-desktop')
   await card.locator('.btn-extras-toggle').click();await card.locator('.card-extras').waitFor({state:'detached'});assert.equal(await dock.count(),1)

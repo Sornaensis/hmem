@@ -14,7 +14,7 @@ test('actual runtime role switches across shared cards and transcript while conn
   await runtimeChanged(h,{model:'Actual B',role:'Reviewer',provider:'Known provider',reasoning:'high'});await until(async()=>await transcript.innerText()==='Reviewer');await until(async()=>await card.locator('.session-runtime-value').innerText()==='Reviewer')
   assert.match(await page.locator('.session-viewer .session-runtime').getAttribute('title'),/Actual B.*Known provider.*high/);assert.deepEqual([h.active.revision,h.active.committed_bytes,h.active.last_seen_at],counters)
   await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle();const task=page.locator('#entity-'+h.fixture.tasks[0].id)
-  await task.locator('.btn-extras-toggle').click();await h.idle();await task.locator('.task-sessions-icon').click();await task.getByRole('button',{name:'Evidence',exact:true}).click();await task.locator('.task-session-evidence summary').click()
+  await task.locator('.btn-extras-toggle').click();await h.idle();await task.locator('.task-sessions-icon').click();await task.getByRole('button',{name:'Evidence',exact:true}).click();await task.locator('.task-session-evidence').waitFor()
   await until(async()=>await task.locator('.task-session-dock .session-viewer .session-runtime-value').innerText()==='Reviewer')
   assert.equal(await task.locator('.task-session-evidence .session-runtime-value').innerText(),'Developer');assert.equal(await task.locator('.session-connection,.session-runtime-source').count(),0)
   await runtimeChanged(h,null);await until(async()=>await task.locator('.task-session-dock .session-viewer .session-runtime-value').innerText()==='Unknown role')

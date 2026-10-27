@@ -93,7 +93,7 @@ viewReadableWorkspaceContext model ws =
                 , div [ class "workspace-header-actions" ]
                     [ viewCreateButton model.activeTab
                     , if Permissions.canAdminCurrentWorkspace model then
-                        button [ class "btn-small btn-danger-subtle", onClick (ConfirmWorkspaceDelete ws.id), disabled (model.groups.workspaceDeletion /= Nothing) ] [ text "Delete workspace" ]
+                        button [ class "btn-small btn-danger-subtle workspace-delete-action", onClick (ConfirmWorkspaceDelete ws.id), disabled (model.groups.workspaceDeletion /= Nothing) ] [ text "Delete workspace" ]
                       else text ""
                     ]
                 ]

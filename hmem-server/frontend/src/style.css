@@ -4830,7 +4830,6 @@ textarea.observation-edit-content {
 .task-sessions-icon:disabled { opacity:.5; cursor:default; }
 .task-card > .card-header { flex-wrap:wrap; gap:.5rem; }
 .task-card > .card-header .tree-toggle-row { flex:1 1 180px; min-width:0; }
-.task-card-with-dock > .card-header .tree-toggle-row { flex-basis:100%; }
 .task-card > .card-header .card-actions { flex-wrap:wrap; flex-shrink:1; }
 .task-card-with-dock { display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,1.2fr); column-gap:1rem; align-items:start; }
 .task-card-with-dock > * { grid-column:1; min-width:0; }
@@ -5157,7 +5156,7 @@ textarea.observation-edit-content {
 .main-content { grid-row: 3; }
 .app > .workspace-context-persistent {
   grid-column: 1 / -1; grid-row: 2; position: relative; top: auto;
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  display: grid; grid-template-columns: minmax(0, 1fr);
   margin: 0; padding: 0; max-height: 45dvh; overflow: auto;
 }
 .app > .workspace-context-persistent > .workspace-tabs { grid-column: 1 / -1; grid-row: 2; }
@@ -5171,13 +5170,13 @@ textarea.observation-edit-content {
 .workspace-context-persistent .workspace-summary { grid-column: 1; margin-top: 0; }
 .workspace-context-persistent .workspace-metadata { grid-column: 2; margin-top: 0; align-self: center; }
 .workspace-context-persistent .workspace-metadata[open] { grid-column: 1 / -1; }
-.workspace-context-persistent > .global-search-bar { grid-column: 1; grid-row: 3; padding: 6px 8px 6px 16px; }
+.workspace-context-persistent > .global-search-bar { grid-column: 1; grid-row: 3; padding: 6px 16px; }
 .workspace-context-persistent .workspace-search-filter-bar,
 .workspace-context-persistent .workspace-search-filter-bar > .search-filter-bar { display: contents; }
 .workspace-context-persistent .search-bar { padding: 0; margin: 0; }
 .workspace-context-persistent .search-input,
 .workspace-context-persistent .hierarchy-search-input { min-height: 32px; padding: 6px 9px; font-size: 14px; }
-.workspace-context-persistent .workspace-search-filter-bar > .search-filter-bar > .search-bar { grid-column: 2; grid-row: 3; margin: 6px 16px 6px 8px; }
+.workspace-context-persistent .workspace-search-filter-bar > .search-filter-bar > .search-bar { grid-column: 1; grid-row: 4; margin: 6px 16px; }
 .workspace-context-persistent .filter-bar { grid-column: 1 / -1; margin: 0; padding: 6px 16px; gap: 6px; border-width: 1px 0 0; border-radius: 0; background: transparent; }
 .workspace-context-persistent .filter-group { gap: 4px; }
 .workspace-context-persistent .filter-pill { min-height: 32px; padding: 2px 6px; }
@@ -5208,15 +5207,11 @@ textarea.observation-edit-content {
   .app:not(:has(.sidebar)):not(:has(.workspace-context-persistent)) { grid-template-rows: auto minmax(0, 1fr); }
   .app:not(:has(.sidebar)):not(:has(.workspace-context-persistent)) > .main-content { grid-row: 2; }
 }
-/* At desktop widths the two distinct searches share the identity row. */
-@media (min-width: 651px) {
-  .app > .workspace-context-persistent { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
-  .app > .workspace-context-persistent > .workspace-header { grid-column: 1; }
-  .workspace-context-persistent > .global-search-bar { grid-column: 2; grid-row: 1; align-self: center; }
-  .workspace-context-persistent .workspace-search-filter-bar > .search-filter-bar > .search-bar { grid-column: 3; grid-row: 1; align-self: center; }
-  .workspace-context-persistent:not(:has(.hierarchy-search-input)) > .global-search-bar { grid-column: 2 / -1; }
-  .workspace-context-persistent .workspace-header-actions { flex-shrink: 0; }
-}
+.workspace-context-persistent .workspace-header { position: relative; }
+.workspace-context-persistent .workspace-header-title { padding-right: 150px; }
+.workspace-context-persistent .workspace-header-actions { grid-column: 1 / -1; }
+.workspace-context-persistent .workspace-delete-action { position: absolute; top: 12px; right: 16px; }
+.task-sessions-icon.selected { border-color: var(--accent); background: var(--bg-surface); }
 
 /* Keep the accepted narrow text size and coarse hit areas after compact rules. */
 @media (max-width: 650px) {
@@ -5259,8 +5254,7 @@ textarea.observation-edit-content {
 .workspace-tree-content .tree-card :is(.status-select, .priority-select, .btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open) { min-height: 32px; }
 .workspace-tree-content .tree-card .btn-extras-toggle { width: 24px; height: 24px; min-height: 24px; }
 @media (max-width: 650px) {
-  .workspace-tree-content .tree-card > .card-header > .tree-toggle-row { flex-basis: 100%; }
-  .workspace-tree-content .tree-card > .card-header > .card-actions { flex: 1 1 100%; justify-content: flex-end; }
+  .workspace-tree-content .tree-card > .card-header > .card-actions { justify-content: flex-end; }
   .workspace-tree-content .card-section-button { flex: 1 1 auto; }
   .workspace-tree-content .tree-card :is(select, .inline-edit-input, .inline-edit-textarea) { font-size: 16px; }
 }

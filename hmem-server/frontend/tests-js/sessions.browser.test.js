@@ -251,7 +251,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     const focusedCard=page.locator('#entity-'+task.id)
     await focusedCard.locator('.btn-extras-toggle').click()
     await focusedCard.getByRole('button',{name:'Evidence',exact:true}).click()
-    await focusedCard.locator('.task-session-evidence summary').click()
+    await focusedCard.locator('.task-session-evidence').waitFor()
     await focusedCard.locator('.task-session-evidence a').first().waitFor()
     await focusedCard.locator('.task-session-evidence a').first().click()
     await until(()=>page.url().includes('session='+id),'task evidence navigates back to exact session')

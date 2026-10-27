@@ -101,7 +101,7 @@ for (const [zone, expected, next, live, rangeStart, rangeEnd] of [
     await textIncludes(h.page, '#entity-timezone-invalid .card-meta-group', 'Updated: Invalid timestamp')
 
     const project = h.page.locator('#entity-root-project')
-    await project.locator('.btn-extras-toggle').click(); await project.locator('.entity-history-toggle').click()
+    await project.locator('.btn-extras-toggle').click(); await project.getByRole('button',{name:'History',exact:true}).click()
     await textEquals(h.page, '#entity-root-project .history-timestamp', expected)
     await h.page.getByRole('button', { name: 'Administration', exact: true }).click()
     await textEquals(h.page, '.membership-updated', 'Updated ' + expected)

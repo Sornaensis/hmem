@@ -1,10 +1,41 @@
-module CardSections exposing (detailsId, disclosure, disclosureIcon, fact, facts, metadata, section)
+module CardSections exposing (detailsId, disclosure, disclosureIcon, fact, facts, metadata, panel, section, tabs)
 
 import Html exposing (Html, div, footer, h4, label, span, text)
 import Html.Attributes exposing (attribute, class)
 import Html.Events exposing (onClick)
 import Svg
 import Svg.Attributes as SvgAttr
+
+
+tabs : String -> String -> String -> (String -> msg) -> Html msg
+tabs kind entityId current select =
+    Html.nav [ class "card-local-sections", attribute "aria-label" (kind ++ " sections") ]
+        (List.map
+            (\( name, label ) ->
+                Html.button
+                    [ class ("card-section-button" ++ (if current == name then " selected" else ""))
+                    , Html.Attributes.type_ "button"
+                    , Html.Attributes.id (String.toLower kind ++ "-" ++ entityId ++ "-" ++ name ++ "-button")
+                    , attribute "aria-controls" (String.toLower kind ++ "-" ++ entityId ++ "-" ++ name)
+                    , attribute "aria-pressed" (if current == name then "true" else "false")
+                    , onClick (select name)
+                    ]
+                    [ text label ]
+            )
+            [ ( "work", "Work" ), ( "evidence", "Evidence" ), ( "history", "History" ) ]
+        )
+
+
+panel : String -> String -> String -> String -> List (Html msg) -> Html msg
+panel kind entityId current name content =
+    div
+        [ class "card-section-panel"
+        , Html.Attributes.id (kind ++ "-" ++ entityId ++ "-" ++ name)
+        , attribute "role" "region"
+        , attribute "aria-labelledby" (kind ++ "-" ++ entityId ++ "-" ++ name ++ "-button")
+        , Html.Attributes.hidden (current /= name)
+        ]
+        content
 
 
 detailsId : String -> String -> String

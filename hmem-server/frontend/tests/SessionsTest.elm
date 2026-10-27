@@ -661,12 +661,12 @@ associationTests =
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace unresolved "one") |> Query.has [Selector.tag "button",Selector.attribute (Html.Attributes.disabled True)]
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace unresolved "one") |> Query.hasNot [Selector.class "session-state-inactive"]
             ] ()
-    , test "current empty all-state direct membership removes toggle and inactive light" <| \_ ->
+    , test "current empty all-state direct membership shows a disabled no-session state" <| \_ ->
         let (ready,_) = driveAssociations [] (Ok []) associationFixture
             toggled = Sessions.update (SessionsToggleDock "one") ready |> Tuple.first
         in Expect.all
             [ \_ -> Expect.equal (Just False,Nothing) (presence ready,toggled.sessions.taskPanel)
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.hasNot [Selector.tag "button"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.tag "button", Selector.attribute (Html.Attributes.disabled True), Selector.text "No sessions"]
             ] ()
     , test "terminated-only association retains an enabled grey toggle without an inline terminated reader" <| withSession (\session ->
         let (ready,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) associationFixture
@@ -740,7 +740,7 @@ associationTests =
             closed = Sessions.update (SessionsToggleDock "one") opened |> Tuple.first
         in Expect.all
             [ \_ -> Expect.equal (Nothing,Nothing) (denied.sessions.taskPanel,closed.sessions.taskPanel)
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace stale "one") |> Query.hasNot [Selector.tag "button"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace stale "one") |> Query.has [Selector.tag "button", Selector.attribute (Html.Attributes.disabled True), Selector.text "No sessions"]
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace opened "one") |> Query.has [Selector.text "<- Hide Agents"]
             ] ())
     , test "authority retirement clears association hints and late old admissions cannot restore them" <| withSession (\session ->

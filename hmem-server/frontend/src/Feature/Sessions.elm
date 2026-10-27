@@ -746,12 +746,12 @@ viewTaskIcon workspace model task =
         open = model.sessions.taskPanel == Just task
         activityCurrent = taskActivityCurrent workspace model task
         inactive = association == Just True && activityCurrent && (hint |> Maybe.map (\current -> not current.error && not current.active && current.epoch == model.sessionDelivery.listInvalidation) |> Maybe.withDefault False)
-        label = if open then "<- Hide Agents" else "View Agents ->"
-        status = if active then " · active sessions" ++ (if association == Nothing || not activityCurrent then " · refreshing" else "") else if inactive then " · no active sessions" else if (hint |> Maybe.map .error |> Maybe.withDefault False) || (Dict.get task model.sessions.taskAssociations |> Maybe.map .error |> Maybe.withDefault False) then " · associations or activity unavailable" else " · checking associations and activity"
+        empty = association == Just False && not open
+        label = if open then "<- Hide Agents" else if empty then "No sessions" else "View Agents ->"
+        status = if empty then " · no sessions associated with this task" else if active then " · active sessions" ++ (if association == Nothing || not activityCurrent then " · refreshing" else "") else if inactive then " · no active sessions" else if (hint |> Maybe.map .error |> Maybe.withDefault False) || (Dict.get task model.sessions.taskAssociations |> Maybe.map .error |> Maybe.withDefault False) then " · associations or activity unavailable" else " · checking associations and activity"
     in
-    if association == Just False && not open then text "" else
-    button [class ("btn btn-secondary btn-sm task-sessions-icon" ++ (if active then " has-active-sessions" else "")),disabled (not open && not (taskCanOpen workspace model task)),attribute "aria-label" label,attribute "aria-expanded" (if open then "true" else "false"),Html.Attributes.title (label ++ status),stopPropagationOn "click" (Decode.succeed (SessionsToggleDock task,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
-        [if active then SessionActivityLight.view True status else if inactive then span [class "session-state-dot session-state-inactive",attribute "aria-hidden" "true"] [] else span [class "session-association-pending",attribute "aria-hidden" "true"] [text "…"],text label]
+    button [class ("btn btn-secondary btn-sm task-sessions-icon" ++ (if active && not empty then " has-active-sessions" else "") ++ (if open then " selected" else "") ++ (if empty then " no-associated-sessions" else "")),disabled (not open && not (taskCanOpen workspace model task)),attribute "aria-label" label,attribute "aria-expanded" (if open then "true" else "false"),Html.Attributes.title (label ++ status),stopPropagationOn "click" (Decode.succeed (SessionsToggleDock task,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
+        [if empty then text "" else if active then SessionActivityLight.view True status else if inactive then span [class "session-state-dot session-state-inactive",attribute "aria-hidden" "true"] [] else span [class "session-association-pending",attribute "aria-hidden" "true"] [text "…"],text label]
 
 
 viewTaskPanel : String -> Model -> String -> Html Msg
@@ -849,8 +849,8 @@ viewTaskSection evidence workspace model task =
             Err message -> Just message
             _ -> Nothing)
     in
-    details [class ("task-session-section " ++ (if evidence then "task-session-evidence" else "task-session-active"))]
-        [summary [] [text (heading ++ (if page /= Nothing then " · " ++ String.fromInt (List.length sessions) else ""))]
+    section [class ("task-session-section " ++ (if evidence then "task-session-evidence" else "task-session-active")),attribute "aria-label" heading]
+        [h4 [class "card-section-heading"] [text (heading ++ (if page /= Nothing then " · " ++ String.fromInt (List.length sessions) else ""))]
         ,if evidence then viewArchive model task else text ""
         ,if page == Nothing then p [class "card-meta"] [text (if cachedError /= Nothing then "Sessions could not be loaded." else "Loading sessions…"),if cachedError /= Nothing then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""]
          else if List.isEmpty sessions then p [class "card-meta"] [text ("No " ++ String.toLower heading ++ " on this page.")]

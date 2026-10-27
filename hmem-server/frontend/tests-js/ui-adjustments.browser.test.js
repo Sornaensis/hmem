@@ -213,7 +213,7 @@ test('audit status and timestamps retain minute precision without truncating tim
     await h.start(); await h.idle()
     const project = h.page.locator('#entity-root-project')
     await project.locator('.btn-extras-toggle').click(); await h.idle()
-    await project.locator('.entity-history-toggle').click(); await project.locator('.history-entry').waitFor()
+    await project.getByRole('button',{name:'History',exact:true}).click(); await project.locator('.history-entry').waitFor()
     assert.equal(await project.locator('.history-timestamp').innerText(), '2026-10-08 10:34')
     assert.match(await project.locator('.history-diff').innerText(), /todo.*done/s)
     const geometry = await project.evaluate(element => { const scroll = document.getElementById('main-content-scroll'); return { top: element.getBoundingClientRect().top, host: scroll.getBoundingClientRect().top, viewport: scroll.clientHeight } })

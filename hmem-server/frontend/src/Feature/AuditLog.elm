@@ -1,4 +1,4 @@
-module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, auditReturnFilters, entityHistoryTimestampSources, init, nextAuditOffset, timestampSources, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
+module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, auditReturnFilters, entityHistoryTimestampSources, init, nextAuditOffset, timestampSources, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewEntityHistoryContent, viewRevertConfirmModal)
 
 import ActorAttribution
 import Api
@@ -1531,6 +1531,14 @@ viewEntityHistory model entityType entityId =
                 )
             ]
         , if expanded then
+            viewEntityHistoryContent model entityType entityId
+          else
+            text ""
+        ]
+
+
+viewEntityHistoryContent : Model -> String -> String -> Html Msg
+viewEntityHistoryContent model entityType entityId =
             case Dict.get entityId model.auditLog.entityHistory of
                 Just entries ->
                     div [ class "entity-history-timeline" ]
@@ -1554,11 +1562,6 @@ viewEntityHistory model entityType entityId =
                 Nothing ->
                     div [ class "entity-history-timeline" ]
                         [ div [ class "entity-history-loading" ] [ text "Loading..." ] ]
-
-          else
-            text ""
-        ]
-
 
 viewHistoryEntry : Model -> Api.AuditLogEntry -> Html Msg
 viewHistoryEntry model entry =

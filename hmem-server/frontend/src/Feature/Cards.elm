@@ -71,6 +71,7 @@ init =
         , top = 0, height = 800, nativePins = Set.empty, target = Nothing, preserveScroll = False, filterExtent = 0
         }
     , taskSections = Dict.empty
+    , projectSections = Dict.empty
     , expandedCards = Dict.empty
     , collapsedNodes = Dict.empty
     , deleteConfirmation = Nothing
@@ -101,12 +102,27 @@ focusClickIntervalTriggers deltaMs =
 -- UPDATE
 
 
+selectCardSection : String -> String -> String -> Model -> ( Model, Cmd Msg )
+selectCardSection kind entityId section model =
+    if section == "history" && not (Dict.get entityId model.auditLog.historyExpanded |> Maybe.withDefault False) then
+        Feature.AuditLog.update (ToggleEntityHistory kind entityId) model
+    else
+        ( model, Cmd.none )
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         SetTaskCardSection task section ->
-            if Dict.member task model.tasks && List.member section ["work","agents","evidence","history"] then
-                (updateCardsModel (\state -> {state | taskSections = Dict.insert task section state.taskSections}) model,Cmd.none)
+            if Dict.member task model.tasks && List.member section ["work","evidence","history"] then
+                selectCardSection "task" task section
+                    (updateCardsModel (\state -> {state | taskSections = Dict.insert task section state.taskSections}) model)
+            else (model,Cmd.none)
+
+        SetProjectCardSection project section ->
+            if Dict.member project model.projects && List.member section ["work","evidence","history"] then
+                selectCardSection "project" project section
+                    (updateCardsModel (\state -> {state | projectSections = Dict.insert project section state.projectSections}) model)
             else (model,Cmd.none)
 
         RegisterFocusClick entityType entityId timeStampMs ->
@@ -1828,9 +1844,15 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     , viewCardDescription model "project" project.id project.description
                     ]
                 , if isExpanded model project.id then
+                    let
+                        currentSection = Dict.get project.id model.cards.projectSections |> Maybe.withDefault "work"
+                        panel = CardSections.panel "project" project.id currentSection
+                    in
                     div [ class "card-extras", id (CardSections.detailsId "project" project.id) ]
-                        [ CardSections.section "Work" [viewProjectNextTasksPanel projection model project]
-                        , CardSections.section "History" [Feature.AuditLog.viewEntityHistory model "project" project.id]
+                        [ CardSections.tabs "Project" project.id currentSection (SetProjectCardSection project.id)
+                        , panel "work" [viewProjectNextTasksPanel projection model project]
+                        , panel "evidence" [p [class "card-meta"] [text "Open a task to view its evidence."]]
+                        , panel "history" [Feature.AuditLog.viewEntityHistoryContent model "project" project.id]
                         ]
 
                   else
@@ -2353,6 +2375,8 @@ viewTaskCardBody descendants projection showProject model task =
             , div [ class "card-actions" ]
                 [ Feature.Sessions.viewTaskIcon task.workspaceId model task.id
                 , Feature.Move.viewAction model "task" task.id
+                , Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
+                , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
                     button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]
 
@@ -2419,22 +2443,16 @@ viewTaskCardBody descendants projection showProject model task =
             extrasExpanded =
                 isExpanded model task.id
             currentSection = Dict.get task.id model.cards.taskSections |> Maybe.withDefault "work"
-            panel section content =
-                div [class "card-section-panel",id ("task-" ++ task.id ++ "-" ++ section),attribute "role" "region",attribute "aria-labelledby" ("task-" ++ task.id ++ "-" ++ section ++ "-button"),hidden (currentSection /= section)] content
+            panel = CardSections.panel "task" task.id currentSection
           in
           div [ class "card-body card-expanded" ]
-            [ CardSections.facts
-                [ CardSections.fact "Status" (Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus)
-                , CardSections.fact "Priority" (Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority)
-                ]
-            , div [ class "card-desc-row" ]
+            [ div [ class "card-desc-row" ]
                 [ CardSections.disclosure extrasExpanded (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
                 , viewCardDescription model "task" task.id task.description
                 ]
             , if extrasExpanded then
                 div [ class "card-extras", id (CardSections.detailsId "task" task.id) ]
-                    [ nav [class "card-local-sections",attribute "aria-label" "Task sections"]
-                        (List.map (\(section,label) -> button [class ("card-section-button" ++ (if currentSection == section then " selected" else "")),type_ "button",id ("task-" ++ task.id ++ "-" ++ section ++ "-button"),attribute "aria-controls" ("task-" ++ task.id ++ "-" ++ section),attribute "aria-pressed" (if currentSection == section then "true" else "false"),onClick (SetTaskCardSection task.id section)] [text label]) [("work","Work"),("agents","Agents"),("evidence","Evidence"),("history","History")])
+                    [ CardSections.tabs "Task" task.id currentSection (SetTaskCardSection task.id)
                     , panel "work" [if showProject then
                         case projectName of
                             Just pname ->
@@ -2460,12 +2478,8 @@ viewTaskCardBody descendants projection showProject model task =
                                 else if List.isEmpty loadedChildren then p [class "card-meta"] [text (if hasChildren then "Subtasks are available in the hierarchy below." else "No loaded subtasks.")]
                                 else text ""])
                     , Feature.Dependencies.viewTaskDependencies model task.id deps]
-                    , panel "agents"
-                        [ p [class "card-meta"] [text (if Feature.Sessions.taskActive task.workspaceId model task.id then "Active sessions are available for this task." else "No active sessions are currently known for this task.")]
-                        , Feature.Sessions.viewTaskIcon task.workspaceId model task.id
-                        ]
                     , panel "evidence" [Feature.Sessions.viewTaskEvidence task.workspaceId model task.id]
-                    , panel "history" [Feature.AuditLog.viewEntityHistory model "task" task.id]
+                    , panel "history" [Feature.AuditLog.viewEntityHistoryContent model "task" task.id]
                     ]
 
               else

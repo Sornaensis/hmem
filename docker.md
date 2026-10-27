@@ -16,9 +16,10 @@ and automatic vectorization disabled.
 2. Set a strong `POSTGRES_PASSWORD` in `.env`. Leave
    `HMEM_HTTP_BIND=127.0.0.1` for local use.
 
-   In `config/compose.env`, uncomment and set `HMEM_API_KEY` to a strong
-   bearer token. The default local profile requires it before startup.
-   Keep both secrets out of Git and stable across container replacements.
+   In `config/compose.env`, uncomment and set `HMEM_AUTH_LOCAL_USER_TOKEN` to
+   a strong browser credential. For automated API/MCP clients, also set a
+   distinct `HMEM_API_KEY`. The local profile needs at least one credential.
+   Keep secrets out of Git and stable across container replacements.
    A later change to `POSTGRES_PASSWORD` does not change the password already
    stored in an existing PostgreSQL volume.
 3. Build and start:
@@ -31,14 +32,16 @@ and automatic vectorization disabled.
 
    hmem waits for PostgreSQL and applies migrations before serving. Wait until
    the hmem service is healthy.
-4. Open `http://127.0.0.1:8420/#hmem_token=<your-HMEM_API_KEY>`, replacing the
+4. Open `http://127.0.0.1:8420/#hmem_token=<your-HMEM_AUTH_LOCAL_USER_TOKEN>`, replacing the
    placeholder with the token you supplied. A healthy service still requires
    browser authentication. The frontend removes the fragment after processing;
    its default token storage is `localStorage`. Set
    `HMEM_FRONTEND_AUTH_TOKEN_STORAGE=session` or `memory` in the runtime env file
    if you prefer shorter-lived storage.
 
-API clients send the same token as `Authorization: Bearer <token>`.
+Automated API clients send `HMEM_API_KEY` as `Authorization: Bearer <token>`
+and declare `X-HMem-Bot-Identity` as described in [authentication](auth.md).
+Browser writes use the separate human credential.
 For shared browser access, use deployed OIDC authentication below.
 
 ## Configuration and secrets
@@ -48,12 +51,12 @@ For shared browser access, use deployed OIDC authentication below.
 | `.env` | Compose interpolation: PostgreSQL user/database/password/image, hmem image tag, host bind/port, and runtime env-file path. |
 | `config/compose.env` | Runtime settings passed to hmem, migration, and MCP containers. Change its path with `HMEM_ENV_FILE` in `.env`. |
 
-Putting `HMEM_API_KEY` in `.env` alone does not pass it to hmem.
+Putting authentication values in `.env` alone does not pass them to hmem.
 Compose supplies the database connection from its `environment` settings;
 those override the same values in the runtime env file. After editing runtime
 settings, recreate the service with `docker compose up -d hmem`.
 
-For secrets mounted into containers, use `HMEM_API_KEY_FILE`,
+For secrets mounted into containers, use `HMEM_AUTH_LOCAL_USER_TOKEN_FILE`, `HMEM_API_KEY_FILE`,
 `HMEM_DB_PASSWORD_FILE`, and the OIDC/MCP `*_FILE` options in the
 [configuration reference](config/container-runtime-contract.md).
 Setting a file path does not mount the file: add the read-only secret/bind mount
@@ -235,10 +238,10 @@ the published hmem server. Credential choices and precedence are in
 
 | Problem | Check |
 | --- | --- |
-| Missing local bearer token | Supply `HMEM_API_KEY` in the runtime env file or mount `HMEM_API_KEY_FILE`. |
+| Missing local bearer token | Supply the human browser token or automated API key in the runtime env file, or mount its matching `*_FILE` secret. |
 | PostgreSQL won't start/connect | Password, service health, configured database/user, and SSL mode. An existing volume keeps its old role password. |
 | Migration/schema failure | `docker compose run --rm migrate`; check the selected database and migration output before restarting. |
-| Unhealthy hmem | `docker compose logs hmem`; check DB/migrations and token-file readability. Any explicit healthcheck token must be accepted by the server; otherwise let it use `HMEM_API_KEY`. |
+| Unhealthy hmem | `docker compose logs hmem`; check DB/migrations and token-file readability. Any explicit healthcheck token must be accepted by the server; otherwise it uses the API credential, then the human credential. |
 | Browser unauthorized | Open the quick-start token fragment URL, or check deployed login using [authentication](auth.md). |
 | Blank page/404 | `HMEM_WEB_ENABLED=true`, `HMEM_WEB_STATIC_DIR=/run/hmem/static`, and reverse-proxy browser paths. |
 | pgvector unavailable | Follow [embedding readiness](embeddings.md); this is expected with the default PostgreSQL image. |

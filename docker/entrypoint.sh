@@ -44,6 +44,29 @@ trim() {
   printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+trim_token_line_endings() {
+  tl_value=$1
+  tl_cr=$(printf '\r')
+  tl_lf='
+'
+  while :; do
+    case "$tl_value" in
+      *"$tl_cr") tl_value=${tl_value%"$tl_cr"} ;;
+      *"$tl_lf") tl_value=${tl_value%"$tl_lf"} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$tl_value"
+}
+
+token_has_whitespace() {
+  case "$1" in
+    *"
+"*|*"$(printf '\r')"*) return 0 ;;
+  esac
+  printf '%s' "$1" | grep -q '[[:space:]]'
+}
+
 read_secret_file() {
   rs_var=$1
   rs_file_var=$2
@@ -52,6 +75,9 @@ read_secret_file() {
   [ -f "$rs_file" ] || fail "$rs_file_var points to a missing file"
   [ -r "$rs_file" ] || fail "$rs_file_var points to an unreadable file"
   rs_value=$(cat "$rs_file") || fail "could not read $rs_file_var"
+  if [ "$rs_var" = HMEM_AUTH_LOCAL_USER_TOKEN ]; then
+    rs_value=$(trim_token_line_endings "$rs_value")
+  fi
   [ -n "$rs_value" ] || fail "$rs_file_var points to an empty file"
   export "$rs_var=$rs_value"
 }
@@ -59,6 +85,17 @@ read_secret_file() {
 load_config_secret_files() {
   read_secret_file HMEM_DB_PASSWORD HMEM_DB_PASSWORD_FILE
   read_secret_file HMEM_API_KEY HMEM_API_KEY_FILE
+  read_secret_file HMEM_AUTH_LOCAL_USER_TOKEN HMEM_AUTH_LOCAL_USER_TOKEN_FILE
+  if [ "${HMEM_AUTH_LOCAL_USER_TOKEN_FILE+x}" = x ]; then
+    [ -n "$HMEM_AUTH_LOCAL_USER_TOKEN_FILE" ] || fail "HMEM_AUTH_LOCAL_USER_TOKEN_FILE points to a missing file"
+  fi
+  if [ "${HMEM_AUTH_LOCAL_USER_TOKEN+x}" = x ]; then
+    lu_token=$(get_env HMEM_AUTH_LOCAL_USER_TOKEN)
+    [ -n "$lu_token" ] && ! token_has_whitespace "$lu_token" \
+      || fail "HMEM_AUTH_LOCAL_USER_TOKEN must be nonempty and contain no whitespace"
+    [ "$lu_token" != "$(get_env HMEM_API_KEY)" ] || fail "HMEM_AUTH_LOCAL_USER_TOKEN must differ from HMEM_API_KEY"
+    [ "$lu_token" != "$(get_env HMEM_MCP_PROVENANCE_TOKEN)" ] || fail "HMEM_AUTH_LOCAL_USER_TOKEN must differ from MCP provenance credentials"
+  fi
   read_secret_file HMEM_AUTH_DEPLOYED_TOKEN_HASH_SECRET HMEM_AUTH_DEPLOYED_TOKEN_HASH_SECRET_FILE
   read_secret_file HMEM_AUTH_DEPLOYED_CLIENT_SECRET HMEM_AUTH_DEPLOYED_CLIENT_SECRET_FILE
 }
@@ -419,7 +456,8 @@ validate_startup_auth() {
   if [ "$HMEM_AUTH_MODE" = "local" ]; then
     if [ "$HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED" = "false" ]; then
       [ "$HMEM_AUTH_ENABLED" = "true" ] || fail "local static-bearer profile requires HMEM_AUTH_ENABLED=true"
-      env_is_set_nonempty HMEM_API_KEY || fail "local static-bearer profile requires HMEM_API_KEY or HMEM_API_KEY_FILE"
+      env_is_set_nonempty HMEM_API_KEY || env_is_set_nonempty HMEM_AUTH_LOCAL_USER_TOKEN \
+        || fail "local bearer profile requires HMEM_API_KEY[_FILE] or HMEM_AUTH_LOCAL_USER_TOKEN[_FILE]"
     else
       if [ "$HMEM_AUTH_LOCAL_ALLOW_REMOTE_BOOTSTRAP" = "true" ]; then
         warn "DEV-ONLY: HMEM_AUTH_LOCAL_ALLOW_REMOTE_BOOTSTRAP=true may expose the implicit local superadmin to remote clients"

@@ -22,8 +22,16 @@ is rejected unless `auth.local.allow_remote_bootstrap: true` is set; that option
 exposes superadmin access and is only suitable for trusted private development
 networks.
 
-To require a bearer token in local mode, set `auth.enabled: true`, supply
-`HMEM_API_KEY` (or `auth.api_key`), and turn bootstrap off. Local bot tokens under
+To require a bearer token in local mode, set `auth.enabled: true` and turn
+bootstrap off. For browser users, supply a distinct `HMEM_AUTH_LOCAL_USER_TOKEN`
+or `HMEM_AUTH_LOCAL_USER_TOKEN_FILE` (`auth.local.user_token` for native YAML).
+It authenticates a local human superadmin without a bot identity declaration.
+The file takes precedence over the value; missing, unreadable, empty or blank
+files fail closed. Trailing CR/LF is removed; other whitespace is rejected.
+Keep it distinct from every bot/API and MCP provenance credential.
+
+Automated clients use `HMEM_API_KEY` (or `auth.api_key`) and declare their bot
+identity on unsafe API requests. Local bot tokens under
 `auth.local.bot_tokens` can label automated actions, but have superadmin access
 too. Local credentials and bootstrap do not work in deployed mode.
 
@@ -169,8 +177,10 @@ See [activity connection limits and recovery](api.md#session-activity-projection
 An explicit bearer token takes precedence over a session cookie, even if the
 token is invalid. Remove an old bearer token before relying on cookie login.
 For browser bearer fallback, return tokens in URL fragments, never query strings.
-In local mode, open `/#hmem_token=<your-local-API-key>` to supply the configured
-key without a provider login. This bootstrap accepts no provider callback
+In local mode, open `/#hmem_token=<your-local-human-token>` to supply the configured
+human browser credential without a provider login. API keys retain bot attribution
+and cannot replace this browser credential for writes or POST-based searches.
+This bootstrap accepts no provider callback
 metadata or outstanding login state; provider callbacks still require matching
 login state by default.
 Bearer storage defaults to `localStorage`, where script access can expose it.

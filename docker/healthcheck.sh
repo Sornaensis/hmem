@@ -7,6 +7,29 @@ log() {
   printf '%s: %s\n' "$APP_NAME" "$*" >&2
 }
 
+trim_token_line_endings() {
+  tl_value=$1
+  tl_cr=$(printf '\r')
+  tl_lf='
+'
+  while :; do
+    case "$tl_value" in
+      *"$tl_cr") tl_value=${tl_value%"$tl_cr"} ;;
+      *"$tl_lf") tl_value=${tl_value%"$tl_lf"} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$tl_value"
+}
+
+token_has_whitespace() {
+  case "$1" in
+    *"
+"*|*"$(printf '\r')"*) return 0 ;;
+  esac
+  printf '%s' "$1" | grep -q '[[:space:]]'
+}
+
 secret_value() {
   sv_file_var=$1
   sv_file=$(eval "printf '%s' \"\${$sv_file_var-}\"")
@@ -23,6 +46,9 @@ secret_value() {
     log "could not read $sv_file_var"
     return 2
   }
+  if [ "$sv_file_var" = HMEM_AUTH_LOCAL_USER_TOKEN_FILE ]; then
+    sv_value=$(trim_token_line_endings "$sv_value")
+  fi
   [ -n "$sv_value" ] || {
     log "$sv_file_var points to an empty file"
     return 2
@@ -46,6 +72,24 @@ health_bearer_token() {
     printf '%s' "$HMEM_API_KEY"
   elif [ -n "${HMEM_API_KEY_FILE:-}" ]; then
     secret_value HMEM_API_KEY_FILE
+  elif [ "${HMEM_AUTH_LOCAL_USER_TOKEN_FILE+x}" = x ]; then
+    [ -n "$HMEM_AUTH_LOCAL_USER_TOKEN_FILE" ] || {
+      log "HMEM_AUTH_LOCAL_USER_TOKEN_FILE points to a missing file"
+      return 2
+    }
+    hc_human_token=$(secret_value HMEM_AUTH_LOCAL_USER_TOKEN_FILE) || return $?
+    if token_has_whitespace "$hc_human_token"; then
+      log "HMEM_AUTH_LOCAL_USER_TOKEN must contain no whitespace"
+      return 2
+    fi
+    printf '%s' "$hc_human_token"
+  elif [ "${HMEM_AUTH_LOCAL_USER_TOKEN+x}" = x ]; then
+    hc_human_token=$HMEM_AUTH_LOCAL_USER_TOKEN
+    if [ -z "$hc_human_token" ] || token_has_whitespace "$hc_human_token"; then
+      log "HMEM_AUTH_LOCAL_USER_TOKEN must be nonempty and contain no whitespace"
+      return 2
+    fi
+    printf '%s' "$hc_human_token"
   else
     return 1
   fi

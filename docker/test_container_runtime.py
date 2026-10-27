@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -242,6 +243,139 @@ class ComposeContractTest(unittest.TestCase):
         self.assertEqual(len(gpu["services"]["hmem"]["ports"]), 1)
 
 
+class LocalHumanSecretTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.shell = shutil.which("sh")
+        if cls.shell is None and os.name == "nt":
+            git = shutil.which("git")
+            candidate = Path(git).resolve().parent.parent / "bin" / "sh.exe" if git else None
+            if candidate is not None and candidate.is_file():
+                cls.shell = str(candidate)
+        if cls.shell is None:
+            raise unittest.SkipTest("a POSIX shell is required for container secret checks")
+
+    def run_shell(self, script: str, overrides: dict[str, str], action: str) -> subprocess.CompletedProcess[str]:
+        source = (ROOT / "docker" / script).read_text(encoding="utf-8")
+        functions, separator, _ = source.rpartition('main "$@"')
+        self.assertTrue(separator, "entrypoint invocation boundary is missing")
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("HMEM_")}
+        environment.update(overrides)
+        return subprocess.run([self.shell, "-s"], input=functions + "\n" + action,
+                              capture_output=True, text=True, encoding="utf-8",
+                              timeout=10, env=environment, cwd=ROOT)
+
+    def test_human_only_local_profile_and_secret_file_precedence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-human-secret-") as private:
+            secret_file = Path(private) / "human-token"
+            secret_file.write_bytes(b"human-file-token\r\n\r\n")
+            result = self.run_shell("entrypoint.sh", {
+                "HMEM_AUTH_LOCAL_USER_TOKEN": "discarded-environment-token",
+                "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": secret_file.as_posix(),
+            }, "load_config_secret_files; apply_defaults; validate_startup_auth; "
+               "[ \"$HMEM_AUTH_LOCAL_USER_TOKEN\" = human-file-token ]")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("human-file-token", result.stderr)
+
+    def test_human_secret_invalid_values_fail_closed_without_leaking(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-human-invalid-") as private:
+            root = Path(private)
+            empty = root / "empty"
+            empty.write_bytes(b"")
+            blank = root / "blank"
+            blank.write_bytes(b" \t\r\n")
+            cases = [
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": ""},
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": "invalid secret marker"},
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": "valid-fallback", "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": ""},
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": "valid-fallback", "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": (root / "missing").as_posix()},
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": "valid-fallback", "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": empty.as_posix()},
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": "valid-fallback", "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": blank.as_posix()},
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": "collision-marker", "HMEM_API_KEY": "collision-marker"},
+                {"HMEM_AUTH_LOCAL_USER_TOKEN": "collision-marker", "HMEM_MCP_PROVENANCE_TOKEN": "collision-marker"},
+            ]
+            for index, settings in enumerate(cases):
+                with self.subTest(case=index):
+                    result = self.run_shell("entrypoint.sh", settings, "load_config_secret_files")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("HMEM_AUTH_LOCAL_USER_TOKEN", result.stderr)
+                    self.assertNotIn("invalid secret marker", result.stderr)
+                    self.assertNotIn("collision-marker", result.stderr)
+
+    def test_human_file_preserves_interior_whitespace_rejection(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-human-interior-") as private:
+            secret_file = Path(private) / "human-token"
+            secret_file.write_bytes(b"human\r\ntoken\r\n")
+            result = self.run_shell("entrypoint.sh", {
+                "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": secret_file.as_posix(),
+            }, "load_config_secret_files")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("contain no whitespace", result.stderr)
+
+    def test_human_file_read_failure_does_not_use_environment_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-human-read-failure-") as private:
+            secret_file = Path(private) / "human-token"
+            secret_file.write_bytes(b"unreadable-test-token")
+            result = self.run_shell("entrypoint.sh", {
+                "HMEM_AUTH_LOCAL_USER_TOKEN": "valid-fallback",
+                "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": secret_file.as_posix(),
+            }, "cat() { return 1; }; load_config_secret_files")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not read HMEM_AUTH_LOCAL_USER_TOKEN_FILE", result.stderr)
+            self.assertNotIn("valid-fallback", result.stdout)
+
+    def test_healthcheck_human_fallback_and_existing_token_precedence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-human-health-") as private:
+            secret_file = Path(private) / "human-token"
+            secret_file.write_bytes(b"human-file-token\r\n")
+            cases = [
+                ({"HMEM_AUTH_LOCAL_USER_TOKEN": "human-token"}, "human-token"),
+                ({"HMEM_AUTH_LOCAL_USER_TOKEN": "discarded", "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": secret_file.as_posix()}, "human-file-token"),
+                ({"HMEM_AUTH_LOCAL_USER_TOKEN": "human-token", "HMEM_API_KEY": "api-token"}, "api-token"),
+                ({"HMEM_AUTH_LOCAL_USER_TOKEN": "human-token", "HMEM_API_KEY": "api-token", "HMEM_HEALTHCHECK_BEARER_TOKEN": "explicit-token"}, "explicit-token"),
+            ]
+            for settings, expected in cases:
+                with self.subTest(expected=expected):
+                    result = self.run_shell("healthcheck.sh", settings, "health_bearer_token")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected)
+
+    def test_human_only_healthcheck_authenticates_and_accepts_ok(self) -> None:
+        result = self.run_shell("healthcheck.sh", {
+            "HMEM_AUTH_LOCAL_USER_TOKEN": "human-health-token",
+            "HMEM_CONTAINER_TEST_PYTHON": Path(sys.executable).as_posix(),
+        }, """
+python3() { "$HMEM_CONTAINER_TEST_PYTHON" "$@"; }
+curl() {
+  case " $* " in
+    *" Authorization: Bearer human-health-token "*) printf '%s' '{"status":"ok"}' ;;
+    *) return 1 ;;
+  esac
+}
+main
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_healthcheck_rejects_bad_human_file_without_environment_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-human-health-invalid-") as private:
+            secret_file = Path(private) / "human-token"
+            secret_file.write_bytes(b"\r\n")
+            for value in ("", (Path(private) / "missing").as_posix(), secret_file.as_posix()):
+                with self.subTest(path=value):
+                    result = self.run_shell("healthcheck.sh", {
+                        "HMEM_AUTH_LOCAL_USER_TOKEN": "valid-fallback",
+                        "HMEM_AUTH_LOCAL_USER_TOKEN_FILE": value,
+                    }, "health_bearer_token")
+                    self.assertEqual(result.returncode, 2)
+                    self.assertNotIn("valid-fallback", result.stdout)
+            result = self.run_shell("healthcheck.sh", {
+                "HMEM_API_KEY_FILE": (Path(private) / "missing-api").as_posix(),
+                "HMEM_AUTH_LOCAL_USER_TOKEN": "valid-human-fallback",
+            }, "health_bearer_token")
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn("valid-human-fallback", result.stdout)
+
+
 class BuiltImageTest(unittest.TestCase):
     def setUp(self) -> None:
         if not IMAGE:
@@ -339,6 +473,17 @@ class BuiltImageTest(unittest.TestCase):
                              "noexec", "nosuid", "nodev")))
         self.assertEqual(docker("exec", self.cid, "stat", "-f", "-c", "%T", "/var/lib/hmem"), "tmpfs")
         docker("exec", self.cid, "test", "-x", "/usr/local/bin/hmem-embedding-http-helper")
+
+    def test_human_only_profile_keeps_credential_out_of_generated_files(self) -> None:
+        secret = "human-packaging-secret-never-in-files"
+        self.create({"HMEM_AUTH_LOCAL_USER_TOKEN": secret})
+        config = self.await_config()
+        self.assertNotIn(secret, config)
+        self.assertNotIn("user_token:", config)
+        assert self.cid is not None
+        js = docker("exec", self.cid, "cat", "/run/hmem/static/hmem-runtime-config.js")
+        self.assertNotIn(secret, js)
+        self.assertIn("Running database migrations", docker("logs", self.cid))
 
     def test_managed_profile_and_bounds(self) -> None:
         self.create({"HMEM_API_KEY": "test-key", "HMEM_EMBEDDING_PROVIDER": "managed-tei",

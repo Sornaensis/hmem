@@ -30,6 +30,7 @@ Existing hmem env overrides must be used instead of writing these values into ge
 
 - `HMEM_DB_PASSWORD` -> `database.password`
 - `HMEM_API_KEY` -> `auth.api_key`
+- `HMEM_AUTH_LOCAL_USER_TOKEN` -> `auth.local.user_token`
 - `HMEM_DB_SSLMODE` -> `database.sslmode`
 
 If `_FILE` variants are supported by the entrypoint, it reads the file and exports the base variable above before starting hmem. The `_FILE` variable itself is never written into YAML.
@@ -147,21 +148,23 @@ The container must never start with the implicit local superadmin exposed on `0.
 
 | Env | Default | YAML field | Notes |
 | --- | --- | --- | --- |
-| `HMEM_AUTH_MODE` | `local` | `auth.mode` | `local` or `deployed`. Default is local static bearer mode, not implicit bootstrap. |
-| `HMEM_AUTH_ENABLED` | `true` | `auth.enabled` | Enables local legacy static bearer auth when `HMEM_AUTH_MODE=local` and `HMEM_API_KEY` is set. |
-| `HMEM_API_KEY` | unset | env override only | Static bearer secret for local mode. Required for the default local container profile. Do not write to YAML. |
+| `HMEM_AUTH_MODE` | `local` | `auth.mode` | `local` or `deployed`. Default is local bearer mode, not implicit bootstrap. |
+| `HMEM_AUTH_ENABLED` | `true` | `auth.enabled` | Enables local bearer authentication when `HMEM_AUTH_MODE=local`. |
+| `HMEM_API_KEY` | unset | env override only | Local automated API/MCP bearer secret. Bot writes require declared role/model identity. Do not write to YAML. |
 | `HMEM_API_KEY_FILE` | unset | none | Optional secret-file source for `HMEM_API_KEY`. |
+| `HMEM_AUTH_LOCAL_USER_TOKEN` | unset | env override only | Optional local human browser superadmin credential. Must be nonempty, contain no whitespace, and differ from bot/API and MCP provenance credentials. Never write to YAML or frontend configuration. |
+| `HMEM_AUTH_LOCAL_USER_TOKEN_FILE` | unset | none | Takes precedence over the human token value. Missing, unreadable, empty or blank files fail closed; trailing CR/LF is removed, other whitespace is rejected. |
 | `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED` | `false` | `auth.local.bootstrap_enabled` | Must remain false for normal container deployments. |
 | `HMEM_AUTH_LOCAL_ALLOW_REMOTE_BOOTSTRAP` | `false` | `auth.local.allow_remote_bootstrap` | Dev-only escape hatch. If true, log a high-severity warning naming the remote-bootstrap risk. |
 | `HMEM_AUTH_LOCAL_BOT_TOKENS_FILE` | unset | `auth.local.bot_tokens` | Optional JSON/YAML array of `{label, token}`. Because tokens are bearer secrets, prefer `HMEM_API_KEY` for v1 static container auth unless per-bot attribution is required. |
 
 Local-mode startup is valid only when one of these profiles is true:
 
-1. `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=false`, `HMEM_AUTH_ENABLED=true`, and `HMEM_API_KEY` is present.
+1. `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=false`, `HMEM_AUTH_ENABLED=true`, and a human browser token or `HMEM_API_KEY` is present.
 2. `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=true` while the server is bound to loopback and CORS is loopback-only.
 3. Dev-only: `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=true` and `HMEM_AUTH_LOCAL_ALLOW_REMOTE_BOOTSTRAP=true`, with an explicit warning that the implicit local superadmin may be reachable by remote clients.
 
-The default container profile uses case 1 and must fail fast until `HMEM_API_KEY` or `HMEM_API_KEY_FILE` is supplied.
+The default container profile uses case 1 and fails fast until `HMEM_AUTH_LOCAL_USER_TOKEN[_FILE]` or `HMEM_API_KEY[_FILE]` is supplied. Use distinct credentials for browser humans and automated clients. Local credentials do not authenticate deployed requests. Health checks retain their explicit bearer override first, then the API credential, then the human credential when no API credential is configured.
 
 ## Deployed OIDC/session env
 
@@ -217,7 +220,7 @@ Allowed frontend env surface:
 | `HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS` | `hmem_token,auth_token,access_token` | `authTokenUrlParams` | For fragment-only bearer fallback callbacks. |
 | `HMEM_FRONTEND_REQUIRE_AUTH_STATE` | `true` | `requireAuthState` | Should remain true for provider redirects. |
 
-The generator must never put `HMEM_API_KEY`, `HMEM_AUTH_TOKEN`, `HMEM_MCP_AUTH_TOKEN`, DB passwords, OIDC client secrets, PATs, or service tokens into `window.HMEM_CONFIG`. In particular, do not generate `window.HMEM_CONFIG.authToken` by default.
+The generator must never put `HMEM_AUTH_LOCAL_USER_TOKEN`, `HMEM_API_KEY`, `HMEM_AUTH_TOKEN`, `HMEM_MCP_AUTH_TOKEN`, DB passwords, OIDC client secrets, PATs, or service tokens into `window.HMEM_CONFIG`. In particular, do not generate `window.HMEM_CONFIG.authToken` by default.
 
 ## MCP env
 
@@ -242,7 +245,7 @@ The entrypoint must refuse to start when any of these are true:
 - Any boolean env is not one of `true`, `false`, `1`, `0`, `yes`, or `no`.
 - Any constrained string env is outside its allowed set, including `HMEM_AUTH_MODE` (`local|deployed`), `HMEM_AUTH_DEPLOYED_TOKEN_LOOKUP` (`database`), `HMEM_AUTH_DEPLOYED_COOKIE_SAME_SITE` (`Lax|Strict|None`), or `HMEM_FRONTEND_AUTH_TOKEN_STORAGE` (`local|session|memory`).
 - `HMEM_AUTH_MODE=local`, `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=true`, and `HMEM_AUTH_LOCAL_ALLOW_REMOTE_BOOTSTRAP=false` with either a non-loopback `HMEM_SERVER_HOST` or remote/wildcard `HMEM_CORS_ALLOWED_ORIGINS`.
-- `HMEM_AUTH_MODE=local` has `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=false` but `HMEM_AUTH_ENABLED` is not true, or neither `HMEM_API_KEY` nor `HMEM_API_KEY_FILE` is supplied.
+- `HMEM_AUTH_MODE=local` has `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=false` but `HMEM_AUTH_ENABLED` is not true, or neither a human credential (`HMEM_AUTH_LOCAL_USER_TOKEN[_FILE]`) nor an API credential (`HMEM_API_KEY[_FILE]`) is supplied.
 - `HMEM_AUTH_MODE=deployed` is missing `issuer`, `audience`, or all JWKS/discovery sources.
 - Browser OIDC login is enabled in deployed mode but `client_id`, `client_secret`, `redirect_uri`, or the login endpoint source (`discovery_url` or both `authorization_endpoint` and `token_endpoint`) is missing.
 - Deployed cookie sessions use wildcard or otherwise over-broad credentialed CORS, or `cookie_same_site=None` with `cookie_secure=false`.

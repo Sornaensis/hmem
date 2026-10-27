@@ -1,5 +1,12 @@
 # Web interface guide
 
+## Home and workspaces
+
+Home groups your workspaces and keeps workspace creation and group management
+beside the list. Choose a workspace to open it. Creation, editing and administration
+controls appear according to your current access. If a session authorization
+recheck fails, use **Retry session** before you continue.
+
 ## Workspace context
 
 The workspace header keeps its identity, totals, section navigation and current
@@ -81,7 +88,8 @@ Keep one unsaved Observation draft while moving between rows, tabs or Back
 within a workspace. Use **Return to draft**, **Save draft** or **Discard draft**.
 Save or discard before leaving the workspace; a save cannot be interrupted by
 discard. Reload, closing the tab, access loss or deletion can retire the draft.
-Drafts are not saved in browser storage.
+Drafts are not saved in browser storage. If a subject filter excludes the draft,
+clear that filter before choosing **Return to draft** to reopen its editor.
 
 A competing edit preserves your draft and shows a conflict. **Keep my draft**
 uses the latest version on the next save; **Use latest version** replaces your
@@ -148,7 +156,9 @@ for dates and the copyable task ID. Project, memory and Observation cards group
 their existing work, links, history and provenance into named sections.
 
 On task cards, **Active Agent →** opens the task’s active agents and transcript
-in a dock inside the card. Choose an agent to inspect its messages and expand
+in a dock inside the card. The work and agent hierarchy stay on the left, with the
+conversation on the right; narrow panes stack them. Choose an agent to inspect its
+messages and expand
 grouped activity. Close the dock to return the card to its usual width. The dock
 also works with task extras collapsed; saved transcripts and downloads remain
 under **Evidence** in the extras. The selected session's lineage is shown beside
@@ -158,7 +168,15 @@ missing or truncated ancestry is stated explicitly.
 Live transcripts keep recent agent messages visible while tool activity arrives.
 Expanded activity and tool details stay open during synchronization. Reading
 above the end keeps your place; following resumes when you scroll to the end.
-Loading a large transcript keeps the view steady.
+Loading a large transcript keeps the view steady. **Open full session ↗** opens
+Sessions with the same agent selected; its return link brings you back to the card.
+
+The **Sessions** tab puts the agent hierarchy beside the conversation and selected
+event details. **Live** and **Quiet** describe recent activity. Choose an event's
+inspect control to read its existing input or result. Narrow screens place event
+details below the conversation. Runtime declarations, creator identity, linked
+tasks and session ancestry remain separately labeled; unavailable values stay
+explicit rather than being inferred.
 
 Tasks with **In Progress** status and **Blocked** parents with a running subtask
 appear first, followed by Todo, other Blocked, Done and Cancelled tasks. Within

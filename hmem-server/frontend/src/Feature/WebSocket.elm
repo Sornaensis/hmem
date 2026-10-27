@@ -27,6 +27,7 @@ import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
+import Process
 import Ports exposing (clearChangeStreamScope, connectWebSocket, disconnectChangeStreamScope, wsConnected, wsConnecting, wsConnectionFailed, wsDisconnected, wsMessage)
 import Set
 import String
@@ -97,12 +98,19 @@ updateRaw msg model =
         RemoveSessionResource workspace target ->
             ( { model | sessionDelivery = SessionDelivery.removeDemand workspace target model.sessionDelivery }, Cmd.none )
 
+        SessionResourceRetry ticket guard ->
+            if workspaceGuardIsCurrent guard model && Permissions.canReadCurrentWorkspace model then
+                ({model | sessionDelivery=SessionDelivery.retry ticket model.sessionDelivery},Cmd.none)
+            else (model,Cmd.none)
+
         SessionResourceFetched id guard result ->
             let
                 current = workspaceGuardIsCurrent guard model && Permissions.canReadCurrentWorkspace model
-                    && (request |> Maybe.map (\owned -> guard.scopeKey == ChangeStream.scopeKey (ChangeStream.Workspace owned.workspace) && guard.routeWorkspace == Just owned.workspace && guard.targetKey == "session-resource:" ++ owned.key) |> Maybe.withDefault False)
+                    && (request |> Maybe.map (\owned -> guard.scopeKey == ChangeStream.scopeKey (ChangeStream.Workspace owned.workspace) && guard.routeWorkspace == Just owned.workspace && guard.targetKey == "session-resource:" ++ owned.key && SessionDelivery.requestIsCurrent owned model.sessionDelivery) |> Maybe.withDefault False)
                 request = Dict.get id model.sessionDelivery.physical
-                released = { model | sessionDelivery = SessionDelivery.settle id current result model.sessionDelivery }
+                (settled,ticket) = SessionDelivery.settleSelected id current result model.sessionDelivery
+                released = { model | sessionDelivery = settled }
+                delayed = ticket |> Maybe.map (\value -> Process.sleep SessionDelivery.retryDelay |> Task.perform (\_ -> SessionResourceRetry value guard)) |> Maybe.withDefault Cmd.none
             in
             if not current then ( released, Cmd.none )
             else case result of
@@ -119,7 +127,7 @@ updateRaw msg model =
                             -- read proof while preserving the presentation owner.
                             ( { released | sessionDelivery = SessionDelivery.invalidateReadProof (Maybe.withDefault "" guard.routeWorkspace) released.sessionDelivery }, Cmd.none )
                         _ -> ( released, Cmd.none )
-                _ -> ( released, Cmd.none )
+                _ -> ( released, delayed )
 
         RefreshTaskStatusEligibility workspace epoch taskId ->
             if workspace /= model.selectedWorkspaceId || epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspace) |> Maybe.withDefault False) then

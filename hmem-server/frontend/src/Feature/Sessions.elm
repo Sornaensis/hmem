@@ -234,7 +234,9 @@ reconcile ( model, command ) =
             (List.map (\target -> (ws,target)) hintTargets) ++
             (window |> Maybe.map List.singleton |> Maybe.withDefault [])) |> Maybe.withDefault []
         identities = List.map (\(ws,target) -> Delivery.key ws target) desired
-        kept = List.foldl (\(ws,target) state -> if List.member (Delivery.key ws target) identities then state else Delivery.removeDemand ws target state) model.sessionDelivery old.owned
+        selection = Maybe.map2 (\ws id -> {workspace=ws,session=id,lifetime=current.stamp ++ ":" ++ String.fromInt current.generation}) workspace selected
+        selectedDelivery = Delivery.select selection model.sessionDelivery
+        kept = List.foldl (\(ws,target) state -> if List.member (Delivery.key ws target) identities then state else Delivery.removeDemand ws target state) selectedDelivery old.owned
         demanded = List.foldl (\(ws,target) state -> if Dict.get (Delivery.key ws target) state.resources |> Maybe.map (\existing -> existing.target == target) |> Maybe.withDefault False then state else Delivery.demand ws target state) kept desired
         chunk = window |> Maybe.andThen (\(ws,target) -> Dict.get (Delivery.key ws target) demanded.resources |> Maybe.andThen (\value -> if current.pending || value.dirty /= value.settled then Nothing else case value.data of
             Just (Delivery.Bytes range) -> if range.offset == current.offset then Just range else Nothing
@@ -323,7 +325,7 @@ update msg model =
                 decodeRecovery = state.error /= Nothing
                 begin = max 0 (state.end - 2097152)
                 refresh ws delivery =
-                    Delivery.invalidateFacets ws (Delivery.invalidateLists ws delivery)
+                    Delivery.invalidateFacets ws (Delivery.invalidateLists ws (Delivery.retrySelected delivery))
                         |> (\current -> state.selected |> Maybe.map (\id -> Delivery.invalidateSession ws id current) |> Maybe.withDefault current)
                         |> (\current -> state.taskPanel |> Maybe.map (\id -> Delivery.invalidateTask ws id current) |> Maybe.withDefault current)
                         |> (\current -> List.foldl (\(ownedWorkspace,target) accumulated -> case target of

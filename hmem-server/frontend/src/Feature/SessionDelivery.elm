@@ -1,7 +1,7 @@
 module Feature.SessionDelivery exposing
     ( State, Target(..), Payload(..), Request, Resource, init, key, demand, removeDemand
     , invalidateSession, invalidateProgress, invalidateTask, invalidateLists, invalidateFacets, invalidateReadProof, invalidateWorkspace, invalidateAll, retireWorkspace, retireAll
-    , admit, settle, fetch, staleAt, consume
+    , admit, requestIsCurrent, settle, settleSelected, retry, retrySelected, select, RetryTicket, Selection, RetryState(..), transient, retryDelay, fetch, staleAt, consume
     )
 
 {-| Bounded demand for canonical session HTTP resources. Logical retirement
@@ -38,23 +38,41 @@ type Payload
     | FacetsPage Api.SessionFacetPage
 
 
+type RetryState
+    = Available
+    | Waiting RetryTicket
+    | Spent
+
+
+type alias Selection =
+    { workspace : String, session : String, lifetime : String }
+
+
+type alias RetryTicket =
+    { request : Request, selection : Selection }
+
+
+retryDelay : Float
+retryDelay = 500
+
+
 type alias Resource =
     { workspace : String, target : Target, dirty : Int, settled : Int
-    , data : Maybe Payload, ranges : List Api.SessionRange, error : Maybe String, proven : Bool }
+    , data : Maybe Payload, ranges : List Api.SessionRange, error : Maybe String, proven : Bool, incarnation : Int, retry : RetryState }
 
 
 type alias Request =
-    { id : Int, key : String, workspace : String, target : Target, dirty : Int, proofRetirement : Int }
+    { id : Int, key : String, workspace : String, target : Target, dirty : Int, proofRetirement : Int, incarnation : Int }
 
 
 type alias State =
     { resources : Dict String Resource, physical : Dict Int Request, order : List String, implicitMetadata : Set String
-    , nextId : Int, version : Int, retirement : Int, proofRetirement : Int, listInvalidation : Int, foregroundStreak : Int, admissionError : Maybe String }
+    , selection : Maybe Selection, nextId : Int, version : Int, retirement : Int, proofRetirement : Int, listInvalidation : Int, foregroundStreak : Int, admissionError : Maybe String }
 
 
 init : State
 init =
-    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, nextId = 1, version = 0, retirement = 0, proofRetirement = 0, listInvalidation = 0, foregroundStreak = 0, admissionError = Nothing }
+    { resources = Dict.empty, physical = Dict.empty, order = [], implicitMetadata = Set.empty, selection = Nothing, nextId = 1, version = 0, retirement = 0, proofRetirement = 0, listInvalidation = 0, foregroundStreak = 0, admissionError = Nothing }
 
 
 key : String -> Target -> String
@@ -132,13 +150,70 @@ demandOne workspace target state =
     in
     case Dict.get identity state.resources of
         Just resource ->
-            if resource.target == target && resource.error == Nothing then state
+            if resource.target == target && (resource.error == Nothing || isSelected resource state) then state
             else { state | version = version, admissionError = Nothing
-                , resources = Dict.insert identity { resource | target = target, dirty = version, error = Nothing } state.resources }
+                , resources = Dict.insert identity { resource | target = target, dirty = version, error = Nothing, incarnation = version, retry = Available } state.resources }
         Nothing ->
             if Dict.size state.resources >= 16 then { state | admissionError = Just "demand_limit" }
             else { state | version = version, admissionError = Nothing, order = state.order ++ [identity]
-                , resources = Dict.insert identity (Resource workspace target version 0 Nothing [] Nothing False) state.resources }
+                , resources = Dict.insert identity (Resource workspace target version 0 Nothing [] Nothing False version Available) state.resources }
+
+
+-- Selection lifetimes are independent of progress invalidation versions.
+isSelected : Resource -> State -> Bool
+isSelected resource state =
+    state.selection |> Maybe.map (\selection ->
+        resource.workspace == selection.workspace && (case resource.target of
+            SessionMetadata id -> id == selection.session
+            SessionBytes id _ _ -> id == selection.session
+            SessionWindow id _ _ _ -> id == selection.session
+            _ -> False)) |> Maybe.withDefault False
+
+
+select : Maybe Selection -> State -> State
+select selection state =
+    if selection == state.selection then state else
+    let
+        version = state.version + 1
+        next = {state | selection=selection,version=version}
+    in
+    {next | resources=Dict.map (\_ resource ->
+        if isSelected resource next then
+            {resource | incarnation=version,retry=Available,error=Nothing}
+        else if isSelected resource state then
+            {resource | incarnation=version,retry=Spent}
+        else resource) state.resources}
+
+
+retrySelected : State -> State
+retrySelected state =
+    let version=state.version+1 in
+    {state | version=version,resources=Dict.map (\_ resource ->
+        if isSelected resource state then {resource | incarnation=version,retry=Available,error=Nothing,dirty=version} else resource) state.resources}
+
+
+transient : Http.Error -> Bool
+transient error =
+    case error of
+        Http.Timeout -> True
+        Http.NetworkError -> True
+        Http.BadStatus status -> List.member status [500,502,503,504]
+        _ -> False
+
+
+-- A timer only restores queued demand. Admission and callback-owned release
+-- remain the scheduler's responsibility.
+retry : RetryTicket -> State -> State
+retry ticket state =
+    let request=ticket.request in
+    case Dict.get request.key state.resources of
+        Just resource ->
+            if state.selection == Just ticket.selection && isSelected resource state
+                && resource.incarnation == request.incarnation && resource.target == request.target
+                && state.proofRetirement == request.proofRetirement && resource.retry == Waiting ticket then
+                {state | resources=Dict.insert request.key {resource | retry=Spent,error=Nothing} state.resources}
+            else state
+        Nothing -> state
 
 
 removeDemand : String -> Target -> State -> State
@@ -164,7 +239,7 @@ invalidate : (Resource -> Bool) -> State -> State
 invalidate matches state =
     let version = state.version + 1 in
     { state | version = version, listInvalidation = state.listInvalidation + 1, resources = Dict.map (\_ resource ->
-        if matches resource then { resource | dirty = version, error = Nothing } else resource) state.resources }
+        if matches resource then { resource | dirty = version, error = if isSelected resource state then resource.error else Nothing } else resource) state.resources }
 
 
 invalidateWorkspace : String -> State -> State
@@ -178,12 +253,12 @@ invalidateReadProof : String -> State -> State
 invalidateReadProof workspace =
     invalidate (\resource -> resource.workspace == workspace)
         >> (\state -> { state | proofRetirement = state.proofRetirement + 1, resources = Dict.map (\_ resource ->
-            if resource.workspace == workspace then { resource | data = retainedMetadata resource.data, ranges = [], proven = False } else resource) state.resources })
+            if resource.workspace == workspace then { resource | data = retainedMetadata resource.data, ranges = [], proven = False, incarnation = state.version, retry = Available, error = Nothing } else resource) state.resources })
 
 
 invalidateAll : State -> State
 invalidateAll =
-    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, proofRetirement = state.proofRetirement + 1, resources = Dict.map (\_ resource -> { resource | data = retainedMetadata resource.data, ranges = [], proven = False }) state.resources })
+    invalidate (always True) >> (\state -> { state | retirement = state.retirement + 1, proofRetirement = state.proofRetirement + 1, resources = Dict.map (\_ resource -> { resource | data = retainedMetadata resource.data, ranges = [], proven = False, incarnation = state.version, retry = Available, error = Nothing }) state.resources })
 
 
 -- Same-authority refresh keeps the last admitted presentation in this existing
@@ -242,7 +317,7 @@ invalidateProgress workspace id state =
                     in freshness || (not hasMetadata && contains)
     in
     { state | version = version, resources = Dict.map (\_ resource ->
-        if resource.workspace == workspace && matches resource then { resource | dirty = version, error = Nothing } else resource) state.resources }
+        if resource.workspace == workspace && matches resource then { resource | dirty = version, error = if isSelected resource state then resource.error else Nothing } else resource) state.resources }
 
 
 invalidateTask : String -> String -> State -> State
@@ -291,7 +366,9 @@ admit workspace state =
                 |> Maybe.map (\detail -> detail.proven && detail.error == Nothing && detail.data /= Nothing) |> Maybe.withDefault False
             Nothing -> True
         ready = state.order |> List.filterMap (\identity -> Dict.get identity state.resources |> Maybe.map (Tuple.pair identity)) |> List.filter (\( identity, resource ) ->
-            resource.workspace == workspace && resource.dirty /= resource.settled && resource.error == Nothing && not (occupied identity) && metadataReady resource)
+            resource.workspace == workspace && resource.dirty /= resource.settled && resource.error == Nothing && (case resource.retry of
+                Waiting _ -> False
+                _ -> True) && not (occupied identity) && metadataReady resource)
         foreground (_, resource) = case resource.target of
             SessionMetadata _ -> True
             SessionBytes _ _ _ -> True
@@ -316,14 +393,36 @@ admit workspace state =
                         paced = {next | foregroundStreak = if foreground item then min 3 (current.foregroundStreak + 1) else 0}
                     in choose (remaining - 1) (List.filter (Tuple.first >> (/=) (Tuple.first item)) available) paced admitted
         add ( identity, resource ) ( current, requests ) =
-            let request = Request current.nextId identity workspace resource.target resource.dirty current.proofRetirement in
+            let request = Request current.nextId identity workspace resource.target resource.dirty current.proofRetirement resource.incarnation in
             ( { current | nextId = current.nextId + 1, physical = Dict.insert request.id request current.physical, order = List.filter ((/=) identity) current.order ++ [identity] }, requests ++ [request] )
     in
     choose (max 0 (2 - Dict.size state.physical)) ready state []
 
 
+requestIsCurrent : Request -> State -> Bool
+requestIsCurrent request state =
+    request.proofRetirement == state.proofRetirement
+        && (Dict.get request.key state.resources |> Maybe.map (\resource ->
+            resource.incarnation == request.incarnation && resource.target == request.target) |> Maybe.withDefault False)
+
+
 settle : Int -> Bool -> Result Http.Error Payload -> State -> State
 settle id authorized result state =
+    settleSelected id authorized result state |> Tuple.first
+
+
+settleSelected : Int -> Bool -> Result Http.Error Payload -> State -> ( State, Maybe RetryTicket )
+settleSelected id authorized result state =
+    let
+        finished = settleResult id authorized result state
+        ticket = Dict.get id state.physical |> Maybe.andThen (\request -> Dict.get request.key finished.resources |> Maybe.andThen (\resource -> case resource.retry of
+            Waiting value -> if value.request.id == id then Just value else Nothing
+            _ -> Nothing))
+    in (finished,ticket)
+
+
+settleResult : Int -> Bool -> Result Http.Error Payload -> State -> State
+settleResult id authorized result state =
     case Dict.get id state.physical of
         Nothing -> state
         Just request ->
@@ -331,16 +430,22 @@ settle id authorized result state =
             case Dict.get request.key state.resources of
                 Nothing -> released
                 Just resource ->
-                    if not authorized || request.proofRetirement /= state.proofRetirement || resource.target /= request.target then released
+                    if not authorized || request.proofRetirement /= state.proofRetirement || resource.target /= request.target || resource.incarnation /= request.incarnation then released
                     else if resource.dirty /= request.dirty && (case result of
+                        Err _ -> not (isSelected resource state)
                         Ok (Metadata _) -> False
                         Ok (SessionsPage _) -> False
                         Ok (TasksPage _) -> False
                         Ok (FacetsPage _) -> False
                         _ -> True) then released
                     else case result of
-                        Err _ ->
-                            { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "refresh_failed", proven = False } released.resources }
+                        Err error ->
+                            let
+                                retryState = case (resource.retry,state.selection) of
+                                    (Available,Just selection) -> if isSelected resource state && transient error then Waiting {request=request,selection=selection} else Spent
+                                    _ -> Spent
+                            in
+                            { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "refresh_failed", proven = False, retry = retryState } released.resources }
                         Ok payload ->
                             if not (valid request payload) then
                                 { released | resources = Dict.insert request.key { resource | data = Nothing, ranges = [], error = Just "invalid_response", proven = False } released.resources }
@@ -456,7 +561,7 @@ base64ByteLength encoded =
 apply : Request -> Resource -> Payload -> State -> State
 apply request resource payload state =
     let
-        cached = { resource | data = Just payload, settled = request.dirty, error = Nothing, proven = True }
+        cached = { resource | data = Just payload, settled = request.dirty, error = Nothing, proven = True, retry = Available }
         updated = { state | resources = Dict.insert request.key cached state.resources }
     in
     case payload of
@@ -484,7 +589,10 @@ apply request resource payload state =
                     case old.target of
                         SessionBytes id offset sealed ->
                             if sealed /= (session.state == Api.SessionTerminated) || (session.committedBytes > offset && not (Dict.values refreshed.physical |> List.any (\pending -> pending.key == rangeKey))) then
-                                { old | target = SessionBytes id offset (session.state == Api.SessionTerminated), dirty = refreshed.version + 1, error = Nothing }
+                                { old | target = SessionBytes id offset (session.state == Api.SessionTerminated), dirty = refreshed.version + 1
+                                    , error = if sealed /= (session.state == Api.SessionTerminated) then Nothing else old.error
+                                    , retry = if sealed /= (session.state == Api.SessionTerminated) then Available else old.retry
+                                    , incarnation = if sealed /= (session.state == Api.SessionTerminated) then refreshed.version + 1 else old.incarnation }
                             else if session.committedBytes == offset then { old | settled = old.dirty }
                             else old
                         _ -> old

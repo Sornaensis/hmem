@@ -36,7 +36,8 @@ and local fragments; raw HTML is not executed and images display their alt text.
   mounted cards to converge under its unchanged 16-resource and two-request caps.
   Pending physical requests retain their admissions until their exact callbacks.
   Invalidation makes cached results stale and queues a canonical refresh; errors
-  stay paused until retry or invalidation. Workspace/authority epochs clear caches.
+  stay paused until retry or invalidation outside the selected-read recovery below.
+  Workspace/authority epochs clear caches.
   Same-authority canonical refresh retains the last admitted metadata pages in
   that bounded cache, so lists, linked tasks and model labels do not flash to
   loading placeholders or move the transcript. Ordinary output refresh can admit a
@@ -49,6 +50,16 @@ and local fragments; raw HTML is not executed and images display their alt text.
   replace it. The dock exposes refresh through `aria-busy` without inserting a
   temporary row above the transcript. Transport byte payloads and their bounded
   range history are discarded on canonical refresh, not reused as metadata.
+- The selected session’s metadata and current transcript range retry once, 500 ms
+  after a completed timeout, network error or HTTP 500/502/503/504. The retry keeps
+  its exact offset, end and active/evidence target and re-enters the shared
+  scheduler without occupying a slot during backoff. The HTTP timeout remains
+  20 seconds. Selection, range, workspace, authority and read-proof changes retire
+  delayed tickets; stale callbacks release only their own physical admission.
+  Ordinary progress invalidation preserves waiting and exhausted attempts. A second
+  failure leaves the existing manual Retry action; success or explicit Retry
+  restores the budget. Lists, background-only reads, downloads, archives and
+  permanent/authentication/decoding/invalid-response failures do not automatically retry.
 - Ordinary session updates reuse a demanded session metadata read and patch its
   existing proven page entries. Without that demand, only pages displaying the
   session refresh. Missing fresh-filter members and stale-filter membership still

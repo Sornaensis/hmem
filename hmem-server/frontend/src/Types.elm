@@ -1489,6 +1489,7 @@ type Msg
     | SessionsTaskPreviousPage String
     | RemoveSessionResource String Feature.SessionDelivery.Target
     | SessionResourceFetched Int CanonicalRequestGuard (Result Http.Error Feature.SessionDelivery.Payload)
+    | SessionResourceRetry Feature.SessionDelivery.RetryTicket CanonicalRequestGuard
     | CanonicalWorkspaceFetched CanonicalRequestGuard String (Result Http.Error Api.Workspace)
     | CanonicalProjectFetched CanonicalRequestGuard String (Result Http.Error Api.Project)
     | CanonicalTaskFetched CanonicalRequestGuard String (Result Http.Error Api.Task)

@@ -142,6 +142,9 @@ route msg model =
         RemoveSessionResource _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
+        SessionResourceRetry _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
         SessionResourceFetched _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 

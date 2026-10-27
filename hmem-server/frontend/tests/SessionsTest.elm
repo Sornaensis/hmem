@@ -362,7 +362,7 @@ metadataPresentationTests =
         detailTarget = Delivery.SessionMetadata sessionId
         windowTarget = Delivery.SessionWindow sessionId 0 32 False
         legacyTarget = Delivery.SessionBytes sessionId 0 False
-        entry target value = {workspace=workspace,target=target,dirty=0,settled=0,data=Just value,ranges=[],error=Nothing,proven=True}
+        entry target value = {workspace=workspace,target=target,dirty=0,settled=0,data=Just value,ranges=[],error=Nothing,proven=True,incarnation=0,retry=Delivery.Available}
         ready session =
             let initial=Delivery.init
                 range={session=session,offset=0,nextOffset=3,dataBase64="e30K",hasMore=True}

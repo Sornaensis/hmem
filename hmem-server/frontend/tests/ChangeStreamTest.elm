@@ -161,6 +161,22 @@ suite =
                         in
                         Expect.equal (0,0,Nothing) (Dict.size done.sessionDelivery.physical,Dict.size refused.sessionDelivery.physical,Dict.get request.key refused.sessionDelivery.resources |> Maybe.andThen .data)
                     _ -> Expect.fail "Expected one current request"
+        , test "same-key reincarnation rejects stale authentication failures before authority effects" <|
+            \_ ->
+                let
+                    target = Delivery.SessionMetadata agentId
+                    source = WebSocket.update (DemandSessionResource "a" target) streamModel |> Tuple.first
+                in
+                case Dict.values source.sessionDelivery.physical of
+                    [request] ->
+                        let
+                            readded = {source | sessionDelivery=source.sessionDelivery |> Delivery.removeDemand "a" target |> Delivery.demand "a" target}
+                            finish status = WebSocket.update (SessionResourceFetched request.id (sessionGuard source request) (Err (Http.BadStatus status))) readded |> Tuple.first
+                            results = List.map finish [401,403]
+                        in
+                        Expect.equal [(AuthReady,1,True),(AuthReady,1,True)]
+                            (List.map (\result -> (result.auth.status,Dict.size result.sessionDelivery.physical,result.sessionDelivery.nextId > source.sessionDelivery.nextId)) results)
+                    _ -> Expect.fail "Expected one current metadata request"
         , test "closing focus retires its implicit metadata but preserves a separately demanded detail owner" <|
             \_ ->
                 let

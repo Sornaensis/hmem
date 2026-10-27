@@ -3214,16 +3214,19 @@ textarea.observation-edit-content {
 
 .card-status-active,
 .card-status-todo {
+  --card-status-surface: var(--bg-surface);
   background: var(--bg-surface);
 }
 
 .card-status-in_progress {
+  --card-status-surface: rgba(14, 165, 233, 0.06);
   --card-status-border: rgba(14, 165, 233, 0.25);
   background: rgba(14, 165, 233, 0.06);
   border-color: rgba(14, 165, 233, 0.25);
 }
 
 .card-status-paused {
+  --card-status-surface: rgba(234, 179, 8, 0.06);
   --card-status-border: rgba(234, 179, 8, 0.25);
   background: rgba(234, 179, 8, 0.06);
   border-color: rgba(234, 179, 8, 0.25);
@@ -3231,6 +3234,7 @@ textarea.observation-edit-content {
 
 .card-status-completed,
 .card-status-done {
+  --card-status-surface: rgba(34, 197, 94, 0.06);
   --card-status-border: rgba(34, 197, 94, 0.2);
   background: rgba(34, 197, 94, 0.06);
   border-color: rgba(34, 197, 94, 0.2);
@@ -3238,6 +3242,7 @@ textarea.observation-edit-content {
 
 .card-status-archived,
 .card-status-cancelled {
+  --card-status-surface: rgba(148, 163, 184, 0.06);
   --card-status-border: rgba(148, 163, 184, 0.2);
   background: rgba(148, 163, 184, 0.06);
   border-color: rgba(148, 163, 184, 0.2);
@@ -4847,9 +4852,15 @@ textarea.observation-edit-content {
 .task-session-dock .session-records { height:440px; min-height:180px; max-height:65vh; }
 .task-session-dock .sessions-toolbar { align-items:flex-start; flex-wrap:wrap; }
 
-/* A dock uses the available extra width while ordinary cards keep their measure. */
-.hierarchy-viewport:has(.task-card-with-dock) { max-width:109.2rem; }
-.hierarchy-viewport:has(.task-card-with-dock) .hierarchy-row > .card:not(.task-card-with-dock) { max-width:78rem; }
+/* Keep row geometry stable; only the owning card borrows the dock's extra width.
+   The percentage retains its row's existing hierarchy indentation. */
+.workspace-tree-content .hierarchy-row > .task-card-with-dock { width:calc(100% + min(109.2rem, 100cqw) - min(78rem, 100cqw)); }
+.workspace-tree-content .hierarchy-task-family > .hierarchy-row > .card-subtask.task-card-with-dock { width:calc(100% + min(109.2rem, 100cqw) - min(78rem, 100cqw) - 14px); }
+/* Continue the existing family surface only beneath the owning face. An opaque
+   underlay also covers the narrow family's inset edge without recoloring peers. */
+.workspace-tree-content .hierarchy-row:has(> .task-card-with-dock) { position:relative; isolation:isolate; }
+.workspace-tree-content .hierarchy-row:has(> .task-card-with-dock)::before { content:""; position:absolute; z-index:-1; pointer-events:none; inset:0 auto 12px 0; width:calc(100% + min(109.2rem, 100cqw) - min(78rem, 100cqw)); border-radius:8px; background:linear-gradient(var(--card-status-surface, var(--bg-surface)), var(--card-status-surface, var(--bg-surface))), var(--bg); }
+.workspace-tree-content .hierarchy-task-family > .hierarchy-row:has(> .card-subtask.task-card-with-dock)::before { width:calc(100% + min(109.2rem, 100cqw) - min(78rem, 100cqw) - 14px); }
 .task-card-with-dock { grid-template-columns:minmax(0,1fr) minmax(360px,1.3fr); }
 .session-card { padding:0; min-width:0; background:var(--bg-surface); transition:border-color .15s; }
 .session-card:hover,.session-card.selected { border-color:var(--accent); }

@@ -81,3 +81,34 @@ test('an unfocused dock retires when its card leaves the bounded mounted hierarc
   assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
+
+test('only the owning task grows for a dock across sibling, nested and project boundaries',{timeout:90000},async t=>{
+ const h=await openSessionExplorer({activeCount:1,linkedCount:2}),{page,fixture:f}=h,owner=f.tasks[0],old=owner.id
+ owner.id='11000000-0000-4000-8000-000000000001';for(const links of h.sessionLinks.values()){links.delete(old);links.add(owner.id)}
+ const a=f.projects[0],b={...a,id:'50000000-0000-4000-8000-000000000002',name:'Independent project',priority:4};a.name='Frontend delivery';a.priority=10;f.projects.push(b)
+ const sibling=f.tasks[1];Object.assign(owner,{title:'Implement the in-card agent reader',status:'in_progress',priority:10});Object.assign(sibling,{title:'Review sibling task layout',priority:8})
+ const make=(suffix,title,parent_id,project_id,priority)=>({...owner,id:'11000000-0000-4000-8000-'+suffix,title,parent_id,project_id,priority,status:'todo'})
+ f.tasks.push(make('000000000003','Nested agent task',sibling.id,a.id,6),make('000000000004','Nested sibling task',sibling.id,a.id,5),make('000000000005','Another project task',null,b.id,4),make('000000000006','Another project subtask','11000000-0000-4000-8000-000000000005',b.id,3))
+ for(const links of h.sessionLinks.values())for(const task of f.tasks)links.add(task.id)
+ const faces=[...f.projects.map(p=>({kind:'project',id:p.id})),...f.tasks.map(task=>({kind:'task',id:task.id}))],receipts=[]
+ const measure=async()=>{const result={};for(const face of faces){await h.scrollTo(face.kind+':'+face.id);result[face.id]=await page.locator('#entity-'+face.id+(face.kind==='project'?' > .card-project':'')).evaluate(el=>{const r=el.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,scrollTop:document.getElementById('main-content-scroll').scrollTop}})}return result}
+ const stable=(baseline,current,except)=>{for(const face of faces)if(face.id!==except){assert.ok(Math.abs(current[face.id].width-baseline[face.id].width)<1,JSON.stringify({face,before:baseline[face.id],after:current[face.id]}));assert.ok(Math.abs(current[face.id].height-baseline[face.id].height)<1,JSON.stringify({face,before:baseline[face.id],after:current[face.id]}))}}
+ try{
+  await h.start();await page.getByRole('button',{name:'Expand All',exact:true}).click();await h.idle()
+  for(const width of [2560,1440,900,430]){
+   // Fit this finite comparison scene so inspecting distant peers cannot invoke
+   // the separately covered offscreen-owner retirement contract.
+   await page.setViewportSize({width,height:6000});const baseline=await measure(),hierarchyWidth=await page.locator('.hierarchy-viewport').evaluate(n=>n.getBoundingClientRect().width)
+   for(const task of [owner,f.tasks[2],f.tasks[4]]){
+    await h.scrollTo('task:'+task.id);const button=page.locator('#entity-'+task.id+' > .card-header .task-sessions-icon');await button.focus();await page.keyboard.press('Enter');await page.locator('#entity-'+task.id+'.task-card-with-dock').waitFor();await page.locator('#session-records .session-record').first().waitFor();await h.idle()
+    await page.locator('#session-records').evaluate(n=>window.dockIsolationReader=n);const opened=await measure();stable(baseline,opened,task.id)
+    assert.ok(opened[task.id].height>baseline[task.id].height,JSON.stringify({width,task:task.id,before:baseline[task.id],after:opened[task.id],dock:await page.locator('.task-card-with-dock').evaluateAll(ns=>ns.map(n=>n.id)),active:await page.evaluate(()=>document.activeElement.outerHTML.slice(0,400))}));assert.ok(opened[task.id].width>=baseline[task.id].width-1);if(width===2560)assert.ok(opened[task.id].width>baseline[task.id].width+100)
+    assert.equal(await page.locator('.hierarchy-viewport').evaluate(n=>n.getBoundingClientRect().width),hierarchyWidth);assert.equal(await page.locator('#session-records').count(),1);assert.equal(await page.locator('#session-records').evaluate(n=>n===window.dockIsolationReader),true)
+    const bounds=await page.locator('#entity-'+task.id).evaluate(n=>{const main=document.getElementById('main-content-scroll');return{card:n.getBoundingClientRect().toJSON(),main:main.getBoundingClientRect().toJSON(),overflow:document.documentElement.scrollWidth>innerWidth,mainOverflow:main.scrollWidth>main.clientWidth}});assert.equal(bounds.overflow,false);assert.equal(bounds.mainOverflow,false);assert.ok(bounds.card.right<=bounds.main.right+1)
+    receipts.push({width,owner:task.id,hierarchyWidth,before:baseline[task.id],opened:opened[task.id],unchangedFaces:faces.length-1})
+   }
+   const last=f.tasks[4];await h.scrollTo('task:'+last.id);const close=page.locator('#entity-'+last.id+' > .card-header .task-sessions-icon');await close.click();await h.idle();assert.equal(await page.locator('#session-records').count(),0);assert.equal(await close.evaluate(n=>n===document.activeElement),true);stable(baseline,await measure(),null)
+  }
+  assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[]);t.diagnostic(JSON.stringify({owningCardOnly:true,oneViewer:true,nativeKeyboardAndCloseFocus:true,normalFlowY:true,receipts}))
+ }finally{await h.close()}
+})

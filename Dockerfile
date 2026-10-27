@@ -73,6 +73,7 @@ COPY hmem-server/test/fixtures/embedding-gpu-viability/foundation-contract-v1.js
 COPY config/managed-embedding-provenance.yaml config/managed-embedding-provenance.yaml
 COPY hmem-mcp/src hmem-mcp/src
 COPY hmem-mcp/app hmem-mcp/app
+COPY hmem-mcp/cbits hmem-mcp/cbits
 COPY hmem-embedding-http/src hmem-embedding-http/src
 COPY hmem-embedding-http/app hmem-embedding-http/app
 COPY hmem-embedding-http/cbits hmem-embedding-http/cbits

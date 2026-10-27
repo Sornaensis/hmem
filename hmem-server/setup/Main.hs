@@ -429,13 +429,16 @@ doInit = do
   putStrLn ""
 
   dir <- configDir
-  let dataDir = dir </> "data" </> "postgresql"
-      logDir  = dir </> "logs"
+  let dataDir   = dir </> "data" </> "postgresql"
+      logDir    = dir </> "logs"
+      socketDir = dir </> "run"
 
   -- 1. Create directory structure
   step "Creating directory structure"
   createDirectoryIfMissing True dataDir
   createDirectoryIfMissing True logDir
+  when (not isWindows) $
+    createDirectoryIfMissing True socketDir
 
   -- 2. Check for PostgreSQL tools
   step "Checking PostgreSQL tools"
@@ -471,6 +474,14 @@ doInit = do
         , "listen_addresses = 'localhost'"
         ]
       pure cfg
+
+  -- Debian PostgreSQL builds default to /var/run/postgresql for Unix sockets,
+  -- which is not writable by an unprivileged, user-owned cluster.  Apply this
+  -- after the PG_VERSION check as well so re-running init repairs a cluster
+  -- left behind by a failed first startup.
+  when (not isWindows) $ do
+    step "Configuring PostgreSQL socket directory"
+    configurePostgresSocketDirectory dataDir socketDir
 
   -- 4. Start PostgreSQL temporarily
   step "Starting PostgreSQL"
@@ -1455,6 +1466,46 @@ step msg = do
 
 strip :: String -> String
 strip = dropWhileEnd isSpace . dropWhile isSpace
+
+-- | Ensure a user-owned PostgreSQL cluster does not inherit a system socket
+-- directory that its owner cannot write.  An explicit setting is treated as
+-- user configuration and left intact; otherwise a small managed stanza is
+-- appended without rewriting the rest of postgresql.conf.
+configurePostgresSocketDirectory :: FilePath -> FilePath -> IO ()
+configurePostgresSocketDirectory dataDir socketDir = do
+  let configPath = dataDir </> "postgresql.conf"
+  contents <- readFile configPath
+  if hasPostgresSetting "unix_socket_directories" contents
+    then putStrLn "  Existing unix_socket_directories setting preserved."
+    else do
+      appendFile configPath $ unlines
+        [ ""
+        , "# hmem Unix socket configuration"
+        , "unix_socket_directories = " <> postgresConfigString socketDir
+        ]
+      putStrLn $ "  Socket directory: " <> socketDir
+
+hasPostgresSetting :: String -> String -> Bool
+hasPostgresSetting setting = any isSetting . lines
+  where
+    expectedName = map toLowerAscii setting
+    isSetting line =
+      let uncommented = strip (takeWhile (/= '#') line)
+          (name, remainder) = span (\c -> not (isSpace c) && c /= '=') uncommented
+          afterName = dropWhile isSpace remainder
+          configuredValue = case afterName of
+            '=' : rest -> strip rest
+            rest       -> strip rest
+      in map toLowerAscii name == expectedName && not (null configuredValue)
+
+-- PostgreSQL configuration strings use backslash escapes and accept doubled
+-- single quotes.  Escape both so unusual (but valid) home paths round-trip.
+postgresConfigString :: String -> String
+postgresConfigString raw = "'" <> concatMap escape raw <> "'"
+  where
+    escape '\\' = "\\\\"
+    escape '\'' = "''"
+    escape c    = [c]
 
 requireCommand :: String -> IO ()
 requireCommand name = do

@@ -19,7 +19,11 @@ hmem-ctl status
 
 Run `stack path --local-bin` to find the executable directory and add it to `PATH`
 before running `hmem-ctl`. Setup creates a local database and
-`~/.hmem/config.yaml`, and registers services to start automatically. Use
+`~/.hmem/config.yaml`, and registers services to start automatically. On Linux,
+the user-owned PostgreSQL cluster places its Unix socket in `~/.hmem/run`
+instead of a system directory such as `/var/run/postgresql`; rerunning
+`hmem-ctl init` also repairs this setting after an interrupted first setup. An
+existing explicit `unix_socket_directories` setting is preserved. Use
 `hmem-ctl init` instead of the
 bare `hmem-ctl` command if you want to manage startup yourself.
 

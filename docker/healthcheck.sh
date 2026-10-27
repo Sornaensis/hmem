@@ -103,6 +103,13 @@ health_url() {
 
   hc_host=${HMEM_SERVER_HOST:-127.0.0.1}
   hc_port=${HMEM_SERVER_PORT:-8420}
+  hc_scheme=http
+  if [ -n "${HMEM_TLS_CERT_FILE:-}" ] && [ -n "${HMEM_TLS_KEY_FILE:-}" ]; then
+    hc_scheme=https
+  elif [ -n "${HMEM_TLS_CERT_FILE:-}${HMEM_TLS_KEY_FILE:-}" ]; then
+    log "HMEM_TLS_CERT_FILE and HMEM_TLS_KEY_FILE must be set together"
+    return 1
+  fi
   case "$hc_host" in
     0.0.0.0) hc_host=127.0.0.1 ;;
     ::) hc_host='[::1]' ;;
@@ -113,7 +120,7 @@ health_url() {
       esac
       ;;
   esac
-  printf 'http://%s:%s/api/v1/health' "$hc_host" "$hc_port"
+  printf '%s://%s:%s/api/v1/health' "$hc_scheme" "$hc_host" "$hc_port"
 }
 
 fetch_health() {

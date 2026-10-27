@@ -65,6 +65,12 @@ Secrets that do not currently have hmem runtime env overrides, such as OIDC `cli
 | `HMEM_TLS_CERT_FILE` | unset | `tls.cert_file` | TLS is enabled only when both cert and key are set. |
 | `HMEM_TLS_KEY_FILE` | unset | `tls.key_file` | Fail fast if only one TLS file is set. |
 
+The container healthcheck uses HTTPS when both TLS files are configured, and HTTP
+when neither is set. `HMEM_HEALTHCHECK_URL` overrides its default loopback URL. Certificate
+and hostname verification stay enabled: if the server certificate does not cover
+the loopback hostname/address, set an explicit matching HTTPS health URL and make
+its CA trusted inside the image.
+
 ## Embedding configuration
 
 The entrypoint writes only existing `embedding` YAML fields. It does not

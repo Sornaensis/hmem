@@ -375,6 +375,45 @@ main
             self.assertEqual(result.returncode, 2)
             self.assertNotIn("valid-human-fallback", result.stdout)
 
+    def test_healthcheck_tls_defaults_and_explicit_url(self) -> None:
+        tls = {"HMEM_TLS_CERT_FILE": "/tls/server.crt", "HMEM_TLS_KEY_FILE": "/tls/server.key"}
+        cases = [
+            ({}, "http://127.0.0.1:8420/api/v1/health"),
+            (tls, "https://127.0.0.1:8420/api/v1/health"),
+            ({**tls, "HMEM_SERVER_HOST": "0.0.0.0", "HMEM_SERVER_PORT": "9443"},
+             "https://127.0.0.1:9443/api/v1/health"),
+            ({**tls, "HMEM_SERVER_HOST": "::"}, "https://[::1]:8420/api/v1/health"),
+            ({**tls, "HMEM_HEALTHCHECK_URL": "https://health.example.test:9443/ready"},
+             "https://health.example.test:9443/ready"),
+        ]
+        for settings, expected in cases:
+            with self.subTest(expected=expected):
+                result = self.run_shell("healthcheck.sh", settings, "health_url")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+        for setting in ("HMEM_TLS_CERT_FILE", "HMEM_TLS_KEY_FILE"):
+            result = self.run_shell("healthcheck.sh", {setting: "/tls/only-one-file"}, "health_url")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must be set together", result.stderr)
+
+    def test_tls_healthcheck_does_not_disable_certificate_verification(self) -> None:
+        result = self.run_shell("healthcheck.sh", {
+            "HMEM_TLS_CERT_FILE": "/tls/server.crt", "HMEM_TLS_KEY_FILE": "/tls/server.key",
+            "HMEM_CONTAINER_TEST_PYTHON": Path(sys.executable).as_posix(),
+        }, """
+python3() { "$HMEM_CONTAINER_TEST_PYTHON" "$@"; }
+curl() {
+  for argument in "$@"; do
+    case "$argument" in -k|--insecure|--no-check-certificate) return 1 ;; esac
+    final_argument=$argument
+  done
+  [ "$final_argument" = https://127.0.0.1:8420/api/v1/health ] || return 1
+  printf '%s' '{"status":"ok"}'
+}
+main
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 class BuiltImageTest(unittest.TestCase):
     def setUp(self) -> None:

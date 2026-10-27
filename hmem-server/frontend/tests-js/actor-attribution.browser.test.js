@@ -28,17 +28,17 @@ async function assertActors(rows) {
   assert.equal(await rows.locator('.actor-details').count(), 0)
 }
 
-async function assertSidebar(page, expected) {
-  await page.locator('.sidebar').evaluate(element => { element.scrollTop = element.scrollHeight })
+async function assertSessionContext(page, expected) {
+  await page.locator('.global-context').scrollIntoViewIfNeeded()
   assert.equal(await page.locator('.sidebar-session-principal').innerText(), expected)
   assert.doesNotMatch(await page.locator('.sidebar-session').innerText(), /gpt-6|authority-local|local_superadmin|Actor details/)
-  const geometry = await page.locator('.sidebar').evaluate(sidebar => {
-    const bounds = sidebar.getBoundingClientRect(), session = sidebar.querySelector('.sidebar-session').getBoundingClientRect()
+  const geometry = await page.locator('.global-context').evaluate(header => {
+    const bounds = header.getBoundingClientRect(), session = header.querySelector('.sidebar-session').getBoundingClientRect()
     const main = document.querySelector('.main-content').getBoundingClientRect()
-    return { contained: session.top >= bounds.top && session.bottom <= bounds.bottom + 1, separated: innerWidth > 700 || main.top >= bounds.bottom - 1 }
+    return { contained: session.top >= bounds.top && session.bottom <= bounds.bottom + 1, separated: main.top >= bounds.bottom - 1 }
   })
-  assert.equal(geometry.contained, true, 'session is reachable inside its scrolling sidebar')
-  assert.equal(geometry.separated, true, 'sidebar and main content do not overlap')
+  assert.equal(geometry.contained, true, 'session is reachable inside its current global header')
+  assert.equal(geometry.separated, true, 'global header and main content do not overlap')
 }
 
 test('production attribution keeps declared, authenticated and historical actors readable across existing views', { timeout: 60000 }, async () => {
@@ -69,14 +69,14 @@ test('production attribution keeps declared, authenticated and historical actors
   })
   try {
     await h.start(); await h.idle()
-    await assertSidebar(h.page, 'Local User')
+    await assertSessionContext(h.page, 'Local User')
     const project = h.page.locator('#entity-root-project')
     await project.locator('.btn-extras-toggle').click(); await project.locator('.entity-history-toggle').click()
     await project.locator('.history-entry').first().waitFor()
     await assertActors(project.locator('.history-entry'))
     await shot('history-desktop')
     await h.page.setViewportSize({ width: 320, height: 1000 })
-    await assertSidebar(h.page, 'Local User'); await shot('session-320')
+    await assertSessionContext(h.page, 'Local User'); await shot('session-320')
     await h.page.setViewportSize({ width: 1440, height: 1000 })
     await h.page.getByRole('button', { name: 'Audit', exact: true }).click()
     await h.page.locator('.audit-entry').first().waitFor()
@@ -92,7 +92,12 @@ test('production attribution keeps declared, authenticated and historical actors
       await shot('audit-' + width)
       const overflowing = await h.page.locator('.audit-detail-value').evaluateAll(rows => rows.filter(row => row.scrollWidth > row.clientWidth + 1).length)
       assert.equal(overflowing, 0, 'audit metadata values wrap at ' + width)
-      if (width === 320) assert.equal(await h.page.locator('.audit-detail-grid').first().evaluate(row => getComputedStyle(row).gridTemplateColumns.split(' ').length), 1, 'narrow audit metadata uses full-width values')
+      if (width === 320) {
+        const tracks = await h.page.locator('.audit-detail-grid').first().evaluate(row => ({ widths: getComputedStyle(row).gridTemplateColumns.split(' ').map(parseFloat), available: row.clientWidth, gap: parseFloat(getComputedStyle(row).columnGap) }))
+        assert.equal(tracks.widths.length, 2)
+        assert.equal(tracks.widths[0], 65, 'Accepted narrow Audit keeps its label track')
+        assert.ok(tracks.widths[1] > 0 && tracks.widths[0] + tracks.widths[1] + tracks.gap <= tracks.available + 1, 'Audit values use the remaining bounded content width')
+      }
     }
     await h.page.setViewportSize({ width: 1440, height: 1000 })
     await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
@@ -113,6 +118,7 @@ test('production attribution keeps declared, authenticated and historical actors
     await h.page.waitForFunction(() => new URLSearchParams(location.hash.slice(1)).get('focus') === 'project:root-project')
     await h.page.setViewportSize({ width: 1440, height: 1000 })
     await h.page.getByLabel('Workspace sections').getByRole('button', { name: 'Observations', exact: true }).click()
+    await h.page.getByRole('button', { name: 'All Observations', exact: true }).click()
     await h.page.locator('.observation-card').first().waitFor()
     await h.page.locator('.observation-card').first().click()
     await h.page.locator('.observation-current-provenance').waitFor()
@@ -134,7 +140,7 @@ test('production attribution keeps declared, authenticated and historical actors
     await h.page.locator('.observation-history-entry').first().waitFor()
     authenticated = true
     await h.page.reload(); await h.page.locator('.sidebar-session-principal').getByText('Alice Authenticated User').waitFor()
-    await assertSidebar(h.page, 'Alice Authenticated User'); await shot('session-authenticated-320')
+    await assertSessionContext(h.page, 'Alice Authenticated User'); await shot('session-authenticated-320')
     assert.deepEqual(h.errors, [])
   } finally { await h.close() }
 })

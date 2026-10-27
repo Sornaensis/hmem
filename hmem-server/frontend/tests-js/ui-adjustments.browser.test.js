@@ -98,7 +98,7 @@ test('obsolete due audit values remain inspectable and structured replay refusal
     await detail.waitFor()
     assert.match(await detail.innerText(), /Due at \(obsolete\)/)
     assert.match(await detail.innerText(), /2026-10-08 12:34/)
-    await h.page.locator('.audit-entry .btn-revert').click()
+    await detail.locator('.btn-revert').click()
     await h.page.locator('.revert-confirm-modal').getByRole('button', { name: 'Revert', exact: true }).click()
     await h.page.getByText(message, { exact: true }).waitFor()
     await h.page.locator('.revert-confirm-modal').waitFor({ state: 'detached' })

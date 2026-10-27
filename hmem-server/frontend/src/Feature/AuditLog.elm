@@ -442,22 +442,26 @@ viewAuditEntries model emptyMessage =
         div [ class "empty-state" ] [ text emptyMessage ]
 
     else
-        div [ class "audit-log-list audit-ledger",attribute "aria-label" "Audit ledger" ]
-            (List.map (viewAuditLogEntry model) model.auditLog.entries
-                ++ (if List.any (\entry -> Dict.get entry.id model.auditLog.expandedEntries == Just True) model.auditLog.entries then [] else [aside [class "audit-ledger-empty",style "grid-row" ("1 / span " ++ String.fromInt (Basics.max 1 (List.length model.auditLog.entries)))] [h4 [] [text "Event detail"],p [] [text "Select an event to inspect its recorded changes."]]])
-                ++ (if model.auditLog.hasMore && model.auditLog.loading then
-                        [ div [ class "loading-indicator" ] [ text "Loading more audit entries..." ] ]
+        div [ class "audit-log-list audit-ledger", attribute "aria-label" "Audit ledger" ]
+            [ div [ class "audit-ledger-rows" ]
+                ([ div [ class "audit-ledger-head" ] [ span [] [ text "Time / actor" ], span [] [ text "Change" ] ] ]
+                    ++ List.map (viewAuditLogEntry model) model.auditLog.entries
+                    ++ (if model.auditLog.hasMore && model.auditLog.loading then
+                            [ div [ class "loading-indicator" ] [ text "Loading more audit entries..." ] ]
 
-                    else if model.auditLog.hasMore then
-                        [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ]
-                            [ text "Load more..." ]
-                        ]
+                        else if model.auditLog.hasMore then
+                            [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ] [ text "Load more..." ] ]
 
-                    else
-                        []
-                   )
-            )
-
+                        else
+                            []
+                       )
+                )
+            , model.auditLog.entries
+                |> List.filter (\entry -> Dict.get entry.id model.auditLog.expandedEntries == Just True)
+                |> List.head
+                |> Maybe.map (viewAuditSelectedDetail model)
+                |> Maybe.withDefault (aside [ class "audit-ledger-empty" ] [ h4 [] [ text "Event detail" ], p [] [ text "Select an event to inspect its recorded changes." ] ])
+            ]
 
 viewAuditLogFilters : Model -> Html Msg
 viewAuditLogFilters model =
@@ -1408,7 +1412,9 @@ viewAuditLogEntry model entry =
     in
     div [ class ("audit-entry" ++ (if expanded then " audit-entry-selected" else "")) ]
         [ div [ class "audit-entry-row", onClick (ToggleAuditExpand entry.id) ]
-            [ button [ class "audit-expand-icon",type_ "button",attribute "aria-label" ("Inspect audit event " ++ entitySummary),attribute "aria-expanded" (if expanded then "true" else "false"),stopPropagationOn "click" (Decode.succeed (ToggleAuditExpand entry.id,True)) ]
+            [ div [ class "audit-ledger-when" ] [ span [ class "audit-timestamp" ] [ text (TimestampDisplay.lookup model.timestamps entry.changedAt) ], span [ class "audit-actor" ] [ ActorAttribution.viewInline entry ] ]
+            , div [ class "audit-ledger-change" ]
+              [ button [ class "audit-expand-icon",type_ "button",attribute "aria-label" ("Inspect audit event " ++ entitySummary),attribute "aria-expanded" (if expanded then "true" else "false"),stopPropagationOn "click" (Decode.succeed (ToggleAuditExpand entry.id,True)) ]
                 [ text
                     (if expanded then
                         "▾"
@@ -1428,8 +1434,6 @@ viewAuditLogEntry model entry =
 
                 Nothing ->
                     text ""
-            , span [ class "audit-actor" ] [ ActorAttribution.viewInline entry ]
-            , span [ class "audit-timestamp" ] [ text (TimestampDisplay.lookup model.timestamps entry.changedAt) ]
             , diffField |> Maybe.map (\field ->
                 let origin = "audit-diff-row-" ++ entry.id in
                 button
@@ -1440,27 +1444,26 @@ viewAuditLogEntry model entry =
                     ]
                     [ text "View diff" ]) |> Maybe.withDefault (text "")
             ]
-        , if expanded then
-            aside [ class "audit-entry-detail",attribute "aria-label" "Selected audit event",style "grid-row" ("1 / span " ++ String.fromInt (Basics.max 1 (List.length model.auditLog.entries))) ]
-                [ h4 [class "audit-detail-heading"] [text "Event detail"]
-                , viewAuditContext model entry
-                , viewAuditDetailSection model.timestamps "Action details" (auditActionDetailItems entry)
-                , viewAuditEntryChangeDetails model.timestamps entry
-                , div [ class "audit-entry-meta" ]
-                    [ span [ class "audit-entry-id" ] [ text "Entry: ", Helpers.copyableValue "" "audit entry ID" entry.id (String.left 8 entry.id) ]
-                    , span [ class "audit-entity-id" ] [ text "Entity: ", Helpers.copyableValue "" "entity ID" entry.entityId (String.left 8 entry.entityId) ]
-                    , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model && model.page == AuditLogPage then
-                        button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
-
-                      else
-                        text ""
-                    ]
-                ]
-
-          else
-            text ""
+            ]
         ]
 
+viewAuditSelectedDetail : Model -> Api.AuditLogEntry -> Html Msg
+viewAuditSelectedDetail model entry =
+    aside [ class "audit-entry-detail", attribute "aria-label" "Selected audit event" ]
+        [ h4 [ class "audit-detail-heading" ] [ text "Event detail" ]
+        , viewAuditContext model entry
+        , viewAuditDetailSection model.timestamps "Action details" (auditActionDetailItems entry)
+        , viewAuditEntryChangeDetails model.timestamps entry
+        , div [ class "audit-entry-meta" ]
+            [ span [ class "audit-entry-id" ] [ text "Entry: ", Helpers.copyableValue "" "audit entry ID" entry.id (String.left 8 entry.id) ]
+            , span [ class "audit-entity-id" ] [ text "Entity: ", Helpers.copyableValue "" "entity ID" entry.entityId (String.left 8 entry.entityId) ]
+            , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model && model.page == AuditLogPage then
+                button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
+
+              else
+                text ""
+            ]
+        ]
 
 viewAuditEntryChangeDetails : TimestampDisplay.State -> Api.AuditLogEntry -> Html Msg
 viewAuditEntryChangeDetails display entry =

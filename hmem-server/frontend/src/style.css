@@ -5434,3 +5434,49 @@ textarea.observation-edit-content {
   .workspace-context-persistent > .global-search-bar { align-self: start; }
 }
 
+
+/* The ledger owns its rows independently of the single selected detail. */
+.audit-log-view { max-width: 78rem; }
+.audit-log-view > :is(.section-header, .page-header) { margin-bottom: 14px; }
+.audit-log-filters { padding: 10px 14px; margin-bottom: 20px; gap: 12px; border-radius: 8px; }
+.audit-filter-group { gap: 5px; min-width: 0; }
+.audit-filter-group label { font-size: 12px; }
+.audit-log-filters :is(input, select, button) { min-height: 32px; font-size: 14px; }
+.audit-ledger { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 0; border-top: 1px solid var(--border); align-items: start; }
+.audit-ledger-rows { min-width: 0; }
+.audit-ledger .audit-entry { display: block; margin: 0; background: transparent; border: 0; border-radius: 0; overflow: visible; }
+.audit-ledger-head, .audit-ledger .audit-entry-row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 14px; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; align-items: start; }
+.audit-ledger-head { font-size: 12px; color: var(--text-muted); }
+.audit-ledger .audit-entry-selected > .audit-entry-row { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.audit-ledger-when { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.audit-ledger .audit-timestamp { font: 12px/1.5 monospace; margin: 0; }
+.audit-ledger .audit-actor { font-size: 12px; }
+.audit-ledger-change { display: flex; flex-wrap: wrap; align-items: center; align-content: start; gap: 8px; min-width: 0; font-size: 14px; line-height: 1.5; }
+.audit-ledger .audit-expand-icon { width: 24px; height: 24px; flex: 0 0 24px; align-self: center; }
+.audit-ledger .audit-entity-type { min-width: 0; font-size: 12px; }
+.audit-ledger .audit-entity-summary { flex: 1 1 100%; min-width: 0; font-size: 14px; white-space: normal; overflow-wrap: anywhere; }
+.audit-ledger .audit-status-change { flex: 1 1 100%; }
+.audit-ledger .audit-row-diff { min-height: 32px; font-size: 14px; }
+.audit-ledger .audit-entry-detail, .audit-ledger > .audit-ledger-empty { grid-column: auto; grid-row: auto; position: sticky; top: 12px; padding: 16px; border: 0; border-left: 1px solid var(--border); border-radius: 0; margin: 0; font-size: 12px; line-height: 1.5; }
+.audit-ledger .audit-detail-section { padding: 12px 0; margin: 12px 0 0; border: 0; border-top: 1px solid var(--border); background: transparent; border-radius: 0; }
+.audit-ledger .audit-detail-grid { grid-template-columns: 65px minmax(0, 1fr); gap: 8px 10px; }
+.audit-ledger .audit-detail-heading, .audit-ledger-empty h4 { font-size: 11px; margin-bottom: 12px; }
+.audit-ledger .audit-entry-meta { gap: 8px; font-size: 12px; margin-top: 14px; }
+.audit-ledger :is(.audit-view-diff, .btn-revert), .entity-history :is(.audit-view-diff, .btn-revert) { min-height: 32px; font-size: 14px; }
+.audit-diff-dialog { padding: 14px; border-radius: 8px; }
+.audit-diff-dialog[open] { gap: 14px; }
+.audit-diff-dialog :is(button, select) { min-height: 32px; }
+@media (max-width: 850px) {
+  .audit-ledger { grid-template-columns: minmax(0, 1fr) 235px; }
+}
+@media (max-width: 650px) {
+  .audit-ledger { grid-template-columns: minmax(0, 1fr); }
+  .audit-ledger-head, .audit-ledger .audit-entry-row { grid-template-columns: 85px minmax(0, 1fr); gap: 8px; padding: 14px 12px; }
+  .audit-ledger .audit-entry-detail, .audit-ledger > .audit-ledger-empty { position: static; border-left: 0; border-top: 1px solid var(--border); }
+  .audit-filter-group { flex: 1 1 120px; }
+  .audit-log-filters .audit-filter-group:has(input[type="date"]) { flex: 1 1 160px; min-width: 160px; }
+  .audit-log-filters .audit-filter-group :is(input, select), .audit-diff-dialog select { font-size: 16px; width: 100%; min-width: 0; }
+}
+@media (pointer: coarse) {
+  .audit-log-filters :is(input, select, button), .audit-ledger :is(.audit-row-diff, .audit-view-diff, .btn-revert), .audit-diff-dialog :is(button, select) { min-height: 44px; }
+}

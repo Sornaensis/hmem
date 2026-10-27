@@ -5480,3 +5480,62 @@ textarea.observation-edit-content {
 @media (pointer: coarse) {
   .audit-log-filters :is(input, select, button), .audit-ledger :is(.audit-row-diff, .audit-view-diff, .btn-revert), .audit-diff-dialog :is(button, select) { min-height: 44px; }
 }
+/* Remaining views use the same context, section and control primitives. */
+.home-page, .workspace-administration { max-width: 78rem; }
+.home-context { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); }
+.home-context h2 { flex: 1 1 180px; margin: 0; font-size: 18px; line-height: 1.4; font-weight: 500; }
+.home-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.home-page .local-session-notice { margin: 0 0 14px; padding: 14px; font-size: 12px; line-height: 1.5; border-radius: 8px; }
+.home-page .group-section { margin-bottom: 14px; border: 1px solid var(--border); border-radius: 8px; overflow: visible; }
+.home-page .group-header { flex-wrap: wrap; gap: 8px 14px; padding: 10px 14px; margin: 0; border-bottom: 1px solid var(--border); background: var(--bg-surface); border-radius: 8px 8px 0 0; }
+.home-page .group-title { flex: 1 1 180px; min-width: 0; flex-wrap: wrap; font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
+.home-page .group-description { font-size: 12px; line-height: 1.5; }
+.home-page .group-actions { flex-wrap: wrap; gap: 8px; }
+.home-page .group-manage-panel { margin: 14px; padding: 14px; border-radius: 8px; }
+.home-page .group-add-section { flex-wrap: wrap; gap: 8px; }
+.home-page .group-member-chip, .home-page .group-add-chip { max-width: 100%; overflow-wrap: anywhere; font-size: 14px; }
+.home-page .group-member-chip .chip-remove { flex-shrink: 0; width: 32px; height: 32px; }
+.home-page .card-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 14px; }
+.home-page .group-section > .card-grid { padding: 14px; }
+.home-page .home-ungrouped-heading { margin: 20px 0 14px; font-size: 16px; line-height: 1.5; }
+.home-page .workspace-card { padding: 0; color: var(--text); font: inherit; text-align: left; border-radius: 8px; }
+.home-page .workspace-card > .card-header { padding: 10px 14px; margin: 0; min-height: 54px; flex-wrap: wrap; gap: 8px; }
+.home-page .workspace-card .card-title { font-size: 14px; line-height: 1.5; }
+.home-page .workspace-card:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+.home-page :is(.home-actions, .group-actions) button, .home-page .group-add-chip { min-height: 32px; font-size: 14px; }
+.workspace-administration, .workspace-admin-content { gap: 14px; }
+.workspace-administration > h2, .workspace-memberships h3 { font-size: 18px; line-height: 1.4; font-weight: 500; }
+.workspace-admin-context { padding: 10px 14px; border-radius: 8px; }
+.workspace-memberships { padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); }
+.membership-row { gap: 8px 14px; padding: 12px 0; font-size: 14px; line-height: 1.5; }
+.membership-updated, .workspace-admin-label, .workspace-memberships .form-help { font-size: 12px; line-height: 1.5; }
+.membership-form { gap: 14px; }
+.workspace-administration :is(button, input, select) { min-height: 32px; }
+.auth-page { max-width: 48rem; margin: 14px; padding: 0 14px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); font-size: 14px; line-height: 1.5; }
+.auth-page > h2 { margin: 0 -14px 14px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 18px; line-height: 1.4; font-weight: 500; }
+.auth-page > p { margin: 0 0 14px; overflow-wrap: anywhere; }
+.auth-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.auth-page button { min-height: 32px; }
+.modal, .move-dialog { padding: 14px; border-radius: 8px; }
+.modal-title { padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 14px; font-size: 18px; line-height: 1.4; font-weight: 500; }
+.modal-actions { gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); margin-top: 14px; }
+.form-group { margin-bottom: 14px; }
+.form-label { font-size: 12px; line-height: 1.5; margin-bottom: 5px; }
+.form-input { min-width: 0; min-height: 32px; border-radius: 8px; }
+.modal :is(button, select, input), .move-dialog :is(button, select, input) { min-height: 32px; }
+.move-dialog h2 { font-size: 18px; line-height: 1.4; font-weight: 500; }
+.popover-menu { width: min(640px, calc(100vw - 28px)); min-width: 0; border-radius: 8px; }
+.popover-menu :is(button, select, input) { min-height: 32px; font-size: 14px; }
+.inline-edit-input, .inline-create-input { min-width: 0; min-height: 32px; font-size: 14px; }
+@media (max-width: 650px) {
+  .home-context h2 { flex-basis: 100%; }
+  .workspace-administration :is(input, select), .modal :is(input, select), .move-dialog :is(input, select), .popover-menu :is(input, select), .inline-edit-input, .inline-create-input { font-size: 16px; }
+  .group-member-list, .group-add-options { min-width: 0; }
+}
+@media (pointer: coarse) {
+  .home-page :is(.home-actions, .group-actions, .group-manage-panel) button, .workspace-administration :is(button, input, select), .auth-page button, .modal :is(button, input, select), .move-dialog :is(button, input, select), .popover-menu :is(button, input, select) { min-height: 44px; }
+  .home-page .group-member-chip .chip-remove { min-width: 44px; height: 44px; }
+}
+@media (pointer: coarse) {
+  .inline-edit-input, .inline-create-input { min-height: 44px; }
+}

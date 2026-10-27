@@ -447,27 +447,29 @@ viewHomePage model =
         ungroupedWs =
             allWs |> List.filter (\ws -> not (Dict.member ws.id groupedWsIds))
     in
-    div [ class "page" ]
-        [ h2 [ style "display" "flex", style "align-items" "center", style "gap" "0.75rem" ]
-            [ text "Workspaces"
-            , if Permissions.canCreateWorkspace model then
-                button
-                    [ class "btn-small"
-                    , onClick (ShowCreateForm (CreateWorkspaceForm { name = "", workspaceType = Api.Repository, ghOwner = "", ghRepo = "" }))
-                    ]
-                    [ text "+ Workspace" ]
+    div [ class "page home-page" ]
+        [ div [ class "home-context" ]
+            [ h2 [] [ text "Workspaces" ]
+            , div [ class "home-actions" ]
+                [ if Permissions.canCreateWorkspace model then
+                    button
+                        [ class "btn-small"
+                        , onClick (ShowCreateForm (CreateWorkspaceForm { name = "", workspaceType = Api.Repository, ghOwner = "", ghRepo = "" }))
+                        ]
+                        [ text "+ Workspace" ]
 
-              else
-                text ""
-            , if Permissions.isSuperadmin model then
-                button
-                    [ class "btn-small"
-                    , onClick (ShowCreateForm (CreateGroupForm { name = "", description = "" }))
-                    ]
-                    [ text "+ Group" ]
+                  else
+                    text ""
+                , if Permissions.isSuperadmin model then
+                    button
+                        [ class "btn-small"
+                        , onClick (ShowCreateForm (CreateGroupForm { name = "", description = "" }))
+                        ]
+                        [ text "+ Group" ]
 
-               else
-                text ""
+                  else
+                    text ""
+                ]
             ]
         , viewLocalModeNotice model
         , if model.dataLoading.loadingWorkspaces then
@@ -483,7 +485,7 @@ viewHomePage model =
                         ++ [ if not (List.isEmpty ungroupedWs) then
                                 div []
                                     [ if not (List.isEmpty groups) then
-                                        h3 [ style "margin-top" "1.5rem", style "margin-bottom" "0.75rem" ] [ text "Ungrouped" ]
+                                        h3 [ class "home-ungrouped-heading" ] [ text "Ungrouped" ]
 
                                       else
                                         text ""
@@ -667,14 +669,11 @@ viewHomeGroup model group =
 
 viewWorkspaceCard : Model -> Api.Workspace -> Html Msg
 viewWorkspaceCard model ws =
-    div [ class "card clickable workspace-card", onClick (SelectWorkspace ws.id) ]
+    button [ class "card clickable workspace-card", type_ "button", onClick (SelectWorkspace ws.id) ]
         [ div [ class "card-header" ]
             [ span [ class "card-title" ] [ text ws.name ]
             , span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
                 [ text (Api.workspaceTypeToString ws.workspaceType) ]
             , SessionActivityLight.view (Feature.SessionActivity.active ("workspace:" ++ ws.id) model) "Active sessions in this workspace"
-            ]
-        , div [ class "card-body" ]
-            [ text ""
             ]
         ]

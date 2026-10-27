@@ -66,7 +66,9 @@ Reference and production Main cases use identical record IDs,strings,timestamps,
 
 State bundles:L loading->populated+long text/code/paths;E empty/zero;R error+retry;U unavailable/unknown/unsupported/encrypted where supported;P read-only/denied/edit/admin actor variants;K keyboard/focus/native-dialog/edit/busy/protected-draft/return/anchors. Every existing subsurface's supported bundle states needs its own DOM/functional assertions;retain one highest-risk representativePNG per family/bundle and record membership/substeps/outcomes. Inapplicable states need a source/control reason. Only common geometry/style evidence can reuse B/E;authority,draft and mutation assertions stay domain-specific. This is pairwise/bundle coverage,not a Cartesian claim.
 
-Total60pairs plus72candidate-only screenshots=192PNG and24zero-image boundary cases,within256MiB. One contained `output/ui-alignment-27e2d615/` area is owned by the final qualifier through project closure,then newly created evidence is disposed. Preserve accepted originals and preexisting evidence/output siblings. Replace disposed superseded current-task captures or justify a revised bound for extra unresolved diagnostics;do not overwrite historical evidence.
+The canonical matrix remains60pairs plus72candidate-only screenshots=192PNG and24zero-image boundary cases. Retain11 historical supplemental PNGs separately:8dock-reading views,2native viewer-inspector views and1highest-risk short-height coarse view. The combined retention bound is203PNG within256MiB. Preserve each supplement's actual source,asset and viewport provenance; these historical supplements neither assert current-HEAD equivalence nor substitute for canonical cases.
+
+One contained `output/ui-alignment-27e2d615/` area is owned by the final qualifier through project closure,then newly created evidence is disposed. Preserve accepted originals and preexisting evidence/output siblings. Replace disposed superseded current-task captures or justify a revised bound for extra unresolved diagnostics;do not overwrite historical evidence.
 
 ## Validation and delivery
 

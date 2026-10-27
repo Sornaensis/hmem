@@ -1146,7 +1146,7 @@ viewPage model =
                     Feature.AuditLog.viewAuditLogPage model
 
                 NotFound ->
-                    div [ class "page" ]
+                    div [ class "page auth-page" ]
                         [ h2 [] [ text "Not Found" ] ]
 
 
@@ -1160,7 +1160,7 @@ viewAuthBootstrapPage model =
             else
                 "Checking " ++ Permissions.authModeLabel model ++ " auth session..."
     in
-    div [ class "page" ]
+    div [ class "page auth-page" ]
         [ h2 [] [ text "Loading session" ]
         , div [ class "loading-indicator" ] [ text loadingText ]
         ]
@@ -1209,7 +1209,7 @@ viewAuthRequiredPage model =
 
 viewAuthFailedPage : Model -> String -> Html Msg
 viewAuthFailedPage model message =
-    div [ class "page" ]
+    div [ class "page auth-page" ]
         [ h2 [] [ text "Session unavailable" ]
         , p [] [ text message ]
         , if model.workspaceAdmin.authorizationFailure /= Nothing then

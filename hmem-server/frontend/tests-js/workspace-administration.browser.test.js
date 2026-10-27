@@ -12,6 +12,7 @@ async function openAdmin() {
   let role = 'owner', actor = 'admin-actor', implicit = false, sessionReads = 0
   let members = [{ workspace_id: h.fixture.workspace.id, user_id: memberId, role: 'edit', granted_by: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-10-07T00:00:00Z' }]
   await h.page.route('**/api/v1/session**', async route => {
+    if (new URL(route.request().url()).pathname !== '/api/v1/session') return route.fallback()
     sessionReads++
     const control = controls.find(c => !c.used && c.method === 'SESSION')
     if (control) { control.used = true; control.arrive(); await control.wait }
@@ -85,7 +86,7 @@ test('production dedicated Administration routes and responsive native controls 
     await h.start()
     assert.equal(await h.page.locator('.workspace-administration,.permission-summary,.workspace-memberships').count(), 0)
     assert.equal(h.adminRequests.length, 0)
-    assert.deepEqual(await h.page.locator('.workspace-tabs button').allTextContents(), ['Projects', 'Observations', 'Timeline', 'Audit', 'Administration'])
+    assert.deepEqual(await h.page.locator('.workspace-tabs button').allTextContents(), ['Projects', 'Sessions', 'Observations', 'Timeline', 'Audit', 'Administration'])
     for (const width of [1440, 320]) {
       await h.page.setViewportSize({ width, height: 900 }); await paint(h.page)
       await capture(h, width === 1440 ? 'workspace-observations-desktop' : 'workspace-observations-narrow')
@@ -104,7 +105,7 @@ test('production dedicated Administration routes and responsive native controls 
     }
     await h.page.addStyleTag({ content: 'html { font-size: 32px !important; }' }); await paint(h.page)
     await h.page.getByRole('button', { name: 'Projects', exact: true }).focus()
-    for (let i = 0; i < 4; i++) await h.page.keyboard.press('Tab')
+    for (let i = 0; i < 5; i++) await h.page.keyboard.press('Tab')
     assert.equal(await h.page.evaluate(() => document.activeElement.textContent), 'Administration')
     await h.page.keyboard.press('Enter'); await h.quiet()
     assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))

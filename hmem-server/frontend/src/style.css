@@ -5251,22 +5251,23 @@ textarea.observation-edit-content {
 .workspace-tree-content .hierarchy-row { padding-bottom: 12px; min-width: 0; }
 .workspace-tree-content .hierarchy-task-family > .hierarchy-row > .card-subtask { margin-right: 14px; }
 .workspace-tree-content .hierarchy-task-family { border-radius: 8px; }
-.workspace-tree-content .tree-card :is(.status-select, .priority-select, .btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open) { min-height: 32px; }
+.workspace-tree-content .tree-card :is(.btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open) { min-height: 32px; }
 .workspace-tree-content .tree-card .btn-extras-toggle { width: 24px; height: 24px; min-height: 24px; }
 @media (max-width: 650px) {
   .workspace-tree-content .tree-card > .card-header > .card-actions { justify-content: flex-end; }
   .workspace-tree-content .card-section-button { flex: 1 1 auto; }
-  .workspace-tree-content .tree-card :is(select, .inline-edit-input, .inline-edit-textarea) { font-size: 16px; }
+  .workspace-tree-content .tree-card :is(select:not(.status-select):not(.priority-select), .inline-edit-input, .inline-edit-textarea) { font-size: 16px; }
 }
 @media (pointer: coarse) {
-  .workspace-tree-content .tree-card :is(.status-select, .priority-select, .btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open, .card-section-button) { min-height: 44px; }
+  .workspace-tree-content .tree-card :is(.btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open, .card-section-button) { min-height: 44px; }
 }
 
 .workspace-tree-content .card-subtask-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .workspace-tree-content .card-subtask-jump { flex: 1 1 140px; text-align: left; background: transparent; color: var(--text); border: 0; padding: 0; font: inherit; overflow-wrap: anywhere; cursor: pointer; }
-.workspace-tree-content .tree-card :is(button:not(.btn-extras-toggle), select) { min-height: 32px; }
+/* Status and priority keep their original compact font, padding and intrinsic height. */
+.workspace-tree-content .tree-card :is(button:not(.btn-extras-toggle):not(.status-select), select:not(.status-select):not(.priority-select)) { min-height: 32px; }
 @media (pointer: coarse) {
-  .workspace-tree-content .tree-card :is(button:not(.btn-extras-toggle), select),
+  .workspace-tree-content .tree-card :is(button:not(.btn-extras-toggle):not(.status-select), select:not(.status-select):not(.priority-select)),
   .workspace-tree-content .card-footer .card-metadata > summary { min-height: 44px; }
 }
 

@@ -1,4 +1,8 @@
 /* MPL-2.0: the child is placed in its death-on-owner scope before readiness. */
+/* Expose Linux pipe2 before any system header includes features.h. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0A00
@@ -218,7 +222,6 @@ void hmem_process_destroy(hmem_process *p) {
 int hmem_child_watch_parent(void) { return 1; }
 
 #else
-#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>

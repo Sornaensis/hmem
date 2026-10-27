@@ -1,0 +1,39 @@
+name: Native Linux setup
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/native-setup.yml"
+      - "stack.yaml"
+      - "stack.yaml.lock"
+      - "hmem-core/**"
+      - "hmem-embedding-http/cbits/**"
+      - "hmem-server/package.yaml"
+      - "hmem-server/hmem-server.cabal"
+      - "hmem-server/setup/**"
+      - "hmem-server/src/**"
+      - "hmem-server/test-native/**"
+
+permissions:
+  contents: read
+
+jobs:
+  native-setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+          stack-version: latest
+      - name: Install PostgreSQL tools and headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql libpq-dev
+      - name: Check Linux feature declarations
+        run: |
+          gcc -std=gnu17 -Werror -fsyntax-only hmem-embedding-http/cbits/process_owner.c
+          gcc -std=gnu17 -D_GNU_SOURCE -Werror -fsyntax-only hmem-embedding-http/cbits/process_owner.c
+      - name: Test native PostgreSQL TCP-only setup
+        run: hmem-server/test-native/postgres-socket-setup.sh

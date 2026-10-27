@@ -100,8 +100,39 @@ const authLoginStateStorageKey = runtimeConfig.authLoginStateStorageKey || 'hmem
 const csrfCookieName = runtimeConfig.csrfCookieName || 'hmem_csrf'
 const csrfHeaderName = runtimeConfig.csrfHeaderName || 'X-CSRF-Token'
 const requireAuthState = runtimeConfig.requireAuthState !== false
+const configuredBotIdentity = normalizeConfiguredBotIdentity(runtimeConfig.botIdentity)
 let pendingAuthSessionError = null
 let ignoreStoredAuthToken = false
+
+function normalizeConfiguredBotIdentity(value) {
+  if (value === undefined || value === null) return null
+  try {
+    if (typeof value !== 'object' || Array.isArray(value)) throw new Error('must contain exactly role and model-id strings')
+    const keys = Object.keys(value).sort()
+    if (keys.length !== 2 || keys[0] !== 'model-id' || keys[1] !== 'role' || typeof value.role !== 'string' || typeof value['model-id'] !== 'string') {
+      throw new Error('must contain exactly role and model-id strings')
+    }
+    const rawRole = value.role
+    const rawModelId = value['model-id']
+    const utf8Length = text => new TextEncoder().encode(text).length
+    if (utf8Length(rawRole) > 128) throw new Error('role must be at most 128 UTF-8 bytes')
+    if (utf8Length(rawModelId) > 256) throw new Error('model-id must be at most 256 UTF-8 bytes')
+    if (/[\p{Cc}\p{Cf}]/u.test(rawRole) || /[\p{Cc}\p{Cf}]/u.test(rawModelId)) {
+      throw new Error('role and model-id must not contain control or format characters')
+    }
+    const role = rawRole.trim()
+    const modelId = rawModelId.trim()
+    if (!role) throw new Error('role must not be empty')
+    if (!/^[A-Za-z0-9._\/-]+:[A-Za-z0-9._\/-]+:[A-Za-z0-9._\/-]+$/.test(modelId)) {
+      throw new Error('model-id must be a valid harness:model:reasoning identifier')
+    }
+    return JSON.stringify({ role, 'model-id': modelId })
+      .replace(/[\u0080-\uffff]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+  } catch (error) {
+    console.error(`Ignoring invalid HMEM_CONFIG.botIdentity: ${error.message}`)
+    return null
+  }
+}
 
 function normalizeAuthTokenStorageMode(value) {
   if (value === 'memory' || value === 'session' || value === 'local') return value
@@ -289,13 +320,22 @@ function captureAuthTokenFromUrl() {
 
   const returnedState = (fromSearch ? url.searchParams.get('state') : null) || (hashParams ? hashParams.get('state') : null)
   const expectedState = safeSessionStorageGet(authLoginStateStorageKey)
-  const stateAccepted = !requireAuthState || (expectedState !== null && returnedState === expectedState)
+  // hmem_token is the documented manual handoff for local static-bearer mode,
+  // not an OAuth provider callback. Deployed and provider-style returns retain
+  // state validation by default.
+  const localStaticBearerHandoff = runtimeMode === 'local' && found.name === 'hmem_token'
+  const stateAccepted = localStaticBearerHandoff || !requireAuthState || (expectedState !== null && returnedState === expectedState)
 
   if (stateAccepted) {
     ignoreStoredAuthToken = false
     if (!storedAuthTokenSet(found.value)) {
+      ignoreStoredAuthToken = true
       runtimeConfig.authToken = found.value
       pendingAuthSessionError = 'Browser storage is unavailable; using the returned auth token for this tab only.'
+    } else if (authTokenStorageMode !== 'memory') {
+      // A prior storage failure may have installed an in-memory fallback. Once
+      // durable storage accepts a newer token it must become authoritative.
+      runtimeConfig.authToken = null
     }
     safeSessionStorageRemove(authLoginStateStorageKey)
   } else {
@@ -313,6 +353,19 @@ function captureAuthTokenFromUrl() {
 clearInactiveStoredAuthTokens()
 captureAuthTokenFromUrl()
 
+function processAuthCallbackNavigation() {
+  const capturedToken = captureAuthTokenFromUrl()
+  if (capturedToken) notifyAuthTokenChanged(true)
+  if (pendingAuthSessionError) {
+    notifyAuthSessionError(pendingAuthSessionError)
+    pendingAuthSessionError = null
+  }
+}
+
+// Install before Elm so popstate/hashchange observers see the scrubbed URL.
+window.addEventListener('popstate', processAuthCallbackNavigation, true)
+window.addEventListener('hashchange', processAuthCallbackNavigation, true)
+
 function currentAuthToken() {
   const storedToken = ignoreStoredAuthToken ? null : storedAuthTokenGet()
   if (runtimeMode === 'deployed') return storedToken || runtimeConfig.authToken || null
@@ -329,7 +382,15 @@ function authTokenSignature() {
 
 function authHeaderObject() {
   const token = currentAuthToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
+  return token
+    ? { Authorization: `Bearer ${token}`, ...configuredBotIdentityHeader() }
+    : {}
+}
+
+function configuredBotIdentityHeader() {
+  return configuredBotIdentity
+    ? { 'X-HMem-Bot-Identity': configuredBotIdentity }
+    : {}
 }
 
 function readCookie(name) {
@@ -353,6 +414,8 @@ function isUnsafeMethod(method) {
 
 function currentRelativeReturnPath(returnPath) {
   const parsed = new URL(returnPath || '/', window.location.href)
+  const parsedHash = parseHashParams(parsed.hash)
+  scrubAuthCallbackParams(parsed, parsedHash.params, parsedHash.prefix)
   return `${parsed.pathname}${parsed.search}${parsed.hash}`
 }
 
@@ -404,6 +467,10 @@ function installAuthHeaderInterceptor() {
       const hasAuthorization = this.__hmemHeaders && this.__hmemHeaders.authorization
       if (token && !hasAuthorization) {
         originalSetRequestHeader.call(this, 'Authorization', `Bearer ${token}`)
+      }
+      const hasBotIdentity = this.__hmemHeaders && this.__hmemHeaders['x-hmem-bot-identity']
+      if (token && configuredBotIdentity && !hasBotIdentity) {
+        originalSetRequestHeader.call(this, 'X-HMem-Bot-Identity', configuredBotIdentity)
       }
 
       const hasCsrf = this.__hmemHeaders && this.__hmemHeaders[String(csrfHeaderName).toLowerCase()]

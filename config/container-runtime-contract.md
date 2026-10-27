@@ -215,7 +215,20 @@ Allowed frontend env surface:
 | `HMEM_FRONTEND_AUTH_TOKEN_STORAGE` | `local` | `authTokenStorage` | `local`, `session`, or `memory` for explicit bearer fallback flows. |
 | `HMEM_FRONTEND_AUTH_TOKEN_STORAGE_KEY` | `hmem-auth-token` | `authTokenStorageKey` | Non-secret storage key name. |
 | `HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS` | `hmem_token,auth_token,access_token` | `authTokenUrlParams` | For fragment-only bearer fallback callbacks. |
-| `HMEM_FRONTEND_REQUIRE_AUTH_STATE` | `true` | `requireAuthState` | Should remain true for provider redirects. |
+| `HMEM_FRONTEND_REQUIRE_AUTH_STATE` | `true` | `requireAuthState` | Should remain true for provider redirects. The documented local `#hmem_token` manual handoff is exempt; deployed and provider-style callbacks still require matching state. |
+| `HMEM_FRONTEND_BOT_ROLE` | local: `Browser Operator`; deployed: unset | `botIdentity.role` | Non-secret declared attribution used only while the browser sends a bearer token. At most 128 UTF-8 bytes. Set together with the model ID. |
+| `HMEM_FRONTEND_BOT_MODEL_ID` | local: `hmem:web:manual`; deployed: unset | `botIdentity.model-id` | Non-secret `harness:model:reasoning` identifier used only while the browser sends a bearer token. Set together with the role. |
+
+The local generated browser identity lets the static-bearer web client satisfy the
+server's declared-attribution requirement on unsafe API requests. Deployed mode
+omits it by default so ordinary human JWT/PAT use is not labeled as a browser bot;
+operators can explicitly set both fields for deployed bot bearer flows. The
+identity grants no permissions and is not sent for cookie-only or tokenless
+browser sessions. The frontend drops malformed runtime identity, including
+control/format characters, before constructing headers; the server remains the
+authority for declarations that reach it. Shell generation performs only the
+portable pair, byte-length, ASCII-control, nonempty-role, and model-ID checks
+above.
 
 The generator must never put `HMEM_API_KEY`, `HMEM_AUTH_TOKEN`, `HMEM_MCP_AUTH_TOKEN`, DB passwords, OIDC client secrets, PATs, or service tokens into `window.HMEM_CONFIG`. In particular, do not generate `window.HMEM_CONFIG.authToken` by default.
 
@@ -240,7 +253,7 @@ The entrypoint must refuse to start when any of these are true:
 - `HOME` and the passwd home differ, or `/var/lib/hmem` / `/var/lib/hmem/.hmem/logs` is not writable.
 - Any numeric env is missing a valid number or is outside the ranges listed above.
 - Any boolean env is not one of `true`, `false`, `1`, `0`, `yes`, or `no`.
-- Any constrained string env is outside its allowed set, including `HMEM_AUTH_MODE` (`local|deployed`), `HMEM_AUTH_DEPLOYED_TOKEN_LOOKUP` (`database`), `HMEM_AUTH_DEPLOYED_COOKIE_SAME_SITE` (`Lax|Strict|None`), or `HMEM_FRONTEND_AUTH_TOKEN_STORAGE` (`local|session|memory`).
+- Any constrained string env is outside its allowed set, including `HMEM_AUTH_MODE` (`local|deployed`), `HMEM_AUTH_DEPLOYED_TOKEN_LOOKUP` (`database`), `HMEM_AUTH_DEPLOYED_COOKIE_SAME_SITE` (`Lax|Strict|None`), `HMEM_FRONTEND_AUTH_TOKEN_STORAGE` (`local|session|memory`), or the browser bot model ID (`harness:model:reasoning`); browser bot role/model settings must be supplied together.
 - `HMEM_AUTH_MODE=local`, `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=true`, and `HMEM_AUTH_LOCAL_ALLOW_REMOTE_BOOTSTRAP=false` with either a non-loopback `HMEM_SERVER_HOST` or remote/wildcard `HMEM_CORS_ALLOWED_ORIGINS`.
 - `HMEM_AUTH_MODE=local` has `HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=false` but `HMEM_AUTH_ENABLED` is not true, or neither `HMEM_API_KEY` nor `HMEM_API_KEY_FILE` is supplied.
 - `HMEM_AUTH_MODE=deployed` is missing `issuer`, `audience`, or all JWKS/discovery sources.

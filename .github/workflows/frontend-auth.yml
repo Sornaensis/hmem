@@ -1,0 +1,37 @@
+name: Browser authentication regressions
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/frontend-auth.yml"
+      - "hmem-server/frontend/**"
+      - "docker/entrypoint.sh"
+      - "docker/test_container_runtime.py"
+      - "config/**"
+
+permissions:
+  contents: read
+
+jobs:
+  browser-auth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hmem-server/frontend/package-lock.json
+      - name: Install frontend dependencies and Chromium
+        working-directory: hmem-server/frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Test browser authentication and JavaScript units
+        working-directory: hmem-server/frontend
+        run: |
+          npm run test:auth-runtime
+          node --test tests-js/change-stream.test.js tests-js/timestamp-display.test.js
+      - name: Test offline entrypoint validation
+        run: python3 docker/test_container_runtime.py EntrypointFrontendConfigTest

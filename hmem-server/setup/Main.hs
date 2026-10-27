@@ -25,9 +25,11 @@
 module Main where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception  (SomeException, try)
+import Control.Exception  (SomeException, bracketOnError, try)
 import Control.Monad      (filterM, when)
 import Data.Aeson qualified as Aeson
+import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Char          (isSpace)
@@ -41,15 +43,16 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
-import System.Directory   (createDirectoryIfMissing, copyFile,
+import System.Directory   (canonicalizePath, createDirectoryIfMissing, copyFile,
+                           copyFileWithMetadata,
                            doesDirectoryExist, doesFileExist,
                            findExecutable, getHomeDirectory,
-                           listDirectory,
+                           listDirectory, renameFile,
                            removeDirectoryRecursive, removeFile)
 import System.Exit        (ExitCode(..), exitFailure, exitSuccess, exitWith)
-import System.FilePath    ((</>))
+import System.FilePath    ((</>), takeDirectory)
 import System.IO          (IOMode(..), hClose, hFlush, hPutStrLn,
-                           openFile, stderr, stdout)
+                           openBinaryTempFile, openFile, stderr, stdout)
 import System.Info        (os)
 import System.Process     (CreateProcess(..), StdStream(..), callProcess,
                            createProcess, getProcessExitCode, proc, ProcessHandle,
@@ -471,6 +474,16 @@ doInit = do
         , "listen_addresses = 'localhost'"
         ]
       pure cfg
+
+  -- Debian PostgreSQL builds default to /var/run/postgresql for Unix sockets,
+  -- which is not writable by an unprivileged, user-owned cluster. hmem uses
+  -- TCP exclusively, so disable sockets as an early default. Settings later in
+  -- postgresql.conf, included files, and postgresql.auto.conf still override it.
+  -- Apply this after the PG_VERSION check so a rerun also repairs a cluster
+  -- left behind by a failed first startup.
+  when (not isWindows) $ do
+    step "Configuring PostgreSQL for TCP-only access"
+    configurePostgresTcpOnlyDefault dataDir
 
   -- 4. Start PostgreSQL temporarily
   step "Starting PostgreSQL"
@@ -1455,6 +1468,45 @@ step msg = do
 
 strip :: String -> String
 strip = dropWhileEnd isSpace . dropWhile isSpace
+
+-- | Prepend hmem's TCP-only default without interpreting or normalizing the
+-- initdb-generated configuration. PostgreSQL applies settings in order, so
+-- every existing top-level setting or include remains authoritative. Its
+-- automatically loaded postgresql.auto.conf is later still. Rewrite a sibling
+-- temporary copy and rename it only after close so failed writes leave the live
+-- configuration and its permissions intact. Resolve the file first so an
+-- explicit postgresql.conf symlink remains in place while its target is updated.
+configurePostgresTcpOnlyDefault :: FilePath -> IO ()
+configurePostgresTcpOnlyDefault dataDir = do
+  configPath <- canonicalizePath (dataDir </> "postgresql.conf")
+  contents <- BS.readFile configPath
+  if postgresTcpOnlyPrefix `BS.isPrefixOf` contents
+    then putStrLn "  TCP-only default already configured."
+    else do
+      bracketOnError
+        (openBinaryTempFile (takeDirectory configPath) ".postgresql.conf.hmem.tmp")
+        cleanupTemp
+        (\(tempPath, tempHandle) -> do
+          hClose tempHandle
+          copyFileWithMetadata configPath tempPath
+          BS.writeFile tempPath (postgresTcpOnlyPrefix <> contents)
+          renameFile tempPath configPath)
+      putStrLn "  Unix sockets disabled by default; later settings may override."
+  where
+    cleanupTemp (tempPath, tempHandle) = do
+      _ <- try (hClose tempHandle) :: IO (Either SomeException ())
+      _ <- try (removeIfExists tempPath) :: IO (Either SomeException ())
+      pure ()
+
+postgresTcpOnlyMarker :: BS.ByteString
+postgresTcpOnlyMarker = BS8.pack "# hmem managed native PostgreSQL TCP-only default"
+
+postgresTcpOnlyPrefix :: BS.ByteString
+postgresTcpOnlyPrefix = BS8.unlines
+  [ postgresTcpOnlyMarker
+  , BS8.pack "unix_socket_directories = ''"
+  , BS.empty
+  ]
 
 requireCommand :: String -> IO ()
 requireCommand name = do

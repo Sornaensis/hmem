@@ -31,6 +31,7 @@ spec = importlib.util.spec_from_file_location("prepare_managed_gpu", SCRIPT)
 assert spec is not None and spec.loader is not None
 prep = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prep)
+ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
 
 
 def docker(*args: str, timeout: int = 30) -> str:
@@ -45,6 +46,23 @@ def docker(*args: str, timeout: int = 30) -> str:
     # Docker logs normally writes container stderr to its own stderr. Keep the
     # command status strict while inspecting both bounded output streams.
     return (result.stdout + result.stderr if args[0] == "logs" else result.stdout).strip()
+
+
+class EntrypointFrontendConfigTest(unittest.TestCase):
+    def test_bot_identity_carriage_return_is_rejected_before_generation(self) -> None:
+        functions = ENTRYPOINT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0]
+        result = subprocess.run(
+            ["/bin/sh"], input=functions + "\napply_defaults\nvalidate_common_config ctl\n",
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env={
+                **os.environ,
+                "HMEM_FRONTEND_BOT_ROLE": "Browser\rOperator",
+                "HMEM_FRONTEND_BOT_MODEL_ID": "hmem:web:manual",
+            },
+            timeout=10, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("frontend bot identity must not contain ASCII control characters", result.stderr)
 
 
 class BundlePreparationTest(unittest.TestCase):
@@ -319,6 +337,8 @@ class BuiltImageTest(unittest.TestCase):
         assert self.cid is not None
         js = docker("exec", self.cid, "cat", "/run/hmem/static/hmem-runtime-config.js")
         self.assertIn("window.HMEM_CONFIG", js)
+        self.assertIn('"requireAuthState": true', js)
+        self.assertIn('"botIdentity": {"role": "Browser Operator", "model-id": "hmem:web:manual" }', js)
         self.assertNotIn(secret, js)
         for asset in (ROOT / "hmem-server/frontend/public").rglob("*"):
             if asset.is_file():
@@ -339,6 +359,20 @@ class BuiltImageTest(unittest.TestCase):
                              "noexec", "nosuid", "nodev")))
         self.assertEqual(docker("exec", self.cid, "stat", "-f", "-c", "%T", "/var/lib/hmem"), "tmpfs")
         docker("exec", self.cid, "test", "-x", "/usr/local/bin/hmem-embedding-http-helper")
+
+    def test_deployed_frontend_omits_default_bot_identity(self) -> None:
+        self.create({
+            "HMEM_AUTH_MODE": "deployed",
+            "HMEM_AUTH_DEPLOYED_ISSUER": "https://issuer.example",
+            "HMEM_AUTH_DEPLOYED_AUDIENCE": "hmem-web",
+            "HMEM_AUTH_DEPLOYED_DISCOVERY_URL": "https://issuer.example/.well-known/openid-configuration",
+            "HMEM_FRONTEND_SERVER_SIDE_OIDC_LOGIN": "false",
+        })
+        self.await_config()
+        assert self.cid is not None
+        js = docker("exec", self.cid, "cat", "/run/hmem/static/hmem-runtime-config.js")
+        self.assertIn('"authMode": "deployed"', js)
+        self.assertNotIn('"botIdentity"', js)
 
     def test_managed_profile_and_bounds(self) -> None:
         self.create({"HMEM_API_KEY": "test-key", "HMEM_EMBEDDING_PROVIDER": "managed-tei",

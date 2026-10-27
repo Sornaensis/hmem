@@ -106,22 +106,26 @@ services:
         condition: service_healthy
     command: ["migrate"]
 
-  # Optional MCP sidecar/profile. It uses the image entrypoint command dispatch
-  # and reaches the app over the Compose service network.
+  # Optional stdio MCP process, launched by a client with `compose run --rm -T`.
+  # It reaches the app over the Compose service network; no TCP port is exposed.
   mcp:
     <<: *hmem-image
     profiles: ["mcp"]
-    restart: unless-stopped
+    restart: "no"
+    stdin_open: true
+    tty: false
     read_only: true
     env_file: *hmem-env-file
     environment:
-      HMEM_SERVER_URL: http://hmem:8420
+      HMEM_SERVER_URL: ${HMEM_MCP_SERVER_URL:-http://hmem:8420}
       # Set HMEM_MCP_AUTH_TOKEN[_FILE] or HMEM_AUTH_TOKEN[_FILE] in the env_file.
     tmpfs:
       - /tmp:size=64m,uid=10001,gid=10001,mode=1770,noexec,nosuid,nodev
     depends_on:
       hmem:
         condition: service_healthy
+    healthcheck:
+      disable: true
     command: ["hmem-mcp"]
 
 # PostgreSQL remains durable. The hmem-data declaration is retained for existing

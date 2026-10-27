@@ -134,11 +134,11 @@ data; protect it along with the separately supplied secrets. This single-databas
 backup does not include PostgreSQL roles or configuration.
 
 Restore into a distinctly named **new, empty replacement database**, keeping the
-current database intact. Stop hmem, the optional MCP sidecar and all other writers
+current database intact. Stop hmem, disconnect MCP clients and stop all other writers
 first. For the default administrator role and a new name `hmem_recovered`:
 
 ```bash
-docker compose stop hmem mcp
+docker compose stop hmem
 docker compose cp ./hmem-backup.dump postgres:/tmp/hmem-backup.dump
 docker compose exec -T postgres createdb -U hmem --owner=hmem \
   --template=template0 hmem_recovered
@@ -152,8 +152,8 @@ the application release matched to that backup. Before restarting, set
 `POSTGRES_DB=hmem_recovered` in Compose's `.env` and update any mounted database
 configuration to the same target. `compose.yaml` derives `HMEM_DB_NAME` from
 `POSTGRES_DB`, overriding the runtime env file's value. Recreate the PostgreSQL
-service with `docker compose up -d postgres`, then start hmem and any previously
-enabled MCP service using the matched release only after restore succeeds.
+service with `docker compose up -d postgres`, then start hmem using the matched
+release and reconnect MCP clients only after restore succeeds.
 Substitute your configured role/database names as needed; keep the old database
 until recovery is verified.
 
@@ -219,20 +219,26 @@ in the [runtime reference](config/container-runtime-contract.md). Input-size,
 timeout, and compatibility limits are listed there. See [embeddings](embeddings.md)
 for manual imports and matching query vectors.
 
-## MCP sidecar
+## MCP stdio client
 
 Set `HMEM_MCP_AUTH_TOKEN` in the runtime env file to a deployed service token or,
 for a personal installation, the same value as `HMEM_API_KEY`. You can also use
-`HMEM_MCP_AUTH_TOKEN_FILE` with a mounted secret file. Then start the optional profile:
+`HMEM_MCP_AUTH_TOKEN_FILE` with a mounted secret file. Configure the client to run
+the optional Compose service as its stdio command:
 
 ```bash
-docker compose --profile mcp up --build -d mcp
-docker compose logs -f mcp
+docker compose run --rm -T mcp
 ```
 
-For an interactive stdio MCP client, use [the README setup](README.md) against
-the published hmem server. Credential choices and precedence are in
-[authentication](auth.md).
+The client exchanges JSON-RPC over this process's stdin/stdout. Closing stdin
+drains accepted calls and exits; this service has no network MCP listener or HTTP
+healthcheck. Keep it attached to its client rather than starting it detached.
+
+The default upstream is `http://hmem:8420`. For a TLS-enabled hmem service, set
+`HMEM_MCP_SERVER_URL` in Compose's `.env` to an HTTPS URL whose hostname matches
+the server certificate. The MCP image must trust that certificate's CA.
+Credential choices and precedence are in [authentication](auth.md); the
+[README setup](README.md) also supports clients against the published server.
 
 ## Troubleshooting
 

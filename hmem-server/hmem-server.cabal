@@ -146,6 +146,7 @@ library
     , insert-ordered-containers
     , jose
     , lens
+    , memory
     , network
     , openapi3
     , optparse-applicative
@@ -218,6 +219,7 @@ executable build-frontend
     , insert-ordered-containers
     , jose
     , lens
+    , memory
     , network
     , openapi3
     , optparse-applicative
@@ -292,6 +294,7 @@ executable hmem-ctl
     , insert-ordered-containers
     , jose
     , lens
+    , memory
     , network
     , openapi3
     , optparse-applicative
@@ -369,6 +372,7 @@ executable hmem-server
     , insert-ordered-containers
     , jose
     , lens
+    , memory
     , network
     , openapi3
     , optparse-applicative
@@ -442,6 +446,7 @@ executable hmem-test-harness
     , insert-ordered-containers
     , jose
     , lens
+    , memory
     , network
     , openapi3
     , optparse-applicative
@@ -496,6 +501,7 @@ test-suite hmem-server-test
       HMem.Server.LocalSandboxSpec
       HMem.Server.LogRotationSpec
       HMem.Server.ObservationDiscoverySpec
+      HMem.Server.OidcCallbackSpec
       HMem.Server.PgvectorEmbeddingWorkflowSpec
       HMem.Server.SessionPrefixSpec
       HMem.Server.SessionReaperSpec
@@ -552,6 +558,7 @@ test-suite hmem-server-test
     , insert-ordered-containers
     , jose
     , lens
+    , memory
     , network
     , openapi3
     , optparse-applicative

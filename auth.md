@@ -78,6 +78,12 @@ IDs. This startup requirement does not introduce a credential requirement.
    intended for hmem. Browser login validates the ID token against `client_id`.
    Serve hmem over HTTPS: session cookies are secure by default, and OIDC
    authorization and token endpoints require HTTPS.
+   Register a confidential authorization-code client using `client_secret_post`
+   token-endpoint authentication and PKCE S256. Sign-in requests also bind the
+   signed ID token to a fresh nonce. ID tokens must name the configured issuer
+   and client, include `exp` and `iat`, and contain an active registered subject.
+   Extra audiences are not trusted; an `azp` claim, when present, must match the
+   client ID.
 3. Run this operator command against the same configured database. Use the
    provider's stable `sub` claim, rather than the user's email address:
 
@@ -91,6 +97,15 @@ IDs. This startup requirement does not introduce a credential requirement.
    refuses; use `--force` only for deliberate recovery or an additional superadmin.
 4. Sign in and check `GET /api/v1/session` for the `superadmin` permission.
    Other provider users must also be registered in hmem before they can sign in.
+
+Pending sign-ins expire after five minutes and belong to the application
+instance that started them. Restarting that instance requires starting sign-in
+again; multiple instances need callback affinity. Established sessions remain
+in PostgreSQL. Signing out revokes the hmem session; it does not sign out of the
+identity provider or other applications.
+The short-lived sign-in transaction cookies use `SameSite=Lax` for the provider's
+GET callback. Established session and CSRF cookies retain the configured policy,
+including `Strict`. Return targets stay within hmem's origin.
 
 Register a user who can create workspaces:
 

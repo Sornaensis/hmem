@@ -19,6 +19,7 @@ dependencies:
   - hmem-embedding-http
   - containers
   - crypton
+  - memory
   - http-media
   - servant-server >= 0.19
   - warp

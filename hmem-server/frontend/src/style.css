@@ -10,7 +10,7 @@
   --success: #22c55e;
   --warning: #f59e0b;
   --error: #ef4444;
-  --sidebar-width: 146px;
+  --sidebar-width: 260px;
   --ui-space: 14px;
   --ui-radius: 8px;
   --ui-inspector-width: 260px;
@@ -5115,7 +5115,6 @@ textarea.observation-edit-content {
   .workspace-page { padding-top: 0; }
 }
 @media (min-width: 651px) and (max-width: 850px) {
-  :root { --sidebar-width: 120px; }
   .sidebar-logo { width: 100px; }
 }
 @media (max-width: 650px) {
@@ -5147,15 +5146,15 @@ textarea.observation-edit-content {
   .global-context :is(button, a), .sidebar :is(button, a),
   .workspace-context-persistent :is(button, select, input), .modal :is(button, select, input) { min-height: 44px; }
 }
-/* Full-width context precedes the workspace rail and native main viewport. */
+/* The workspace rail spans below the masthead beside context and main content. */
 .app { grid-template-rows: auto auto minmax(0, 1fr); }
 .global-context { grid-column: 1 / -1; grid-row: 1; }
 .global-logo { flex: 0 0 112px; display: block; line-height: 0; }
 .global-logo img { display: block; width: 112px; height: auto; }
-.sidebar { grid-row: 3; }
+.sidebar { grid-row: 2 / -1; }
 .main-content { grid-row: 3; }
 .app > .workspace-context-persistent {
-  grid-column: 1 / -1; grid-row: 2; position: relative; top: auto;
+  grid-column: 2; grid-row: 2; position: relative; top: auto;
   display: grid; grid-template-columns: minmax(0, 1fr);
   margin: 0; padding: 0; max-height: 45dvh; overflow: auto;
 }
@@ -5187,10 +5186,11 @@ textarea.observation-edit-content {
 .app:not(:has(.workspace-context-persistent)) { grid-template-rows: auto minmax(0, 1fr); }
 .app:not(:has(.workspace-context-persistent)) > .sidebar,
 .app:not(:has(.workspace-context-persistent)) > .main-content { grid-row: 2; }
+.app:not(:has(.sidebar)) > .workspace-context-persistent { grid-column: 1; }
 .workspace-page { padding-top: 20px; }
 @media (max-width: 650px) {
   .app { grid-template-rows: auto auto auto minmax(0, 1fr); }
-  .app > .workspace-context-persistent { grid-template-columns: minmax(0, 1fr); max-height: 42dvh; }
+  .app > .workspace-context-persistent { grid-column: 1; grid-template-columns: minmax(0, 1fr); max-height: 42dvh; }
   .app > .workspace-context-persistent > .workspace-header { display: flex; flex-wrap: wrap; gap: 6px 8px; padding: 10px 14px; }
   .workspace-context-persistent .workspace-header-title { flex: 1 1 130px; }
   .workspace-context-persistent .workspace-summary { flex: 1 1 100%; }

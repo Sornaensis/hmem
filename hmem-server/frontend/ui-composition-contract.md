@@ -22,7 +22,7 @@ Select the corresponding `#hm-AREA-tab`, assert the unique visible selected stag
 
 | Composition | Normal-content geometry |
 |---|---|
-| Workspace | 146px desktop rail and fluid Projects main without an outer inspector; at <=850px rail120px; at <=650px one column and wrapping horizontal rail. Workspace UUID/Created/Updated stay visible. |
+| Workspace | 260px desktop rail spans from immediately below the full-width global masthead to the viewport bottom. Workspace context and fluid Projects main occupy only the right column, without an outer inspector. At <=650px use one column and a bounded wrapping horizontal rail. Workspace UUID/Created/Updated stay visible. |
 | Sections | 14px/1.5 base, 18px/1.4 primary heading, 14px secondary heading, 12px metadata and 11px labels;14px spacing,8px radius;10x14px entity header,12x14px footer,12px card separation. |
 | Persistent context | Global header minimum54px with12x16px padding; workspace controls12x16px/gap12px;tabs11x8px and local tabs9x8px;main padding20px,14px at<=650px. |
 | Ledger | Fluid ledger plus270px detail,235px at<=850px;single column<=650px;timestamp/content110px+fluid with14px gap,narrow85px+fluid with8px gap. |

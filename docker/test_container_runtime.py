@@ -407,7 +407,7 @@ class BuiltImageTest(unittest.TestCase):
             docker("rm", "-f", identity)
         self.assertEqual(self.exact_id(), "", "owned test container remained after cleanup")
 
-    def create(self, overrides: dict[str, str], command: str = "hmem-server") -> None:
+    def create(self, overrides: dict[str, str], command: str | list[str] = "hmem-server") -> None:
         assert IMAGE is not None
         args = [
             "create", "--name", self.name, "--label", f"hmem.packaging.test={self.name}",
@@ -420,7 +420,7 @@ class BuiltImageTest(unittest.TestCase):
         ]
         for key, value in sorted(overrides.items()):
             args += ["--env", f"{key}={value}"]
-        args += [IMAGE, command]
+        args += [IMAGE, *([command] if isinstance(command, str) else command)]
         # Register intent before create: a daemon-side create can succeed even
         # if the client loses the returned ID. Cleanup recovers by unique name
         # and authenticates label + image before removing anything.
@@ -484,6 +484,46 @@ class BuiltImageTest(unittest.TestCase):
         js = docker("exec", self.cid, "cat", "/run/hmem/static/hmem-runtime-config.js")
         self.assertNotIn(secret, js)
         self.assertIn("Running database migrations", docker("logs", self.cid))
+
+    def test_auth_bootstrap_uses_config_without_native_postgres_state(self) -> None:
+        self.create({}, ["hmem-ctl", "auth", "bootstrap-superadmin", "--auth-subject", ""])
+        assert self.cid is not None
+        self.assertEqual(docker("wait", self.cid, timeout=20), "1")
+        logs = docker("logs", self.cid)
+        self.assertIn("--auth-subject must not be empty", logs)
+        self.assertNotIn("hmem is not initialized", logs)
+
+    def test_auth_users_use_config_without_native_postgres_state(self) -> None:
+        self.create({}, ["hmem-ctl", "auth", "users", "upsert", "--auth-subject", "test-subject",
+                         "--active", "--disabled"])
+        assert self.cid is not None
+        self.assertEqual(docker("wait", self.cid, timeout=20), "1")
+        logs = docker("logs", self.cid)
+        self.assertIn("conflicting grant flags for active", logs)
+        self.assertNotIn("hmem is not initialized", logs)
+
+    def test_auth_tokens_use_config_without_native_postgres_state(self) -> None:
+        self.create({}, ["hmem-ctl", "auth", "tokens", "issue", "--grant-user-id", "not-a-uuid",
+                         "--actor-label", "test-bot"])
+        assert self.cid is not None
+        self.assertEqual(docker("wait", self.cid, timeout=20), "1")
+        logs = docker("logs", self.cid)
+        self.assertIn("--grant-user-id must be a valid UUID", logs)
+        self.assertNotIn("hmem is not initialized", logs)
+
+    def test_auth_requires_configuration_even_without_native_postgres(self) -> None:
+        self.create({}, ["sh", "-c", "exec hmem-ctl auth users upsert --auth-subject test-subject --active --disabled"])
+        assert self.cid is not None
+        self.assertEqual(docker("wait", self.cid, timeout=20), "1")
+        logs = docker("logs", self.cid)
+        self.assertIn("hmem configuration not found", logs)
+        self.assertNotIn("conflicting grant flags", logs)
+
+    def test_native_start_still_requires_initialized_postgres(self) -> None:
+        self.create({}, ["hmem-ctl", "start"])
+        assert self.cid is not None
+        self.assertEqual(docker("wait", self.cid, timeout=20), "1")
+        self.assertIn("hmem is not initialized", docker("logs", self.cid))
 
     def test_managed_profile_and_bounds(self) -> None:
         self.create({"HMEM_API_KEY": "test-key", "HMEM_EMBEDDING_PROVIDER": "managed-tei",

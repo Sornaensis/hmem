@@ -967,7 +967,7 @@ doTokenCommand = \case
 
 doBootstrapSuperadmin :: BootstrapSuperadminOpts -> IO ()
 doBootstrapSuperadmin opts = do
-  _ <- ensureInitialized "auth bootstrap-superadmin"
+  ensureConfigured "auth bootstrap-superadmin"
   cfg <- loadConfig
 
   when (cfg.auth.mode /= AuthModeDeployed) $
@@ -1108,7 +1108,7 @@ doRevokeToken opts = do
 
 loadAuthOperatorConfig :: String -> String -> IO HMemConfig
 loadAuthOperatorConfig commandName operationLabel = do
-  _ <- ensureInitialized commandName
+  ensureConfigured commandName
   cfg <- loadConfig
   when (cfg.auth.mode /= AuthModeDeployed) $
     hPutStrLn stderr $ "Warning: auth.mode is not 'deployed'; " <> operationLabel <> "."
@@ -1477,6 +1477,19 @@ findBinary name fallback = do
       hPutStrLn stderr $
         "Warning: '" <> name <> "' not found on PATH, using '" <> fallback <> "'"
       pure fallback
+
+-- Auth operators work with the configured database, including externally
+-- managed PostgreSQL. Native data-directory state is only a lifecycle concern.
+ensureConfigured :: String -> IO ()
+ensureConfigured commandName = do
+  configPath <- configFilePath
+  configExists <- doesFileExist configPath
+  when (not configExists) $ do
+    hPutStrLn stderr "Error: hmem configuration not found."
+    hPutStrLn stderr $
+      "Provide configuration before 'hmem-ctl " <> commandName
+        <> "'; native installations can create it with 'hmem-ctl init'."
+    exitFailure
 
 ensureInitialized :: String -> IO FilePath
 ensureInitialized commandName = do

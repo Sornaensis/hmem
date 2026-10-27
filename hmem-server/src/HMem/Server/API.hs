@@ -318,7 +318,10 @@ handleDBErrors action = do
         _ -> err500 { errBody = Aeson.encode (object ["error" .= ("internal" :: Text)]) }
 
 badRequest :: Text -> Text -> ServerError
-badRequest kind message = err400 { errBody = Aeson.encode (object ["error" .= kind, "message" .= message]) }
+badRequest kind message = err400
+  { errBody = Aeson.encode (object ["error" .= kind, "message" .= message])
+  , errHeaders = [("Content-Type", "application/json")]
+  }
 
 decodeLifecycleDetail :: Text -> Value
 decodeLifecycleDetail detail = fromMaybe (Aeson.String detail) $

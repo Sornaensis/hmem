@@ -1195,6 +1195,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       before <- mapM overview [taskA.id, taskB.id, taskC.id]
       rejected <- add taskC.id taskA.id
       responseStatus rejected `shouldBe` status400
+      lookup "Content-Type" rejected.simpleHeaders `shouldBe` Just "application/json"
       let Just errorBody = decode (responseBody rejected) :: Maybe Value
       jsonField "error" errorBody `shouldBe` Just (String "dependency_cycle")
       jsonField "message" errorBody `shouldBe` Just (String "Task dependency would create a cycle")

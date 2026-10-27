@@ -927,6 +927,29 @@ spec = do
       sealed.lastSeenAt `shouldBe` stale.lastSeenAt
       sealed.state `shouldBe` Terminated
 
+    it "omits heartbeat-only audit entries while preserving live events and meaningful session changes" $ \env -> do
+      (workspace,row) <- fresh env
+      let audits count = boolean env ("SELECT count(*)="<>count<>" FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid row.id<>"'") `shouldReturn` True
+          events count = boolean env ("SELECT count(*)="<>count<>" FROM change_stream_outbox WHERE scope='workspace' AND envelope#>>'{entity,type}'='agent_session' AND envelope#>>'{entity,id}'='"<>uuid row.id<>"'") `shouldReturn` True
+      audits "1"
+      events "1"
+      seen <- heartbeatSession env.pool workspace row.id
+      seen.lastSeenAt `shouldSatisfy` (>row.lastSeenAt)
+      audits "1"
+      events "2"
+      boolean env ("SELECT NOT EXISTS(SELECT 1 FROM change_stream_outbox e CROSS JOIN LATERAL jsonb_array_elements(e.envelope->'invalidations') target WHERE e.envelope#>>'{entity,id}'='"<>uuid row.id<>"' AND e.envelope#>>'{entity,action}'='updated' AND target->>'target' LIKE 'active_sessions:%')") `shouldReturn` True
+      uploaded <- append env workspace seen "{}\n" False
+      audits "2"
+      events "3"
+      _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "audit-model" Nothing Nothing (Just "developer"))))
+      audits "3"
+      events "4"
+      sealed <- terminateSession env.pool workspace row.id (receipt uploaded.session "{}\n")
+      sealed.state `shouldBe` Terminated
+      audits "4"
+      events "5"
+      boolean env ("SELECT count(*)=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid row.id<>"' AND old_values->>'state'='active' AND new_values->>'state'='terminated'") `shouldReturn` True
+
     it "does not store raw bytes in audit or change events" $ \env -> do
       (workspace,row) <- fresh env
       _ <- append env workspace row "{\"secret\":\"session-only-needle\"}\n" False
@@ -1097,6 +1120,62 @@ spec = do
           allBytes env workspace row.id `shouldReturn` ""
 
   describe "Agent sessions migration" $ do
+    it "removes only historical heartbeat audits and installs the audit guard atomically" $
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir = sandbox.sandboxRoot </> "before-v048"
+              upgradeDir = sandbox.sandboxRoot </> "only-v048"
+              filename = "V048__session_timestamp_audit_noise.sql"
+              env = TestEnv pool sandbox db
+          createDirectory beforeDir
+          createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V048" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
+          (workspace,row) <- fresh env
+          _ <- heartbeatSession pool workspace row.id
+          execute env "CREATE TABLE heartbeat_audit_ids AS SELECT id FROM audit_log WHERE entity_type='agent_session' AND action='update'"
+          boolean env "SELECT count(*)=1 FROM heartbeat_audit_ids" `shouldReturn` True
+          uploaded <- append env workspace row "{}\n" False
+          _ <- setRuntimeIdentity pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "upgrade-model" Nothing Nothing (Just "developer"))))
+          sealed <- terminateSession pool workspace row.id (receipt uploaded.session "{}\n")
+          -- Minimal legacy snapshots exercise cleanup without newer runtime keys.
+          execute env "INSERT INTO audit_log(entity_type,entity_id,action,old_values,new_values,request_id) VALUES ('agent_session','legacy-heartbeat','update','{\"state\":\"active\",\"last_seen_at\":\"old\"}','{\"state\":\"active\",\"last_seen_at\":\"new\"}','remove-heartbeat')"
+          let retain entity action old new = execute env ("INSERT INTO audit_log(entity_type,entity_id,action,old_values,new_values,request_id) VALUES ('"<>entity<>"','retained-fixture','"<>action<>"',"<>old<>","<>new<>",'retain-heartbeat-fixture')")
+          forM_
+            [ ("agent_session","create","NULL","'{\"last_seen_at\":\"new\"}'")
+            , ("task","update","'{\"last_seen_at\":\"old\"}'","'{\"last_seen_at\":\"new\"}'")
+            , ("agent_session","update","NULL","'{\"last_seen_at\":\"new\"}'")
+            , ("agent_session","update","'[]'","'[\"last_seen_at\"]'")
+            , ("agent_session","update","'1'","'2'")
+            , ("agent_session","update","'\"old\"'","'\"new\"'")
+            , ("agent_session","update","'null'","'true'")
+            , ("agent_session","update","'{}'","'{\"last_seen_at\":\"new\"}'")
+            , ("agent_session","update","'{\"last_seen_at\":null}'","'{\"last_seen_at\":\"new\"}'")
+            , ("agent_session","update","'{\"last_seen_at\":\"same\"}'","'{\"last_seen_at\":\"same\"}'")
+            , ("agent_session","update","'{\"last_seen_at\":\"old\",\"future_field\":1}'","'{\"last_seen_at\":\"new\",\"future_field\":2}'")
+            ] $ \(entity,action,old,new) -> retain entity action old new
+          execute env "CREATE TABLE pre_v048_audits AS TABLE audit_log; CREATE TABLE pre_v048_events AS TABLE change_stream_outbox; CREATE TABLE pre_v048_sessions AS SELECT to_jsonb(s) AS value FROM sessions s; CREATE TABLE pre_v048_function AS SELECT pg_get_functiondef('hmem_agent_session_change()'::regprocedure) AS value; CREATE TABLE expected_v048_audits AS SELECT * FROM audit_log WHERE id NOT IN (SELECT id FROM heartbeat_audit_ids) AND request_id IS DISTINCT FROM 'remove-heartbeat'"
+          bracket_
+            (execute env "CREATE FUNCTION heartbeat_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=48 THEN RAISE EXCEPTION 'injected heartbeat ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER heartbeat_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION heartbeat_ledger_failure()")
+            (execute env "DROP TRIGGER heartbeat_ledger_failure ON schema_migrations; DROP FUNCTION heartbeat_ledger_failure()") $ do
+              Migration.runMigrations pool upgradeDir >>= (\result -> result.failed `shouldSatisfy` (/=Nothing))
+              boolean env "SELECT NOT EXISTS((TABLE audit_log EXCEPT TABLE pre_v048_audits) UNION ALL (TABLE pre_v048_audits EXCEPT TABLE audit_log)) AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=48)" `shouldReturn` True
+              boolean env "SELECT pg_get_functiondef('hmem_agent_session_change()'::regprocedure)=(SELECT value FROM pre_v048_function)" `shouldReturn` True
+          upgraded <- Migration.runMigrations pool upgradeDir
+          upgraded.failed `shouldBe` Nothing
+          upgraded.applied `shouldBe` [filename]
+          boolean env "SELECT (SELECT pg_get_functiondef('hmem_agent_session_change()'::regprocedure))<>(SELECT value FROM pre_v048_function) AND NOT EXISTS((TABLE audit_log EXCEPT TABLE expected_v048_audits) UNION ALL (TABLE expected_v048_audits EXCEPT TABLE audit_log))" `shouldReturn` True
+          boolean env "SELECT NOT EXISTS((TABLE change_stream_outbox EXCEPT TABLE pre_v048_events) UNION ALL (TABLE pre_v048_events EXCEPT TABLE change_stream_outbox)) AND NOT EXISTS((SELECT to_jsonb(s) FROM sessions s EXCEPT SELECT value FROM pre_v048_sessions) UNION ALL (SELECT value FROM pre_v048_sessions EXCEPT SELECT to_jsonb(s) FROM sessions s))" `shouldReturn` True
+          getSession pool workspace row.id `shouldReturn` Just sealed
+          allBytes env workspace row.id `shouldReturn` "{}\n"
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
+          (activeWorkspace,active) <- fresh env
+          _ <- heartbeatSession pool activeWorkspace active.id
+          boolean env ("SELECT count(*)=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid active.id<>"'") `shouldReturn` True
+
     it "upgrades populated V042 evidence atomically, keeps legacy metadata unchanged and resumes an untitled active session" $
       withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
         bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do

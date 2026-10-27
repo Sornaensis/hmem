@@ -29,6 +29,7 @@ import HMem.Config qualified as Config
 import HMem.DB.TestHarness (TestEnv(..), withTestEnv)
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithOidcCodeExchangeAndClock)
+import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.TestHarness
 import HMem.Server.WebSocket (newWSState)
 
@@ -40,6 +41,31 @@ data CallbackApp = CallbackApp
 
 spec :: Spec
 spec = describe "OIDC browser callback" $ do
+  it "requires configured API JWT issuer and audience while keeping time claims optional" $
+    withCallbackEnv $ \env -> do
+      harness <- callbackApp env id getCurrentTime
+      let claims = object
+            [ "iss" .= deployedSandboxIssuer, "aud" .= deployedSandboxAudience
+            , "sub" .= ("oidc-probe-user" :: Text)
+            ]
+          probes =
+            [ ("valid without exp/iat", id, 200)
+            , ("valid multiple resource audiences", replace "aud" (toJSON [deployedSandboxAudience, "another-resource"]), 200)
+            , ("missing issuer", remove "iss", 401)
+            , ("missing audience", remove "aud", 401)
+            , ("wrong issuer", replace "iss" (String "https://untrusted.example"), 401)
+            , ("wrong audience", replace "aud" (String "untrusted-client"), 401)
+            ] :: [(String, Value -> Value, Int)]
+      forM_ probes $ \(name, change, expected) -> do
+        token <- signClaimsValue (change claims)
+        response <- request harness.application methodGet "/api/v1/session" [("Authorization", "Bearer " <> encodeUtf8 token)]
+        putStrLn ("API signed JWT probe: " <> show (name, status response))
+        status response `shouldBe` expected
+      patUser <- createDeployedSandboxUser env True False
+      pat <- issueDeployedSandboxPAT env patUser "API JWT compatibility bot"
+      patResponse <- request harness.application methodGet "/api/v1/session" [("Authorization", "Bearer " <> encodeUtf8 pat.rawToken)]
+      status patResponse `shouldBe` 200
+
   it "binds S256 and the signed nonce to a one-use browser transaction" $
     withCallbackEnv $ \env -> do
       harness <- callbackApp env id getCurrentTime

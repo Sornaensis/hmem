@@ -298,7 +298,10 @@ resolveJwtPrincipal jwksCache pool deployedCfg token = case (deployedCfg.issuer,
 resolveJwtPrincipalForAudience :: JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> Text -> Text -> IO (Maybe Principal)
 resolveJwtPrincipalForAudience jwksCache pool deployedCfg expectedIssuer expectedAudience token = do
   mClaims <- verifiedJwtClaims jwksCache deployedCfg expectedIssuer expectedAudience token
-  case mClaims >>= (\claims -> preview JWT.string =<< (claims ^. JWT.claimSub)) of
+  case mClaims >>= (\claims -> do
+    _ <- claims ^. JWT.claimIss
+    _ <- claims ^. JWT.claimAud
+    preview JWT.string =<< (claims ^. JWT.claimSub)) of
     Nothing -> pure Nothing
     Just subject -> Auth.resolveUserPrincipalByAuthSubject pool subject
 

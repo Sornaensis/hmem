@@ -127,6 +127,7 @@ mkLocalSandboxConfig env = Config.defaultConfig
       , Config.apiKey = Nothing
       , Config.local = Config.LocalAuthConfig
           { Config.bootstrapEnabled = True
+          , Config.userToken = Nothing
           , Config.allowRemoteBootstrap = False
           , Config.botTokens =
               [ Config.LocalBotTokenConfig
@@ -164,6 +165,7 @@ mkDeployedSandboxConfig env = Config.defaultConfig
       , Config.apiKey = Nothing
       , Config.local = Config.LocalAuthConfig
           { Config.bootstrapEnabled = False
+          , Config.userToken = Nothing
           , Config.allowRemoteBootstrap = False
           , Config.botTokens = []
           }

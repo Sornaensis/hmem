@@ -1,8 +1,9 @@
 module HMem.ConfigSpec (spec) where
 
-import Control.Exception (bracket, try)
+import Control.Exception (IOException, bracket, try)
+import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 qualified as BS8
-import Data.Either (isLeft)
+import Data.Either (isLeft, isRight)
 import Data.List (isInfixOf)
 import Data.Text qualified as T
 import Data.Yaml qualified as Yaml
@@ -15,6 +16,89 @@ import HMem.Config
 
 spec :: Spec
 spec = do
+  describe "local human bearer configuration" $ do
+    it "is absent by default and only active in enabled local auth" $ do
+      defaultConfig.auth.local.userToken `shouldBe` Nothing
+      let cfg = defaultConfig.auth
+            { enabled = True, local = defaultConfig.auth.local { userToken = Just "human-secret" } }
+      authLocalUserToken cfg `shouldBe` Just "human-secret"
+      authLocalUserToken (cfg { enabled = False }) `shouldBe` Nothing
+      authLocalUserToken (cfg { mode = AuthModeDeployed }) `shouldBe` Nothing
+      authLocalUserTokenMatches cfg "human-secret" `shouldBe` True
+      authLocalUserTokenMatches cfg "human-secreu" `shouldBe` False
+      authLocalUserTokenMatches cfg "human-secret-long" `shouldBe` False
+
+    it "rejects blank, whitespace, null and non-text YAML credentials" $
+      mapM_ (\value -> do
+        let yaml = BS8.pack ("auth:\n  local:\n    user_token: " <> value <> "\n")
+        (Yaml.decodeEither' yaml :: Either Yaml.ParseException HMemConfig) `shouldSatisfy` isLeft)
+        ["''", "'   '", "'two words'", "null", "42"]
+
+    it "rejects collisions with API, configured bot and MCP provenance secrets" $ do
+      let base = defaultConfig.auth { enabled = True
+            , local = defaultConfig.auth.local { userToken = Just "shared-secret" } }
+          collisions = [base { apiKey = Just "shared-secret" }
+            , base { local = base.local { botTokens = [LocalBotTokenConfig "agent" "shared-secret"] } }
+            , base { mcpProvenanceToken = Just "shared-secret" }]
+      mapM_ (\cfg -> do
+        localUserTokenConfigError cfg `shouldSatisfy` (/= Nothing)
+        authLocalUserTokenMatches cfg "shared-secret" `shouldBe` False) collisions
+
+    it "loads native env and secret-file overrides with file precedence" $
+      withSystemTempDirectory "hmem-human-token" $ \dir -> do
+        let cfgFile = dir </> "config.yaml"
+            secretFile = dir </> "human-token"
+            cfg = defaultConfig { auth = defaultConfig.auth { enabled = True
+              , local = defaultConfig.auth.local { bootstrapEnabled = False, userToken = Just "file-config-secret" } } }
+        Yaml.encodeFile cfgFile cfg
+        BS8.writeFile secretFile "secret-file-value\r\n"
+        fromEnv <- withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN" (Just "env-secret")
+          $ withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN_FILE" Nothing $ loadConfigFile cfgFile
+        fromEnv.auth.local.userToken `shouldBe` Just "env-secret"
+        fromFile <- withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN" (Just "env-secret")
+          $ withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN_FILE" (Just secretFile) $ loadConfigFile cfgFile
+        fromFile.auth.local.userToken `shouldBe` Just "secret-file-value"
+
+    it "never falls back from invalid YAML, env or secret-file configuration" $
+      withSystemTempDirectory "hmem-human-invalid" $ \dir -> do
+        let cfgFile = dir </> "config.yaml"
+            secretFile = dir </> "human-token"
+        BS8.writeFile cfgFile "auth:\n  local:\n    user_token: '   '\n"
+        withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN" Nothing
+          (withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN_FILE" Nothing (loadConfigFile cfgFile)) `shouldThrow` anyIOException
+        Yaml.encodeFile cfgFile defaultConfig
+        withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN" (Just "   ")
+          (withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN_FILE" Nothing (loadConfigFile cfgFile)) `shouldThrow` anyIOException
+        withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN" (Just "valid-fallback-secret")
+          (withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN_FILE" (Just (dir </> "missing")) (loadConfigFile cfgFile)) `shouldThrow` anyIOException
+        mapM_ (\contents -> do
+          BS8.writeFile secretFile contents
+          withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN" (Just "valid-fallback-secret")
+            (withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN_FILE" (Just secretFile) (loadConfigFile cfgFile)) `shouldThrow` anyIOException)
+          ["", " \t\n"]
+
+    it "detects invalid credentials through normalized quoted and flow-map YAML keys" $
+      withSystemTempDirectory "hmem-human-normalized" $ \dir -> do
+        let cfgFile = dir </> "config.yaml"
+        mapM_ (\yaml -> do
+          (Yaml.decodeEither' yaml :: Either Yaml.ParseException Aeson.Value) `shouldSatisfy` isRight
+          BS8.writeFile cfgFile yaml
+          withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN" Nothing
+            (withEnvVar "HMEM_AUTH_LOCAL_USER_TOKEN_FILE" Nothing (loadConfigFile cfgFile)) `shouldThrow` anyIOException)
+          [ "auth:\n  local:\n    bootstrap_enabled: false\n    \"user\\u005ftoken\": ''\n"
+          , "auth: {local: {bootstrap_enabled: false, \"user\\u005ftoken\": null}}\n"
+          , "auth: {local: {bootstrap_enabled: false, 'user_token': {invalid: text}}}\n"
+          ]
+
+    it "fails closed on unparseable YAML without echoing secret contents" $
+      withSystemTempDirectory "hmem-human-syntax" $ \dir -> do
+        let cfgFile = dir </> "config.yaml"
+        BS8.writeFile cfgFile "auth: [unparseable-private-secret\n"
+        result <- try (loadConfigFile cfgFile) :: IO (Either IOException HMemConfig)
+        case result of
+          Left err -> show err `shouldSatisfy` (not . isInfixOf "unparseable-private-secret")
+          Right _ -> expectationFailure "invalid YAML must not activate default configuration"
+
   describe "applyEnvOverrides" $ do
     it "uses HMEM_DB_PASSWORD when present" $ do
       let cfg = defaultConfig
@@ -527,6 +611,7 @@ spec = do
                     { bootstrapEnabled = False
                     , allowRemoteBootstrap = True
                     , botTokens = [ LocalBotTokenConfig { label = "codex", token = "secret-token" } ]
+                    , userToken = Just "human-secret"
                     }
                 , deployed = DeployedAuthConfig
                     { issuer = Just "https://issuer.example"

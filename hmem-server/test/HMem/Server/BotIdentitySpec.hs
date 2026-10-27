@@ -7,7 +7,8 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.UUID qualified as UUID
 import HMem.Config qualified as Config
 import HMem.DB.RequestContext
-import HMem.Server.App (botIdentityMiddleware)
+import HMem.Server.App (authMiddleware, botIdentityMiddleware, resolveRequestPrincipal)
+import HMem.Server.WebSocket (resolveLocalWebSocketAccess, WorkspaceSubscription(..))
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.DB.Pool qualified as Pool
 import HMem.DB.ChangeStream (ChangeScope(..))
@@ -19,7 +20,7 @@ import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Types (Workspace(..), Observation(..), ObservationProvenance(..), ObservationRevisionEvent(..), PaginatedResult(..), SessionContext(..), SessionPrincipal(..), SessionActor(..))
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson (Value(..))
-import Network.HTTP.Types (Header, Method, methodGet, methodPost, status200, status400, status403)
+import Network.HTTP.Types (Header, Method, methodGet, methodPost, status200, status400, status401, status403)
 import Network.Wai (Application, defaultRequest, responseLBS)
 import Network.Wai qualified as Wai
 import Network.Wai.Test
@@ -27,6 +28,53 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "HTTP declared bot identity" $ do
+  it "authenticates a distinct local human bearer without a bot declaration" $ do
+    response <- callBearer humanAuth "human-secret" []
+    simpleStatus response `shouldBe` status200
+    simpleBody response `shouldBe` encode (object
+      ["principal_id" .= ("local-user" :: String), "authority" .= show PrincipalSyntheticLocalSuperadmin
+      , "actor_type" .= ("user" :: String), "has_identity" .= False])
+    wrong <- callBearer humanAuth "human-secreu" []
+    simpleStatus wrong `shouldBe` status401
+
+  it "keeps API and configured-bot bearers as declared bots beside the human credential" $
+    mapM_ (\token -> do
+      missing <- callBearer humanAuth token []
+      simpleStatus missing `shouldBe` status400
+      declared <- callBearer humanAuth token [identityHeader]
+      simpleStatus declared `shouldBe` status200
+      fields <- case decode (simpleBody declared) of
+        Just (Object value) -> pure value
+        other -> fail ("expected bot attribution response, got " <> show other)
+      KM.lookup "actor_type" fields `shouldBe` Just (String "bot"))
+      ["machine-secret", "configured-bot-secret"]
+
+  it "rejects dormant and colliding human credentials instead of falling back" $ do
+    let req = bearerRequest "human-secret" []
+    resolveRequestPrincipal (humanAuth { Config.enabled = False }) req `shouldBe` Nothing
+    resolveRequestPrincipal (humanAuth { Config.mode = Config.AuthModeDeployed }) req `shouldBe` Nothing
+    mapM_ (\cfg -> do
+      resolveRequestPrincipal cfg req `shouldBe` Nothing
+      denied <- callBearer cfg "human-secret" []
+      simpleStatus denied `shouldBe` status401)
+      [ humanAuth { Config.apiKey = Just "human-secret" }
+      , humanAuth { Config.local = humanAuth.local { Config.botTokens = [Config.LocalBotTokenConfig "collision" "human-secret"] } }
+      , humanAuth { Config.local = humanAuth.local { Config.userToken = Just "   " } }
+      ]
+
+  it "supports human-only local bearer gating and the same WebSocket identity" $ do
+    let cfg = humanAuth { Config.apiKey = Nothing }
+    response <- callBearer cfg "human-secret" []
+    simpleStatus response `shouldBe` status200
+    denied <- callBearer cfg "wrong" []
+    simpleStatus denied `shouldBe` status401
+    case resolveLocalWebSocketAccess cfg (Just "human-secret") of
+      Just (Just original, SubscribeAllWorkspaces) -> original `shouldBe` principal
+      other -> expectationFailure ("expected authenticated human WebSocket, got " <> show other)
+    resolveLocalWebSocketAccess cfg Nothing `shouldBe` Nothing
+    resolveLocalWebSocketAccess cfg (Just "wrong") `shouldBe` Nothing
+    resolveLocalWebSocketAccess (cfg { Config.apiKey = Just "human-secret" }) (Just "human-secret") `shouldBe` Nothing
+
   it "attributes an implicit local declaration without changing its authority or audience ID" $ do
     response <- call local principal methodPost [identityHeader]
     simpleStatus response `shouldBe` status200
@@ -140,6 +188,22 @@ spec = describe "HTTP declared bot identity" $ do
 local, deployed :: Config.AuthConfig
 local = Config.defaultConfig.auth
 deployed = local { Config.mode = Config.AuthModeDeployed }
+
+humanAuth :: Config.AuthConfig
+humanAuth = local { Config.enabled = True, Config.apiKey = Just "machine-secret"
+  , Config.local = local.local { Config.bootstrapEnabled = False, Config.userToken = Just "human-secret"
+    , Config.botTokens = [Config.LocalBotTokenConfig "agent" "configured-bot-secret"] } }
+
+bearerRequest :: T.Text -> [Header] -> Wai.Request
+bearerRequest token headers = defaultRequest
+  { Wai.requestMethod = methodPost, Wai.pathInfo = ["api", "v1", "workspaces"]
+  , Wai.requestHeaders = ("Authorization", "Bearer " <> TE.encodeUtf8 token) : headers }
+
+callBearer :: Config.AuthConfig -> T.Text -> [Header] -> IO SResponse
+callBearer cfg token headers =
+  let req = bearerRequest token headers
+  in withPrincipalContext (resolveRequestPrincipal cfg req) $
+    runSession (srequest (SRequest req "")) (authMiddleware cfg (botIdentityMiddleware cfg inspect))
 
 principal, botPrincipal :: Principal
 principal = Principal ActorUser "local-user" "Local User" PrincipalSyntheticLocalSuperadmin

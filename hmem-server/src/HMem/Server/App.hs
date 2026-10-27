@@ -15,6 +15,7 @@ module HMem.Server.App
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import Control.Lens ((&), (.~), (^.), preview)
+import Control.Monad (guard)
 import Data.Bits (xor, (.|.))
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
@@ -235,7 +236,10 @@ botIdentityMiddleware authCfg app req respond = case requestBotIdentity (Wai.req
 
 resolveRequestPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
 resolveRequestPrincipal authCfg req =
-  resolveBearerPrincipal authCfg req <|> defaultPrincipal authCfg
+  if isJust (Config.localUserTokenConfigError authCfg) then Nothing
+  else if isJust authCfg.local.userToken && isJust (lookup "Authorization" (Wai.requestHeaders req))
+    then resolveBearerPrincipal authCfg req
+    else resolveBearerPrincipal authCfg req <|> defaultPrincipal authCfg
   where
     defaultPrincipal cfg
       | cfg.mode == AuthModeLocal
@@ -696,7 +700,12 @@ localUserPrincipal = Principal
 resolveBearerPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
 resolveBearerPrincipal authCfg req = do
   token <- bearerToken req
-  localBotPrincipal authCfg token <|> legacyPrincipal authCfg token
+  localHumanPrincipal authCfg token <|> localBotPrincipal authCfg token <|> legacyPrincipal authCfg token
+
+localHumanPrincipal :: AuthConfig -> Text -> Maybe Principal
+localHumanPrincipal authCfg token = do
+  guard (Config.authLocalUserTokenMatches authCfg token)
+  pure localUserPrincipal
 
 localBotPrincipal :: AuthConfig -> Text -> Maybe Principal
 localBotPrincipal authCfg token
@@ -754,21 +763,24 @@ bearerToken request = do
 -- Authorization header of the form @Bearer <token>@.
 authMiddleware :: AuthConfig -> Middleware
 authMiddleware authCfg app req respond
-  | not (authStaticBearerEnabled authCfg) = app req respond
+  | isJust (Config.localUserTokenConfigError authCfg) = unauthorized
+  | not (authStaticBearerEnabled authCfg || isJust (Config.authLocalUserToken authCfg)) = app req respond
   | Wai.requestMethod req == methodOptions = app req respond
   | authorized = app req respond
-  | otherwise = respond $ Wai.responseLBS status401
+  | otherwise = unauthorized
+  where
+    unauthorized = respond $ Wai.responseLBS status401
       [ (hContentType, "application/json")
       , ("WWW-Authenticate", "Bearer")
       ]
       (encode unauthorizedBody)
-  where
     unauthorizedBody = object
       [ "error" .= ("unauthorized" :: Text)
       , "message" .= ("Missing or invalid bearer token" :: Text)
       ]
 
-    authorizedToken token = localBotTokenAuthorized authCfg token || maybe False (== token) (authStaticBearerToken authCfg)
+    authorizedToken token = isJust (localHumanPrincipal authCfg token)
+      || localBotTokenAuthorized authCfg token || maybe False (== token) (authStaticBearerToken authCfg)
 
     authorized = case bearerToken req of
       Just actual -> authorizedToken actual

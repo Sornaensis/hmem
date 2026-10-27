@@ -57,6 +57,7 @@ import Hasql.Connection qualified as Hasql
 import System.Timeout (timeout)
 
 import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), authStaticBearerEnabled, authStaticBearerToken)
+import HMem.Config qualified as Config
 import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..), ChangeStreamError(..), replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden, OutboxRecord(..), ReplayPage(..))
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
 import HMem.DB.Auth qualified as Auth
@@ -917,15 +918,24 @@ ticketFromRequest rh =
 
 authorizedTokenPrincipal :: AuthConfig -> Text -> Maybe Principal
 authorizedTokenPrincipal authCfg token =
-  localBotPrincipal authCfg token <|> legacyPrincipal authCfg token
+  localHumanPrincipal authCfg token <|> localBotPrincipal authCfg token <|> legacyPrincipal authCfg token
+
+localHumanPrincipal :: AuthConfig -> Text -> Maybe Principal
+localHumanPrincipal cfg token
+  | Config.authLocalUserTokenMatches cfg token = Just Principal
+      { actorType = ActorUser, actorId = "local-user", actorLabel = "Local User"
+      , authority = PrincipalSyntheticLocalSuperadmin }
+  | otherwise = Nothing
 
 resolveLocalWebSocketAccess :: AuthConfig -> Maybe Text -> Maybe (Maybe Principal, WorkspaceSubscription)
 resolveLocalWebSocketAccess authCfg mToken
   | authCfg.mode /= AuthModeLocal = Nothing
+  | isJust (Config.localUserTokenConfigError authCfg) = Nothing
   | Just token <- mToken
   , Just principal <- authorizedTokenPrincipal authCfg token =
       Just (Just principal, SubscribeAllWorkspaces)
   | authStaticBearerEnabled authCfg = Nothing
+  | isJust (Config.authLocalUserToken authCfg) = Nothing
   | AuthConfig { local = LocalAuthConfig { allowRemoteBootstrap = True } } <- authCfg = Nothing
   | otherwise = Just (defaultLocalPrincipal authCfg, SubscribeAllWorkspaces)
 

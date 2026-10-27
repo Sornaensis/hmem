@@ -298,6 +298,7 @@ mkLocalConfig env port =
       , Config.apiKey = Nothing
       , Config.local = Config.LocalAuthConfig
           { Config.bootstrapEnabled = True
+          , Config.userToken = Nothing
           , Config.allowRemoteBootstrap = False
           , Config.botTokens =
               [ Config.LocalBotTokenConfig
@@ -330,6 +331,7 @@ mkDeployedConfig env port =
       , Config.apiKey = Nothing
       , Config.local = Config.LocalAuthConfig
           { Config.bootstrapEnabled = False
+          , Config.userToken = Nothing
           , Config.allowRemoteBootstrap = False
           , Config.botTokens = []
           }

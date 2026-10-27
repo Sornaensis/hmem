@@ -53,19 +53,24 @@ module HMem.Config
   , authStaticBearerEnabled
   , authStaticBearerToken
   , authMcpProvenanceToken
+  , authLocalUserToken
+  , authLocalUserTokenMatches
+  , localUserTokenConfigError
   ) where
 
 import Control.Applicative ((<|>))
-import Control.Exception (throwIO)
+import Control.Exception (IOException, throwIO, try)
 import Control.Monad (guard)
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.:?), (.!=), (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
-import Data.Char (isAlphaNum, isDigit, isHexDigit)
+import Data.Bits (xor, (.|.))
+import Data.Char (isAlphaNum, isDigit, isHexDigit, isSpace)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Yaml qualified as Yaml
 import System.Environment (lookupEnv)
 import System.Directory (getHomeDirectory, doesFileExist, createDirectoryIfMissing)
@@ -125,6 +130,7 @@ data LocalAuthConfig = LocalAuthConfig
   { bootstrapEnabled      :: !Bool
   , allowRemoteBootstrap :: !Bool
   , botTokens            :: ![LocalBotTokenConfig]
+  , userToken            :: !(Maybe Text)
   } deriving stock (Show, Eq)
 
 data DeployedAuthConfig = DeployedAuthConfig
@@ -373,13 +379,17 @@ instance FromJSON LocalAuthConfig where
     <$> o .:? "bootstrap_enabled" .!= True
     <*> o .:? "allow_remote_bootstrap" .!= False
     <*> o .:? "bot_tokens" .!= []
+    <*> case KeyMap.lookup "user_token" o of
+          Nothing -> pure Nothing
+          Just (Aeson.String value) | validLocalUserToken value -> pure (Just value)
+          _ -> fail "auth.local.user_token must be nonempty text without whitespace"
 
 instance ToJSON LocalAuthConfig where
-  toJSON localCfg = Aeson.object
+  toJSON localCfg = Aeson.object $
     [ "bootstrap_enabled" .= localCfg.bootstrapEnabled
     , "allow_remote_bootstrap" .= localCfg.allowRemoteBootstrap
     , "bot_tokens" .= localCfg.botTokens
-    ]
+    ] <> maybe [] (\value -> ["user_token" .= value]) localCfg.userToken
 
 instance FromJSON DeployedAuthConfig where
   parseJSON = Aeson.withObject "DeployedAuthConfig" $ \o -> DeployedAuthConfig
@@ -585,6 +595,7 @@ defLocalAuth = LocalAuthConfig
   { bootstrapEnabled = True
   , allowRemoteBootstrap = False
   , botTokens = []
+  , userToken = Nothing
   }
 
 defDeployedAuth :: DeployedAuthConfig
@@ -688,9 +699,11 @@ configFilePath = (</> "config.yaml") <$> configDir
 loadConfig :: IO HMemConfig
 loadConfig = configFilePath >>= loadConfigFile
 
--- | Load config from an explicit path.  A missing or generally malformed file
--- uses 'defaultConfig'.  An explicitly configured historical embedding identity
--- is rejected before environment overrides can activate a rewritten provider.
+-- | Load config from an explicit path. A missing file uses 'defaultConfig'.
+-- Invalid YAML syntax and invalid explicit human credentials fail closed;
+-- legacy type errors without a human credential retain the existing fallback.
+-- An explicitly configured historical embedding identity is rejected before
+-- environment overrides can activate a rewritten provider.
 -- Prints warnings for validation issues and clamps values to valid ranges.
 loadConfigFile :: FilePath -> IO HMemConfig
 loadConfigFile path = do
@@ -703,6 +716,9 @@ loadConfigFile path = do
         Left err -> do
           let untyped = Yaml.decodeEither' contents :: Either Yaml.ParseException Aeson.Value
           case untyped of
+            Left _ -> ioError (userError "Invalid configuration YAML; refusing configuration fallback")
+            Right value | containsLocalUserTokenSetting value ->
+              ioError (userError "Invalid auth.local.user_token configuration; refusing configuration fallback")
             Right value | containsHistoricalManagedTeiSpaceFingerprint value -> throwIO err
             _ -> do
               hPutStrLn stderr $
@@ -723,12 +739,70 @@ loadConfigFile path = do
   let cfg' = applyChangeStreamEnvOverrides envRetention envResumeTtl envSessionTtl
            $ applyEnvOverrides envPassword envApiKey envSslMode cfg
       cfg'' = applyMcpProvenanceEnvOverride envMcpProvenanceToken cfg'
-  cfg''' <- case applyEmbeddingProviderEnvOverrides envEmbeddingMode envEmbeddingEndpoint cfg'' of
-    Left err -> hPutStrLn stderr ("Config warning: " <> err <> "; retaining file configuration") >> pure cfg''
+  cfgWithUser <- applyLocalUserTokenEnv cfg''
+  cfg''' <- case applyEmbeddingProviderEnvOverrides envEmbeddingMode envEmbeddingEndpoint cfgWithUser of
+    Left err -> hPutStrLn stderr ("Config warning: " <> err <> "; retaining file configuration") >> pure cfgWithUser
     Right overridden -> pure overridden
   let (warnings, validated) = validateConfig cfg'''
   mapM_ (\w -> hPutStrLn stderr $ "Config warning: " <> w) warnings
   pure validated
+
+containsLocalUserTokenSetting :: Aeson.Value -> Bool
+containsLocalUserTokenSetting (Aeson.Object root) = case KeyMap.lookup "auth" root of
+  Just (Aeson.Object authObject) -> case KeyMap.lookup "local" authObject of
+    Just (Aeson.Object localObject) -> KeyMap.member "user_token" localObject
+    _ -> False
+  _ -> False
+containsLocalUserTokenSetting _ = False
+
+-- An explicitly configured human credential must never disappear into defaults.
+-- Secret-file precedence matches the container entrypoint; only trailing line
+-- endings are removed, so accidental whitespace is rejected rather than changed.
+applyLocalUserTokenEnv :: HMemConfig -> IO HMemConfig
+applyLocalUserTokenEnv cfg = do
+  envValue <- fmap T.pack <$> lookupEnv "HMEM_AUTH_LOCAL_USER_TOKEN"
+  filePath <- lookupEnv "HMEM_AUTH_LOCAL_USER_TOKEN_FILE"
+  supplied <- case filePath of
+    Nothing -> pure envValue
+    Just file -> do
+      result <- try (BS.readFile file) :: IO (Either IOException BS.ByteString)
+      case result of
+        Left _ -> ioError (userError "Cannot read HMEM_AUTH_LOCAL_USER_TOKEN_FILE")
+        Right bytes -> case TE.decodeUtf8' bytes of
+          Left _ -> ioError (userError "HMEM_AUTH_LOCAL_USER_TOKEN_FILE must contain UTF-8 text")
+          Right value -> pure (Just (T.dropWhileEnd (`elem` ['\r', '\n']) value))
+  let configured = cfg { auth = cfg.auth { local = cfg.auth.local
+        { userToken = supplied <|> cfg.auth.local.userToken } } }
+  case localUserTokenConfigError configured.auth of
+    Just message -> ioError (userError message)
+    Nothing -> pure configured
+
+validLocalUserToken :: Text -> Bool
+validLocalUserToken value = not (T.null value) && not (T.any isSpace value)
+
+localUserTokenConfigError :: AuthConfig -> Maybe String
+localUserTokenConfigError cfg = case cfg.local.userToken of
+  Nothing -> Nothing
+  Just value
+    | not (validLocalUserToken value) -> Just "auth.local.user_token must be nonempty text without whitespace"
+    | Just value == cfg.apiKey || any (\bot -> bot.token == value) cfg.local.botTokens
+        || Just value == authMcpProvenanceToken cfg ->
+        Just "auth.local.user_token must differ from API, bot and MCP provenance credentials"
+    | otherwise -> Nothing
+
+authLocalUserToken :: AuthConfig -> Maybe Text
+authLocalUserToken cfg
+  | cfg.mode == AuthModeLocal, cfg.enabled, Nothing <- localUserTokenConfigError cfg = cfg.local.userToken
+  | otherwise = Nothing
+
+authLocalUserTokenMatches :: AuthConfig -> Text -> Bool
+authLocalUserTokenMatches cfg actual = case authLocalUserToken cfg of
+  Nothing -> False
+  Just expected ->
+    let expectedBytes = TE.encodeUtf8 expected
+        actualBytes = TE.encodeUtf8 actual
+    in BS.length expectedBytes == BS.length actualBytes
+      && foldl' (.|.) 0 (BS.zipWith xor expectedBytes actualBytes) == 0
 
 -- | Write config to @~\/.hmem\/config.yaml@.
 saveConfig :: HMemConfig -> IO ()
@@ -1011,7 +1085,8 @@ validateConfig cfg = (warnings, corrected)
         missingLegacyWarn
           | a.mode == AuthModeLocal
           , a.enabled
-          , Nothing <- a.apiKey =
+          , Nothing <- a.apiKey
+          , Nothing <- authLocalUserToken a =
               ["auth.enabled is true but no auth.api_key or HMEM_API_KEY is configured; current runtime will not enable legacy static bearer auth until richer mode-specific auth is implemented"]
           | otherwise = []
 

@@ -1437,9 +1437,7 @@ refreshingKnownEligibility model task =
 viewProjectsTree : String -> Model -> Html Msg
 viewProjectsTree wsId model =
     div [class "workspace-tree-layout"]
-        [ div [class "workspace-tree-content"] [viewHierarchyViewport wsId model]
-        , Feature.Sessions.viewWorkspaceInspector wsId model
-        ]
+        [ div [class "workspace-tree-content"] [viewHierarchyViewport wsId model] ]
 
 
 viewProjectsTreeLegacy : String -> Model -> Html Msg
@@ -1876,7 +1874,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                 [ div [ class "card-meta-row" ]
                     [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps project.createdAt) ]
                     , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps project.updatedAt) ]
-                    , Helpers.copyableValue "card-meta card-id card-id-copy" "project ID" project.id project.id
+                    , span [ class "card-meta" ] [ text "UUID: " ], Helpers.copyableValue "card-meta card-id card-id-copy" "project ID" project.id project.id
                     ]
                 ]
             ]
@@ -2370,7 +2368,9 @@ viewTaskCardBody descendants projection showProject model task =
                     text ""
                 ]
             ]
-        , let
+        , div [ class "task-card-work" ]
+          [
+          let
             childTasks =
                 childTasksForTask
 
@@ -2478,7 +2478,7 @@ viewTaskCardBody descendants projection showProject model task =
                     , Feature.Dependencies.viewTaskDependencies model task.id deps]
                     , panel "agents"
                         [ p [class "card-meta"] [text (if Feature.Sessions.taskActive task.workspaceId model task.id then "Active sessions are available for this task." else "No active sessions are currently known for this task.")]
-                        , button [class "btn btn-secondary btn-sm card-agents-open",type_ "button",disabled (not (Feature.Sessions.taskActive task.workspaceId model task.id) && model.sessions.taskPanel /= Just task.id),onClick (SessionsToggleDock task.id)] [text (if model.sessions.taskPanel == Just task.id then "Close active agents" else "Open in card")]
+                        , Feature.Sessions.viewTaskIcon task.workspaceId model task.id
                         ]
                     , panel "evidence" [Feature.Sessions.viewTaskEvidence task.workspaceId model task.id]
                     , panel "history" [Feature.AuditLog.viewEntityHistory model "task" task.id]
@@ -2501,14 +2501,15 @@ viewTaskCardBody descendants projection showProject model task =
               else
                 text ""
             ]
-        , Feature.Sessions.viewTaskActiveChoices task.workspaceId model task.id
-        , Feature.Sessions.viewTaskActiveConversation task.workspaceId model task.id
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
+          ]
+        , Feature.Sessions.viewTaskActiveConversation task.workspaceId model task.id
+        , Feature.Sessions.viewTaskActiveChoices task.workspaceId model task.id
         , CardSections.metadata
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps task.createdAt) ]
                 , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps task.updatedAt) ]
-                , Helpers.copyableValue "card-meta card-id card-id-copy" "task ID" task.id task.id
+                , span [ class "card-meta" ] [ text "UUID: " ], Helpers.copyableValue "card-meta card-id card-id-copy" "task ID" task.id task.id
                 ]
             , div [ class "card-meta-row" ]
                 [ case task.completedAt of

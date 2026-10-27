@@ -5539,3 +5539,52 @@ textarea.observation-edit-content {
 @media (pointer: coarse) {
   .inline-edit-input, .inline-create-input { min-height: 44px; }
 }
+/* Projects keep one full-width entity header and explicit visible metadata. */
+.workspace-tree-layout { grid-template-columns: minmax(0, 1fr); }
+.workspace-metadata .workspace-details { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.workspace-metadata .workspace-detail { min-width: 0; overflow-wrap: anywhere; }
+.workspace-metadata .workspace-detail-value { white-space: normal; overflow-wrap: anywhere; }
+.card-footer .card-meta-group, .card-footer .card-id-copy { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.task-card-work { min-width: 0; }
+.workspace-tree-content .task-card-work > .card-summary { margin: 0; padding: 0 14px 10px; font-size: 12px; }
+.workspace-tree-content .task-card-work > .card-body { padding: 0 14px 14px; font-size: 14px; gap: 10px; }
+.workspace-tree-content .task-card-work > .card-inline-actions { margin: 0; padding: 8px 14px; gap: 8px; flex-wrap: wrap; }
+.task-card-with-dock { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(180px, .7fr); }
+.task-card-with-dock > .card-header { grid-column: 1 / -1; grid-row: 1; }
+.task-card-with-dock > .task-card-work { grid-column: 1; grid-row: 2; }
+.task-card-with-dock > .task-session-dock { grid-column: 2; grid-row: 2; border-left: 1px solid var(--border); }
+.task-card-with-dock > .task-session-context-choices { grid-column: 3; grid-row: 2; border-top: 0; border-left: 1px solid var(--border); margin: 0; }
+.task-card-with-dock > .card-footer, .task-card-with-dock > .tree-children, .task-card-with-dock > .tree-tasks { grid-column: 1 / -1; }
+.task-session-context-grid { flex-direction: row; align-items: flex-start; }
+.task-session-context-grid > .task-session-transcript { flex: 1 1 0; }
+.task-session-context-grid > .task-session-context-choices { flex: 0 1 210px; }
+.sessions-page .sessions-layout { grid-template-columns: minmax(0, 1fr) 210px 230px; }
+.sessions-page .session-viewer { grid-column: 1; }
+.sessions-page .sessions-list { grid-column: 2; border-right: 0; border-left: 1px solid var(--border); }
+.sessions-page .sessions-layout > .session-detail.empty-state { grid-column: 1; }
+@media (max-width: 850px) {
+  .sessions-page .sessions-layout { grid-template-columns: minmax(0, 1fr) 180px; }
+  .sessions-page .session-event-inspector { grid-column: 1; }
+}
+@container task-work (max-width: 950px) {
+  .task-card-with-dock { grid-template-columns: minmax(0, 1fr); }
+  .task-card-with-dock > .task-card-work { grid-column: 1; grid-row: 2; }
+  .task-card-with-dock > .task-session-dock { grid-column: 1; grid-row: 3; border-left: 0; border-top: 1px solid var(--border); }
+  .task-card-with-dock > .task-session-context-choices { grid-column: 1; grid-row: 4; border-left: 0; border-top: 1px solid var(--border); }
+}
+@media (max-width: 650px) {
+  .sessions-page .sessions-layout { grid-template-columns: minmax(0, 1fr); }
+  .sessions-page .session-viewer { grid-column: 1; grid-row: 4; }
+  .sessions-page .sessions-list { grid-column: 1; grid-row: 5; border-left: 0; }
+  .sessions-page .session-event-inspector { grid-column: 1; grid-row: 6; }
+  .task-session-context-grid { flex-direction: column; }
+  .task-session-context-grid > .task-session-context-choices { flex-basis: auto; }
+}
+.workspace-context-persistent .workspace-metadata,
+.workspace-context-persistent .workspace-summary { grid-column: 1 / -1; min-width: 0; }
+.workspace-context-persistent .workspace-header-title { min-width: 0; }
+.workspace-context-persistent .workspace-metadata { align-self: start; }
+/* Leave native scroll room for Projects metadata above the fixed connection badge. */
+@media (max-width: 650px) {
+  .page:has(.workspace-tree-layout) { padding-bottom: 4rem; }
+}

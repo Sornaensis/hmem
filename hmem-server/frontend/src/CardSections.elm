@@ -1,6 +1,6 @@
 module CardSections exposing (fact, facts, metadata, section)
 
-import Html exposing (Html, details, div, footer, h4, label, span, summary, text)
+import Html exposing (Html, div, footer, h4, label, span, text)
 import Html.Attributes exposing (attribute, class)
 
 
@@ -24,8 +24,4 @@ fact name control =
 metadata : List (Html msg) -> Html msg
 metadata children =
     footer [ class "card-footer" ]
-        [ details [ class "card-metadata" ]
-            [ summary [] [ text "Metadata" ]
-            , div [ class "card-meta-group" ] children
-            ]
-        ]
+        [ div [ class "card-meta-group" ] children ]

@@ -1,6 +1,6 @@
 # UI composition reference
 
-The six accepted directions define the shared layout. The original HTML and reopened review are immutable inputs; simplified mock controls and example records do not replace production capabilities.
+The six accepted directions define the shared visual system. The current follow-up layout explicitly supersedes the earlier Projects inspector, metadata disclosures and session-pane order. Original HTML, reopened review and prior release captures remain immutable historical inputs; simplified controls and example records do not replace production capabilities.
 
 ## Inputs and selected stages
 
@@ -22,14 +22,14 @@ Select the corresponding `#hm-AREA-tab`, assert the unique visible selected stag
 
 | Composition | Normal-content geometry |
 |---|---|
-| Workspace | 146px desktop rail, fluid main, 260px inspector; at <=850px rail120px and inspector below main; at <=650px one column and wrapping horizontal rail. |
+| Workspace | 146px desktop rail and fluid Projects main without an outer inspector; at <=850px rail120px; at <=650px one column and wrapping horizontal rail. Workspace UUID/Created/Updated stay visible. |
 | Sections | 14px/1.5 base, 18px/1.4 primary heading, 14px secondary heading, 12px metadata and 11px labels;14px spacing,8px radius;10x14px entity header,12x14px footer,12px card separation. |
 | Persistent context | Global header minimum54px with12x16px padding; workspace controls12x16px/gap12px;tabs11x8px and local tabs9x8px;main padding20px,14px at<=650px. |
 | Ledger | Fluid ledger plus270px detail,235px at<=850px;single column<=650px;timestamp/content110px+fluid with14px gap,narrow85px+fluid with8px gap. |
-| Dock | `minmax(0,1fr)` Work and active-agent hierarchy on the left plus `minmax(300px,1.1fr)` conversation on the right; stack when the workspace tree-content pane is <=650px. Inline-size containment is on that pane: at a 900px viewport the 440px pane contains a narrower nested card, so the dock stacks without removing the workspace inspector. No block-size containment or viewer ownership change. |
+| Dock | One full-width task/subtask header above Work, sole reader and hierarchy from left to right (`1fr/1.2fr/minmax(180px,.7fr)`). At workspace tree-content width <=950px, stack Work, reader, hierarchy. Inline-size containment and the existing boxed reader remain; the card toggle owns close. Metadata is an always-visible full-width footer. |
 | Observations adaptation | No literal mock screen. Apply shared W context rows and C full-width header/content/provenance-footer sections; keep the existing Subject Tree/All/Files and exact inline/detached detail occurrence, native reader widths and measured viewport owners. At <=650px width/400px height, the Observation shell bounds header54px/context at most30dvh/rail max(40px,12dvh), with fine main space reserved for max(36px,1.5rem+4px) and local tabs in native flow; coarse context/rail48px retain full44px targets and native scroll access. |
 | Search and Timeline adaptation | No literal mock screens. Use shared context, 10x14px headers, 14px content and 12x14px result-ID/action footers. Keep condensed keyed hits, distinct global/workspace/focused controls, original interactive Timeline SVG, legends, filters and native canvas scrolling. A header search input leases only its same-app unique direct main page; header edits reserve one physical viewport ceiling, while local input leases keep their existing rule. No scroll restoration or new scroll owner. |
-| Conversation | 210px hierarchy/fluid conversation/230px inspector;<=850px hierarchy180px and inspector below conversation;<=650px single column. |
+| Conversation | Fluid conversation/210px hierarchy/230px event inspector;<=850px hierarchy180px and inspector below conversation;<=650px conversation, hierarchy, inspector in one column. Full Sessions navigation and event inspection remain. |
 
 Tolerances are +/-2 CSSpx spacing, +/-4px fixed panes and +/-3 percentage points dock proportion on matching inputs. They do not excuse missing panes, wrong ordering, lost controls or premature1200px inspector stacking. Header heights are minima: long labels and200% text must wrap. Fine-pointer controls target32px and coarse-pointer controls44px;existing card disclosures retain their coordinated24px footprint/placement.
 
@@ -37,12 +37,20 @@ Preserve existing `style.css` canvas/surface/text/accent and semantic status/pri
 
 Production has more real controls than the examples: count/retry states, workspace details, separate all-entity and hierarchy search, permissions and authentication remain accessible. They wrap rather than being removed to force a mock height. The global row reuses the existing principal/mode/sign-out controls. Full-width workspace identity/search, tabs and real filter controls precede the rail/main/inspector row. The extra real hierarchy-filter row is a measured adaptation; it does not replace or hide the accepted tab row. Native main/sidebar overflow and measured context obstruction remain authoritative.
 
+## Current agent association and metadata contract
+
+Keep `View Agents ->` and `<- Hide Agents` exact. A current settled active direct-task page proves association; otherwise a bounded first all-state page uses the existing mounted rotation and shared admission. Do not infer absence from active=false or from contextual ancestors. A current empty direct page suppresses toggle/light; associated inactive sessions show grey. Dirty, failed or retired proofs cannot authorize a closed dock. Preserve the existing active presentation with its refreshing qualifier, and keep an already open close control usable while proof refreshes.
+
+Workspace/project/task/subtask UUID, Created and Updated values are always rendered with honest timestamp fallbacks and native wrapping/copy controls. Remove only the inline reader's X and duplicate task heading; preserve full Sessions navigation and event inspector.
+
+The follow-up evidence uses separate `output/ui-layout-d913653e/` with eight representative PNGs and bounded DOM/functional receipts. The final verifier owns it through this project's closure, with explicit coordinator cleanup disposition. The earlier 207-image release remains protected and is not relabeled as this revision.
+
 ## Surface ownership
 
 | Family | Current surfaces and preserved workflows |
 |---|---|
 | Shell/Home | AppShell,Groups,Page.Home,Page.Workspace;grouped workspace picker,identity/totals/tabs,bootstrap/required/failed auth,connection/toasts,NotFound. |
-| Projects | Cards,CardSections,Editing,Dependencies,Move,DragDrop;root/nested/focused hierarchy,inspector,readiness,next tasks,Work/Agents/Evidence/History,all create/edit/status/priority/dependency/move/drop/delete confirmations. |
+| Projects | Cards,CardSections,Editing,Dependencies,Move,DragDrop;root/nested/focused hierarchy,readiness,next tasks,Work/Agents/Evidence/History,all create/edit/status/priority/dependency/move/drop/delete confirmations. |
 | Sessions | Sessions and viewer bridges;actual lineage/truncation,tree/list/detail/dock/inspector,live/quiet/terminated,runtime versus creator,raw/tool/save/integrity/encrypted/unsupported states. |
 | Observations | Subject Tree/All/Files/query/match,selected/detached detail,drafts,editing/subjects/provenance/history/curation and confirmations. |
 | Search/Timeline | Global/workspace/focused filters,loading/error/results,jump/return/history;ranges/granularity/chart/series/tooltips/events. |

@@ -8,10 +8,13 @@ import Feature.Sessions as Sessions
 import Feature.SessionDelivery as Delivery
 import Helpers
 import Http
+import Html.Attributes
 import Set
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Test exposing (describe, test)
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
 import Types exposing (..)
 import Url
 
@@ -19,7 +22,8 @@ import Url
 suite : Test.Test
 suite =
     describe "Sessions production wire contract"
-        [ describe "card-owned dock authority" dockTests
+        [ describe "direct task association presence" associationTests
+        , describe "card-owned dock authority" dockTests
         , describe "same-authority metadata presentation" metadataPresentationTests
         , test "inspected event uses current bounded source and retires with session or authority" <| \_ ->
             let
@@ -245,8 +249,8 @@ suite =
                 (ready,bounded) = List.foldl advance (model,True) (List.range 1 100)
                 retired = Sessions.reconcile ({ready | auth={status=AuthRequired,mode=Nothing}},Cmd.none) |> Tuple.first
             in
-            Expect.equal {pages=22,hints=22,bounded=True,retiredPages=0,retiredHints=0}
-                {pages=Dict.size ready.sessions.taskPages,hints=Dict.size ready.sessions.taskHints,bounded=bounded,retiredPages=Dict.size retired.sessions.taskPages,retiredHints=Dict.size retired.sessions.taskHints}
+            Expect.equal {pages=22,hints=22,associations=22,bounded=True,retiredPages=0,retiredHints=0,retiredAssociations=0}
+                {pages=Dict.size ready.sessions.taskPages,hints=Dict.size ready.sessions.taskHints,associations=Dict.size ready.sessions.taskAssociations,bounded=bounded,retiredPages=Dict.size retired.sessions.taskPages,retiredHints=Dict.size retired.sessions.taskHints,retiredAssociations=Dict.size retired.sessions.taskAssociations}
         , test "active and evidence cursors remain independent between tasks" <| \_ ->
             let
                 cursor={createdAt="2026-10-24T00:00:00Z",id=sessionId}
@@ -539,7 +543,7 @@ dockFixture =
         second = page.items |> List.map (\session -> {session | id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})
         all = {page | items=page.items ++ second}
         cached = {result=Ok all,epoch=entered.sessionDelivery.listInvalidation,cursor=Nothing}
-    in {entered | tasks=Dict.fromList (List.map (\id -> (id,{id=id,workspaceId=workspace,projectId=Nothing,parentId=Nothing,title=id,description=Nothing,status=Api.InProgress,priority=1,completedAt=Nothing,dependencyCount=0,memoryLinkCount=0,createdAt="",updatedAt=""})) ["one","two"]), sessionDelivery=List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage all)) delivery) entered.sessionDelivery (Dict.values entered.sessionDelivery.physical), sessions={state | taskPages=Dict.fromList [("active:one",cached),("active:two",cached)],taskHints=Dict.fromList [("one",{active=True,error=False,epoch=entered.sessionDelivery.listInvalidation}),("two",{active=True,error=False,epoch=entered.sessionDelivery.listInvalidation})]}}
+    in {entered | tasks=Dict.fromList (List.map (\id -> (id,{id=id,workspaceId=workspace,projectId=Nothing,parentId=Nothing,title=id,description=Nothing,status=Api.InProgress,priority=1,completedAt=Nothing,dependencyCount=0,memoryLinkCount=0,createdAt="",updatedAt=""})) ["one","two"]), sessionDelivery=List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage all)) delivery) entered.sessionDelivery (Dict.values entered.sessionDelivery.physical), sessions={state | taskPages=Dict.fromList [("active:one",cached),("active:two",cached)],taskAssociations=Dict.fromList (List.map (\id -> (id,{present=True,error=False,epoch=entered.sessionDelivery.listInvalidation})) ["one","two"]),taskHints=Dict.fromList [("one",{active=True,error=False,epoch=entered.sessionDelivery.listInvalidation}),("two",{active=True,error=False,epoch=entered.sessionDelivery.listInvalidation})]}}
 
 
 dockTests : List Test.Test
@@ -613,3 +617,139 @@ settleDockPages current =
             Delivery.TaskSessionsFiltered _ _ _ -> Delivery.settle request.id True (Ok (Delivery.SessionsPage page)) delivery
             _ -> delivery
     in {current | sessionDelivery=List.foldl settle current.sessionDelivery (Dict.values current.sessionDelivery.physical)}
+
+
+associationFixture : Model
+associationFixture =
+    let base = dockFixture
+        state = base.sessions
+    in {base | sessions={state | taskHints=Dict.empty,taskAssociations=Dict.empty,taskPages=Dict.empty,owned=[],taskPanel=Nothing,selected=Nothing},sessionDelivery=Delivery.init}
+
+
+driveAssociations : List Api.AgentSession -> Result Http.Error (List Api.AgentSession) -> Model -> (Model,List Delivery.Target)
+driveAssociations active associated model =
+    let advance _ (current,targets) =
+            let requested = Sessions.reconcile (current,Cmd.none) |> Tuple.first
+                requests = Dict.values requested.sessionDelivery.physical
+                reply request = case request.target of
+                    Delivery.TaskSessionsFiltered _ filters _ ->
+                        (if filters.state == "active" then Ok active else associated) |> Result.map (\items -> Delivery.SessionsPage {items=items,nextCursor=Nothing})
+                    _ -> Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})
+                settled = List.foldl (\request delivery -> Delivery.settle request.id True (reply request) delivery) requested.sessionDelivery requests
+            in ({requested | sessionDelivery=settled},targets ++ List.map .target requests)
+    in List.foldl advance (model,[]) (List.range 1 12)
+
+
+associationTests : List Test.Test
+associationTests =
+    let sample = Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
+        presence model = Dict.get "one" model.sessions.taskAssociations |> Maybe.andThen (\hint -> if hint.error || hint.epoch /= model.sessionDelivery.listInvalidation then Nothing else Just hint.present)
+        withSession check = \_ -> sample |> Maybe.map check |> Maybe.withDefault (Expect.fail "Invalid session fixture")
+        allState target = case target of
+            Delivery.TaskSessionsFiltered _ filters _ -> filters.state == ""
+            _ -> False
+    in
+    [ test "active positive proves association without a second all-state read" <| withSession (\session ->
+        let (ready,targets) = driveAssociations [session] (Ok []) associationFixture
+        in Expect.equal (Just True,True,0) (presence ready,Sessions.taskActive workspace ready "one",List.filter allState targets |> List.length))
+    , test "an active-negative page alone is unresolved rather than proof of no association" <| \_ ->
+        let entered = Sessions.reconcile (associationFixture,Cmd.none) |> Tuple.first
+            settled = List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) delivery) entered.sessionDelivery (Dict.values entered.sessionDelivery.physical)
+            unresolved = Sessions.reconcile ({entered | sessionDelivery=settled},Cmd.none) |> Tuple.first
+        in Expect.all
+            [ \_ -> Expect.equal Nothing (presence unresolved)
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace unresolved "one") |> Query.has [Selector.tag "button",Selector.attribute (Html.Attributes.disabled True)]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace unresolved "one") |> Query.hasNot [Selector.class "session-state-inactive"]
+            ] ()
+    , test "current empty all-state direct membership removes toggle and inactive light" <| \_ ->
+        let (ready,_) = driveAssociations [] (Ok []) associationFixture
+            toggled = Sessions.update (SessionsToggleDock "one") ready |> Tuple.first
+        in Expect.all
+            [ \_ -> Expect.equal (Just False,Nothing) (presence ready,toggled.sessions.taskPanel)
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.hasNot [Selector.tag "button"]
+            ] ()
+    , test "terminated-only association retains an enabled grey toggle without an inline terminated reader" <| withSession (\session ->
+        let (ready,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) associationFixture
+            toggled = Sessions.update (SessionsToggleDock "one") ready |> Tuple.first
+        in Expect.all
+            [ \_ -> Expect.equal {present=Just True,active=False,panel=Just "one",selected=Nothing} {present=presence ready,active=Sessions.taskActive workspace ready "one",panel=toggled.sessions.taskPanel,selected=toggled.sessions.selected}
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.class "session-state-inactive"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.text "View Agents ->"]
+            ] ())
+    , test "all-state error stays unresolved and never becomes a confirmed grey or empty result" <| \_ ->
+        let (ready,_) = driveAssociations [] (Err (Http.BadStatus 503)) associationFixture
+        in Expect.all
+            [ \_ -> Expect.equal Nothing (presence ready)
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.tag "button"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.hasNot [Selector.class "session-state-inactive"]
+            ] ()
+    , test "retained dirty empty membership cannot be restamped current after invalidation" <| \_ ->
+        let (ready,_) = driveAssociations [] (Ok []) associationFixture
+            invalid = {ready | sessionDelivery=Delivery.invalidateReadProof workspace ready.sessionDelivery}
+            checking = Sessions.reconcile (invalid,Cmd.none) |> Tuple.first
+        in Expect.equal Nothing (presence checking)
+    , test "ordinary list invalidation makes both stored empty and stored positive association proofs unresolved" <| withSession (\session ->
+        let check items =
+                let (ready,_) = driveAssociations [] (Ok items) associationFixture
+                    invalid = {ready | sessionDelivery=Delivery.invalidateLists workspace ready.sessionDelivery}
+                    checking = Sessions.reconcile (invalid,Cmd.none) |> Tuple.first
+                in presence checking
+        in Expect.equal [Nothing,Nothing] [check [],check [{session | state=Api.SessionTerminated}]])
+    , test "active to terminated retains association while clearing the active indicator" <| withSession (\session ->
+        let (active,_) = driveAssociations [session] (Ok []) associationFixture
+            invalid = {active | sessionDelivery=Delivery.invalidateLists workspace active.sessionDelivery}
+            (inactive,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) invalid
+        in Expect.equal (Just True,False) (presence inactive,Sessions.taskActive workspace inactive "one"))
+    , test "dirty retained active presentation cannot admit a closed dock and remains labelled refreshing" <| withSession (\session ->
+        let (ready,_) = driveAssociations [session] (Ok []) associationFixture
+            checking = Sessions.reconcile ({ready | sessionDelivery=Delivery.invalidateLists workspace ready.sessionDelivery},Cmd.none) |> Tuple.first
+            clicked = Sessions.update (SessionsToggleDock "one") checking |> Tuple.first
+        in Expect.all
+            [ \_ -> Expect.equal (Nothing,Nothing,True) (presence checking,clicked.sessions.taskPanel,Sessions.taskActive workspace checking "one")
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.tag "button",Selector.attribute (Html.Attributes.disabled True)]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.title "View Agents -> · active sessions · refreshing")]
+            ] ())
+    , test "an open inactive dock stays unresolved while its active refresh is held despite fresh positive association" <| withSession (\session ->
+        let (ready,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) associationFixture
+            opened = Sessions.update (SessionsToggleDock "one") ready |> Tuple.first
+            waiting = Sessions.reconcile ({opened | sessionDelivery=Delivery.invalidateLists workspace opened.sessionDelivery},Cmd.none) |> Tuple.first
+            state = waiting.sessions
+            -- The independent all-state first page has confirmed direct membership;
+            -- its result cannot confirm activity while the retained active page is dirty.
+            associated = {waiting | sessions={state | taskAssociations=Dict.insert "one" {present=True,error=False,epoch=waiting.sessionDelivery.listInvalidation} state.taskAssociations}}
+            checking = Sessions.reconcile (associated,Cmd.none) |> Tuple.first
+            settled = List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) delivery) checking.sessionDelivery (Dict.values checking.sessionDelivery.physical)
+            confirmed = Sessions.reconcile ({checking | sessionDelivery=settled},Cmd.none) |> Tuple.first
+        in Expect.all
+            [ \_ -> Expect.equal (Just "one",Just True) (checking.sessions.taskPanel,presence checking)
+            , \_ -> Expect.notEqual (Just checking.sessionDelivery.listInvalidation) (Dict.get "one" checking.sessions.taskHints |> Maybe.map .epoch)
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.hasNot [Selector.class "session-state-inactive"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.text "<- Hide Agents"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.title "<- Hide Agents · checking associations and activity")]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace checking "one") |> Query.hasNot [Selector.text "No active sessions for this task."]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace checking "one") |> Query.has [Selector.text "Loading active sessions…"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace confirmed "one") |> Query.has [Selector.class "session-state-inactive"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace confirmed "one") |> Query.has [Selector.text "No active sessions for this task."]
+            ] ())
+    , test "current proven empty beats stale active presentation but an already open dock can always close" <| withSession (\session ->
+        let (empty,_) = driveAssociations [] (Ok []) associationFixture
+            state = empty.sessions
+            stale = {empty | sessions={state | taskHints=Dict.insert "one" {active=True,error=False,epoch=empty.sessionDelivery.listInvalidation-1} state.taskHints}}
+            denied = Sessions.update (SessionsToggleDock "one") stale |> Tuple.first
+            opened = {stale | sessions={state | taskPanel=Just "one",taskAssociations=Dict.empty}}
+            closed = Sessions.update (SessionsToggleDock "one") opened |> Tuple.first
+        in Expect.all
+            [ \_ -> Expect.equal (Nothing,Nothing) (denied.sessions.taskPanel,closed.sessions.taskPanel)
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace stale "one") |> Query.hasNot [Selector.tag "button"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace opened "one") |> Query.has [Selector.text "<- Hide Agents"]
+            ] ())
+    , test "authority retirement clears association hints and late old admissions cannot restore them" <| withSession (\session ->
+        let (ready,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) associationFixture
+            invalid = {ready | sessionDelivery=Delivery.invalidateLists workspace ready.sessionDelivery}
+            busy = Sessions.reconcile (invalid,Cmd.none) |> Tuple.first
+            requests = Dict.values busy.sessionDelivery.physical
+            retired = Sessions.reconcile ({busy | sessionRequestEpoch=busy.sessionRequestEpoch+1,auth={status=AuthRequired,mode=Nothing}},Cmd.none) |> Tuple.first
+            late = List.foldl (\request delivery -> Delivery.settle request.id False (Ok (Delivery.SessionsPage {items=[session],nextCursor=Nothing})) delivery) retired.sessionDelivery requests
+            final = Sessions.reconcile ({retired | sessionDelivery=late},Cmd.none) |> Tuple.first
+        in Expect.equal (0,0) (Dict.size final.sessions.taskAssociations,Dict.size final.sessionDelivery.physical))
+    ]

@@ -10,11 +10,9 @@ recheck fails, use **Retry session** before you continue.
 ## Workspace context
 
 The workspace header keeps its identity, totals, section navigation and current
-controls available while scrolling. Open **Workspace details** for IDs, repository
-information and dates. The Inspector follows the focused project or task and the
-task whose active agents are open. On narrow screens, the inspector and session
-preview stack with their related content. Use **Return to selected card** in the
-Inspector to return to its project or task in the tree.
+controls available while scrolling. Its UUID, creation date, modification date
+and available repository information stay visible. Projects uses the full main
+pane; session event details remain available in the **Sessions** tab.
 
 ## Timeline and history
 
@@ -151,28 +149,28 @@ Workspace group disclosure is saved globally.
 
 Expand task details to switch between **Work**, **Agents**, **Evidence** and
 **History**. Status, priority and description stay above these local sections;
-creation actions remain available below them. Open **Metadata** in the footer
-for dates and the copyable task ID. Project, memory and Observation cards group
-their existing work, links, history and provenance into named sections.
+creation actions remain available below them. Project, task and subtask footers
+always show **UUID**, **Created** and **Updated**, including unavailable values.
+UUID controls copy the complete value even when it wraps on a narrow screen.
 
-On task cards, **Active Agent →** opens the task’s active agents and transcript
-in a dock inside the card. The work and agent hierarchy stay on the left, with the
-conversation on the right; narrow panes stack them. Choose an agent to inspect its
-messages and expand
-grouped activity. Close the dock to return the card to its usual width. The dock
-also works with task extras collapsed; saved transcripts and downloads remain
-under **Evidence** in the extras. The selected session's lineage is shown beside
-the preview. Ancestors outside the active results are labeled as context, and
-missing or truncated ancestry is stated explicitly.
+On task and subtask cards, **View Agents ->** opens active agents beside the work.
+The task title spans the full card, with description and work on the left,
+conversation beside it and agent hierarchy on the right. Narrow panes stack work,
+conversation and hierarchy. Choose **<- Hide Agents** in the card header to close
+the view; it also works with task extras collapsed. A task with no associated
+sessions has no Agents toggle or grey light. Associated sessions with none active
+keep the toggle and grey light; checking or unavailable activity stays explicit.
+Saved transcripts and downloads remain under **Evidence**. Session ancestry stays
+separate from linked tasks; unavailable or truncated context is labeled.
 
 Live transcripts keep recent agent messages visible while tool activity arrives.
 Expanded activity and tool details stay open during synchronization. Reading
 above the end keeps your place; following resumes when you scroll to the end.
 Loading a large transcript keeps the view steady. **Open full session ↗** opens
-Sessions with the same agent selected; its return link brings you back to the card.
+Sessions with the same agent selected; choose **Projects** to return to the card.
 
-The **Sessions** tab puts the agent hierarchy beside the conversation and selected
-event details. **Live** and **Quiet** describe recent activity. Choose an event's
+The **Sessions** tab puts the hierarchy to the right of the conversation and keeps
+selected event details in their own inspector. **Live** and **Quiet** describe recent activity. Choose an event's
 inspect control to read its existing input or result. Narrow screens place event
 details below the conversation. Runtime declarations, creator identity, linked
 tasks and session ancestry remain separately labeled; unavailable values stay

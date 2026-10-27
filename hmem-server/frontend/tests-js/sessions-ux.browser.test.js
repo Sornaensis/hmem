@@ -54,7 +54,7 @@ test('authorized task and full-session navigation retains one viewer and valid r
   await h.start();await h.idle()
   const card=page.locator('#entity-'+h.fixture.tasks[0].id)
   await until(async()=>await card.locator('.has-active-sessions').count()===1)
-  await card.locator('.task-sessions-icon').click();await page.locator('.session-record').first().waitFor()
+  await card.locator(':scope > .card-header .task-sessions-icon').click();await page.locator('.session-record').first().waitFor()
   await page.locator('.session-activity-group').first().locator(':scope > summary').click()
   await page.locator('.session-content-tool').first().locator('summary').click()
   await page.locator('.session-activity-group').last().locator(':scope > summary').click()
@@ -165,7 +165,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   await until(async()=>await card.locator('.has-active-sessions').count()===1)
   await card.locator('.btn-extras-toggle').click();await h.idle()
   const active=card.locator('.task-session-dock'),evidence=card.locator('.task-session-evidence')
-  await card.locator('.task-sessions-icon').click();await card.getByRole('button',{name:'Evidence',exact:true}).click();await evidence.locator('summary').click()
+  await card.locator(':scope > .card-header .task-sessions-icon').click();await card.getByRole('button',{name:'Evidence',exact:true}).click();await evidence.locator('summary').click()
   await card.locator('.task-session-work-context').getByRole('button',{name:/Codex/}).waitFor()
   assert.equal(await card.locator('.card-extras .task-session-active').count(),0);assert.equal(await card.locator('.card-section-button[aria-pressed="true"]').innerText(),'Evidence');assert.equal(await card.locator('.task-dependencies-section').count(),1)
   const downloadPromise=page.waitForEvent('download');await evidence.getByRole('button',{name:/Download session/}).click();const download=await downloadPromise
@@ -185,7 +185,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   assert.ok(h.peak()<=2,'session HTTP admission stays at two')
   await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects');await h.idle()
   const second=page.locator('#entity-'+h.fixture.tasks[1].id)
-  await second.locator('.task-sessions-icon').click();await second.locator('.task-session-dock').waitFor();assert.ok(page.url().includes('tab=projects'));await second.getByRole('link',{name:'Open full session ↗',exact:true}).click();await until(()=>page.url().includes('task='+h.fixture.tasks[1].id));await page.locator('.sessions-task-filter').waitFor()
+  await second.locator(':scope > .card-header .task-sessions-icon').click();await second.locator('.task-session-dock').waitFor();assert.ok(page.url().includes('tab=projects'));await second.getByRole('link',{name:'Open full session ↗',exact:true}).click();await until(()=>page.url().includes('task='+h.fixture.tasks[1].id));await page.locator('.sessions-task-filter').waitFor()
   assert.ok(h.reads.some(read=>read.path.includes('/tasks/'+h.fixture.tasks[1].id+'/sessions')))
   assert.deepEqual(h.errors,[])
  }finally{await h.close();await rm(scratch,{recursive:true,force:true})}
@@ -198,7 +198,7 @@ test('active hints converge beyond sixteen mounted tasks and refresh after an as
   await last.waitFor();await until(async()=>await last.locator('.has-active-sessions').count()===1)
   assert.ok(h.reads.filter(r=>r.query.includes('state=active')).length>16)
   const first=h.page.locator('#entity-'+h.fixture.tasks[0].id)
-  await until(async()=>/no active sessions/.test(await first.locator('.task-sessions-icon').getAttribute('aria-label')))
+  await first.waitFor();await until(async()=>h.reads.some(read=>read.path.endsWith('/tasks/'+h.fixture.tasks[0].id+'/sessions')&&!new URLSearchParams(read.query).get('state'))&&await first.locator(':scope > .card-header .task-sessions-icon').count()===0)
   await h.associate(h.fixture.tasks[0].id)
   await until(async()=>await first.locator('.has-active-sessions').count()===1)
   for(const task of h.fixture.tasks)await h.page.locator('#entity-'+task.id+' .btn-extras-toggle').click()
@@ -272,7 +272,7 @@ test('conversation flow preserves declared identity and wraps long model names w
    if(scenario.creator&&scenario.width===1440){
     await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle()
     const taskCard=page.locator('#entity-'+h.fixture.tasks[0].id);await taskCard.locator('.btn-extras-toggle').click();await h.idle()
-    await taskCard.locator('.task-sessions-icon').click();await taskCard.getByRole('button',{name:'Evidence',exact:true}).click();await taskCard.locator('.task-session-evidence summary').click();await taskCard.locator('.session-viewer .session-identity').waitFor()
+    await taskCard.locator(':scope > .card-header .task-sessions-icon').click();await taskCard.getByRole('button',{name:'Evidence',exact:true}).click();await taskCard.locator('.task-session-evidence summary').click();await taskCard.locator('.session-viewer .session-identity').waitFor()
     assert.equal(await taskCard.locator('.task-session-card .session-identity,.task-session-dock .session-viewer .session-identity').count(),2)
     for(const label of await taskCard.locator('.task-session-card .session-runtime,.task-session-dock .session-viewer .session-runtime').evaluateAll(nodes=>nodes.map(node=>node.title)))assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
    }

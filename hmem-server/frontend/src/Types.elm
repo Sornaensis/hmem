@@ -1335,6 +1335,7 @@ type alias SessionsModel =
     , lastFilterRefresh : Float
     , taskPages : Dict String { result : Result String Api.SessionPage, epoch : Int, cursor : Maybe Api.SessionCursor }
     , taskHints : Dict String { active : Bool, error : Bool, epoch : Int }
+    , taskAssociations : Dict String { present : Bool, error : Bool, epoch : Int }
     , sectionOrder : List String
     , hintOrder : List String
     , taskFilter : Maybe String
@@ -1360,7 +1361,7 @@ emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, inspectedEvent = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
     , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
-    , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
+    , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, taskAssociations = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
 
 
 type alias SessionArchiveOperation =

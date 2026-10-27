@@ -108,11 +108,10 @@ viewReadableWorkspaceContext model ws =
                              else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
                         , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
                   else text "" ]
-            , details [class "workspace-metadata"]
-                [ summary [] [text "Workspace details"]
-                , div [ class "workspace-details" ]
+            , div [class "workspace-metadata"]
+                [ div [ class "workspace-details" ]
                   [ div [ class "workspace-detail" ]
-                    [ span [ class "workspace-detail-label" ] [ text "ID" ]
+                    [ span [ class "workspace-detail-label" ] [ text "UUID" ]
                     , Helpers.copyableValue "workspace-detail-value card-id card-id-copy" "workspace ID" ws.id ws.id
                     ]
                 , case ws.ghOwner of

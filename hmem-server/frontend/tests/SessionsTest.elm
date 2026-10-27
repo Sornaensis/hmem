@@ -674,7 +674,7 @@ associationTests =
         in Expect.all
             [ \_ -> Expect.equal {present=Just True,active=False,panel=Just "one",selected=Nothing} {present=presence ready,active=Sessions.taskActive workspace ready "one",panel=toggled.sessions.taskPanel,selected=toggled.sessions.selected}
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.class "session-state-inactive"]
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.text "View Agents ->"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.text "View Agents"]
             ] ())
     , test "all-state error stays unresolved and never becomes a confirmed grey or empty result" <| \_ ->
         let (ready,_) = driveAssociations [] (Err (Http.BadStatus 503)) associationFixture
@@ -707,7 +707,7 @@ associationTests =
         in Expect.all
             [ \_ -> Expect.equal (Nothing,Nothing,True) (presence checking,clicked.sessions.taskPanel,Sessions.taskActive workspace checking "one")
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.tag "button",Selector.attribute (Html.Attributes.disabled True)]
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.title "View Agents -> · active sessions · refreshing")]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.title "View Agents · active sessions · refreshing")]
             ] ())
     , test "an open inactive dock stays unresolved while its active refresh is held despite fresh positive association" <| withSession (\session ->
         let (ready,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) associationFixture
@@ -724,8 +724,8 @@ associationTests =
             [ \_ -> Expect.equal (Just "one",Just True) (checking.sessions.taskPanel,presence checking)
             , \_ -> Expect.notEqual (Just checking.sessionDelivery.listInvalidation) (Dict.get "one" checking.sessions.taskHints |> Maybe.map .epoch)
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.hasNot [Selector.class "session-state-inactive"]
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.text "<- Hide Agents"]
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.title "<- Hide Agents · checking associations and activity")]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.text "Hide Agents"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.title "Hide Agents · checking associations and activity")]
             , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace checking "one") |> Query.hasNot [Selector.text "No active sessions for this task."]
             , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace checking "one") |> Query.has [Selector.text "Loading active sessions…"]
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace confirmed "one") |> Query.has [Selector.class "session-state-inactive"]
@@ -741,7 +741,7 @@ associationTests =
         in Expect.all
             [ \_ -> Expect.equal (Nothing,Nothing) (denied.sessions.taskPanel,closed.sessions.taskPanel)
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace stale "one") |> Query.has [Selector.tag "button", Selector.attribute (Html.Attributes.disabled True), Selector.text "No sessions"]
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace opened "one") |> Query.has [Selector.text "<- Hide Agents"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace opened "one") |> Query.has [Selector.text "Hide Agents"]
             ] ())
     , test "authority retirement clears association hints and late old admissions cannot restore them" <| withSession (\session ->
         let (ready,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) associationFixture

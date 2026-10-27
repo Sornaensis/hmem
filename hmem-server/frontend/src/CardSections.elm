@@ -1,4 +1,4 @@
-module CardSections exposing (detailsId, disclosure, disclosureIcon, fact, facts, metadata, panel, section, tabs)
+module CardSections exposing (detailsId, disclosure, disclosureIcon, fact, facts, horizontalDisclosureIcon, metadata, panel, section, tabs)
 
 import Html exposing (Html, div, footer, h4, label, span, text)
 import Html.Attributes exposing (attribute, class)
@@ -62,13 +62,23 @@ disclosure expanded regionId name message =
 
 disclosureIcon : Bool -> Html msg
 disclosureIcon expanded =
+    chevronIcon (if expanded then "M4 7 L8 3 L12 7 M4 12 L8 8 L12 12" else "M4 4 L8 8 L12 4 M4 9 L8 13 L12 9")
+
+
+horizontalDisclosureIcon : Bool -> Html msg
+horizontalDisclosureIcon expanded =
+    chevronIcon (if expanded then "M7 4 L3 8 L7 12 M12 4 L8 8 L12 12" else "M4 4 L8 8 L4 12 M9 4 L13 8 L9 12")
+
+
+chevronIcon : String -> Html msg
+chevronIcon path =
     Svg.svg
         [ SvgAttr.width "16", SvgAttr.height "16", SvgAttr.viewBox "0 0 16 16"
         , SvgAttr.fill "none", SvgAttr.stroke "currentColor", SvgAttr.strokeWidth "1.5"
         , SvgAttr.strokeLinecap "round", SvgAttr.strokeLinejoin "round"
         , attribute "aria-hidden" "true", attribute "focusable" "false"
         ]
-        [ Svg.path [ SvgAttr.d (if expanded then "M4 7 L8 3 L12 7 M4 12 L8 8 L12 12" else "M4 4 L8 8 L12 4 M4 9 L8 13 L12 9") ] [] ]
+        [ Svg.path [ SvgAttr.d path ] [] ]
 
 
 section : String -> List (Html msg) -> Html msg

@@ -33,10 +33,14 @@ and automatic vectorization disabled.
    the hmem service is healthy.
 4. Open `http://127.0.0.1:8420/#hmem_token=<your-HMEM_API_KEY>`, replacing the
    placeholder with the token you supplied. A healthy service still requires
-   browser authentication. The frontend removes the fragment after processing;
-   its default token storage is `localStorage`. Set
-   `HMEM_FRONTEND_AUTH_TOKEN_STORAGE=session` or `memory` in the runtime env file
-   if you prefer shorter-lived storage.
+   browser authentication. The frontend removes the fragment after processing,
+   including when the link is pasted into an already-open app. Its default token
+   storage is `localStorage`. Set `HMEM_FRONTEND_AUTH_TOKEN_STORAGE=session` or
+   `memory` in the runtime env file if you prefer shorter-lived storage. The
+   generated non-secret browser attribution (`Browser Operator`,
+   `hmem:web:manual`) lets bearer-authenticated writes satisfy the server's bot
+   declaration requirement; customize it with `HMEM_FRONTEND_BOT_ROLE` and
+   `HMEM_FRONTEND_BOT_MODEL_ID` when appropriate.
 
 API clients send the same token as `Authorization: Bearer <token>`.
 For shared browser access, use deployed OIDC authentication below.

@@ -27,6 +27,12 @@ To require a bearer token in local mode, set `auth.enabled: true`, supply
 `auth.local.bot_tokens` can label automated actions, but have superadmin access
 too. Local credentials and bootstrap do not work in deployed mode.
 
+The web UI accepts the documented local `#hmem_token=<token>` fragment as a
+manual static-bearer handoff without OAuth state. This exception is limited to
+`hmem_token` in local frontend mode; deployed and provider-style token callbacks
+still require matching login state by default. Token fragments are scrubbed after
+capture, including fragment-only navigation in an already-open app.
+
 ## Declared bot identity
 
 Automated callers declare metadata in one `X-HMem-Bot-Identity` HTTP header:
@@ -172,6 +178,23 @@ For browser bearer fallback, return tokens in URL fragments, never query strings
 Bearer storage defaults to `localStorage`, where script access can expose it.
 Set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab storage or
 `memory` to discard the token when the page closes or reloads.
+
+A bearer-authenticated bot must declare attribution on writes. Configure the web
+client with non-secret metadata when it can use bearer credentials:
+
+```javascript
+window.HMEM_CONFIG = {
+  authMode: 'local',
+  botIdentity: { role: 'Browser Operator', 'model-id': 'hmem:web:manual' }
+}
+```
+
+Keep the default `requireAuthState: true`; local-mode `hmem_token` is the scoped
+manual exception. The browser sends the identity header only when it also sends
+a bearer token. Container runtime config supplies that generic default and supports
+`HMEM_FRONTEND_BOT_ROLE` and `HMEM_FRONTEND_BOT_MODEL_ID` overrides. Declarations
+grant no permissions; use a specific role and model ID when the browser is acting
+for an automated client.
 
 ## Access problems
 

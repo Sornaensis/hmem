@@ -119,6 +119,8 @@ apply_defaults() {
   default_env HMEM_FRONTEND_AUTH_TOKEN_STORAGE_KEY "hmem-auth-token"
   default_env HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS "hmem_token,auth_token,access_token"
   default_env HMEM_FRONTEND_REQUIRE_AUTH_STATE "true"
+  default_env HMEM_FRONTEND_BOT_ROLE "Browser Operator"
+  default_env HMEM_FRONTEND_BOT_MODEL_ID "hmem:web:manual"
 
   default_env HMEM_MIGRATIONS_DIR "/opt/hmem/migrations"
   default_env HMEM_DB_CONNECT_RETRIES "30"
@@ -350,6 +352,7 @@ validate_common_config() {
     HMEM_FRONTEND_LOGIN_URL HMEM_FRONTEND_LOGOUT_URL HMEM_FRONTEND_LOGOUT_REDIRECT_URL \
     HMEM_FRONTEND_CSRF_COOKIE_NAME HMEM_FRONTEND_CSRF_HEADER_NAME \
     HMEM_FRONTEND_AUTH_TOKEN_STORAGE HMEM_FRONTEND_AUTH_TOKEN_STORAGE_KEY \
+    HMEM_FRONTEND_BOT_ROLE HMEM_FRONTEND_BOT_MODEL_ID \
     HMEM_AUTH_DEPLOYED_ISSUER HMEM_AUTH_DEPLOYED_AUDIENCE HMEM_AUTH_DEPLOYED_DISCOVERY_URL \
     HMEM_AUTH_DEPLOYED_JWKS_URL HMEM_AUTH_DEPLOYED_TOKEN_HASH_SECRET \
     HMEM_AUTH_DEPLOYED_CLIENT_ID HMEM_AUTH_DEPLOYED_CLIENT_SECRET \
@@ -362,6 +365,19 @@ validate_common_config() {
   validate_csv_scalars_no_newline HMEM_CORS_ALLOWED_ORIGINS
   validate_csv_scalars_no_newline HMEM_AUTH_DEPLOYED_SCOPES
   validate_csv_scalars_no_newline HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS
+  [ "$(printf '%s' "$HMEM_FRONTEND_BOT_ROLE" | wc -c | tr -d ' ')" -le 128 ] \
+    || fail "HMEM_FRONTEND_BOT_ROLE must be at most 128 UTF-8 bytes"
+  [ "$(printf '%s' "$HMEM_FRONTEND_BOT_MODEL_ID" | wc -c | tr -d ' ')" -le 256 ] \
+    || fail "HMEM_FRONTEND_BOT_MODEL_ID must be at most 256 UTF-8 bytes"
+  if printf '%s%s' "$HMEM_FRONTEND_BOT_ROLE" "$HMEM_FRONTEND_BOT_MODEL_ID" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    fail "frontend bot identity must not contain control characters"
+  fi
+  vc_bot_role=$(trim "$HMEM_FRONTEND_BOT_ROLE")
+  vc_bot_model_id=$(trim "$HMEM_FRONTEND_BOT_MODEL_ID")
+  [ -n "$vc_bot_role" ] || fail "HMEM_FRONTEND_BOT_ROLE must not be empty"
+  printf '%s' "$vc_bot_model_id" \
+    | grep -Eq '^[A-Za-z0-9._/-]+:[A-Za-z0-9._/-]+:[A-Za-z0-9._/-]+$' \
+    || fail "HMEM_FRONTEND_BOT_MODEL_ID must be a harness:model:reasoning identifier"
 
   case "$HMEM_EMBEDDING_PROVIDER" in
     disabled)
@@ -731,6 +747,13 @@ js_add_bool() {
   js_add_raw "$ja_out" "$ja_key" "$ja_value"
 }
 
+js_add_bot_identity() {
+  jbi_out=$1
+  jbi_role=$2
+  jbi_model_id=$3
+  js_add_raw "$jbi_out" botIdentity "{\"role\": $(json_quote "$jbi_role"), \"model-id\": $(json_quote "$jbi_model_id") }"
+}
+
 js_add_csv_array() {
   ja_out=$1
   ja_key=$2
@@ -829,6 +852,7 @@ generate_frontend_config() {
   js_add_string "$gf_tmp" authTokenStorageKey "$HMEM_FRONTEND_AUTH_TOKEN_STORAGE_KEY"
   js_add_csv_array "$gf_tmp" authTokenUrlParams "$HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS"
   js_add_bool "$gf_tmp" requireAuthState "$HMEM_FRONTEND_REQUIRE_AUTH_STATE"
+  js_add_bot_identity "$gf_tmp" "$HMEM_FRONTEND_BOT_ROLE" "$HMEM_FRONTEND_BOT_MODEL_ID"
   printf '\n  };\n})();\n' >> "$gf_tmp"
 
   chmod 644 "$gf_tmp" || fail "failed to chmod frontend runtime config"

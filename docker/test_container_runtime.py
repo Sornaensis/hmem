@@ -319,6 +319,8 @@ class BuiltImageTest(unittest.TestCase):
         assert self.cid is not None
         js = docker("exec", self.cid, "cat", "/run/hmem/static/hmem-runtime-config.js")
         self.assertIn("window.HMEM_CONFIG", js)
+        self.assertIn('"requireAuthState": true', js)
+        self.assertIn('"botIdentity": {"role": "Browser Operator", "model-id": "hmem:web:manual" }', js)
         self.assertNotIn(secret, js)
         for asset in (ROOT / "hmem-server/frontend/public").rglob("*"):
             if asset.is_file():

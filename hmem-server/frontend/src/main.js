@@ -289,7 +289,13 @@ function captureAuthTokenFromUrl() {
 
   const returnedState = (fromSearch ? url.searchParams.get('state') : null) || (hashParams ? hashParams.get('state') : null)
   const expectedState = safeSessionStorageGet(authLoginStateStorageKey)
-  const stateAccepted = !requireAuthState || (expectedState !== null && returnedState === expectedState)
+  // Local API keys are pasted explicitly; they are not provider callbacks.
+  // Mixed callback metadata and an outstanding login still require state.
+  const localTokenBootstrap = runtimeMode === 'local' && fromHash?.name === 'hmem_token'
+    && expectedState === null
+    && !authCallbackUrlParams.some((name) => name !== 'hmem_token'
+      && (url.searchParams.has(name) || hashParams?.has(name)))
+  const stateAccepted = localTokenBootstrap || !requireAuthState || (expectedState !== null && returnedState === expectedState)
 
   if (stateAccepted) {
     ignoreStoredAuthToken = false

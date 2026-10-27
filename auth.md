@@ -169,6 +169,10 @@ See [activity connection limits and recovery](api.md#session-activity-projection
 An explicit bearer token takes precedence over a session cookie, even if the
 token is invalid. Remove an old bearer token before relying on cookie login.
 For browser bearer fallback, return tokens in URL fragments, never query strings.
+In local mode, open `/#hmem_token=<your-local-API-key>` to supply the configured
+key without a provider login. This bootstrap accepts no provider callback
+metadata or outstanding login state; provider callbacks still require matching
+login state by default.
 Bearer storage defaults to `localStorage`, where script access can expose it.
 Set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab storage or
 `memory` to discard the token when the page closes or reloads.

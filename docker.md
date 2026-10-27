@@ -37,10 +37,11 @@ and automatic vectorization disabled.
    including when the link is pasted into an already-open app. Its default token
    storage is `localStorage`. Set `HMEM_FRONTEND_AUTH_TOKEN_STORAGE=session` or
    `memory` in the runtime env file if you prefer shorter-lived storage. The
-   generated non-secret browser attribution (`Browser Operator`,
+   local-mode generated non-secret browser attribution (`Browser Operator`,
    `hmem:web:manual`) lets bearer-authenticated writes satisfy the server's bot
    declaration requirement; customize it with `HMEM_FRONTEND_BOT_ROLE` and
-   `HMEM_FRONTEND_BOT_MODEL_ID` when appropriate.
+   `HMEM_FRONTEND_BOT_MODEL_ID` when appropriate. Deployed mode leaves these
+   unset unless both are explicitly configured for a bot bearer flow.
 
 API clients send the same token as `Authorization: Bearer <token>`.
 For shared browser access, use deployed OIDC authentication below.

@@ -67,7 +67,8 @@ for the non-secret runtime fields and [authentication](../../auth.md) for login,
 token storage, bearer bot attribution, and CSRF setup. Never bake secrets into
 assets or runtime config. `botIdentity` is sent only with a bearer token. Local
 `#hmem_token` links are manual handoffs and do not weaken the default state check
-for deployed or provider-style callbacks.
+for deployed or provider-style callbacks. Auth callback parameters are scrubbed
+before application navigation and are removed again from login return paths.
 
 Set `HMEM_CONFIG.workspaceSnapshotProfile` before startup to `full_v1` for complete
 workspace snapshots. The default is `workspace_shell_v1`; no other value is

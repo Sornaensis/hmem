@@ -106,31 +106,32 @@ let ignoreStoredAuthToken = false
 
 function normalizeConfiguredBotIdentity(value) {
   if (value === undefined || value === null) return null
-  if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('HMEM_CONFIG.botIdentity must contain exactly role and model-id strings')
+  try {
+    if (typeof value !== 'object' || Array.isArray(value)) throw new Error('must contain exactly role and model-id strings')
+    const keys = Object.keys(value).sort()
+    if (keys.length !== 2 || keys[0] !== 'model-id' || keys[1] !== 'role' || typeof value.role !== 'string' || typeof value['model-id'] !== 'string') {
+      throw new Error('must contain exactly role and model-id strings')
+    }
+    const rawRole = value.role
+    const rawModelId = value['model-id']
+    const utf8Length = text => new TextEncoder().encode(text).length
+    if (utf8Length(rawRole) > 128) throw new Error('role must be at most 128 UTF-8 bytes')
+    if (utf8Length(rawModelId) > 256) throw new Error('model-id must be at most 256 UTF-8 bytes')
+    if (/[\p{Cc}\p{Cf}]/u.test(rawRole) || /[\p{Cc}\p{Cf}]/u.test(rawModelId)) {
+      throw new Error('role and model-id must not contain control or format characters')
+    }
+    const role = rawRole.trim()
+    const modelId = rawModelId.trim()
+    if (!role) throw new Error('role must not be empty')
+    if (!/^[A-Za-z0-9._\/-]+:[A-Za-z0-9._\/-]+:[A-Za-z0-9._\/-]+$/.test(modelId)) {
+      throw new Error('model-id must be a valid harness:model:reasoning identifier')
+    }
+    return JSON.stringify({ role, 'model-id': modelId })
+      .replace(/[\u0080-\uffff]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+  } catch (error) {
+    console.error(`Ignoring invalid HMEM_CONFIG.botIdentity: ${error.message}`)
+    return null
   }
-  const keys = Object.keys(value).sort()
-  if (keys.length !== 2 || keys[0] !== 'model-id' || keys[1] !== 'role' || typeof value.role !== 'string' || typeof value['model-id'] !== 'string') {
-    throw new Error('HMEM_CONFIG.botIdentity must contain exactly role and model-id strings')
-  }
-  const rawRole = value.role
-  const rawModelId = value['model-id']
-  const utf8Length = text => new TextEncoder().encode(text).length
-  if (utf8Length(rawRole) > 128 || /[\p{Cc}\p{Cf}]/u.test(rawRole)) {
-    throw new Error('HMEM_CONFIG.botIdentity.role must be at most 128 UTF-8 bytes without control or format characters')
-  }
-  if (utf8Length(rawModelId) > 256 || /[\p{Cc}\p{Cf}]/u.test(rawModelId)) {
-    throw new Error('HMEM_CONFIG.botIdentity.model-id must be at most 256 UTF-8 bytes without control or format characters')
-  }
-  const role = rawRole.trim()
-  const modelId = rawModelId.trim()
-  if (!role) {
-    throw new Error('HMEM_CONFIG.botIdentity.role must not be empty')
-  }
-  if (!/^[A-Za-z0-9._\/-]+:[A-Za-z0-9._\/-]+:[A-Za-z0-9._\/-]+$/.test(modelId)) {
-    throw new Error('HMEM_CONFIG.botIdentity.model-id must be a valid harness:model:reasoning identifier')
-  }
-  return JSON.stringify({ role, 'model-id': modelId })
 }
 
 function normalizeAuthTokenStorageMode(value) {
@@ -328,8 +329,13 @@ function captureAuthTokenFromUrl() {
   if (stateAccepted) {
     ignoreStoredAuthToken = false
     if (!storedAuthTokenSet(found.value)) {
+      ignoreStoredAuthToken = true
       runtimeConfig.authToken = found.value
       pendingAuthSessionError = 'Browser storage is unavailable; using the returned auth token for this tab only.'
+    } else if (authTokenStorageMode !== 'memory') {
+      // A prior storage failure may have installed an in-memory fallback. Once
+      // durable storage accepts a newer token it must become authoritative.
+      runtimeConfig.authToken = null
     }
     safeSessionStorageRemove(authLoginStateStorageKey)
   } else {
@@ -346,6 +352,19 @@ function captureAuthTokenFromUrl() {
 
 clearInactiveStoredAuthTokens()
 captureAuthTokenFromUrl()
+
+function processAuthCallbackNavigation() {
+  const capturedToken = captureAuthTokenFromUrl()
+  if (capturedToken) notifyAuthTokenChanged(true)
+  if (pendingAuthSessionError) {
+    notifyAuthSessionError(pendingAuthSessionError)
+    pendingAuthSessionError = null
+  }
+}
+
+// Install before Elm so popstate/hashchange observers see the scrubbed URL.
+window.addEventListener('popstate', processAuthCallbackNavigation, true)
+window.addEventListener('hashchange', processAuthCallbackNavigation, true)
 
 function currentAuthToken() {
   const storedToken = ignoreStoredAuthToken ? null : storedAuthTokenGet()
@@ -395,6 +414,8 @@ function isUnsafeMethod(method) {
 
 function currentRelativeReturnPath(returnPath) {
   const parsed = new URL(returnPath || '/', window.location.href)
+  const parsedHash = parseHashParams(parsed.hash)
+  scrubAuthCallbackParams(parsed, parsedHash.params, parsedHash.prefix)
   return `${parsed.pathname}${parsed.search}${parsed.hash}`
 }
 
@@ -514,15 +535,6 @@ function notifyAuthTokenChanged(force) {
 function notifyAuthSessionError(message) {
   if (app.ports.authSessionError) app.ports.authSessionError.send(message)
 }
-
-window.addEventListener('hashchange', function () {
-  const capturedToken = captureAuthTokenFromUrl()
-  if (capturedToken) notifyAuthTokenChanged(true)
-  if (pendingAuthSessionError) {
-    notifyAuthSessionError(pendingAuthSessionError)
-    pendingAuthSessionError = null
-  }
-})
 
 if (pendingAuthSessionError) {
   setTimeout(function () {

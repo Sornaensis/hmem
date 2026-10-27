@@ -119,8 +119,6 @@ apply_defaults() {
   default_env HMEM_FRONTEND_AUTH_TOKEN_STORAGE_KEY "hmem-auth-token"
   default_env HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS "hmem_token,auth_token,access_token"
   default_env HMEM_FRONTEND_REQUIRE_AUTH_STATE "true"
-  default_env HMEM_FRONTEND_BOT_ROLE "Browser Operator"
-  default_env HMEM_FRONTEND_BOT_MODEL_ID "hmem:web:manual"
 
   default_env HMEM_MIGRATIONS_DIR "/opt/hmem/migrations"
   default_env HMEM_DB_CONNECT_RETRIES "30"
@@ -365,19 +363,25 @@ validate_common_config() {
   validate_csv_scalars_no_newline HMEM_CORS_ALLOWED_ORIGINS
   validate_csv_scalars_no_newline HMEM_AUTH_DEPLOYED_SCOPES
   validate_csv_scalars_no_newline HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS
-  [ "$(printf '%s' "$HMEM_FRONTEND_BOT_ROLE" | wc -c | tr -d ' ')" -le 128 ] \
-    || fail "HMEM_FRONTEND_BOT_ROLE must be at most 128 UTF-8 bytes"
-  [ "$(printf '%s' "$HMEM_FRONTEND_BOT_MODEL_ID" | wc -c | tr -d ' ')" -le 256 ] \
-    || fail "HMEM_FRONTEND_BOT_MODEL_ID must be at most 256 UTF-8 bytes"
-  if printf '%s%s' "$HMEM_FRONTEND_BOT_ROLE" "$HMEM_FRONTEND_BOT_MODEL_ID" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-    fail "frontend bot identity must not contain control characters"
+  vc_bot_role=$(get_env HMEM_FRONTEND_BOT_ROLE)
+  vc_bot_model_id=$(get_env HMEM_FRONTEND_BOT_MODEL_ID)
+  if [ -n "$vc_bot_role" ] || [ -n "$vc_bot_model_id" ]; then
+    [ -n "$vc_bot_role" ] && [ -n "$vc_bot_model_id" ] \
+      || fail "HMEM_FRONTEND_BOT_ROLE and HMEM_FRONTEND_BOT_MODEL_ID must be set together"
+    [ "$(printf '%s' "$vc_bot_role" | wc -c | tr -d ' ')" -le 128 ] \
+      || fail "HMEM_FRONTEND_BOT_ROLE must be at most 128 UTF-8 bytes"
+    [ "$(printf '%s' "$vc_bot_model_id" | wc -c | tr -d ' ')" -le 256 ] \
+      || fail "HMEM_FRONTEND_BOT_MODEL_ID must be at most 256 UTF-8 bytes"
+    if printf '%s%s' "$vc_bot_role" "$vc_bot_model_id" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+      fail "frontend bot identity must not contain ASCII control characters"
+    fi
+    vc_bot_role=$(trim "$vc_bot_role")
+    vc_bot_model_id=$(trim "$vc_bot_model_id")
+    [ -n "$vc_bot_role" ] || fail "HMEM_FRONTEND_BOT_ROLE must not be empty"
+    printf '%s' "$vc_bot_model_id" \
+      | grep -Eq '^[A-Za-z0-9._/-]+:[A-Za-z0-9._/-]+:[A-Za-z0-9._/-]+$' \
+      || fail "HMEM_FRONTEND_BOT_MODEL_ID must be a harness:model:reasoning identifier"
   fi
-  vc_bot_role=$(trim "$HMEM_FRONTEND_BOT_ROLE")
-  vc_bot_model_id=$(trim "$HMEM_FRONTEND_BOT_MODEL_ID")
-  [ -n "$vc_bot_role" ] || fail "HMEM_FRONTEND_BOT_ROLE must not be empty"
-  printf '%s' "$vc_bot_model_id" \
-    | grep -Eq '^[A-Za-z0-9._/-]+:[A-Za-z0-9._/-]+:[A-Za-z0-9._/-]+$' \
-    || fail "HMEM_FRONTEND_BOT_MODEL_ID must be a harness:model:reasoning identifier"
 
   case "$HMEM_EMBEDDING_PROVIDER" in
     disabled)
@@ -814,6 +818,12 @@ generate_frontend_config() {
   gf_file="$HMEM_WEB_STATIC_DIR/hmem-runtime-config.js"
   gf_tmp="$gf_file.tmp.$$"
   gf_auth_mode=$(frontend_auth_mode)
+  gf_bot_role=$(get_env HMEM_FRONTEND_BOT_ROLE)
+  gf_bot_model_id=$(get_env HMEM_FRONTEND_BOT_MODEL_ID)
+  if [ -z "$gf_bot_role" ] && [ -z "$gf_bot_model_id" ] && [ "$gf_auth_mode" = "local" ]; then
+    gf_bot_role="Browser Operator"
+    gf_bot_model_id="hmem:web:manual"
+  fi
 
   if [ -z "$(get_env HMEM_FRONTEND_LOGIN_URL)" ] && [ "$gf_auth_mode" = "deployed" ]; then
     HMEM_FRONTEND_LOGIN_URL="/api/v1/auth/login"; export HMEM_FRONTEND_LOGIN_URL
@@ -852,7 +862,9 @@ generate_frontend_config() {
   js_add_string "$gf_tmp" authTokenStorageKey "$HMEM_FRONTEND_AUTH_TOKEN_STORAGE_KEY"
   js_add_csv_array "$gf_tmp" authTokenUrlParams "$HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS"
   js_add_bool "$gf_tmp" requireAuthState "$HMEM_FRONTEND_REQUIRE_AUTH_STATE"
-  js_add_bot_identity "$gf_tmp" "$HMEM_FRONTEND_BOT_ROLE" "$HMEM_FRONTEND_BOT_MODEL_ID"
+  if [ -n "$gf_bot_role" ]; then
+    js_add_bot_identity "$gf_tmp" "$gf_bot_role" "$gf_bot_model_id"
+  fi
   printf '\n  };\n})();\n' >> "$gf_tmp"
 
   chmod 644 "$gf_tmp" || fail "failed to chmod frontend runtime config"

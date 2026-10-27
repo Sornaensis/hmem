@@ -458,25 +458,19 @@ viewMemoryCard model memory =
             ]
         , div [ class "card-body card-expanded" ]
             [ div [ class "card-desc-row" ]
-                [ button [ class "btn-extras-toggle", onClick (ToggleCardExpand memory.id) ]
-                    [ text
-                        (if extrasExpanded then
-                            "−"
-
-                         else
-                            "+"
-                        )
-                    ]
+                [ CardSections.disclosure extrasExpanded (CardSections.detailsId "memory" memory.id) ("memory: " ++ memorySummaryTitle memory) (ToggleCardExpand memory.id)
                 , Feature.Editing.viewEditableTextarea model "memory" memory.id "content" memory.content
                 ]
             , if extrasExpanded then
-                div [ class "card-extras" ]
+                div [ class "card-extras", id (CardSections.detailsId "memory" memory.id) ]
                     [ CardSections.section "Tags" [Feature.Editing.viewTagEditor model memory]
                     , CardSections.section "Linked entities" [viewMemoryLinkedEntities model memory.id linkedProjects linkedTasks]
                     , CardSections.section "History" [Feature.AuditLog.viewEntityHistory model "memory" memory.id]
                     ]
 
-              else if not (List.isEmpty linkedProjects) || not (List.isEmpty linkedTasks) then
+              else
+                div [ id (CardSections.detailsId "memory" memory.id), hidden True ] []
+            , if not extrasExpanded && (not (List.isEmpty linkedProjects) || not (List.isEmpty linkedTasks)) then
                 div [ class "card-collapsed-badges" ]
                     [ span [ class "linked-memories-badge" ]
                         [ text ("🔗 " ++ String.fromInt (List.length linkedProjects + List.length linkedTasks) ++ " linked") ]

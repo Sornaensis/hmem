@@ -16,9 +16,11 @@ async function flatCard(page, position) {
 const focusId = page => page.evaluate(() => document.activeElement?.id)
 const scrollTop = page => page.locator('#main-content-scroll').evaluate(element => element.scrollTop)
 async function assertDisclosure(page, control, expanded) {
-  assert.equal(await control.textContent(), expanded ? '−' : '+')
+  assert.equal(await control.locator('svg[aria-hidden="true"]').count(), 1)
+  assert.equal(await control.locator('svg path').getAttribute('d'), expanded ? 'M4 7 L8 3 L12 7 M4 12 L8 8 L12 12' : 'M4 4 L8 8 L12 4 M4 9 L8 13 L12 9')
   assert.equal(await control.getAttribute('aria-expanded'), String(expanded))
   assert.match(await control.getAttribute('aria-label'), expanded ? /^Collapse / : /^Open /)
+  assert.equal(await control.getAttribute('title'), await control.getAttribute('aria-label'))
   const body = await control.getAttribute('aria-controls')
   assert.equal(await page.locator('[id=' + JSON.stringify(body) + ']').count(), 1, 'Disclosure controls one existing body')
   const style = await control.evaluate(element => {

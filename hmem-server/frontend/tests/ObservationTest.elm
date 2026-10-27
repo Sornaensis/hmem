@@ -3430,7 +3430,8 @@ suite =
                 in
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Event.simulate Event.click |> Event.expect ReturnObservationResults
-                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Query.has [ Selector.tag "button", Selector.text "−", Selector.attribute (attribute "aria-expanded" "true"), Selector.attribute (attribute "aria-controls" "observation-detail"), Selector.attribute (attribute "data-observation-detail-anchor" "true") ]
+                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Query.has [ Selector.tag "button", Selector.attribute (attribute "aria-expanded" "true"), Selector.attribute (attribute "aria-controls" "observation-detail"), Selector.attribute (attribute "data-observation-detail-anchor" "true") ]
+                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Query.find [ Selector.tag "svg" ] |> Query.has [ Selector.attribute (attribute "aria-hidden" "true") ]
                     , \_ -> view |> Query.hasNot [ Selector.id "observation-detail-heading" ]
                     , \_ -> view |> Query.hasNot [ Selector.class "observation-return" ]
                     , \_ -> view |> Query.hasNot [ Selector.id "observation-edit" ]

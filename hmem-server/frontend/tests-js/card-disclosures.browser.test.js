@@ -18,6 +18,42 @@ function fixture() {
   return f
 }
 
+async function assertDetails(page, control, expanded) {
+  assert.equal(await control.getAttribute('type'), 'button')
+  assert.equal(await control.getAttribute('aria-expanded'), String(expanded))
+  const label = await control.getAttribute('aria-label')
+  assert.match(label, expanded ? /^Hide details for / : /^Show details for /)
+  assert.equal(await control.getAttribute('title'), label)
+  const region = page.locator('[id=' + JSON.stringify(await control.getAttribute('aria-controls')) + ']')
+  assert.equal(await region.count(), 1)
+  assert.equal(await region.isVisible(), expanded)
+  assert.equal(await control.locator('svg[aria-hidden="true"][focusable="false"]').count(), 1)
+  assert.equal(await control.locator('svg path').getAttribute('d'), expanded ? 'M4 7 L8 3 L12 7 M4 12 L8 8 L12 12' : 'M4 4 L8 8 L12 4 M4 9 L8 13 L12 9')
+  const box = await control.boundingBox()
+  assert.equal(box.width, 24); assert.equal(box.height, 24)
+}
+
+for (const width of [1440, 430]) test(`native card details keyboard and unique regions at ${width}px`, {timeout:60000}, async () => {
+  const f = hierarchyFixture()
+  f.projects = [f.projects[0], {...f.projects[1], id:'nested-project', parent_id:f.projects[0].id, name:'Nested project'}]
+  f.tasks = [{...f.tasks[0], id:'parent', title:'Parent'}, {...f.tasks[0], id:'child', parent_id:'parent', title:'Child'}]
+  const h = await openHierarchy(f)
+  try {
+    await h.page.setViewportSize({width,height:1000})
+    await h.start(); await h.idle()
+    for (const key of ['project:root-project','project:nested-project','task:parent','task:child']) {
+      const row = await h.scrollTo(key), control = row.locator('.btn-extras-toggle').first()
+      await assertDetails(h.page,control,false)
+      await control.focus(); await h.page.keyboard.press('Enter'); await h.idle()
+      await assertDetails(h.page,control,true)
+      await control.focus(); await h.page.keyboard.press('Space'); await h.idle()
+      await assertDetails(h.page,control,false)
+      assert.ok(await control.evaluate(node=>node===document.activeElement))
+    }
+    assert.deepEqual(h.errors,[]); assert.deepEqual(h.unhandled,[])
+  } finally {await h.close()}
+})
+
 test('complete next work and blocked disclosure exceed both old limits and are independent of closed dependencies', {timeout:60000}, async () => {
   const h = await openHierarchy(fixture())
   try {

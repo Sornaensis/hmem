@@ -14,12 +14,51 @@
   --ui-space: 14px;
   --ui-radius: 8px;
   --ui-inspector-width: 260px;
+  --scrollbar-size: 8px;
+  --scrollbar-inset: 2px;
+  --scrollbar-thumb: #475569;
+  --scrollbar-thumb-hover: #6366f1;
+  --scrollbar-thumb-active: #a5b4fc;
 }
 
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+}
+
+/* Native Indigo Capsule scrollbars. Standard-only engines choose their own
+   thin geometry and do not expose thumb hover/drag states to CSS. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+}
+
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+  border: var(--scrollbar-inset) solid transparent;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
 }
 
 body {
@@ -1200,7 +1239,7 @@ a:hover {
   gap: 0.5rem;
 }
 
-/* Description row with +/- toggle */
+/* Description row with details disclosure */
 
 .card-desc-row {
   display: flex;
@@ -2954,23 +2993,6 @@ textarea.observation-edit-content {
   max-height: 300px;
 }
 
-.popover-results::-webkit-scrollbar {
-  width: 6px;
-}
-
-.popover-results::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.popover-results::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
-}
-
-.popover-results::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
-}
-
 .popover-empty {
   font-size: 0.75rem;
   color: var(--text-muted);
@@ -4466,11 +4488,7 @@ textarea.observation-edit-content {
 .move-dialog button:disabled { opacity: .5; cursor: default; }
 .move-status-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .move-status-filters .filter-pill { text-transform: capitalize; }
-.move-tree { height: min(560px, max(168px, calc(100dvh - 250px))); overflow: auto; overflow-anchor: none; border: none; border-radius: 8px; background: transparent; color-scheme: dark; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-.move-tree::-webkit-scrollbar { width: 8px; height: 8px; }
-.move-tree::-webkit-scrollbar-track { background: transparent; }
-.move-tree::-webkit-scrollbar-thumb { background: var(--border); border: 2px solid var(--bg-surface); border-radius: 8px; }
-.move-tree::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+.move-tree { height: min(560px, max(168px, calc(100dvh - 250px))); overflow: auto; overflow-anchor: none; border: none; border-radius: 8px; background: transparent; color-scheme: dark; }
 .move-project-row { position: relative; display: flex; align-items: center; height: 56px; box-sizing: border-box; }
 .move-project-card { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; height: 48px; margin: 4px; padding: 0 4px; box-sizing: border-box; border: 1px solid transparent; border-radius: 8px; background: var(--bg); }
 .move-project-row .tree-toggle, .move-project-row .tree-toggle-spacer { flex: 0 0 24px; width: 24px; margin: 0; position: relative; z-index: 1; }

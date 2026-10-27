@@ -5447,12 +5447,13 @@ observationToggle expanded cardId name message =
          , classList [ ( "btn-extras-toggle", True ), ( "observation-disclosure", True ), ( "observation-card", cardId /= "observation-detached-toggle" ), ( "observation-card-selected", expanded ) ]
          , type_ "button"
          , attribute "aria-label" (plainTextExcerpt 180 ((if expanded then "Collapse " else "Open ") ++ name))
+         , title (plainTextExcerpt 180 ((if expanded then "Collapse " else "Open ") ++ name))
          , attribute "aria-expanded" (if expanded then "true" else "false")
          , attribute "aria-current" (if expanded then "true" else "false")
          , attribute "aria-controls" (if expanded then "observation-detail" else cardId ++ "-body")
          , onClick message
          ] ++ (if expanded then [ attribute "data-observation-detail-anchor" "true" ] else []))
-        [ text (if expanded then "−" else "+") ]
+        [ CardSections.disclosureIcon expanded ]
 
 
 {-| Only one exact repeated occurrence owns detail. Linked selection chooses the

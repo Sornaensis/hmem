@@ -1824,25 +1824,17 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     ]
             , div [ class "card-body card-expanded" ]
                 [ div [ class "card-desc-row" ]
-                    [ button [ class "btn-extras-toggle", onClick (ToggleCardExpand project.id) ]
-                        [ text
-                            (if isExpanded model project.id then
-                                "−"
-
-                             else
-                                "+"
-                            )
-                        ]
+                    [ CardSections.disclosure (isExpanded model project.id) (CardSections.detailsId "project" project.id) ("project: " ++ project.name) (ToggleCardExpand project.id)
                     , viewCardDescription model "project" project.id project.description
                     ]
                 , if isExpanded model project.id then
-                    div [ class "card-extras" ]
+                    div [ class "card-extras", id (CardSections.detailsId "project" project.id) ]
                         [ CardSections.section "Work" [viewProjectNextTasksPanel projection model project]
                         , CardSections.section "History" [Feature.AuditLog.viewEntityHistory model "project" project.id]
                         ]
 
                   else
-                    text ""
+                    div [ id (CardSections.detailsId "project" project.id), hidden True ] []
                 ]
             , div [ class "card-inline-actions" ]
                 [ if Permissions.canEditCurrentWorkspace model then
@@ -2436,19 +2428,11 @@ viewTaskCardBody descendants projection showProject model task =
                 , CardSections.fact "Priority" (Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority)
                 ]
             , div [ class "card-desc-row" ]
-                [ button [ class "btn-extras-toggle", onClick (ToggleCardExpand task.id) ]
-                    [ text
-                        (if extrasExpanded then
-                            "−"
-
-                         else
-                            "+"
-                        )
-                    ]
+                [ CardSections.disclosure extrasExpanded (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
                 , viewCardDescription model "task" task.id task.description
                 ]
             , if extrasExpanded then
-                div [ class "card-extras" ]
+                div [ class "card-extras", id (CardSections.detailsId "task" task.id) ]
                     [ nav [class "card-local-sections",attribute "aria-label" "Task sections"]
                         (List.map (\(section,label) -> button [class ("card-section-button" ++ (if currentSection == section then " selected" else "")),type_ "button",id ("task-" ++ task.id ++ "-" ++ section ++ "-button"),attribute "aria-controls" ("task-" ++ task.id ++ "-" ++ section),attribute "aria-pressed" (if currentSection == section then "true" else "false"),onClick (SetTaskCardSection task.id section)] [text label]) [("work","Work"),("agents","Agents"),("evidence","Evidence"),("history","History")])
                     , panel "work" [if showProject then
@@ -2485,7 +2469,7 @@ viewTaskCardBody descendants projection showProject model task =
                     ]
 
               else
-                text ""
+                div [ id (CardSections.detailsId "task" task.id), hidden True ] []
 
             ]
         , div [ class "card-inline-actions" ]

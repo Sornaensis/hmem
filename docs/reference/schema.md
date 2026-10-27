@@ -8,7 +8,8 @@ registered reruns do not repeat effects. It neither backfills historical events
 nor retires existing full/shell snapshots or resume bearers.
 
 Actual session creates, append counter updates, active heartbeats and termination
-write one `agent_session` audit and workspace event. Exact create/append/seal
+write one `agent_session` audit and workspace event. From V048, timestamp-only
+heartbeats emit the workspace event without an audit. Exact create/append/seal
 retries and unchanged raw updates emit nothing. The explicit audit projection
 contains identity, format, state, timestamps, committed byte/record counts,
 revision, newline state and final receipt. No complete row or chunk is serialized.
@@ -270,3 +271,18 @@ changes preserve the latest declaration. Existing audit and canonical outbox
 triggers attribute this server operation to absent/system context and publish
 the ordinary termination invalidations. Manual termination remains unchanged.
 
+## Session timestamp audit cleanup (V048)
+
+`V048__session_timestamp_audit_noise.sql` stops adding agent-session audit entries
+when only `last_seen_at` changes. Heartbeats still update the session timestamp
+and publish the existing live invalidations. Creation, transcript counters,
+runtime declarations and termination remain audited with their full snapshots.
+
+The migration deletes historical `agent_session` `update` audit rows whose object
+snapshots have different string `last_seen_at` values and otherwise match exactly.
+It retains incomplete snapshots, other entity/action rows and every other field
+change. Session metadata, transcript bytes, sealed receipts and existing change
+events are preserved. The trigger replacement, cleanup and version-48 ledger
+entry commit in one transaction; failure rolls all three back, and the migration
+runner skips an applied version. Removed heartbeat audit entries have no down
+migration; recovering them requires restoring a database backup.

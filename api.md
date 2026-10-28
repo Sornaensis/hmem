@@ -39,6 +39,7 @@ file path or reads the caller's filesystem.
 | Method and path suffix | Request or query | Response |
 | --- | --- | --- |
 | POST `/sessions` | `id` (caller UUID), required `task_id`, `format_label` (1–128 UTF-8 bytes), `title` (1–80 UTF-8 bytes), optional `parent_session_id` and `initial_runtime_identity` | Empty active session and its initial task link, or identical create retry |
+| POST `/sessions/imports` | `session` (ordinary create metadata), `final_bytes`, `final_sha256` | Historical import with immutable task/size/hash manifest; task may have any status |
 | PUT `/sessions/{sessionId}/runtime` | `expected_runtime_revision`, explicit nullable `runtime_identity` | Guarded active runtime declaration; separate from transcript revision |
 | GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness`/`project_id`/`task_id` | `items`, optional `next_cursor` |
 | GET `/sessions/filters` | `kind=projects` or `kind=tasks`, optional `project_id`, `after_id`, `selected_id`, `limit` | Active-session options, `next_id`, validated `selected` |
@@ -100,7 +101,7 @@ These are additive task links. Deleted tasks are hidden in either direction;
 restoring a task restores visibility of its links. Sessions have no edit, reopen,
 delete, redaction or unlink route. A new link requires the live same-workspace task to be `in_progress`, including after session termination. Existing links remain retry-safe after task completion. A refusal returns 409 `session_task_not_in_progress` with `required_status` and `current_status`.
 
-New sessions require `task_id` identifying a live same-workspace task whose
+New live-capture sessions require `task_id` identifying a live same-workspace task whose
 status is `in_progress`. Session creation and that initial association commit
 atomically; rejection leaves no session, link, audit or outbox effects. Missing,
 foreign or deleted tasks return 404 `session_task_not_found`; a non-running task
@@ -719,3 +720,23 @@ transitions remain usable. Malformed stored provenance returns
 `409 audit_pause_provenance_invalid`.
 
 Expanded project cards consume `GET /api/v1/projects/:id/next-task-page` to exhaustion. It returns `{items, has_more}`, defaults to 50 items, caps pages at 100, and accepts `offset` and `include_blocked`. Diagnostic pages include parent-gated subtasks with `parent_blocked`; closed/deleted placements stay excluded. The legacy `next-tasks` list keeps its existing limits and candidate eligibility. Dependency summaries in task overviews and dependency pages include authoritative `status` for closed-work grouping.
+
+## Historical session imports
+
+`POST /api/v1/workspaces/{workspaceId}/sessions/imports` requires edit access,
+normal bot attribution/CSRF, and the same 2 MiB request limit as other session
+mutations. Its strict body contains `session` (the ordinary create fields),
+`final_bytes` (nonnegative int64) and `final_sha256` (lowercase SHA-256).
+The declared task must be visible, nondeleted and in the same workspace; done
+and cancelled tasks are accepted without a status change. Registration persists
+`import_task_id`, `import_bytes` and `import_sha256` and atomically links the task.
+
+Use existing bounded append and prefix-verification endpoints. Pending imports
+remain addressable by UUID but are omitted from ordinary session lists and live
+activity/facets. Runtime identity and the import manifest cannot change.
+Termination requires the full manifest and verifies the bytes normally;
+abandoned-session cleanup never seals imports. Completed imports appear in
+saved evidence and task ZIP downloads. Live creation cannot reuse an import UUID.
+Exact registration retries preserve the original importer attribution; conflicting
+metadata/manifest reuse fails. An authorized manager may reconcile and resume an
+existing import by UUID without changing its creator.

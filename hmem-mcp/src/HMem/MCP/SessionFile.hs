@@ -1,7 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 -- Stable identity belongs to the same native handle that supplies the bytes.
 module HMem.MCP.SessionFile
-  ( Source, SourceFault(..), openSource, closeSource, checkSource, readSource, openSourceCount ) where
+  ( Source, SourceFault(..), openSource, closeSource, checkSource, readSource, openSourceCount, publishNewFile ) where
 
 import Control.Concurrent.MVar
 import Control.Exception
@@ -25,6 +25,14 @@ foreign import ccall safe "hmem_session_close" nativeClose :: Ptr () -> IO CInt
 foreign import ccall safe "hmem_session_info" nativeInfo :: Ptr () -> Ptr Word64 -> Ptr Word8 -> Ptr Int64 -> IO CInt
 foreign import ccall safe "hmem_session_read" nativeRead :: Ptr () -> Int64 -> Ptr Word8 -> CInt -> IO CInt
 foreign import ccall unsafe "hmem_session_open_count" nativeCount :: IO CInt
+foreign import ccall safe "hmem_session_publish" nativePublish :: CString -> CString -> IO CInt
+
+-- Same-directory atomic publication. The native operation never replaces an
+-- existing destination, including a destination created during the download.
+publishNewFile :: FilePath -> FilePath -> IO Bool
+publishNewFile source target =
+  BS.useAsCString (TE.encodeUtf8 (T.pack source)) $ \from ->
+    BS.useAsCString (TE.encodeUtf8 (T.pack target)) $ \to -> (/=0) <$> nativePublish from to
 
 openSourceCount :: IO Int
 openSourceCount = fromIntegral <$> nativeCount

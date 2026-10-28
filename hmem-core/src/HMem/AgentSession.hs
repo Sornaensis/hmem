@@ -1,6 +1,6 @@
 -- | Provider-neutral metadata and byte-oriented agent session inputs.
 module HMem.AgentSession
-  ( SessionState(..), SessionFreshness(..), SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..)
+  ( SessionState(..), SessionFreshness(..), SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..), ImportSession(..)
   , AppendSession(..), TerminateSession(..), SessionAppendResult(..), RuntimeIdentity(..), SetRuntimeIdentity(..), runtimeIdentityValid, runtimeDeclarationValid
   , SessionPageCursor(..), SessionPage(..), SessionTask(..), SessionTaskPage(..), SessionAncestor(..), SessionFacet(..), SessionFacetPage(..)
   , SessionRange(..), SessionException(..), SessionErrorCode(..)
@@ -102,6 +102,9 @@ data AgentSession = AgentSession
   , terminatedAt :: !(Maybe UTCTime)
   , finalBytes :: !(Maybe Int64)
   , finalSha256 :: !(Maybe Text)
+  , importTaskId :: !(Maybe UUID)
+  , importBytes :: !(Maybe Int64)
+  , importSha256 :: !(Maybe Text)
   } deriving stock (Show, Eq, Generic)
 instance ToJSON AgentSession where toJSON = genericToJSON jsonOptions
 instance FromJSON AgentSession where
@@ -112,6 +115,7 @@ instance FromJSON AgentSession where
     <*> o .:? "runtime_identity" <*> o .:? "runtime_revision" .!= 0
     <*> o .: "created_at" <*> o .: "last_seen_at" <*> o .: "committed_bytes" <*> o .: "committed_records" <*> o .: "revision"
     <*> o .: "ends_with_newline" <*> o .:? "terminated_at" <*> o .:? "final_bytes" <*> o .:? "final_sha256"
+    <*> o .:? "import_task_id" <*> o .:? "import_bytes" <*> o .:? "import_sha256"
 
 data SessionAncestor = SessionAncestor
   { id :: !UUID, title :: !(Maybe Text), formatLabel :: !Text, state :: !SessionState, parentSessionId :: !(Maybe UUID)
@@ -131,6 +135,11 @@ data CreateSession = CreateSession
   } deriving stock (Show, Eq, Generic)
 instance ToJSON CreateSession where toJSON = genericToJSON jsonOptions
 instance FromJSON CreateSession where parseJSON = genericParseJSON jsonOptions
+
+-- Historical import identity is fixed before any bytes are accepted.
+data ImportSession = ImportSession
+  { session :: !CreateSession, finalBytes :: !Int64, finalSha256 :: !Text
+  } deriving stock (Show, Eq)
 
 -- | Bytes are never JSON encoded here. HTTP/MCP adapters own base64 encoding.
 data AppendSession = AppendSession

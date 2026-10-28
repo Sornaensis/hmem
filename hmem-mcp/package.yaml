@@ -25,6 +25,7 @@ dependencies:
   - directory
   - filepath
   - case-insensitive
+  - zlib
 
 ghc-options:
   - -Wall

@@ -47,6 +47,35 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+
+  it "HistoricalImport authorizes a completed task, binds its manifest and downloads byte-identical evidence" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+      workspace <- createTestWorkspace env "http-historical-import"
+      task <- makeTask env workspace.id
+      foreignWorkspace <- createTestWorkspace env "http-historical-foreign"
+      foreignTask <- makeTask env foreignWorkspace.id
+      identifier <- UUID.nextRandom
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+      let bytes="{\"old\":true}\r\n[1]"
+          metadata=CreateSessionRequest identifier "jsonl" "Historical completed work" Nothing Nothing task.id
+          manifest=ImportSessionRequest metadata (fromIntegral (BS.length bytes)) (Core.sessionSha256 bytes)
+          root=sessions workspace.id; target=root<>"/"<>uuid identifier
+      post app root [] (toJSON metadata) >>= status status409
+      created <- post app (root<>"/imports") [] (toJSON manifest) >>= decoded @Core.AgentSession
+      created.importTaskId `shouldBe` Just task.id
+      post app (root<>"/imports") [] (toJSON manifest) >>= decoded @Core.AgentSession >>= (`shouldBe` created)
+      post app (target<>"/terminate") [] (toJSON $ TerminateSessionRequest 0 0 0 (Core.sessionSha256 "")) >>= status status409
+      uploaded <- post app (target<>"/append") [] (toJSON $ AppendSessionRequest 0 0 (encodeSessionBytes bytes) True) >>= decoded @AppendSessionResponse
+      sealed <- post app (target<>"/terminate") [] (toJSON $ TerminateSessionRequest uploaded.session.committedBytes uploaded.session.revision uploaded.session.committedBytes (Core.sessionSha256 bytes)) >>= decoded @Core.AgentSession
+      sealed.state `shouldBe` Core.Terminated
+      evidence <- call app methodGet (target<>"/evidence") [] "" >>= decoded @SessionRangeResponse
+      decodeSessionBytes evidence.dataBase64 `shouldBe` Right bytes
+      another <- UUID.nextRandom
+      post app (root<>"/imports") [] (toJSON $ ImportSessionRequest (metadata {id=another,taskId=foreignTask.id}) 0 (Core.sessionSha256 "")) >>= status status404
+      Just unchanged <- Task.getTask env.pool task.id
+      toJSON unchanged.status `shouldBe` String "done"
+
   it "PrefixProof binds historical raw prefixes and retains ordinary caller compatibility" $
     withLocalSandboxAppContext $ \ctx -> bracket (newPrefixRegistry ctx.localEnv.pool) closePrefixRegistry $ \registry -> do
       let env=ctx.localEnv; cfg=ctx.localConfig
@@ -480,7 +509,7 @@ spec = describe "Agent session HTTP" $ do
         call app methodGet target outsider "" >>= status status403
         call app methodGet target [] "" >>= status status401
       forM_ [root<>"?limit=invalid",path<>"/transcript?offset=invalid"] $ \target -> call app methodGet target outsider "" >>= status status403
-      forM_ [(root,methodPost),(path<>"/append",methodPost),(path<>"/heartbeat",methodPost),(path<>"/terminate",methodPost),(path<>"/tasks/"<>uuid task.id,methodPut)] $ \(target,method) -> do
+      forM_ [(root<>"/imports",methodPost),(root,methodPost),(path<>"/append",methodPost),(path<>"/heartbeat",methodPost),(path<>"/terminate",methodPost),(path<>"/tasks/"<>uuid task.id,methodPut)] $ \(target,method) -> do
         call app method target reader "{" >>= status status403
         call app method target outsider "{" >>= status status403
         call app method target [] "{" >>= status status401

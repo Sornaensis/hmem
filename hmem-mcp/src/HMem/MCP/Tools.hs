@@ -47,6 +47,7 @@ import HMem.Types
 import HMem.AgentSession qualified as AgentSession
 import HMem.AgentSession.Transport qualified as SessionWire
 import HMem.MCP.SessionFollower (uploadToolDefinitions)
+import HMem.MCP.TaskTriage (downloadEvidence)
 
 -- The MCP surface adapts the authorized HTTP API. The accepted context supplies
 -- workspace IDs when callers omit explicit overrides.
@@ -180,6 +181,7 @@ toolDefinitions =
       , "project_id" .= nullableProp "Destination project UUID, or null/omitted to detach the tasks from a project"
       ] ["task_ids"])
   , tool "task_detail" "Get task details, including its complete description." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
+  , tool "task_triage" "Download all linked saved/terminated session evidence as a verified ZIP64 archive to a new explicit local path. Refuses overwrite; incomplete or invalid downloads are removed. Returns archive byte count, SHA-256 and session count without transcript content. Active sessions are excluded; task status is unchanged." (strictSchema ["workspace_id" .= prop "string" "Optional workspace override; accepted identity still required", "task_id" .= prop "string" "Task UUID", "path" .= prop "string" "New explicit local archive destination; parent directory must exist"] ["task_id","path"])
   , tool "task_overview" "Get a compact task overview and dependency summaries." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
@@ -435,6 +437,7 @@ data ToolCall
   -- not part of BatchMoveTasksRequest, which remains the REST body.
   | TaskMoveBatch (Maybe UUID) BatchMoveTasksRequest
   | TaskDetail UUID
+  | TaskTriage UUID UUID FilePath
   | TaskOverviewCall UUID
   | TaskDependency UUID UUID Text
   | TaskStart UUID
@@ -473,6 +476,10 @@ parseToolCall name args = do
     "task_update" -> TaskUpdate <$> required "task_id" <*> parse args
     "task_move_batch" -> uncurry TaskMoveBatch <$> parseBatchMoveTasks args
     "task_detail" -> TaskDetail <$> required "task_id"
+    "task_triage" -> parseEither (withObject "task triage arguments" $ \o -> do
+      if all (`elem` ["workspace_id","task_id","path"]) (KM.keys o) then pure () else fail "Unsupported fields"
+      workspace <- o .: "workspace_id"; task <- o .: "task_id"; path <- o .: "path"
+      if null path || '\0' `elem` path then fail "Explicit destination required" else pure (TaskTriage workspace task path)) args
     "task_overview" -> TaskOverviewCall <$> required "task_id"
     "task_dependency" -> TaskDependency <$> required "task_id" <*> required "depends_on_id" <*> required "action"
     "task_start" -> TaskStart <$> required "task_id"
@@ -577,6 +584,7 @@ handleToolCall manager base token identity params = case parseParams params of
   where
     localError "search" code message = searchError code (searchErrorField message) message []
     localError "observation_discovery" code message = searchError code (discoveryErrorField message) message []
+    localError "task_triage" _ _ = sessionToolError "invalid_arguments" Nothing "task_triage requires task_id, a new local destination path and workspace context"
     localError "session_create" _ _ = sessionToolError "invalid_arguments" Nothing "session_create requires task_id (a same-workspace in_progress task UUID), session_id, a very short descriptive title and format_label"
     localError name _ _ | isSessionTool name = sessionToolError "invalid_arguments" Nothing "Invalid session tool arguments"
     localError _ _ message = mcpError message
@@ -622,6 +630,10 @@ execute manager base apiKey = \case
         Left errorValue -> pure errorValue
         Right () -> dispatchBatchMove manager base apiKey input
   TaskDetail tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid) Nothing fullTaskDetail
+  TaskTriage workspace tid path -> do
+    let ForwardingContext credential identity = apiKey
+    provenance <- mcpProvenanceHeaders
+    downloadEvidence manager base ([("X-HMem-Bot-Identity",BL.toStrict (encode identity)),("X-HMem-Change-Cause","mcp")] <> provenance <> maybe [] (\token -> [("Authorization",TE.encodeUtf8 ("Bearer " <> token))]) credential) workspace tid path
   TaskOverviewCall tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid <> "/overview") Nothing compactTaskOverview
   TaskDependency tid depId "add" -> request manager base apiKey "POST" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies") (Just (encode (object ["depends_on_id" .= depId]))) compactTaskDependencyMutation
   TaskDependency tid depId "remove" -> request manager base apiKey "DELETE" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/" <> uuidPath depId) Nothing compactTaskDependencyMutation

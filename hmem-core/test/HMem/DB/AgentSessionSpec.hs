@@ -44,6 +44,66 @@ import HMem.Types qualified as Types
 spec :: Spec
 spec = do
   around withTestEnv $ describe "Agent sessions" $ do
+
+    it "HistoricalImport links completed tasks without changing live rules or exposing partial evidence" $ \env -> do
+      workspace <- (.id) <$> createTestWorkspace env "historical-import"
+      forM_ ["done","cancelled"] $ \status -> do
+        task <- makeTask env workspace "Historical work"
+        execute env ("UPDATE tasks SET status='"<>status<>"' WHERE id='"<>uuid task.id<>"'")
+        identifier <- UUID.nextRandom
+        let body="{\"message\":\"historical\"}\r\n[1,2]"
+            metadata=CreateSession identifier workspace "historical-jsonl" "Historical completed work" Nothing Nothing task.id
+            manifest=ImportSession metadata (fromIntegral (BS.length body)) (sessionSha256 body)
+        expectCode (SessionTaskNotInProgress (TE.decodeUtf8 status)) $ createSession env.pool metadata
+        row <- importSession env.pool manifest
+        importSession env.pool manifest `shouldReturn` row
+        expectCode SessionConflict $ importSession env.pool (manifest {finalSha256=sessionSha256 "different"})
+        expectCode SessionConflict $ createSession env.pool metadata
+        (row.importTaskId,row.importBytes,row.importSha256) `shouldBe` (Just task.id,Just (fromIntegral (BS.length body)),Just (sessionSha256 body))
+        page <- listTaskSessions env.pool workspace task.id Nothing 50
+        page.items `shouldBe` []
+        workspaceSessionActivity env.pool [workspace] `shouldReturn` [(workspace,False)]
+        expectCode SessionConflict $ setRuntimeIdentity env.pool workspace identifier (SetRuntimeIdentity 0 Nothing)
+        expectCode SessionConflict $ terminateSession env.pool workspace identifier (receipt row "")
+        sealIdleSessionWithClock env.pool (pure (addUTCTime 7200 row.lastSeenAt)) (pure ()) row `shouldReturn` Nothing
+        rejectDb $ execute env ("UPDATE sessions SET state='terminated',terminated_at=clock_timestamp(),final_bytes=0,final_sha256='"<>TE.encodeUtf8 (sessionSha256 "")<>"',revision=revision+1 WHERE id='"<>uuid identifier<>"'")
+        rejectDb $ execute env ("UPDATE sessions SET import_bytes=import_bytes+1 WHERE id='"<>uuid identifier<>"'")
+        appended <- (.session) <$> append env workspace row body True
+        sealed <- terminateSession env.pool workspace identifier (receipt appended body)
+        allBytes env workspace identifier `shouldReturn` body
+        pageDone <- listTaskSessions env.pool workspace task.id Nothing 50
+        map (.id) pageDone.items `shouldBe` [identifier]
+        importSession env.pool manifest `shouldReturn` sealed
+        Just unchanged <- Task.getTask env.pool task.id
+        Aeson.toJSON unchanged.status `shouldBe` Aeson.String (TE.decodeUtf8 status)
+    it "HistoricalImport upgrades V048 atomically without rewriting legacy evidence" $ \_ ->
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir=sandbox.sandboxRoot </> "before-v049"
+              upgradeDir=sandbox.sandboxRoot </> "only-v049"
+              filename="V049__historical_session_import.sql"
+              env=TestEnv pool sandbox db
+          createDirectory beforeDir; createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V049" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
+          (workspace,row) <- legacyFreshFixture env
+          uploaded <- (.session) <$> append env workspace row "{}\r\n" False
+          sealed <- terminateSession pool workspace row.id (receipt uploaded "{}\r\n")
+          execute env "CREATE TABLE pre_v049_sessions AS SELECT to_jsonb(s) AS value FROM sessions s; CREATE TABLE pre_v049_counts AS SELECT (SELECT count(*) FROM audit_log) AS audits,(SELECT count(*) FROM change_stream_outbox) AS events"
+          bracket_
+            (execute env "CREATE FUNCTION import_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=49 THEN RAISE EXCEPTION 'injected import ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER import_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION import_ledger_failure()")
+            (execute env "DROP TRIGGER import_ledger_failure ON schema_migrations; DROP FUNCTION import_ledger_failure()") $ do
+              Migration.runMigrations pool upgradeDir >>= (\result -> result.failed `shouldSatisfy` (/=Nothing))
+              boolean env "SELECT NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='sessions' AND column_name='import_task_id') AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=49)" `shouldReturn` True
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [filename])
+          boolean env "SELECT NOT EXISTS(SELECT 1 FROM sessions s WHERE (to_jsonb(s)-ARRAY['import_task_id','import_bytes','import_sha256']) NOT IN (SELECT value FROM pre_v049_sessions) OR s.import_task_id IS NOT NULL OR s.import_bytes IS NOT NULL OR s.import_sha256 IS NOT NULL) AND (SELECT count(*) FROM audit_log)=(SELECT audits FROM pre_v049_counts) AND (SELECT count(*) FROM change_stream_outbox)=(SELECT events FROM pre_v049_counts)" `shouldReturn` True
+          getSession pool workspace row.id `shouldReturn` Just sealed
+          allBytes env workspace row.id `shouldReturn` "{}\r\n"
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
+
     it "SealCAS releases each bounded group lease and refuses an append winner" $ \env -> do
       (workspace,_,row) <- reaperFixture env
       let record = BS.replicate 1022 32 <> "0\n"; chunk = BS.concat (replicate 1024 record)
@@ -282,7 +342,9 @@ spec = do
           forM_ (filter (\name -> name < "V047" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
           copyFile (source </> filename) (upgradeDir </> filename)
           Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
-          (workspace,_,row) <- reaperFixture env
+          workspace <- (.id) <$> createTestWorkspace env "idle-session-reaper"
+          task <- makeTask env workspace "Session reaper fixture"
+          row <- legacySessionFixture env workspace task.id
           bracket_
             (execute env "CREATE FUNCTION idle_index_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=47 THEN RAISE EXCEPTION 'injected idle index ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER idle_index_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION idle_index_ledger_failure()")
             (execute env "DROP TRIGGER idle_index_ledger_failure ON schema_migrations; DROP FUNCTION idle_index_ledger_failure()") $ do
@@ -467,13 +529,16 @@ spec = do
           Just legacy <- getSession pool workspace.id active
           createSession pool (CreateSession active workspace.id "jsonl" "Legacy orphan capture" Nothing Nothing workspace.id) `shouldReturn` legacy
           terminateSession pool workspace.id active (receipt legacy "") >>= (\row -> row.state `shouldBe` Terminated)
+          newer <- UUID.nextRandom
+          rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid newer<>"','"<>uuid workspace.id<>"','jsonl','Rejected orphan capture')")
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
+          -- The V045 assertions above retain their historical schema boundary.
+          -- Exercise today's reaper only after installing its complete schema.
+          Migration.runMigrations pool source >>= (\result -> result.failed `shouldBe` Nothing)
           Just oldOrphan <- getSession pool workspace.id abandoned
           Just savedOrphan <- sealIdleSession pool oldOrphan
           savedOrphan.finalSha256 `shouldBe` Just (sessionSha256 "")
           savedOrphan.state `shouldBe` Terminated
-          newer <- UUID.nextRandom
-          rejectDb $ execute env ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid newer<>"','"<>uuid workspace.id<>"','jsonl','Rejected orphan capture')")
-          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
 
     it "keeps runtime declarations separate from immutable caller and transcript receipts, including retry and clear" $ \env -> do
       workspace <- createTestWorkspace env "runtime-identities"
@@ -1134,7 +1199,7 @@ spec = do
           forM_ (filter (\name -> name < "V048" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
           copyFile (source </> filename) (upgradeDir </> filename)
           Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
-          (workspace,row) <- fresh env
+          (workspace,row) <- legacyFreshFixture env
           _ <- heartbeatSession pool workspace row.id
           execute env "CREATE TABLE heartbeat_audit_ids AS SELECT id FROM audit_log WHERE entity_type='agent_session' AND action='update'"
           boolean env "SELECT count(*)=1 FROM heartbeat_audit_ids" `shouldReturn` True
@@ -1172,7 +1237,7 @@ spec = do
           getSession pool workspace row.id `shouldReturn` Just sealed
           allBytes env workspace row.id `shouldReturn` "{}\n"
           Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
-          (activeWorkspace,active) <- fresh env
+          (activeWorkspace,active) <- legacyFreshFixture env
           _ <- heartbeatSession pool activeWorkspace active.id
           boolean env ("SELECT count(*)=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid active.id<>"'") `shouldReturn` True
 
@@ -1262,6 +1327,20 @@ reaperFixture env = do
   identifier <- UUID.nextRandom
   row <- createSession env.pool (CreateSession identifier workspace.id "jsonl" "Idle task capture" Nothing Nothing task.id)
   pure (workspace.id,task,row)
+
+legacySessionFixture :: TestEnv -> UUID -> UUID -> IO AgentSession
+legacySessionFixture env workspace task = do
+  identifier <- UUID.nextRandom
+  runTransaction env.pool $ S.sql ("INSERT INTO sessions(id,workspace_id,format_label,title) VALUES ('"<>uuid identifier<>"','"<>uuid workspace<>"','jsonl','Historical schema fixture'); INSERT INTO task_sessions(workspace_id,session_id,task_id) VALUES ('"<>uuid workspace<>"','"<>uuid identifier<>"','"<>uuid task<>"')")
+  getSession env.pool workspace identifier >>= maybe (fail "Missing historical fixture session") pure
+
+legacyFreshFixture :: TestEnv -> IO (UUID,AgentSession)
+legacyFreshFixture env = do
+  workspace <- (.id) <$> createTestWorkspace env "historical-schema-session"
+  task <- makeTask env workspace "Historical schema task"
+  row <- legacySessionFixture env workspace task.id
+  execute env ("UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid task.id<>"'")
+  pure (workspace,row)
 
 fresh :: TestEnv -> IO (UUID,AgentSession)
 fresh env = do

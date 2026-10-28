@@ -379,7 +379,7 @@ handleMethod follower mgr serverUrl mApiKey wsContext workspaceSnapshot req = ca
               Nothing -> atomically $ readTVar wsContext
             case capturedWorkspace of
               Nothing -> pure $ Just $ jsonRpcResponse req.reqId $
-                if maybe False isUploadTool mToolName || mToolName `elem` (map Just ["search", "observation_discovery", "session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]) then searchContextError else object
+                if maybe False isUploadTool mToolName || mToolName `elem` (map Just ["task_triage", "search", "observation_discovery", "session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]) then searchContextError else object
                   [ "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Call set_workspace with workspace_id and identity before using ordinary tools" :: Text)]]
                   , "isError" .= True
                   ]

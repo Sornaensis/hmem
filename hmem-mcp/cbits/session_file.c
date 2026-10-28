@@ -50,6 +50,17 @@ int hmem_session_read(void *value, int64_t offset, unsigned char *buffer, int co
 int hmem_session_close(void *value) {
   hmem_file *file = value; int ok = CloseHandle(file->handle) != 0; if (ok) InterlockedDecrement(&hmem_open_sources); free(file); return ok;
 }
+int hmem_session_publish(const char *source, const char *target) {
+  int a = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, source, -1, NULL, 0);
+  int b = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, NULL, 0);
+  if (!a || !b) return 0;
+  wchar_t *from = malloc((size_t)a * sizeof(wchar_t)), *to = malloc((size_t)b * sizeof(wchar_t));
+  if (!from || !to) { free(from); free(to); return 0; }
+  int ok = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, source, -1, from, a)
+    && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, to, b)
+    && MoveFileExW(from, to, MOVEFILE_WRITE_THROUGH);
+  free(from); free(to); return ok;
+}
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -78,5 +89,10 @@ int hmem_session_read(void *value, int64_t offset, unsigned char *buffer, int co
 }
 int hmem_session_close(void *value) {
   hmem_file *file = value; int ok = close(file->fd) == 0; if (ok) __sync_sub_and_fetch(&hmem_open_sources, 1); free(file); return ok;
+}
+int hmem_session_publish(const char *source, const char *target) {
+  if (link(source, target) != 0) return 0;
+  /* The complete destination is published even if temporary cleanup fails. */
+  unlink(source); return 1;
 }
 #endif

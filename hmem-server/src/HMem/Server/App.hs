@@ -163,6 +163,7 @@ agentSessionBodyLimit pool app req respond = case sessionMutationWorkspace req o
 sessionMutationWorkspace :: Wai.Request -> Maybe UUID.UUID
 sessionMutationWorkspace req = case (Wai.requestMethod req, dropWhileEnd T.null (Wai.pathInfo req)) of
   ("POST", ["api","v1","workspaces",workspace,"sessions"]) -> UUID.fromText workspace
+  ("POST", ["api","v1","workspaces",workspace,"sessions","imports"]) -> UUID.fromText workspace
   ("POST", ["api","v1","workspaces",workspace,"sessions",_,operation])
     | operation `elem` ["append","heartbeat","terminate","prefix-verifications"] -> UUID.fromText workspace
   ("PUT", ["api","v1","workspaces",workspace,"sessions",_,"tasks",_]) -> UUID.fromText workspace

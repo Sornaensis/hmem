@@ -56,7 +56,7 @@ data Registry = Registry
   , processScope :: ProcessScope, helperPath :: FilePath
   }
 data Job = Job
-  { sid :: UUID, workspace :: UUID, sourcePath :: FilePath, formatLabel :: Text, title :: Text, parentSessionId :: Maybe UUID, initialRuntimeIdentity :: Maybe Core.RuntimeIdentity, taskId :: UUID
+  { sid :: UUID, workspace :: UUID, sourcePath :: FilePath, formatLabel :: Text, title :: Text, parentSessionId :: Maybe UUID, initialRuntimeIdentity :: Maybe Core.RuntimeIdentity, taskId :: UUID, imported :: Bool
   , http :: CapturedHTTP, state :: TVar JobState, control :: TVar (Maybe Control)
   , busy :: TVar Bool
   }
@@ -72,6 +72,11 @@ data Sweep = Sweep
 
 newSweep :: SweepPurpose -> Core.AgentSession -> Sweep
 newSweep purpose session = Sweep purpose session.committedBytes session.revision 0 hashInit Nothing Nothing False False Nothing
+data ImportScan = ImportScan !Int64 !Int64 !(Context SHA256) !ByteString
+
+data ImportFault = InvalidImport | ImportDeadline deriving (Show,Eq)
+instance Exception ImportFault
+
 data JobState = JobState
   { phase :: Text, source :: Maybe Source, remote :: Maybe Core.AgentSession
   , createNeeded :: Bool, sweep :: Maybe Sweep, verifyNext :: Bool
@@ -82,15 +87,18 @@ data JobState = JobState
   , lastHeartbeat :: Maybe UTCTime
   , failureDetails :: Maybe Value
   , nextVerification :: UTCTime, lastProof :: Maybe (Wire.PrefixProofRequest,Text)
+  , importScan :: Maybe ImportScan, importManifest :: Maybe (Int64,Text), importDeadline :: Maybe UTCTime, importCompleted :: Maybe Core.AgentSession
   }
 
 isUploadTool :: Text -> Bool
-isUploadTool name = name `elem` ["session_upload_start", "session_upload_status", "session_upload_flush", "session_upload_stop"]
+isUploadTool name = name `elem` ["session_import", "session_upload_start", "session_upload_status", "session_upload_flush", "session_upload_stop"]
 
 uploadToolDefinitions :: [Value]
 uploadToolDefinitions =
   [ define "session_upload_start" "Start/resume capture with REQUIRED task_id and a VERY SHORT DESCRIPTIVE TITLE, normally 3–8 words such as 'Repair session filters'. NEW sessions are atomically linked to this same-workspace in_progress task; start the task first. Resume preserves existing links and does not require the task to remain in_progress. Registration returns validating while remote creation is pending; a rejected task fails and closes the follower without creating a session. Accepted identity attributes the connection caller, NOT the actual target session model. Supply initial_runtime_identity with that model and the actual running agent role when known; omit/null means unknown. This initializes NEW sessions only; resume preserves canonical runtime and never reasserts startup identity after model switches. Use session_set_runtime for changes. An optional parent_session_id fixes one parent at creation. Captured workspace/caller/credentials never retarget. Never terminates a session."
       ["path" .= str "Explicit local JSONL file path; never sent to the HTTP server or echoed", "format_label" .= str "Required provider-neutral format label for create/resume", "title" .= str "Required very short descriptive title (normally 3–8 words; 1..80 UTF-8 bytes)", "task_id" .= str "Required initial same-workspace task UUID; NEW sessions require status in_progress", "parent_session_id" .= str "Optional existing same-workspace parent session UUID, fixed at creation", "initial_runtime_identity" .= runtimeIdentitySchema] ["path", "format_label", "title", "task_id"]
+  , define "session_import" "Import a completed local JSONL as historical task evidence. Validates the entire finite regular file before registration, preserves exact bytes, and seals only the full verified import. Accepts any visible same-workspace task status without changing it. Returns promptly; inspect session_upload_status for completed status and receipt. Retry the same UUID, source and immutable metadata to resume. Invalid tails or observed source changes fail; no transcript or path is returned. Explicit historical runtime identity is separate from importer attribution."
+      ["path" .= str "Explicit completed local JSONL regular-file path; remains local", "format_label" .= str "Provider-neutral transcript format", "title" .= str "Very short descriptive title (1..80 UTF-8 bytes)", "task_id" .= str "Visible same-workspace historical task UUID; any status", "parent_session_id" .= str "Optional existing same-workspace parent UUID", "initial_runtime_identity" .= runtimeIdentitySchema] ["path", "format_label", "title", "task_id"]
   , define "session_upload_status" "Inspect bounded process-local metadata, pending control receipt and independent 30-second HTTP acknowledgement staleness. No paths or transcript data." [] []
   , define "session_upload_flush" "Capture one finite source boundary after current job work; may send a complete final JSON record without LF. Returns a fully verified canonical prefix receipt or explicit pending operation within one second. Does not seal." [] []
   , define "session_upload_stop" "Capture and flush one finite source boundary, verify receipt and close the source. Partial/invalid final tail remains pending in the receipt. Returns complete or pending within one second; never seals." [] []
@@ -132,7 +140,7 @@ newRegistryWith options = mask_ $ do
   pure shell {workers = [first,second]}
 
 terminal :: Text -> Bool
-terminal phase = phase `elem` ["stopped", "failed", "terminated"]
+terminal phase = phase `elem` ["stopped", "failed", "terminated", "imported"]
 
 completeControl :: Job -> Value -> STM ()
 completeControl job resultValue = do
@@ -193,12 +201,12 @@ closeRegistry registry = mask $ \restore -> do
 
 handleUploadTool :: Registry -> Manager -> String -> Maybe Text -> BotIdentity -> Text -> Value -> IO Value
 handleUploadTool registry _ordinaryManager base token identity name arguments = case parseEither parse arguments of
-  Left _ -> pure $ toolError "invalid_arguments" (if name == "session_upload_start" then "session_upload_start requires task_id (a same-workspace in_progress task UUID), a very short descriptive title (1 to 80 UTF-8 bytes), a format_label and readable path; parent_session_id is optional and must differ from session_id." else "Invalid uploader arguments")
+  Left _ -> pure $ toolError "invalid_arguments" (if name == "session_import" then "session_import requires a completed regular-file path, task_id (a visible same-workspace task UUID of any status), session_id, a very short descriptive title and format_label; optional parent must differ from session_id." else if name == "session_upload_start" then "session_upload_start requires task_id (a same-workspace in_progress task UUID), a very short descriptive title (1 to 80 UTF-8 bytes), a format_label and readable path; parent_session_id is optional and must differ from session_id." else "Invalid uploader arguments")
   Right (workspace,sid,path,label,title,parentSessionId,initialRuntimeIdentity,taskId) -> do
     prune registry
     found <- Map.lookup sid <$> readTVarIO registry.jobs
     case name of
-      "session_upload_start" -> do
+      startName | startName `elem` ["session_upload_start","session_import"] -> do
         captured <- captureHTTP registry.processScope registry.helperPath base token identity
         time <- registry.options.now
         state <- newTVarIO JobState
@@ -206,9 +214,10 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
           , sweep = Nothing, verifyNext = False, pending = Nothing, reconcile = False, due = time
           , lastAck = Nothing, failures = 0, failure = Nothing, completedAt = Nothing, receipt = Nothing
           , observedSize = 0, lastHeartbeat = Nothing, failureDetails = Nothing
-          , nextVerification = time, lastProof = Nothing }
+          , nextVerification = time, lastProof = Nothing
+          , importScan = Nothing, importManifest = Nothing, importDeadline = if name == "session_import" then Just (addUTCTime 900 time) else Nothing, importCompleted = Nothing }
         control <- newTVarIO Nothing; busy <- newTVarIO False
-        let job = Job sid workspace path label title parentSessionId initialRuntimeIdentity taskId captured state control busy
+        let job = Job sid workspace path label title parentSessionId initialRuntimeIdentity taskId (name == "session_import") captured state control busy
         result <- atomically $ do
           closing <- readTVar registry.closed
           existing <- readTVar registry.jobs
@@ -227,11 +236,16 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
             modifyTVar' registry.order (\ids -> filter (`Map.member` trimmed) (filter (/= sid) ids) <> [sid])
             pure (Right ())
         case result of
+          Left "already_following" | Just existing <- found, job.imported && existing.imported
+            && job.workspace == existing.workspace && job.sourcePath == existing.sourcePath
+            && job.taskId == existing.taskId && job.formatLabel == existing.formatLabel && job.title == existing.title
+            && job.parentSessionId == existing.parentSessionId && job.initialRuntimeIdentity == existing.initialRuntimeIdentity -> statusValue registry existing
           Left code -> pure $ toolError code "Uploader registration refused"
           Right () -> statusValue registry job
       _ -> case found of
         Just job | job.workspace == workspace -> case name of
           "session_upload_status" -> statusValue registry job
+          _ | job.imported -> pure $ toolError "import_control_unsupported" "Historical imports accept status reads and exact session_import retries; live flush/stop controls are not supported"
           _ -> do
             time <- registry.options.now
             op <- UUID.nextRandom
@@ -258,17 +272,17 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
   where
     parse = withObject "uploader arguments" $ \o -> do
       let allowed = ["workspace_id", "session_id"]
-          extra = if name == "session_upload_start" then ["path", "format_label", "title", "parent_session_id", "initial_runtime_identity", "task_id"] else []
+          extra = if name `elem` ["session_upload_start","session_import"] then ["path", "format_label", "title", "parent_session_id", "initial_runtime_identity", "task_id"] else []
       unless (all (`elem` (allowed <> extra)) (KM.keys o)) $ fail "Unsupported fields"
       workspace <- o .: "workspace_id"; sid <- o .: "session_id"
-      path <- if name == "session_upload_start" then o .: "path" else pure ""
-      label <- if name == "session_upload_start" then o .: "format_label" else pure ""
-      title <- if name == "session_upload_start" then T.strip <$> o .: "title" else pure ""
-      parentSessionId <- if name == "session_upload_start" then o .:? "parent_session_id" else pure Nothing
-      initialRuntimeIdentity <- if name == "session_upload_start" then o .:? "initial_runtime_identity" else pure Nothing
-      taskId <- if name == "session_upload_start" then o .: "task_id" else pure nil
-      when (name == "session_upload_start" && (null path || '\0' `elem` path || T.null (T.strip label) || BS.length (TE.encodeUtf8 label) > 128)) $ fail "Invalid source"
-      when (name == "session_upload_start" && (T.null title || BS.length (TE.encodeUtf8 title)>80 || parentSessionId==Just sid)) $ fail "Invalid title or optional parent"
+      path <- if name `elem` ["session_upload_start","session_import"] then o .: "path" else pure ""
+      label <- if name `elem` ["session_upload_start","session_import"] then o .: "format_label" else pure ""
+      title <- if name `elem` ["session_upload_start","session_import"] then T.strip <$> o .: "title" else pure ""
+      parentSessionId <- if name `elem` ["session_upload_start","session_import"] then o .:? "parent_session_id" else pure Nothing
+      initialRuntimeIdentity <- if name `elem` ["session_upload_start","session_import"] then o .:? "initial_runtime_identity" else pure Nothing
+      taskId <- if name `elem` ["session_upload_start","session_import"] then o .: "task_id" else pure nil
+      when (name `elem` ["session_upload_start","session_import"] && (null path || '\0' `elem` path || T.null (T.strip label) || BS.length (TE.encodeUtf8 label) > 128)) $ fail "Invalid source"
+      when (name `elem` ["session_upload_start","session_import"] && (T.null title || BS.length (TE.encodeUtf8 title)>80 || parentSessionId==Just sid)) $ fail "Invalid title or optional parent"
       pure (workspace,sid,path,label,title,parentSessionId,initialRuntimeIdentity,taskId)
 
 toolError :: Text -> Text -> Value
@@ -315,11 +329,14 @@ workerLoop registry = do
   case selected of
     Nothing -> threadDelay 10000
     Just job -> (turn registry job `catch` \(exception :: SomeException) -> do
-        let reason = case fromException exception :: Maybe SourceFault of
-              Just SourceChanged -> "source_identity_or_prefix_changed"
-              Just SourceTruncated -> "source_truncated"
-              Just SourceClosed -> "source_closed"
-              _ -> "source_unavailable_or_invalid_response"
+        let reason = case fromException exception :: Maybe ImportFault of
+              Just InvalidImport -> "invalid_jsonl"
+              Just ImportDeadline -> "import_timeout"
+              Nothing -> case fromException exception :: Maybe SourceFault of
+                Just SourceChanged -> "source_identity_or_prefix_changed"
+                Just SourceTruncated -> "source_truncated"
+                Just SourceClosed -> "source_closed"
+                _ -> "source_unavailable_or_invalid_response"
         retire registry job "failed" reason
         case fromException exception :: Maybe SomeAsyncException of Just _ -> throwIO exception; Nothing -> pure ())
       `finally` atomically (writeTVar job.busy False)
@@ -361,11 +378,8 @@ turn :: Registry -> Job -> IO ()
 turn registry job = do
   state <- readTVarIO job.state
   time <- registry.options.now
-  let settled :: UTCTime -> JobState -> JobState -> JobState
-      settled completed updated current = updated
-        { observedSize = max current.observedSize updated.observedSize
-        , due = completed }
-      verificationDelay = fromIntegral registry.options.intervalMicros / 100000
+  when (maybe False (time >) state.importDeadline) $ throwIO ImportDeadline
+  let verificationDelay = fromIntegral registry.options.intervalMicros / 100000
       pollDelay = min 0.05 (fromIntegral registry.options.intervalMicros / 1000000)
       saveAt due updated = do
         completed <- registry.options.now
@@ -391,49 +405,95 @@ turn registry job = do
           HTTPTaskRejected code kind currentStatus -> do
             retireWithDetails registry job "failed" kind (Just $ object
               (["code" .= kind, "field" .= ("task_id" :: Text), "http_status" .= code
-               , "message" .= ("Start a live same-workspace task before creating a session; its status must be in_progress." :: Text)
-               , "required_status" .= ("in_progress" :: Text)] <> maybe [] (\value -> ["current_status" .= value]) currentStatus))
+               , "message" .= (if job.imported then "Import requires a visible nondeleted task in the same workspace; any task status is accepted." else "Start a live same-workspace task before creating a session; its status must be in_progress." :: Text)]
+               <> if job.imported then [] else ["required_status" .= ("in_progress" :: Text)] <> maybe [] (\value -> ["current_status" .= value]) currentStatus))
           HTTPStatus code | code == 401 || code == 403 -> retire registry job "failed" "permission_revoked"
           HTTPStatus 409 -> save state {remote = Nothing, reconcile = True, sweep = Nothing, phase = "validating"}
           HTTPStatus 400 -> retire registry job "failed" "invalid_record_or_boundary"
           HTTPStatus 413 -> retire registry job "failed" "record_too_large"
           _ | state.failures >= 4 -> retire registry job "failed" "retry_exhausted"
             | otherwise -> atomically $ modifyTVar' job.state (\current -> state {observedSize = current.observedSize, phase = "retry", failures = state.failures+1, failure = Just "transient_http", due = addUTCTime (fromIntegral (min 16 (2 ^ state.failures) :: Int)) failedAt})
-      decodeValue :: FromJSON a => Value -> IO a
-      decodeValue value = either (const $ throwIO SourceUnavailable) pure (parseEither parseJSON value)
       acceptSession value = do
         session <- decodeValue value
         unless ((session :: Core.AgentSession).id == job.sid && session.workspaceId == job.workspace && session.formatLabel == job.formatLabel && session.parentSessionId == job.parentSessionId && maybe True (==job.title) session.title) $ throwIO SourceChanged
+        unless (if job.imported then session.importTaskId == Just job.taskId
+          && session.importBytes == fmap fst state.importManifest && session.importSha256 == fmap snd state.importManifest
+          && session.runtimeIdentity == job.initialRuntimeIdentity else session.importTaskId == Nothing) $ throwIO SourceChanged
         pure session
-      begin session = if session.state == Core.Terminated then retire registry job "terminated" "session_terminated"
+      completeImport source session = do
+        (total,digest) <- maybe (throwIO SourceUnavailable) pure state.importManifest
+        size <- checkSource source total
+        unless (size == total && session.state == Core.Terminated && session.finalBytes == Just total && session.finalSha256 == Just digest) $ throwIO SourceChanged
+        closeSource source
+        completed <- registry.options.now
+        let receiptValue = object ["committed_offset" .= total, "revision" .= session.revision, "sha256" .= digest,
+              "capture_boundary" .= total, "pending_tail" .= False, "source_verified" .= True, "state" .= ("terminated" :: Text), "historical" .= True]
+        atomically $ do
+          completeControl job receiptValue
+          modifyTVar' job.state (settled completed state {phase="imported",source=Nothing,remote=Just session,receipt=Just receiptValue,completedAt=Just completed,lastAck=Just completed,failure=Nothing})
+      begin source session = if session.state == Core.Terminated then
+          if job.imported then save state {remote=Just session,importCompleted=Just session,importScan=Just (ImportScan session.committedBytes 0 hashInit BS.empty)} else retire registry job "terminated" "session_terminated"
         else acknowledge state {remote = Just session, createNeeded = False, sweep = Just (newSweep Resume session), phase = "validating"}
   case state.source of
     Nothing -> mask_ $ do
       source <- openSource job.sourcePath
-      save state {source = Just source}
+      boundary <- checkSource source 0 `onException` closeSource source
+      save state {source = Just source, importScan = if job.imported then Just (ImportScan boundary 0 hashInit BS.empty) else Nothing}
     Just source -> do
       size <- checkSource source (max state.observedSize (maybe 0 (.committedBytes) state.remote))
+      when (job.imported && maybe False ((/=size) . fst) state.importManifest) $ throwIO SourceChanged
       atomically $ modifyTVar' job.state (\s -> s {observedSize = max size s.observedSize})
       rawControl <- readTVarIO job.control
       let control = case rawControl of Just c | c.result == Nothing -> Just c; _ -> Nothing
       case control of
         Just c | not (isJust c.boundary) -> atomically $ modifyTVar' job.control (fmap (\current -> if current.operationId == c.operationId then current {boundary = Just size} else current))
         _ -> pure ()
+      case state.importScan of
+        Just (ImportScan boundary offset context tailBytes) -> do
+          unless (size == boundary) $ throwIO SourceChanged
+          if offset < boundary then do
+            let count = fromIntegral (min 1048576 (boundary-offset))
+            bytes <- readSource source offset count
+            unless (BS.length bytes == count) $ throwIO SourceTruncated
+            let records = BS.split 10 (tailBytes <> bytes)
+                complete = init records
+                tailNext = last records
+            unless (all (\line -> BS.length line < 1048576 && validFinal line) complete && BS.length tailNext <= 1048576) $ throwIO InvalidImport
+            let updated = hashUpdate context bytes
+            updated `seq` registry.options.transition "import_validation_page"
+            save state {importScan=Just (ImportScan boundary (offset+fromIntegral count) updated tailNext)}
+          else do
+            unless (BS.null tailBytes || validFinal tailBytes) $ throwIO InvalidImport
+            let manifest = (boundary,T.pack (show (hashFinalize context :: Digest SHA256)))
+            case state.importCompleted of
+              Just completed -> do
+                unless (state.importManifest == Just manifest) $ throwIO SourceChanged
+                completeImport source completed
+              Nothing -> do
+                op <- UUID.nextRandom
+                completion <- newEmptyTMVarIO
+                atomically $ writeTVar job.control (Just (Control op True (Just boundary) Nothing completion))
+                save state {importScan=Nothing,importManifest=Just manifest}
+        Nothing -> advance source size control acceptSession begin completeImport save saveAt acknowledge acknowledgeAt mutated failHTTP verificationDelay pollDelay
+  where
+    advance source size (control :: Maybe Control) acceptSession begin completeImport save saveAt acknowledge acknowledgeAt mutated failHTTP verificationDelay pollDelay = do
+      state <- readTVarIO job.state
+      time <- registry.options.now
       case state.remote of
         Nothing | state.createNeeded -> do
           result <- createRemote registry job
-          either failHTTP (acceptSession >=> begin) result
+          either failHTTP (acceptSession >=> begin source) result
         Nothing -> do
           result <- request registry job "GET" "" Nothing
           case result of
             Left (HTTPStatus 404) | not state.reconcile -> save state {createNeeded = True}
             Left fault -> failHTTP fault
-            Right value -> acceptSession value >>= begin
+            Right value -> acceptSession value >>= begin source
         Just session | not (isJust state.pending) && maybe True (\lastBeat -> diffUTCTime time lastBeat >= 10) state.lastHeartbeat -> do
           result <- request registry job "POST" "/heartbeat" Nothing
           either failHTTP (\value -> do
             canonical <- acceptSession value
-            if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated"
+            if canonical.state == Core.Terminated then if job.imported then begin source canonical else retire registry job "terminated" "session_terminated"
             else mutated state {remote = Just canonical
               , phase = if canonical.committedBytes /= session.committedBytes then "validating" else state.phase
               , sweep = if canonical.committedBytes /= session.committedBytes || canonical.revision /= session.revision then Just (newSweep Resume canonical) else state.sweep}) result
@@ -445,7 +505,7 @@ turn registry job = do
               Right value -> do
                 response <- decodeValue value :: IO Wire.AppendSessionResponse
                 canonical <- acceptSession (toJSON response.session)
-                if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated" else
+                if canonical.state == Core.Terminated then if job.imported then begin source canonical else retire registry job "terminated" "session_terminated" else
                   mutated state {remote = Just canonical, pending = Nothing, phase = "following"
                     , sweep = if response.replayed || canonical.committedBytes /= append.expectedOffset + fromIntegral (either (const 0) BS.length (Wire.decodeSessionBytes append.dataBase64))
                         then Just (newSweep Resume canonical)
@@ -477,13 +537,18 @@ turn registry job = do
                       Left fault -> failHTTP fault
                       Right value -> do
                         canonical <- acceptSession value
-                        if canonical.state == Core.Terminated then retire registry job "terminated" "session_terminated"
+                        if canonical.state == Core.Terminated then if job.imported then begin source canonical else retire registry job "terminated" "session_terminated"
                         else if maybe False (canonical.committedBytes >) (control >>= (.boundary)) then retire registry job "failed" "capture_boundary_conflict"
                         else if canonical.committedBytes /= verify.end || canonical.revision /= verify.revision then
                           mutated state {remote = Just canonical, sweep = Just (newSweep verify.purpose canonical)}
                         else if verify.purpose == Resume then
                           mutated state {remote = Just canonical, sweep = Nothing, pending = if state.reconcile then Nothing else state.pending
                             , reconcile = False, phase = "following", verifyNext = False, nextVerification = addUTCTime verificationDelay time}
+                        else if job.imported then do
+                          (total,expected) <- maybe (throwIO SourceUnavailable) pure state.importManifest
+                          unless (verify.end == total && digest == expected) $ throwIO SourceChanged
+                          sealed <- request registry job "POST" "/terminate" (Just (toJSON (Wire.TerminateSessionRequest total canonical.revision total expected)))
+                          either failHTTP (acceptSession >=> completeImport source) sealed
                         else do
                           let resultValue = object ["committed_offset" .= verify.end, "revision" .= canonical.revision, "sha256" .= digest
                                 , "capture_boundary" .= (control >>= (.boundary)), "pending_tail" .= maybe False (> verify.end) (control >>= (.boundary)), "source_verified" .= True]
@@ -570,11 +635,23 @@ validFinal bytes = not (BS.null bytes) && case TE.decodeUtf8' bytes of
 
 createRemote :: Registry -> Job -> IO (Either HTTPFault Value)
 createRemote registry job = bracket_ acquire release $ do
-  let path = "/api/v1/workspaces/" <> show job.workspace <> "/sessions"
-      body = Just (toJSON (Wire.CreateSessionRequest job.sid job.formatLabel job.title job.parentSessionId job.initialRuntimeIdentity job.taskId))
+  state <- readTVarIO job.state
+  let path = "/api/v1/workspaces/" <> show job.workspace <> "/sessions" <> if job.imported then "/imports" else ""
+      metadata = Wire.CreateSessionRequest job.sid job.formatLabel job.title job.parentSessionId job.initialRuntimeIdentity job.taskId
+      body = Just $ case state.importManifest of
+        Just (total,digest) | job.imported -> toJSON (Wire.ImportSessionRequest metadata total digest)
+        _ -> toJSON metadata
   case registry.options.requestOverride of Nothing -> followerRequest job.http "POST" path body; Just action -> action "POST" path body
   where
     acquire = atomically $ do n <- readTVar registry.slots; check (n < 2); writeTVar registry.slots (n+1); modifyTVar' registry.peak (max (n+1))
     release = atomically $ do
       poisoned <- scopePoisoned registry.processScope
       if poisoned then writeTVar registry.closed True else modifyTVar' registry.slots (subtract 1)
+
+-- Fixed diagnostics: never expose raw response/parser or transcript content.
+decodeValue :: FromJSON a => Value -> IO a
+decodeValue value = either (const $ throwIO SourceUnavailable) pure (parseEither parseJSON value)
+
+settled :: UTCTime -> JobState -> JobState -> JobState
+settled completed updated current = updated
+  { observedSize = max current.observedSize updated.observedSize, due = completed }

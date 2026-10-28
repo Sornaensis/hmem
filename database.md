@@ -139,6 +139,9 @@ classDiagram
       TIMESTAMPTZ? terminated_at
       BIGINT? final_bytes
       TEXT? final_sha256
+      UUID? import_task_id FK
+      BIGINT? import_bytes
+      TEXT? import_sha256
     }
     class session_chunks {
       UUID session_id PK FK
@@ -335,6 +338,7 @@ classDiagram
   sessions "1" --> "0..*" session_chunks : session_id NO ACTION
   sessions "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
   tasks "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
+  tasks "0..1" --> "0..*" sessions : import_task_id, workspace_id NO ACTION
   workspaces "1" --> "0..*" observations : workspace_id
   observations "1" --> "0..*" observation_subjects : observation_id
   observations "1" --> "0..*" observation_revision_events : observation_id
@@ -347,7 +351,7 @@ classDiagram
   note "PK = primary key; UK = unique key; FK = foreign key\n? = nullable; all other columns NOT NULL\nRepeated PK marks a composite key\nLines show declared foreign keys only\nON DELETE CASCADE unless a line says otherwise"
   note for workspaces "UNIQUE (gh_owner, gh_repo)\nWHERE both are non-null AND deleted_at IS NULL"
   note for observations "UNIQUE (id, workspace_id)\nembedding: vector(1536), nullable; present only with pgvector enabled"
-  note for sessions "UNIQUE (id, workspace_id)\nNew rows require a same-transaction in_progress task link\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
+  note for sessions "UNIQUE (id, workspace_id)\nLive rows require a same-transaction in_progress task link; imports require their declared historical task\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
   sessions "0..1" --> "0..*" sessions : parent_session_id, workspace_id
   note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; ordered append only"
   note for tasks "UNIQUE (id, workspace_id), used by session links"
@@ -404,3 +408,13 @@ legacy sessions with no links also qualify. The server hashes the committed
 prefix without an exclusive session lock, then rechecks unchanged activity,
 transcript cursor and terminal task statuses under locks before storing the
 immutable receipt. See the [schema reference](docs/reference/schema.md#idle-session-cleanup-v047).
+
+V049 adds the nullable historical import tuple `import_task_id`, `import_bytes`
+and `import_sha256`. All three are null for live captures, or present with a
+nonnegative byte count and lowercase SHA-256 for imports. The composite task
+foreign key enforces the workspace. The tuple is immutable, limits appended
+bytes, and requires every seal to match the complete declared size/hash.
+Import runtime identity is fixed at registration. The deferred initial-link guard
+accepts the declared nondeleted historical task in any status; other new links
+retain the live `in_progress` rule. Pending imports are excluded from live
+activity, navigation predicates and abandoned-session sealing.

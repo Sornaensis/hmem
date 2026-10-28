@@ -1,6 +1,6 @@
 -- | Shared HTTP/MCP wire contract. Local paths never enter these DTOs.
 module HMem.AgentSession.Transport
-  ( CreateSessionRequest(..), AppendSessionRequest(..), TerminateSessionRequest(..)
+  ( CreateSessionRequest(..), ImportSessionRequest(..), AppendSessionRequest(..), TerminateSessionRequest(..)
   , AppendSessionResponse(..), SessionPageResponse(..), SessionTaskPageResponse(..)
   , SessionRangeResponse(..), SessionTransportError(..), decodeSessionBytes, encodeSessionBytes
   , PrefixProofRequest(..), PrefixProofResponse(..)
@@ -28,6 +28,14 @@ data CreateSessionRequest = CreateSessionRequest { id :: !UUID, formatLabel :: !
 instance ToJSON CreateSessionRequest where toJSON = genericToJSON jsonOptions
 instance FromJSON CreateSessionRequest where
   parseJSON = strictObject "CreateSessionRequest" ["id","format_label","title","parent_session_id","initial_runtime_identity","task_id"] $ \o -> CreateSessionRequest <$> o .: "id" <*> o .: "format_label" <*> o .: "title" <*> o .:? "parent_session_id" <*> o .:? "initial_runtime_identity" <*> o .: "task_id"
+
+data ImportSessionRequest = ImportSessionRequest
+  { session :: !CreateSessionRequest, finalBytes :: !Int64, finalSha256 :: !Text }
+  deriving stock (Show, Eq, Generic)
+instance ToJSON ImportSessionRequest where toJSON = genericToJSON jsonOptions
+instance FromJSON ImportSessionRequest where
+  parseJSON = strictObject "ImportSessionRequest" ["session","final_bytes","final_sha256"] $ \o ->
+    ImportSessionRequest <$> o .: "session" <*> o .: "final_bytes" <*> o .: "final_sha256"
 
 data AppendSessionRequest = AppendSessionRequest
   { expectedOffset :: !Int64, expectedRevision :: !Int64, dataBase64 :: !Text, allowFinalRecord :: !Bool }

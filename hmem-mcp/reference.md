@@ -84,6 +84,8 @@ read access; creation, association, runtime changes and termination require edit
 | `session_terminate` | `session_id`, `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Explicit immutable seal receipt |
 | `session_read` | `session_id`, optional `offset`, `limit` | Active transcript byte range |
 | `session_evidence` | `session_id`, optional `offset`, `limit` | Terminated evidence byte range |
+| `task_triage` | `task_id`, `path` | Verified ZIP of all linked saved sessions to a new local destination |
+| `session_import` | `session_id`, `task_id`, `path`, `format_label`, `title`, optional parent/runtime | Pending historical upload; final receipt via `session_upload_status` |
 
 Lists default to 50 rows and accept 1..100. Session lists retain the server's
 descending immutable `(created_at, id)` keyset; task links continue by UUID.
@@ -341,3 +343,44 @@ automatically. A 409 `discovery_restart_required` requires a fresh query; a 429
 HTTP status/details. Nested SHA validation errors identify the actual
 `filters.git_sha`, `filters.current_git_sha`, or `filters.history_git_sha`, with
 null attribution when several are invalid.
+
+## Task triage and historical import
+
+`task_triage` downloads the authorized task evidence ZIP, including all pages of
+linked terminated sessions. Active sessions are excluded. The explicit local
+destination's parent directory must exist. Existing destinations are refused,
+including a path created concurrently during download. A same-directory temporary
+file is removed on failure; only a complete ZIP64 with validated central index,
+entry sizes and CRCs is atomically published. Empty evidence is a valid archive.
+The compact receipt contains `archive_bytes`, locally calculated `sha256`,
+`session_count` and `verified`. The archive digest identifies the local download;
+the server does not advertise a transfer digest. The operation has a 15-minute
+total deadline and 30-second HTTP response timeout.
+
+`session_import` accepts an explicitly supplied completed regular JSONL file and
+returns promptly. It shares the live uploader's four-job registry, two HTTP slots,
+captured identity/workspace, request limits and cleanup. Before remote
+registration, bounded fair passes validate every UTF-8 JSON record and hash the
+entire fixed file boundary. CRLF and a complete final record without LF are
+preserved. Invalid/incomplete records are rejected rather than omitted. File
+replacement, truncation, growth or observed byte mutation fail. The import has a
+15-minute deadline; process loss leaves a resumable pending import.
+
+The server binds an immutable historical task/size/hash manifest. Any visible
+same-workspace task status is accepted without changing it. Importer attribution
+is the actual connecting caller. Optional `initial_runtime_identity` describes
+the historical producer only when explicitly known; no identity is inferred from
+JSONL. Historical runtime is frozen. Ordinary live create/associate rules remain.
+
+Poll `session_upload_status` until `status: "imported"` and a receipt with
+`source_verified: true`, `state: "terminated"`, full `committed_offset` and
+`sha256`. A failed job reports a fixed error code. Live flush/stop controls return
+`import_control_unsupported` for imports. Retry `session_import` with the same
+UUID, file and metadata to resume after failure/process loss or reconcile a lost
+acknowledgement; an exact active retry returns its current status. A sealed retry
+rehashes the local file and checks the final receipt. Conflicting UUID metadata
+or source manifest fails. Authorized managers can resume without impersonating
+or replacing the immutable original creator.
+
+Finite receipts describe observed source bytes and identity. They cannot detect
+an external mutate-and-restore write entirely between observations.

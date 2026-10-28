@@ -154,6 +154,7 @@ type AgentSessionAPI =
          :> Get '[JSON] SessionWire.SessionPageResponse
   :<|> "filters" :> QueryParam "kind" Text :> QueryParam "project_id" UUID :> QueryParam "after_id" UUID :> QueryParam "selected_id" UUID :> QueryParam "limit" Text :> Get '[JSON] AgentSession.SessionFacetPage
   :<|> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.CreateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
+  :<|> "imports" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.ImportSessionRequest) :> Post '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> Get '[JSON] AgentSession.AgentSession
   :<|> Capture "sessionId" UUID :> "append" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.AppendSessionRequest) :> Post '[JSON] SessionWire.AppendSessionResponse
   :<|> Capture "sessionId" UUID :> "heartbeat" :> Post '[JSON] AgentSession.AgentSession
@@ -608,7 +609,7 @@ sessionIO :: Pool Hasql.Connection -> UUID -> IO a -> Handler a
 sessionIO _ workspace = handleSessionErrors . withWorkspaceIdContext (Just workspace)
 
 agentSessions :: Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
-agentSessions prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated :<|> proofH :<|> proofResultH
+agentSessions prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> importH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated :<|> proofH :<|> proofResultH
   where
     readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
     writeAccess = authorizeAgentSessionWrite pool workspace
@@ -662,6 +663,12 @@ agentSessions prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> get
         AgentSessionRequest (Right parsed) -> pure parsed
         _ -> throwError $ sessionError err400 "validation_error" "Session creation requires task_id (UUID), a very short title and a format_label; task_id must identify an in_progress task."
       sessionIO pool workspace $ AgentSessions.createSession pool (AgentSession.CreateSession input.id workspace input.formatLabel input.title input.parentSessionId input.initialRuntimeIdentity input.taskId)
+    importH request = do
+      writeAccess
+      input <- sessionRequest request
+      let metadata = input.session
+      sessionIO pool workspace $ AgentSessions.importSession pool
+        (AgentSession.ImportSession (AgentSession.CreateSession metadata.id workspace metadata.formatLabel metadata.title metadata.parentSessionId metadata.initialRuntimeIdentity metadata.taskId) input.finalBytes input.finalSha256)
     getH identifier = readAccess >> requireAgentSession pool workspace identifier
     appendH identifier request = do
       writeAccess

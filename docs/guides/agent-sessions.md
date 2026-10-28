@@ -129,3 +129,28 @@ for a server-compressed ZIP of every linked saved session, including other pages
 Cancel stay in that task’s Evidence section. Keep the page open until the archive
 finishes; an error produces no partial download. The archive follows the current
 paginated task links while it runs.
+
+## Retrieve task evidence with MCP
+
+Call `task_triage` with `task_id` and `path` pointing to a new local ZIP file.
+The parent directory must exist. The tool downloads every linked saved session,
+checks the complete archive, and returns its byte count, SHA-256 and session
+count. Existing files are preserved; a failed download produces no destination.
+Active sessions are excluded, as in **Download all**.
+
+## Import a completed conversation
+
+For a session that could not be connected while running, call `session_import`
+with an explicit completed JSONL `path`, stable `session_id`, `task_id`,
+`format_label` and short `title`. The historical task can already be done or
+cancelled. The tool leaves task status unchanged and validates the whole file
+before registering it. An optional parent and explicitly known historical runtime
+identity can be supplied; caller attribution records the importer separately.
+
+Inspect `session_upload_status` until it reports **imported** and a verified
+terminated receipt. The finite import uploads and seals the complete declared
+file; invalid tails and source changes fail instead of saving a partial prefix.
+Live flush/stop controls do not apply. Retry the same import UUID, source and
+metadata to resume or confirm a completed import after a lost acknowledgement.
+Pending imports stay out of live conversations and saved evidence. Completed
+imports appear under the task's **Evidence** and are included by `task_triage`.

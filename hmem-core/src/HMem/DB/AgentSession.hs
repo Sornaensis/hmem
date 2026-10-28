@@ -1,6 +1,6 @@
 -- | Canonical transactional persistence for immutable JSONL evidence.
 module HMem.DB.AgentSession
-  ( createSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
+  ( createSession, importSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
   , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
   , workspaceSessionActivity, projectSessionActivity, listSessionFacets
   , appendSession, heartbeatSession, associateSessionTask, terminateSession, terminateSessionWithHook, readSessionRange, setRuntimeIdentity
@@ -65,7 +65,16 @@ getStatement :: Bool -> St.Statement (UUID,UUID) (Maybe AgentSession)
 getStatement locked = St.Statement (sessionSelect <> if locked then " FOR UPDATE OF s" else "") pairParams (D.rowMaybe jsonRow) True
 
 createSession :: Pool Hasql.Connection -> CreateSession -> IO AgentSession
-createSession pool input = do
+createSession pool input = createSessionWith pool input Nothing
+
+importSession :: Pool Hasql.Connection -> ImportSession -> IO AgentSession
+importSession pool input
+  | input.finalBytes < 0 || T.length input.finalSha256 /= 64
+    || T.any (`notElem` ("0123456789abcdef" :: String)) input.finalSha256 = invalid "Import requires a nonnegative byte count and lowercase SHA-256"
+  | otherwise = createSessionWith pool input.session (Just (input.finalBytes,input.finalSha256))
+
+createSessionWith :: Pool Hasql.Connection -> CreateSession -> Maybe (Int64,Text) -> IO AgentSession
+createSessionWith pool input manifest = do
   if BS.length (TE.encodeUtf8 input.formatLabel) > 128 || T.null (T.strip input.formatLabel)
     then invalid "format_label must contain 1 to 128 UTF-8 bytes"
     else pure ()
@@ -91,9 +100,9 @@ createSession pool input = do
         target <- S.statement (input.workspaceId,input.id,input.taskId) taskAssociationStatement
         case target of
           Nothing -> racedOr (SessionException SessionTaskNotFound "task_id must identify a live same-workspace task")
-          Just (status,_) | status /= "in_progress" -> racedOr (SessionException (SessionTaskNotInProgress status) "Start the task before creating a session")
+          Just (status,_) | status /= "in_progress" && manifest == Nothing -> racedOr (SessionException (SessionTaskNotInProgress status) "Start the task before creating a session")
           _ -> do
-            inserted <- S.statement (input {title = T.strip input.title} :: CreateSession) createStatement
+            inserted <- S.statement ((input {title = T.strip input.title} :: CreateSession),manifest) createStatement
             case inserted of
               Just row -> do
                 S.statement (input.workspaceId,input.id,input.taskId) associateStatement
@@ -104,7 +113,10 @@ createSession pool input = do
       Right Nothing -> problem SessionConflict "Session UUID already exists in another workspace, or workspace is inactive"
       Right (Just row)
         | row.formatLabel == input.formatLabel && row.parentSessionId == input.parentSessionId
-          && maybe True (== T.strip input.title) row.title && sameCreator actor row -> Right row
+          && maybe True (== T.strip input.title) row.title && sameCreator actor row
+          && row.importTaskId == (input.taskId <$ manifest)
+          && row.importBytes == fmap fst manifest && row.importSha256 == fmap snd manifest
+          && (manifest == Nothing || row.runtimeIdentity == input.initialRuntimeIdentity) -> Right row
         | otherwise -> problem SessionConflict "Session UUID was already created with different immutable metadata"
   where
     sameCreator Nothing row = row.creatorActorType == Nothing && row.creatorActorId == Nothing
@@ -113,11 +125,12 @@ createSession pool input = do
       && row.creatorActorId == Just actor.actorId && row.creatorActorLabel == Just actor.actorLabel
       && row.creatorBotIdentity == actor.botIdentity
 
-createStatement :: St.Statement CreateSession (Maybe AgentSession)
+createStatement :: St.Statement (CreateSession,Maybe (Int64,Text)) (Maybe AgentSession)
 createStatement = St.Statement sql encoder (D.rowMaybe jsonRow) True
   where
-    sql = "WITH workspace AS (SELECT id FROM workspaces WHERE id=$2 AND deleted_at IS NULL FOR SHARE), inserted AS (INSERT INTO sessions(id,workspace_id,format_label,title,parent_session_id,runtime_identity,creator_actor_type,creator_actor_id,creator_actor_label,creator_bot_identity) SELECT $1,id,$3,$4,$5,$6,NULLIF(current_setting('hmem.actor_type',true),''),NULLIF(current_setting('hmem.actor_id',true),''),NULLIF(current_setting('hmem.actor_label',true),''),NULLIF(current_setting('hmem.bot_identity',true),'')::jsonb FROM workspace ON CONFLICT(id) DO NOTHING RETURNING *) SELECT to_jsonb(inserted) FROM inserted"
-    encoder = param (.id) E.uuid <> param (.workspaceId) E.uuid <> param (.formatLabel) E.text <> param (.title) E.text <> optional (.parentSessionId) E.uuid <> optional (fmap toJSON . (.initialRuntimeIdentity)) E.jsonb
+    sql = "WITH workspace AS (SELECT id FROM workspaces WHERE id=$2 AND deleted_at IS NULL FOR SHARE), inserted AS (INSERT INTO sessions(id,workspace_id,format_label,title,parent_session_id,runtime_identity,import_task_id,import_bytes,import_sha256,creator_actor_type,creator_actor_id,creator_actor_label,creator_bot_identity) SELECT $1,id,$3,$4,$5,$6,$7,$8,$9,NULLIF(current_setting('hmem.actor_type',true),''),NULLIF(current_setting('hmem.actor_id',true),''),NULLIF(current_setting('hmem.actor_label',true),''),NULLIF(current_setting('hmem.bot_identity',true),'')::jsonb FROM workspace ON CONFLICT(id) DO NOTHING RETURNING *) SELECT to_jsonb(inserted) FROM inserted"
+    encoder = param ((.id) . fst) E.uuid <> param ((.workspaceId) . fst) E.uuid <> param ((.formatLabel) . fst) E.text <> param ((.title) . fst) E.text <> optional ((.parentSessionId) . fst) E.uuid <> optional (fmap toJSON . (.initialRuntimeIdentity) . fst) E.jsonb
+      <> optional (\(value,m) -> value.taskId <$ m) E.uuid <> optional (fmap fst . snd) E.int8 <> optional (fmap snd . snd) E.text
 
 -- Runtime declarations have their own cursor. They never consume transcript
 -- revisions, heartbeat activity or byte/hash receipts, and share the row lock
@@ -132,6 +145,7 @@ setRuntimeIdentity pool workspace identifier input = do
     case found of
       Nothing -> pure $ problem SessionNotFound "Session not found"
       Just row | row.state == Terminated -> pure $ problem SessionTerminated "Session is terminated"
+      Just row | row.importTaskId /= Nothing -> pure $ problem SessionConflict "Historical runtime identity is fixed at import"
       Just row
         | row.runtimeRevision == input.expectedRuntimeRevision ->
             if row.runtimeIdentity == input.runtimeIdentity then pure (Right row)
@@ -183,7 +197,7 @@ listSessions pool workspace task filters cursor limit = do
 listStatement :: St.Statement (UUID,Maybe UTCTime,Maybe UUID,Maybe UUID,Int32,Maybe Text,Maybe Bool,Maybe UUID,Maybe UUID) [AgentSession]
 listStatement = St.Statement sql encoder (D.rowList jsonRow) True
   where
-    sql = "SELECT to_jsonb(s) || hmem_session_ancestor_context(s.id) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) AND ($6::text IS NULL OR s.state=$6) AND ($7::boolean IS NULL OR (s.last_seen_at > statement_timestamp()-interval '30 seconds')=$7) AND ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN hmem_session_project_tasks($1,$8) scoped ON scoped.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1)) AND ($8::uuid IS NULL OR $9::uuid IS NULL OR $9 IN (SELECT id FROM hmem_session_project_tasks($1,$8))) AND ($9::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$9 AND t.deleted_at IS NULL)) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
+    sql = "SELECT to_jsonb(s) || hmem_session_ancestor_context(s.id) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND (s.import_task_id IS NULL OR s.state='terminated') AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) AND ($6::text IS NULL OR s.state=$6) AND ($7::boolean IS NULL OR (s.last_seen_at > statement_timestamp()-interval '30 seconds')=$7) AND ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN hmem_session_project_tasks($1,$8) scoped ON scoped.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1)) AND ($8::uuid IS NULL OR $9::uuid IS NULL OR $9 IN (SELECT id FROM hmem_session_project_tasks($1,$8))) AND ($9::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$9 AND t.deleted_at IS NULL)) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
     encoder = param (\(a,_,_,_,_,_,_,_,_) -> a) E.uuid
       <> optional (\(_,b,_,_,_,_,_,_,_) -> b) E.timestamptz
       <> optional (\(_,_,c,_,_,_,_,_,_) -> c) E.uuid
@@ -215,7 +229,7 @@ listSessionFacets pool workspace projects project cursor selectedId limit = do
     statement = St.Statement sql encoder (D.rowList jsonRow) True
     sql = if projects then
       "SELECT jsonb_build_object('id',p.id,'title',p.name) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR p.id=$2) AND ($3::uuid IS NULL OR p.id>$3) AND hmem_project_has_active_session(p.id) ORDER BY p.id LIMIT $4"
-      else "SELECT jsonb_build_object('id',t.id,'title',t.title) FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR t.id IN (SELECT id FROM hmem_session_project_tasks($1,$2))) AND ($3::uuid IS NULL OR t.id>$3) AND EXISTS(SELECT 1 FROM task_sessions link JOIN sessions s ON s.id=link.session_id WHERE link.workspace_id=$1 AND link.task_id=t.id AND s.workspace_id=$1 AND s.state='active') ORDER BY t.id LIMIT $4"
+      else "SELECT jsonb_build_object('id',t.id,'title',t.title) FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR t.id IN (SELECT id FROM hmem_session_project_tasks($1,$2))) AND ($3::uuid IS NULL OR t.id>$3) AND EXISTS(SELECT 1 FROM task_sessions link JOIN sessions s ON s.id=link.session_id WHERE link.workspace_id=$1 AND link.task_id=t.id AND s.workspace_id=$1 AND s.state='active' AND s.import_task_id IS NULL) ORDER BY t.id LIMIT $4"
 
 listSessionTasks :: Pool Hasql.Connection -> UUID -> UUID -> Maybe UUID -> Int -> IO SessionTaskPage
 listSessionTasks pool workspace identifier cursor limit = do
@@ -248,6 +262,8 @@ appendSession pool workspace identifier input = do
         replay <- S.statement (identifier,input.expectedOffset,input.expectedRevision+1,input.bytes,input.allowFinalRecord) replayStatement
         if replay then pure $ Right (SessionAppendResult row True)
         else if row.state == Terminated then pure $ problem SessionTerminated "Session is terminated"
+        else if maybe False (\total -> fromIntegral (BS.length input.bytes) > total-row.committedBytes) row.importBytes
+          then pure $ problem SessionConflict "Append exceeds the historical import manifest"
         else if row.committedBytes /= input.expectedOffset || row.revision /= input.expectedRevision
           then pure $ problem SessionConflict "Append cursor does not match the committed session"
           else do
@@ -382,6 +398,8 @@ terminateSessionWithHook pool duringHash workspace identifier input = do
     then invalid "Termination requires nonnegative cursor/count and lowercase SHA-256"
     else pure ()
   let validate row
+        | row.importTaskId /= Nothing && (row.importBytes /= Just input.finalBytes || row.importSha256 /= Just input.finalSha256) =
+            problem SessionConflict "Historical import must be sealed with its complete declared manifest"
         | row.state == Terminated =
             if input.expectedOffset == row.committedBytes && input.expectedRevision == row.revision-1
               && Just input.finalBytes == row.finalBytes && Just input.finalSha256 == row.finalSha256
@@ -433,7 +451,7 @@ listIdleSessionCandidatesAt pool now = listIdleSessionCandidatesBefore pool (Jus
 listIdleSessionCandidatesBefore :: Pool Hasql.Connection -> Maybe UTCTime -> Maybe IdleSessionCursor -> IO [AgentSession]
 listIdleSessionCandidatesBefore pool cutoff cursor = runSession pool $ S.statement (cutoff,cursor) $
   St.Statement
-    "SELECT to_jsonb(s) FROM sessions s WHERE state='active' AND last_seen_at < coalesce($1,statement_timestamp()-interval '1 hour') AND ($2::timestamptz IS NULL OR (last_seen_at,id)>($2,$3)) ORDER BY last_seen_at,id LIMIT 32"
+    "SELECT to_jsonb(s) FROM sessions s WHERE state='active' AND import_task_id IS NULL AND last_seen_at < coalesce($1,statement_timestamp()-interval '1 hour') AND ($2::timestamptz IS NULL OR (last_seen_at,id)>($2,$3)) ORDER BY last_seen_at,id LIMIT 32"
     (optional fst E.timestamptz <> optional (fmap fst . snd) E.timestamptz <> optional (fmap snd . snd) E.uuid)
     (D.rowList jsonRow) True
 
@@ -479,7 +497,7 @@ sealIdleSessionWithCutoff pool cutoffClock duringHash snapshot = do
 
 eligibleStatement :: St.Statement (UUID,Maybe UTCTime) Bool
 eligibleStatement = St.Statement
-  "SELECT EXISTS(SELECT 1 FROM sessions s WHERE s.id=$1 AND s.state='active' AND s.last_seen_at < coalesce($2,clock_timestamp()-interval '1 hour') AND NOT EXISTS(SELECT 1 FROM task_sessions ts JOIN tasks t ON t.id=ts.task_id WHERE ts.session_id=s.id AND t.status NOT IN ('done','cancelled')))"
+  "SELECT EXISTS(SELECT 1 FROM sessions s WHERE s.id=$1 AND s.state='active' AND s.import_task_id IS NULL AND s.last_seen_at < coalesce($2,clock_timestamp()-interval '1 hour') AND NOT EXISTS(SELECT 1 FROM task_sessions ts JOIN tasks t ON t.id=ts.task_id WHERE ts.session_id=s.id AND t.status NOT IN ('done','cancelled')))"
   (param fst E.uuid <> optional snd E.timestamptz) (D.singleRow (D.column (D.nonNullable D.bool))) True
 
 sealStatement :: St.Statement (UUID,UUID,Text) AgentSession
@@ -491,7 +509,7 @@ sealStatement = St.Statement
 -- Boolean projections only: no transcript or descendant metadata leaves SQL.
 workspaceSessionActivity :: Pool Hasql.Connection -> [UUID] -> IO [(UUID,Bool)]
 workspaceSessionActivity pool identifiers = runSession pool $ S.statement identifiers $
-  St.Statement "SELECT w.id,EXISTS(SELECT 1 FROM sessions s WHERE s.workspace_id=w.id AND s.state='active') FROM workspaces w WHERE w.id=ANY($1) AND w.deleted_at IS NULL"
+  St.Statement "SELECT w.id,EXISTS(SELECT 1 FROM sessions s WHERE s.workspace_id=w.id AND s.state='active' AND s.import_task_id IS NULL) FROM workspaces w WHERE w.id=ANY($1) AND w.deleted_at IS NULL"
     (E.param (E.nonNullable (E.foldableArray (E.nonNullable E.uuid))))
     (D.rowList ((,) <$> D.column (D.nonNullable D.uuid) <*> D.column (D.nonNullable D.bool))) True
 
@@ -506,5 +524,5 @@ projectSessionActivity pool workspace identifiers = runSession pool $ S.statemen
       \ ), task_tree(root,id) AS (\
       \ SELECT p.root,t.id FROM project_tree p JOIN tasks t ON t.project_id=p.id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL\
       \ UNION SELECT parent.root,child.id FROM tasks child JOIN task_tree parent ON child.parent_id=parent.id WHERE child.workspace_id=$1 AND child.deleted_at IS NULL\
-      \ ) SELECT p.id,EXISTS(SELECT 1 FROM task_tree t JOIN task_sessions link ON link.task_id=t.id JOIN sessions s ON s.id=link.session_id WHERE t.root=p.id AND s.workspace_id=$1 AND s.state='active')\
+      \ ) SELECT p.id,EXISTS(SELECT 1 FROM task_tree t JOIN task_sessions link ON link.task_id=t.id JOIN sessions s ON s.id=link.session_id WHERE t.root=p.id AND s.workspace_id=$1 AND s.state='active' AND s.import_task_id IS NULL)\
       \ FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.id=ANY($2) AND p.deleted_at IS NULL AND w.deleted_at IS NULL"

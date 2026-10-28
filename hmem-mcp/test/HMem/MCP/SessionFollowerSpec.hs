@@ -40,6 +40,7 @@ import HMem.MCP.SessionHTTP
 import HMem.MCP.SessionProcess
 import HMem.MCP.Server (MCPContext(..), handleStdioLineWithRegistry, runMCPServerWithHandlesObservedWithFollowerOptions)
 import HMem.MCP.Tools (handleToolCall)
+import HMem.MCP.TaskTriage (validateArchive)
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
@@ -64,6 +65,109 @@ import Text.Read (readMaybe)
 
 spec :: Spec
 spec = describe "Session follower" $ do
+
+  it "HistoricalImport uploads completed-task JSONL, retries a lost seal ack, and triages a verified archive without overwrite" $
+    withBackend $ \env wid manager base -> do
+      runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>BS8.pack (show wid)<>"'")
+      let original=BS.concat (replicate 42 ("{\"text\":\""<>BS.replicate 32740 97<>"\"}\r\n"))<>"[1,true]"
+      withSourceFile original $ \path -> withCapturedHTTP base $ \captured -> do
+        sid <- UUID.nextRandom
+        lost <- newTVarIO False
+        let action verb target body = do
+              result <- followerRequest captured verb target body
+              if "/terminate" `T.isSuffixOf` T.pack target then do
+                first <- atomically $ do old <- readTVar lost; writeTVar lost True; pure (not old)
+                pure (if first then Left HTTPUnavailable else result)
+              else pure result
+            args=object ["workspace_id" .= wid,"session_id" .= sid,"task_id" .= wid,"path" .= path,"title" .= ("Historical completed work" :: Text),"format_label" .= ("jsonl" :: Text)]
+            imported registry=handleUploadTool registry manager base Nothing identity "session_import" args
+        withRegistry fast {requestOverride=Just action} $ \registry -> do
+          initial <- imported registry
+          payload initial `shouldSatisfy` hasStatus "validating"
+          forM_ ["session_upload_flush","session_upload_stop"] $ \name -> do
+            refusal <- handleUploadTool registry manager base Nothing identity name (object ["workspace_id" .= wid,"session_id" .= sid])
+            nested ["structuredContent","error","code"] refusal `shouldBe` Just (String "import_control_unsupported")
+          repeated <- imported registry
+          field "isError" repeated `shouldBe` Nothing
+          completed <- await registry manager base wid sid (hasStatus "imported")
+          nested ["receipt","sha256"] completed `shouldBe` Just (String (Core.sessionSha256 original))
+          Just canonical <- Sessions.getSession env.pool wid sid
+          canonical.state `shouldBe` Core.Terminated
+          canonical.finalBytes `shouldBe` Just (fromIntegral (BS.length original))
+          canonical.importTaskId `shouldBe` Just wid
+          let download offset pieces = do
+                range <- Sessions.readSessionRange env.pool wid sid offset 65536
+                if range.hasMore then download range.nextOffset (range.bytes:pieces) else pure (BS.concat (reverse (range.bytes:pieces)))
+          download 0 [] `shouldReturn` original
+          retried <- imported registry
+          field "isError" retried `shouldBe` Nothing
+          _ <- await registry manager base wid sid (hasStatus "imported")
+          withSourceFile "" $ \destination -> do
+            removeFile destination
+            let callTriage=handleToolCall manager base Nothing identity (object ["name" .= ("task_triage" :: Text),"arguments" .= object ["workspace_id" .= wid,"task_id" .= wid,"path" .= destination]])
+            archived <- callTriage
+            nested ["structuredContent","session_count"] archived `shouldBe` Just (Number 1)
+            withBinaryFile destination ReadMode validateArchive `shouldReturn` 1
+            archiveBefore <- BS.readFile destination
+            refused <- callTriage
+            nested ["structuredContent","error","code"] refused `shouldBe` Just (String "destination_exists")
+            BS.readFile destination `shouldReturn` archiveBefore
+            withSourceFile "" $ \racingDestination -> do
+              removeFile racingDestination
+              let raceApp _ respond = do
+                    BS.writeFile racingDestination "preserve concurrent destination"
+                    respond (Wai.responseLBS status200 [] (BL.fromStrict archiveBefore))
+              testWithApplication (pure raceApp) $ \racePort -> do
+                refusedRace <- handleToolCall manager ("http://127.0.0.1:"<>show racePort) Nothing identity
+                  (object ["name" .= ("task_triage" :: Text),"arguments" .= object ["workspace_id" .= wid,"task_id" .= wid,"path" .= racingDestination]])
+                nested ["structuredContent","error","code"] refusedRace `shouldBe` Just (String "destination_exists")
+                BS.readFile racingDestination `shouldReturn` "preserve concurrent destination"
+            forM_ [BS.take (BS.length archiveBefore-1) archiveBefore,BS.take 64 archiveBefore<>BS.singleton 0<>BS.drop 65 archiveBefore] $ \damaged ->
+              testWithApplication (pure (\_ respond -> respond (Wai.responseLBS status200 [] (BL.fromStrict damaged)))) $ \badPort ->
+                withSourceFile "" $ \missing -> do
+                  removeFile missing
+                  result <- handleToolCall manager ("http://127.0.0.1:"<>show badPort) Nothing identity
+                    (object ["name" .= ("task_triage" :: Text),"arguments" .= object ["workspace_id" .= wid,"task_id" .= wid,"path" .= missing]])
+                  field "isError" result `shouldBe` Just (Bool True)
+                  doesPathExist missing `shouldReturn` False
+          runSession env.pool (SQL.sql ("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM tasks WHERE id='"<>BS8.pack (show wid)<>"' AND status='done') THEN RAISE EXCEPTION 'Task status changed'; END IF; END $$"))
+
+  it "HistoricalImport rejects invalid tails before remote registration and refuses live controls during validation" $
+    withBackend $ \env wid manager base -> forM_ ["{}\n{", "{}\n\n",BS.pack [255],"{}\nfalse garbage"] $ \invalid ->
+      withSourceFile invalid $ \path -> withRegistry fast $ \registry -> do
+        sid <- UUID.nextRandom
+        _ <- handleUploadTool registry manager base Nothing identity "session_import"
+          (object ["workspace_id" .= wid,"session_id" .= sid,"task_id" .= wid,"path" .= path,"title" .= ("Invalid historical evidence" :: Text),"format_label" .= ("jsonl" :: Text)])
+        failed <- await registry manager base wid sid (hasStatus "failed")
+        field "error" failed `shouldBe` Just (String "invalid_jsonl")
+        Sessions.getSession env.pool wid sid `shouldReturn` Nothing
+
+  it "HistoricalImport reports a missing task without live-start guidance" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n" $ \path -> withRegistry fast $ \registry -> do
+      sid <- UUID.nextRandom; missing <- UUID.nextRandom
+      _ <- handleUploadTool registry manager base Nothing identity "session_import"
+        (object ["workspace_id" .= wid,"session_id" .= sid,"task_id" .= missing,"path" .= path,"title" .= ("Missing historical task" :: Text),"format_label" .= ("jsonl" :: Text)])
+      failed <- await registry manager base wid sid (hasStatus "failed")
+      field "error" failed `shouldBe` Just (String "session_task_not_found")
+      nested ["error_details","required_status"] failed `shouldBe` Nothing
+      nested ["error_details","message"] failed `shouldBe` Just (String "Import requires a visible nondeleted task in the same workspace; any task status is accepted.")
+      Sessions.getSession env.pool wid sid `shouldReturn` Nothing
+
+  it "HistoricalImport rejects source truncation and replacement during finite prevalidation" $
+    withBackend $ \env wid manager base -> forM_ [False,True] $ \replace ->
+      withSourceFile "{}\n[]\n" $ \path -> do
+        changed <- newTVarIO False
+        let mutation phase = when (phase=="import_validation_page") $ do
+              first <- atomically $ do old <- readTVar changed; writeTVar changed True; pure (not old)
+              when first $ if replace then renameFile path (path<>".old") >> BS.writeFile path "{}\n[]\n" else BS.writeFile path "{}"
+        withRegistry fast {transition=mutation} $ \registry -> do
+          sid <- UUID.nextRandom
+          _ <- handleUploadTool registry manager base Nothing identity "session_import"
+            (object ["workspace_id" .= wid,"session_id" .= sid,"task_id" .= wid,"path" .= path,"title" .= ("Changed historical evidence" :: Text),"format_label" .= ("jsonl" :: Text)])
+          failed <- await registry manager base wid sid (hasStatus "failed")
+          field "error" failed `shouldBe` Just (String (if replace then "source_identity_or_prefix_changed" else "source_truncated"))
+          Sessions.getSession env.pool wid sid `shouldReturn` Nothing
+
   it "Reusable transport retains one helper and HTTP connection across exchanges, then joins it" $ do
     peers <- newTVarIO ([] :: [String])
     let app request respond = do
@@ -1007,7 +1111,7 @@ epoch = UTCTime (fromGregorian 2026 1 1) 0
 
 fakeMetadata :: UUID -> Int -> Value
 fakeMetadata sid count = toJSON (Core.AgentSession sid workspace "jsonl" Nothing Nothing [] False Core.Active Nothing Nothing Nothing Nothing Nothing 0
-  epoch epoch (fromIntegral count) 0 0 True Nothing Nothing Nothing)
+  epoch epoch (fromIntegral count) 0 0 True Nothing Nothing Nothing Nothing Nothing Nothing)
 
 -- Controlled HTTP fixture for tests of local scheduling/receipts. Canonical
 -- boundary validation and authenticated audiences are separately exercised by

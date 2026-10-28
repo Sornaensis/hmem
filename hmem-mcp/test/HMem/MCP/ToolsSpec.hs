@@ -67,9 +67,9 @@ spec = do
         result `shouldSatisfy` contains "runtime_revision"
         result `shouldSatisfy` (not . contains "sensitive-content")
 
-    it "advertises strict explicit management tools and bounded range/list windows without ingestion or local file controls" $ do
+    it "advertises strict explicit management tools and bounded range/list windows with historical import alongside live management" $ do
       let names = [name | Object definition <- toolDefinitions, Just (String name) <- [KM.lookup "name" definition], "session_" `T.isPrefixOf` name, not ("session_upload_" `T.isPrefixOf` name)]
-      sort names `shouldBe` sort ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]
+      sort names `shouldBe` sort ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime", "session_import"]
       forM_ names $ \name -> do
         let [definition] = [value | value <- toolDefinitions, jsonField "name" value == Just (String name)]
         jsonPath ["inputSchema", "additionalProperties"] definition `shouldBe` Just (Bool False)
@@ -1138,7 +1138,7 @@ spec = do
       sort toolNames `shouldBe` sort (serverOwnedTools <>
         [ "session_create", "session_list", "session_detail", "session_tasks", "session_associate"
         , "session_terminate", "session_read", "session_evidence", "session_set_runtime"
-        , "session_upload_start", "session_upload_status", "session_upload_flush", "session_upload_stop"
+        , "session_import", "task_triage", "session_upload_start", "session_upload_status", "session_upload_flush", "session_upload_stop"
         ] <> map fst toolSamples)
       mapM_ (\(name, arguments) -> parseToolCall name arguments `shouldSatisfy` isRight) toolSamples
       requests <- newTVarIO []

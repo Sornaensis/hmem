@@ -231,10 +231,15 @@ The generator must never put `HMEM_AUTH_LOCAL_USER_TOKEN`, `HMEM_API_KEY`, `HMEM
 ## MCP env
 
 The MCP process reads existing runtime env directly; these values are not part of server YAML.
+Compose clients use `docker compose exec -T hmem hmem-entrypoint hmem-mcp`.
+This loads MCP secret files and starts an independent stdio bridge in the running
+service without writing server configuration or starting migrations. Process
+workspace, identity and follower registries remain separate. The `hmem` service
+must have any MCP secret and transcript mounts needed by its clients.
 
 | Env | Default | Notes |
 | --- | --- | --- |
-| `HMEM_SERVER_URL` | `http://127.0.0.1:${HMEM_SERVER_PORT}` | URL for `hmem-mcp` to reach `hmem-server`. Override to a service URL in multi-container Compose. |
+| `HMEM_SERVER_URL` | `http://127.0.0.1:${HMEM_SERVER_PORT}` | URL for `hmem-mcp` to reach `hmem-server`. Compose sets this in `hmem` from `HMEM_MCP_SERVER_URL` in its `.env`, defaulting to `http://127.0.0.1:8420`. For TLS, use a trusted HTTPS URL with a certificate-matching hostname. |
 | `HMEM_MCP_AUTH_TOKEN` | unset | Preferred bearer token for MCP. Secret; do not write to YAML or frontend config. |
 | `HMEM_MCP_AUTH_TOKEN_FILE` | unset | Optional secret-file source for `HMEM_MCP_AUTH_TOKEN`. |
 | `HMEM_AUTH_TOKEN` | unset | Fallback bearer token used by MCP clients. Secret; do not write to YAML or frontend config. |

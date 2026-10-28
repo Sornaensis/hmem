@@ -13,10 +13,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -199,7 +201,7 @@ class BundlePreparationTest(unittest.TestCase):
 
 
 class ComposeContractTest(unittest.TestCase):
-    def render(self, gpu: bool) -> dict:
+    def render(self, gpu: bool, overrides: dict[str, str] | None = None) -> dict:
         command = ["docker", "compose", "--profile", "admin",
                    "-f", str(ROOT / "compose.yaml")]
         if gpu:
@@ -207,6 +209,8 @@ class ComposeContractTest(unittest.TestCase):
         command += ["config", "--format", "json"]
         env = os.environ.copy()
         env["HMEM_MANAGED_BUNDLE_CONTEXT"] = "D:/private/verified-managed-bundle"
+        env["HMEM_MCP_SERVER_URL"] = ""
+        env.update(overrides or {})
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True,
                                 timeout=30, text=True, encoding="utf-8", errors="replace")
         self.assertEqual(result.returncode, 0, result.stderr[-4000:])
@@ -242,6 +246,17 @@ class ComposeContractTest(unittest.TestCase):
         self.assertEqual(reservation[0]["capabilities"], ["gpu"])
         self.assertEqual(len(gpu["services"]["hmem"]["ports"]), 1)
 
+    def test_mcp_reuses_hmem_with_default_and_tls_upstream(self) -> None:
+        for gpu in (False, True):
+            with self.subTest(gpu=gpu):
+                ordinary = self.render(gpu)
+                self.assertEqual(set(ordinary["services"]), {"postgres", "hmem", "migrate"})
+                self.assertEqual(ordinary["services"]["hmem"]["environment"]["HMEM_SERVER_URL"],
+                                 "http://127.0.0.1:8420")
+                tls = self.render(gpu, {"HMEM_MCP_SERVER_URL": "https://hmem.example.test:8420"})
+                self.assertEqual(tls["services"]["hmem"]["environment"]["HMEM_SERVER_URL"],
+                                 "https://hmem.example.test:8420")
+
 
 class LocalHumanSecretTest(unittest.TestCase):
     @classmethod
@@ -276,6 +291,57 @@ class LocalHumanSecretTest(unittest.TestCase):
                "[ \"$HMEM_AUTH_LOCAL_USER_TOKEN\" = human-file-token ]")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("human-file-token", result.stderr)
+
+    def test_mcp_dispatch_loads_files_without_preparing_server_state(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-mcp-secret-") as private:
+            secret = Path(private) / "mcp-token"
+            secret.write_text("mcp-file-token\n", encoding="utf-8")
+            fallback = Path(private) / "fallback-token"
+            fallback.write_text("fallback-file-token\n", encoding="utf-8")
+            result = self.run_shell("entrypoint.sh", {
+                "HMEM_MCP_AUTH_TOKEN": "discarded-mcp-token",
+                "HMEM_MCP_AUTH_TOKEN_FILE": secret.as_posix(),
+                "HMEM_AUTH_TOKEN": "discarded-fallback-token",
+                "HMEM_AUTH_TOKEN_FILE": fallback.as_posix(),
+                "HMEM_DB_PORT": "invalid-unused-server-value",
+            }, """
+prepare_runtime() { return 91; }
+run_migrations_with_retries() { return 92; }
+generate_config() { return 93; }
+stage_frontend_assets() { return 94; }
+exec_as_runtime_user() {
+  [ "$1" = hmem-mcp ] && [ "$2" = --no-auth ] &&
+  [ "$HMEM_MCP_AUTH_TOKEN" = mcp-file-token ] &&
+  [ "$HMEM_AUTH_TOKEN" = fallback-file-token ] &&
+  [ "$HMEM_SERVER_URL" = http://127.0.0.1:8420 ]
+}
+main hmem-mcp --no-auth
+""")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertNotIn("file-token", result.stderr)
+
+    def test_mcp_preserves_explicit_tls_url_and_custom_port_default(self) -> None:
+        for settings, expected in [
+            ({"HMEM_SERVER_PORT": "9443"}, "http://127.0.0.1:9443"),
+            ({"HMEM_SERVER_URL": "https://hmem.example.test:9443"},
+             "https://hmem.example.test:9443"),
+        ]:
+            with self.subTest(expected=expected):
+                result = self.run_shell("entrypoint.sh", settings,
+                                        'prepare_mcp_environment; printf "%s" "$HMEM_SERVER_URL"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+
+    def test_mcp_missing_secret_file_fails_without_fallback_or_secret_output(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hmem-mcp-missing-") as private:
+            result = self.run_shell("entrypoint.sh", {
+                "HMEM_MCP_AUTH_TOKEN": "secret-fallback-must-not-leak",
+                "HMEM_MCP_AUTH_TOKEN_FILE": (Path(private) / "missing").as_posix(),
+            }, "main hmem-mcp")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("HMEM_MCP_AUTH_TOKEN_FILE", result.stderr)
+            self.assertNotIn("secret-fallback-must-not-leak", result.stdout + result.stderr)
 
     def test_human_secret_invalid_values_fail_closed_without_leaking(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hmem-human-invalid-") as private:
@@ -478,8 +544,93 @@ class BuiltImageTest(unittest.TestCase):
             )
             if result.returncode == 0:
                 return result.stdout
+            if docker("inspect", "--format", "{{.State.Running}}", self.cid) != "true":
+                self.fail("container stopped during config setup: " + docker("logs", self.cid)[-4000:])
             time.sleep(0.2)
         self.fail("entrypoint did not generate config within 15 seconds")
+
+    def test_concurrent_mcp_bridges_reuse_container_and_exit_independently(self) -> None:
+        # Exercise the image's real MCP binaries with local context calls.
+        # Token-file preparation is checked separately; no HTTP/DB service is needed.
+        self.create({}, ["sleep", "3600"])
+        assert self.cid is not None
+        docker("exec", self.cid, "sh", "-ec", """
+mkdir -p /var/lib/hmem/.hmem /run/hmem/static
+printf '%s\n' mcp-file-token > /tmp/mcp-token
+printf '%s\n' '{}' > /var/lib/hmem/.hmem/config.yaml
+printf '%s\n' '/* unchanged runtime assets */' > /run/hmem/static/hmem-runtime-config.js
+""")
+        state_paths = ["/var/lib/hmem/.hmem/config.yaml",
+                       "/run/hmem/static/hmem-runtime-config.js"]
+        state_before = docker("exec", self.cid, "sha256sum", *state_paths)
+        owned_before = docker("ps", "-aq", "--no-trunc", "--filter",
+                              f"label=hmem.packaging.test={self.name}")
+        self.assertEqual(owned_before, self.cid)
+        bridges: list[subprocess.Popen[str]] = []
+
+        def rpc(process: subprocess.Popen[str], method: str, params: dict) -> dict:
+            assert process.stdin is not None and process.stdout is not None
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1,
+                                           "method": method, "params": params}) + "\n")
+            process.stdin.flush()
+            lines: queue.Queue[str] = queue.Queue(maxsize=1)
+            threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
+            response = json.loads(lines.get(timeout=10))
+            self.assertNotIn("error", response)
+            return response["result"]
+
+        def request(process: subprocess.Popen[str], name: str, arguments: dict) -> dict:
+            result = rpc(process, "tools/call", {"name": name, "arguments": arguments})
+            self.assertFalse(result.get("isError", False), result)
+            return json.loads(result["content"][0]["text"])
+
+        try:
+            for _ in range(2):
+                bridges.append(subprocess.Popen([
+                    "docker", "exec", "-i",
+                    "--env", "HMEM_MCP_AUTH_TOKEN_FILE=/tmp/mcp-token",
+                    "--env", "HMEM_MCP_AUTH_TOKEN=discarded-env-token",
+                    "--env", "HMEM_AUTH_TOKEN=fallback-token", self.cid,
+                    "hmem-entrypoint", "hmem-mcp",
+                ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                   text=True, encoding="utf-8"))
+            workspaces = [str(uuid.uuid4()), str(uuid.uuid4())]
+            for index, bridge in enumerate(bridges):
+                rpc(bridge, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                           "clientInfo": {"name": "container-test", "version": "1"}})
+                self.assertIsNone(request(bridge, "get_workspace", {})["identity"])
+                request(bridge, "set_workspace", {
+                    "workspace_id": workspaces[index],
+                    "identity": {"model-id": "test:container:high", "role": f"client-{index}"},
+                })
+            for index, bridge in enumerate(bridges):
+                context = request(bridge, "get_workspace", {})
+                self.assertEqual(context["workspace_id"], workspaces[index])
+                self.assertEqual(context["identity"]["role"], f"client-{index}")
+            assert bridges[0].stdin is not None
+            bridges[0].stdin.close()
+            self.assertEqual(bridges[0].wait(timeout=10), 0)
+            self.assertIsNone(bridges[1].poll())
+            self.assertEqual(request(bridges[1], "get_workspace", {})["workspace_id"], workspaces[1])
+            self.assertEqual(docker("inspect", "--format", "{{.State.Running}}", self.cid), "true")
+            self.assertEqual(docker("ps", "-aq", "--no-trunc", "--filter",
+                                    f"label=hmem.packaging.test={self.name}"), owned_before)
+            self.assertEqual(docker("exec", self.cid, "sha256sum", *state_paths), state_before)
+        finally:
+            for bridge in bridges:
+                if bridge.stdin is not None and not bridge.stdin.closed:
+                    bridge.stdin.close()
+                try:
+                    bridge.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    bridge.kill()
+                    bridge.wait(timeout=10)
+                if bridge.stdout is not None:
+                    bridge.stdout.close()
+                if bridge.stderr is not None:
+                    diagnostics = bridge.stderr.read(8192)
+                    bridge.stderr.close()
+                    self.assertNotIn("mcp-file-token", diagnostics)
 
     def test_default_config_and_read_only_frontend(self) -> None:
         secret = "packaging-secret-never-in-files"

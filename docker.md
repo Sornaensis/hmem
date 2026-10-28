@@ -223,20 +223,33 @@ for manual imports and matching query vectors.
 
 Set `HMEM_MCP_AUTH_TOKEN` in the runtime env file to a deployed service token or,
 for a personal installation, the same value as `HMEM_API_KEY`. You can also use
-`HMEM_MCP_AUTH_TOKEN_FILE` with a mounted secret file. Configure the client to run
-the optional Compose service as its stdio command:
+`HMEM_MCP_AUTH_TOKEN_FILE` with a secret file mounted in the `hmem` service.
+Start the stack and wait for `hmem` to become healthy, then configure each MCP
+client to run this stdio command from the Compose project directory (using the
+same Compose files and project options as the running stack):
 
 ```bash
-docker compose run --rm -T mcp
+docker compose exec -T hmem hmem-entrypoint hmem-mcp
 ```
 
-The client exchanges JSON-RPC over this process's stdin/stdout. Closing stdin
-drains accepted calls and exits; this service has no network MCP listener or HTTP
-healthcheck. Keep it attached to its client rather than starting it detached.
+Each client gets an independent MCP process inside the existing `hmem` container.
+Workspace, identity and transcript upload state belong to that process. The
+explicit `hmem-entrypoint` loads MCP secret files without regenerating server
+configuration, running migrations or changing frontend assets.
 
-The default upstream is `http://hmem:8420`. For a TLS-enabled hmem service, set
+The client exchanges JSON-RPC over stdin/stdout; `-T` keeps the stream free of
+terminal formatting. Closing stdin drains that bridge's accepted calls and exits
+without stopping the service or other clients. Keep it attached to its client.
+Restart or reconnect MCP clients after replacing or restarting the service.
+The previous `docker compose run --rm -T mcp` command created a new container for
+each client; replace it with the command above.
+
+The default upstream is `http://127.0.0.1:8420`. For a TLS-enabled hmem service, set
 `HMEM_MCP_SERVER_URL` in Compose's `.env` to an HTTPS URL whose hostname matches
-the server certificate. The MCP image must trust that certificate's CA.
+the server certificate. The `hmem` container must trust that certificate's CA.
+Recreate the service after changing its environment. For local transcript
+uploads, mount the required host transcript directory read-only in `hmem` and
+pass the path as seen inside the container; host paths are not visible by default.
 Credential choices and precedence are in [authentication](auth.md); the
 [README setup](README.md) also supports clients against the published server.
 

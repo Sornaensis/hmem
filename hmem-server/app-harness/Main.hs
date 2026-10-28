@@ -6,7 +6,6 @@ import Control.Exception (Exception, SomeException, bracket, finally, throwIO, t
 import Control.Monad (unless, when)
 import Data.Aeson (encode, toJSON)
 import Data.ByteString.Lazy qualified as LBS
-import Data.Pool (destroyAllResources)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -33,7 +32,7 @@ import Crypto.JOSE.JWK qualified as JWK
 import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.Pool qualified as DBPool
-import HMem.DB.TestHarness (TestDb(..), TestEnv(..), TestSandbox(..), createTestWorkspace, withSandboxedTestEnv)
+import HMem.DB.TestHarness (TestDb(..), TestEnv(..), TestSandbox(..), createTestWorkspace, newSandboxLifetime, withSandboxedTestEnvBorrowed)
 import HMem.Server.AccessTracker (flushNow, newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
@@ -41,6 +40,7 @@ import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
+import HMem.Server.Archive.Worker (startArchiveWorker, stopArchiveWorker)
 import HMem.Server.Logging (jsonRequestLogger, logInfo, logWarn, newLogger, parseLogLevel)
 import HMem.Server.WebSocket (newWSState)
 
@@ -142,7 +142,12 @@ modeReader = eitherReader $ \case
   other -> Left $ "unknown mode " <> show other <> "; expected local, deployed, or keycloak"
 
 runHarness :: Opts -> IO ()
-runHarness opts = withSandboxedTestEnv $ \env -> do
+runHarness opts = do
+  lifetime <- newSandboxLifetime
+  withSandboxedTestEnvBorrowed lifetime (startArchiveWorker . (.pool)) stopArchiveWorker $ \env _archiveWorker -> runHarnessEnv opts env
+
+runHarnessEnv :: Opts -> TestEnv -> IO ()
+runHarnessEnv opts env = do
   let TestEnv { testSandbox = sandbox } = env
       TestSandbox { sandboxConfigDir = configDir, sandboxLogDir = logDir } = sandbox
   port <- maybe (randomRIO (49152, 65535)) pure opts.optPort
@@ -224,7 +229,6 @@ runHarness opts = withSandboxedTestEnv $ \env -> do
                       printBanner opts env cfg serverUrl logPath configPath seed
                       waitForStop inputDone serverDone serverThread)))
               `finally` flushForShutdown)))
-    `finally` destroyAllResources env.pool
   when opts.optPreserve $
     throwIO PreserveSandboxExit
 

@@ -114,6 +114,35 @@ generation, the sealed receipt or original chunks. Operators retain raw evidence
 on any failure. Recovery uses the existing database backup procedure; there is
 no destructive down migration for published evidence.
 
+### Server worker
+
+`HMem.Server.Archive.Worker` owns one background loop in the production server,
+dev server and interactive harness. Each turn scans at most 32 sealed sessions,
+cleans at most eight obsolete staging rows, and claims one due job. Both explicit
+termination and the idle-session reaper become eligible through that scan. The
+worker never changes task state, the sealed receipt or original payloads.
+
+`HMem.SessionArchive.Codec` uses an opaque C zlib context with fixed 64 KiB
+buffers and checked 64-bit counts. Compression writes physical parts without
+resetting the stream. The first persisted readback derives restart points; a
+second independently derives and compares their exact offsets, bits and
+dictionary bytes, verifies each original ledger boundary and raw-chunk hash,
+and checks both whole-stream digests before publication. Index rows and original
+chunks are processed individually. Failed attempts retain raw evidence and
+retry with a fresh generation. A dedicated owned child renews the lease every
+10 seconds with a five-second request deadline. Attempt and shutdown deadlines
+remain those specified above; an unconfirmed join is an explicit failure.
+
+Dev and harness entrypoints use the opt-in `SandboxLifetime` borrower helper.
+A failed worker drain retains its exact handle, pool, database and sandbox
+release actions. Recovery retries that same capability before releasing them
+in dependency order. This opt-in path owns a foreground PostgreSQL handle,
+disables its logging collector, retains one in-flight orderly-stop helper, and
+requires both process joins and PID-file completion before deleting the root.
+Stop and deletion failures propagate and retain the unfinished release actions.
+Ordinary test helpers retain their existing behavior;
+this guard does not implement the deferred general test supervisor.
+
 ## Raw reads, proofs and replay
 
 Use zran-style restart points: raw offset, compressed byte offset, 0–7 unused

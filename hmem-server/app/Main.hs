@@ -28,7 +28,7 @@ import Hasql.Session qualified as Session
 import HMem.Config qualified as Config
 import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Pool qualified as Pool
-import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
+import HMem.DB.TestHarness (TestDb(..), TestEnv(..), newSandboxLifetime, withSandboxedTestEnvBorrowed)
 import HMem.Types (parseEmbeddingSpaceFingerprint)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
 import HMem.Server.App (mkAppWithPrefixProofs)
@@ -36,6 +36,7 @@ import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscoveryProvider)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
+import HMem.Server.Archive.Worker (startArchiveWorker, stopArchiveWorker)
 import HMem.Server.Embedding.ManagedTei
   ( defaultManagedTeiConfig, defaultManagedTeiDeps, managedTeiEventText
   , ManagedTeiActive(..), ManagedTeiActivationFailure(..), ManagedTeiHooks(..), startManagedTeiWith
@@ -118,7 +119,8 @@ main = do
 runDevMode :: Opts -> IO ()
 runDevMode opts = do
   hPutStrLn stderr "[dev] Starting sandboxed PostgreSQL..."
-  withSandboxedTestEnv $ \env -> do
+  lifetime <- newSandboxLifetime
+  withSandboxedTestEnvBorrowed lifetime (startArchiveWorker . (.pool)) stopArchiveWorker $ \env _archiveWorker -> do
     let port = fromMaybe 8420 opts.optPort
         pool = env.pool
         TestEnv { testDb = db } = env
@@ -167,7 +169,6 @@ runDevMode opts = do
           logInfo logger "[dev] Shutting down..."
           flushNow pool tracker `catch` \(_ :: SomeException) -> pure ()
           stopChangeStreamWorker streamWorker
-          destroyAllResources pool
           cleanupLog
 
     case Config.localImplicitBootstrapStartupError devConfigForPolicy of
@@ -426,7 +427,8 @@ runNormalMode opts = do
               (Nothing, Just _) -> logWarn logger "--tls-key provided without --tls-cert; running plain HTTP" >> runSettings settings app
               (Nothing, Nothing) -> logInfo logger "TLS disabled (no cert/key configured)" >> runSettings settings app
         runServer
-  withPreservingCleanup (mask $ \restore -> do
+  bracket (startArchiveWorker pool)
+    (\archiveWorker -> stopArchiveWorker archiveWorker >> shutdownDatabase) $ \_archiveWorker -> mask $ \restore -> do
     managed <- if pgvec && cfg.embeddingProvider.mode == Config.EmbeddingProviderManagedTei
       then do
         let deps = withManagedTeiEmitter
@@ -462,4 +464,3 @@ runNormalMode opts = do
           , mapM_ (\task -> cancel task >> void (waitCatch task)) external
           ]
     withPreservingCleanup (restore (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> bracket (startSessionReaper pool) stopSessionReaper (\_ -> runWarp prefixes))) shutdownVectors
-    ) shutdownDatabase

@@ -7,7 +7,9 @@ module HMem.DB.SessionArchive
   , enqueueArchives, claimArchive, renewArchive, releaseArchive, archiveProgress
   , stageArchivePart, stageArchiveCheckpoint, stageArchiveLedger, publishArchive
   , getArchiveJob, getPublishedArchive, readArchivePart, findArchiveCheckpoint, readArchiveLedger
-  , readStagedPart, cleanupArchiveGeneration
+  , readStagedPart, cleanupArchiveGeneration, cleanupNextArchiveGeneration
+  , ArchiveReceipt(..), ArchiveSourceChunk(..), readArchiveReceipt, readArchiveSourceChunk
+  , readStagedCheckpoint, readStagedLedger
   ) where
 
 import Control.Exception (throwIO)
@@ -71,6 +73,14 @@ data ArchiveCheckpoint = ArchiveCheckpoint
 data ArchiveLedger = ArchiveLedger
   { revision :: !Int64, startOffset :: !Int64, endOffset :: !Int64, allowFinalRecord :: !Bool
   , recordCount :: !Int64, endsWithNewline :: !Bool, rawSha256 :: !Text, bindingSha256 :: !Text
+  } deriving stock (Show, Eq)
+
+data ArchiveReceipt = ArchiveReceipt
+  { rawBytes :: !Int64, rawRecords :: !Int64, rawRevision :: !Int64, rawSha256 :: !Text
+  } deriving stock (Show, Eq)
+data ArchiveSourceChunk = ArchiveSourceChunk
+  { revision :: !Int64, startOffset :: !Int64, bytes :: !ByteString
+  , allowFinalRecord :: !Bool, recordCount :: !Int64, endsWithNewline :: !Bool
   } deriving stock (Show, Eq)
 
 param :: (a -> b) -> E.Value b -> E.Params a
@@ -205,8 +215,42 @@ readStagedPart :: Pool H.Connection -> ArchiveLease -> Int64 -> IO (Maybe Archiv
 readStagedPart pool lease ordinal=do
   guardInput (ordinal>=0)
   result <- withLease pool lease $ S.statement (lease,ordinal) $ statement
-    "SELECT ordinal,start_offset,end_offset,data,data_sha256,binding_sha256 FROM session_archive_parts WHERE workspace_id=$1 AND session_id=$2 AND generation_id=$3 AND ordinal=$6 AND $4::uuid IS NOT NULL AND $5::bigint>0"
+    "SELECT p.ordinal,p.start_offset,p.end_offset,p.data,p.data_sha256,p.binding_sha256 FROM session_archive_parts p WHERE p.workspace_id=$1 AND p.session_id=$2 AND p.generation_id=$3 AND p.ordinal=$6 AND $4::uuid IS NOT NULL AND $5::bigint>0 AND p.data_sha256=encode(sha256(p.data),'hex') AND p.binding_sha256=hmem_archive_binding(coalesce((SELECT q.binding_sha256 FROM session_archive_parts q WHERE q.generation_id=p.generation_id AND q.ordinal=p.ordinal-1),''),jsonb_build_array(p.generation_id,p.ordinal,p.start_offset,p.end_offset,p.data_sha256))"
     (contramap fst leaseParams<>param snd E.int8) (D.rowMaybe partRow)
+  pure (result >>= id)
+
+-- Worker-only input/readback operations keep one original chunk, part or index
+-- row in memory. Each call releases the job lock and pool connection on return.
+readArchiveReceipt :: Pool H.Connection -> ArchiveLease -> IO (Maybe ArchiveReceipt)
+readArchiveReceipt pool lease=withLease pool lease $ S.statement lease $ statement
+  "SELECT raw_bytes,raw_records,raw_revision,raw_sha256 FROM session_archive_generations WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND lease_token=$4 AND attempt=$5"
+  leaseParams (D.singleRow (ArchiveReceipt <$> column D.int8 <*> column D.int8 <*> column D.int8 <*> column D.text))
+
+readArchiveSourceChunk :: Pool H.Connection -> ArchiveLease -> Int64 -> IO (Maybe ArchiveSourceChunk)
+readArchiveSourceChunk pool lease offset=do
+  guardInput (offset>=0)
+  result<-withLease pool lease $ S.statement (lease,offset) $ statement
+    "SELECT c.revision,c.start_offset,c.data,c.allow_final_record,c.record_count,c.ends_with_newline FROM session_chunks c JOIN sessions s ON s.id=c.session_id WHERE s.workspace_id=$1 AND s.id=$2 AND c.start_offset>=$6 AND $3::uuid IS NOT NULL AND $4::uuid IS NOT NULL AND $5::bigint>0 ORDER BY c.start_offset LIMIT 1"
+    (contramap fst leaseParams<>param snd E.int8)
+    (D.rowMaybe (ArchiveSourceChunk <$> column D.int8 <*> column D.int8 <*> column D.bytea <*> column D.bool <*> column D.int8 <*> column D.bool))
+  pure (result >>= id)
+
+readStagedCheckpoint :: Pool H.Connection -> ArchiveLease -> Int64 -> IO (Maybe ArchiveCheckpoint)
+readStagedCheckpoint pool lease ordinal=do
+  guardInput (ordinal>=0)
+  result<-withLease pool lease $ S.statement (lease,ordinal) $ statement
+    "SELECT c.ordinal,c.raw_offset,c.compressed_offset,c.unused_bits,c.dictionary,c.dictionary_sha256,c.binding_sha256 FROM session_archive_checkpoints c WHERE c.workspace_id=$1 AND c.session_id=$2 AND c.generation_id=$3 AND c.ordinal=$6 AND $4::uuid IS NOT NULL AND $5::bigint>0 AND c.dictionary_sha256=encode(sha256(c.dictionary),'hex') AND c.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_checkpoints p WHERE p.generation_id=c.generation_id AND p.ordinal=c.ordinal-1),''),jsonb_build_array(c.generation_id,c.ordinal,c.raw_offset,c.compressed_offset,c.unused_bits,c.dictionary_sha256))"
+    (contramap fst leaseParams<>param snd E.int8)
+    (D.rowMaybe (ArchiveCheckpoint <$> column D.int8 <*> column D.int8 <*> column D.int8 <*> column D.int2 <*> column D.bytea <*> column D.text <*> column D.text))
+  pure (result >>= id)
+
+readStagedLedger :: Pool H.Connection -> ArchiveLease -> Int64 -> IO (Maybe ArchiveLedger)
+readStagedLedger pool lease revision=do
+  guardInput (revision>=1)
+  result<-withLease pool lease $ S.statement (lease,revision) $ statement
+    "SELECT l.revision,l.start_offset,l.end_offset,l.allow_final_record,l.record_count,l.ends_with_newline,l.raw_sha256,l.binding_sha256 FROM session_archive_ledger l WHERE l.workspace_id=$1 AND l.session_id=$2 AND l.generation_id=$3 AND l.revision=$6 AND $4::uuid IS NOT NULL AND $5::bigint>0 AND l.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_ledger p WHERE p.generation_id=l.generation_id AND p.revision=l.revision-1),''),jsonb_build_array(l.generation_id,l.revision,l.start_offset,l.end_offset,l.allow_final_record,l.record_count,l.ends_with_newline,l.raw_sha256))"
+    (contramap fst leaseParams<>param snd E.int8)
+    (D.rowMaybe (ArchiveLedger <$> column D.int8 <*> column D.int8 <*> column D.int8 <*> column D.bool <*> column D.int8 <*> column D.bool <*> column D.text <*> column D.text))
   pure (result >>= id)
 
 findArchiveCheckpoint :: Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe ArchiveCheckpoint)
@@ -241,3 +285,13 @@ cleanupArchiveGeneration pool workspace session generation=runTransaction pool $
       if count/=0 then pure count else do
         S.statement generation $ statement "DELETE FROM session_archive_generations WHERE id=$1" (E.param (E.nonNullable E.uuid)) D.noResult
         pure 1
+
+-- A single obsolete generation and at most eight child rows per fair worker
+-- turn. Selection grants no deletion authority; the existing locked primitive
+-- rechecks current/published ownership before deleting anything.
+cleanupNextArchiveGeneration :: Pool H.Connection -> IO Int64
+cleanupNextArchiveGeneration pool=do
+  candidate<-runSession pool $ S.statement () $ statement
+    "SELECT g.workspace_id,g.session_id,g.id FROM session_archive_generations g JOIN session_archive_jobs j ON j.session_id=g.session_id WHERE g.published_at IS NULL AND j.generation_id IS DISTINCT FROM g.id ORDER BY g.created_at,g.id LIMIT 1"
+    E.noParams (D.rowMaybe ((,,) <$> column D.uuid <*> column D.uuid <*> column D.uuid))
+  case candidate of Nothing -> pure 0; Just (w,s,g) -> cleanupArchiveGeneration pool w s g

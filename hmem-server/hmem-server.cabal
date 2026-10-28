@@ -74,6 +74,7 @@ library
       HMem.Server.AccessTracker
       HMem.Server.API
       HMem.Server.App
+      HMem.Server.Archive.Worker
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
@@ -480,6 +481,7 @@ test-suite hmem-server-test
       HMem.Server.AccessTrackerSpec
       HMem.Server.AgentSessionSpec
       HMem.Server.APISpec
+      HMem.Server.Archive.WorkerSpec
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec

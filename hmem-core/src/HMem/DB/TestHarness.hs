@@ -18,6 +18,10 @@ module HMem.DB.TestHarness
   , withSandboxedEnv
   , withSandboxedPostgres
   , withSandboxedTestEnv
+  , SandboxLifetime, newSandboxLifetime, withSandboxedTestEnvBorrowed
+  , newSandboxLifetimeWithReleaseHooks
+  , newSandboxLifetimeWithControlHook
+  , retrySandboxLifetime, sandboxLifetimeFailures
   , assertInSandbox
     -- * Transaction-based test isolation
   , setupTestPool
@@ -39,6 +43,7 @@ module HMem.DB.TestHarness
   ) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVar_, readMVar)
 import Control.Concurrent.Async (Async, wait, waitCatch, withAsync)
 import Control.Exception (SomeException, bracket, bracketOnError, finally, mask, onException, throwIO, try)
 import Control.Exception qualified as Exception
@@ -83,12 +88,167 @@ import Hasql.Encoders qualified as E
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Rel8
-
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool (createPool, runSession, setTestTransactionMode, withConn)
 import HMem.DB.Schema
 import HMem.Types
 import Paths_hmem_core (getDataDir)
+
+-- An opt-in single borrower retains its exact drain and three dependent
+-- resource releases. This is deliberately separate from ordinary suite setup.
+newtype SandboxLifetime = SandboxLifetime (MVar SandboxLifetimeState)
+data SandboxLifetimeState = SandboxLifetimeState
+  { usedLifetime :: Bool, retainedLifetime :: Bool, scopeExited :: Bool, borrowerDrain :: Maybe (IO ())
+  , poolRelease :: Maybe (IO ()), postgresRelease :: Maybe (IO ()), rootRelease :: Maybe (IO ())
+  , lifetimeFailures :: [String]
+  , beforePostgresRelease :: IO (), beforeRootRelease :: IO ()
+  , afterControlStarted :: IO ()
+  }
+-- Synchronous cleanup aggregation retains the original typed exception; only
+-- the secondary diagnostic text is bounded. Async causes are rethrown intact.
+data SandboxBorrowFailure = SandboxBorrowFailure SomeException String deriving stock (Show)
+instance Exception.Exception SandboxBorrowFailure
+
+newSandboxLifetime :: IO SandboxLifetime
+newSandboxLifetime = newSandboxLifetimeWithReleaseHooks (pure ()) (pure ())
+
+-- | Test-only failure seams before the real strict release operations.
+newSandboxLifetimeWithReleaseHooks :: IO () -> IO () -> IO SandboxLifetime
+newSandboxLifetimeWithReleaseHooks beforePg beforeRoot = SandboxLifetime <$> newMVar
+  (SandboxLifetimeState False False False Nothing Nothing Nothing Nothing [] beforePg beforeRoot (pure ()))
+
+-- | Test-only failure seam after the actual stop helper is registered.
+newSandboxLifetimeWithControlHook :: IO () -> IO SandboxLifetime
+newSandboxLifetimeWithControlHook hook = do
+  life@(SandboxLifetime state) <- newSandboxLifetime
+  modifyMVar_ state $ \s -> pure (s { afterControlStarted = hook })
+  pure life
+
+controlStartedHook :: Maybe SandboxLifetime -> IO (IO ())
+controlStartedHook Nothing = pure (pure ())
+controlStartedHook (Just (SandboxLifetime state)) = (.afterControlStarted) <$> readMVar state
+
+sandboxLifetimeFailures :: SandboxLifetime -> IO [String]
+sandboxLifetimeFailures (SandboxLifetime state) = (.lifetimeFailures) <$> readMVar state
+
+-- Each retained closure owns the original resource; no PID/path reconstruction
+-- or ambient environment setting can authorize release.
+data SandboxResource = BorrowedPool | BorrowedPostgres | BorrowedRoot
+
+guardedSandboxRelease :: Maybe SandboxLifetime -> SandboxResource -> IO () -> IO ()
+guardedSandboxRelease Nothing _ action = action
+guardedSandboxRelease (Just (SandboxLifetime state)) resource action = do
+  result <- modifyMVar state $ \s -> do
+    let ownedAction = (case resource of
+          BorrowedPool -> pure ()
+          BorrowedPostgres -> s.beforePostgresRelease
+          BorrowedRoot -> s.beforeRootRelease) >> action
+    let remember value = case resource of
+          BorrowedPool -> value { poolRelease = Just (boundedRelease resource ownedAction) }
+          BorrowedPostgres -> value { postgresRelease = Just (boundedRelease resource ownedAction) }
+          BorrowedRoot -> value { rootRelease = Just (boundedRelease resource ownedAction) }
+    if s.retainedLifetime then pure (remember s,Right ()) else do
+      result <- try (boundedRelease resource ownedAction)
+      case result of
+        Right () -> pure (s,Right ())
+        Left (failure :: SomeException) -> pure
+          (remember (s { retainedLifetime = True, lifetimeFailures = take 8 (s.lifetimeFailures <> [take 4096 (show failure)]) }),Left failure)
+  either throwIO pure result
+
+boundedRelease :: SandboxResource -> IO () -> IO ()
+boundedRelease resource action = do
+  let budget = case resource of BorrowedPostgres -> 10000000; _ -> 5000000
+  completed <- timeout budget action
+  unless (completed == Just ()) (fail "borrowed sandbox release deadline exceeded; ownership retained")
+
+-- | The acquire callback must itself be exception-safe. It runs masked through
+-- registration; use is interruptible. The drain callback returns only after
+-- the actual borrower and its children have joined, within five seconds.
+withSandboxedTestEnvBorrowed :: SandboxLifetime -> (TestEnv -> IO borrower) -> (borrower -> IO ()) -> (TestEnv -> borrower -> IO a) -> IO a
+withSandboxedTestEnvBorrowed life@(SandboxLifetime state) acquire drain use = mask $ \restoreOuter -> do
+  modifyMVar_ state $ \s -> do
+    when s.usedLifetime (fail "SandboxLifetime is single-use")
+    pure (s { usedLifetime = True })
+  primaryCause <- newIORef (Nothing :: Maybe SomeException)
+  let rememberPrimary failure = do
+        previous <- readIORef primaryCause
+        case previous of
+          Just _ -> pure ()
+          Nothing -> do
+            writeIORef primaryCause (Just failure)
+            modifyMVar_ state $ \s -> pure
+              (s { lifetimeFailures = take 8 (s.lifetimeFailures <> [take 4096 (show failure)]) })
+      capturePrimary :: IO b -> IO b
+      capturePrimary action = action `Exception.catch` \(failure :: SomeException) ->
+        rememberPrimary failure >> throwIO failure
+  outcome <- try @SomeException $ restoreOuter $ withTestSandboxOwned (Just life) $ \sandbox ->
+    withSandboxedEnv sandbox $
+      withSandboxedPostgresOwned (Just life) sandbox $ \db ->
+        withActiveSandboxEnv sandbox db $
+          bracket (capturePrimary (createPooledTestEnv sandbox db 10))
+            (\env -> guardedSandboxRelease (Just life) BorrowedPool (destroyAllResources env.pool)) $ \env ->
+              mask $ \restore -> do
+                borrower <- capturePrimary (acquire env)
+                modifyMVar_ state $ \s -> pure (s { borrowerDrain = Just (drain borrower) })
+                result <- try (restore (use env borrower))
+                either rememberPrimary (const (pure ())) result
+                joined <- try (drainSandboxBorrower life)
+                case (result,joined) of
+                  (Right value,Right ()) -> pure value
+                  (Left (primary :: SomeException),Right ()) -> throwIO primary
+                  (Right _,Left (failure :: SomeException)) -> throwIO failure
+                  (Left primary,Left _) -> throwIO primary
+  modifyMVar_ state $ \s -> pure (s { scopeExited = True })
+  -- Select the original cause only after every dependent finalizer has run.
+  -- Nested brackets may replace their exception while unwinding; their strict
+  -- release failures and retained capabilities remain in the lifetime state.
+  original <- readIORef primaryCause
+  case original of
+    Nothing -> either throwIO pure outcome
+    Just primary -> case Exception.fromException primary :: Maybe Exception.SomeAsyncException of
+      Just _ -> throwIO primary
+      Nothing -> do
+        failures <- sandboxLifetimeFailures life
+        case drop 1 failures of
+          [] -> throwIO primary
+          secondary -> throwIO (SandboxBorrowFailure primary (take 4096 (unlines secondary)))
+
+drainSandboxBorrower :: SandboxLifetime -> IO ()
+drainSandboxBorrower (SandboxLifetime state) = do
+  result <- modifyMVar state $ \s -> do
+    outcome <- try $ do
+      completed <- timeout 5000000 (maybe (pure ()) Prelude.id s.borrowerDrain)
+      unless (completed == Just ()) (fail "borrowed sandbox drain deadline exceeded")
+    case outcome of
+      Right () -> pure (s { borrowerDrain = Nothing },Right ())
+      Left (failure :: SomeException) -> do
+        hPutStrLn stderr "[test-sandbox] borrower drain failed; pool, PostgreSQL and root retained; retry the same SandboxLifetime"
+        pure (s { retainedLifetime = True, lifetimeFailures = take 8 (s.lifetimeFailures <> [take 4096 (show failure)]) },Left failure)
+  either throwIO pure result
+
+-- | Finite explicit recovery of the same retained borrower. Completed releases
+-- are cleared individually; failed recovery preserves the remaining closures.
+retrySandboxLifetime :: SandboxLifetime -> IO ()
+retrySandboxLifetime life@(SandboxLifetime state) = mask $ \_ -> do
+  ready <- (.scopeExited) <$> readMVar state
+  unless ready (fail "SandboxLifetime cannot recover before its borrowing scope exits")
+  drainSandboxBorrower life
+  result <- modifyMVar state $ \s -> do
+    let release get clear current = case get current of
+          Nothing -> pure (Right current)
+          Just action -> try action >>= \case
+            Right () -> pure (Right (clear current))
+            Left (failure :: SomeException) -> pure (Left (current,failure))
+        steps current = release (.poolRelease) (\v -> v { poolRelease = Nothing }) current >>= \case
+          Left failure -> pure (Left failure)
+          Right a -> release (.postgresRelease) (\v -> v { postgresRelease = Nothing }) a >>= \case
+            Left failure -> pure (Left failure)
+            Right b -> release (.rootRelease) (\v -> v { rootRelease = Nothing }) b
+    outcome <- steps s
+    case outcome of
+      Right done -> pure (done { retainedLifetime = False },Right ())
+      Left (pending,failure) -> pure (pending { retainedLifetime = True, lifetimeFailures = take 8 (pending.lifetimeFailures <> [take 4096 (show failure)]) },Left failure)
+  either throwIO pure result
 
 -- | Test environment wrapping the connection pool.
 data TestEnv = TestEnv
@@ -462,7 +622,10 @@ withSandboxedTestEnv action =
           withPooledTestEnv sandbox db 10 action
 
 withTestSandbox :: (TestSandbox -> IO a) -> IO a
-withTestSandbox action = do
+withTestSandbox = withTestSandboxOwned Nothing
+
+withTestSandboxOwned :: Maybe SandboxLifetime -> (TestSandbox -> IO a) -> IO a
+withTestSandboxOwned lifetime action = do
   preserve <- envFlag preserveSandboxVar
   tmpBase <- getCanonicalTemporaryDirectory
   root <- createTempDirectory tmpBase "hmem-sandbox"
@@ -493,10 +656,10 @@ withTestSandbox action = do
     pure (sandbox, value)
   case result of
     Right (sandbox, value) -> do
-      cleanupSandbox sandbox True
+      guardedSandboxRelease lifetime BorrowedRoot (cleanupBorrowedRoot lifetime sandbox.sandboxRoot False)
       pure value
     Left (err :: SomeException) -> do
-      cleanupSandboxRoot root preserve
+      guardedSandboxRelease lifetime BorrowedRoot (cleanupBorrowedRoot lifetime root preserve)
       throwIO err
 
 withSandboxedEnv :: TestSandbox -> IO a -> IO a
@@ -527,12 +690,21 @@ withSandboxedEnv sandbox action = do
     action
 
 withSandboxedPostgres :: TestSandbox -> (TestDb -> IO a) -> IO a
-withSandboxedPostgres sandbox action = do
+withSandboxedPostgres = withSandboxedPostgresOwned Nothing
+
+withSandboxedPostgresOwned :: Maybe SandboxLifetime -> TestSandbox -> (TestDb -> IO a) -> IO a
+withSandboxedPostgresOwned lifetime sandbox action = do
   prepared <- preparedPostgresBackendFromEnv sandbox
   case prepared of
     PreparedNative -> do
       checkPgTools
-      bracket (startEphemeralPgInSandbox sandbox) stopEphemeralPgServer $ \pg -> do
+      bracket (do
+          pg <- startEphemeralPgInSandboxWith lifetime sandbox
+          release <- case lifetime of
+            Nothing -> pure (stopEphemeralPgServer pg)
+            Just _ -> controlStartedHook lifetime >>= (\hook -> strictPostgresRelease hook pg)
+          pure (pg,release))
+        (\(_,release) -> guardedSandboxRelease lifetime BorrowedPostgres release) $ \(pg,_) -> do
         let db = TestDb
               { testDbDataDir = pg.epDataDir
               , testDbLogFile = pg.epLogFile
@@ -543,7 +715,7 @@ withSandboxedPostgres sandbox action = do
               }
         action db
     PreparedManagedLinux docker ->
-      bracket (startManagedLinuxPg sandbox docker) stopManagedLinuxPg $ \pg ->
+      bracket (startManagedLinuxPg sandbox docker) (\pg -> guardedSandboxRelease lifetime BorrowedPostgres (stopManagedLinuxPg pg)) $ \pg ->
         action TestDb
           { testDbDataDir = pg.managedPgMetadataDir
           , testDbLogFile = pg.managedPgLogFile
@@ -1321,7 +1493,11 @@ startEphemeralPg =
   bracketOnError createStandaloneSandbox (`cleanupSandbox` False) startEphemeralPgInSandbox
 
 startEphemeralPgInSandbox :: TestSandbox -> IO EphemeralPg
-startEphemeralPgInSandbox sandbox = do
+startEphemeralPgInSandbox = startEphemeralPgInSandboxWith Nothing
+
+startEphemeralPgInSandboxWith :: Maybe SandboxLifetime -> TestSandbox -> IO EphemeralPg
+startEphemeralPgInSandboxWith lifetime sandbox = do
+  let foreground = isJust lifetime
   port <- randomRIO (49152, 65535) :: IO Int
   suffix <- T.take 8 . T.filter (/= '-') . T.pack . show <$> UUID.nextRandom
   let dbName = "hmem_test_" <> suffix
@@ -1340,11 +1516,11 @@ startEphemeralPgInSandbox sandbox = do
     ]
 
   -- Configure port / localhost only
-  appendFile (dataDir </> "postgresql.conf") $ unlines
+  appendFile (dataDir </> "postgresql.conf") $ unlines $
     [ "", "# hmem test overrides"
     , "port = " ++ show port
     , "listen_addresses = 'localhost'"
-    ]
+    ] <> if foreground then ["logging_collector = off"] else []
 
   -- Opt-in measurements belong only to this freshly created native sandbox.
   -- Production configuration and ordinary tests retain their existing defaults.
@@ -1369,7 +1545,7 @@ startEphemeralPgInSandbox sandbox = do
              ]
         else [ "log_statement = 'all'" ]
 
-  (startedPort, process) <- startPostgresWithRetries dataDir logFile port 5
+  (startedPort, process) <- startPostgresWithRetries foreground dataDir logFile port 5
   let pg = EphemeralPg
         { epTmpDir  = sandbox.sandboxRoot
         , epDataDir = dataDir
@@ -1382,7 +1558,11 @@ startEphemeralPgInSandbox sandbox = do
 
   bracketOnError
     (pure pg)
-    stopEphemeralPgServer
+    (\owned -> case lifetime of
+      Nothing -> stopEphemeralPgServer owned
+      Just _ -> do
+        hook <- controlStartedHook lifetime
+        strictPostgresRelease hook owned >>= guardedSandboxRelease lifetime BorrowedPostgres)
     (\started -> do
       threadDelay 500000
 
@@ -1398,9 +1578,9 @@ startEphemeralPgInSandbox sandbox = do
 -- | Retry a random port when another process wins the race between port
 -- selection and PostgreSQL binding. Windows frequently leaves just-closed
 -- loopback ports unavailable briefly during the migration-heavy test suite.
-startPostgresWithRetries :: FilePath -> FilePath -> Int -> Int -> IO (Int, Maybe ProcessHandle)
-startPostgresWithRetries dataDir logFile port attempts = do
-  started <- if os == "mingw32"
+startPostgresWithRetries :: Bool -> FilePath -> FilePath -> Int -> Int -> IO (Int, Maybe ProcessHandle)
+startPostgresWithRetries foreground dataDir logFile port attempts = do
+  started <- if foreground || os == "mingw32"
     then startWindowsPostgres dataDir logFile port
     else fmap (fmap (const Nothing)) $ try (callProcess "pg_ctl"
       [ "start", "-D", dataDir, "-l", logFile, "-w", "-t", "30" ])
@@ -1412,7 +1592,7 @@ startPostgresWithRetries dataDir logFile port attempts = do
           nextPort <- randomRIO (49152, 65535) :: IO Int
           hPutStrLn stderr $ "[test-pg] retrying port: " ++ show nextPort
           appendFile (dataDir </> "postgresql.conf") $ "port = " ++ show nextPort ++ "\n"
-          startPostgresWithRetries dataDir logFile nextPort (attempts - 1)
+          startPostgresWithRetries foreground dataDir logFile nextPort (attempts - 1)
 
 -- | PostgreSQL's Windows @pg_ctl start@ asks Windows to create a restricted
 -- child token.  That API is unavailable in some isolated test hosts even
@@ -1466,6 +1646,36 @@ stopEphemeralPgServer pg = do
   -- Small delay so Windows releases file locks
   threadDelay 500000
   pure ()
+
+-- Opt-in borrower release is strict and resumable. The closure retains the
+-- original foreground postmaster and any already-created stop helper across
+-- timeout/cancellation. A retry never rediscovers a process by PID or path.
+strictPostgresRelease :: IO () -> EphemeralPg -> IO (IO ())
+strictPostgresRelease afterControl pg = do
+  postmaster <- maybe (fail "Borrowed sandbox requires a foreground PostgreSQL handle") pure pg.epProcess
+  helper <- newIORef Nothing
+  pure $ mask $ \restore -> do
+    pending <- readIORef helper
+    status <- getProcessExitCode postmaster
+    control <- case (pending,status) of
+      (Just process,_) -> pure (Just process)
+      (Nothing,Just _) -> pure Nothing
+      (Nothing,Nothing) -> do
+        (_,_,_,process) <- createProcess (proc "pg_ctl" ["stop","-D",pg.epDataDir,"-m","fast","-w","-t","5"])
+          { std_in = NoStream, std_out = NoStream, std_err = NoStream }
+        writeIORef helper (Just process)
+        restore afterControl
+        pure (Just process)
+    case control of
+      Nothing -> pure ()
+      Just process -> do
+        outcome <- restore (waitForProcess process)
+        writeIORef helper Nothing
+        unless (outcome == ExitSuccess) (fail ("Borrowed PostgreSQL stop helper failed: " <> show outcome))
+    outcome <- restore (waitForProcess postmaster)
+    unless (outcome == ExitSuccess) (fail ("Borrowed PostgreSQL exited abnormally: " <> show outcome))
+    remains <- doesFileExist (pg.epDataDir </> "postmaster.pid")
+    when remains (fail "Borrowed PostgreSQL PID file remained after confirmed exit")
 
 assertInSandbox :: TestSandbox -> FilePath -> IO ()
 assertInSandbox sandbox path = do
@@ -1614,6 +1824,16 @@ cleanupSandboxRoot :: FilePath -> Bool -> IO ()
 cleanupSandboxRoot root preserve
   | preserve = hPutStrLn stderr $ "[test-sandbox] preserved after failure: " <> root
   | otherwise = removeSandboxDirectory root
+
+cleanupBorrowedRoot :: Maybe SandboxLifetime -> FilePath -> Bool -> IO ()
+cleanupBorrowedRoot Nothing root preserve = cleanupSandboxRoot root preserve
+cleanupBorrowedRoot (Just _) root preserve
+  | preserve = hPutStrLn stderr $ "[test-sandbox] preserved after failure: " <> root
+  | otherwise = do
+      present <- doesDirectoryExist root
+      when present (removeDirectoryRecursive root)
+      remains <- doesDirectoryExist root
+      when remains (fail "Borrowed sandbox root remained after cleanup")
 
 removeSandboxDirectory :: FilePath -> IO ()
 removeSandboxDirectory root = do

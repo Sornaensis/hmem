@@ -1,10 +1,10 @@
 module HMem.DB.TestHarnessSpec (spec) where
 
 import Control.Concurrent.Async (cancel, cancelWith, wait, waitCatch, withAsync)
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (Exception(..), SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, finally, fromException, try)
-import Control.Monad (void, when)
+import Control.Concurrent (threadDelay, forkIOWithUnmask, killThread)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, readMVar)
+import Control.Exception (Exception(..), SomeException, AsyncException(ThreadKilled), asyncExceptionFromException, asyncExceptionToException, bracket, finally, fromException, throwIO, try)
+import Control.Monad (void, when, forM_)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.Functor.Contravariant (contramap)
@@ -12,7 +12,7 @@ import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Pool (Pool, destroyAllResources)
 import Data.Text (Text)
 import Data.Int (Int64)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.Text qualified as T
 import Data.UUID (UUID)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -41,6 +41,198 @@ import HMem.Types (SubjectKind, subjectKindToText)
 spec :: Spec
 spec = do
   selectedBackend <- runIO readTestPostgresBackend
+
+  describe "Borrowed sandbox lifetime" $ do
+    it "joins its borrower while the pool and root remain usable, then releases them" $ do
+      lifetime <- newSandboxLifetime
+      owned <- newIORef Nothing
+      drains <- newIORef (0 :: Int)
+      withSandboxedTestEnvBorrowed lifetime
+        (\env -> writeIORef owned (Just env) >> pure env)
+        (\env -> do
+          doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` True
+          runSession env.pool (Session.sql "SELECT 1")
+          modifyIORef' drains (+1))
+        (\_ _ -> pure ())
+      Just env <- readIORef owned
+      doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` False
+      readIORef drains `shouldReturn` 1
+      retrySandboxLifetime lifetime
+      readIORef drains `shouldReturn` 1
+
+    it "retains the exact pool backend, PostgreSQL and root after failed drain caught outside, then recovers once" $ do
+      lifetime <- newSandboxLifetime
+      mayJoin <- newIORef False
+      owned <- newIORef Nothing
+      drains <- newIORef (0 :: Int)
+      result <- try @SomeException $ withSandboxedTestEnvBorrowed lifetime
+        (\env -> do
+          pid <- runSession env.pool $ Session.statement () (Statement.Statement "SELECT pg_backend_pid()" E.noParams (D.singleRow (D.column (D.nonNullable D.int4))) False)
+          observer <- createPool env.testDb.testDbConnStr 1 5.0 5000
+          writeIORef owned (Just (env,pid,observer))
+          pure ())
+        (\_ -> do
+          modifyIORef' drains (+1)
+          allowed <- readIORef mayJoin
+          when (not allowed) (fail "test borrower has not joined"))
+        (\_ _ -> pure ())
+      result `shouldSatisfy` either (const True) (const False)
+      Just (env,pid,observer) <- readIORef owned
+      -- Checking only query usability would miss destroyAllResources because
+      -- that API can recreate a connection. The original idle backend must live.
+      runSession observer (Session.statement pid (Statement.Statement "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)" (E.param (E.nonNullable E.int4)) (D.singleRow (D.column (D.nonNullable D.bool))) False)) `shouldReturn` True
+      doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` True
+      runSession env.pool (Session.sql "SELECT 1")
+      destroyAllResources observer
+      writeIORef mayJoin True
+      retrySandboxLifetime lifetime
+      doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` False
+      retrySandboxLifetime lifetime
+      readIORef drains `shouldReturn` 2
+
+    it "preserves asynchronous identity alongside drain diagnostics and cleans after a later confirmed join" $ do
+      lifetime <- newSandboxLifetime
+      mayJoin <- newIORef False
+      result <- try @SomeException $ withSandboxedTestEnvBorrowed lifetime
+        (\_ -> pure ())
+        (\_ -> readIORef mayJoin >>= \ok -> when (not ok) (fail "test async drain failed"))
+        (\_ _ -> throwIO ThreadKilled :: IO ())
+      case result of
+        Left failure -> (fromException failure :: Maybe AsyncException) `shouldBe` Just ThreadKilled
+        Right () -> expectationFailure "Expected original asynchronous cause"
+      failures <- sandboxLifetimeFailures lifetime
+      any (isInfixOf "test async drain failed") failures `shouldBe` True
+      any (isInfixOf "thread killed") failures `shouldBe` True
+      writeIORef mayJoin True
+      retrySandboxLifetime lifetime
+
+    it "preserves primary causes across PostgreSQL and root release failures after a successful borrower drain" $ do
+      forM_ [(True,False),(False,False),(True,True),(False,True)] $ \(asynchronous,failRoot) -> do
+        releaseAllowed <- newIORef False
+        drains <- newIORef (0 :: Int)
+        owned <- newIORef Nothing
+        let releaseMessage = if failRoot then "primary test root release failure" else "primary test PostgreSQL release failure"
+            rejectRelease = readIORef releaseAllowed >>= \ok -> when (not ok) (fail releaseMessage)
+            primary = if asynchronous then throwIO ThreadKilled else expectationFailure "primary synchronous use failure"
+        lifetime <- newSandboxLifetimeWithReleaseHooks
+          (if failRoot then pure () else rejectRelease)
+          (if failRoot then rejectRelease else pure ())
+        result <- try @SomeException $ withSandboxedTestEnvBorrowed lifetime
+          (\env -> writeIORef owned (Just env) >> pure ())
+          (const (modifyIORef' drains (+1))) (\_ _ -> primary :: IO ())
+        Just env <- readIORef owned
+        (do
+          readIORef drains `shouldReturn` 1
+          case result of
+            Left failure | asynchronous -> (fromException failure :: Maybe AsyncException) `shouldBe` Just ThreadKilled
+                         | otherwise -> do
+                             show failure `shouldSatisfy` isInfixOf "primary synchronous use failure"
+                             show failure `shouldSatisfy` isInfixOf releaseMessage
+            Right () -> expectationFailure "Expected the original use failure"
+          failures <- sandboxLifetimeFailures lifetime
+          any (isInfixOf (if asynchronous then "thread killed" else "primary synchronous use failure")) failures `shouldBe` True
+          any (isInfixOf releaseMessage) failures `shouldBe` True
+          doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` True
+          doesFileExist (env.testDb.testDbDataDir </> "postmaster.pid") `shouldReturn` not failRoot
+          writeIORef releaseAllowed True
+          retrySandboxLifetime lifetime
+          doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` False
+          readIORef drains `shouldReturn` 1)
+          `finally` (writeIORef releaseAllowed True >> retrySandboxLifetime lifetime)
+
+    it "releases a failed acquisition without registering or draining an absent borrower" $ do
+      lifetime <- newSandboxLifetime
+      root <- newIORef Nothing
+      result <- try @SomeException $ withSandboxedTestEnvBorrowed lifetime
+        (\env -> writeIORef root (Just env.testSandbox.sandboxRoot) >> fail "test acquire failed" :: IO ())
+        (\_ -> expectationFailure "Absent borrower cannot be drained")
+        (\_ _ -> pure ())
+      result `shouldSatisfy` either (const True) (const False)
+      Just path <- readIORef root
+      doesDirectoryExist path `shouldReturn` False
+
+    it "registers and joins the actual child when cancellation races the acquisition handoff" $ do
+      lifetime <- newSandboxLifetime
+      acquired <- newEmptyMVar
+      blocked <- newEmptyMVar
+      childFinished <- newEmptyMVar
+      drains <- newIORef (0 :: Int)
+      let acquire env = do
+            child <- forkIOWithUnmask $ \unmask ->
+              unmask (takeMVar blocked) `finally` putMVar childFinished ()
+            -- Signal before returning ownership; the helper's masked handoff
+            -- must register the child before pending cancellation is delivered.
+            putMVar acquired env
+            pure child
+          drain child = killThread child >> readMVar childFinished >> modifyIORef' drains (+1)
+      withAsync (withSandboxedTestEnvBorrowed lifetime acquire drain (\_ _ -> takeMVar blocked)) $ \owner -> do
+        Just env <- timeout 15000000 (takeMVar acquired)
+        timeout 5000000 (cancel owner) `shouldReturn` Just ()
+        readMVar childFinished `shouldReturn` ()
+        readIORef drains `shouldReturn` 1
+        doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` False
+
+    it "vetoes root release after a strict PostgreSQL release failure and recovers the same capability" $ do
+      releaseAllowed <- newIORef False
+      rootReleases <- newIORef (0 :: Int)
+      owned <- newIORef Nothing
+      lifetime <- newSandboxLifetimeWithReleaseHooks
+        (readIORef releaseAllowed >>= \ok -> when (not ok) (fail "injected strict PostgreSQL release failure"))
+        (modifyIORef' rootReleases (+1))
+      result <- try @SomeException $ withSandboxedTestEnvBorrowed lifetime
+        (\env -> writeIORef owned (Just env) >> pure ()) (const (pure ())) (\_ _ -> pure ())
+      result `shouldSatisfy` either (const True) (const False)
+      Just env <- readIORef owned
+      (do
+        doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` True
+        doesFileExist (env.testDb.testDbDataDir </> "postmaster.pid") `shouldReturn` True
+        readIORef rootReleases `shouldReturn` 0
+        bracket (createPool env.testDb.testDbConnStr 1 5.0 5000) destroyAllResources $ \observer ->
+          runSession observer (Session.sql "SELECT 1")
+        writeIORef releaseAllowed True
+        retrySandboxLifetime lifetime
+        doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` False
+        readIORef rootReleases `shouldReturn` 1
+        retrySandboxLifetime lifetime
+        readIORef rootReleases `shouldReturn` 1)
+        `finally` (writeIORef releaseAllowed True >> retrySandboxLifetime lifetime)
+
+    it "retains a failed root release without repeating the completed PostgreSQL release" $ do
+      releaseAllowed <- newIORef False
+      postgresReleases <- newIORef (0 :: Int)
+      owned <- newIORef Nothing
+      lifetime <- newSandboxLifetimeWithReleaseHooks (modifyIORef' postgresReleases (+1))
+        (readIORef releaseAllowed >>= \ok -> when (not ok) (fail "injected strict root release failure"))
+      result <- try @SomeException $ withSandboxedTestEnvBorrowed lifetime
+        (\env -> writeIORef owned (Just env) >> pure ()) (const (pure ())) (\_ _ -> pure ())
+      result `shouldSatisfy` either (const True) (const False)
+      Just env <- readIORef owned
+      (do
+        doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` True
+        doesFileExist (env.testDb.testDbDataDir </> "postmaster.pid") `shouldReturn` False
+        readIORef postgresReleases `shouldReturn` 1
+        writeIORef releaseAllowed True
+        retrySandboxLifetime lifetime
+        doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` False
+        readIORef postgresReleases `shouldReturn` 1)
+        `finally` (writeIORef releaseAllowed True >> retrySandboxLifetime lifetime)
+
+    it "retains the actual in-flight PostgreSQL control helper and joins it on recovery without a replacement" $ do
+      controls <- newIORef (0 :: Int)
+      owned <- newIORef Nothing
+      lifetime <- newSandboxLifetimeWithControlHook
+        (modifyIORef' controls (+1) >> fail "injected failure after actual PostgreSQL helper registration")
+      result <- try @SomeException $ withSandboxedTestEnvBorrowed lifetime
+        (\env -> writeIORef owned (Just env) >> pure ()) (const (pure ())) (\_ _ -> pure ())
+      result `shouldSatisfy` either (const True) (const False)
+      Just env <- readIORef owned
+      (do
+        doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` True
+        readIORef controls `shouldReturn` 1
+        retrySandboxLifetime lifetime
+        readIORef controls `shouldReturn` 1
+        doesDirectoryExist env.testSandbox.sandboxRoot `shouldReturn` False)
+        `finally` retrySandboxLifetime lifetime
 
   describe "PostgreSQL test backend selection" $ do
     it "defaults to native and accepts both explicit typed values" $ do

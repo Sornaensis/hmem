@@ -38,6 +38,8 @@ ghc-options:
 
 library:
   source-dirs: src
+  c-sources: cbits/session_archive.c
+  extra-libraries: z
 
 tests:
   hmem-core-test:

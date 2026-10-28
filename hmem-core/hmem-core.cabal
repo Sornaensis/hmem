@@ -40,6 +40,7 @@ library
       HMem.DB.Timeline
       HMem.DB.Workspace
       HMem.DB.WorkspaceGroup
+      HMem.SessionArchive.Codec
       HMem.Types
   other-modules:
       Paths_hmem_core
@@ -64,6 +65,10 @@ library
       UndecidableInstances
       TypeApplications
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints
+  c-sources:
+      cbits/session_archive.c
+  extra-libraries:
+      z
   build-depends:
       aeson >=2.0
     , async
@@ -113,6 +118,7 @@ test-suite hmem-core-test
       HMem.DB.TimelineSpec
       HMem.DB.WorkspaceSpec
       HMem.ObservationSubjectMatchCorpus
+      HMem.SessionArchive.CodecSpec
       HMem.TypesSpec
       SpecHook
       Paths_hmem_core

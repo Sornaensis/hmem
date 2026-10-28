@@ -29,7 +29,10 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & info . description ?~ "Repository-scoped observation API with immutable provenance. Automated callers declare self-reported role/model metadata in X-HMem-Bot-Identity; it grants no permissions and local bootstrap remains tokenless. Known credential bots must declare on unsafe API requests. Session effective_actor is attribution alongside the unchanged authority-bearing principal. Task placement mutations can return structured lifecycle conflicts when project, hierarchy, or dependency invariants reject the requested state."
   & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
   & components . schemas . at "ObservationContentConflict" ?~ observationContentConflictSchema
+  & components . schemas . at "SessionArchiveManifest" ?~ sessionArchiveManifestSchema
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/evidence.zip" ?~ taskEvidenceArchivePath
+  & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive" ?~ sessionArchiveManifestPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive/{generationId}/content" ?~ sessionArchiveContentPath
   & paths . traversed . parameters %~ (<> [Inline botIdentityHeader])
   & paths %~ InsOrdMap.mapWithKey documentSessionPath
   & tags .~ InsOrdSet.fromList
@@ -72,6 +75,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
   where
     documentSessionPath path item
+      | "/archive" `isInfixOf` path = item
       | "/sessions" `isInfixOf` path = let document operation = documentSession operation
                                               & parameters . traversed %~ sessionParameter path
           in item & get %~ fmap document & post %~ fmap document & put %~ fmap document
@@ -925,6 +929,64 @@ timelineBucketsResponseOpts :: SchemaOptions
 timelineBucketsResponseOpts = opts { fieldLabelModifier = \case
   "timelineBucketsWorkspaceId" -> "workspace_id"; "timelineBucketsSince" -> "since"; "timelineBucketsUntil" -> "until"; "timelineBucketsBucket" -> "bucket"; "timelineBucketsBuckets" -> "buckets"; "timelineBucketsNextSince" -> "next_since"; other -> camelToSnake other }
 
+
+sessionArchiveManifestSchema :: Schema
+sessionArchiveManifestSchema = mempty
+  & type_ ?~ OpenApiObject
+  & required .~ ["workspace_id","session_id","state","generation_id","codec","codec_implementation","raw_bytes","raw_records","raw_sha256","compressed_bytes","compressed_sha256","content_path","progress","retry_after_ms","error","message","retryable"]
+  & properties .~ InsOrdMap.fromList
+    ([ (key,Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid")) | key<-["workspace_id","session_id"] ]
+     <> [("state",Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["preparing","retrying","ready","failed"]))]
+     <> [(key,Inline (mempty & type_ ?~ OpenApiString & nullable ?~ True)) | key<-["generation_id","codec","codec_implementation","raw_sha256","compressed_sha256","content_path","error","message"]]
+     <> [(key,Inline (decimalSchema & nullable ?~ (key=="compressed_bytes"))) | key<-["raw_bytes","raw_records","compressed_bytes"]]
+     <> [("retryable",Inline (mempty & type_ ?~ OpenApiBoolean))
+        ,("retry_after_ms",Inline (mempty & type_ ?~ OpenApiInteger & nullable ?~ True & minimum_ ?~ 1000 & maximum_ ?~ 60000))
+        ,("progress",Inline (mempty & type_ ?~ OpenApiObject & required .~ ["phase","raw_bytes","compressed_bytes"]
+            & properties .~ InsOrdMap.fromList
+              [("phase",Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["queued","compressing","verifying","ready"]))
+              ,("raw_bytes",Inline decimalSchema),("compressed_bytes",Inline decimalSchema)]))])
+  where decimalSchema=mempty & type_ ?~ OpenApiString & pattern ?~ "^(0|[1-9][0-9]{0,18})$"
+
+archivePathParameters :: [Text] -> [Referenced Param]
+archivePathParameters = map (\key -> Inline (mempty & name .~ key & in_ .~ ParamPath & required ?~ True
+  & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid")))
+
+sessionArchiveManifestPath :: PathItem
+sessionArchiveManifestPath = mempty
+  & parameters .~ archivePathParameters ["workspaceId","sessionId"]
+  & get ?~ (mempty & tags .~ InsOrdSet.singleton "Agent Sessions"
+      & summary ?~ "Check complete sealed-session archive readiness"
+      & description ?~ "Current workspace read permission and session identity are checked before metadata. Idempotently schedules a terminated session; never changes its receipt or serves staged generations. All counts use decimal strings. Preparing/retrying returns bounded current-attempt progress and Retry-After; failed requires operator repair. Cache-Control:no-store."
+      & responses .~ Responses Nothing (InsOrdMap.fromList
+          ([(code,Inline (mempty & description .~ message & content .~ InsOrdMap.singleton "application/json"
+              (mempty & schema ?~ (if code == 503 then Inline (mempty & oneOf ?~
+                [Ref (Reference "#/components/schemas/SessionArchiveManifest")
+                ,Inline (mempty & type_ ?~ OpenApiObject & required .~ ["error","message"]
+                    & properties .~ InsOrdMap.fromList
+                      [("error",Inline (mempty & type_ ?~ OpenApiString & maxLength ?~ 64 & enum_ ?~ ["archive_unavailable"]))
+                      ,("message",Inline (mempty & type_ ?~ OpenApiString & maxLength ?~ 128))])])
+                else Ref (Reference "#/components/schemas/SessionArchiveManifest")))))
+            | (code,message)<-[(200,"Complete immutable ready generation."),(202,"Preparing or retrying; Retry-After supplied."),(503,"Terminal failed manifest (retryable:false), or transient archive_unavailable error.")]]
+          <> [(401,Inline (mempty & description .~ "Authentication required."))
+             ,(403,Inline (mempty & description .~ "Workspace read permission required."))
+             ,(404,Inline (mempty & description .~ "Active workspace or same-workspace session not found."))
+             ,(409,Inline (mempty & description .~ "session_state_conflict: session is active."))])))
+
+sessionArchiveContentPath :: PathItem
+sessionArchiveContentPath = mempty
+  & parameters .~ (archivePathParameters ["workspaceId","sessionId","generationId"] <>
+      [Inline (mempty & name .~ "If-None-Match" & in_ .~ ParamHeader & schema ?~ Inline (mempty & type_ ?~ OpenApiString))])
+  & get ?~ (mempty & tags .~ InsOrdSet.singleton "Agent Sessions"
+      & summary ?~ "Download the complete published gzip generation"
+      & description ?~ "Pins the exact published generation. Authorizes before all metadata and conditional responses, and revalidates credentials and workspace read access between bounded part fetches and writes. A bounded whole-object preflight checks stored integrity before 200/304; transfer reads it again with no database lease spanning network writes. Content-Length is compressed bytes. X-HMem-Archive-Generation/SHA256/Raw-Bytes/Raw-SHA256 bind the response to the manifest. ETag binds generation, digest and a secret-safe authentication-context fingerprint; private,no-cache,no-transform and Vary:Authorization,Cookie require revalidation. Never sets Content-Encoding:gzip. A post-header failure or cancellation aborts transfer; clients must verify the complete count/digest. Fifteen-minute preflight and transfer deadlines."
+      & responses .~ Responses Nothing (InsOrdMap.fromList
+          [(200,Inline (mempty & description .~ "Complete stored single-member gzip object."
+              & content .~ InsOrdMap.singleton "application/gzip" (mempty & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "binary"))))
+          ,(304,Inline (mempty & description .~ "Current authorization and complete object verified; matching generation/authentication-context ETag."))
+          ,(401,Inline (mempty & description .~ "Authentication required or credential revoked/expired."))
+          ,(403,Inline (mempty & description .~ "Workspace read permission required."))
+          ,(404,Inline (mempty & description .~ "Unknown or unbound published generation, workspace or session."))
+          ,(503,Inline (mempty & description .~ "archive_unavailable: complete object cannot be read; Retry-After:1."))]))
 
 taskEvidenceArchivePath :: PathItem
 taskEvidenceArchivePath = mempty

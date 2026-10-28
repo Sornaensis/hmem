@@ -57,11 +57,13 @@ import Crypto.Hash (Digest, SHA256, hash)
 import Crypto.Random (getRandomBytes)
 import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), TokenLookupMode(..), authMcpProvenanceToken, authStaticBearerEnabled, authStaticBearerToken)
 import HMem.DB.Auth qualified as Auth
+import HMem.DB.AgentSession qualified as AgentSessions
 import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, resolveEffectiveActor, withEffectiveActorContext, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
-import HMem.Server.API (HMemAPI, serverWithPrefixProofs, authorizeAgentSessionWrite)
+import HMem.Server.API (HMemAPI, serverWithSessionReaders, authorizeAgentSessionWrite)
+import HMem.Server.Archive.HTTP (archiveMiddleware)
 import HMem.Server.SessionPrefix (PrefixRegistry)
 import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
@@ -113,6 +115,9 @@ mkAppWithServicesAt oidcNow prefixes discovery oidcCodeExchange changeStreamConf
   discoveryService <- maybe (newObservationDiscovery False) pure discovery
   rateLimit <- rateLimitMiddleware rateLimitCfg
   archive <- newArchiveMiddleware pool
+  -- Verified bytes only: no native decoder, DB lease or background thread
+  -- survives a request. The Application owns this bounded heap cache.
+  readers <- AgentSessions.newReaderCache
   jwksCache <- newIORef Nothing
   oidcLogins <- newIORef Map.empty
   pure $ requestIdMiddleware
@@ -125,11 +130,12 @@ mkAppWithServicesAt oidcNow prefixes discovery oidcCodeExchange changeStreamConf
         $ csrfMiddleware authCfg pool
         $ principalContextMiddleware jwksCache authCfg pool
         $ authMiddleware authCfg
+        $ archiveMiddleware pool (resolveArchivePrincipal jwksCache pool authCfg)
         $ archive
         $ agentSessionBodyLimit pool
         $ openApiMiddleware
         $ normalizeObservationIfMatch
-         $ serve (Proxy @HMemAPI) (serverWithPrefixProofs prefixes authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
+         $ serve (Proxy @HMemAPI) (serverWithSessionReaders (Just readers) prefixes authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
 
 -- Authorize before inspecting either declared size or streamed body content.
 -- Read at most 2 MiB before JSON/base64 decoding, including chunked requests.
@@ -280,14 +286,26 @@ resolveCookieSessionPrincipal pool deployedCfg req = case lookupCookie deployedC
   Nothing -> pure Nothing
   Just sessionToken -> Auth.resolveAuthSessionPrincipal pool sessionToken
 
+-- The normal request boundary records token usage once. Archive part checks
+-- revalidate the same credential without adding a write for every part.
+resolveArchivePrincipal :: JWKSetCache -> Pool Hasql.Connection -> AuthConfig -> Wai.Request -> IO (Maybe Principal)
+resolveArchivePrincipal jwksCache pool authCfg req = case authCfg.mode of
+  AuthModeLocal -> pure (resolveRequestPrincipal authCfg req)
+  AuthModeDeployed -> case bearerToken req of
+    Just token -> resolveDeployedBearerPrincipalWithUsage False jwksCache pool authCfg.deployed token
+    Nothing -> resolveCookieSessionPrincipal pool authCfg.deployed req
+
 resolveDeployedBearerPrincipal :: JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Maybe Principal)
-resolveDeployedBearerPrincipal jwksCache pool deployedCfg token = do
+resolveDeployedBearerPrincipal = resolveDeployedBearerPrincipalWithUsage True
+
+resolveDeployedBearerPrincipalWithUsage :: Bool -> JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Maybe Principal)
+resolveDeployedBearerPrincipalWithUsage recordUsage jwksCache pool deployedCfg token = do
   mPatPrincipal <- case deployedCfg.tokenLookup of
     TokenLookupDatabase -> Auth.resolveAccessTokenPrincipalWithSecret pool deployedCfg.tokenHashSecret token
   case mPatPrincipal of
     Just resolved -> do
-      withPrincipalContext (Just resolved.principal) $
-        Auth.touchAccessTokenLastUsed pool resolved.tokenId
+      if recordUsage then withPrincipalContext (Just resolved.principal)
+        (Auth.touchAccessTokenLastUsed pool resolved.tokenId) else pure ()
       pure (Just resolved.principal)
     Nothing        -> resolveJwtPrincipal jwksCache pool deployedCfg token
 
@@ -978,8 +996,8 @@ corsMiddleware authCfg corsCfg = cors $ \req ->
       | otherwise = False
     policy = simpleCorsResourcePolicy
       { corsMethods        = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match", "X-HMem-Bot-Identity"]
-      , corsExposedHeaders = Just ["X-Request-Id"]
+      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match", "If-None-Match", "X-HMem-Bot-Identity"]
+      , corsExposedHeaders = Just ["X-Request-Id", "ETag", "Retry-After", "X-HMem-Archive-Generation", "X-HMem-Archive-SHA256", "X-HMem-Archive-Raw-Bytes", "X-HMem-Archive-Raw-SHA256"]
       }
 
 data RateLimitBucket = RateLimitBucket

@@ -174,13 +174,19 @@ that append boundary.
 Prefix workers and ZIP exports own sequential decoder state across their fair
 turns instead of recreating it for each 64 KiB window. Preserve the existing
 two prefix workers and two ZIP admissions. For ordinary paginated evidence
-reads, use an application-owned cache of four decoder entries keyed by
+reads, use an application-owned cache of four verified-byte entries keyed by
 resolved authenticated principal/account and credential or authentication-session
 context, workspace, session and immutable generation. An audience is that
 resolved security identity, not a generic JWT `aud` value or transport channel;
 reuse the existing equivalent application type where available. Each entry
 has a 30-second idle TTL and at most two verified original chunks (2 MiB);
 the global verified-chunk cache is at most 8 MiB. Serialize use of an entry.
+Between ordinary requests, entries retain verified bytes only. A cache fill
+owns its checkpoint decoder and closes it before returning; it does not retain
+an advancing native decoder, transaction, connection or background reaper.
+Repeated tiny pages within those verified chunks use the cached bytes. Crossing
+the retained chunk boundary performs another bounded checkpoint fill. Prefix
+and ZIP processing retain their explicitly owned sequential decoder contexts.
 Recheck current authorization before lookup or reuse. No cached state owns a
 transaction or pool connection between requests. Evict only idle entries;
 admission failure returns retryable 503 with `Retry-After: 1`. Offset mismatch,
@@ -193,6 +199,30 @@ metadata/raw statements can race raw reclamation: on a missing/short raw read,
 re-resolve the source and retry against the published archive once. If no
 consistent complete source is available, fail closed. Range reads, proofs,
 replay and ZIP scans must cover this race; a short read is never successful EOF.
+
+Archived range service allocates 25 seconds to logical work and reserves five
+seconds for database/native decoder cleanup within its 30-second budget.
+Reader-owned lookup statements use transaction-local `lock_timeout` of at most
+one second and `statement_timeout` of at most four seconds, preserving stricter
+existing settings. Each guarded query owns its transaction and returns its pool
+connection before decoding or consumer callbacks. A typed archive-read failure
+retains the database cause internally; the HTTP API returns a fixed
+`archive_unavailable` 503 with `Retry-After: 1`.
+
+The terminated evidence route selects the dedicated
+`readSessionEvidenceRange`/`readSessionEvidenceRangeWithCache` entrypoints using
+its existing route identity. Their session metadata and raw-first SELECTs use
+the same local query guard as the archive lookups. Active and direct legacy
+range functions retain their existing behavior; selecting the guarded path
+does not add a state-probe query or a foreground round trip.
+
+This guard does not establish hard cancellation for the whole route. Existing
+authentication, the readiness enqueue mutation, pool acquisition and transaction
+context setup remain outside the guarded SELECT body. Active/direct-legacy raw
+calls and arbitrary driver/network stalls retain their inherited behavior.
+The 25-second timer requests cancellation; cleanup still must finish before
+releasing cache/native ownership.
+Active range requests retain their existing 30-second logical work deadline.
 
 ## HTTP and client
 
@@ -240,6 +270,26 @@ authorization between bounded streamed parts. Release pool leases before
 network writes. New manifest counts/offsets use decimal strings so JavaScript
 does not round 64-bit integers.
 
+`HMem.Server.Archive.HTTP` implements these routes as application middleware.
+It validates the immutable manifest and reads all bounded compressed parts once
+before successful content headers, checking exact positions, bindings, count
+and SHA-256. It reads the same pinned generation again for delivery. This costs
+two compressed storage reads and must be included in full-download latency
+measurements. Each pass retains at most one 1 MiB part and one hash context;
+neither uses a transcript-sized buffer or temporary file. Preflight and transfer
+each have a 15-minute logical work deadline. Disconnects and cancellation unwind
+the request without a database lease spanning network backpressure; the query
+guard and inherited cancellation limits above still apply.
+
+The server re-resolves the request's credential or cookie session and checks
+current workspace permission before metadata, conditional responses and every
+bounded part fetch/write. Content cache policy is `private, no-cache,
+no-transform` with `Vary: Authorization, Cookie`. The ETag includes the immutable
+generation/digest and a hash binding the resolved authority and credential/session
+context. An old context's ETag cannot authorize a 304 under a new context.
+Manifests use `no-store`. Browser local-data ownership still requires the client
+logout/principal-switch invalidation described below.
+
 The sealed viewer waits for this object; it does not fall back to raw range
 viewing. A worker stages the complete compressed download in a private local
 generation and verifies compressed count/hash. Only after complete transfer
@@ -283,7 +333,7 @@ These are prospective implementation gates, not measured product results:
 | Work | Limit |
 | --- | --- |
 | Archive attempt through verified publication | max(30 s, 120 s × ceil(raw GiB)); timeout retains raw evidence and retries |
-| Legacy range request | p95 ≤ max(500 ms, twice the matching raw baseline); finite 30 s service deadline |
+| Legacy range request | p95 ≤ max(500 ms, twice the matching raw baseline); finite 30 s service deadline remains required; inherited cancellation limits above remain unqualified |
 | Archive-related incremental server working set | ≤ 128 MiB over a matching idle/foreground baseline, fixed across 1 MiB/100 MiB/1 GiB |
 | Client incremental processing memory | ≤ 128 MiB over the matching viewer baseline; index/decoded data staged on disk |
 | Full-view deadline at controlled 100 Mbit/s | 2 × compressed bytes / 12,500,000 + 120 s × ceil(raw GiB) + 5 s; empty sessions use one size unit |

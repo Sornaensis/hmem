@@ -100,20 +100,21 @@ streamArchive pool workspace task check send = do
             cursor <- newIORef (0 :: Int64)
             crc <- newIORef (0xffffffff :: Word32)
             hash <- newIORef (hashInit :: Context SHA256)
-            let input = do
-                  at <- readIORef cursor
-                  if at == size then pure BS.empty else do
-                    check
-                    range <- DB.readSessionRange pool workspace session.id at 65536
-                    unless (range.session == session && range.offset == at && range.nextOffset > at && range.nextOffset <= size && range.nextOffset-at == fromIntegral (BS.length range.bytes)) failArchive
-                    writeIORef cursor range.nextOffset
-                    modifyIORef' crc (\previous -> BS.foldl' crcByte previous range.bytes)
-                    modifyIORef' hash (`hashUpdate` range.bytes)
-                    pure range.bytes
-                compress (Z.CompressInputRequired next) = input >>= next >>= compress
-                compress (Z.CompressOutputAvailable bytes next) = emit bytes >> next >>= compress
-                compress Z.CompressStreamEnd = pure ()
-            compress (Z.compressIO Z.rawFormat Z.defaultCompressParams{Z.compressBufferSize=65536})
+            bracket (DB.newSessionReader pool workspace session.id size) DB.closeSessionReader $ \reader -> do
+              let input = do
+                    at <- readIORef cursor
+                    if at == size then pure BS.empty else do
+                      check
+                      bytes <- DB.readSessionReader reader at 65536
+                      unless (not (BS.null bytes) && fromIntegral (BS.length bytes) == min 65536 (size-at)) failArchive
+                      writeIORef cursor (at+fromIntegral (BS.length bytes))
+                      modifyIORef' crc (\previous -> BS.foldl' crcByte previous bytes)
+                      modifyIORef' hash (`hashUpdate` bytes)
+                      pure bytes
+                  compress (Z.CompressInputRequired next) = input >>= next >>= compress
+                  compress (Z.CompressOutputAvailable bytes next) = emit bytes >> next >>= compress
+                  compress Z.CompressStreamEnd = pure ()
+              compress (Z.compressIO Z.rawFormat Z.defaultCompressParams{Z.compressBufferSize=65536})
             actual <- readIORef cursor
             digest <- readIORef hash
             unless (actual == size && T.pack (show (hashFinalize digest :: Digest SHA256)) == expected) failArchive

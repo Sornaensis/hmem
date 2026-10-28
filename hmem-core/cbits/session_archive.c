@@ -10,12 +10,12 @@ const char *hmem_archive_zlib_version(void) { return zlibVersion(); }
 void *hmem_archive_codec_new(int encode) {
     hmem_codec *c = calloc(1, sizeof(*c));
     if (!c) return NULL;
-    c->encode = encode;
-    int result = encode
+    c->encode = encode > 0;
+    int result = c->encode
         ? deflateInit2(&c->stream, 6, Z_DEFLATED, 31, 8, Z_DEFAULT_STRATEGY)
-        : inflateInit2(&c->stream, 31);
+        : inflateInit2(&c->stream, encode == -1 ? -15 : 31);
     if (result != Z_OK) { free(c); return NULL; }
-    if (encode) {
+    if (c->encode) {
         c->header.os = 255;
         if (deflateSetHeader(&c->stream, &c->header) != Z_OK) {
             deflateEnd(&c->stream); free(c); return NULL;
@@ -37,7 +37,7 @@ int hmem_archive_codec_step(void *opaque, const unsigned char *input,
     uint32_t length, unsigned char *output, uint32_t capacity, int mode,
     uint32_t *consumed, uint32_t *produced, uint32_t *boundary) {
     hmem_codec *c = opaque;
-    if (!c || length > 65536 || capacity != 65536 || mode < 0 || mode > 2 ||
+    if (!c || length > 65536 || capacity == 0 || capacity > 65536 || mode < 0 || mode > 2 ||
         (uint64_t)(uInt)length != length || (uint64_t)(uInt)capacity != capacity)
         return Z_STREAM_ERROR;
     c->stream.next_in = (Bytef *)input; c->stream.avail_in = (uInt)length;
@@ -50,6 +50,17 @@ int hmem_archive_codec_step(void *opaque, const unsigned char *input,
     *boundary = (uint32_t)c->stream.data_type;
     c->stream.next_in = NULL; c->stream.next_out = NULL;
     c->stream.avail_in = 0; c->stream.avail_out = 0;
+    return result;
+}
+
+/* Restore a zran point. The preceding byte supplies the remaining high bits. */
+int hmem_archive_restore(void *opaque, uint32_t bits, uint32_t byte,
+    const unsigned char *dictionary, uint32_t length) {
+    hmem_codec *c = opaque;
+    if (!c || c->encode || bits > 7 || byte > 255 || length > 32768)
+        return Z_STREAM_ERROR;
+    int result = bits ? inflatePrime(&c->stream, (int)bits, (int)(byte >> (8-bits))) : Z_OK;
+    if (result == Z_OK && length) result = inflateSetDictionary(&c->stream, dictionary, (uInt)length);
     return result;
 }
 

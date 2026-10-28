@@ -1,6 +1,6 @@
 module HMem.SessionArchive.CodecSpec (spec) where
 
-import Control.Exception (try)
+import Control.Exception (try, bracket)
 import Control.Monad (forM_, when)
 import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
 import Data.ByteString (ByteString)
@@ -74,6 +74,32 @@ spec = describe "Single-member archive codec" $ do
   it "keeps authoritative arithmetic above 4 GiB and rejects signed overflow" $ do
     checkedAdd 4294967296 1048593 `shouldReturn` 4296015889
     checkedAdd maxBound 1 `shouldThrow` anyException
+  it "restores non-byte-aligned checkpoints and keeps one decoder across tiny sequential reads" $ do
+    let raw = BS.concat (replicate 80000 "{\"payload\":\"shared dictionary across checkpoint boundaries\"}\r\n")
+    (_,compressed) <- encodeChunks (cuts 65521 raw)
+    source <- sourceOf (cuts 1021 compressed)
+    points <- newIORef []
+    _ <- verify (fromIntegral (BS.length raw)) source (const (pure ())) (\p -> modifyIORef' points (p:))
+    checkpoints' <- reverse <$> readIORef points
+    any ((/=0) . (.unusedBits)) checkpoints' `shouldBe` True
+    forM_ checkpoints' $ \point -> do
+      let start=fromIntegral point.rawOffset
+          compressedStart=fromIntegral point.compressedOffset-if point.unusedBits == 0 then 0 else 1
+          count=min 1048576 (BS.length raw-start)
+      input <- sourceOf (cuts 17 (BS.drop compressedStart compressed))
+      bracket (newDecoder point input) closeDecoder $ \decoder -> do
+        pieces <- sequence [readDecoder decoder n | n <- map BS.length (cuts 1021 (BS.take count (BS.drop start raw)))]
+        BS.concat pieces `shouldBe` BS.take count (BS.drop start raw)
+    -- A wrong dictionary can successfully inflate plausible bytes. Integrity
+    -- belongs to the complete-original-chunk hash in the compatible reader.
+    case filter ((>0) . (.rawOffset)) checkpoints' of
+      [] -> expectationFailure "missing dictionary checkpoint"
+      point:_ -> do
+        let bad=point {dictionary=BS.map (`xor` 1) point.dictionary}
+            start=fromIntegral point.compressedOffset-if point.unusedBits == 0 then 0 else 1
+        input <- sourceOf (cuts 65536 (BS.drop start compressed))
+        result <- try @CodecFailure $ bracket (newDecoder bad input) closeDecoder (\decoder -> readDecoder decoder 65536)
+        result `shouldSatisfy` either (const True) (/=BS.take 65536 (BS.drop (fromIntegral point.rawOffset) raw))
   it "hashes a generated 64 MiB stream with bounded live memory and no retained source/output list" $ do
     enabled <- getRTSStatsEnabled
     if not enabled then pendingWith "Run this gate with +RTS -T" else do

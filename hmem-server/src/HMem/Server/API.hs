@@ -21,10 +21,13 @@ module HMem.Server.API
   , serverWithChangeStream
   , serverWithDiscovery
   , serverWithPrefixProofs
+  , serverWithSessionReaders
   , prepareObservationDiscovery
   , AgentSessionRequest
   , authorizeAgentSessionWrite
   , authorizeTaskEvidenceRead
+  , authorizeSessionRead
+  , archiveAudience
   ) where
 
 import Control.Exception (try, throwIO)
@@ -34,6 +37,8 @@ import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKeyMap
+import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Int (Int64)
@@ -53,6 +58,7 @@ import Network.HTTP.Media ((//))
 import Rel8 hiding (Delete)
 import Servant
 import System.IO (stderr)
+import System.Timeout (timeout)
 
 import HMem.Config qualified as Config
 import HMem.AgentSession qualified as AgentSession
@@ -78,6 +84,7 @@ import HMem.Server.ObservationDiscovery qualified as Discovery
 import HMem.Server.SessionPrefix qualified as Prefix
 import HMem.Server.WebSocket qualified as WS
 import HMem.Server.Snapshot (materializeSnapshotWithProfile)
+import HMem.SessionArchive.Codec qualified as ArchiveCodec
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -162,8 +169,8 @@ type AgentSessionAPI =
   :<|> Capture "sessionId" UUID :> "tasks" :> QueryParam "limit" Text :> QueryParam "after_task_id" Text :> Get '[JSON] SessionWire.SessionTaskPageResponse
   :<|> Capture "sessionId" UUID :> "tasks" :> Capture "taskId" UUID :> Put '[JSON] NoContent
   :<|> Capture "sessionId" UUID :> "terminate" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.TerminateSessionRequest) :> Post '[JSON] AgentSession.AgentSession
-  :<|> Capture "sessionId" UUID :> "transcript" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Get '[JSON] SessionWire.SessionRangeResponse
-  :<|> Capture "sessionId" UUID :> "evidence" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Get '[JSON] SessionWire.SessionRangeResponse
+  :<|> Capture "sessionId" UUID :> "transcript" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Header "Authorization" Text :> Header "Cookie" Text :> Get '[JSON] SessionWire.SessionRangeResponse
+  :<|> Capture "sessionId" UUID :> "evidence" :> QueryParam "offset" Text :> QueryParam "limit" Text :> Header "Authorization" Text :> Header "Cookie" Text :> Get '[JSON] SessionWire.SessionRangeResponse
   :<|> Capture "sessionId" UUID :> "prefix-verifications" :> ReqBody '[TolerantJSON] (AgentSessionRequest SessionWire.PrefixProofRequest) :> Post '[JSON] SessionWire.PrefixProofResponse
   :<|> Capture "sessionId" UUID :> "prefix-verifications" :> Capture "operationId" UUID :> Get '[JSON] SessionWire.PrefixProofResponse
 
@@ -490,10 +497,11 @@ sessionError status kind message = status
 -- through the generic database logger or echo database/parser details.
 handleSessionErrors :: IO a -> Handler a
 handleSessionErrors action = do
-  result <- liftIO $ try @DBException (try @AgentSession.SessionException action)
+  result <- liftIO $ try @AgentSessions.ArchiveReadFailure
+    (try @ArchiveCodec.CodecFailure (try @DBException (try @AgentSession.SessionException action)))
   case result of
-    Right (Right value) -> pure value
-    Right (Left exception) -> throwError $ case exception.code of
+    Right (Right (Right (Right value))) -> pure value
+    Right (Right (Right (Left exception))) -> throwError $ case exception.code of
       AgentSession.SessionNotFound -> sessionError err404 "session_not_found" "Session or task not found"
       AgentSession.SessionTaskNotFound -> err404
         { errBody = Aeson.encode (object ["error" .= ("session_task_not_found" :: Text), "field" .= ("task_id" :: Text), "message" .= ("task_id must identify a live task in this workspace. Start it before creating a session." :: Text)])
@@ -505,13 +513,17 @@ handleSessionErrors action = do
       AgentSession.SessionTaskNotInProgress status -> err409
         { errBody = Aeson.encode (object ["error" .= ("session_task_not_in_progress" :: Text), "field" .= ("task_id" :: Text), "message" .= ("Start the task before creating or associating a session. Required status is in_progress; current status is " <> status <> "."), "required_status" .= ("in_progress" :: Text), "current_status" .= status])
         , errHeaders = [("Content-Type","application/json")] }
-    Left exception -> throwError $ case exception of
+    Right (Right (Left exception)) -> throwError $ case exception of
       DBCheckViolation{} -> sessionError err400 "session_invalid_input" "Invalid JSONL record or session constraint"
       DBForeignKeyViolation{} -> sessionError err404 "session_not_found" "Session or task not found"
       DBUniqueViolation{} -> sessionError err409 "session_conflict" "Concurrent session mutation conflicts"
       DBSerializationFailure -> sessionError err409 "session_conflict" "Concurrent session mutation conflicts"
       DBStatementTimeout -> sessionError err504 "session_timeout" "Session operation timed out"
       _ -> sessionError err500 "session_internal" "Session operation failed"
+    Right (Left _) -> throwError $ (sessionError err503 "archive_unavailable" "Complete archived evidence is unavailable")
+      {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
+    Left _ -> throwError $ (sessionError err503 "archive_unavailable" "Complete archived evidence is unavailable")
+      {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
 
 requireSessionWorkspace :: Pool Hasql.Connection -> UUID -> Auth.WorkspaceRole -> Handler ()
 requireSessionWorkspace pool workspace role = do
@@ -573,6 +585,28 @@ authorizeTaskEvidenceRead pool workspace task = do
   requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
   requireSessionTask pool workspace task
 
+-- Shared with the complete-archive transport; authorize before any manifest,
+-- conditional response or persisted bytes are inspected.
+authorizeSessionRead :: Pool Hasql.Connection -> UUID -> UUID -> Handler AgentSession.AgentSession
+authorizeSessionRead pool workspace identifier = do
+  requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
+  requireAgentSession pool workspace identifier
+
+-- Fingerprint the resolved authority and exact credential/session context.
+-- Generic JWT aud and effective bot metadata never identify cache ownership.
+archiveAudience :: Principal -> Maybe Text -> Maybe Text -> Text
+archiveAudience principal authorization cookie = AgentSession.sessionSha256 $
+  BS.concat $ map framed
+    [ TE.encodeUtf8 $ case principal.authority of
+        PrincipalGrantUser identifier -> "grant-user:" <> UUID.toText identifier
+        PrincipalSyntheticLocalSuperadmin -> "local-superadmin"
+        PrincipalNoAuthority -> "no-authority"
+    , TE.encodeUtf8 (actorTypeToText principal.actorType), TE.encodeUtf8 principal.actorId
+    , maybe "absent" (("present:" <>) . TE.encodeUtf8) authorization
+    , maybe "absent" (("present:" <>) . TE.encodeUtf8) cookie
+    ]
+  where framed bytes = BS8.pack (show $ BS.length bytes) <> ":" <> bytes
+
 parseSessionParam :: FromHttpApiData a => Text -> Handler a
 parseSessionParam value = either (const $ throwError $ sessionError err400 "validation_error" "Invalid session query parameter") pure (parseQueryParam value)
 
@@ -608,8 +642,24 @@ sessionRequest (AgentSessionRequest result) = either (const $ throwError $ sessi
 sessionIO :: Pool Hasql.Connection -> UUID -> IO a -> Handler a
 sessionIO _ workspace = handleSessionErrors . withWorkspaceIdContext (Just workspace)
 
-agentSessions :: Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
-agentSessions prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> importH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated :<|> proofH :<|> proofResultH
+sessionRangeIO :: AgentSession.SessionState -> UUID -> IO a -> Handler a
+sessionRangeIO expectedState workspace action = do
+  -- Archive work stops at 25 seconds, reserving five of the service budget's
+  -- 30 seconds for bounded DB/native cleanup. Ordinary raw driver/network
+  -- cancellation retains its inherited limitations; this is not a global
+  -- preemptive deadline. Active ranges keep their existing work deadline.
+  let workMicros = if expectedState == AgentSession.Terminated then 25000000 else 30000000
+  result <- handleSessionErrors $ withWorkspaceIdContext (Just workspace)
+    (try @AgentSessions.ReaderCacheBusy $ timeout workMicros action)
+  case result of
+    Left _ -> throwError $ (sessionError err503 "archive_busy" "Evidence readers are busy; retry shortly")
+      {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
+    Right Nothing -> throwError $ (sessionError err503 "archive_unavailable" "Evidence range timed out; retry shortly")
+      {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
+    Right (Just value) -> pure value
+
+agentSessions :: Maybe AgentSessions.ReaderCache -> Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
+agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> importH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated :<|> proofH :<|> proofResultH
   where
     readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
     writeAccess = authorizeAgentSessionWrite pool workspace
@@ -708,11 +758,18 @@ agentSessions prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> imp
       input <- sessionRequest request
       sessionIO pool workspace $ AgentSessions.terminateSession pool workspace identifier
         (AgentSession.TerminateSession input.expectedOffset input.expectedRevision input.finalBytes input.finalSha256)
-    rangeH expectedState identifier rawOffset rawLimit = do
+    rangeH expectedState identifier rawOffset rawLimit authorization cookie = do
       readAccess
       offset <- maybe (pure 0) (parseSessionParam @Int64) rawOffset
       limit <- maybe (pure SessionWire.defaultSessionRangeBytes) parseSessionParam rawLimit
-      result <- sessionIO pool workspace $ AgentSessions.readSessionRange pool workspace identifier offset limit
+      principal <- liftIO currentPrincipal >>= maybe (throwError $ sessionError err401 "unauthorized" "Authentication required") pure
+      result <- sessionRangeIO expectedState workspace $ case (expectedState, readers) of
+        (AgentSession.Terminated, Nothing) -> AgentSessions.readSessionEvidenceRange pool workspace identifier offset limit
+        (AgentSession.Terminated, Just cache) -> AgentSessions.readSessionEvidenceRangeWithCache cache
+          (AgentSessions.ArchiveAudience $ archiveAudience principal authorization cookie) pool workspace identifier offset limit
+        (_, Nothing) -> AgentSessions.readSessionRange pool workspace identifier offset limit
+        (_, Just cache) -> AgentSessions.readSessionRangeWithCache cache
+          (AgentSessions.ArchiveAudience $ archiveAudience principal authorization cookie) pool workspace identifier offset limit
       when (result.session.state /= expectedState) $
         throwError $ sessionError err409 "session_state_conflict" "Use transcript for active sessions and evidence for terminated sessions"
       pure $ SessionWire.SessionRangeResponse result.session result.offset (SessionWire.encodeSessionBytes result.bytes) result.nextOffset result.hasMore
@@ -742,12 +799,15 @@ serverWithDiscovery :: Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe D
 serverWithDiscovery = serverWithPrefixProofs Nothing
 
 serverWithPrefixProofs :: Maybe Prefix.PrefixRegistry -> Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe Discovery.ObservationDiscovery -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
-serverWithPrefixProofs prefixes authConfig changeStreamConfig discovery pool tracker wsState _ =
+serverWithPrefixProofs = serverWithSessionReaders Nothing
+
+serverWithSessionReaders :: Maybe AgentSessions.ReaderCache -> Maybe Prefix.PrefixRegistry -> Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe Discovery.ObservationDiscovery -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
+serverWithSessionReaders readers prefixes authConfig changeStreamConfig discovery pool tracker wsState _ =
        health pool tracker
   :<|> session authConfig pool
   :<|> sessionActivity pool
   :<|> activityTicket pool wsState
-  :<|> workspaces prefixes pool
+  :<|> workspaces readers prefixes pool
   :<|> groups pool
   :<|> observations pool
   :<|> discoveryH pool discovery
@@ -881,8 +941,8 @@ navigationOwnerOutcomes requests readOwner = forM requests $ \item -> do
     Left failure -> NavigationBatchOutcome { requestId = item.requestId, parent = item.parent, status = errHTTPCode failure, response = Nothing
       , error = Just (if errHTTPCode failure == 404 then "Navigation owner was not found" else "Navigation owner read failed") }
 
-workspaces :: Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces prefixes pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> navigationBatchH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH :<|> agentSessions prefixes pool :<|> taskAgentSessions pool where
+workspaces :: Maybe AgentSessions.ReaderCache -> Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> Server WorkspaceAPI
+workspaces readers prefixes pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> planningCountsH :<|> navigationH :<|> navigationBatchH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH :<|> agentSessions readers prefixes pool :<|> taskAgentSessions pool where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.

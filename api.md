@@ -55,6 +55,21 @@ file path or reads the caller's filesystem.
 | POST `/sessions/{sessionId}/terminate` | `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Immutable terminated metadata |
 | GET `/sessions/{sessionId}/transcript` | `offset`, `limit` | Bounded active transcript range |
 | GET `/sessions/{sessionId}/evidence` | `offset`, `limit` | Bounded terminated evidence range |
+| GET `/sessions/{sessionId}/archive` | No query/body | Ready manifest (200), preparing/retrying (202), failed (503), or active-state conflict (409) |
+| GET `/sessions/{sessionId}/archive/{generationId}/content` | Optional `If-None-Match` | Complete immutable `application/gzip` object (200), authorized 304, unknown generation (404), or unavailable object (503) |
+
+Archive readiness schedules eligible terminated sessions idempotently. Until
+publication, generation and compressed receipt fields are null; pending manifests
+include bounded progress and `Retry-After`. Terminal failure requires operator
+repair. New archive byte/record counts are decimal strings. Content has exact
+compressed `Content-Length`, generation/digest/raw-receipt binding headers and an
+authentication-context-bound ETag. It uses private revalidated caching and never
+sets `Content-Encoding: gzip`: clients receive the stored compressed bytes.
+The server verifies all parts before successful headers, then streams the same
+pinned object with fresh authorization between bounded parts. Clients must
+verify the complete compressed count/SHA-256 and decoded original receipt before
+displaying content. See the [archive contract](docs/reference/sealed-session-archives.md)
+for manifest fields, cache isolation and full-transfer budgets.
 
 Prefix proofs verify an existing active session's exact immutable append boundary
 `N/R`, including historical boundaries and `0/0`. They never append bytes or seal.

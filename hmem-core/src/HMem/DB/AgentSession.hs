@@ -7,10 +7,15 @@ module HMem.DB.AgentSession
   , IdleSessionCursor, listIdleSessionCandidates, sealIdleSession, sealIdleSessionWithHook
   , listIdleSessionCandidatesAt, sealIdleSessionWithClock
   , validateSessionPrefixBoundary, readSessionPrefixWindow
+  , SessionReader, newSessionReader, readSessionReader, closeSessionReader
+  , ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), newReaderCache, closeReaderCache, readSessionRangeWithCache
+  , ArchiveReadFailure(..)
+  , readSessionEvidenceRange, readSessionEvidenceRangeWithCache
   ) where
 
-import Control.Exception (throwIO)
-import Control.Monad (foldM)
+import Control.Exception (throwIO, bracket, mask, onException, catch)
+import Control.Concurrent.MVar
+import Control.Monad (foldM, forM_)
 import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
 import Data.Aeson (FromJSON, Result(..), fromJSON, toJSON)
 import Data.ByteString (ByteString)
@@ -33,6 +38,9 @@ import Hasql.Statement qualified as St
 import HMem.AgentSession
 import HMem.DB.Pool (runSession, runTransaction)
 import HMem.DB.RequestContext (EffectiveActor(..), actorTypeToText, currentEffectiveActor)
+import HMem.DB.SessionArchive.Reader (ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), ArchiveReadFailure(..), newReaderCache, closeReaderCache)
+import HMem.DB.SessionArchive.Reader qualified as Archive
+import HMem.DB.SessionArchive qualified
 
 problem :: SessionErrorCode -> Text -> Either SessionException a
 problem code message = Left (SessionException code message)
@@ -251,17 +259,20 @@ listSessionTasks pool workspace identifier cursor limit = do
 appendSession :: Pool Hasql.Connection -> UUID -> UUID -> AppendSession -> IO SessionAppendResult
 appendSession pool workspace identifier input = do
   if BS.null input.bytes || BS.length input.bytes > maxSessionChunkBytes
-    || input.expectedOffset < 0 || input.expectedRevision < 0
+    || input.expectedOffset < 0 || input.expectedRevision < 0 || input.expectedRevision == maxBound
     then invalid "Append requires nonnegative cursor and 1 to 1048576 bytes"
     else pure ()
-  checked pool $ do
+  -- Active appends retain the original transaction and query path. Only a
+  -- terminal row with no exact raw replay leaves a candidate for archive
+  -- decoding after this transaction has released its lock and pool lease.
+  result <- checked pool $ do
     current <- S.statement (workspace,identifier) (getStatement True)
     case current of
       Nothing -> pure $ problem SessionNotFound "Session not found"
       Just row -> do
         replay <- S.statement (identifier,input.expectedOffset,input.expectedRevision+1,input.bytes,input.allowFinalRecord) replayStatement
-        if replay then pure $ Right (SessionAppendResult row True)
-        else if row.state == Terminated then pure $ problem SessionTerminated "Session is terminated"
+        if replay then pure $ Right (Right (SessionAppendResult row True))
+        else if row.state == Terminated then pure $ Right (Left row)
         else if maybe False (\total -> fromIntegral (BS.length input.bytes) > total-row.committedBytes) row.importBytes
           then pure $ problem SessionConflict "Append exceeds the historical import manifest"
         else if row.committedBytes /= input.expectedOffset || row.revision /= input.expectedRevision
@@ -270,8 +281,27 @@ appendSession pool workspace identifier input = do
             S.statement (identifier,input) appendStatement
             result <- S.statement (workspace,identifier) (getStatement False)
             pure $ case result of
-              Just updated -> Right (SessionAppendResult updated False)
+              Just updated -> Right (Right (SessionAppendResult updated False))
               Nothing -> problem SessionNotFound "Session not found"
+  case result of
+    Right appended -> pure appended
+    Left sealed -> do
+      -- Published generations and original append rows are immutable. Compare
+      -- the complete verified original chunk and allow_final_record before
+      -- rejecting the terminal state, without reopening a transaction.
+      published <- Archive.verifiedManifest pool workspace identifier
+      replay <- case published of
+        Nothing -> pure False
+        Just manifest -> do
+          original <- Archive.verifiedLedger pool workspace identifier manifest.id input.expectedOffset
+          case original of
+            Just row | row.startOffset == input.expectedOffset && row.revision == input.expectedRevision+1
+              && row.endOffset-row.startOffset == fromIntegral (BS.length input.bytes) && row.allowFinalRecord == input.allowFinalRecord ->
+                bracket (Archive.openArchiveReader pool manifest) Archive.closeArchiveReader $ \reader ->
+                  (== input.bytes) <$> Archive.readArchiveRange reader input.expectedOffset (BS.length input.bytes)
+            _ -> pure False
+      if replay then pure (SessionAppendResult sealed True)
+        else throwIO (SessionException SessionTerminated "Session is terminated")
 
 replayStatement :: St.Statement (UUID,Int64,Int64,ByteString,Bool) Bool
 replayStatement = St.Statement
@@ -342,7 +372,7 @@ validateSessionPrefixBoundary :: Pool Hasql.Connection -> UUID -> UUID -> Int64 
 validateSessionPrefixBoundary pool workspace identifier end revision
   | end < 0 || revision < 0 = pure False
   | otherwise = runSession pool $ S.statement (workspace,identifier,end,revision) $ St.Statement
-      "SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND w.deleted_at IS NULL AND $3<=s.committed_bytes AND (($3=0 AND $4=0) OR EXISTS(SELECT 1 FROM session_chunks c WHERE c.session_id=s.id AND c.revision=$4 AND c.start_offset+octet_length(c.data)=$3)))"
+      "SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND w.deleted_at IS NULL AND $3<=s.committed_bytes AND (($3=0 AND $4=0) OR EXISTS(SELECT 1 FROM session_chunks c WHERE c.session_id=s.id AND c.revision=$4 AND c.start_offset+octet_length(c.data)=$3) OR EXISTS(SELECT 1 FROM session_archives g JOIN session_archive_ledger l ON l.generation_id=g.id WHERE g.workspace_id=s.workspace_id AND g.session_id=s.id AND l.revision=$4 AND l.end_offset=$3 AND l.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_ledger p WHERE p.generation_id=l.generation_id AND p.revision=l.revision-1),''),jsonb_build_array(l.generation_id,l.revision,l.start_offset,l.end_offset,l.allow_final_record,l.record_count,l.ends_with_newline,l.raw_sha256)))))"
       (param (\(a,_,_,_) -> a) E.uuid <> param (\(_,b,_,_) -> b) E.uuid <> param (\(_,_,c,_) -> c) E.int8 <> param (\(_,_,_,d) -> d) E.int8)
       (D.singleRow (D.column (D.nonNullable D.bool))) True
 
@@ -352,39 +382,100 @@ readSessionPrefixWindow :: Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int
 readSessionPrefixWindow pool workspace identifier end offset
   | offset < 0 || end < offset = invalid "Invalid prefix window"
   | offset == end = pure BS.empty
-  | otherwise = do
-      bytes <- runSession pool $ do
-        exists <- S.statement (workspace,identifier,end) $ St.Statement
-          "SELECT EXISTS(SELECT 1 FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND w.deleted_at IS NULL AND s.committed_bytes >= $3)"
-          (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.int8)
-          (D.singleRow (D.column (D.nonNullable D.bool))) True
-        if exists then S.statement (identifier,offset,offset+min 1048576 (end-offset)) rangeStatement else pure BS.empty
-      if fromIntegral (BS.length bytes) /= min 1048576 (end-offset)
-        then invalid "Committed prefix is missing or discontinuous"
-        else pure bytes
+  | otherwise = bracket (newSessionReader pool workspace identifier end) closeSessionReader $ \reader ->
+      readSessionReader reader offset (fromIntegral (min 1048576 (end-offset)))
+
+-- A caller-owned sequential scan, pinned to a frozen raw prefix and, once
+-- needed, one immutable archive generation. No transaction/connection is held
+-- between turns. Short raw reads re-resolve publication exactly once.
+data SessionReader = SessionReader
+  { readerPool :: !(Pool Hasql.Connection), readerWorkspace :: !UUID, readerSession :: !UUID
+  , readerEnd :: !Int64, archived :: !(MVar (Bool,Maybe Archive.ArchiveReader)) }
+
+newSessionReader :: Pool Hasql.Connection -> UUID -> UUID -> Int64 -> IO SessionReader
+newSessionReader pool workspace identifier end = do
+  row <- getSession pool workspace identifier
+  case row of
+    Just session | end >= 0 && end <= session.committedBytes ->
+      SessionReader pool workspace identifier end <$> newMVar (False,Nothing)
+    _ -> invalid "Committed prefix is missing or discontinuous"
+
+closeSessionReader :: SessionReader -> IO ()
+closeSessionReader reader = modifyMVar_ reader.archived $ \(_,archive) -> do
+  forM_ archive Archive.closeArchiveReader
+  pure (True,Nothing)
+
+readSessionReader :: SessionReader -> Int64 -> Int -> IO ByteString
+readSessionReader reader offset limit = modifyMVar reader.archived $ \(closed,archive) -> do
+  if closed || offset < 0 || offset > reader.readerEnd || limit < 0 || limit > maxSessionRangeBytes
+    then invalid "Invalid prefix window" else pure ()
+  let count=min (fromIntegral limit) (reader.readerEnd-offset)
+      readArchived source = do
+        bytes <- Archive.readArchiveRange source offset (fromIntegral count)
+        if fromIntegral (BS.length bytes) /= count then invalid "Committed prefix is missing or discontinuous" else pure bytes
+  case archive of
+    Just source -> do
+      bytes <- readArchived source
+      pure ((False,archive),bytes)
+    Nothing -> do
+      bytes <- runSession reader.readerPool $ S.statement (reader.readerSession,offset,offset+count) rangeStatement
+      if fromIntegral (BS.length bytes) == count then pure ((False,Nothing),bytes) else mask $ \restore -> do
+        manifest <- Archive.verifiedManifest reader.readerPool reader.readerWorkspace reader.readerSession
+          >>= maybe (invalid "Committed prefix is missing or discontinuous") pure
+        if manifest.rawBytes < reader.readerEnd then invalid "Committed prefix is missing or discontinuous" else pure ()
+        source <- Archive.openArchiveReader reader.readerPool manifest
+        result <- restore (readArchived source) `onException` Archive.closeArchiveReader source
+        pure ((False,Just source),result)
 
 readSessionRange :: Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int -> IO SessionRange
-readSessionRange pool workspace identifier offset limit = do
+readSessionRange = readSessionRangeUsing False Nothing
+
+readSessionRangeWithCache :: ReaderCache -> ArchiveAudience -> Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int -> IO SessionRange
+readSessionRangeWithCache cache audience = readSessionRangeUsing False (Just (cache,audience))
+
+-- The terminated evidence route keeps the same raw-first data contract while
+-- bounding its metadata and raw queries with the archive read policy. Active
+-- and direct legacy callers retain their existing query policy.
+readSessionEvidenceRange :: Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int -> IO SessionRange
+readSessionEvidenceRange = readSessionRangeUsing True Nothing
+
+readSessionEvidenceRangeWithCache :: ReaderCache -> ArchiveAudience -> Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int -> IO SessionRange
+readSessionEvidenceRangeWithCache cache audience = readSessionRangeUsing True (Just (cache,audience))
+
+readSessionRangeUsing :: Bool -> Maybe (ReaderCache,ArchiveAudience) -> Pool Hasql.Connection -> UUID -> UUID -> Int64 -> Int -> IO SessionRange
+readSessionRangeUsing guarded cached pool workspace identifier offset limit = do
   if offset < 0 || limit < 1 || limit > maxSessionRangeBytes
     then invalid "Range requires nonnegative offset and 1 to 1048576 bytes"
     else pure ()
-  checked pool $ do
-    -- The metadata read freezes the visible prefix. Chunks below that boundary
-    -- are immutable; later append/seal cannot change these returned raw bytes.
-    current <- S.statement (workspace,identifier) (getStatement False)
-    case current of
-      Nothing -> pure $ problem SessionNotFound "Session not found"
-      Just session
-        | offset > session.committedBytes -> pure $ problem SessionConflict "Range begins beyond the committed prefix"
-        | otherwise -> do
-          let end = offset + min (session.committedBytes-offset) (fromIntegral limit)
-          bytes <- S.statement (identifier,offset,end) rangeStatement
-          if fromIntegral (BS.length bytes) /= end-offset
-            then pure $ problem SessionInvalidInput "Committed prefix is missing or discontinuous"
-            else do
-              let nextOffset = offset+fromIntegral (BS.length bytes)
-                  hasMore = nextOffset < session.committedBytes
-              pure $ Right SessionRange{..}
+  -- Keep the original one-lease raw fast path. Its metadata freezes the visible
+  -- end; a short raw result becomes a candidate only after this transaction has
+  -- committed and returned its connection. Archive decoding never nests here.
+  let snapshot = do
+        current <- if guarded
+          then Archive.archiveReadSession (workspace,identifier) (getStatement False)
+          else S.statement (workspace,identifier) (getStatement False)
+        case current of
+          Nothing -> pure (problem SessionNotFound "Session not found")
+          Just row | offset > row.committedBytes -> pure (problem SessionConflict "Range begins beyond the committed prefix")
+          Just row -> do
+            let frozenEnd=offset+min (row.committedBytes-offset) (fromIntegral limit)
+            rawBytes <- S.statement (identifier,offset,frozenEnd) rangeStatement
+            pure (Right (row,frozenEnd,rawBytes))
+      readSnapshot=runSession pool snapshot
+  result <- if guarded then readSnapshot `catch` (throwIO . ArchiveReadFailure) else readSnapshot
+  (session,end,raw) <- either throwIO pure result
+  let archivedRead manifest = case cached of
+        Just (cache,audience) -> Archive.withCachedReader cache audience pool manifest (\reader -> Archive.readArchiveRange reader offset (fromIntegral (end-offset)))
+        Nothing -> bracket (Archive.openArchiveReader pool manifest) Archive.closeArchiveReader (\reader -> Archive.readArchiveRange reader offset (fromIntegral (end-offset)))
+      fallback = do
+        manifest <- Archive.verifiedManifest pool workspace identifier >>= maybe (invalid "Committed prefix is missing or discontinuous") pure
+        if manifest.rawBytes /= session.committedBytes then invalid "Committed prefix is missing or discontinuous" else archivedRead manifest
+  -- Intact raw evidence keeps its existing read path. A short READ COMMITTED
+  -- result re-resolves publication once to cover concurrent reclamation.
+  bytes <- if fromIntegral (BS.length raw) == end-offset then pure raw else fallback
+  if fromIntegral (BS.length bytes) /= end-offset then invalid "Committed prefix is missing or discontinuous" else pure ()
+  let nextOffset=offset+fromIntegral (BS.length bytes); hasMore=nextOffset < session.committedBytes
+  pure SessionRange{..}
 
 terminateSession :: Pool Hasql.Connection -> UUID -> UUID -> TerminateSession -> IO AgentSession
 terminateSession pool = terminateSessionWithHook pool (pure ())

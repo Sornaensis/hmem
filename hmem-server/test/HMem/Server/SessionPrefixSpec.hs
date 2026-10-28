@@ -1,12 +1,12 @@
 module HMem.Server.SessionPrefixSpec (spec) where
 
-import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar)
+import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (SomeException, bracket, finally, throwIO, try, uninterruptibleMask_)
 import Control.Concurrent.Async (withAsync, wait, poll)
-import Control.Monad (forM, forM_, replicateM)
+import Control.Monad (forM, forM_, replicateM, void, when)
 import Data.ByteString qualified as BS
 import Data.IORef
-import Data.List (nub)
+import Data.List (nub,sort)
 import Data.Time
 import Data.UUID.V4 qualified as UUID
 import System.Timeout (timeout)
@@ -18,6 +18,93 @@ import HMem.Server.SessionPrefix
 
 spec :: Spec
 spec = describe "PrefixProof service" $ do
+  it "finishes reader cleanup after confirmed joins before reporting a worker failure" $ do
+    entered <- newEmptyMVar
+    blocked <- newEmptyMVar
+    finalizing <- newEmptyMVar
+    release <- newEmptyMVar
+    cleaned <- newEmptyMVar
+    order <- newIORef ([] :: [String])
+    let record event=atomicModifyIORef' order (\events -> (events<>[event],()))
+        hook index _
+          | index == 0 = throwIO (userError "controlled first worker failure")
+          | otherwise = (putMVar entered () >> readMVar blocked) `finally`
+              uninterruptibleMask_ (putMVar finalizing () >> readMVar release >> record "worker-finalizer")
+        cleanup _=record "reader-cleanup" >> void (tryPutMVar cleaned ())
+        options=PrefixOptions getCurrentTime (const (pure True)) (\_ _ -> pure BS.empty)
+    registry <- newPrefixRegistryWithWorkerHookAndCleanupHook hook cleanup options
+    let drain=void (tryPutMVar release ()) >> void (try @SomeException (closePrefixRegistry registry))
+    (do
+      timeout 1000000 (readMVar entered) `shouldReturn` Just ()
+      withAsync (try @SomeException (closePrefixRegistry registry)) $ \closing -> do
+        (do
+          timeout 1000000 (readMVar finalizing) `shouldReturn` Just ()
+          timeout 10000 (readMVar cleaned) `shouldReturn` Nothing
+          poll closing >>= (`shouldSatisfy` maybe True (const False))) `finally` putMVar release ()
+        result <- wait closing
+        result `shouldSatisfy` either (const True) (const False)
+      readIORef order `shouldReturn` ["worker-finalizer","reader-cleanup"]) `finally` drain
+
+  it "includes expired queued ownership in cleanup after the visible entries are pruned" $ do
+    clock <- getCurrentTime >>= newIORef
+    entered <- newEmptyMVar
+    blocked <- newEmptyMVar
+    cleaned <- newIORef []
+    let hook _ _=putMVar entered () >> readMVar blocked
+        options=PrefixOptions (readIORef clock) (const (pure True)) (\_ _ -> pure BS.empty)
+    -- Both workers remain behind their startup hook while four admitted jobs
+    -- expire out of the visible registry. The observer reports which job
+    -- reader owners the confirmed-join cleanup actually visited.
+    targets <- bracket (newPrefixRegistryWithWorkerHookAndCleanupHook hook (writeIORef cleaned) options) closePrefixRegistry $ \registry -> do
+      timeout 1000000 (takeMVar entered) `shouldReturn` Just ()
+      timeout 1000000 (takeMVar entered) `shouldReturn` Just ()
+      targets <- replicateM 4 (targetFor BS.empty)
+      forM_ targets $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+      prefixRegistryCounts registry `shouldReturn` (4,4)
+      modifyIORef' clock (addUTCTime 301)
+      prefixRegistryCounts registry `shouldReturn` (0,4)
+      modifyIORef' clock (addUTCTime 301)
+      prefixRegistryCounts registry `shouldReturn` (0,0)
+      fresh <- targetFor BS.empty
+      timeout 1000000 (submitPrefixProof registry fresh) `shouldReturn` Just (Left PrefixBusy)
+      pure targets
+    sort . nub <$> readIORef cleaned `shouldReturn` sort (map (.request.operationId) targets)
+
+  it "reserves requeue capacity for active readers while expired queued owners await cleanup" $ do
+    clock <- getCurrentTime >>= newIORef
+    let bytes=BS.replicate (2*1048576) 97
+    old <- replicateM 2 (targetFor bytes)
+    newer <- replicateM 2 (targetFor bytes)
+    fresh <- replicateM 2 (targetFor bytes)
+    oldEntered <- newEmptyMVar; oldGate <- newEmptyMVar
+    newEntered <- newEmptyMVar; newGate <- newEmptyMVar
+    requeued <- newEmptyMVar; requeueGate <- newEmptyMVar
+    let oldIds=map (.request.operationId) old; newIds=map (.request.operationId) newer
+        readWindow target offset=do
+          when (offset == 0 && target.request.operationId `elem` oldIds) (putMVar oldEntered () >> readMVar oldGate)
+          when (offset == 0 && target.request.operationId `elem` newIds) (putMVar newEntered () >> readMVar newGate)
+          pure (BS.take 1048576 (BS.drop (fromIntegral offset) bytes))
+        afterRequeue target=when (target.request.operationId `elem` oldIds) (putMVar requeued () >> readMVar requeueGate)
+        options=PrefixOptions (readIORef clock) (const (pure True)) readWindow
+    bracket (newPrefixRegistryWithRequeueHook afterRequeue options) closePrefixRegistry $ \registry -> do
+      forM_ old $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+      replicateM 2 (timeout 1000000 (takeMVar oldEntered)) `shouldReturn` [Just (),Just ()]
+      modifyIORef' clock (addUTCTime 250)
+      forM_ newer $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+      putMVar oldGate ()
+      replicateM 2 (timeout 1000000 (takeMVar requeued)) `shouldReturn` [Just (),Just ()]
+      -- Expire after the atomic handoff, before either old turn can finish.
+      modifyIORef' clock (addUTCTime 51)
+      prefixRegistryCounts registry `shouldReturn` (2,4)
+      putMVar requeueGate ()
+      replicateM 2 (timeout 1000000 (takeMVar newEntered)) `shouldReturn` [Just (),Just ()]
+      forM_ fresh $ \target -> timeout 1000000 (submitPrefixProof registry target) `shouldReturn` Just (Left PrefixBusy)
+      putMVar newGate ()
+      forM_ newer $ \target -> await registry target >>= (\value -> value.state `shouldBe` "verified")
+      forM_ old $ \target -> await registry target >>= (\value -> value.state `shouldBe` "failed")
+      submitPrefixProof registry (head fresh) >>= (`shouldSatisfy` isRight)
+      await registry (head fresh) >>= (\value -> value.state `shouldBe` "verified")
+
   it "joins every worker finalizer before reporting an earlier worker failure" $ do
     secondEntered <- newEmptyMVar; blocked <- newEmptyMVar; finalizerEntered <- newEmptyMVar; release <- newEmptyMVar
     let hook index _action

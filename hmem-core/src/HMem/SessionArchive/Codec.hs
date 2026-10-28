@@ -3,9 +3,10 @@
 module HMem.SessionArchive.Codec
   ( CodecFailure(..), StreamDigest(..), CodecResult(..), Checkpoint(..)
   , codecImplementation, compress, verify, checkedAdd
+  , Decoder, newDecoder, readDecoder, closeDecoder
   ) where
 
-import Control.Exception (Exception, bracket, throwIO)
+import Control.Exception (Exception, bracket, throwIO, mask, onException)
 import Control.Monad (unless, when)
 import Crypto.Hash (Context, SHA256, Digest, hashInit, hashUpdate, hashFinalize)
 import Data.Bits ((.&.))
@@ -16,8 +17,9 @@ import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word8, Word32)
-import Foreign (Ptr, nullPtr, castPtr, alloca, allocaBytes, peek)
+import Foreign (Ptr, FunPtr, nullPtr, castPtr, alloca, allocaBytes, peek)
 import Foreign.C
+import Foreign.ForeignPtr (ForeignPtr, newForeignPtr, withForeignPtr, finalizeForeignPtr)
 
 data NativeCodec
 foreign import ccall unsafe "hmem_archive_codec_new" codecNew :: CInt -> IO (Ptr NativeCodec)
@@ -25,6 +27,8 @@ foreign import ccall unsafe "hmem_archive_codec_free" codecFree :: Ptr NativeCod
 foreign import ccall unsafe "hmem_archive_codec_step" codecStep :: Ptr NativeCodec -> Ptr Word8 -> Word32 -> Ptr Word8 -> Word32 -> CInt -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> IO CInt
 foreign import ccall unsafe "hmem_archive_dictionary" codecDictionary :: Ptr NativeCodec -> Ptr Word8 -> Ptr Word32 -> IO CInt
 foreign import ccall unsafe "hmem_archive_zlib_version" codecVersion :: IO CString
+foreign import ccall unsafe "hmem_archive_restore" codecRestore :: Ptr NativeCodec -> Word32 -> Word32 -> Ptr Word8 -> Word32 -> IO CInt
+foreign import ccall unsafe "&hmem_archive_codec_free" codecFinalizer :: FunPtr (Ptr NativeCodec -> IO ())
 
 data CodecFailure = CodecFailure Text deriving stock (Show, Eq)
 instance Exception CodecFailure
@@ -65,16 +69,67 @@ withCodec encode = bracket acquire codecFree
 
 -- One copied output buffer; the C state never retains input or output pointers.
 step :: Ptr NativeCodec -> ByteString -> CInt -> IO (CInt, Int, ByteString, Word32)
-step codec input mode = BS.useAsCStringLen input $ \(source,n) ->
-  allocaBytes 65536 $ \output -> alloca $ \used -> alloca $ \made -> alloca $ \flags -> do
-    require (n <= 65536) "archive_input_buffer_bound"
-    result <- codecStep codec (castPtr source) (fromIntegral n) output 65536 mode used made flags
+step codec input mode = stepBounded codec input mode 65536
+
+stepBounded :: Ptr NativeCodec -> ByteString -> CInt -> Int -> IO (CInt, Int, ByteString, Word32)
+stepBounded codec input mode capacity = BS.useAsCStringLen input $ \(source,n) ->
+  allocaBytes capacity $ \output -> alloca $ \used -> alloca $ \made -> alloca $ \flags -> do
+    require (n <= 65536 && capacity > 0 && capacity <= 65536) "archive_input_buffer_bound"
+    result <- codecStep codec (castPtr source) (fromIntegral n) output (fromIntegral capacity) mode used made flags
     consumed <- fromIntegral <$> peek used
     produced <- fromIntegral <$> peek made
     boundary <- peek flags
-    require (consumed <= n && produced <= 65536) "archive_native_buffer_bound"
+    require (consumed <= n && produced <= capacity) "archive_native_buffer_bound"
     bytes <- BS.packCStringLen (castPtr output, produced)
     pure (result,consumed,bytes,boundary)
+
+-- | Incremental raw DEFLATE restored from one verified checkpoint. The caller
+-- owns serialization and must close it on failure/cancellation. Source starts
+-- at compressedOffset, minus one when unusedBits is nonzero. No borrowed
+-- native pointer or database connection survives a call.
+data Decoder = Decoder !(ForeignPtr NativeCodec) !(IORef ByteString) !(IO (Maybe ByteString)) !(IORef Bool)
+
+newDecoder :: Checkpoint -> IO (Maybe ByteString) -> IO Decoder
+newDecoder point source = mask $ \restore -> do
+  require (point.rawOffset >= 0 && point.compressedOffset >= 10 && point.unusedBits >= 0 && point.unusedBits <= 7
+    && BS.length point.dictionary == fromIntegral (min point.rawOffset 32768)) "archive_restart_point"
+  native <- codecNew (-1)
+  require (native /= nullPtr) "archive_codec_initialization"
+  pointer <- newForeignPtr codecFinalizer native
+  restore (do
+    first <- if point.unusedBits == 0 then pure BS.empty else source >>= maybe (throwIO (CodecFailure "archive_restart_truncated")) pure
+    require (point.unusedBits == 0 || not (BS.null first)) "archive_restart_truncated"
+    result <- BS.useAsCStringLen point.dictionary $ \(dict,n) -> codecRestore native
+      (fromIntegral point.unusedBits) (if BS.null first then 0 else fromIntegral (BS.head first)) (castPtr dict) (fromIntegral n)
+    require (result == 0) "archive_restart_dictionary"
+    input <- newIORef (if point.unusedBits == 0 then first else BS.drop 1 first)
+    ended <- newIORef False
+    pure (Decoder pointer input source ended)) `onException` finalizeForeignPtr pointer
+
+closeDecoder :: Decoder -> IO ()
+closeDecoder (Decoder pointer _ _ ended) = writeIORef ended True >> finalizeForeignPtr pointer
+
+-- | Read at most 1 MiB, producing exactly the requested count or failing.
+-- Capacity is the remaining request, so historical proofs never decode past
+-- their append boundary. Empty requests do not advance the native stream.
+readDecoder :: Decoder -> Int -> IO ByteString
+readDecoder (Decoder pointer input source ended) count = do
+  require (count >= 0 && count <= 1048576) "archive_decoder_read_bound"
+  withForeignPtr pointer $ \native -> do
+    let loop 0 parts = pure (BS.concat (reverse parts))
+        loop left parts = do
+          done <- readIORef ended
+          require (not done) "archive_decoder_closed_or_short"
+          pending <- readIORef input
+          bytes <- if BS.null pending then source >>= maybe (throwIO (CodecFailure "archive_truncated")) pure else pure pending
+          require (not (BS.null bytes) && BS.length bytes <= 1048576) "archive_source_part_bound"
+          (result,used,output,flags) <- stepBounded native (BS.take 65536 bytes) 0 (min 65536 left)
+          require (result == 0 || result == 1) "archive_inflate_failure"
+          writeIORef input (BS.drop used bytes)
+          when (result == 1) (writeIORef ended True)
+          require (used > 0 || not (BS.null output) || flags .&. 128 /= 0) "archive_inflate_stalled"
+          loop (left-BS.length output) (output:parts)
+    loop count []
 
 dictionaryAt :: Ptr NativeCodec -> IO ByteString
 dictionaryAt codec = allocaBytes 32768 $ \output -> alloca $ \size -> do

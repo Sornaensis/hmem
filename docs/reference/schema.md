@@ -75,14 +75,18 @@ of the transcript revision. Freshness is derived by consumers from that timestam
 Database triggers also reject raw chunk edits/deletes, malformed or out-of-order
 inserts, counter drift, identity edits and changes to already terminated metadata.
 Statement guards reject `TRUNCATE` of each evidence table, including cascades
-from task/workspace tables. Only the privileged test harness suspends those exact
-three guards during its authorized fixture reset, restoring them before commit
+from task/workspace tables. Only the privileged test harness suspends its explicit
+evidence-table guard list during its authorized fixture reset, restoring them before commit
 on the same connection and rolling back on failure or cancellation.
 Canonical core termination owns digest verification; these guards do not claim
 to prevent a privileged database administrator from forging an initial seal or
 disabling triggers. Transcript bytes have no audit/outbox trigger and never enter
 workspace snapshots. The HTTP authorization and live invalidation adapters are
 separate boundaries over these primitives.
+
+V050 adds sealed-session archive sidecars and extends that fixture guard list.
+Their schema, publication boundary and storage-only validation are specified in
+the [sealed-session archive reference](sealed-session-archives.md#storage-primitives-v050).
 
 Lists reject limits outside 1–100. Session lists use immutable descending
 `(created_at,id)` keyset cursors; task references use ascending task UUID cursors.

@@ -307,7 +307,7 @@ cleanDB :: TestEnv -> IO ()
 cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
   -- TestEnv already carries the harness's explicit destructive reset authority,
   -- including the separately opted-in unsafe external test-database mode.
-  -- Only these three statement guards are suspended, under table locks held
+  -- Only the evidence statement guards below are suspended, under table locks held
   -- until commit. Production has no setting or SQL helper that bypasses them.
   rollbackSql <- newIORef "ROLLBACK"
   identifier <- UUID.nextRandom
@@ -323,7 +323,7 @@ cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
         ]
       guardSql action = B8.pack $ unlines
         [ "DO $$ DECLARE target TEXT; BEGIN"
-        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions'] LOOP"
+        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions','session_archive_jobs','session_archive_generations','session_archive_parts','session_archive_checkpoints','session_archive_ledger'] LOOP"
         , "IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.'||target)"
         , "AND tgname='session_evidence_no_truncate' AND NOT tgisinternal) THEN"
         , "EXECUTE format('ALTER TABLE public.%I " <> action <> " TRIGGER session_evidence_no_truncate',target);"

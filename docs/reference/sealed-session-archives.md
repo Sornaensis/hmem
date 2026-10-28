@@ -43,8 +43,7 @@ Use sidecars, leaving terminated session metadata and its final receipt intact:
 | Archive checkpoints | Generation, raw/compressed offset, unused-bit count, dictionary, dictionary digest and metadata digest |
 | Original append ledger | Session/workspace, original revision/start/end, `allow_final_record`, record count/end-newline and raw-chunk SHA-256 |
 
-The migration task selects final SQL names and keeps the schema reference and
-diagram consistent. All sidecars enforce session/workspace identity and foreign
+The SQL names and persistence boundary are listed below. All sidecars enforce session/workspace identity and foreign
 keys; staged generations are invisible to ordinary readers. Ordinary writes
 cannot mutate published parts, checkpoints or ledger entries, or delete raw
 evidence. Cleanup uses a narrowly scoped maintenance operation, not a
@@ -66,6 +65,54 @@ the complete verified generation only while its lease and original receipt
 still match. An expired owner cannot publish. Keep the raw payload until the
 compatible readers below are installed and publication has been verified.
 Abandoned staging cleanup is bounded and cannot touch a published generation.
+
+### Storage primitives (V050)
+
+`V050__sealed_session_archives.sql` installs `session_archive_jobs`,
+`session_archive_generations`, `session_archive_parts`,
+`session_archive_checkpoints` and `session_archive_ledger`, including its migration
+ledger entry, in one transaction. It does not enqueue existing evidence, change
+sealing, install a worker, or enable raw cleanup. The `session_archives` view
+resolves only a published generation bound to its ready job; ordinary readers
+use that binding and pass its immutable generation ID on subsequent reads.
+
+`HMem.DB.SessionArchive` scans eligible sessions with a bounded keyset cursor,
+claims one due job with a fresh attempt/generation/token and a 60-second lease,
+and renews only an unexpired current lease. Retry starts a new generation, resets
+progress and uses 1–60-second exponential backoff. Worker code must renew at most
+15 seconds apart. Each database operation releases its connection; source ledger
+copy and abandoned cleanup handle at most eight rows per call. Parts are at most
+1 MiB and checkpoint dictionaries at most 32 KiB. The caller continues ledger
+copy from its last returned original revision. A completed scan restarts for
+newly sealed sessions, including a seal whose enqueue was interrupted.
+
+Staging serializes under job then generation locks, checks original receipts and
+ordered positions, computes versioned SHA-256 chains over positions and payload
+digests, and validates each ledger row against its original chunk. A manifest
+hash commits codec parameters, receipts, counts and all three chain heads.
+Publication checks those structural boundaries under the current lease and
+atomically marks the generation and job ready. Published rows reject ordinary
+updates, deletes and truncation. Raw evidence guards remain in force. There is
+no caller-settable bypass; the existing privileged test fixture reset suspends
+only its explicit list of evidence truncate guards within its owned transaction.
+
+`ArchiveVerification` is an internal trusted-worker attestation, supplied only
+after complete persisted-output readback. SQL checks lengths, counts and stored
+bindings; it does not decode gzip or establish the attested whole-object digest.
+The worker must verify single-member termination, the compressed digest and
+original count/digest before calling `publishArchive`. Storage tests use opaque
+bytes to exercise this boundary and cannot qualify codec, reader or client work.
+Staged output is available only through an explicit lease-fenced readback
+primitive; public-facing consumers use published reads.
+
+Releasing a current lease to retry or terminal failure detaches its unpublished
+generation, making its staging eligible for cleanup even when no retry follows.
+Cleanup accepts a known obsolete unpublished generation, locks its job and
+generation, and removes at most eight child rows per call, then its empty
+generation on a later call. It cannot delete the current or a published
+generation, the sealed receipt or original chunks. Operators retain raw evidence
+on any failure. Recovery uses the existing database backup procedure; there is
+no destructive down migration for published evidence.
 
 ## Raw reads, proofs and replay
 

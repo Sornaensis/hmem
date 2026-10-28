@@ -34,6 +34,7 @@ library
       HMem.DB.SavedView
       HMem.DB.Schema
       HMem.DB.Search
+      HMem.DB.SessionArchive
       HMem.DB.Task
       HMem.DB.TestHarness
       HMem.DB.Timeline
@@ -106,6 +107,7 @@ test-suite hmem-core-test
       HMem.DB.OverviewSpec
       HMem.DB.ProjectSpec
       HMem.DB.SearchSpec
+      HMem.DB.SessionArchiveSpec
       HMem.DB.TaskSpec
       HMem.DB.TestHarnessSpec
       HMem.DB.TimelineSpec

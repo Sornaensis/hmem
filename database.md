@@ -152,6 +152,78 @@ classDiagram
       BIGINT record_count
       BOOLEAN ends_with_newline
     }
+    class session_archive_jobs {
+      UUID session_id PK FK
+      UUID workspace_id FK
+      TEXT state
+      BIGINT attempt
+      UUID? generation_id FK
+      UUID? lease_token
+      TIMESTAMPTZ? lease_expires_at
+      TIMESTAMPTZ retry_at
+      TEXT phase
+      BIGINT raw_progress
+      BIGINT compressed_progress
+      TEXT? error_code
+    }
+    class session_archive_generations {
+      UUID id PK
+      UUID session_id FK
+      UUID workspace_id FK
+      BIGINT attempt
+      UUID lease_token
+      TEXT codec
+      TEXT codec_implementation
+      JSONB codec_parameters
+      BIGINT raw_bytes
+      BIGINT raw_records
+      BIGINT raw_revision
+      TEXT raw_sha256
+      TIMESTAMPTZ created_at
+      TIMESTAMPTZ? published_at
+      BIGINT? compressed_bytes
+      TEXT? compressed_sha256
+      BIGINT? part_count
+      BIGINT? checkpoint_count
+      BIGINT? ledger_count
+      TEXT? metadata_sha256
+    }
+    class session_archive_parts {
+      UUID generation_id PK FK
+      UUID session_id FK
+      UUID workspace_id FK
+      BIGINT ordinal PK
+      BIGINT start_offset
+      BIGINT end_offset
+      BYTEA data
+      TEXT data_sha256
+      TEXT binding_sha256
+    }
+    class session_archive_checkpoints {
+      UUID generation_id PK FK
+      UUID session_id FK
+      UUID workspace_id FK
+      BIGINT ordinal PK
+      BIGINT raw_offset
+      BIGINT compressed_offset
+      SMALLINT unused_bits
+      BYTEA dictionary
+      TEXT dictionary_sha256
+      TEXT binding_sha256
+    }
+    class session_archive_ledger {
+      UUID generation_id PK FK
+      UUID session_id FK
+      UUID workspace_id FK
+      BIGINT revision PK
+      BIGINT start_offset
+      BIGINT end_offset
+      BOOLEAN allow_final_record
+      BIGINT record_count
+      BOOLEAN ends_with_newline
+      TEXT raw_sha256
+      TEXT binding_sha256
+    }
     class task_sessions {
       UUID workspace_id FK
       UUID task_id PK FK
@@ -336,6 +408,12 @@ classDiagram
   users "1" --> "0..*" auth_sessions : user_id
   workspaces "1" --> "0..*" sessions : workspace_id NO ACTION
   sessions "1" --> "0..*" session_chunks : session_id NO ACTION
+  sessions "1" --> "0..1" session_archive_jobs : id + workspace_id NO ACTION
+  session_archive_jobs "1" --> "0..*" session_archive_generations : session_id + workspace_id NO ACTION
+  session_archive_generations "0..1" <-- "0..1" session_archive_jobs : generation_id + session_id + workspace_id NO ACTION
+  session_archive_generations "1" --> "0..*" session_archive_parts : id + session_id + workspace_id NO ACTION
+  session_archive_generations "1" --> "0..*" session_archive_checkpoints : id + session_id + workspace_id NO ACTION
+  session_archive_generations "1" --> "0..*" session_archive_ledger : id + session_id + workspace_id NO ACTION
   sessions "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
   tasks "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
   tasks "0..1" --> "0..*" sessions : import_task_id, workspace_id NO ACTION
@@ -354,6 +432,11 @@ classDiagram
   note for sessions "UNIQUE (id, workspace_id)\nLive rows require a same-transaction in_progress task link; imports require their declared historical task\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
   sessions "0..1" --> "0..*" sessions : parent_session_id, workspace_id
   note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; ordered append only"
+  note for session_archive_jobs "UNIQUE (session_id, workspace_id)\nState: queued, running, retry, ready, failed\nCurrent-generation FK deferred until commit"
+  note for session_archive_generations "UNIQUE (id, session_id, workspace_id) and (session_id, attempt)\nOne published generation per session\nPublication fields are all NULL until publication"
+  note for session_archive_parts "UNIQUE (generation_id, start_offset)\nAt most 1 MiB EXTERNAL payload; ordered hash chain"
+  note for session_archive_checkpoints "UNIQUE (generation_id, raw_offset)\nAt most 32 KiB EXTENDED dictionary; at most 1 MiB raw gap"
+  note for session_archive_ledger "UNIQUE (generation_id, start_offset)\nExact original append metadata and chunk SHA-256"
   note for tasks "UNIQUE (id, workspace_id), used by session links"
   note for task_sessions "Composite foreign keys enforce one workspace\nAdditive links survive task soft deletion"
   note for observation_subjects "UNIQUE (observation_id, subject_kind, subject)"

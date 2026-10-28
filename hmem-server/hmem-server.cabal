@@ -67,6 +67,7 @@ data-files:
     migrations/V047__idle_session_scan.sql
     migrations/V048__session_timestamp_audit_noise.sql
     migrations/V049__historical_session_import.sql
+    migrations/V050__sealed_session_archives.sql
 
 library
   exposed-modules:

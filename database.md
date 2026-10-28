@@ -224,6 +224,42 @@ classDiagram
       TEXT raw_sha256
       TEXT binding_sha256
     }
+    class session_archive_control {
+      BOOLEAN singleton PK
+      TIMESTAMPTZ cutover_at
+      BOOLEAN paused
+      BOOLEAN backfill_enabled
+      BOOLEAN reclaim_enabled
+      BOOLEAN qualified
+      TIMESTAMPTZ? cursor_time
+      UUID? cursor_id
+      BIGINT staging_budget
+      BIGINT wal_budget
+      BIGINT staged_bytes
+      BIGINT reserved_bytes
+      UUID? permit_generation
+      UUID? permit_token
+      TEXT? permit_kind
+      TIMESTAMPTZ? permit_expires_at
+      TEXT? blocked_reason
+    }
+    class session_archive_requests {
+      UUID session_id PK FK
+      UUID workspace_id FK
+      TIMESTAMPTZ requested_at
+    }
+    class session_archive_reclamation {
+      UUID generation_id PK FK
+      UUID session_id FK
+      UUID workspace_id FK
+      TEXT metadata_sha256
+      TIMESTAMPTZ? verified_at
+      TIMESTAMPTZ retry_at
+      BIGINT deleted_revision
+      BIGINT deleted_bytes
+      BOOLEAN complete
+      TEXT? error_code
+    }
     class task_sessions {
       UUID workspace_id FK
       UUID task_id PK FK
@@ -414,6 +450,8 @@ classDiagram
   session_archive_generations "1" --> "0..*" session_archive_parts : id + session_id + workspace_id NO ACTION
   session_archive_generations "1" --> "0..*" session_archive_checkpoints : id + session_id + workspace_id NO ACTION
   session_archive_generations "1" --> "0..*" session_archive_ledger : id + session_id + workspace_id NO ACTION
+  sessions "1" --> "0..1" session_archive_requests : id + workspace_id NO ACTION
+  session_archive_generations "1" --> "0..1" session_archive_reclamation : id + session_id + workspace_id NO ACTION
   sessions "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
   tasks "1" --> "0..*" task_sessions : id + workspace_id NO ACTION
   tasks "0..1" --> "0..*" sessions : import_task_id, workspace_id NO ACTION
@@ -431,12 +469,14 @@ classDiagram
   note for observations "UNIQUE (id, workspace_id)\nembedding: vector(1536), nullable; present only with pgvector enabled"
   note for sessions "UNIQUE (id, workspace_id)\nLive rows require a same-transaction in_progress task link; imports require their declared historical task\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
   sessions "0..1" --> "0..*" sessions : parent_session_id, workspace_id
-  note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; ordered append only"
+  note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; immutable ordered append\nV051 verified maintenance may reclaim complete raw rows"
   note for session_archive_jobs "UNIQUE (session_id, workspace_id)\nState: queued, running, retry, ready, failed\nCurrent-generation FK deferred until commit"
   note for session_archive_generations "UNIQUE (id, session_id, workspace_id) and (session_id, attempt)\nOne published generation per session\nPublication fields are all NULL until publication"
   note for session_archive_parts "UNIQUE (generation_id, start_offset)\nAt most 1 MiB EXTERNAL payload; ordered hash chain"
   note for session_archive_checkpoints "UNIQUE (generation_id, raw_offset)\nAt most 32 KiB EXTENDED dictionary; at most 1 MiB raw gap"
   note for session_archive_ledger "UNIQUE (generation_id, start_offset)\nExact original append metadata and chunk SHA-256"
+  note for session_archive_control "One initialized true singleton\nCapacity values are logical policy, not measured free disk/WAL caps\nPermit IDs are control fields without foreign keys"
+  note for session_archive_reclamation "Mutable verification/progress bound to immutable manifest\nRaw deletion at most 8 rows / 8 MiB per transaction"
   note for tasks "UNIQUE (id, workspace_id), used by session links"
   note for task_sessions "Composite foreign keys enforce one workspace\nAdditive links survive task soft deletion"
   note for observation_subjects "UNIQUE (observation_id, subject_kind, subject)"
@@ -501,3 +541,12 @@ Import runtime identity is fixed at registration. The deferred initial-link guar
 accepts the declared nondeleted historical task in any status; other new links
 retain the live `in_progress` rule. Pending imports are excluded from live
 activity, navigation predicates and abandoned-session sealing.
+
+V050 stores one verified whole-stream gzip in bounded archive parts, with
+immutable checkpoint dictionaries and the original append ledger. V051 adds
+separate durable controls, explicit on-demand requests and manifest-bound
+verification/reclamation progress. Its narrow maintenance capability may delete
+verified raw chunks while retaining the sealed receipt, archive and ledger;
+ordinary evidence mutation stays forbidden. Historical discovery and raw
+reclamation default off. See the [archive reference](docs/reference/sealed-session-archives.md)
+and [ordered upgrade procedure](docs/reference/upgrades.md#sealed-archive-maintenance-v050-and-v051).

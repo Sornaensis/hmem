@@ -501,6 +501,7 @@ cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
         run $ do
           Session.sql (guardSql "DISABLE")
           Session.sql sql
+          Session.sql "DO $$ BEGIN IF to_regclass('public.session_archive_control') IS NOT NULL THEN UPDATE public.session_archive_control SET cutover_at=clock_timestamp(),paused=false,backfill_enabled=false,reclaim_enabled=false,qualified=false,cursor_time=NULL,cursor_id=NULL,staging_budget=8589934592,wal_budget=34359738368,staged_bytes=0,reserved_bytes=0,permit_generation=NULL,permit_token=NULL,permit_kind=NULL,permit_expires_at=NULL,blocked_reason=NULL WHERE singleton; END IF; END $$"
           Session.sql (guardSql "ENABLE")
           Session.sql finish
   result <- try @SomeException (restore reset)

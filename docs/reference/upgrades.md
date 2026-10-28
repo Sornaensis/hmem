@@ -1,5 +1,46 @@
 # Upgrade reference
 
+## Sealed archive maintenance (V050 and V051)
+
+Apply the ordered chain with a separate PostgreSQL migration administrator before
+starting the archive-compatible server/ctl build. V051 atomically provisions its
+restricted NOLOGIN capability owner, control/progress relations, guards and
+migration ledger row. It leaves historical discovery and raw reclamation off;
+new seals and explicitly requested older sealed views still use the archive
+worker. A failed preflight or ledger insertion rolls back the migration.
+
+Use a runtime role that owns no evidence/maintenance tables or guard functions,
+cannot CREATE in `public` or hold TRIGGER rights on protected write targets,
+directly or through assumable roles, is not a superuser or CREATEROLE role and
+cannot assume the maintenance owner. Remove caller-controlled attached trigger
+callbacks even if their former TRIGGER grants have already been revoked. Grant
+the trusted server/ctl role EXECUTE on
+`public.hmem_archive_reclaim(uuid,uuid,uuid,text,uuid)` explicitly; PUBLIC receives no
+grant. Existing application DML grants and server authorization are still needed.
+The database refuses reclamation enablement and work from an unsafe runtime role.
+An administrative connection may migrate and compress new seals, but cannot
+qualify that runtime boundary by acting as an ordinary application role.
+
+V051 also schema-qualifies the existing runtime-identity validator's helper
+calls, preserving its accepted values and IMMUTABLE behavior. This permits
+`pg_restore` to load session CHECK constraints under its empty search path.
+
+Install and qualify compatible range/proof/replay/ZIP readers and the complete
+archive viewer before enabling historical backfill or deletion. Inspect
+`hmem-ctl archives status --json`; configure capacity, then use the explicit
+`backfill-enable --qualified` and `reclaim-enable --qualified` controls only in
+the approved change window. Completion of implementation or tests does not
+enable production maintenance. See the [maintenance reference](sealed-session-archives.md#maintenance-and-recovery-v051)
+for commands, capacity meaning, pause/retry and backup verification.
+
+Take and verify a backup after reclamation as well as the pre-change backup.
+Restore the post-cleanup backup into an empty replacement database and verify
+archive-only ranges, historical proofs, exact replay and ZIP before retiring the
+old database. Roll back code only to a tested archive-compatible build. A raw-only
+build requires restoring the pre-cleanup backup and loses later writes unless
+they are separately recovered. Do not delete the archive schema or ledger as a
+rollback step.
+
 ## Agent sessions (V041 and V042)
 
 Deploy matching server, `hmem-ctl`, MCP and frontend artifacts. Stop old writers

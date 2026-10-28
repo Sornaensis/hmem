@@ -68,6 +68,7 @@ import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AuthUsers qualified as AuthUsers
 import HMem.Server.CtlMigrate qualified as CtlMigrate
+import HMem.Server.CtlArchivesCli qualified as CtlArchivesCli
 import HMem.Server.CtlEmbeddingsCli qualified as CtlEmbeddingsCli
 import HMem.Server.CtlPgvectorCli qualified as CtlPgvectorCli
 import HMem.Server.CtlPaths
@@ -94,6 +95,7 @@ data Command
   | CmdAuth AuthCommand
   | CmdPgvector CtlPgvectorCli.PgvectorCliCommand
   | CmdEmbeddings CtlEmbeddingsCli.EmbeddingsCliCommand
+  | CmdArchives CtlArchivesCli.ArchivesCommand
 
 data AuthCommand
   = CmdBootstrapSuperadmin BootstrapSuperadminOpts
@@ -186,6 +188,7 @@ commandParser = subparser
       (progDesc "Auth operator workflows"))
   <> command "pgvector" (CtlPgvectorCli.pgvectorCommandInfo CmdPgvector)
   <> command "embeddings" (CtlEmbeddingsCli.embeddingsCommandInfo CmdEmbeddings)
+  <> command "archives" (CtlArchivesCli.archivesCommandInfo CmdArchives)
   )
   <|> pure CmdSetup
 
@@ -372,6 +375,7 @@ main = do
     CmdAuth authCmd    -> doAuth authCmd
     CmdPgvector pgvectorCmd -> doPgvector pgvectorCmd
     CmdEmbeddings embeddingsCmd -> doEmbeddings embeddingsCmd
+    CmdArchives archivesCmd -> CtlArchivesCli.runArchivesCommand archivesCmd >>= exitWith
 
 ------------------------------------------------------------------------
 -- Pgvector commands for any configured PostgreSQL database

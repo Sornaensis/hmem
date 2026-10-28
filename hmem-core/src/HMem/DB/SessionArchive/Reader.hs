@@ -81,7 +81,7 @@ query pool input sql row = archiveQuery pool input (St.Statement sql params (D.r
 -- without an unbounded global scan. This operation never seals or changes it.
 ensureArchive :: Pool H.Connection -> UUID -> UUID -> IO ()
 ensureArchive pool workspace session = runTransaction pool $ S.statement (workspace,session) $ St.Statement
-  "INSERT INTO session_archive_jobs(session_id,workspace_id) SELECT s.id,s.workspace_id FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND s.state='terminated' AND w.deleted_at IS NULL ON CONFLICT DO NOTHING"
+  "WITH requested AS (INSERT INTO session_archive_requests(session_id,workspace_id) SELECT s.id,s.workspace_id FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND s.state='terminated' AND w.deleted_at IS NULL ON CONFLICT DO NOTHING) INSERT INTO session_archive_jobs(session_id,workspace_id) SELECT s.id,s.workspace_id FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND s.id=$2 AND s.state='terminated' AND w.deleted_at IS NULL ON CONFLICT DO NOTHING"
   (param fst E.uuid <> param snd E.uuid) D.noResult True
 
 -- Bind manifest fields and every chain head before using a generation. Child

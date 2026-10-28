@@ -68,6 +68,7 @@ data-files:
     migrations/V048__session_timestamp_audit_noise.sql
     migrations/V049__historical_session_import.sql
     migrations/V050__sealed_session_archives.sql
+    migrations/V051__session_archive_maintenance.sql
 
 library
   exposed-modules:
@@ -75,12 +76,15 @@ library
       HMem.Server.API
       HMem.Server.App
       HMem.Server.Archive.HTTP
+      HMem.Server.Archive.Maintenance
       HMem.Server.Archive.Worker
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
       HMem.Server.BotIdentity
       HMem.Server.ChangeStream
+      HMem.Server.CtlArchives
+      HMem.Server.CtlArchivesCli
       HMem.Server.CtlEmbeddings
       HMem.Server.CtlEmbeddingsCli
       HMem.Server.CtlMigrate
@@ -482,6 +486,9 @@ test-suite hmem-server-test
       HMem.Server.AccessTrackerSpec
       HMem.Server.AgentSessionSpec
       HMem.Server.APISpec
+      HMem.Server.Archive.MaintenanceQualificationSpec
+      HMem.Server.Archive.MaintenanceRollbackSpec
+      HMem.Server.Archive.MaintenanceSpec
       HMem.Server.Archive.WorkerSpec
       HMem.Server.ArchiveHTTPSpec
       HMem.Server.AuthBootstrapSpec
@@ -490,6 +497,7 @@ test-suite hmem-server-test
       HMem.Server.BotIdentitySpec
       HMem.Server.ChangeStreamSpec
       HMem.Server.ConfiguredObservationDiscoverySpec
+      HMem.Server.CtlArchivesCliSpec
       HMem.Server.CtlEmbeddingsCliSpec
       HMem.Server.CtlEmbeddingsSpec
       HMem.Server.CtlMigrateSpec

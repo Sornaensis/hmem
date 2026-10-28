@@ -104,6 +104,9 @@ spec=around withTestEnv $ describe "Session archives" $ do
     reject $ execute env ("UPDATE session_archive_jobs SET lease_expires_at=clock_timestamp()+interval '60 seconds' WHERE session_id='"<>uuid s.id<>"'")
     renewArchive env.pool old `shouldReturn` False
     publishArchive env.pool old verification `shouldReturn` False
+    claimArchive env.pool "new-attempt" `shouldReturn` Nothing
+    cleanupArchiveGeneration env.pool w s.id old.generationId `shouldReturn` 4
+    cleanupArchiveGeneration env.pool w s.id old.generationId `shouldReturn` 1
     (a,b)<-concurrently (claimArchive env.pool "new-attempt") (claimArchive env.pool "new-attempt")
     let leases=[l | Just l<-[a,b]]
     length leases `shouldBe` 1
@@ -111,8 +114,7 @@ spec=around withTestEnv $ describe "Session archives" $ do
     (current.generationId/=old.generationId,current.leaseToken/=old.leaseToken,current.attempt) `shouldBe` (True,True,2)
     stageArchivePart env.pool old 2 20 "x" `shouldReturn` False
     cleanupArchiveGeneration env.pool w s.id current.generationId `shouldReturn` 0
-    cleanupArchiveGeneration env.pool w s.id old.generationId `shouldReturn` 4
-    cleanupArchiveGeneration env.pool w s.id old.generationId `shouldReturn` 1
+    cleanupArchiveGeneration env.pool w s.id old.generationId `shouldReturn` 0
     stageComplete env current
     publishArchive env.pool current verification `shouldReturn` True
     cleanupArchiveGeneration env.pool w s.id current.generationId `shouldReturn` 0
@@ -129,6 +131,7 @@ spec=around withTestEnv $ describe "Session archives" $ do
     claimArchive env.pool "retry" `shouldReturn` Nothing
     -- Wait only the specified first backoff, then acquire a fresh generation.
     threadDelay 1100000
+    cleanupArchiveGeneration env.pool w s.id l.generationId `shouldReturn` 1
     Just next<-claimArchive env.pool "retry"
     next.attempt `shouldBe` 2
     stageComplete env next

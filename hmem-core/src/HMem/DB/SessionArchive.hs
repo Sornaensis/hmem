@@ -1,6 +1,6 @@
 -- | Bounded archive persistence. The codec worker owns persisted-output
 -- verification; publication here checks its attestation and immutable structure.
--- No operation changes the sealed session or reclaims original payloads.
+-- Sealed receipts remain immutable; V051 maintenance owns raw reclamation.
 module HMem.DB.SessionArchive
   ( ArchiveJob(..), ArchiveManifest(..), ArchivePart(..), ArchiveCheckpoint(..), ArchiveLedger(..)
   , ArchiveLease(..), ArchiveVerification(..)
@@ -112,8 +112,17 @@ claimArchive :: Pool H.Connection -> Text -> IO (Maybe ArchiveLease)
 claimArchive pool implementation=do
   guardInput (not (T.null implementation) && T.length implementation<=128)
   runTransaction pool $ do
+    lockControl
+    -- Expiry detaches only one fenced attempt. Its staging must drain before
+    -- any replacement can reserve another attempt's storage.
+    S.statement () (statement
+      "WITH expired AS (SELECT session_id FROM session_archive_jobs WHERE state='running' AND lease_expires_at<=clock_timestamp() ORDER BY session_id LIMIT 1 FOR UPDATE) UPDATE session_archive_jobs j SET state='retry',generation_id=NULL,lease_token=NULL,lease_expires_at=NULL,phase='queued',raw_progress=0,compressed_progress=0,error_code='archive_lease_expired' FROM expired e WHERE j.session_id=e.session_id"
+      E.noParams D.noResult)
+    S.statement () (statement
+      "UPDATE session_archive_control c SET blocked_reason=CASE WHEN paused THEN 'paused' WHEN EXISTS(SELECT 1 FROM session_archive_generations WHERE published_at IS NULL AND id IS DISTINCT FROM c.permit_generation) THEN 'staging_draining' WHEN permit_expires_at>clock_timestamp() THEN 'attempt_running' WHEN EXISTS(SELECT 1 FROM session_archive_jobs j JOIN sessions s ON s.id=j.session_id JOIN workspaces w ON w.id=j.workspace_id WHERE w.deleted_at IS NULL AND j.state IN ('queued','retry') AND j.retry_at<=clock_timestamp() AND (c.backfill_enabled OR s.terminated_at>=c.cutover_at OR EXISTS(SELECT 1 FROM session_archive_requests demand WHERE demand.session_id=s.id AND demand.workspace_id=s.workspace_id)) AND (hmem_archive_reservation(s.final_bytes,s.revision-1)+c.staged_bytes>c.staging_budget OR hmem_archive_reservation(s.final_bytes,s.revision-1)*4>c.wal_budget)) THEN 'resource_blocked' ELSE NULL END WHERE singleton"
+      E.noParams D.noResult)
     claimed <- S.statement () $ statement
-      "WITH candidate AS (SELECT j.session_id FROM session_archive_jobs j JOIN workspaces w ON w.id=j.workspace_id WHERE w.deleted_at IS NULL AND j.state IN ('queued','retry','running') AND j.retry_at<=clock_timestamp() AND (j.state<>'running' OR j.lease_expires_at<=clock_timestamp()) ORDER BY j.retry_at,j.session_id FOR UPDATE OF j SKIP LOCKED LIMIT 1) UPDATE session_archive_jobs j SET state='running',attempt=attempt+1,generation_id=gen_random_uuid(),lease_token=gen_random_uuid(),lease_expires_at=clock_timestamp()+interval '60 seconds',phase='compressing',raw_progress=0,compressed_progress=0,error_code=NULL FROM candidate c WHERE j.session_id=c.session_id RETURNING j.workspace_id,j.session_id,j.generation_id,j.lease_token,j.attempt"
+      "WITH candidate AS (SELECT j.session_id FROM session_archive_jobs j JOIN workspaces w ON w.id=j.workspace_id JOIN sessions s ON s.id=j.session_id CROSS JOIN session_archive_control c WHERE c.singleton AND (c.blocked_reason IS NULL OR c.blocked_reason='resource_blocked') AND hmem_archive_reservation(s.final_bytes,s.revision-1)+c.staged_bytes<=c.staging_budget AND hmem_archive_reservation(s.final_bytes,s.revision-1)*4<=c.wal_budget AND w.deleted_at IS NULL AND j.state IN ('queued','retry') AND j.retry_at<=clock_timestamp() AND (c.backfill_enabled OR s.terminated_at>=c.cutover_at OR EXISTS(SELECT 1 FROM session_archive_requests demand WHERE demand.session_id=s.id AND demand.workspace_id=s.workspace_id)) ORDER BY j.retry_at,j.session_id FOR UPDATE OF j SKIP LOCKED LIMIT 1) UPDATE session_archive_jobs j SET state='running',attempt=attempt+1,generation_id=gen_random_uuid(),lease_token=gen_random_uuid(),lease_expires_at=clock_timestamp()+interval '60 seconds',phase='compressing',raw_progress=0,compressed_progress=0,error_code=NULL FROM candidate c WHERE j.session_id=c.session_id RETURNING j.workspace_id,j.session_id,j.generation_id,j.lease_token,j.attempt"
       E.noParams (D.rowMaybe (ArchiveLease <$> column D.uuid <*> column D.uuid <*> column D.uuid <*> column D.uuid <*> column D.int8))
     case claimed of
       Nothing -> pure Nothing
@@ -123,16 +132,20 @@ claimArchive pool implementation=do
           (contramap fst leaseParams<>param snd E.text) D.noResult
         pure (Just lease)
 
--- Lock the job before any generation/child row. Recheck the lease AFTER lock.
+-- All worker transactions use control -> job -> generation/child row.
+lockControl :: S.Session ()
+lockControl=S.statement () $ statement "SELECT singleton FROM session_archive_control WHERE singleton FOR UPDATE" E.noParams (() <$ D.singleRow (column D.bool))
+
 withLease :: Pool H.Connection -> ArchiveLease -> S.Session a -> IO (Maybe a)
 withLease pool lease action=runTransaction pool $ do
+  lockControl
   locked <- S.statement lease $ statement "SELECT session_id FROM session_archive_jobs WHERE workspace_id=$1 AND session_id=$2 FOR UPDATE"
     (contramap (\x->(x.workspaceId,x.sessionId)) pair) (D.rowMaybe (column D.uuid))
   case locked of
     Nothing -> pure Nothing
     Just _ -> do
       live <- S.statement lease $ statement
-        "SELECT state='running' AND generation_id=$3 AND lease_token=$4 AND attempt=$5 AND lease_expires_at>clock_timestamp() FROM session_archive_jobs WHERE workspace_id=$1 AND session_id=$2"
+        "SELECT coalesce(j.state='running' AND j.generation_id=$3 AND j.lease_token=$4 AND j.attempt=$5 AND j.lease_expires_at>clock_timestamp() AND c.permit_kind='compression' AND c.permit_generation=$3 AND c.permit_token=$4 AND c.permit_expires_at>clock_timestamp(),false) FROM session_archive_jobs j CROSS JOIN session_archive_control c WHERE c.singleton AND j.workspace_id=$1 AND j.session_id=$2"
         leaseParams (D.singleRow (column D.bool))
       if live then Just <$> action else pure Nothing
 
@@ -272,6 +285,7 @@ readArchiveLedger pool workspace session generation offset=do
 -- job/generation locks exclude publication or claim; raw evidence is untouched.
 cleanupArchiveGeneration :: Pool H.Connection -> UUID -> UUID -> UUID -> IO Int64
 cleanupArchiveGeneration pool workspace session generation=runTransaction pool $ do
+  lockControl
   _ <- S.statement (workspace,session) $ statement "SELECT session_id FROM session_archive_jobs WHERE workspace_id=$1 AND session_id=$2 FOR UPDATE" pair (D.rowMaybe (column D.uuid))
   abandoned <- S.statement (workspace,session,generation,0) $ statement
     "SELECT g.id FROM session_archive_generations g JOIN session_archive_jobs j ON j.session_id=g.session_id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND g.published_at IS NULL AND j.generation_id IS DISTINCT FROM g.id AND $4::bigint=0 FOR UPDATE OF g"

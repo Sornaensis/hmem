@@ -107,7 +107,7 @@ primitive; public-facing consumers use published reads.
 
 Releasing a current lease to retry or terminal failure detaches its unpublished
 generation, making its staging eligible for cleanup even when no retry follows.
-Cleanup accepts a known obsolete unpublished generation, locks its job and
+Cleanup accepts a known obsolete unpublished generation, locks control, job and
 generation, and removes at most eight child rows per call, then its empty
 generation on a later call. It cannot delete the current or a published
 generation, the sealed receipt or original chunks. Operators retain raw evidence
@@ -120,7 +120,9 @@ no destructive down migration for published evidence.
 dev server and interactive harness. Each turn scans at most 32 sealed sessions,
 cleans at most eight obsolete staging rows, and claims one due job. Both explicit
 termination and the idle-session reaper become eligible through that scan. The
-worker never changes task state, the sealed receipt or original payloads.
+compression path never changes task state, the sealed receipt or original
+payloads. V051 adds the separately enabled verified reclamation turns described
+below to this same worker lifetime.
 
 `HMem.SessionArchive.Codec` uses an opaque C zlib context with fixed 64 KiB
 buffers and checked 64-bit counts. Compression writes physical parts without
@@ -224,6 +226,120 @@ The 25-second timer requests cancellation; cleanup still must finish before
 releasing cache/native ownership.
 Active range requests retain their existing 30-second logical work deadline.
 
+## Maintenance and recovery (V051)
+
+`session_archive_control` keeps operational state separate from immutable
+evidence: a durable `(terminated_at,id)` discovery cursor, pause, qualification,
+historical/reclaim switches, configured capacity and one generation/token/expiry
+permit purpose. Compression and full reclamation verification share that one
+durable permit, including owned renewal and confirmed child cleanup. Discovery
+inserts at most 32 candidates and advances its cursor in the
+same transaction. An exhausted sweep restarts. Historical background discovery
+defaults off at the migration's cutover timestamp. A same-workspace explicit
+archive request records one `session_archive_requests` row and may schedule an
+older session without enabling the historical scan or changing a ready job.
+
+All worker storage transactions lock control before job and generation. There
+is one global attempt permit, renewed atomically with the job's 60-second lease.
+Expiry detaches one stale generation; subsequent turns drain at most eight
+staging rows before any fresh claim, including on-demand and newly sealed work.
+Pause prevents new claims and raw deletion while the current bounded attempt
+drains through its existing cancellation/renewal lifetime. Resume retains the
+cursor, published archives and deletion progress.
+
+Default staging and WAL headroom allowances are 8 GiB and 32 GiB. These are
+configured logical capacity policies, not observations of PostgreSQL disk free
+space or caps on actual WAL emission. Admission reserves
+`raw + ceil(raw/500) + max(1,ceil(raw/1MiB))*65536 + append_count*1024 + 8MiB`
+bytes and four times that allowance for WAL, using checked numeric arithmetic.
+Actual staging accounting adds part bytes plus 512 bytes per part, dictionary
+bytes plus 512 bytes per checkpoint, and 1024 bytes per append-ledger row.
+Each bounded insertion checks the configured staging allowance; published data
+ceases to be staging. An insufficient allowance produces `resource_blocked`
+without classifying the session as unsupported. Operators may raise capacity
+for larger supported transcripts. Physical disk, WAL retention, backups and
+ordinary foreground database consumption require separate operational
+monitoring; a client filesystem cannot establish remote PostgreSQL free space.
+
+Before first deletion, an independent bounded readback verifies the pinned
+manifest, exact single-member gzip termination, compressed and original receipt
+counts/digests, every checkpoint and append-ledger binding, and original chunk
+metadata. `session_archive_reclamation` stores the compact result bound to the
+immutable generation/manifest. Failed verification stores no deletion eligibility
+and retries after 60 seconds or an explicit retry command. No transcript-sized
+buffer or raw temporary file is needed.
+Pausing or disabling reclamation after successful verification defers deletion
+while preserving the attestation, raw rows and deletion progress. Status remains
+`draining` during a pause while its attempt permit remains live.
+
+`public.hmem_archive_reclaim(workspace,session,generation,manifest,token)` locks control,
+job and generation in order. It rechecks enablement, qualification, readiness,
+verification, current maintenance permit and actual runtime-role safety, then compares each raw row's complete
+metadata and SHA-256 with the immutable append ledger. It deletes at most eight
+rows/8 MiB and commits progress in the same transaction. Any mismatch rolls back
+the entire batch. Empty, repeated and interrupted batches are safe. The original
+receipt, ledger, checkpoints and published gzip remain unchanged.
+
+The SECURITY DEFINER capability has a fixed `pg_catalog` search path and qualified
+relations, is revoked from PUBLIC and belongs to a protected NOLOGIN/NOINHERIT
+owner with no role memberships. Its narrow grants include one UPDATE column only
+because PostgreSQL row locking requires that privilege; ordinary UPDATE is still
+rejected by the chunk guard. Runtime readiness rejects superusers, CREATEROLE,
+public-schema CREATE, evidence/guard ownership and membership of the capability
+owner, including authority available through assumable roles. It also rejects
+TRIGGER rights on protected write targets and caller-controlled attached trigger
+functions in any schema, even after attachment rights have been revoked.
+Use a separate migration administrator and explicitly grant the trusted runtime
+role EXECUTE on this one capability. Administrators can alter PostgreSQL guards;
+they are not ordinary runtime callers. No caller setting, disabled trigger or
+general evidence bypass authorizes production deletion.
+
+```text
+hmem-ctl archives status --json
+hmem-ctl archives capacity --staging-bytes 8589934592 --wal-bytes 34359738368
+hmem-ctl archives backfill-enable --qualified
+hmem-ctl archives reclaim-enable --qualified
+hmem-ctl archives pause
+hmem-ctl archives resume
+hmem-ctl archives retry --workspace UUID --session UUID
+hmem-ctl archives reclaim-disable
+hmem-ctl archives backfill-disable
+```
+
+The qualification switches acknowledge completed compatible-reader, complete-view
+and backup gates. They are operator actions; deployments never enable them merely
+because migrations or task acceptance succeeded. Status distinguishes configured
+capacity, current permit, attempt/retry counts, verification failures and reclaimed
+bytes. `runtime_safe=false` explains an unsuitable configured database role.
+
+Keep a verified pre-cleanup backup. Also back up **after** raw reclamation,
+restore into an empty replacement database and verify archive-only ranges,
+historical proofs, exact terminal replay and ZIP bytes. Code rollback must use
+an archive-compatible build; raw-only code requires the pre-cleanup backup.
+Logical DELETE makes space reclaimable. Ordinary VACUUM and later inserts may
+reuse heap/TOAST/index pages; reusable space is different from OS file shrink.
+Never run VACUUM FULL automatically. Measure raw baseline, ready-plus-raw,
+post-delete and post-vacuum/reuse storage with separate non-double-counted heap,
+TOAST, index, dictionary and ledger totals, plus actual WAL, staging and backup
+sizes before making storage-saving claims.
+
+The implementation owner's disposable qualification area is
+`.scratch/sealed-archives-8ff1e216`, transferred to Task 8 after verified handoff.
+Required receipts and the active rollback source/binary remain through frontend
+rebind and aggregate approval, then Task 8 disposes that scratch. Existing
+harness sandboxes separately own their ephemeral PostgreSQL databases and process
+handles and clean them through their supported finite release paths. Routine raw
+fixtures/logs are not retained. A compact measurement/recovery receipt is required
+release evidence. The reproducible backend-only rollback derivative is defined
+by [its patch](../../tools/session-archive-rollback-compat.patch) and
+[source/build recipe](../../tools/session-archive-rollback-compat.json), owned by
+repository maintainers until that target is replaced or retired. A source hash
+alone is not qualification: require the matching executable, restored-database
+operational probes and actual served frontend asset hashes. Keep the current
+frontend, pause/drain maintenance and disable reclamation before switching
+backends. Raw-only code still requires the pre-cleanup backup. Unresolved failure
+diagnostics expire at issue closure.
+
 ## HTTP and client
 
 Add authorized session archive readiness/manifest and content routes alongside
@@ -305,20 +421,46 @@ disclosure identity and ordering; independently parsing each page is insufficien
 Store raw record offsets and event/occurrence references locally. Commit at most
 256 index records or 1 MiB per batch, with backpressure. Keep worker messages,
 navigation reads and the DOM bounded by the existing 200-row/4 MiB presentation
-window while allowing navigation across the entire verified session.
+window while allowing navigation across the entire verified session. A page
+reserves 128 KiB for hydrated bodies and 1 MiB of wire data within that combined
+ceiling. Exact pretty output is produced lazily in chunks of at most 16 Ki UTF-16
+units/64 KiB UTF-8, with bounded tokenization.
+
+One explicit presentation exception applies to structured reasoning objects
+whose exact pretty-printed JSON exceeds 1,048,576 UTF-8 bytes: show the complete
+JSON through exact paged output, with links and emphasis displayed literally.
+Objects at or below that limit, normal text/thinking Markdown, pairing and
+activity grouping keep their existing semantics. This exception does not
+increase memory budgets or introduce a virtual Markdown parser.
 
 Cancel download, decoding and indexing on selection change, explicit cancel,
 authorization loss or disposal. Tag every message with session, generation and
 load token; stale completions cannot replace the current view. Close worker
-handles before deleting unverified staging. Reusing verified local data still
-requires current server authorization and the same audience/workspace/generation.
-Clear its ownership on logout, principal switch or credential/session change,
-even when workspace and session IDs stay the same.
+handles before deleting staging. Keep only the current private generation;
+selection change, authority withdrawal and cancellation delete it. Revisiting a
+session performs fresh authorized manifest and content GETs, with no
+cross-selection verified cache. Pages within the current verified generation
+read local data without HTTP. Logout,
+principal switch and credential/session changes retire ownership even when
+workspace/session IDs stay the same.
+
+Worker, gzip `DecompressionStream`, worker OPFS, IndexedDB and Web Locks are
+required. A per-local-UUID lock protects each live tab through actual cleanup;
+there is no lifetime origin mutex. The versioned
+`hmem-session-archives-v1/owner.json` layout marks owned generations. Recovery
+examines at most 128 entries and removes at most eight marked stale UUIDs per
+admission, skipping live owners and unknown entries. Exhausting the eight-stale
+cleanup budget gives a retry that makes real progress. More than 128 preserved
+entries produces terminal `archive_recovery_limit` with close-other-tabs/private-
+storage remediation; live and unknown entries remain preserved. Cleanup failures
+retain ownership until the same outstanding cleanup completes.
 
 The initial qualification platform is desktop Windows Chromium, matching the
 repository's native test platform; record actual browser/build/device versions.
-Require Worker, gzip `DecompressionStream`, worker OPFS and IndexedDB support by
-feature detection. Other browsers must pass the same integration gates before
+Run browser qualification in a normal persistent disk-backed profile with a
+storage canary. Capability checks do not establish private/incognito profile
+behavior; record the profile and storage evidence with each qualification result.
+Require those capabilities by feature detection. Other browsers must pass the same integration gates before
 being advertised. Missing capabilities or insufficient quota produce an explicit
 unsupported/resource error, never a reduced raw-window view. Before transfer,
 check storage estimates against compressed + raw bytes plus an index allowance;

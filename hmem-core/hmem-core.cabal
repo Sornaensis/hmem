@@ -35,6 +35,7 @@ library
       HMem.DB.Schema
       HMem.DB.Search
       HMem.DB.SessionArchive
+      HMem.DB.SessionArchive.Maintenance
       HMem.DB.SessionArchive.Reader
       HMem.DB.Task
       HMem.DB.TestHarness
@@ -113,6 +114,7 @@ test-suite hmem-core-test
       HMem.DB.OverviewSpec
       HMem.DB.ProjectSpec
       HMem.DB.SearchSpec
+      HMem.DB.SessionArchive.MaintenanceSpec
       HMem.DB.SessionArchive.ReaderSpec
       HMem.DB.SessionArchiveSpec
       HMem.DB.TaskSpec

@@ -1,0 +1,502 @@
+{
+  "format_version": 1,
+  "derivative": "b7428aa-v051-archive-compat-2",
+  "owner": "Repository maintainers",
+  "retention": "Until this supported rollback target is replaced or retired",
+  "source": {
+    "revision": "b7428aa960d0b526fb85e33146f36374f3b8b109",
+    "archive_sha256": "ccf428aa6a87a80ad1a83c9dd12f4356784d9587dc462f89056747c8492c49b8",
+    "archive_bytes": 6197097,
+    "prefix": "rollback-b742/",
+    "entries": 820,
+    "unpacked_bytes": 35678285,
+    "regular_files": 737
+  },
+  "patch": {
+    "path": "tools/session-archive-rollback-compat.patch",
+    "sha256": "16d7c5d1e0608dee069a17aba2b9e5518ac84aceb75bac3ade498877ce294867",
+    "files": [
+      {
+        "path": "hmem-core/src/HMem/DB/SessionArchive.hs",
+        "before_sha256": "e8c03933ff717afc05922b010943c366dc8b577bade2454507e5adafd2740999",
+        "after_sha256": "a7c2c127988b5a0fdef4ee369ccd4a734a813884c5d35df3cf629304944efcfa"
+      },
+      {
+        "path": "hmem-core/src/HMem/DB/SessionArchive/Reader.hs",
+        "before_sha256": "3afd98912981f1eb5cf7b36fabf3ef2e8b0ce7124f4d6de32db7423846b24eae",
+        "after_sha256": "b0441104acea90fbc829e7520ec0899ca9dd7c2f05d076494efc89d6cdf1ddfb"
+      },
+      {
+        "path": "hmem-server/src/HMem/Server/Archive/Worker.hs",
+        "before_sha256": "248930cac8da22e86920d8b0cbf111f012c8c2989304aac3afb53eda14745278",
+        "after_sha256": "94c2411cdaa531e5fe53ec729420a74d0add3470370f2fd02f35a490104c90c8"
+      },
+      {
+        "path": "hmem-core/src/HMem/Config.hs",
+        "before_sha256": "10c9dda7e1658a4ba2256ac2175e1b740cbc7a2c91901c93465c24f85ff81694",
+        "after_sha256": "acb92d851b2cdc4504689a76230f94bb95aa3fa809cecd8bc187eedb9c94128b"
+      }
+    ]
+  },
+  "configuration": [
+    {
+      "path": "stack.yaml",
+      "before_sha256": "a7bfaea8ae5dee69350c7e39a1246ab9e0e3d6cc1a34fcc81cc0a0bb8056f4fd",
+      "after_sha256": "a7bfaea8ae5dee69350c7e39a1246ab9e0e3d6cc1a34fcc81cc0a0bb8056f4fd"
+    },
+    {
+      "path": "stack.yaml.lock",
+      "before_sha256": "862716fdd2413305885b94d3482793221f41ebb7d62c9f2df2e9c4ba88391556",
+      "after_sha256": "862716fdd2413305885b94d3482793221f41ebb7d62c9f2df2e9c4ba88391556"
+    },
+    {
+      "path": "hmem-core/package.yaml",
+      "before_sha256": "2e0a79c1487a9cbba601806f7e4b920e4bae6cbd4a1a885befd74c18b6b4585a",
+      "after_sha256": "2e0a79c1487a9cbba601806f7e4b920e4bae6cbd4a1a885befd74c18b6b4585a"
+    },
+    {
+      "path": "hmem-core/hmem-core.cabal",
+      "before_sha256": "413bfd6366de65c6111d5ab13211d1c65e7ab6c95146c4c9d387c015ea1b2cfd",
+      "after_sha256": "413bfd6366de65c6111d5ab13211d1c65e7ab6c95146c4c9d387c015ea1b2cfd"
+    },
+    {
+      "path": "hmem-server/package.yaml",
+      "before_sha256": "45162a5a0350fb3c24fefe7bef3eb485c25b38b2185cf86543eacd8ae9f45d73",
+      "after_sha256": "45162a5a0350fb3c24fefe7bef3eb485c25b38b2185cf86543eacd8ae9f45d73"
+    },
+    {
+      "path": "hmem-server/hmem-server.cabal",
+      "before_sha256": "8e4b8a072db877d4d06c722433da298dd3a438f59ed4919bd5beb75344b2ba53",
+      "after_sha256": "8e4b8a072db877d4d06c722433da298dd3a438f59ed4919bd5beb75344b2ba53"
+    },
+    {
+      "path": "hmem-embedding-http/package.yaml",
+      "before_sha256": "34ec5862bc9e2db0df1101ccbbf0fd002ffc5381e8933799aa61800e8c7b7127",
+      "after_sha256": "34ec5862bc9e2db0df1101ccbbf0fd002ffc5381e8933799aa61800e8c7b7127"
+    },
+    {
+      "path": "hmem-embedding-http/hmem-embedding-http.cabal",
+      "before_sha256": "ceeff3ae5506db285fa6a783bb35a6aa966ea7462f378b92ea752afbb6b0c078",
+      "after_sha256": "ceeff3ae5506db285fa6a783bb35a6aa966ea7462f378b92ea752afbb6b0c078"
+    }
+  ],
+  "build": {
+    "git_root": "D:/Projects/hmem",
+    "source_fixture": ".scratch/sealed-archives-8ff1e216/rollback-b742",
+    "work_dir": ".stack-work-rollback",
+    "status": "built; local backend operational probe passed; no deployment readiness claim",
+    "commands": [
+      "stack build hmem-core:lib --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback",
+      "stack build hmem-embedding-http:lib --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback",
+      "stack build hmem-server:lib --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback",
+      "stack build hmem-server:exe:hmem-server --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback --copy-bins --local-bin-path D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-bin-v2"
+    ],
+    "artifact": {
+      "path": ".scratch/sealed-archives-8ff1e216/rollback-bin-v2/hmem-server.exe",
+      "bytes": 79956992,
+      "sha256": "c1de81ddeebf6dd64505b6516c6d2011bba0b3a0b4025ee28974ed840526b496"
+    },
+    "compiler_from_locked_snapshot": "ghc-9.10.2",
+    "package_registrations": [
+      {
+        "file": "hmem-core-0.1.0.0-EenpPpzsINd7J1rpyekWjg.conf",
+        "sha256": "bca5916731b220d992d8ab13d4e1568ef9216e078074468e1b3c3830456ac245",
+        "unit_id": "hmem-core-0.1.0.0-EenpPpzsINd7J1rpyekWjg",
+        "abi": "765bb9a1f26c3c0fd6fc072a3a586941",
+        "depends": [
+          "aeson-2.2.3.0-1iVCG89JmSt3mu3XuwfHyM",
+          "async-2.2.5-8ZmPVorT3IBBSjA3l4hymn",
+          "base-4.20.1.0-fed5",
+          "base64-bytestring-1.2.1.0-HMwg6vz6YJ1E4n217vAoMf",
+          "bytestring-0.12.2.0-194a",
+          "containers-0.7-aa7c",
+          "crypton-1.0.4-Jlo3q9vDlBwGIdCDcurp6k",
+          "directory-1.3.8.5-ca39",
+          "filepath-1.5.4.0-90fc",
+          "hasql-1.9.1.2-DoMqQIHPeCP2XsTKpexMMy",
+          "hasql-pool-1.3.0.3-Hn4axXFFOwZ3uYWaGFZVp2",
+          "process-1.6.25.0-68e9",
+          "random-1.2.1.3-F582qkP2HLDEBeugIUSDKS",
+          "rel8-1.7.0.0-LEamxCFtQ4H2zvXd6RXTMQ",
+          "resource-pool-0.4.0.0-DGUBhOLzVtiJjIshTAG0L1",
+          "temporary-1.3-EVy9kW9lFEjHvMeMVIopfJ",
+          "text-2.1.2-0b2c",
+          "time-1.12.2-f10a",
+          "uuid-1.3.16-K0R2PryM6HnKQRmtGb3XgR",
+          "yaml-0.11.11.2-98Gx4ZtcRPj6vsebTbBznI"
+        ]
+      },
+      {
+        "file": "hmem-embedding-http-0.1.0.0-9NQFLif5tWUFJ7Y7SSy1q6.conf",
+        "sha256": "7e0769a702ce993be0de3f9c2b18cbc7f9a144cde4d41ba02786131216d768b5",
+        "unit_id": "hmem-embedding-http-0.1.0.0-9NQFLif5tWUFJ7Y7SSy1q6",
+        "abi": "d5374efb118de4b287162eaa24db95ca",
+        "depends": [
+          "async-2.2.5-8ZmPVorT3IBBSjA3l4hymn",
+          "base-4.20.1.0-fed5",
+          "bytestring-0.12.2.0-194a",
+          "directory-1.3.8.5-ca39",
+          "filepath-1.5.4.0-90fc",
+          "http-client-0.7.19-jMCjoGsXUREUO7a9oLQv0",
+          "http-client-tls-0.3.6.4-Auft7xjJ08L1Q8UIywIcdJ",
+          "http-types-0.12.4-ELvKXBe8BgcFftDhZS730g",
+          "network-3.2.7.0-6Zt8bYA4bl0H3fTtlqN0Va",
+          "process-1.6.25.0-68e9",
+          "tls-2.1.8-Db1VTxZGSG9EBalVlsc47"
+        ]
+      },
+      {
+        "file": "hmem-server-0.1.0.0-5pjzQ5D1ByuG622udSpWEj.conf",
+        "sha256": "61366c7a2ad4bc7e3eb3be6cd1d7be207e24496ba57cff022929624550dfce02",
+        "unit_id": "hmem-server-0.1.0.0-5pjzQ5D1ByuG622udSpWEj",
+        "abi": "1e82b2ea37b3083755a50f90b0ba355d",
+        "depends": [
+          "aeson-2.2.3.0-1iVCG89JmSt3mu3XuwfHyM",
+          "async-2.2.5-8ZmPVorT3IBBSjA3l4hymn",
+          "base-4.20.1.0-fed5",
+          "bytestring-0.12.2.0-194a",
+          "containers-0.7-aa7c",
+          "crypton-1.0.4-Jlo3q9vDlBwGIdCDcurp6k",
+          "directory-1.3.8.5-ca39",
+          "fast-logger-3.2.6-C7e1urZWAhh86dP1Ppf3oB",
+          "file-embed-0.0.16.0-JzWUMs4DUoq6tcerzi7WFZ",
+          "filepath-1.5.4.0-90fc",
+          "hasql-1.9.1.2-DoMqQIHPeCP2XsTKpexMMy",
+          "hmem-core-0.1.0.0-EenpPpzsINd7J1rpyekWjg",
+          "hmem-embedding-http-0.1.0.0-9NQFLif5tWUFJ7Y7SSy1q6",
+          "http-client-0.7.19-jMCjoGsXUREUO7a9oLQv0",
+          "http-client-tls-0.3.6.4-Auft7xjJ08L1Q8UIywIcdJ",
+          "http-media-0.8.1.1-AqxlsOn7SV4KCx1XUVKckG",
+          "http-types-0.12.4-ELvKXBe8BgcFftDhZS730g",
+          "insert-ordered-containers-0.2.7-1wZdAfEnk3eDZP2NdSzPa",
+          "jose-0.11-EPbIjrNKCq4FiK6bheO6p5",
+          "lens-5.3.5-3ua4TYnH1MxJ9jRJqr2RRe",
+          "memory-0.18.0-2HJFnh81mhTIf6oA4RkIP2",
+          "network-3.2.7.0-6Zt8bYA4bl0H3fTtlqN0Va",
+          "openapi3-3.2.4-GWUz2xiLV9MEuR9NF9nhS",
+          "optparse-applicative-0.18.1.0-CbSONZqmw60MMIOfigpRU",
+          "process-1.6.25.0-68e9",
+          "random-1.2.1.3-F582qkP2HLDEBeugIUSDKS",
+          "rel8-1.7.0.0-LEamxCFtQ4H2zvXd6RXTMQ",
+          "resource-pool-0.4.0.0-DGUBhOLzVtiJjIshTAG0L1",
+          "servant-openapi3-2.0.1.6-KCmtguf0YI6ESH7kscuyZj",
+          "servant-server-0.20.3.0-K00lGDZT1bW2ZcKx5GR5Wp",
+          "stm-2.5.3.1-7e26",
+          "text-2.1.2-0b2c",
+          "time-1.12.2-f10a",
+          "uuid-1.3.16-K0R2PryM6HnKQRmtGb3XgR",
+          "wai-3.2.4-6BtRy6UqXEfIVAA2b7l8I",
+          "wai-cors-0.2.7-FXHXuAA4QEm9NKvQYpnJXF",
+          "wai-extra-3.1.17-DO4OC8wx0GzJdMJUyvCWR2",
+          "wai-websockets-3.0.1.2-5te15zYxEPGLL1SB99CLaM",
+          "warp-3.4.8-jh3IXds6FNHKqPSXgT1wu",
+          "warp-tls-3.4.13-BOyBlKybn8B2iWRze5vq9F",
+          "websockets-0.13.0.0-4x0MLOjVaPyLCi8C8Oua7Z",
+          "yaml-0.11.11.2-98Gx4ZtcRPj6vsebTbBznI",
+          "zlib-0.7.1.0-G6xXrKrv37oEn2hKBrUFQY"
+        ]
+      }
+    ],
+    "entrypoint_source_sha256": "3b81d17a1d2d1e822c66073a00b54c41dfd8dc4a72673ee0f3ae30778c4a834f",
+    "compiler_setup_header": "Saved package config for hmem-server-0.1.0.0 written by Cabal-3.12.1.0 using ghc-9.10",
+    "compiler_from_registration_import_dir": "ghc-9.10.2"
+  },
+  "deployment_contract": {
+    "backend_only": true,
+    "requires_schema_versions": [
+      50,
+      51
+    ],
+    "controls": "Use the current ctl to pause, confirm no running permit/staging, disable reclamation, stop the current backend, start this derivative, then resume eligible compression. Retain V051 roles, owners, grants and evidence.",
+    "frontend": "Retain the current Task6 functional candidate index and Worker assets; bind and test actual served hashes. Task8 must renew the final qualified asset binding and browser integration.",
+    "not_supported": "Pristine b742 backend/old frontend or raw-only code rollback after reclamation",
+    "v051_source_sha256": "bcf46e892e7de2ece61b9a63a0b53985cdabd040b424ae8f23896d63f7ab914f",
+    "configuration_root": "Optional HMEM_CONFIG_DIR must be nonempty and absolute; invalid overrides fail before config load, otherwise OS-home default is unchanged. The probe supplies its verified contained sandbox .hmem directory for configuration, logs and downstream config-root users."
+  },
+  "required_operational_probes": [
+    "Actual entrypoint starts on V051 restored database",
+    "Archive-only ranges, historical/full proofs, exact replay, ZIP and compressed content",
+    "Valid new seal including intermediate final-record LF/CRLF separators",
+    "Dormant historical queue plus explicit demand",
+    "Fitting new seals beside oversized capacity-blocked work",
+    "Expired current staging detachment, bounded drain and retry",
+    "Actual served current index and Worker asset hashes",
+    "Explicit contained configuration root, unchanged private config and log location"
+  ],
+  "limitations": [
+    "This file defines reproducible source and required probes; it does not itself certify an executable or completed qualification."
+  ],
+  "prior_unqualified_build": {
+    "git_root": "D:/Projects/hmem",
+    "source_fixture": ".scratch/sealed-archives-8ff1e216/rollback-b742",
+    "work_dir": ".stack-work-rollback",
+    "commands": [
+      "stack build hmem-core:lib --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback",
+      "stack build hmem-embedding-http:lib --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback",
+      "stack build hmem-server:lib --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback",
+      "stack build hmem-server:exe:hmem-server --stack-yaml D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-b742/stack.yaml --work-dir .stack-work-rollback --copy-bins --local-bin-path D:/Projects/hmem/.scratch/sealed-archives-8ff1e216/rollback-bin"
+    ],
+    "artifact": {
+      "path": ".scratch/sealed-archives-8ff1e216/rollback-bin/hmem-server.exe",
+      "bytes": 79956480,
+      "sha256": "2004ca05293d108929e8b31348a8e56e92e97460ef7b949056a275757a83bfa5"
+    },
+    "compiler_setup_header": "Saved package config for hmem-server-0.1.0.0 written by Cabal-3.12.1.0 using ghc-9.10",
+    "compiler_from_locked_snapshot": "ghc-9.10.2",
+    "package_registrations": [
+      {
+        "file": "hmem-core-0.1.0.0-EenpPpzsINd7J1rpyekWjg.conf",
+        "sha256": "5a1b00c244b158cdbee0d2e68742072617338a4b083d4cecb1af02985bc3ddba",
+        "unit_id": "hmem-core-0.1.0.0-EenpPpzsINd7J1rpyekWjg",
+        "abi": "bef980e9da118f7a82f680f9a84c4e1e",
+        "depends": [
+          "aeson-2.2.3.0-1iVCG89JmSt3mu3XuwfHyM",
+          "async-2.2.5-8ZmPVorT3IBBSjA3l4hymn",
+          "base-4.20.1.0-fed5",
+          "base64-bytestring-1.2.1.0-HMwg6vz6YJ1E4n217vAoMf",
+          "bytestring-0.12.2.0-194a",
+          "containers-0.7-aa7c",
+          "crypton-1.0.4-Jlo3q9vDlBwGIdCDcurp6k",
+          "directory-1.3.8.5-ca39",
+          "filepath-1.5.4.0-90fc",
+          "hasql-1.9.1.2-DoMqQIHPeCP2XsTKpexMMy",
+          "hasql-pool-1.3.0.3-Hn4axXFFOwZ3uYWaGFZVp2",
+          "process-1.6.25.0-68e9",
+          "random-1.2.1.3-F582qkP2HLDEBeugIUSDKS",
+          "rel8-1.7.0.0-LEamxCFtQ4H2zvXd6RXTMQ",
+          "resource-pool-0.4.0.0-DGUBhOLzVtiJjIshTAG0L1",
+          "temporary-1.3-EVy9kW9lFEjHvMeMVIopfJ",
+          "text-2.1.2-0b2c",
+          "time-1.12.2-f10a",
+          "uuid-1.3.16-K0R2PryM6HnKQRmtGb3XgR",
+          "yaml-0.11.11.2-98Gx4ZtcRPj6vsebTbBznI"
+        ]
+      },
+      {
+        "file": "hmem-embedding-http-0.1.0.0-9NQFLif5tWUFJ7Y7SSy1q6.conf",
+        "sha256": "7e0769a702ce993be0de3f9c2b18cbc7f9a144cde4d41ba02786131216d768b5",
+        "unit_id": "hmem-embedding-http-0.1.0.0-9NQFLif5tWUFJ7Y7SSy1q6",
+        "abi": "d5374efb118de4b287162eaa24db95ca",
+        "depends": [
+          "async-2.2.5-8ZmPVorT3IBBSjA3l4hymn",
+          "base-4.20.1.0-fed5",
+          "bytestring-0.12.2.0-194a",
+          "directory-1.3.8.5-ca39",
+          "filepath-1.5.4.0-90fc",
+          "http-client-0.7.19-jMCjoGsXUREUO7a9oLQv0",
+          "http-client-tls-0.3.6.4-Auft7xjJ08L1Q8UIywIcdJ",
+          "http-types-0.12.4-ELvKXBe8BgcFftDhZS730g",
+          "network-3.2.7.0-6Zt8bYA4bl0H3fTtlqN0Va",
+          "process-1.6.25.0-68e9",
+          "tls-2.1.8-Db1VTxZGSG9EBalVlsc47"
+        ]
+      },
+      {
+        "file": "hmem-server-0.1.0.0-5pjzQ5D1ByuG622udSpWEj.conf",
+        "sha256": "87db39d7f57a4302a6dcb0a7cf6887cb84a321aa75b2930e1fa895d821a862fa",
+        "unit_id": "hmem-server-0.1.0.0-5pjzQ5D1ByuG622udSpWEj",
+        "abi": "4546ac2398a311c4ae8be2b0686e7a13",
+        "depends": [
+          "aeson-2.2.3.0-1iVCG89JmSt3mu3XuwfHyM",
+          "async-2.2.5-8ZmPVorT3IBBSjA3l4hymn",
+          "base-4.20.1.0-fed5",
+          "bytestring-0.12.2.0-194a",
+          "containers-0.7-aa7c",
+          "crypton-1.0.4-Jlo3q9vDlBwGIdCDcurp6k",
+          "directory-1.3.8.5-ca39",
+          "fast-logger-3.2.6-C7e1urZWAhh86dP1Ppf3oB",
+          "file-embed-0.0.16.0-JzWUMs4DUoq6tcerzi7WFZ",
+          "filepath-1.5.4.0-90fc",
+          "hasql-1.9.1.2-DoMqQIHPeCP2XsTKpexMMy",
+          "hmem-core-0.1.0.0-EenpPpzsINd7J1rpyekWjg",
+          "hmem-embedding-http-0.1.0.0-9NQFLif5tWUFJ7Y7SSy1q6",
+          "http-client-0.7.19-jMCjoGsXUREUO7a9oLQv0",
+          "http-client-tls-0.3.6.4-Auft7xjJ08L1Q8UIywIcdJ",
+          "http-media-0.8.1.1-AqxlsOn7SV4KCx1XUVKckG",
+          "http-types-0.12.4-ELvKXBe8BgcFftDhZS730g",
+          "insert-ordered-containers-0.2.7-1wZdAfEnk3eDZP2NdSzPa",
+          "jose-0.11-EPbIjrNKCq4FiK6bheO6p5",
+          "lens-5.3.5-3ua4TYnH1MxJ9jRJqr2RRe",
+          "memory-0.18.0-2HJFnh81mhTIf6oA4RkIP2",
+          "network-3.2.7.0-6Zt8bYA4bl0H3fTtlqN0Va",
+          "openapi3-3.2.4-GWUz2xiLV9MEuR9NF9nhS",
+          "optparse-applicative-0.18.1.0-CbSONZqmw60MMIOfigpRU",
+          "process-1.6.25.0-68e9",
+          "random-1.2.1.3-F582qkP2HLDEBeugIUSDKS",
+          "rel8-1.7.0.0-LEamxCFtQ4H2zvXd6RXTMQ",
+          "resource-pool-0.4.0.0-DGUBhOLzVtiJjIshTAG0L1",
+          "servant-openapi3-2.0.1.6-KCmtguf0YI6ESH7kscuyZj",
+          "servant-server-0.20.3.0-K00lGDZT1bW2ZcKx5GR5Wp",
+          "stm-2.5.3.1-7e26",
+          "text-2.1.2-0b2c",
+          "time-1.12.2-f10a",
+          "uuid-1.3.16-K0R2PryM6HnKQRmtGb3XgR",
+          "wai-3.2.4-6BtRy6UqXEfIVAA2b7l8I",
+          "wai-cors-0.2.7-FXHXuAA4QEm9NKvQYpnJXF",
+          "wai-extra-3.1.17-DO4OC8wx0GzJdMJUyvCWR2",
+          "wai-websockets-3.0.1.2-5te15zYxEPGLL1SB99CLaM",
+          "warp-3.4.8-jh3IXds6FNHKqPSXgT1wu",
+          "warp-tls-3.4.13-BOyBlKybn8B2iWRze5vq9F",
+          "websockets-0.13.0.0-4x0MLOjVaPyLCi8C8Oua7Z",
+          "yaml-0.11.11.2-98Gx4ZtcRPj6vsebTbBznI",
+          "zlib-0.7.1.0-G6xXrKrv37oEn2hKBrUFQY"
+        ]
+      }
+    ],
+    "entrypoint_source_sha256": "3b81d17a1d2d1e822c66073a00b54c41dfd8dc4a72673ee0f3ae30778c4a834f",
+    "derivative": "b7428aa-v051-archive-compat-1",
+    "qualification": "Unqualified revision1; copy and OS-home safety guards failed before native launch; preserve artifact without relabeling",
+    "source_files": [
+      {
+        "path": "hmem-core/src/HMem/DB/SessionArchive.hs",
+        "before_sha256": "e8c03933ff717afc05922b010943c366dc8b577bade2454507e5adafd2740999",
+        "after_sha256": "a7c2c127988b5a0fdef4ee369ccd4a734a813884c5d35df3cf629304944efcfa"
+      },
+      {
+        "path": "hmem-core/src/HMem/DB/SessionArchive/Reader.hs",
+        "before_sha256": "3afd98912981f1eb5cf7b36fabf3ef2e8b0ce7124f4d6de32db7423846b24eae",
+        "after_sha256": "b0441104acea90fbc829e7520ec0899ca9dd7c2f05d076494efc89d6cdf1ddfb"
+      },
+      {
+        "path": "hmem-server/src/HMem/Server/Archive/Worker.hs",
+        "before_sha256": "248930cac8da22e86920d8b0cbf111f012c8c2989304aac3afb53eda14745278",
+        "after_sha256": "94c2411cdaa531e5fe53ec729420a74d0add3470370f2fd02f35a490104c90c8"
+      }
+    ]
+  },
+  "runtime_qualification": {
+    "result": "passed: local backend operational compatibility only",
+    "executed_recipe_sha256": "d23df004839b7e19f9ee2e5680cdd681c0c48fe0abac4a8ba47b323790c43139",
+    "receipt": {
+      "path": ".scratch/sealed-archives-8ff1e216/rollback-e9a1020d-59a9-4347-9fa6-adb3e7e16ddf.json",
+      "sha256": "b30067506b4a70704408e9fa20a6dd4c3b83e6a94b09411235dcde213cc66823"
+    },
+    "main_test_executable_sha256": "e53d889f13c8ac5faffc19d2f786d60d845daede61dfd791c650294d580b75dc",
+    "native_test_source_sha256": "d12c8eaf749976485771e7393f15a96c8915ffab4d008b9ad0cd99d9f90ce17c",
+    "derivative_artifact_sha256": "c1de81ddeebf6dd64505b6516c6d2011bba0b3a0b4025ee28974ed840526b496",
+    "supported_tool_call": {
+      "tool": "stack_test",
+      "targets": "hmem-server:test:hmem-server-test",
+      "ta": "--match \"runs the reviewed prior backend derivative\"",
+      "result": "non-error {}; no parsed example count"
+    },
+    "native_helpers": [
+      {
+        "actual_helper_joined": true,
+        "elapsed_seconds": 0.4993677,
+        "exit_code": "ExitSuccess",
+        "tool": "pg_dump"
+      },
+      {
+        "actual_helper_joined": true,
+        "elapsed_seconds": 0.9035992,
+        "exit_code": "ExitSuccess",
+        "tool": "pg_restore"
+      },
+      {
+        "actual_helper_joined": true,
+        "elapsed_seconds": 4.7466972,
+        "exit_code": "ExitFailure 1",
+        "stop": "actual handle termination after bounded probe, then confirmed join",
+        "tool": "reviewed rollback hmem-server"
+      },
+      {
+        "actual_helper_joined": true,
+        "elapsed_seconds": 0.6867204,
+        "exit_code": "ExitFailure 1",
+        "stop": "actual handle termination after bounded probe, then confirmed join",
+        "tool": "reviewed rollback hmem-server"
+      }
+    ],
+    "native_new_archive_codecs": [
+      "zlib-1.3.1",
+      "zlib-1.3.1"
+    ],
+    "config_sha256": "f440553066097aa4834194bb46df14c5fb2dceec23bf97173284b0758ddf0db1",
+    "served_static": [
+      {
+        "path": "assets\\index-BNSYx-iy.css",
+        "sha256": "1e1ba27f0dfbe1d166d59a3f6e9fe8a39f6599042ae0c289629167a8aa8f2101"
+      },
+      {
+        "path": "assets\\index-Cygs4JTI.js",
+        "sha256": "7ed637e49aabbb1055316ef33405903204c8efcf577a4c7d4279060aa8b6d319"
+      },
+      {
+        "path": "assets\\session-archive-worker-BX-WqTer.js",
+        "sha256": "de49f45f8777f10205e758b7f07f9d5fb109fd629757c9848e14b836177ea0e8"
+      },
+      {
+        "path": "assets\\vendor-W2tPfneV.js",
+        "sha256": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+      },
+      {
+        "path": "hmem-icon.svg",
+        "sha256": "d93692782fcf6b1aa20790c32ad945df5f0266d97468f025f23691dc80b8d4ea"
+      },
+      {
+        "path": "hmem-logo.svg",
+        "sha256": "6b07f1af02d677188064a57ace9a0b57809fb3674923cbb87de60a805da8c9f5"
+      },
+      {
+        "path": "hmem-runtime-config.js",
+        "sha256": "739734590402f928ffac6856daa2448f3ba9b549a64d171fc5c5c2b3f03f6ae0"
+      },
+      {
+        "path": "index.html",
+        "sha256": "cf685cd9a4066d3691f5765db6c91050efdd029f3b3beae90c4c1448c1734d33"
+      }
+    ],
+    "checks": [
+      "actual native entrypoint on V051 empty replacement restore",
+      "protected owner/grants restored",
+      "archive-only ranges/proofs/replay/ZIP/content over real HTTP",
+      "current candidate index and Worker served byte-identically",
+      "LF/CRLF intermediate-final new seals",
+      "dormant historical request plus fitting new seal under resource block",
+      "expired current staging detached/drained on actual backend restart",
+      "fresh generation retry and stale renewal fence",
+      "pause/drain/reclamation-disabled controls",
+      "Explicit contained HMEM_CONFIG_DIR, private log file and unchanged private configuration"
+    ],
+    "cleanup": "Both actual native server handles and pg_dump/pg_restore helpers joined. Receipt published only after the supported BorrowedSandboxLifetime returned; no pending borrowed helper/root. No broader supervisor qualification is claimed.",
+    "frontend_scope": "Current functional candidate asset bytes only; Task8 must rebind the final qualified frontend and browser integration. Viewer memory and broader one-GiB matrix are separate.",
+    "deployment_scope": "No production migration, enablement or deployment performed. Backfill/reclamation migration defaults remain disabled.",
+    "producer_metadata_successor": {
+      "current_source_sha256": "936859452298e43bf2015e753960f5ea99f841f196bfbbc6283ee1d5ab2404c1",
+      "change": "Only receipt expiry text changed after the successful run; restoring that text exactly reconstructs native_test_source_sha256. Behavior/assertions unchanged; no redundant behavior rerun."
+    },
+    "retention_disposition": {
+      "original_receipt": "Preserve original B300 receipt bytes/hash, including its older expiry phrase. This successor disposition clarifies scope without rewriting evidence.",
+      "scratch": "Task7 until verified Task8 handoff; source/binaries/receipts are active Task8 inputs only and are disposed at verified Task8 aggregate/rebind closure.",
+      "durable": "Only repository tools patch/recipe are maintained until this rollback target is replaced or retired."
+    },
+    "prior_failed_attempts": [
+      {
+        "stage": "preinstrumentation static copy",
+        "result": "failed",
+        "reported_exit_code": 1,
+        "test_source_sha256": "720f7dff3a79b677740a067b02ad4cd8796ce4419007b77d5d2b10ea3e711b23",
+        "primary": "IOException ResourceBusy from copyFile; exact path/phase not retained in that run",
+        "qualification": "No native compatibility claim"
+      },
+      {
+        "stage": "instrumented static copy",
+        "result": "failed",
+        "reported_tool_exit_code": 125,
+        "test_source_sha256": "7fea6fd1a9d8a733d83f545975a10183928babeaea004a29048f06c6530626fe",
+        "primary": "ResourceBusy copying index-BNSYx-iy.css before native launch; Stack MCP classified inner file-lock stderr as project lock contention",
+        "native_launch_count": 0,
+        "ownership": "Actual helpers joined; no registered helper; exact owned root absent"
+      },
+      {
+        "stage": "OS-home containment safety guard",
+        "result": "failed",
+        "reported_exit_code": 1,
+        "test_source_sha256": "f73bd83ccd4635208b36ce098063fb50d3fbecc74bbd20330d2cfd301a25681e",
+        "primary": "Windows OS home ignored HOME/USERPROFILE redirection; assertion stopped before config write/native launch",
+        "ownership": "Exact owned root absent; no native launch/config write"
+      }
+    ]
+  }
+}

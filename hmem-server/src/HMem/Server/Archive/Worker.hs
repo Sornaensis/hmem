@@ -6,6 +6,7 @@ module HMem.Server.Archive.Worker
   , runArchiveLeaseWith
   , compressArchive, verifyAndPublishArchive, archiveAttemptMicros
   , verifyAndPublishArchiveWith
+  , maintainArchive, runReclamationLeaseWith
   ) where
 
 import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId, threadDelay, throwTo)
@@ -26,6 +27,8 @@ import System.Timeout (timeout)
 
 import HMem.AgentSession (sessionSha256)
 import HMem.DB.SessionArchive qualified as DB
+import HMem.DB.SessionArchive.Maintenance qualified as Maintenance
+import HMem.Server.Archive.Maintenance qualified as Reclamation
 import HMem.SessionArchive.Codec qualified as Codec
 
 -- A failed join carries the exact unfinished capability, including when its
@@ -72,21 +75,19 @@ startArchiveWorker = startArchiveWorkerWith (pure ()) (pure ())
 
 -- | Test-only seams for an active attempt and the owned renewal finalizer.
 startArchiveWorkerWith :: IO () -> IO () -> Pool H.Connection -> IO ArchiveWorker
-startArchiveWorkerWith afterCompression renewalCleanup pool = ArchiveWorker <$> spawnOwned (loop Nothing)
+startArchiveWorkerWith afterCompression renewalCleanup pool = ArchiveWorker <$> spawnOwned loop
   where
-    loop cursor = do
-      next <- synchronous (do
+    loop = do
+      synchronous (do
         _ <- DB.cleanupNextArchiveGeneration pool
-        rows <- DB.enqueueArchives pool cursor 32
+        _ <- Maintenance.discoverArchives pool
         implementation <- Codec.codecImplementation
         lease <- DB.claimArchive pool implementation
         mapM_ (runArchiveLeaseInternal afterCompression renewalCleanup pool) lease
-        -- A sweep advances even when one candidate fails. Claim ordering is
-        -- retry-time/session, independent of this eligibility keyset.
-        pure $ case reverse rows of [] -> Nothing; row:_ -> Just row)
-        (hPutStrLn stderr "session-archive: scan failed; retrying" >> threadDelay 1000000 >> pure cursor)
+        maintainArchive pool)
+        (hPutStrLn stderr "session-archive: scan failed; retrying" >> threadDelay 1000000)
       threadDelay 100000
-      loop next
+      loop
 
 stopArchiveWorker :: ArchiveWorker -> IO ()
 stopArchiveWorker (ArchiveWorker thread) = stopOwned thread
@@ -148,13 +149,44 @@ runArchiveLeaseInternal afterCompression renewalCleanup pool lease = mask $ \res
             Just _ -> throwIO failure
             Nothing -> pure ()
 
+-- Reuse the same owned renewal capability/failure drain as compression. A failed
+-- child join retains admission and is rethrown to the owning worker shutdown.
+maintainArchive :: Pool H.Connection -> IO ()
+maintainArchive pool=Maintenance.claimReclamation pool >>= mapM_ (runReclamationLeaseWith (pure ()) pool)
+
+runReclamationLeaseWith :: IO () -> Pool H.Connection -> Maintenance.ReclamationLease -> IO ()
+runReclamationLeaseWith beforeVerification pool lease=mask $ \restore -> do
+  parent<-myThreadId
+  let renewal=forever $ do
+        threadDelay 10000000
+        renewed<-timeout 5000000 (Maintenance.renewReclamation pool lease)
+        check (renewed==Just True) "archive_maintenance_lease_lost"
+      monitor=renewal `catch` \(failure::SomeException) -> case fromException failure :: Maybe SomeAsyncException of
+        Just _ -> throwIO failure
+        Nothing -> throwTo parent (ArchiveFailure "archive_maintenance_lease_lost")
+  outcome<-try @SomeException $ bracket (spawnOwned monitor) stopOwned $ \_ -> restore $ do
+    result<-timeout (archiveAttemptMicros lease.manifest.rawBytes) (Reclamation.runReclamation beforeVerification pool lease)
+    check (result==Just ()) "archive_maintenance_timeout"
+  case outcome of
+    Left failure | Just (ArchiveJoinFailure _) <- fromException failure -> throwIO failure
+    _ -> do
+      case outcome of
+        Left failure | Nothing <- (fromException failure :: Maybe SomeAsyncException) ->
+          void $ timeout 5000000 $ synchronous (Maintenance.recordVerification pool lease (Just "archive_verification_failed")) (pure ())
+        _ -> pure ()
+      released<-timeout 5000000 (Maintenance.releaseReclamation pool lease)
+      check (released==Just ()) "archive_maintenance_release_failed"
+      case outcome of
+        Left failure | Just _ <- (fromException failure :: Maybe SomeAsyncException) -> throwIO failure
+        _ -> pure ()
+
 compressArchive :: Pool H.Connection -> DB.ArchiveLease -> IO PreparedArchive
 compressArchive pool lease = do
   receipt <- DB.readArchiveReceipt pool lease >>= need "archive_receipt_unavailable"
-  sourcePosition <- newIORef (0,0,0 :: Int64)
+  sourcePosition <- newIORef (0,0,0 :: Int64,True)
   partPosition <- newIORef (0,0 :: Int64)
   let source = do
-        (offset,revision,records) <- readIORef sourcePosition
+        (offset,revision,records,previousNewline) <- readIORef sourcePosition
         row <- DB.readArchiveSourceChunk pool lease offset
         case row of
           Nothing -> do
@@ -165,25 +197,26 @@ compressArchive pool lease = do
               not (BS.null chunk.bytes) && BS.length chunk.bytes <= 1048576) "archive_source_order"
             end <- Codec.checkedAdd offset (fromIntegral (BS.length chunk.bytes))
             let newline = BS.last chunk.bytes == 10
-                count = fromIntegral (BS.count 10 chunk.bytes) + if newline then 0 else 1
+                count = fromIntegral (BS.count 10 chunk.bytes) + (if newline then 0 else 1) - (if previousNewline then 0 else 1)
             check (end <= receipt.rawBytes && chunk.endsWithNewline == newline && chunk.recordCount == count &&
-              (newline || chunk.allowFinalRecord && end == receipt.rawBytes)) "archive_source_metadata"
+              (previousNewline || BS.isPrefixOf "\n" chunk.bytes || BS.isPrefixOf "\r\n" chunk.bytes) &&
+              (newline || chunk.allowFinalRecord)) "archive_source_metadata"
             copied <- DB.stageArchiveLedger pool lease revision 1
             check (copied == Just chunk.revision) "archive_ledger_stage_failed"
             totalRecords <- Codec.checkedAdd records count
-            writeIORef sourcePosition (end,chunk.revision,totalRecords)
+            writeIORef sourcePosition (end,chunk.revision,totalRecords,newline)
             pure (Just chunk.bytes)
       sink bytes = do
         (ordinal,offset) <- readIORef partPosition
         live (DB.stageArchivePart pool lease ordinal offset bytes)
         end <- Codec.checkedAdd offset (fromIntegral (BS.length bytes))
         writeIORef partPosition (ordinal+1,end)
-        (raw,_,_) <- readIORef sourcePosition
+        (raw,_,_,_) <- readIORef sourcePosition
         live (DB.archiveProgress pool lease "compressing" raw end)
   encoded <- Codec.compress source sink
   check (encoded.raw.byteCount == receipt.rawBytes && encoded.raw.sha256 == receipt.rawSha256) "archive_source_receipt_mismatch"
   (parts,_) <- readIORef partPosition
-  (_,ledger,_) <- readIORef sourcePosition
+  (_,ledger,_,_) <- readIORef sourcePosition
   pure (PreparedArchive receipt encoded parts ledger)
 
 -- Each pass fetches persisted parts individually and validates the position,

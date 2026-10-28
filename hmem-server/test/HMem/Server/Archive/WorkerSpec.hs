@@ -31,7 +31,7 @@ import HMem.Types qualified as Types
 spec :: Spec
 spec = around withTestEnv $ describe "Archive worker" $ do
   it "publishes empty, CRLF/UTF-8, final-no-LF and maximum-record evidence without changing its receipt or task" $ \env -> bounded $ do
-    forM_ [[],["{}\r\n[\"\195\166\"]"],["\""<>BS.replicate 1048574 120<>"\""],replicate 4 (BS.concat (replicate 60000 "{}\n"))<>["[]"]] $ \chunks -> do
+    forM_ [[],["{}\r\n[\"\195\166\"]"],["{}","\n[]\n"],["{}","\r\n[]\r\n"],["\""<>BS.replicate 1048574 120<>"\""],replicate 4 (BS.concat (replicate 60000 "{}\n"))<>["[]"]] $ \chunks -> do
       (w,sealed,taskId) <- fixture env chunks
       taskBefore <- Task.getTask env.pool taskId
       lease <- claim env
@@ -130,6 +130,11 @@ spec = around withTestEnv $ describe "Archive worker" $ do
     expire env sealed.id
     DB.renewArchive env.pool old `shouldReturn` False
     verifyAndPublishArchive env.pool old prepared `shouldThrow` anyException
+    DB.claimArchive env.pool "restart" `shouldReturn` Nothing
+    let drain = do
+          n <- DB.cleanupArchiveGeneration env.pool w sealed.id old.generationId
+          if n==0 then pure () else drain
+    drain
     (a,b) <- concurrently (DB.claimArchive env.pool "restart") (DB.claimArchive env.pool "restart")
     let leases = [l | Just l <- [a,b]]
     length leases `shouldBe` 1

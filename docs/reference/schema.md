@@ -88,6 +88,20 @@ V050 adds sealed-session archive sidecars and extends that fixture guard list.
 Their schema, publication boundary and storage-only validation are specified in
 the [sealed-session archive reference](sealed-session-archives.md#storage-primitives-v050).
 
+V051 adds `session_archive_control`, `session_archive_requests` and
+`session_archive_reclamation`. Controls persist the fair discovery cursor, pause,
+qualification, configured capacity and one purpose/generation/token/expiry permit.
+Insert-once same-workspace requests allow an older sealed session to be archived
+on demand while background historical discovery is disabled. Reclamation records
+store a manifest-bound independent readback result, bounded retry/error and
+separate atomic deletion progress; they do not modify the append ledger or final
+receipt. The only raw DELETE capability is the restricted, fixed-search-path
+`public.hmem_archive_reclaim(uuid,uuid,uuid,text,uuid)`. Runtime role readiness is
+checked in the database before enabling or performing reclamation. Ordinary
+UPDATE/DELETE/TRUNCATE guards remain active. See
+[maintenance and recovery](sealed-session-archives.md#maintenance-and-recovery-v051)
+for provisioning, limits and rollout order.
+
 Lists reject limits outside 1–100. Session lists use immutable descending
 `(created_at,id)` keyset cursors; task references use ascending task UUID cursors.
 Newer sessions do not shift a previously issued page cursor. Links added behind

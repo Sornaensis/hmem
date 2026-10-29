@@ -1,6 +1,6 @@
 -- | Provider-neutral metadata and byte-oriented agent session inputs.
 module HMem.AgentSession
-  ( SessionState(..), SessionFreshness(..), SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..), ImportSession(..)
+  ( SessionState(..), SessionFreshness(..), SessionActivity(..), parseSessionActivity, SessionFilter(..), defaultSessionFilter, AgentSession(..), CreateSession(..), ImportSession(..)
   , AppendSession(..), TerminateSession(..), SessionAppendResult(..), RuntimeIdentity(..), SetRuntimeIdentity(..), runtimeIdentityValid, runtimeDeclarationValid
   , SessionPageCursor(..), SessionPage(..), SessionTask(..), SessionTaskPage(..), SessionAncestor(..), SessionFacet(..), SessionFacetPage(..)
   , SessionRange(..), SessionException(..), SessionErrorCode(..)
@@ -15,6 +15,7 @@ import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString (ByteString)
 import Data.Int (Int64)
+import Data.List (nub)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -38,13 +39,25 @@ instance FromJSON SessionState where
 -- | Freshness is independent of lifecycle. The database applies both filters
 -- before keyset pagination, using its statement clock and the 30-second policy.
 data SessionFreshness = Fresh | Stale deriving stock (Show, Eq)
+data SessionActivity = Live | Quiet | Completed deriving stock (Show, Eq)
+
+parseSessionActivity :: Text -> Either Text [SessionActivity]
+parseSessionActivity raw =
+  let tokens = if raw == "" then [] else T.splitOn "," raw
+      invalid = Left "Session activity must be a unique comma-separated subset of live,quiet,completed; empty selects none"
+  in if length tokens /= length (nub tokens) then invalid else traverse (\case
+    "live" -> Right Live
+    "quiet" -> Right Quiet
+    "completed" -> Right Completed
+    _ -> invalid) tokens
+
 data SessionFilter = SessionFilter
   { state :: !(Maybe SessionState), freshness :: !(Maybe SessionFreshness)
-  , projectId :: !(Maybe UUID), taskId :: !(Maybe UUID)
+  , projectId :: !(Maybe UUID), taskId :: !(Maybe UUID), activity :: !(Maybe [SessionActivity])
   } deriving stock (Show, Eq)
 
 defaultSessionFilter :: SessionFilter
-defaultSessionFilter = SessionFilter Nothing Nothing Nothing Nothing
+defaultSessionFilter = SessionFilter Nothing Nothing Nothing Nothing Nothing
 
 -- | A declaration about the target session, never the connecting actor.
 -- Legacy declarations may have no role; new declarations identify the running

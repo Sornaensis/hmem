@@ -881,12 +881,12 @@ spec = do
       foreignScope <- makeTask env workspace "Other linked task"
       execute env ("UPDATE tasks SET project_id='"<>uuid other.id<>"' WHERE id='"<>uuid foreignScope.id<>"'")
       associateSessionTask env.pool workspace row.id foreignScope.id
-      mismatched <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Active) Nothing (Just root.id) (Just foreignScope.id)) Nothing 50
+      mismatched <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Active) Nothing (Just root.id) (Just foreignScope.id) Nothing) Nothing 50
       mismatched.items `shouldBe` []
       child <- Task.createTask env.pool (Types.CreateTask workspace (Just leaf.id) (Just (head tasks).id) "Null project active child" Nothing Nothing Nothing)
       execute env ("UPDATE tasks SET status='in_progress',project_id=NULL WHERE id='"<>uuid child.id<>"'")
       associateSessionTask env.pool workspace row.id child.id
-      filtered <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Active) Nothing (Just root.id) (Just child.id)) Nothing 50
+      filtered <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Active) Nothing (Just root.id) (Just child.id) Nothing) Nothing 50
       map (.id) filtered.items `shouldBe` [row.id]
       let selector = Types.NavigationFilter (Just "tasks") [] [] Nothing Nothing (Just "Null project") (Just True) (Just True)
       visible <- Project.listFilteredProjectChildren env.pool workspace Nothing selector 50 0
@@ -897,6 +897,35 @@ spec = do
       empty <- listSessionFacets env.pool workspace True Nothing Nothing (Just root.id) 50
       empty.items `shouldBe` []
       empty.selected `shouldBe` Nothing
+
+    it "keeps opt-in facet scopes authoritative without status matches and options stable across heartbeat age" $ \env -> do
+      (workspace,_) <- fresh env
+      identifier <- UUID.nextRandom
+      insertRaw env workspace [identifier] ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('"<>uuid identifier<>"','"<>uuid workspace<>"','jsonl','Facet age fixture',clock_timestamp()-interval '90 seconds',clock_timestamp()-interval '60 seconds')")
+      Just row <- getSession env.pool workspace identifier
+      project <- Project.createProject env.pool (Types.CreateProject workspace Nothing "Scoped facets" Nothing Nothing Nothing)
+      task <- makeTask env workspace "Only live session"
+      execute env ("UPDATE tasks SET project_id='"<>uuid project.id<>"' WHERE id='"<>uuid task.id<>"'")
+      associateSessionTask env.pool workspace row.id task.id
+      forM_ [[Live],[Quiet],[Completed],[]] $ \selection -> do
+        projects <- listSessionFacetsFiltered env.pool workspace True Nothing Nothing (Just project.id) (Just selection) 1
+        tasks <- listSessionFacetsFiltered env.pool workspace False (Just project.id) Nothing (Just task.id) (Just selection) 1
+        fmap (.id) projects.selected `shouldBe` Just project.id
+        fmap (.id) tasks.selected `shouldBe` Just task.id
+        map (.id) tasks.items `shouldBe` if Live `elem` selection || Quiet `elem` selection then [task.id] else []
+      before <- listSessionFacetsFiltered env.pool workspace False Nothing Nothing Nothing (Just [Quiet]) 1
+      _ <- heartbeatSession env.pool workspace row.id
+      after <- listSessionFacetsFiltered env.pool workspace False Nothing Nothing Nothing (Just [Quiet]) 1
+      after `shouldBe` before
+      other <- Project.createProject env.pool (Types.CreateProject workspace Nothing "Outside scope" Nothing Nothing Nothing)
+      outside <- listSessionFacetsFiltered env.pool workspace False (Just other.id) Nothing (Just task.id) (Just []) 1
+      outside.selected `shouldBe` Nothing
+      foreignWorkspace <- createTestWorkspace env "foreign-facet-authority"
+      foreignProject <- listSessionFacetsFiltered env.pool foreignWorkspace.id True Nothing Nothing (Just project.id) (Just []) 1
+      foreignProject.selected `shouldBe` Nothing
+      execute env ("UPDATE tasks SET deleted_at=clock_timestamp() WHERE id='"<>uuid task.id<>"'")
+      deleted <- listSessionFacetsFiltered env.pool workspace False (Just project.id) Nothing (Just task.id) (Just []) 1
+      deleted.selected `shouldBe` Nothing
 
     it "creates an empty active session with server attribution and idempotent immutable metadata" $ \env -> do
       workspace <- createTestWorkspace env "session-create"
@@ -1215,8 +1244,8 @@ spec = do
       insertRaw env workspace [old,older] ("INSERT INTO sessions(id,workspace_id,format_label,title,created_at,last_seen_at) VALUES ('" <> uuid old <> "','" <> uuid workspace <> "','jsonl','Test session work',clock_timestamp()-interval '60 seconds',clock_timestamp()-interval '60 seconds'),('" <> uuid older <> "','" <> uuid workspace <> "','jsonl','Test session work',clock_timestamp()-interval '90 seconds',clock_timestamp()-interval '90 seconds')")
       oldRow <- getSession env.pool workspace old >>= maybe (fail "Missing seeded session") pure
       sealed <- terminateSession env.pool workspace old (receipt oldRow "")
-      let stale = SessionFilter Nothing (Just Stale) Nothing Nothing
-          freshOnly = SessionFilter Nothing (Just Fresh) Nothing Nothing
+      let stale = SessionFilter Nothing (Just Stale) Nothing Nothing Nothing
+          freshOnly = SessionFilter Nothing (Just Fresh) Nothing Nothing Nothing
       first <- listWorkspaceSessionsFiltered env.pool workspace stale Nothing 1
       map (.id) first.items `shouldBe` [old]
       second <- listWorkspaceSessionsFiltered env.pool workspace stale first.nextCursor 1
@@ -1224,14 +1253,35 @@ spec = do
       second.nextCursor `shouldBe` Nothing
       recent <- listWorkspaceSessionsFiltered env.pool workspace freshOnly Nothing 50
       map (.id) recent.items `shouldBe` [current.id]
-      closed <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Terminated) (Just Stale) Nothing Nothing) Nothing 50
+      closed <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Terminated) (Just Stale) Nothing Nothing Nothing) Nothing 50
       closed.items `shouldBe` [sealed]
-      active <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Active) (Just Stale) Nothing Nothing) Nothing 50
+      active <- listWorkspaceSessionsFiltered env.pool workspace (SessionFilter (Just Active) (Just Stale) Nothing Nothing Nothing) Nothing 50
       map (.id) active.items `shouldBe` [older]
       task <- makeTask env workspace "filtered evidence"
       forM_ [current.id,old,older] $ \id -> associateSessionTask env.pool workspace id task.id
-      linked <- listTaskSessionsFiltered env.pool workspace task.id (SessionFilter (Just Terminated) Nothing Nothing Nothing) Nothing 1
+      linked <- listTaskSessionsFiltered env.pool workspace task.id (SessionFilter (Just Terminated) Nothing Nothing Nothing Nothing) Nothing 1
       linked.items `shouldBe` [sealed]
+      -- All subsets share the same pre-pagination predicate on workspace/task lists.
+      forM_ [([],[]),([Live],[current.id]),([Quiet],[older]),([Completed],[old]),([Live,Quiet],[current.id,older]),([Live,Completed],[current.id,old]),([Quiet,Completed],[old,older]),([Live,Quiet,Completed],[current.id,old,older])] $ \(selection,expected) -> do
+        let filters = defaultSessionFilter {activity=Just selection}
+        page <- listWorkspaceSessionsFiltered env.pool workspace filters Nothing 50
+        map (.id) page.items `shouldBe` expected
+        scoped <- listTaskSessionsFiltered env.pool workspace task.id filters Nothing 50
+        map (.id) scoped.items `shouldBe` expected
+      let mixed = defaultSessionFilter {activity=Just [Live,Completed]}
+      one <- listWorkspaceSessionsFiltered env.pool workspace mixed Nothing 1
+      map (.id) one.items `shouldBe` [current.id]
+      two <- listWorkspaceSessionsFiltered env.pool workspace mixed one.nextCursor 1
+      map (.id) two.items `shouldBe` [old]
+      two.nextCursor `shouldBe` Nothing
+      -- Completed options survive old heartbeat age and task status changes.
+      insertRaw env workspace [] ("UPDATE tasks SET status='done' WHERE id='" <> uuid task.id <> "'")
+      facets <- listSessionFacetsFiltered env.pool workspace False Nothing Nothing (Just task.id) (Just [Completed]) 1
+      map (.id) facets.items `shouldBe` [task.id]
+      fmap (.id) facets.selected `shouldBe` Just task.id
+      none <- listSessionFacetsFiltered env.pool workspace False Nothing Nothing (Just task.id) (Just []) 1
+      none.items `shouldBe` []
+      fmap (.id) none.selected `shouldBe` Just task.id
 
     it "serializes concurrent appends and append/termination races without losing a committed prefix" $ \env -> do
       (workspace,row) <- fresh env

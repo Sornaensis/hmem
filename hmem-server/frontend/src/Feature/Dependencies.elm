@@ -8,6 +8,7 @@ module Feature.Dependencies exposing
     , resetCache
     , trackDependencyMutationRequest
     , update
+    , viewReadOnlyTask
     , viewTaskDependencies
     )
 
@@ -793,8 +794,21 @@ viewAddDependencyPopover model taskId deps =
             text ""
 
 
+viewReadOnlyTask : Model -> { a | id : String, title : String, status : String } -> Html Msg
+viewReadOnlyTask model task =
+    viewTaskReference model {id=task.id,name=task.title} (Just task.status)
+        [a [class "btn-icon btn-jump",href ("/workspace/" ++ Maybe.withDefault "" model.sessions.workspace ++ "#tab=projects&focus=task:" ++ task.id),title "Jump to task"] [text "↗"]]
+
+
 viewDependencyItem : Model -> String -> Api.TaskDependencySummary -> Html Msg
 viewDependencyItem model taskId dep =
+    viewTaskReference model dep Nothing
+        [button [class "btn-icon btn-jump",onClick (FocusEntity "task" dep.id),title "Jump to task"] [text "↗"]
+        ,if Permissions.canEditCurrentWorkspace model then button [class "btn-icon btn-danger",onClick (PerformRemoveDependency taskId dep.id),title "Remove dependency"] [text "✕"] else text ""]
+
+
+viewTaskReference : Model -> { a | id : String, name : String } -> Maybe String -> List (Html Msg) -> Html Msg
+viewTaskReference model dep fallbackStatus actions =
     let
         depTask =
             Dict.get dep.id model.tasks
@@ -829,23 +843,7 @@ viewDependencyItem model taskId dep =
                         ]
                     , span [ class "popover-card-title" ] [ text t.title ]
                     , div [ class "dep-item-actions" ]
-                        [ button
-                            [ class "btn-icon btn-jump"
-                            , onClick (FocusEntity "task" dep.id)
-                            , title "Jump to task"
-                            ]
-                            [ text "↗" ]
-                        , if Permissions.canEditCurrentWorkspace model then
-                            button
-                                [ class "btn-icon btn-danger"
-                                , onClick (PerformRemoveDependency taskId dep.id)
-                                , title "Remove dependency"
-                                ]
-                                [ text "✕" ]
-
-                          else
-                            text ""
-                        ]
+                        actions
                     ]
                 , if not (List.isEmpty crumbs) then
                     div [ class "popover-card-breadcrumb" ]
@@ -873,23 +871,8 @@ viewDependencyItem model taskId dep =
                     [ span [ class "entity-type-label entity-type-task" ] [ text "TSK" ]
                     , span [ class "popover-card-title" ] [ text dep.name ]
                     , div [ class "dep-item-actions" ]
-                        [ button
-                            [ class "btn-icon btn-jump"
-                            , onClick (FocusEntity "task" dep.id)
-                            , title "Jump to task"
-                            ]
-                            [ text "↗" ]
-                        , if Permissions.canEditCurrentWorkspace model then
-                            button
-                                [ class "btn-icon btn-danger"
-                                , onClick (PerformRemoveDependency taskId dep.id)
-                                , title "Remove dependency"
-                                ]
-                                [ text "✕" ]
-
-                          else
-                            text ""
-                        ]
+                        actions
                     ]
+                , fallbackStatus |> Maybe.map (\status -> div [class "popover-card-meta"] [span [class "badge"] [text status]]) |> Maybe.withDefault (text "")
                 ]
         )

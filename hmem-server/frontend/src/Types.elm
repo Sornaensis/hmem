@@ -1338,7 +1338,6 @@ type alias SessionsModel =
     , cursor : Maybe Api.SessionCursor
     , previous : List (Maybe Api.SessionCursor)
     , linksCursor : Maybe String
-    , showAllLinkedTasks : Bool
     , today : String
     , owned : List ( String, Feature.SessionDelivery.Target )
     , filters : Api.SessionFilters
@@ -1394,8 +1393,8 @@ type alias SessionRecord =
 
 emptySessionsModel : SessionsModel
 emptySessionsModel =
-    { workspace = Nothing, epoch = 0, selected = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
-    , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
+    { workspace = Nothing, epoch = 0, selected = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, today = "", owned = []
+    , filters = Api.workspaceSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
     , sealed = emptySealedSessionView
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, taskAssociations = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
@@ -1525,8 +1524,8 @@ type Msg
     | SetProjectCardSection String String
     | SessionsPreviousPage
     | SessionsLinkedPage (Maybe String)
-    | SessionsShowAllLinkedTasks
     | SessionsRetry
+    | SessionsActivityFilter String
     | SessionsStateFilter String
     | SessionsFreshnessFilter String
     | SessionsProjectFilter String

@@ -1,9 +1,13 @@
 # Agent sessions and evidence
 
-Open a workspace’s **Sessions** tab to explore active agent conversations. **Live**
-is selected initially; use the **Live** and **Quiet** buttons to filter activity.
-Use the **Project** and **Task** dropdowns to narrow the list. They offer only
-projects/tasks with active sessions; a project includes its descendant projects
+Open a workspace’s **Sessions** tab to explore agent conversations. **Live**
+is selected initially. Toggle **Live**, **Quiet** and **Completed** independently
+to combine activity states; selecting none shows no sessions. Completed means
+the session is terminated, regardless of its heartbeat age or linked task status.
+Use the **Project** and **Task** dropdowns to narrow the list. They offer
+projects/tasks with active sessions when Live or Quiet is selected, and saved
+sessions when Completed is selected. A valid selected scope remains selected
+even when no sessions match; a project includes its descendant projects
 and nested tasks. **More projects/tasks** opens the next option page. Sessions
 form a parent tree; compact ancestor paths keep child sessions understandable
 when their parent is outside the selected activity/filter page.
@@ -45,9 +49,10 @@ and green lights in the workspace sidebar indicate active sessions, including qu
 A task card’s **Active Agent →** button docks its active sessions and transcript
 inside the card, which widens by about 40% where space permits and stacks on a narrow screen. Its active sessions form a parent tree. Select a session there to read
 it without leaving the task. Expanded task cards keep saved captures under
-**Evidence**; use **Download** on saved evidence. The first two linked tasks
-appear as compact cards that focus their tasks.
-**Show All Linked Tasks** reveals additional links, with bounded pages when needed.
+**Evidence**; use **Download** on saved evidence. In workspace Sessions, expand
+**Linked Tasks** above **Session Hierarchy** to see its task cards. **Jump to task**
+focuses a linked task; **More tasks** and **First tasks** navigate bounded pages.
+The transcript, linked tasks and hierarchy scroll within the available viewport.
 
 **Download** retrieves the original saved JSONL and checks its final byte count and
 SHA-256 before handing it to the browser. Keep the page open until the download

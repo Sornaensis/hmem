@@ -146,7 +146,7 @@ suite = describe "production routed session retry lifetimes"
             (entry background failed |> Maybe.map .retry,entry background failed |> Maybe.andThen .error,Dict.size failed.sessionDelivery.physical)
     , test "routed list, facet, links, download and archive failures never arm retry tickets" <| \_ ->
         let
-            targets=[Delivery.WorkspaceSessions Nothing,Delivery.SessionFacets "projects" Nothing Nothing Nothing,Delivery.SessionTasks "session" Nothing,Delivery.SessionSave "session" 0 32,Delivery.TaskEvidenceArchive "task" 1]
+            targets=[Delivery.WorkspaceSessions Nothing,Delivery.SessionFacets "projects" Nothing Nothing Nothing Nothing,Delivery.SessionTasks "session" Nothing,Delivery.SessionSave "session" 0 32,Delivery.TaskEvidenceArchive "task" 1]
             check target =
                 let busy=route (DemandSessionResource "a" target) ready
                     failed=complete target (Err Http.Timeout) busy

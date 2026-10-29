@@ -5647,3 +5647,44 @@ textarea.observation-edit-content {
 .audit-target-copy { margin-left: .25rem; }
 .audit-target-unavailable { color: var(--text-muted); font-size: .85em; }
 .audit-return-bar { padding: .5rem 1rem; }
+
+/* Sessions fills the measured remainder below real chrome and wrapped filters. */
+.sessions-page { height:var(--sessions-available-height, auto); min-height:0; display:flex; flex-direction:column; gap:10px; overflow:auto; overscroll-behavior:contain; }
+.sessions-page > :not(.sessions-layout) { flex-shrink:0; margin:0; }
+.sessions-page .sessions-filters { flex-wrap:wrap; }
+.sessions-page .sessions-layout { flex:1 0 0px; min-height:min(12lh,var(--sessions-available-height)); grid-template-columns:minmax(0,1fr) minmax(180px,250px); grid-template-rows:minmax(0,1fr); overflow:hidden; align-items:stretch; }
+.sessions-page .sessions-layout > .session-detail { display:flex; flex-direction:column; grid-column:1; grid-row:1; padding:0; min-width:0; min-height:0; overflow:auto; }
+.sessions-page .session-conversation-grid, .sessions-page .session-conversation { display:flex; flex-direction:column; align-items:stretch; flex:1; min-height:0; min-width:0; overflow:visible; }
+.sessions-page .session-detail-header { flex-shrink:0; padding:10px 14px; }
+.sessions-page .session-viewer { flex:1; display:flex; flex-direction:column; min-height:8lh; min-width:0; overflow:auto; padding:12px; }
+.sessions-page .session-records { flex:1; min-height:3lh; height:0; max-height:none; overflow:auto; overscroll-behavior:contain; }
+.sessions-page .session-viewer > :not(.session-records) { flex-shrink:0; }
+.sessions-page .sessions-layout > .sessions-list { grid-column:2; grid-row:1; display:flex; flex-direction:column; min-height:0; max-height:none; overflow:auto; padding:10px; }
+.sessions-page .session-pane-label { flex-shrink:0; margin:10px 0; }
+.sessions-page .session-hierarchy { flex:1; min-height:3lh; overflow:auto; overscroll-behavior:contain; }
+.sessions-page .session-linked-tasks { flex-shrink:0; min-height:0; max-height:none; overflow:hidden; padding:0; border:0; }
+.sessions-page .session-linked-tasks[open] { display:block; }
+.sessions-page .session-linked-tasks summary { cursor:pointer; padding:8px 0; flex-shrink:0; }
+.sessions-page .session-linked-content { min-height:0; max-height:max(3lh,var(--sessions-linked-height,0px)); overflow:auto; overscroll-behavior:contain; }
+.sessions-page .session-task-cards { display:flex; flex-direction:column; gap:8px; }
+.sessions-page .session-task-cards .popover-card { min-width:0; margin:0; }
+.sessions-page .popover-card-title { overflow-wrap:anywhere; }
+.sessions-page .popover-card-meta { flex-wrap:wrap; }
+.sessions-page .session-download-status { flex-shrink:0; }
+.sessions-page .session-download-status:empty { display:none; }
+@media (max-width:650px) {
+  .sessions-page .sessions-layout { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,2fr) minmax(0,1fr); }
+  .sessions-page .sessions-layout > .sessions-list { grid-column:1; grid-row:2; border-left:0; border-top:1px solid var(--border); }
+  .sessions-page .sessions-layout > .session-detail { grid-column:1; grid-row:1; }
+  .sessions-page .session-viewer { padding:8px; }
+}
+
+
+/* A short viewport still exposes a readable slice; excess chrome scrolls inside
+   Sessions/reader rather than clipping controls or collapsing the transcript. */
+.sessions-page .sessions-layout:not(:has(.session-conversation-grid)) > .sessions-list { grid-column:2; grid-row:1; }
+.sessions-page .sessions-layout > .session-detail.empty-state { grid-column:1; grid-row:1; }
+@media (max-width:650px) {
+  .sessions-page .sessions-layout:not(:has(.session-conversation-grid)) > .sessions-list { grid-column:1; grid-row:2; }
+  .sessions-page .sessions-layout > .session-detail.empty-state { grid-column:1; grid-row:1; }
+}

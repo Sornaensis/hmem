@@ -2,7 +2,7 @@
 module HMem.DB.AgentSession
   ( createSession, importSession, getSession, listWorkspaceSessions, listTaskSessions, listSessionTasks
   , listWorkspaceSessionsFiltered, listTaskSessionsFiltered
-  , workspaceSessionActivity, projectSessionActivity, listSessionFacets
+  , workspaceSessionActivity, projectSessionActivity, listSessionFacets, listSessionFacetsFiltered
   , appendSession, heartbeatSession, associateSessionTask, terminateSession, terminateSessionWithHook, readSessionRange, setRuntimeIdentity
   , IdleSessionCursor, listIdleSessionCandidates, sealIdleSession, sealIdleSessionWithHook
   , listIdleSessionCandidatesAt, sealIdleSessionWithClock
@@ -194,7 +194,7 @@ listSessions pool workspace task filters cursor limit = do
   rows <- runSession pool $ S.statement
     (workspace, fmap (.createdAt) cursor, fmap (.id) cursor, task, fromIntegral (limit+1),
       fmap (\case Active -> "active"; Terminated -> "terminated") filters.state,
-      fmap (\case Fresh -> True; Stale -> False) filters.freshness, filters.projectId, filters.taskId) listStatement
+      fmap (\case Fresh -> True; Stale -> False) filters.freshness, filters.projectId, filters.taskId, activityMask <$> filters.activity) listStatement
   let items = take limit rows
       nextCursor = if length rows > limit then case reverse items of
         row:_ -> Just (SessionPageCursor row.createdAt row.id)
@@ -202,29 +202,46 @@ listSessions pool workspace task filters cursor limit = do
         else Nothing
   pure SessionPage{..}
 
-listStatement :: St.Statement (UUID,Maybe UTCTime,Maybe UUID,Maybe UUID,Int32,Maybe Text,Maybe Bool,Maybe UUID,Maybe UUID) [AgentSession]
+listStatement :: St.Statement (UUID,Maybe UTCTime,Maybe UUID,Maybe UUID,Int32,Maybe Text,Maybe Bool,Maybe UUID,Maybe UUID,Maybe Int32) [AgentSession]
 listStatement = St.Statement sql encoder (D.rowList jsonRow) True
   where
-    sql = "SELECT to_jsonb(s) || hmem_session_ancestor_context(s.id) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND (s.import_task_id IS NULL OR s.state='terminated') AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) AND ($6::text IS NULL OR s.state=$6) AND ($7::boolean IS NULL OR (s.last_seen_at > statement_timestamp()-interval '30 seconds')=$7) AND ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN hmem_session_project_tasks($1,$8) scoped ON scoped.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1)) AND ($8::uuid IS NULL OR $9::uuid IS NULL OR $9 IN (SELECT id FROM hmem_session_project_tasks($1,$8))) AND ($9::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$9 AND t.deleted_at IS NULL)) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
-    encoder = param (\(a,_,_,_,_,_,_,_,_) -> a) E.uuid
-      <> optional (\(_,b,_,_,_,_,_,_,_) -> b) E.timestamptz
-      <> optional (\(_,_,c,_,_,_,_,_,_) -> c) E.uuid
-      <> optional (\(_,_,_,d,_,_,_,_,_) -> d) E.uuid
-      <> param (\(_,_,_,_,e,_,_,_,_) -> e) E.int4
-      <> optional (\(_,_,_,_,_,f,_,_,_) -> f) E.text
-      <> optional (\(_,_,_,_,_,_,g,_,_) -> g) E.bool
-      <> optional (\(_,_,_,_,_,_,_,h,_) -> h) E.uuid
-      <> optional (\(_,_,_,_,_,_,_,_,i) -> i) E.uuid
+    sql = "SELECT to_jsonb(s) || hmem_session_ancestor_context(s.id) FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.workspace_id=$1 AND w.deleted_at IS NULL AND (s.import_task_id IS NULL OR s.state='terminated') AND ($2::timestamptz IS NULL OR (s.created_at,s.id)<($2,$3::uuid)) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$4 AND t.deleted_at IS NULL)) AND ($6::text IS NULL OR s.state=$6) AND ($7::boolean IS NULL OR (s.last_seen_at > statement_timestamp()-interval '30 seconds')=$7) AND ($10::int IS NULL OR (($10 & 1)<>0 AND s.state='active' AND s.last_seen_at>statement_timestamp()-interval '30 seconds') OR (($10 & 2)<>0 AND s.state='active' AND s.last_seen_at<=statement_timestamp()-interval '30 seconds') OR (($10 & 4)<>0 AND s.state='terminated')) AND ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN hmem_session_project_tasks($1,$8) scoped ON scoped.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1)) AND ($8::uuid IS NULL OR $9::uuid IS NULL OR $9 IN (SELECT id FROM hmem_session_project_tasks($1,$8))) AND ($9::uuid IS NULL OR EXISTS(SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id WHERE link.session_id=s.id AND link.workspace_id=$1 AND t.id=$9 AND t.deleted_at IS NULL)) ORDER BY s.created_at DESC,s.id DESC LIMIT $5"
+    encoder = param (\(a,_,_,_,_,_,_,_,_,_) -> a) E.uuid
+      <> optional (\(_,b,_,_,_,_,_,_,_,_) -> b) E.timestamptz
+      <> optional (\(_,_,c,_,_,_,_,_,_,_) -> c) E.uuid
+      <> optional (\(_,_,_,d,_,_,_,_,_,_) -> d) E.uuid
+      <> param (\(_,_,_,_,e,_,_,_,_,_) -> e) E.int4
+      <> optional (\(_,_,_,_,_,f,_,_,_,_) -> f) E.text
+      <> optional (\(_,_,_,_,_,_,g,_,_,_) -> g) E.bool
+      <> optional (\(_,_,_,_,_,_,_,h,_,_) -> h) E.uuid
+      <> optional (\(_,_,_,_,_,_,_,_,i,_) -> i) E.uuid
+      <> optional (\(_,_,_,_,_,_,_,_,_,j) -> j) E.int4
 
 -- Facets are independent of transcript pages and heartbeat freshness. Each
 -- response is bounded; the UUID cursor makes every active option reachable.
 listSessionFacets :: Pool Hasql.Connection -> UUID -> Bool -> Maybe UUID -> Maybe UUID -> Maybe UUID -> Int -> IO SessionFacetPage
-listSessionFacets pool workspace projects project cursor selectedId limit = do
+listSessionFacets pool workspace projects project cursor selectedId =
+  listSessionFacetsFiltered pool workspace projects project cursor selectedId Nothing
+
+activityMask :: [SessionActivity] -> Int32
+activityMask values = sum [bit | (value,bit) <- [(Live,1),(Quiet,2),(Completed,4)], value `elem` values]
+
+-- Facet options retain baseline freshness independence: Live/Quiet select the
+-- active branch. A heartbeat crossing never changes option membership.
+facetActivityMask :: [SessionActivity] -> Int32
+facetActivityMask values = (if Live `elem` values || Quiet `elem` values then 3 else 0) + (if Completed `elem` values then 4 else 0)
+
+listSessionFacetsFiltered :: Pool Hasql.Connection -> UUID -> Bool -> Maybe UUID -> Maybe UUID -> Maybe UUID -> Maybe [SessionActivity] -> Int -> IO SessionFacetPage
+listSessionFacetsFiltered pool workspace projects project cursor selectedId activity limit = do
   validateLimit limit
-  rows <- runSession pool $ S.statement (workspace,project,cursor,fromIntegral (limit+1)) statement
+  rows <- runSession pool $ S.statement (workspace,project,cursor,fromIntegral (limit+1),facetActivityMask <$> activity) statement
   selected <- case selectedId of
     Nothing -> pure Nothing
-    Just identifier -> runSession pool $ S.statement (workspace,project,Just identifier,1) $
+    Just identifier | activity /= Nothing -> runSession pool $ S.statement (workspace,project,identifier) $
+      St.Statement selectedSql
+        (param (\(a,_,_) -> a) E.uuid <> optional (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.uuid)
+        (D.rowMaybe jsonRow) True
+    Just identifier -> runSession pool $ S.statement (workspace,project,Just identifier,1,Nothing) $
       St.Statement (if projects then replace "($3::uuid IS NULL OR p.id>$3)" "p.id=$3" sql else replace "($3::uuid IS NULL OR t.id>$3)" "t.id=$3" sql) encoder (D.rowMaybe jsonRow) True
   let items = take limit rows
       nextId = if length rows > limit then (.id) <$> lastMaybe items else Nothing
@@ -233,11 +250,16 @@ listSessionFacets pool workspace projects project cursor selectedId limit = do
     lastMaybe [] = Nothing
     lastMaybe xs = Just (last xs)
     replace before after = TE.encodeUtf8 . T.replace before after . TE.decodeUtf8
-    encoder = param (\(a,_,_,_) -> a) E.uuid <> optional (\(_,b,_,_) -> b) E.uuid <> optional (\(_,_,c,_) -> c) E.uuid <> param (\(_,_,_,d) -> d) E.int4
+    encoder = param (\(a,_,_,_,_) -> a) E.uuid <> optional (\(_,b,_,_,_) -> b) E.uuid <> optional (\(_,_,c,_,_) -> c) E.uuid <> param (\(_,_,_,d,_) -> d) E.int4 <> optional (\(_,_,_,_,e) -> e) E.int4
     statement = St.Statement sql encoder (D.rowList jsonRow) True
+    -- Activity absence is not evidence that a selected entity became invalid.
+    selectedSql = if projects then
+      "SELECT jsonb_build_object('id',p.id,'title',p.name) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR p.id=$2) AND p.id=$3"
+      else "SELECT jsonb_build_object('id',t.id,'title',t.title) FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR t.id IN (SELECT id FROM hmem_session_project_tasks($1,$2))) AND t.id=$3"
+    activityPredicate = "(s.import_task_id IS NULL OR s.state='terminated') AND (($5::int IS NULL AND s.state='active') OR (($5 & 1)<>0 AND s.state='active' AND s.last_seen_at>statement_timestamp()-interval '30 seconds') OR (($5 & 2)<>0 AND s.state='active' AND s.last_seen_at<=statement_timestamp()-interval '30 seconds') OR (($5 & 4)<>0 AND s.state='terminated'))"
     sql = if projects then
-      "SELECT jsonb_build_object('id',p.id,'title',p.name) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR p.id=$2) AND ($3::uuid IS NULL OR p.id>$3) AND hmem_project_has_active_session(p.id) ORDER BY p.id LIMIT $4"
-      else "SELECT jsonb_build_object('id',t.id,'title',t.title) FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR t.id IN (SELECT id FROM hmem_session_project_tasks($1,$2))) AND ($3::uuid IS NULL OR t.id>$3) AND EXISTS(SELECT 1 FROM task_sessions link JOIN sessions s ON s.id=link.session_id WHERE link.workspace_id=$1 AND link.task_id=t.id AND s.workspace_id=$1 AND s.state='active' AND s.import_task_id IS NULL) ORDER BY t.id LIMIT $4"
+      "SELECT jsonb_build_object('id',p.id,'title',p.name) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR p.id=$2) AND ($3::uuid IS NULL OR p.id>$3) AND EXISTS(SELECT 1 FROM task_sessions link JOIN sessions s ON s.id=link.session_id JOIN hmem_session_project_tasks($1,p.id) scoped ON scoped.id=link.task_id WHERE link.workspace_id=$1 AND s.workspace_id=$1 AND " <> activityPredicate <> ") ORDER BY p.id LIMIT $4"
+      else "SELECT jsonb_build_object('id',t.id,'title',t.title) FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.workspace_id=$1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND ($2::uuid IS NULL OR t.id IN (SELECT id FROM hmem_session_project_tasks($1,$2))) AND ($3::uuid IS NULL OR t.id>$3) AND EXISTS(SELECT 1 FROM task_sessions link JOIN sessions s ON s.id=link.session_id WHERE link.workspace_id=$1 AND link.task_id=t.id AND s.workspace_id=$1 AND " <> activityPredicate <> ") ORDER BY t.id LIMIT $4"
 
 listSessionTasks :: Pool Hasql.Connection -> UUID -> UUID -> Maybe UUID -> Int -> IO SessionTaskPage
 listSessionTasks pool workspace identifier cursor limit = do

@@ -99,12 +99,15 @@ creation; legacy null titles display the format label.
 Project/task facets use their own authorized 50-option UUID pages, independent of
 session pages and freshness. A validated selected option is returned separately
 so a selection beyond the current option page remains visible. Errors preserve
-selection; only successful authority can retire a deleted/moved/inactive choice.
+selection; successful authority retires only deleted, foreign-workspace or
+out-of-project selections, while valid zero-match activity scopes remain selected.
 
 Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.
-The active-state and Live/Quiet activity predicates apply before pagination; Live
-is the default. Saved sessions remain reachable through task Evidence links.
+The selected Live/Quiet/Completed activity union applies before pagination; Live
+is the default. Completed includes canonical terminated sessions independently of
+heartbeat age or linked task status. Saved sessions also remain reachable through
+task Evidence links.
 The server reconciles abandoned sessions at startup and periodically. An active
 session qualifies after strictly more than one hour since `last_seen_at` when
 all explicit task links have status `done` or `cancelled`; no links qualifies.
@@ -120,8 +123,9 @@ provider and reasoning values in accessible tooltips. Legacy roleless metadata
 shows `Unknown role`; creator attribution is retained in storage and hidden from
 these views. Runtime changes refresh these labels without changing heartbeat
 freshness. Event times and list activity use the bounded local timestamp cache; the browser-local day decides
-whether to omit the date. Linked-task cards show two items initially, then one
-bounded page on expansion.
+whether to omit the date. The Linked Tasks disclosure above Session Hierarchy
+shows one bounded page of dependency-style read-only task cards when expanded,
+with Jump navigation and continuation controls.
 
 ## Downloads
 
@@ -229,3 +233,31 @@ on create, termination and new links. Ordinary append/heartbeat updates do not
 restart hierarchy membership passes. Project/task placement and deletion also
 invalidate scoped lists and facets. Existing request/authority guards and
 transport/mounting bounds remain unchanged.
+
+Workspace Sessions uses independent Live, Quiet and Completed toggles. Live is
+active with a heartbeat within 30 seconds; Quiet is active with an older
+heartbeat; Completed is canonical terminated state, regardless of linked task
+status or heartbeat age. The default selection is Live. Project/task filters
+combine with the selected activity union. Changing activities resets list and
+facet cursors; continuation keeps the same selection.
+
+HTTP workspace/task session lists and `/sessions/filters` accept optional
+`activity=live,quiet,completed` (a unique comma-separated subset). An explicit
+empty value selects none; malformed or duplicate values return 400. The list union
+is applied before keyset pagination. On lists, legacy
+`state`/`freshness` constraints still combine conjunctively; omission preserves
+the old list contract. Omitted activity on facets preserves active-only options.
+MCP `session_list` forwards optional activity and retains it in continuation
+requests. Completed never means that a linked task is done.
+
+The workspace reader fills the remaining measured space below app chrome and
+wrapped filters. Its transcript and sidebar scroll internally. Linked Tasks is
+a disclosure above Session Hierarchy, with the dependency card presentation and
+Jump navigation, available cached metadata, and bounded linked-task paging.
+
+Activity-aware facet options preserve freshness independence: either Live or
+Quiet includes active-session options; Completed includes terminated-session
+options. An opt-in selected project/task is validated independently of session
+activity, so zero matches preserve the scope. Deleted, foreign-workspace and
+out-of-project selections remain invalid. Omitted activity retains legacy
+active-only facet membership and selected-option behavior.

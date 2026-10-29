@@ -387,7 +387,10 @@ spec = describe "Agent session HTTP" $ do
       active.items `shouldBe` [newer]
       stale <- call app methodGet (root<>"?freshness=stale") reader "" >>= decoded @SessionPageResponse
       stale.items `shouldBe` []
-      forM_ ["?state=invalid","?freshness=invalid"] $ \query -> do
+      forM_ [("live",[newer]),("quiet",[]),("completed",[sealed]),("live,completed",[newer,sealed]),("quiet,completed",[sealed]),("live,quiet",[newer]),("live,quiet,completed",[newer,sealed]),("",[])] $ \(selection,expected) -> do
+        page <- call app methodGet (root<>"?activity="<>selection) reader "" >>= decoded @SessionPageResponse
+        page.items `shouldBe` expected
+      forM_ ["?state=invalid","?freshness=invalid","?activity=live,live","?activity=unknown","?activity=live,"] $ \query -> do
         call app methodGet (root<>query) reader "" >>= status status400
         call app methodGet (root<>query) outsider "" >>= status status403
         call app methodGet (root<>query) [] "" >>= status status401

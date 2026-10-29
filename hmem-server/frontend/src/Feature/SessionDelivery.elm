@@ -18,7 +18,7 @@ type Target
     = WorkspaceSessions (Maybe Api.SessionCursor)
     | WorkspaceSessionsFiltered Api.SessionFilters (Maybe Api.SessionCursor)
     | ScopedSessions (Maybe String) (Maybe String) Api.SessionFilters (Maybe Api.SessionCursor)
-    | SessionFacets String (Maybe String) (Maybe String) (Maybe String)
+    | SessionFacets String (Maybe String) (Maybe String) (Maybe String) (Maybe String)
     | TaskSessionsFiltered String Api.SessionFilters (Maybe Api.SessionCursor)
     | TaskSessions String (Maybe Api.SessionCursor)
     | SessionMetadata String
@@ -82,10 +82,10 @@ key workspace target =
         cursor value = value |> Maybe.map (\item -> item.createdAt ++ ":" ++ item.id) |> Maybe.withDefault "first"
         suffix = case target of
             WorkspaceSessions before -> "list:" ++ cursor before
-            WorkspaceSessionsFiltered filters before -> "list:" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
-            ScopedSessions project task filters before -> "scoped:" ++ Maybe.withDefault "all" project ++ ":" ++ Maybe.withDefault "all" task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
-            SessionFacets kind project after selected -> "facets:" ++ kind ++ ":" ++ Maybe.withDefault "all" project ++ ":" ++ Maybe.withDefault "first" after ++ ":" ++ Maybe.withDefault "none" selected
-            TaskSessionsFiltered task filters before -> "task-filter:" ++ task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
+            WorkspaceSessionsFiltered filters before -> "list:" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ Maybe.withDefault "legacy" filters.activity ++ ":" ++ cursor before
+            ScopedSessions project task filters before -> "scoped:" ++ Maybe.withDefault "all" project ++ ":" ++ Maybe.withDefault "all" task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ Maybe.withDefault "legacy" filters.activity ++ ":" ++ cursor before
+            SessionFacets kind project after selected activity -> "facets:" ++ kind ++ ":" ++ Maybe.withDefault "all" project ++ ":" ++ Maybe.withDefault "first" after ++ ":" ++ Maybe.withDefault "none" selected ++ ":" ++ Maybe.withDefault "legacy" activity
+            TaskSessionsFiltered task filters before -> "task-filter:" ++ task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ Maybe.withDefault "legacy" filters.activity ++ ":" ++ cursor before
             TaskEvidenceArchive task operation -> "archive:" ++ task ++ ":" ++ String.fromInt operation
             SessionArchiveHttp id sequence -> "sealed:" ++ id ++ ":" ++ String.fromInt sequence
             TaskSessions task before -> "task:" ++ task ++ ":" ++ cursor before
@@ -284,7 +284,7 @@ invalidateSession workspace id =
         WorkspaceSessions _ -> True
         WorkspaceSessionsFiltered _ _ -> True
         ScopedSessions _ _ _ _ -> True
-        SessionFacets _ _ _ _ -> False
+        SessionFacets _ _ _ _ _ -> False
         TaskSessionsFiltered _ _ _ -> True
         TaskSessions _ _ -> True
         SessionBytes _ _ _ -> False
@@ -311,7 +311,7 @@ invalidateProgress workspace id state =
                         contains = case resource.data of
                             Just (SessionsPage page) -> List.any (.id >> (==) id) page.items
                             _ -> False
-                        freshnessChanged filters = filters.freshness /= "" && (filters.freshness /= "fresh" || not contains)
+                        freshnessChanged filters = filters.activity /= Nothing || (filters.freshness /= "" && (filters.freshness /= "fresh" || not contains))
                         freshness = case resource.target of
                             WorkspaceSessionsFiltered filters _ -> freshnessChanged filters
                             ScopedSessions _ _ filters _ -> freshnessChanged filters
@@ -337,7 +337,7 @@ invalidateLists workspace =
         WorkspaceSessions _ -> True
         WorkspaceSessionsFiltered _ _ -> True
         ScopedSessions _ _ _ _ -> True
-        SessionFacets _ _ _ _ -> False
+        SessionFacets _ _ _ _ _ -> False
         TaskSessionsFiltered _ _ _ -> True
         _ -> False))
 
@@ -345,7 +345,7 @@ invalidateLists workspace =
 invalidateFacets : String -> State -> State
 invalidateFacets workspace =
     invalidate (\resource -> resource.workspace == workspace && (case resource.target of
-        SessionFacets _ _ _ _ -> True
+        SessionFacets _ _ _ _ _ -> True
         _ -> False))
 
 
@@ -512,7 +512,7 @@ valid request payload =
         ( WorkspaceSessions _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( WorkspaceSessionsFiltered _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( ScopedSessions _ _ _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
-        ( SessionFacets _ _ _ _, FacetsPage page ) -> List.length page.items <= 50
+        ( SessionFacets _ _ _ _ _, FacetsPage page ) -> List.length page.items <= 50
         ( TaskSessionsFiltered _ _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( TaskEvidenceArchive _ _, ArchiveDownloaded ) -> True
         ( SessionArchiveHttp _ _, ArchiveDownloaded ) -> True
@@ -627,7 +627,7 @@ fetch apiUrl request toMsg =
         WorkspaceSessions cursor -> Api.fetchAgentSessions apiUrl request.workspace Nothing cursor 50 (Result.map SessionsPage >> toMsg)
         WorkspaceSessionsFiltered filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace Nothing filters cursor 50 (Result.map SessionsPage >> toMsg)
         ScopedSessions project task filters cursor -> Api.fetchScopedAgentSessions apiUrl request.workspace project task filters cursor (Result.map SessionsPage >> toMsg)
-        SessionFacets kind project after selected -> Api.fetchSessionFacets apiUrl request.workspace kind project after selected (Result.map FacetsPage >> toMsg)
+        SessionFacets kind project after selected activity -> Api.fetchSessionFacets apiUrl request.workspace kind project after selected activity (Result.map FacetsPage >> toMsg)
         TaskSessionsFiltered task filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace (Just task) filters cursor 50 (Result.map SessionsPage >> toMsg)
         TaskEvidenceArchive _ _ -> Cmd.none
         SessionArchiveHttp _ _ -> Cmd.none

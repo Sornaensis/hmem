@@ -95,6 +95,8 @@ spec = do
         ,("session_read", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "offset" .= (-1 :: Int)])
         ,("session_list", object ["workspace_id" .= workspaceId, "limit" .= (101 :: Int)])
         ,("session_list", object ["workspace_id" .= workspaceId, "before_id" .= observationId])
+        ,("session_list", object ["workspace_id" .= workspaceId, "activity" .= ("live,live" :: Text)])
+        ,("session_list", object ["workspace_id" .= workspaceId, "activity" .= ("invalid" :: Text)])
         ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text)])
         ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text),"task_id" .= Null])
         ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text),"task_id" .= ("invalid-task" :: Text)])
@@ -166,10 +168,11 @@ spec = do
     it "pins list and task continuations to resolved workspace and omits next_request on final empty pages" $ do
       requests <- newTVarIO []
       withSessionMock requests $ \manager base -> do
-        listed <- call manager base "session_list" (object ["workspace_id" .= workspaceId, "task_id" .= observationId, "limit" .= (1 :: Int)])
+        listed <- call manager base "session_list" (object ["workspace_id" .= workspaceId, "task_id" .= observationId, "activity" .= ("live,completed" :: Text), "limit" .= (1 :: Int)])
         let Just next = jsonPath ["next_request", "arguments"] listed
         jsonField "workspace_id" next `shouldBe` Just (String workspaceId)
         jsonField "task_id" next `shouldBe` Just (String observationId)
+        jsonField "activity" next `shouldBe` Just (String "live,completed")
         jsonField "before_id" next `shouldBe` Just (String observationId)
         done <- call manager base "session_list" next
         jsonField "items" done `shouldBe` Just (toJSON ([] :: [Value]))

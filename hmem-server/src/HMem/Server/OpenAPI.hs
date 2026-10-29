@@ -87,6 +87,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
             "offset" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiInteger & format ?~ "int64" & minimum_ ?~ 0))
             "state" -> Inline (parameter & description ?~ "Lifecycle filter applied before keyset pagination: active or terminated. Omit for both.")
             "freshness" -> Inline (parameter & description ?~ "Heartbeat filter applied before keyset pagination: fresh or stale (30 seconds), independently of lifecycle. Omit for both.")
+            "activity" -> Inline (parameter & description ?~ "Optional unique comma-separated subset live,quiet,completed; empty selects none. Lists union Live=active/fresh, Quiet=active/stale (30 seconds), Completed=terminated independently of heartbeat/task status, before pagination and conjunctively with legacy state/freshness. Facet options preserve freshness independence: either Live or Quiet includes active-session options, Completed includes terminated options; selected entity authority is independent of activity. Omit for legacy list and active-only facet behavior.")
             "before_created_at" -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "date-time"))
             name | name `elem` ["before_id","after_task_id"] -> Inline (parameter & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid"))
             _ -> parameterRef

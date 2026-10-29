@@ -6,7 +6,7 @@ module Api exposing
     , AgentSessionState(..)
     , SessionCursor
     , SessionFilters
-    , defaultSessionFilters
+    , defaultSessionFilters, workspaceSessionFilters
     , SessionAncestor, SessionFacet, SessionFacetPage, fetchSessionFacets, fetchScopedAgentSessions
     , SessionPage
     , SessionTaskPage
@@ -4437,11 +4437,22 @@ type alias SessionCursor =
 
 
 type alias SessionFilters =
-    { state : String, freshness : String }
+    { state : String, freshness : String, activity : Maybe String }
 
 
 defaultSessionFilters : SessionFilters
-defaultSessionFilters = { state = "active", freshness = "fresh" }
+defaultSessionFilters = { state = "active", freshness = "fresh",activity=Nothing }
+
+
+workspaceSessionFilters : SessionFilters
+workspaceSessionFilters = {state="",freshness="",activity=Just "live"}
+
+
+sessionFilterQuery : SessionFilters -> String
+sessionFilterQuery filters =
+    (if filters.state == "" then "" else "&state=" ++ Url.percentEncode filters.state)
+        ++ (if filters.freshness == "" then "" else "&freshness=" ++ Url.percentEncode filters.freshness)
+        ++ (filters.activity |> Maybe.map (\activity -> "&activity=" ++ Url.percentEncode activity) |> Maybe.withDefault "")
 
 
 type alias SessionPage =
@@ -4536,8 +4547,7 @@ fetchFilteredAgentSessions apiUrl workspace task filters cursor limit toMsg =
                 Just id -> apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode workspace ++ "/tasks/" ++ Url.percentEncode id ++ "/sessions"
                 Nothing -> sessionResourceUrl apiUrl workspace
             after = cursor |> Maybe.map (\key -> "&before_created_at=" ++ Url.percentEncode key.createdAt ++ "&before_id=" ++ Url.percentEncode key.id) |> Maybe.withDefault ""
-            predicates = (if filters.state == "" then "" else "&state=" ++ Url.percentEncode filters.state)
-                ++ (if filters.freshness == "" then "" else "&freshness=" ++ Url.percentEncode filters.freshness)
+            predicates = sessionFilterQuery filters
         in
         sessionGet (path ++ "?limit=" ++ String.fromInt limit ++ predicates ++ after) sessionPageDecoder toMsg
 
@@ -4547,15 +4557,15 @@ fetchScopedAgentSessions apiUrl workspace project task filters cursor =
     let param key value = value |> Maybe.map (\id -> "&" ++ key ++ "=" ++ Url.percentEncode id) |> Maybe.withDefault ""
         after = cursor |> Maybe.map (\key -> "&before_created_at=" ++ Url.percentEncode key.createdAt ++ "&before_id=" ++ Url.percentEncode key.id) |> Maybe.withDefault ""
     in
-    sessionGet (sessionResourceUrl apiUrl workspace ++ "?limit=50&state=" ++ filters.state ++ "&freshness=" ++ filters.freshness ++ param "project_id" project ++ param "task_id" task ++ after) sessionPageDecoder
+    sessionGet (sessionResourceUrl apiUrl workspace ++ "?limit=50" ++ sessionFilterQuery filters ++ param "project_id" project ++ param "task_id" task ++ after) sessionPageDecoder
 
 
-fetchSessionFacets : String -> String -> String -> Maybe String -> Maybe String -> Maybe String -> (Result Http.Error SessionFacetPage -> msg) -> Cmd msg
-fetchSessionFacets apiUrl workspace kind project after selected =
+fetchSessionFacets : String -> String -> String -> Maybe String -> Maybe String -> Maybe String -> Maybe String -> (Result Http.Error SessionFacetPage -> msg) -> Cmd msg
+fetchSessionFacets apiUrl workspace kind project after selected activity =
     let param key value = value |> Maybe.map (\id -> "&" ++ key ++ "=" ++ Url.percentEncode id) |> Maybe.withDefault ""
         facet = D.map2 SessionFacet (D.field "id" D.string) (D.field "title" D.string)
     in
-    sessionGet (sessionResourceUrl apiUrl workspace ++ "/filters?kind=" ++ kind ++ "&limit=50" ++ param "project_id" project ++ param "after_id" after ++ param "selected_id" selected)
+    sessionGet (sessionResourceUrl apiUrl workspace ++ "/filters?kind=" ++ kind ++ "&limit=50" ++ param "project_id" project ++ param "after_id" after ++ param "selected_id" selected ++ param "activity" activity)
         (D.map3 SessionFacetPage (D.field "items" (D.list facet)) (nullableSessionField "next_id" D.string) (nullableSessionField "selected" facet))
 
 

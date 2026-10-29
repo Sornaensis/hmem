@@ -77,7 +77,7 @@ read access; creation, association, runtime changes and termination require edit
 | --- | --- | --- |
 | `session_create` | Caller-owned `session_id`, required `task_id`, `format_label`, very short `title`, optional `parent_session_id` and `initial_runtime_identity` | Atomic new session plus initial in-progress task link; retries preserve canonical metadata/links |
 | `session_set_runtime` | `session_id`, `expected_runtime_revision`, required nullable `runtime_identity` | Guarded active runtime declaration; explicit null clears to unknown |
-| `session_list` | Optional `task_id`, `limit`, paired `before_created_at` / `before_id` | Compact workspace or task sessions |
+| `session_list` | Optional `task_id`, `limit`, `activity`, paired `before_created_at` / `before_id` | Compact workspace or task sessions |
 | `session_detail` | `session_id` | Metadata including creator attribution |
 | `session_tasks` | `session_id`, optional `limit`, `after_task_id` | Visible associated tasks |
 | `session_associate` | `session_id`, `task_id` | New links require `in_progress`; existing links remain idempotent after task completion |

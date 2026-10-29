@@ -27,15 +27,15 @@ suite =
         , describe "authoritative evidence availability" evidenceAvailabilityTests
         , describe "card-owned dock authority" dockTests
         , describe "same-authority metadata presentation" metadataPresentationTests
-        , test "session and authority changes restore the compact linked-task default" <| \_ ->
+        , test "session and authority changes reset linked-task paging" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
                 state=entered.sessions
-                expanded={entered | sessions={state | showAllLinkedTasks=True}}
+                expanded={entered | sessions={state | linksCursor=Just "old-task"}}
                 epoch=Sessions.reconcile ({expanded | sessionRequestEpoch=expanded.sessionRequestEpoch+1},Cmd.none) |> Tuple.first
                 url=expanded.url
                 selected=Sessions.reconcile ({expanded | url={url | fragment=Just "tab=sessions&session=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}},Cmd.none) |> Tuple.first
-            in Expect.equal (False,False) (epoch.sessions.showAllLinkedTasks,selected.sessions.showAllLinkedTasks)
+            in Expect.equal (Nothing,Nothing) (epoch.sessions.linksCursor,selected.sessions.linksCursor)
         , test "decodes canonical HTTP metadata with omitted optional fields and final page cursor" <| \_ ->
             case Decode.decodeString Api.sessionPageDecoder canonicalPage of
                 Ok page ->
@@ -202,10 +202,20 @@ suite =
                     Expect.equal {purposes=2,automatic=0,next=[Delivery.SessionSave sessionId 3 3],slots=1,cleared=True}
                         {purposes=List.length requests,automatic=List.length automatic,next=List.map .target next,slots=Dict.size rearmed.physical
                         ,cleared=Dict.values consumed.resources |> List.filter (\resource -> resource.target==window || resource.target==save) |> List.all (\resource -> resource.data==Nothing && List.isEmpty resource.ranges)}
+        , test "activity toggles compose canonically and reset list and both facet continuations" <| \_ ->
+            let
+                state=sessionModel.sessions
+                paged={sessionModel | sessions={state | cursor=Just {createdAt="old",id="old"},previous=[Nothing],projectFacetCursor=Just "old-project",taskFacetCursor=Just "old-task"}}
+                changed=Sessions.update (SessionsActivityFilter "completed") paged |> Tuple.first
+                toggled=Sessions.update (SessionsActivityFilter "quiet") changed |> Tuple.first
+                empty=List.foldl (\name model -> Sessions.update (SessionsActivityFilter name) model |> Tuple.first) toggled ["completed","live","quiet"]
+            in
+            Expect.equal {activity=Just "live,quiet,completed",empty=Just "",cursor=Nothing,previous=[],project=Nothing,task=Nothing}
+                {activity=toggled.sessions.filters.activity,empty=empty.sessions.filters.activity,cursor=changed.sessions.cursor,previous=changed.sessions.previous,project=changed.sessions.projectFacetCursor,task=changed.sessions.taskFacetCursor}
         , test "filter changes retire old cursor demand and a hidden or unauthorized tab cannot restore demand" <| \_ ->
             let
                 entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
-                oldTarget = Delivery.WorkspaceSessionsFiltered Api.defaultSessionFilters Nothing
+                oldTarget = Delivery.WorkspaceSessionsFiltered Api.workspaceSessionFilters Nothing
                 filtered = Sessions.update (SessionsFreshnessFilter "stale") entered |> (\pair -> Sessions.reconcile pair) |> Tuple.first
                 hidden = Sessions.reconcile ({filtered | activeTab=ProjectsTab},Cmd.none) |> Tuple.first
                 denied = Sessions.reconcile ({filtered | auth={status=AuthRequired,mode=Nothing}},Cmd.none) |> Tuple.first
@@ -215,9 +225,9 @@ suite =
                 ,hidden=Dict.size hidden.sessionDelivery.resources,denied=Dict.size denied.sessionDelivery.resources,physical=Dict.size denied.sessionDelivery.physical}
         , test "late physical callback from an old filter releases only its slot and cannot install that page" <| \_ ->
             let
-                oldTarget=Delivery.WorkspaceSessionsFiltered Api.defaultSessionFilters Nothing
+                oldTarget=Delivery.WorkspaceSessionsFiltered Api.workspaceSessionFilters Nothing
                 (busy,requests)=Delivery.demand workspace oldTarget Delivery.init |> Delivery.admit workspace
-                newTarget=Delivery.WorkspaceSessionsFiltered {state="terminated",freshness=""} Nothing
+                newTarget=Delivery.WorkspaceSessionsFiltered {state="terminated",freshness="",activity=Nothing} Nothing
                 changed=Delivery.removeDemand workspace oldTarget busy |> Delivery.demand workspace newTarget
                 completed=List.foldl (\request state -> Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) state) changed requests
                 (_,next)=Delivery.admit workspace completed
@@ -404,7 +414,7 @@ metadataPresentationTests =
             (payload detailTarget settled,payload listTarget settled))
     , test "unselected progress refreshes only its displayed pages and freshness membership" <| withMetadata (\session ->
         let
-            fresh = Delivery.WorkspaceSessionsFiltered {state="active",freshness="fresh"} Nothing
+            fresh = Delivery.WorkspaceSessionsFiltered {state="active",freshness="fresh",activity=Nothing} Nothing
             unrelated = Delivery.TaskSessions "unrelated" Nothing
             seed = ready session |> Delivery.removeDemand workspace windowTarget |> Delivery.removeDemand workspace legacyTarget |> Delivery.removeDemand workspace detailTarget
             seeded = {seed | resources=seed.resources |> Dict.insert (Delivery.key workspace fresh) (entry fresh (Delivery.SessionsPage {items=[],nextCursor=Nothing})) |> Dict.insert (Delivery.key workspace unrelated) (entry unrelated (Delivery.SessionsPage {items=[],nextCursor=Nothing})), order=seed.order ++ List.map (Delivery.key workspace) [fresh,unrelated]}
@@ -428,8 +438,8 @@ metadataPresentationTests =
         in Expect.equal (True,True) (settled.listInvalidation>busy.listInvalidation,List.any (.target >> (==) listTarget) next))
     , test "a selected fresh member reuses metadata while quiet and missing-fresh membership recheck" <| withMetadata (\session ->
         let
-            fresh = Delivery.WorkspaceSessionsFiltered {state="active",freshness="fresh"} Nothing
-            quiet = Delivery.TaskSessionsFiltered "task" {state="active",freshness="stale"} Nothing
+            fresh = Delivery.WorkspaceSessionsFiltered {state="active",freshness="fresh",activity=Nothing} Nothing
+            quiet = Delivery.TaskSessionsFiltered "task" {state="active",freshness="stale",activity=Nothing} Nothing
             initial = ready session
             seeded = {initial | resources=initial.resources |> Dict.insert (Delivery.key workspace fresh) (entry fresh (Delivery.SessionsPage {items=[session],nextCursor=Nothing})) |> Dict.insert (Delivery.key workspace quiet) (entry quiet (Delivery.SessionsPage {items=[session],nextCursor=Nothing})),order=initial.order ++ List.map (Delivery.key workspace) [fresh,quiet]}
             dirty = Delivery.invalidateProgress workspace sessionId seeded
@@ -768,7 +778,7 @@ evidenceAvailabilityTests =
         cached value before epoch =
             let state=base.sessions in {base | sessions={state | taskPages=Dict.singleton "terminated:one" {result=value,cursor=before,epoch=epoch}}}
         empty = cached (Ok (page [] Nothing)) Nothing base.sessionDelivery.listInvalidation
-        target = Delivery.TaskSessionsFiltered "one" {state="terminated",freshness=""} Nothing
+        target = Delivery.TaskSessionsFiltered "one" {state="terminated",freshness="",activity=Nothing} Nothing
         resident dirty proven error =
             let delivery=empty.sessionDelivery
                 entry={workspace=workspace,target=target,dirty=dirty,settled=0,data=Just (Delivery.SessionsPage (page [] Nothing)),ranges=[],error=error,proven=proven,incarnation=0,retry=Delivery.Available}

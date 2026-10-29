@@ -7,7 +7,7 @@ async function change(h,type,id,action='updated',membership=false){
  await h.page.evaluate(({workspace,type,id,action,membership})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'change-'+crypto.randomUUID(),scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'session-hierarchy',cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type,id,action},invalidations:[{kind:'entity',target:type+':'+id},...(type==='agent_session'?[{kind:'collection',target:'sessions:'+workspace}]:[]),...(membership?[{kind:'collection',target:'active_sessions:'+workspace}]:[])]}}]),{workspace:h.fixture.workspace.id,type,id,action,membership})
 }
 
-test('active project/task facets page beyond50 and retire moved or ended selections only after successful authority',{timeout:60000},async()=>{
+test('active project/task facets page beyond50 and retire only invalid entity scopes after successful authority',{timeout:60000},async()=>{
  const h=await openSessionExplorer({linkedCount:55});const {page}=h
  try{
   const project=h.fixture.projects[0],other={...project,id:'50000000-0000-4000-8000-000000000002',name:'Other active project'}
@@ -34,10 +34,10 @@ test('active project/task facets page beyond50 and retire moved or ended selecti
   await page.unroute('**/sessions/filters?**');await page.getByRole('button',{name:'Retry projects',exact:true}).click()
   await until(async()=>await page.getByRole('button',{name:'Retry projects',exact:true}).count()===0)
   h.fixture.tasks=h.fixture.tasks.filter(task=>task.id!==selected.id);await change(h,'task',selected.id,'deleted')
-  await until(()=>!page.url().includes('&project=')&&!page.url().includes('&task='))
+  await until(()=>!page.url().includes('&task='));assert.ok(page.url().includes('project='+other.id))
   await projects.selectOption(project.id);await until(()=>page.url().includes('project='+project.id))
   h.active.state='terminated';await change(h,'agent_session',h.active.id,'updated',true)
-  await until(()=>!page.url().includes('&project=')&&!page.url().includes('&task='))
+  await until(async()=>await page.locator('.session-summary').count()===0);assert.ok(page.url().includes('project='+project.id))
   assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })

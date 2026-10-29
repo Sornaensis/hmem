@@ -10,6 +10,7 @@ import Dict
 import Feature.SessionDelivery as Delivery
 import Feature.WebSocket as WebSocket
 import Feature.DataLoading as DataLoading
+import Feature.Dependencies as Dependencies
 import Html exposing (..)
 import Html.Attributes exposing (attribute, class, disabled, href, tabindex, value)
 import Html.Events exposing (onClick, onInput, stopPropagationOn)
@@ -53,8 +54,8 @@ listTarget state =
 
 facetTarget : String -> SessionsModel -> Delivery.Target
 facetTarget kind state =
-    if kind == "projects" then Delivery.SessionFacets kind Nothing state.projectFacetCursor state.projectFilter
-    else Delivery.SessionFacets kind state.projectFilter state.taskFacetCursor state.taskFilter
+    if kind == "projects" then Delivery.SessionFacets kind Nothing state.projectFacetCursor state.projectFilter state.filters.activity
+    else Delivery.SessionFacets kind state.projectFilter state.taskFacetCursor state.taskFilter state.filters.activity
 
 
 filterSuffix : Maybe String -> Maybe String -> String
@@ -108,14 +109,14 @@ reconcile ( model, command ) =
         projectFilter = if workspace /= Nothing && model.activeTab == SessionsTab then urlId "project" model else Nothing
         taskIds = if workspace /= Nothing && model.activeTab == ProjectsTab then mountedTasks model else []
         reset = old.workspace /= workspace || old.epoch /= model.sessionRequestEpoch
-        scoped = if reset then { old | workspace = workspace, epoch = model.sessionRequestEpoch, selected = selected, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, filters = Api.defaultSessionFilters, taskFilter = taskFilter, projectFilter = projectFilter, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPages = Dict.empty, taskHints = Dict.empty, taskAssociations = Dict.empty, hintOrder = [], sectionOrder = [] }
-            else if old.selected /= selected then { old | selected = selected, linksCursor = Nothing, showAllLinkedTasks = False } else old
+        scoped = if reset then { old | workspace = workspace, epoch = model.sessionRequestEpoch, selected = selected, cursor = Nothing, previous = [], linksCursor = Nothing, filters = Api.workspaceSessionFilters, taskFilter = taskFilter, projectFilter = projectFilter, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPages = Dict.empty, taskHints = Dict.empty, taskAssociations = Dict.empty, hintOrder = [], sectionOrder = [] }
+            else if old.selected /= selected then { old | selected = selected, linksCursor = Nothing } else old
         filtered = if scoped.taskFilter /= taskFilter || scoped.projectFilter /= projectFilter then { scoped | taskFilter = taskFilter, projectFilter = projectFilter, taskFacetCursor = Nothing, cursor = Nothing, previous = [] } else scoped
         hintEpoch = model.sessionDelivery.listInvalidation
         retainedHints = Dict.filter (\id _ -> List.member id taskIds) filtered.taskHints
         consumeHint (ws,target) accumulated = case target of
             Delivery.TaskSessionsFiltered task filters cursor ->
-                if cursor /= Nothing || filters.state /= "active" || not (List.member task taskIds) then accumulated else
+                if cursor /= Nothing || filters.activity /= Nothing || filters.state /= "active" || not (List.member task taskIds) then accumulated else
                 case resource ws target model of
                     Just entry ->
                         if entry.error /= Nothing then Dict.insert task {active=False,error=True,epoch=hintEpoch} accumulated else if not entry.proven || entry.dirty /= entry.settled then accumulated else
@@ -130,7 +131,7 @@ reconcile ( model, command ) =
         retainedAssociations = Dict.filter (\id _ -> List.member id taskIds) filtered.taskAssociations
         consumeAssociation (ws,target) accumulated = case target of
             Delivery.TaskSessionsFiltered task filters cursor ->
-                if Just ws /= workspace || cursor /= Nothing || (filters.state /= "" && filters.state /= "active") || filters.freshness /= "" || not (List.member task taskIds) then accumulated else
+                if Just ws /= workspace || cursor /= Nothing || filters.activity /= Nothing || (filters.state /= "" && filters.state /= "active") || filters.freshness /= "" || not (List.member task taskIds) then accumulated else
                 case resource ws target model of
                     Just entry ->
                         if entry.error /= Nothing then
@@ -149,12 +150,12 @@ reconcile ( model, command ) =
             (Dict.get id hints |> Maybe.map (\hint -> hint.epoch == hintEpoch && not hint.error && not hint.active) |> Maybe.withDefault False)
                 && (Dict.get id associations |> Maybe.map (\hint -> hint.epoch /= hintEpoch) |> Maybe.withDefault True)
         hintTarget id =
-            if unresolved id then Just (Delivery.TaskSessionsFiltered id {state="active",freshness=""} Nothing)
-            else if needsAssociation id then Just (Delivery.TaskSessionsFiltered id {state="",freshness=""} Nothing)
+            if unresolved id then Just (Delivery.TaskSessionsFiltered id {state="active",freshness="",activity=Nothing} Nothing)
+            else if needsAssociation id then Just (Delivery.TaskSessionsFiltered id {state="",freshness="",activity=Nothing} Nothing)
             else Nothing
         pendingHintTargets = old.owned |> List.filterMap (\(ws,target) -> case target of
             Delivery.TaskSessionsFiltered task filters cursor ->
-                if Just ws == workspace && cursor == Nothing && (filters.state == "active" || filters.state == "") && filters.freshness == "" && List.member task taskIds && (resource ws target model |> Maybe.map (\entry -> entry.error == Nothing && entry.dirty /= entry.settled) |> Maybe.withDefault False) then Just target else Nothing
+                if Just ws == workspace && cursor == Nothing && filters.activity == Nothing && (filters.state == "active" || filters.state == "") && filters.freshness == "" && List.member task taskIds && (resource ws target model |> Maybe.map (\entry -> entry.error == Nothing && entry.dirty /= entry.settled) |> Maybe.withDefault False) then Just target else Nothing
             _ -> Nothing)
         hintTargets = (pendingHintTargets ++ List.filterMap hintTarget rotation) |> List.foldl (\target targets -> if List.member target targets then targets else targets ++ [target]) [] |> List.take 2
         hintTasks = List.filterMap (\target -> case target of
@@ -332,7 +333,6 @@ update msg model =
                 cursor :: rest -> ( { model | sessions = { state | cursor = cursor, previous = rest } }, Cmd.none )
                 [] -> ( { model | sessions = { state | cursor = Nothing } }, Cmd.none )
         SessionsLinkedPage cursor -> ( { model | sessions = { state | linksCursor = cursor } }, Cmd.none )
-        SessionsShowAllLinkedTasks -> ( { model | sessions = { state | showAllLinkedTasks = True } }, Cmd.none )
         SessionsRetry ->
             let
                 decodeRecovery = state.error /= Nothing
@@ -340,6 +340,7 @@ update msg model =
                 refresh ws delivery =
                     Delivery.invalidateFacets ws (Delivery.invalidateLists ws (Delivery.retrySelected delivery))
                         |> (\current -> state.selected |> Maybe.map (\id -> Delivery.invalidateSession ws id current) |> Maybe.withDefault current)
+                        |> (\current -> state.selected |> Maybe.map (\id -> Delivery.removeDemand ws (Delivery.SessionTasks id state.linksCursor) current) |> Maybe.withDefault current)
                         |> (\current -> state.taskPanel |> Maybe.map (\id -> Delivery.invalidateTask ws id current) |> Maybe.withDefault current)
                         |> (\current -> List.foldl (\(ownedWorkspace,target) accumulated -> case target of
                             Delivery.SessionWindow _ _ _ _ -> Delivery.removeDemand ownedWorkspace target accumulated
@@ -350,13 +351,22 @@ update msg model =
                     , offset = if decodeRecovery then begin else state.offset
                     , generation = state.generation + 1,resetPending = decodeRecovery || state.resetPending}
                 ,sessionDelivery = state.workspace |> Maybe.map (\ws -> refresh ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery},Cmd.none )
+        SessionsActivityFilter value ->
+            if List.member value ["live","quiet","completed"] then
+                let
+                    selected = state.filters.activity |> Maybe.withDefault "live" |> String.split ","
+                    toggled = if List.member value selected then List.filter ((/=) value) selected else value :: selected
+                    canonical = ["live","quiet","completed"] |> List.filter (\item -> List.member item toggled) |> String.join ","
+                in
+                ({model | sessions = {state | filters = {state="",freshness="",activity=Just canonical},cursor=Nothing,previous=[],projectFacetCursor=Nothing,taskFacetCursor=Nothing}},Cmd.none)
+            else (model,Cmd.none)
         SessionsStateFilter value ->
             if value == "active" then
-                let filters = state.filters in ( { model | sessions = { state | filters = { filters | state = "active" }, cursor = Nothing, previous = [] } }, Cmd.none )
+                let filters = state.filters in ( { model | sessions = { state | filters = { filters | state = "active",activity=Nothing }, cursor = Nothing, previous = [] } }, Cmd.none )
             else (model,Cmd.none)
         SessionsFreshnessFilter value ->
             if List.member value ["fresh","stale"] then
-                let filters = state.filters in ( { model | sessions = { state | filters = { filters | freshness = value }, cursor = Nothing, previous = [] } }, Cmd.none )
+                let filters = state.filters in ( { model | sessions = { state | filters = { filters | freshness = value,activity=Nothing }, cursor = Nothing, previous = [] } }, Cmd.none )
             else (model,Cmd.none)
         SessionsProjectFilter value ->
             (model, Helpers.pushUrl model.key (filterUrl model (if value == "" then Nothing else Just value) Nothing))
@@ -371,7 +381,7 @@ update msg model =
             ( { model | sessions = { state | following = False, loadWindow = True, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, rows = [], error = Nothing } }, Cmd.none )
         SessionsTick time ->
             let now = toFloat (Time.posixToMillis time)
-                refresh = state.filters.freshness /= "" && model.activeTab == SessionsTab && now-state.lastFilterRefresh >= 10000
+                refresh = (state.filters.freshness /= "" || state.filters.activity /= Nothing) && model.activeTab == SessionsTab && now-state.lastFilterRefresh >= 10000
                 refreshActivity = state.activityDirty && model.search.filterHasActiveSession && model.activeTab == ProjectsTab && now-state.lastActivityRefresh >= 1000
                 updated = {model | sessions = {state | now = now, lastFilterRefresh = if refresh then now else state.lastFilterRefresh, activityDirty = if refreshActivity || not model.search.filterHasActiveSession then False else state.activityDirty, lastActivityRefresh = if refreshActivity then now else state.lastActivityRefresh}
                     , sessionDelivery = if refresh then state.workspace |> Maybe.map (\ws -> Delivery.invalidateLists ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery else model.sessionDelivery}
@@ -420,7 +430,7 @@ receiveBridge value model =
             Ok statuses -> if Dict.size statuses <= 52 then
                 let crossed = Dict.toList statuses |> List.any (\(id,status) -> Dict.get id state.heartbeats |> Maybe.map ((/=) status) |> Maybe.withDefault False)
                 in ( {model | sessions = {state | heartbeats = statuses, today = field "today" Decode.string state.today}
-                    , sessionDelivery = if crossed && model.activeTab == SessionsTab && state.filters.freshness /= "" then state.workspace |> Maybe.map (\ws -> Delivery.invalidateLists ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery else model.sessionDelivery}, Cmd.none )
+                    , sessionDelivery = if crossed && model.activeTab == SessionsTab && (state.filters.freshness /= "" || state.filters.activity /= Nothing) then state.workspace |> Maybe.map (\ws -> Delivery.invalidateLists ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery else model.sessionDelivery}, Cmd.none )
                 else (model,Cmd.none)
             Err _ -> (model,Cmd.none)
     else if kind == "save-capability" then
@@ -585,21 +595,23 @@ view workspace model =
         [ div [ class "sessions-toolbar" ] [ h2 [] [ text "Sessions" ] ]
         , model.sessions.taskFilter |> Maybe.map (\task -> div [class "sessions-task-filter"] [text ("Sessions linked to " ++ (Dict.get task model.tasks |> Maybe.map .title |> Maybe.withDefault (String.left 8 task))),a [href ("/workspace/" ++ Url.percentEncode workspace ++ "#tab=sessions"),class "btn btn-sm"] [text "Clear"]]) |> Maybe.withDefault (text "")
         , div [class "sessions-filters",attribute "role" "group",attribute "aria-label" "Activity"]
-            (List.map (\(filter,caption) -> button [class ("btn session-filter" ++ (if model.sessions.filters.freshness == filter then " selected" else "")),attribute "aria-pressed" (if model.sessions.filters.freshness == filter then "true" else "false"),onClick (SessionsFreshnessFilter filter)] [text caption]) [("fresh","Live"),("stale","Quiet")]
+            (List.map (\(filter,caption) -> button [class ("btn session-filter" ++ (if List.member filter (model.sessions.filters.activity |> Maybe.withDefault "live" |> String.split ",") then " selected" else "")),attribute "aria-pressed" (if List.member filter (model.sessions.filters.activity |> Maybe.withDefault "live" |> String.split ",") then "true" else "false"),onClick (SessionsActivityFilter filter)] [text caption]) [("live","Live"),("quiet","Quiet"),("completed","Completed")]
                 ++ [viewFacet workspace model "projects",viewFacet workspace model "tasks"])
         , div [ class "sessions-layout" ]
             [ aside [ class "sessions-list", attribute "aria-label" "Session hierarchy" ]
-                [ h3 [class "session-pane-label"] [text "Session hierarchy"]
-                , case list |> Maybe.andThen .error of
+                [ model.sessions.selected |> Maybe.map (viewLinkedTasks workspace model) |> Maybe.withDefault (text "")
+                , h3 [class "session-pane-label"] [text "Session hierarchy"]
+                , div [class "session-hierarchy"]
+                    [ case list |> Maybe.andThen .error of
                     Just _ -> div [ attribute "role" "alert" ] [ text "Sessions could not be loaded. ", button [ onClick SessionsRetry ] [text "Retry"] ]
                     Nothing -> case list |> Maybe.andThen .data of
                         Just (Delivery.SessionsPage page) -> div []
                             [ if List.isEmpty page.items then p [ class "empty-state" ] [text "No sessions match these filters."]
-                              else viewSessionTree workspace model (List.filter (\session -> session.state == Api.SessionActive) page.items)
+                              else viewSessionTree workspace model page.items
                             , div [class "sessions-pagination"]
                                 [ button [class "btn btn-sm", disabled (model.sessions.cursor == Nothing), onClick SessionsPreviousPage] [text "Newer"]
                                 , page.nextCursor |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsNextPage cursor)] [text "Older sessions"]) |> Maybe.withDefault (text "") ] ]
-                        _ -> p [ attribute "role" "status" ] [text "Loading sessions…"] ]
+                        _ -> p [ attribute "role" "status" ] [text "Loading sessions…"] ] ]
             , model.sessions.selected |> Maybe.map (viewDetail workspace model) |> Maybe.withDefault (div [class "empty-state session-detail"] [h3 [] [text "Inspect an agent session"],p [] [text "Select a session to see its activity and linked tasks."]]) ] ]
 
 
@@ -696,16 +708,27 @@ viewDetail workspace model id =
             _ -> resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .error |> Maybe.map (\_ -> p [attribute "role" "alert"] [text "Session could not be loaded.",button [onClick SessionsRetry] [text "Retry"]]) |> Maybe.withDefault (p [attribute "role" "status"] [text "Loading session…"])
         , div [class "session-conversation-grid"]
             [ div [class "session-conversation"]
-              [ section [class "session-linked-tasks",attribute "aria-label" "Linked tasks"]
-            [ case resource workspace (Delivery.SessionTasks id model.sessions.linksCursor) model |> Maybe.andThen .data of
-                Just (Delivery.TasksPage page) -> div []
-                    [div [class "session-task-cards"] (List.map (\task -> a [class "session-task-card",href ("/workspace/" ++ Url.percentEncode workspace ++ "#tab=projects&focus=" ++ Url.percentEncode ("task:" ++ task.id)),Html.Attributes.title task.title] [strong [] [text task.title],span [class "badge"] [text task.status]]) (if model.sessions.showAllLinkedTasks then page.items else List.take 2 page.items))
-                    ,if List.isEmpty page.items then p [class "card-meta"] [text "No linked tasks."] else text ""
-                    ,if not model.sessions.showAllLinkedTasks && (List.length page.items > 2 || page.nextTaskId /= Nothing) then button [class "btn btn-sm session-show-linked",onClick SessionsShowAllLinkedTasks] [text "Show All Linked Tasks"] else text ""
-                    ,if model.sessions.showAllLinkedTasks then div [class "sessions-pagination"] [page.nextTaskId |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsLinkedPage (Just cursor))] [text "More tasks"]) |> Maybe.withDefault (text ""),if model.sessions.linksCursor /= Nothing then button [class "btn btn-sm",onClick (SessionsLinkedPage Nothing)] [text "First tasks"] else text ""] else text ""]
-                _ -> p [class "card-meta"] [text "Loading linked tasks…"] ]
-              , viewRecords workspace model id ] ]
+              [ viewRecords workspace model id ] ]
         ,p [class "session-download-status",attribute "role" "status",attribute "aria-live" "polite"] [text (if model.sessions.archiveMessageTask == Nothing || model.sessions.saveBlocked then model.sessions.saveMessage else "")] ]
+
+
+viewLinkedTasks : String -> Model -> String -> Html Msg
+viewLinkedTasks workspace model id =
+    let entry = resource workspace (Delivery.SessionTasks id model.sessions.linksCursor) model in
+    details [class "session-linked-tasks",attribute "aria-label" "Linked tasks"]
+        [summary [] [text "Linked Tasks"]
+        ,div [class "session-linked-content"]
+            [case entry |> Maybe.andThen .error of
+                Just _ -> p [attribute "role" "alert"] [text "Linked tasks could not be loaded. ",button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"]]
+                Nothing -> case entry |> Maybe.andThen .data of
+                    Just (Delivery.TasksPage page) -> div []
+                        [div [class "session-task-cards"] (List.map (Dependencies.viewReadOnlyTask model) page.items)
+                        ,if List.isEmpty page.items then p [class "card-meta"] [text "No linked tasks."] else text ""
+                        ,div [class "sessions-pagination"]
+                            [page.nextTaskId |> Maybe.map (\cursor -> button [class "btn btn-sm",onClick (SessionsLinkedPage (Just cursor))] [text "More tasks"]) |> Maybe.withDefault (text "")
+                            ,if model.sessions.linksCursor /= Nothing then button [class "btn btn-sm",onClick (SessionsLinkedPage Nothing)] [text "First tasks"] else text ""]]
+                    _ -> p [class "card-meta",attribute "role" "status"] [text "Loading linked tasks…"]]
+        ]
 
 
 identityValue : Maybe String -> Maybe String
@@ -727,7 +750,7 @@ sectionKey evidence task = (if evidence then "terminated:" else "active:") ++ ta
 
 
 sectionTarget : Bool -> Model -> String -> Delivery.Target
-sectionTarget evidence model task = Delivery.TaskSessionsFiltered task {state=if evidence then "terminated" else "active",freshness=""} (taskCursor model (sectionKey evidence task))
+sectionTarget evidence model task = Delivery.TaskSessionsFiltered task {state=if evidence then "terminated" else "active",freshness="",activity=Nothing} (taskCursor model (sectionKey evidence task))
 
 
 taskPage : Bool -> String -> Model -> String -> Maybe Api.SessionPage
@@ -772,7 +795,7 @@ taskAssociation workspace model task =
     if model.sessions.workspace /= Just workspace || model.selectedWorkspaceId /= Just workspace || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then Nothing else
     if model.sessions.epoch == model.sessionRequestEpoch && taskActive workspace model task && taskActivityCurrent workspace model task then Just True else
     Dict.get task model.sessions.taskAssociations |> Maybe.andThen (\hint ->
-        let negativePending = if hint.present then False else resource workspace (Delivery.TaskSessionsFiltered task {state="",freshness=""} Nothing) model
+        let negativePending = if hint.present then False else resource workspace (Delivery.TaskSessionsFiltered task {state="",freshness="",activity=Nothing} Nothing) model
                 |> Maybe.map (\entry -> entry.error /= Nothing || not entry.proven || entry.dirty /= entry.settled || (case entry.data of
                     Just (Delivery.SessionsPage page) -> not (List.isEmpty page.items) || page.nextCursor /= Nothing
                     _ -> True)) |> Maybe.withDefault False
@@ -783,7 +806,7 @@ taskEvidenceAvailable : String -> Model -> String -> Maybe Bool
 taskEvidenceAvailable workspace model task =
     let
         presence page = if not (List.isEmpty page.items) then Just True else if page.nextCursor == Nothing then Just False else Nothing
-        target = Delivery.TaskSessionsFiltered task {state="terminated",freshness=""} Nothing
+        target = Delivery.TaskSessionsFiltered task {state="terminated",freshness="",activity=Nothing} Nothing
         cachedPresence = Dict.get (sectionKey True task) model.sessions.taskPages |> Maybe.andThen (\cached ->
             if cached.epoch /= model.sessionDelivery.listInvalidation then Nothing else Result.toMaybe cached.result |> Maybe.andThen (\page ->
                 if not (List.isEmpty page.items) then Just True else if cached.cursor == Nothing then presence page else Nothing))
@@ -803,7 +826,7 @@ taskActivityCurrent : String -> Model -> String -> Bool
 taskActivityCurrent workspace model task =
     let
         hintCurrent = Dict.get task model.sessions.taskHints |> Maybe.map (\hint -> not hint.error && hint.epoch == model.sessionDelivery.listInvalidation && model.sessions.epoch == model.sessionRequestEpoch) |> Maybe.withDefault False
-        pageCurrent = resource workspace (Delivery.TaskSessionsFiltered task {state="active",freshness=""} Nothing) model |> Maybe.map (\entry -> entry.error == Nothing && entry.proven && entry.dirty == entry.settled) |> Maybe.withDefault True
+        pageCurrent = resource workspace (Delivery.TaskSessionsFiltered task {state="active",freshness="",activity=Nothing} Nothing) model |> Maybe.map (\entry -> entry.error == Nothing && entry.proven && entry.dirty == entry.settled) |> Maybe.withDefault True
     in
     hintCurrent && pageCurrent
 

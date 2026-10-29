@@ -41,8 +41,8 @@ file path or reads the caller's filesystem.
 | POST `/sessions` | `id` (caller UUID), required `task_id`, `format_label` (1–128 UTF-8 bytes), `title` (1–80 UTF-8 bytes), optional `parent_session_id` and `initial_runtime_identity` | Empty active session and its initial task link, or identical create retry |
 | POST `/sessions/imports` | `session` (ordinary create metadata), `final_bytes`, `final_sha256` | Historical import with immutable task/size/hash manifest; task may have any status |
 | PUT `/sessions/{sessionId}/runtime` | `expected_runtime_revision`, explicit nullable `runtime_identity` | Guarded active runtime declaration; separate from transcript revision |
-| GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness`/`project_id`/`task_id` | `items`, optional `next_cursor` |
-| GET `/sessions/filters` | `kind=projects` or `kind=tasks`, optional `project_id`, `after_id`, `selected_id`, `limit` | Active-session options, `next_id`, validated `selected` |
+| GET `/sessions` | `limit`, paired `before_created_at`/`before_id`, optional `state`/`freshness`/`activity`/`project_id`/`task_id` | `items`, optional `next_cursor` |
+| GET `/sessions/filters` | `kind=projects` or `kind=tasks`, optional `activity`, `project_id`, `after_id`, `selected_id`, `limit` | Activity-aware options (Live/Quiet share active membership), `next_id`, independently validated `selected`; omitted activity retains legacy active-only behavior |
 | GET `/sessions/{sessionId}` | — | Canonical metadata, counters, state and final receipt when sealed |
 | POST `/sessions/{sessionId}/append` | `expected_offset`, `expected_revision`, `data_base64`, optional `allow_final_record` (false) | `session`, `replayed` |
 | POST `/sessions/{sessionId}/heartbeat` | No body | Active session with refreshed `last_seen_at`; revision unchanged |
@@ -137,7 +137,7 @@ up to 16 compact ancestors and `ancestors_truncated` when older context is omitt
 Workspace lists may intersect `project_id` and `task_id`. Project scope includes
 all live descendant projects and nested tasks, including child tasks without a
 project ID. A selected task outside that project scope matches no sessions.
-`/sessions/filters` uses active lifecycle independently of freshness and of the
+`/sessions/filters` uses active lifecycle when activity is omitted, independently of freshness and of the
 current session page. Project options include descendant activity; task options
 narrow to the selected project. Continue by `after_id`; `selected_id` separately
 validates a selection even when it is outside the current option page.
@@ -757,3 +757,19 @@ saved evidence and task ZIP downloads. Live creation cannot reuse an import UUID
 Exact registration retries preserve the original importer attribution; conflicting
 metadata/manifest reuse fails. An authorized manager may reconcile and resume an
 existing import by UUID without changing its creator.
+
+Session lists and `/sessions/filters` optionally accept `activity`: a unique
+comma-separated subset of `live`, `quiet`, `completed`. Empty selects none;
+invalid or duplicate values return 400. Live means active/fresh, Quiet means
+active/stale (30 seconds), and Completed means terminated regardless of
+heartbeat age or linked task status. The list union applies before bounded keyset
+pagination. On lists, legacy state/freshness
+remain conjunctive; omission preserves their existing semantics. Omitted
+activity on facets preserves the active-only contract.
+
+Activity-aware facet options preserve freshness independence: either Live or
+Quiet includes active-session options; Completed includes terminated-session
+options. An opt-in selected project/task is validated independently of session
+activity, so zero matches preserve the scope. Deleted, foreign-workspace and
+out-of-project selections remain invalid. Omitted activity retains legacy
+active-only facet membership and selected-option behavior.

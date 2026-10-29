@@ -325,7 +325,7 @@ sessionToolDefinitions =
   , define "session_set_runtime" "Declare or change the actual running agent role and target session model while active. New nonnull declarations require both role and model. This self-reported identity is separate from immutable connection caller attribution and grants no permissions. Use the current runtime_revision from session_detail as expected_runtime_revision, never the transcript revision. Explicit runtime_identity:null clears to unknown. An identical lost-ack retry at the immediately prior runtime revision is safe; other stale updates conflict. Transcript bytes/cursor/hash and activity do not change; terminated sessions reject updates."
       ["session_id" .= uuid,"expected_runtime_revision" .= nonnegative,"runtime_identity" .= runtimeIdentitySchema] ["session_id","expected_runtime_revision","runtime_identity"]
   , define "session_list" "List compact session metadata, optionally for a visible same-workspace task. Descending immutable created_at/UUID keyset; execute next_request to continue in the resolved workspace."
-      ["task_id" .= uuid, "limit" .= pageLimit, "before_created_at" .= string "Returned keyset timestamp, paired with before_id", "before_id" .= uuid] []
+      ["activity" .= string "Optional unique comma-separated subset live,quiet,completed; empty selects none; omitted keeps all sessions", "task_id" .= uuid, "limit" .= pageLimit, "before_created_at" .= string "Returned keyset timestamp, paired with before_id", "before_id" .= uuid] []
   , define "session_detail" "Get session metadata including creator attribution, committed cursor and final receipt; never returns transcript bytes."
       ["session_id" .= uuid] ["session_id"]
   , define "session_tasks" "List visible tasks associated with a session, including terminated sessions. Execute next_request to continue by task UUID."
@@ -358,7 +358,7 @@ sessionToolDefinitions =
 data SessionToolCall
   = SessionCreate UUID SessionWire.CreateSessionRequest
   | SessionSetRuntime UUID UUID AgentSession.SetRuntimeIdentity
-  | SessionList UUID (Maybe UUID) Int (Maybe AgentSession.SessionPageCursor)
+  | SessionList UUID (Maybe UUID) Int (Maybe AgentSession.SessionPageCursor) (Maybe Text)
   | SessionDetail UUID UUID
   | SessionTasks UUID UUID Int (Maybe UUID)
   | SessionAssociate UUID UUID UUID
@@ -371,7 +371,7 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
   let allowed = "workspace_id" : case name of
         "session_create" -> ["session_id", "format_label", "title", "parent_session_id", "initial_runtime_identity", "task_id"]
         "session_set_runtime" -> ["session_id","expected_runtime_revision","runtime_identity"]
-        "session_list" -> ["task_id", "limit", "before_created_at", "before_id"]
+        "session_list" -> ["task_id", "limit", "before_created_at", "before_id", "activity"]
         "session_detail" -> ["session_id"]
         "session_tasks" -> ["session_id", "limit", "after_task_id"]
         "session_associate" -> ["session_id", "task_id"]
@@ -398,7 +398,9 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
         (Nothing, Nothing) -> pure Nothing
         (Just t, Just i) -> pure (Just (AgentSession.SessionPageCursor t i))
         _ -> fail "Incomplete session cursor"
-      SessionList workspace <$> o .:? "task_id" <*> bounded "limit" 50 100 <*> pure cursor
+      activity <- o .:? "activity"
+      mapM_ (either (fail . T.unpack) (const $ pure ()) . AgentSession.parseSessionActivity) activity
+      SessionList workspace <$> o .:? "task_id" <*> bounded "limit" 50 100 <*> pure cursor <*> pure activity
     "session_detail" -> SessionDetail workspace <$> o .: "session_id"
     "session_tasks" -> SessionTasks workspace <$> o .: "session_id" <*> bounded "limit" 50 100 <*> o .:? "after_task_id"
     "session_associate" -> SessionAssociate workspace <$> o .: "session_id" <*> o .: "task_id"
@@ -648,14 +650,14 @@ executeSessionTool manager base credentials call = case call of
   SessionTerminate workspace sid input -> run "POST" (path workspace sid <> "/terminate") (Just (toJSON input)) $ metadata workspace (Just sid) (Just "terminated") False
   SessionAssociate workspace sid tid -> run "PUT" (path workspace sid <> "/tasks/" <> show tid) Nothing $ \value ->
     if value == Null then Right (object ["action" .= ("associated" :: Text), "workspace_id" .= workspace, "session_id" .= sid, "task_id" .= tid]) else invalid
-  SessionList workspace task limit cursor ->
+  SessionList workspace task limit cursor activity ->
     let target = maybe (root workspace) (\tid -> workspacePath workspace <> "/tasks/" <> show tid <> "/sessions") task
-        params = [("limit", Just (show limit)), ("before_created_at", cursor >>= (jsonString . toJSON . (.createdAt))), ("before_id", show . (.id) <$> cursor)]
+        params = [("activity", T.unpack <$> activity), ("limit", Just (show limit)), ("before_created_at", cursor >>= (jsonString . toJSON . (.createdAt))), ("before_id", show . (.id) <$> cursor)]
     in run "GET" (target <> query params) Nothing $ \value -> do
       page <- decodeTyped value :: Either Value SessionWire.SessionPageResponse
       mapM_ (checkSession workspace Nothing) page.items
       let next = (page :: SessionWire.SessionPageResponse).nextCursor
-          args = ["workspace_id" .= workspace, "limit" .= limit] <> maybe [] (\tid -> ["task_id" .= tid]) task
+          args = ["workspace_id" .= workspace, "limit" .= limit] <> maybe [] (\value -> ["activity" .= value]) activity <> maybe [] (\tid -> ["task_id" .= tid]) task
       Right $ object (["workspace_id" .= workspace, "items" .= map sessionSummary page.items, "has_more" .= maybe False (const True) next]
         <> maybe [] (\c -> ["next_request" .= nextRequest "session_list" (args <> ["before_created_at" .= c.createdAt, "before_id" .= c.id])]) next)
   SessionTasks workspace sid limit after -> run "GET"

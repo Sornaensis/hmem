@@ -126,7 +126,7 @@ streamArchive pool workspace task check send = do
             modifyIORef' count (+1)
           pages before = do
             check
-            page <- DB.listTaskSessionsFiltered pool workspace task (S.SessionFilter (Just S.Terminated) Nothing Nothing Nothing) before 50
+            page <- DB.listTaskSessionsFiltered pool workspace task (S.SessionFilter (Just S.Terminated) Nothing Nothing Nothing Nothing) before 50
             let keys=map (\s -> (s.createdAt,s.id)) page.items
                 bound=fmap (\c -> (c.createdAt,c.id)) before
                 ordered previous []=True

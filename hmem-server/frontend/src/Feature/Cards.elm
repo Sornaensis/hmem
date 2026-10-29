@@ -1890,7 +1890,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                 [ div [ class "card-meta-row" ]
                     [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps project.createdAt) ]
                     , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps project.updatedAt) ]
-                    , span [ class "card-meta" ] [ text "UUID: " ], Helpers.copyableValue "card-meta card-id card-id-copy" "project ID" project.id project.id
+                    , Helpers.copyableValue "card-meta card-id card-id-copy" "project ID" project.id project.id
                     ]
                 ]
             ]
@@ -2511,7 +2511,7 @@ viewTaskCardBody descendants projection showProject model task =
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps task.createdAt) ]
                 , span [ class "card-meta" ] [ text ("Updated: " ++ TimestampDisplay.lookup model.timestamps task.updatedAt) ]
-                , span [ class "card-meta" ] [ text "UUID: " ], Helpers.copyableValue "card-meta card-id card-id-copy" "task ID" task.id task.id
+                , Helpers.copyableValue "card-meta card-id card-id-copy" "task ID" task.id task.id
                 ]
             , div [ class "card-meta-row" ]
                 [ case task.completedAt of

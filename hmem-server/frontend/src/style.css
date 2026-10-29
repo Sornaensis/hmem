@@ -4415,7 +4415,7 @@ textarea.observation-edit-content {
 
 /* Every row owns its spacing, so measured heights equal spacer geometry. */
 .hierarchy-viewport { display: block; overflow-anchor: none; }
-.hierarchy-viewport, .observation-viewport, .observation-detached { box-sizing: border-box; width: 100%; max-width: 78rem; margin-left: 0; margin-right: auto; }
+.hierarchy-viewport, .workspace-tree-content > .tree-view > .inline-create-row, .observation-viewport, .observation-detached { box-sizing: border-box; width: 100%; max-width: 78rem; margin-left: 0; margin-right: auto; }
 .hierarchy-row { box-sizing: border-box; padding-bottom: 6px; }
 .hierarchy-task-family {
   border-radius: 0.5rem;
@@ -5255,6 +5255,7 @@ textarea.observation-edit-content {
 .workspace-tree-content .card-section-heading { font-size: 11px; margin-bottom: 8px; }
 .workspace-tree-content .tree-card > .card-inline-actions { margin: 0; padding: 8px 14px; gap: 8px; flex-wrap: wrap; }
 .workspace-tree-content .card-footer { border-top: 1px solid var(--border); padding: 12px 14px; }
+.workspace-tree-content .card-footer > .card-meta-group { border-top: 0; }
 .workspace-tree-content .card-footer .card-metadata { border: 0; margin: 0; padding: 0; }
 .workspace-tree-content .card-footer .card-metadata > summary { font-size: 12px; min-height: 24px; }
 .workspace-tree-content .card-meta-row { gap: 8px 14px; flex-wrap: wrap; }

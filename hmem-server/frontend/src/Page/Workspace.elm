@@ -114,9 +114,7 @@ viewReadableWorkspaceContext model ws =
             , div [class "workspace-metadata"]
                 [ div [ class "workspace-details" ]
                   [ div [ class "workspace-detail" ]
-                    [ span [ class "workspace-detail-label" ] [ text "UUID" ]
-                    , Helpers.copyableValue "workspace-detail-value card-id card-id-copy" "workspace ID" ws.id ws.id
-                    ]
+                    [ Helpers.copyableValue "workspace-detail-value card-id card-id-copy" "workspace ID" ws.id ws.id ]
                 , case ws.ghOwner of
                     Just owner ->
                         div [ class "workspace-detail" ]

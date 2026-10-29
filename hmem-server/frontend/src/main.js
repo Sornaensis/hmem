@@ -8,6 +8,7 @@ import { installObservationViewport } from './observation-viewport.js'
 import { installObservationPreferences } from './observation-preferences.js'
 import { installTimestampDisplay } from './timestamp-display.js'
 import { installAuditViewport } from './audit-navigation.js'
+import { installAuditLayout } from './audit-layout.js'
 import { installSessionBridge } from './session-save.js'
 import { createSessionActivityStream } from './session-activity-stream.js'
 import { Elm } from './Main.elm'
@@ -746,6 +747,8 @@ installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)
 installAuditViewport(app)
+const disposeAuditLayout = installAuditLayout()
+if (import.meta.hot) import.meta.hot.dispose(disposeAuditLayout)
 sessionBridge = installSessionBridge(app, { workerFactory:({incarnation,mode})=>new Worker(archiveResourceWorkerUrl+'?'+new URLSearchParams({incarnation,phase:mode}),{type:'module'}), async fetchArchive(url, {signal,headers}) {
   if(!isApiRequestUrl(url))throw new Error('invalid_archive_origin')
   const generation=authTokenGeneration,signature=authTokenSignature()

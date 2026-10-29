@@ -388,11 +388,7 @@ viewWorkspaceAuditPanel wsId model =
                 model.auditLog.filters.workspaceId == Just wsId
         in
         div [ class "audit-log-view workspace-audit-log" ]
-            [ div [ class "section-header" ]
-                [ h3 [] [ span [ class "section-header-icon icon-audit" ] [], text "Workspace audit" ]
-                , p [ class "help-text" ] [ text "Recent changes recorded for this workspace." ]
-                ]
-            , viewAuditLogFilters model
+            [ viewAuditLogFilters model
             , if filtersMatch then
                 viewAuditEntries model "No workspace audit entries found."
 

@@ -55,7 +55,7 @@ entry collapsed, and closing returns focus to the original control.
 
 Audit presents events in a ledger. Select an event to read its recorded changes,
 attribution and copyable IDs in the detail pane. Selecting another event keeps
-the current filters. The detail pane stacks below its event on narrow screens.
+the current filters. The detail pane stacks above the history on narrow screens.
 
 **Against current** loads a fixed current snapshot for that opening. Switching
 fields reuses it; **Refresh** replaces it. Check the loaded-at time and entity

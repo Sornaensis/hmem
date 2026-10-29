@@ -11,6 +11,11 @@ history within the current workspace or global view.
 Select an event to inspect its recorded values. Load more continues the current
 query. A failed query shows an error instead of an empty-history message.
 
+On wider screens, filters stay visible while scrolling and Event detail stays
+below them. The detail panel has its own scroll area for long recorded values.
+Narrower screens stack the detail above the history; on mobile both filters and
+detail scroll with the page.
+
 Use an entity's underlined text to open its current destination. The surrounding
 row space selects the event. Session connections offer separate session and task
 links; dependencies offer separate owning-task and dependency-task links.

@@ -118,11 +118,12 @@ session and its linked tasks, and rechecks activity and transcript cursors befor
 sealing. Heartbeat, append or task changes during hashing prevent a stale seal.
 The ordinary canonical termination event refreshes active-session indicators;
 original bytes, runtime identity, task status and evidence links are preserved.
-Runtime labels show the explicit `runtime_identity.role`, with complete model,
-provider and reasoning values in accessible tooltips. Legacy roleless metadata
-shows `Unknown role`; creator attribution is retained in storage and hidden from
-these views. Runtime changes refresh these labels without changing heartbeat
-freshness. Event times and list activity use the bounded local timestamp cache; the browser-local day decides
+Runtime labels visibly render `[role] harness:model:reasoning` from explicit
+target-session runtime metadata. Every missing component displays `unknown`.
+Provider appears only in the tooltip and is never substituted for harness.
+Immutable creator attribution identifies the connecting caller separately from
+the runtime and remains hidden in these reader labels. Runtime changes refresh
+these labels without changing heartbeat freshness. Event times and list activity use the bounded local timestamp cache; the browser-local day decides
 whether to omit the date. The Linked Tasks disclosure above Session Hierarchy
 shows one bounded page of dependency-style read-only task cards when expanded,
 with Jump navigation and continuation controls.

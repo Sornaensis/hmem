@@ -8,6 +8,7 @@ import Browser.Navigation as Nav
 import Dict
 import Feature.AuditDiff
 import Feature.AuditLog
+import Feature.AuditRequest as AuditRequest
 import Feature.Cards
 import Feature.ChangeStream
 import Feature.DataLoading
@@ -207,9 +208,7 @@ handleOwnedRaw ownedMsg model =
                                     filters =
                                         workspaceAuditFilters wsId
                                 in
-                                ( resetAuditLogWithFilters filters newModel.auditLog
-                                , Api.fetchAuditLog newModel.flags.apiUrl filters (GotAuditLog filters)
-                                )
+                                AuditRequest.replace filters newModel |> Tuple.mapFirst .auditLog
 
                             else
                                 ( newModel.auditLog, Cmd.none )
@@ -258,7 +257,7 @@ handleOwnedRaw ownedMsg model =
                     Ok sessionContext ->
                         let
                             sessionReadyModel =
-                                { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = model.workspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
+                                { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = model.workspaceAdmin, timeline = nextTimeline }
                                     |> Feature.WorkspaceAdmin.reconcileSessionAuthority
                                     |> Feature.Observation.reconcileCurationPermission
                                     |> updateLoadingAfterSession model expectedWorkspace sessionContext
@@ -287,34 +286,32 @@ handleOwnedRaw ownedMsg model =
                                         Nothing -> ( focusedModel, Cmd.none )
                                 else ( focusedModel, Cmd.none )
 
-                            ( nextAuditLog, fetchAuditCmd ) =
-                                case ( expectedWorkspace, model.page ) of
+                            ( auditModel, fetchAuditCmd ) =
+                                case ( expectedWorkspace, membershipModel.page ) of
                                     ( Nothing, AuditLogPage ) ->
                                         if sessionContext.globalPermissions.superadmin then
                                             let
-                                                auditLog =
-                                                    model.auditLog
+                                                filters =
+                                                    membershipModel.auditLog.filters
                                             in
-                                            ( { auditLog | loading = True, loadingFilters = Just model.auditLog.filters }, Api.fetchAuditLog model.flags.apiUrl model.auditLog.filters (GotAuditLog model.auditLog.filters) )
+                                            AuditRequest.restore filters membershipModel
 
                                         else
-                                            ( model.auditLog, Cmd.none )
+                                            ( membershipModel, Cmd.none )
 
                                     ( Just wsId, WorkspacePage currentWsId ) ->
-                                        if wsId == currentWsId && model.activeTab == AuditTab && sessionCanAdminWorkspace wsId sessionContext then
+                                        if wsId == currentWsId && membershipModel.activeTab == AuditTab && sessionCanAdminWorkspace wsId sessionContext then
                                             let
                                                 filters =
-                                                    workspaceAuditFilters wsId
+                                                    if membershipModel.auditLog.filters.workspaceId == Just wsId then membershipModel.auditLog.filters else workspaceAuditFilters wsId
                                             in
-                                            ( resetAuditLogWithFilters filters model.auditLog
-                                            , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
-                                            )
+                                            AuditRequest.restore filters membershipModel
 
                                         else
-                                            ( model.auditLog, Cmd.none )
+                                            ( membershipModel, Cmd.none )
 
                                     _ ->
-                                        ( model.auditLog, Cmd.none )
+                                        ( membershipModel, Cmd.none )
 
                             ( nextTimeline, fetchTimelineCmd ) =
                                 case ( expectedWorkspace, model.page ) of
@@ -328,7 +325,7 @@ handleOwnedRaw ownedMsg model =
                                     _ ->
                                         ( model.timeline, Cmd.none )
                         in
-                        ( membershipModel
+                        ( auditModel
                         , Cmd.batch [ retireSessionScopes sessionContext model, sessionBootstrapCmd, focusCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
                         )
 
@@ -639,21 +636,6 @@ workspaceAuditFilters wsId =
     , until = Nothing
     , limit = Just 50
     , offset = Nothing
-    }
-
-
-resetAuditLogWithFilters : AuditLogFilters -> AuditLogModel -> AuditLogModel
-resetAuditLogWithFilters filters auditLog =
-    { auditLog
-        | entries = []
-        , entryBaseOffset = filters.offset |> Maybe.withDefault 0
-        , hasMore = False
-        , loading = True
-        , loadingFilters = Just filters
-        , filters = filters
-        , expandedEntries = Dict.empty
-        , revertConfirmation = Nothing
-        , revertInFlight = False
     }
 
 
@@ -976,7 +958,7 @@ clearSessionScopedState model =
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
         , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
-        , auditLog = Feature.AuditLog.init
+        , auditLog = let empty = Feature.AuditLog.init in { empty | nextRequestId = model.auditLog.nextRequestId }
         , auditDiff = let state = model.auditDiff in { state | dialog = Nothing }
         , timeline = Feature.Timeline.init
         , workspaceAdmin = Feature.WorkspaceAdmin.retireSessionState model.workspaceAdmin

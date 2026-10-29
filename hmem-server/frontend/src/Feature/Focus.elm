@@ -1,6 +1,7 @@
 module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, shouldShowReturnContext, timelineReturnContext, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
 
 import Api
+import Feature.AuditRequest as AuditRequest
 import Dict
 import Feature.DataLoading
 import Feature.FocusedFilters
@@ -309,15 +310,7 @@ returnToWorkspaceAuditSource context model =
             model.auditLog
 
         restoredAuditLog =
-            { currentAuditLog
-                | entries = []
-                , entryBaseOffset = filters.offset |> Maybe.withDefault 0
-                , hasMore = False
-                , loading = True
-                , loadingFilters = Just filters
-                , filters = filters
-                , expandedEntries = expandedEntriesForReturn context
-            }
+            { currentAuditLog | expandedEntries = expandedEntriesForReturn context }
 
         nextModel =
             { model
@@ -326,11 +319,14 @@ returnToWorkspaceAuditSource context model =
                 , focus = clearFocusForReturn model.focus
                 , auditLog = restoredAuditLog
             }
+
+        ( requestedModel, requestCmd ) =
+            AuditRequest.restore filters nextModel
     in
-    ( nextModel
+    ( requestedModel
     , Cmd.batch
         [ pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment AuditTab Nothing Nothing)
-        , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
+        , requestCmd
         ]
     )
 

@@ -1089,6 +1089,9 @@ type alias AuditLogModel =
     , hasMore : Bool
     , loading : Bool
     , loadingFilters : Maybe AuditLogFilters
+    , activeRequest : Maybe AuditRequestIdentity
+    , nextRequestId : Int
+    , error : Maybe String
     , filters : AuditLogFilters
     , expandedEntries : Dict String Bool
     , revertConfirmation : Maybe Api.AuditLogEntry
@@ -1229,6 +1232,14 @@ type alias AuditLogFilters =
     , until : Maybe String
     , limit : Maybe Int
     , offset : Maybe Int
+    }
+
+
+type alias AuditRequestIdentity =
+    { requestId : Int
+    , sessionEpoch : Int
+    , workspaceId : Maybe String
+    , audience : Maybe { authMode : String, actorType : String, actorId : String, authority : String, grantUserId : Maybe String }
     }
 
 
@@ -1833,7 +1844,7 @@ type Msg
     | MainContentScrolled Float
     | ClearPendingRequest String
       -- Audit log
-    | GotAuditLog AuditLogFilters (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
+    | GotAuditLog AuditRequestIdentity AuditLogFilters (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | SetTimelineEntityFilter TimelineEntityFilter
     | SetTimelineEventFilter TimelineEventFilter
@@ -1853,7 +1864,7 @@ type Msg
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String
-    | ApplyAuditFilters
+    | ClearAuditFilters
     | LoadMoreAuditLog
     | ToggleAuditExpand String
       -- Revert

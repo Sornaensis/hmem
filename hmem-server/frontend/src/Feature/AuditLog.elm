@@ -6,6 +6,7 @@ import Dict
 import Feature.Focus as Focus
 import Feature.FocusedFilters
 import Feature.AuditDiff
+import Feature.AuditRequest as AuditRequest
 import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, pushUrl)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -28,6 +29,9 @@ init =
     , hasMore = False
     , loading = False
     , loadingFilters = Nothing
+    , activeRequest = Nothing
+    , nextRequestId = 1
+    , error = Nothing
     , filters = { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
     , expandedEntries = Dict.empty
     , revertConfirmation = Nothing
@@ -120,8 +124,8 @@ update msg model =
                         Nothing ->
                             addToast Warning "Cannot navigate: entity workspace unknown" model
 
-        GotAuditLog requestedFilters result ->
-            if requestedFilters /= model.auditLog.filters || model.auditLog.loadingFilters /= Just requestedFilters then
+        GotAuditLog request requestedFilters result ->
+            if not (AuditRequest.matches request requestedFilters model) then
                 ( model, Cmd.none )
 
             else
@@ -140,6 +144,8 @@ update msg model =
                                     , hasMore = paginated.hasMore
                                     , loading = False
                                     , loadingFilters = Nothing
+                                    , activeRequest = Nothing
+                                    , error = Nothing
                                 }
                             )
                             model
@@ -147,7 +153,7 @@ update msg model =
                         )
 
                     Err _ ->
-                        addToast Error "Failed to load audit log" (updateAuditLogModel (\al -> { al | loading = False, loadingFilters = Nothing }) model)
+                        ( updateAuditLogModel (\al -> { al | loading = False, loadingFilters = Nothing, activeRequest = Nothing, error = Just "Failed to load audit entries for these filters." }) model, Cmd.none )
 
         GotEntityHistory entityId result ->
             case result of
@@ -211,6 +217,9 @@ update msg model =
                         "action" ->
                             { filters | action = if filterValue == "" then Nothing else Just filterValue }
 
+                        "entityId" ->
+                            { filters | entityId = if filterValue == "" then Nothing else Just filterValue }
+
                         "since" ->
                             { filters | since = if filterValue == "" then Nothing else Just filterValue }
 
@@ -220,22 +229,24 @@ update msg model =
                         _ ->
                             filters
             in
-            ( updateAuditLogModel (\al -> { al | filters = updated, loading = False, loadingFilters = Nothing }) model, Cmd.none )
+            if (filterName == "since" || filterName == "until") && not (validAuditDate filterValue) then
+                ( model, Cmd.none )
 
-        ApplyAuditFilters ->
+            else
+                AuditRequest.replace { updated | offset = Nothing } model
+
+        ClearAuditFilters ->
             let
                 oldFilters =
                     model.auditLog.filters
 
                 filters =
-                    { oldFilters | offset = Nothing }
+                    { oldFilters | entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, offset = Nothing }
             in
-            ( updateAuditLogModel (\al -> { al | entries = [], entryBaseOffset = filters.offset |> Maybe.withDefault 0, hasMore = False, loading = True, loadingFilters = Just filters, filters = filters }) model
-            , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
-            )
+            AuditRequest.replace filters model
 
         LoadMoreAuditLog ->
-            if model.auditLog.loading then
+            if model.auditLog.loading || not model.auditLog.hasMore then
                 ( model, Cmd.none )
 
             else
@@ -246,9 +257,7 @@ update msg model =
                     filters =
                         { oldFilters | offset = Just (nextAuditOffset model.auditLog) }
                 in
-                ( updateAuditLogModel (\al -> { al | filters = filters, loading = True, loadingFilters = Just filters }) model
-                , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
-                )
+                AuditRequest.append filters model
 
         ToggleAuditExpand entryId ->
             let
@@ -304,14 +313,6 @@ update msg model =
                                 _ ->
                                     Nothing
 
-                        refreshAuditCmd =
-                            case refreshAuditFilters of
-                                Just filters ->
-                                    Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
-
-                                Nothing ->
-                                    Cmd.none
-
                         clearAuditLog =
                             case model.page of
                                 AuditLogPage ->
@@ -355,8 +356,16 @@ update msg model =
                                     )
                                     model
                                 )
+
+                        ( refreshedModel, refreshAuditCmd ) =
+                            case refreshAuditFilters of
+                                Just filters ->
+                                    AuditRequest.replace filters toastModel
+
+                                Nothing ->
+                                    ( toastModel, Cmd.none )
                     in
-                    ( toastModel
+                    ( refreshedModel
                     , Cmd.batch [ toastCmd, refreshHistoryCmd, refreshAuditCmd ]
                     )
 
@@ -438,6 +447,9 @@ viewAuditEntries model emptyMessage =
     if model.auditLog.loading && List.isEmpty model.auditLog.entries then
         div [ class "loading-indicator" ] [ text "Loading audit entries..." ]
 
+    else if model.auditLog.error /= Nothing && List.isEmpty model.auditLog.entries then
+        div [ class "error-message", attribute "role" "alert" ] [ text (Maybe.withDefault "Unable to load audit entries." model.auditLog.error) ]
+
     else if List.isEmpty model.auditLog.entries then
         div [ class "empty-state" ] [ text emptyMessage ]
 
@@ -445,6 +457,7 @@ viewAuditEntries model emptyMessage =
         div [ class "audit-log-list audit-ledger", attribute "aria-label" "Audit ledger" ]
             [ div [ class "audit-ledger-rows" ]
                 ([ div [ class "audit-ledger-head" ] [ span [] [ text "Time / actor" ], span [] [ text "Change" ] ] ]
+                    ++ (model.auditLog.error |> Maybe.map (\message -> [ div [ class "error-message", attribute "role" "alert" ] [ text message ] ]) |> Maybe.withDefault [])
                     ++ List.map (viewAuditLogEntry model) model.auditLog.entries
                     ++ (if model.auditLog.hasMore && model.auditLog.loading then
                             [ div [ class "loading-indicator" ] [ text "Loading more audit entries..." ] ]
@@ -478,6 +491,8 @@ viewAuditLogFilters model =
                 , option [ value "project", selected (filters.entityType == Just "project") ] [ text "Project" ]
                 , option [ value "task", selected (filters.entityType == Just "task") ] [ text "Task" ]
                 , option [ value "observation", selected (filters.entityType == Just "observation") ] [ text "Observations" ]
+                , option [ value "agent_session", selected (filters.entityType == Just "agent_session") ] [ text "Agent Sessions" ]
+                , option [ value "task_session", selected (filters.entityType == Just "task_session") ] [ text "Session task connections" ]
                 , option [ value "category", selected (filters.entityType == Just "category") ] [ text "Category" ]
                 ]
             ]
@@ -498,8 +513,30 @@ viewAuditLogFilters model =
             [ label [for "audit-filter-until"] [ text "Until" ]
             , input [id "audit-filter-until", type_ "date", value (Maybe.withDefault "" filters.until), onInput (SetAuditFilter "until") ] []
             ]
-        , button [ class "btn btn-primary", onClick ApplyAuditFilters ] [ text "Apply" ]
+        , if AuditRequest.hasUserConstraints filters then
+            button [ class "btn btn-secondary", onClick ClearAuditFilters ] [ text "Clear Filters" ]
+
+          else
+            text ""
         ]
+
+
+validAuditDate : String -> Bool
+validAuditDate raw =
+    if raw == "" then
+        True
+
+    else
+        case String.split "-" raw |> List.map String.toInt of
+            [ Just year, Just month, Just day ] ->
+                let
+                    leap = modBy 400 year == 0 || (modBy 4 year == 0 && modBy 100 year /= 0)
+                    days = if month == 2 then (if leap then 29 else 28) else if List.member month [ 4, 6, 9, 11 ] then 30 else 31
+                in
+                String.length raw == 10 && year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days
+
+            _ ->
+                False
 
 
 resolveAuditNavigationTarget : Api.AuditLogEntry -> Maybe ( String, String )

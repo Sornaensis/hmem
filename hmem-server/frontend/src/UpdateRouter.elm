@@ -987,7 +987,7 @@ route msg model =
         ClearFocus ->
             Ok (Feature.Focus.update msg model)
 
-        GotAuditLog _ _ ->
+        GotAuditLog _ _ _ ->
             Ok (Feature.AuditLog.update msg model)
 
         GotEntityHistory _ _ ->
@@ -1002,7 +1002,7 @@ route msg model =
         SetAuditFilter _ _ ->
             Ok (Feature.AuditLog.update msg model)
 
-        ApplyAuditFilters ->
+        ClearAuditFilters ->
             Ok (Feature.AuditLog.update msg model)
 
         LoadMoreAuditLog ->

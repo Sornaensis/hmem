@@ -1,6 +1,7 @@
 module Route exposing (..)
 
 import Api
+import Feature.AuditRequest as AuditRequest
 import Browser
 import Browser.Navigation as Nav
 import Dict
@@ -527,6 +528,8 @@ handleUrlChangeWithoutProtectedExit url model =
                         , hasMore = False
                         , loading = False
                         , loadingFilters = Nothing
+                        , activeRequest = Nothing
+                        , error = Nothing
                         , filters = restoredFilters
                         , expandedEntries = restoredExpandedEntries
                         , revertConfirmation = Nothing
@@ -582,12 +585,8 @@ prepareWorkspaceAuditFromRoute wsId tab model =
             filters =
                 workspaceAuditFilters wsId
 
-            auditLog =
-                resetAuditLogWithFilters filters model.auditLog
         in
-        ( { model | auditLog = auditLog }
-        , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
-        )
+        AuditRequest.replace filters model
 
     else
         ( model, Cmd.none )
@@ -628,21 +627,6 @@ workspaceAuditFilters wsId =
     , until = Nothing
     , limit = Just 50
     , offset = Nothing
-    }
-
-
-resetAuditLogWithFilters : AuditLogFilters -> AuditLogModel -> AuditLogModel
-resetAuditLogWithFilters filters auditLog =
-    { auditLog
-        | entries = []
-        , entryBaseOffset = filters.offset |> Maybe.withDefault 0
-        , hasMore = False
-        , loading = True
-        , loadingFilters = Just filters
-        , filters = filters
-        , expandedEntries = Dict.empty
-        , revertConfirmation = Nothing
-        , revertInFlight = False
     }
 
 

@@ -55,9 +55,9 @@ test('shared compact cards retain parent tree inside a forty-percent wider dock 
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
-test('tasks without running sessions show only an accessible grey indicator',{timeout:30000},async()=>{
+test('tasks with only terminated sessions retain an enabled grey agent control',{timeout:30000},async()=>{
  const h=await openSessionExplorer({activeCount:0}),{page}=h
- try{await h.start();await h.idle();const icon=page.locator('#entity-'+h.fixture.tasks[0].id+' .task-sessions-icon');assert.equal(await icon.innerText(),'');assert.equal(await icon.locator('.session-state-inactive').count(),1);assert.match(await icon.getAttribute('aria-label'),/no active sessions/);assert.equal(await icon.isDisabled(),true)}finally{await h.close()}
+ try{await h.start();await h.idle();const icon=page.locator('#entity-'+h.fixture.tasks[0].id+' .task-sessions-icon');await until(()=>icon.isEnabled());assert.equal(await icon.innerText(),'View Agents');assert.equal(await icon.locator('.session-state-inactive').count(),1);assert.match(await icon.getAttribute('title'),/no active sessions/);assert.equal(await icon.isDisabled(),false)}finally{await h.close()}
 })
 test('Live becomes Quiet after thirty seconds without events while lifecycle activity stays green',{timeout:25000},async()=>{
  const h=await openSessionExplorer(),{page}=h

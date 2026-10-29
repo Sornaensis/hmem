@@ -28,9 +28,9 @@ async function assertDetails(page, control, expanded) {
   assert.equal(await region.count(), 1)
   assert.equal(await region.isVisible(), expanded)
   assert.equal(await control.locator('svg[aria-hidden="true"][focusable="false"]').count(), 1)
-  assert.equal(await control.locator('svg path').getAttribute('d'), expanded ? 'M4 7 L8 3 L12 7 M4 12 L8 8 L12 12' : 'M4 4 L8 8 L12 4 M4 9 L8 13 L12 9')
+  assert.equal(await control.locator('svg path').getAttribute('d'), expanded ? 'M7 4 L3 8 L7 12 M12 4 L8 8 L12 12' : 'M4 4 L8 8 L4 12 M9 4 L13 8 L9 12')
   const box = await control.boundingBox()
-  assert.equal(box.width, 24); assert.equal(box.height, 24)
+  assert.ok(box.width>=32); assert.ok(box.height>=32)
 }
 
 for (const width of [1440, 430]) test(`native card details keyboard and unique regions at ${width}px`, {timeout:60000}, async () => {
@@ -44,8 +44,14 @@ for (const width of [1440, 430]) test(`native card details keyboard and unique r
     for (const key of ['project:root-project','project:nested-project','task:parent','task:child']) {
       const row = await h.scrollTo(key), control = row.locator('.btn-extras-toggle').first()
       await assertDetails(h.page,control,false)
+      assert.ok(await control.evaluate(node=>node.parentElement.classList.contains('card-inline-actions')))
+      await h.page.mouse.move(0,0);await control.evaluate(node=>node.blur());assert.equal(await control.locator('.card-details-label').isVisible(),false)
+      await control.hover();assert.equal(await control.locator('.card-details-label').isVisible(),true)
+      await h.page.mouse.move(0,0);await control.focus();assert.equal(await control.locator('.card-details-label').isVisible(),true)
       await control.focus(); await h.page.keyboard.press('Enter'); await h.idle()
       await assertDetails(h.page,control,true)
+      assert.equal(await control.innerText(),'Hide Details');assert.ok(await control.evaluate(node=>node.parentElement.classList.contains('card-details-toolbar')))
+      assert.equal(await control.evaluate(node=>node===document.activeElement),true)
       await control.focus(); await h.page.keyboard.press('Space'); await h.idle()
       await assertDetails(h.page,control,false)
       assert.ok(await control.evaluate(node=>node===document.activeElement))

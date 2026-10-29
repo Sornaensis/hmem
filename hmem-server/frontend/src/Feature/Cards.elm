@@ -114,7 +114,7 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         SetTaskCardSection task section ->
-            if Dict.member task model.tasks && List.member section ["work","evidence","history"] then
+            if Dict.member task model.tasks && List.member section ["work","evidence","history"] && not (section == "evidence" && Feature.Sessions.taskEvidenceAvailable (Maybe.withDefault "" model.selectedWorkspaceId) model task == Just False) then
                 selectCardSection "task" task section
                     (updateCardsModel (\state -> {state | taskSections = Dict.insert task section state.taskSections}) model)
             else (model,Cmd.none)
@@ -295,7 +295,7 @@ update msg model =
                         ( updatedModel, Cmd.none )
             in
             ( branchModel
-            , Cmd.batch [ fetchDepCmd, fetchProjectNextTasksCmd, branchCmd ]
+            , Cmd.batch [ fetchDepCmd, fetchProjectNextTasksCmd, branchCmd, branchKind |> Maybe.map (\kind -> focusElement (CardSections.detailsId kind cardId ++ "-toggle")) |> Maybe.withDefault Cmd.none ]
             )
 
         LoadNavigationBranchPage parentKind parentId entityKind ->
@@ -1840,16 +1840,17 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     ]
             , div [ class "card-body card-expanded" ]
                 [ div [ class "card-desc-row" ]
-                    [ CardSections.disclosure (isExpanded model project.id) (CardSections.detailsId "project" project.id) ("project: " ++ project.name) (ToggleCardExpand project.id)
-                    , viewCardDescription model "project" project.id project.description
-                    ]
+                    [ viewCardDescription model "project" project.id project.description ]
                 , if isExpanded model project.id then
                     let
                         currentSection = Dict.get project.id model.cards.projectSections |> Maybe.withDefault "work"
                         panel = CardSections.panel "project" project.id currentSection
                     in
                     div [ class "card-extras", id (CardSections.detailsId "project" project.id) ]
-                        [ CardSections.tabs "Project" project.id currentSection (SetProjectCardSection project.id)
+                        [ div [ class "card-details-toolbar" ]
+                            [ CardSections.cardDisclosure True (CardSections.detailsId "project" project.id) ("project: " ++ project.name) (ToggleCardExpand project.id)
+                            , CardSections.tabs "Project" project.id currentSection (SetProjectCardSection project.id)
+                            ]
                         , panel "work" [viewProjectNextTasksPanel projection model project]
                         , panel "evidence" [p [class "card-meta"] [text "Open a task to view its evidence."]]
                         , panel "history" [Feature.AuditLog.viewEntityHistoryContent model "project" project.id]
@@ -1881,6 +1882,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
 
                   else
                     text ""
+                , if isExpanded model project.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "project" project.id) ("project: " ++ project.name) (ToggleCardExpand project.id)
                 ]
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "project"
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "task"
@@ -2447,12 +2449,13 @@ viewTaskCardBody descendants projection showProject model task =
           in
           div [ class "card-body card-expanded" ]
             [ div [ class "card-desc-row" ]
-                [ CardSections.disclosure extrasExpanded (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
-                , viewCardDescription model "task" task.id task.description
-                ]
+                [ viewCardDescription model "task" task.id task.description ]
             , if extrasExpanded then
                 div [ class "card-extras", id (CardSections.detailsId "task" task.id) ]
-                    [ CardSections.tabs "Task" task.id currentSection (SetTaskCardSection task.id)
+                    [ div [ class "card-details-toolbar" ]
+                        [ CardSections.cardDisclosure True (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
+                        , CardSections.tabsWithEvidence (Feature.Sessions.taskEvidenceAvailable task.workspaceId model task.id /= Just False) "Task" task.id currentSection (SetTaskCardSection task.id)
+                        ]
                     , panel "work" [if showProject then
                         case projectName of
                             Just pname ->
@@ -2498,6 +2501,7 @@ viewTaskCardBody descendants projection showProject model task =
 
               else
                 text ""
+            , if isExpanded model task.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
             ]
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
           ]

@@ -5264,6 +5264,12 @@ textarea.observation-edit-content {
 .workspace-tree-content .hierarchy-task-family { border-radius: 8px; }
 .workspace-tree-content .tree-card :is(.btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open) { min-height: 32px; }
 .workspace-tree-content .tree-card .btn-extras-toggle { width: 24px; height: 24px; min-height: 24px; }
+.workspace-tree-content .tree-card .card-details-control { width: auto; height: auto; min-width: 32px; min-height: 32px; margin: 0; padding: 4px 7px; gap: 5px; }
+.card-details-label { display: none; font-weight: 500; white-space: nowrap; }
+.card-details-control:is(:hover, :focus-visible, .is-expanded) .card-details-label { display: inline; }
+.card-details-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--border); }
+.workspace-tree-content .card-details-toolbar > .card-local-sections { flex: 1; padding: 0; border: 0; }
+.card-section-button:disabled { color: var(--text-muted); opacity: .45; cursor: default; }
 @media (max-width: 650px) {
   .workspace-tree-content .tree-card > .card-header > .card-actions { justify-content: flex-end; }
   .workspace-tree-content .card-section-button { flex: 1 1 auto; }
@@ -5271,6 +5277,8 @@ textarea.observation-edit-content {
 }
 @media (pointer: coarse) {
   .workspace-tree-content .tree-card :is(.btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open, .card-section-button) { min-height: 44px; }
+  .workspace-tree-content .tree-card .card-details-control { min-height: 44px; }
+  .card-details-control .card-details-label { display: inline; }
 }
 
 .workspace-tree-content .card-subtask-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }

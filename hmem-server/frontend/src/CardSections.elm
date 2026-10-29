@@ -1,4 +1,4 @@
-module CardSections exposing (detailsId, disclosure, disclosureIcon, fact, facts, horizontalDisclosureIcon, metadata, panel, section, tabs)
+module CardSections exposing (cardDisclosure, detailsId, disclosure, disclosureIcon, fact, facts, horizontalDisclosureIcon, metadata, panel, section, tabs, tabsWithEvidence)
 
 import Html exposing (Html, div, footer, h4, label, span, text)
 import Html.Attributes exposing (attribute, class)
@@ -9,6 +9,11 @@ import Svg.Attributes as SvgAttr
 
 tabs : String -> String -> String -> (String -> msg) -> Html msg
 tabs kind entityId current select =
+    tabsWithEvidence True kind entityId current select
+
+
+tabsWithEvidence : Bool -> String -> String -> String -> (String -> msg) -> Html msg
+tabsWithEvidence evidenceAvailable kind entityId current select =
     Html.nav [ class "card-local-sections", attribute "aria-label" (kind ++ " sections") ]
         (List.map
             (\( name, label ) ->
@@ -18,6 +23,7 @@ tabs kind entityId current select =
                     , Html.Attributes.id (String.toLower kind ++ "-" ++ entityId ++ "-" ++ name ++ "-button")
                     , attribute "aria-controls" (String.toLower kind ++ "-" ++ entityId ++ "-" ++ name)
                     , attribute "aria-pressed" (if current == name then "true" else "false")
+                    , Html.Attributes.disabled (name == "evidence" && not evidenceAvailable)
                     , onClick (select name)
                     ]
                     [ text label ]
@@ -41,6 +47,24 @@ panel kind entityId current name content =
 detailsId : String -> String -> String
 detailsId kind entityId =
     kind ++ "-" ++ entityId ++ "-details"
+
+
+cardDisclosure : Bool -> String -> String -> msg -> Html msg
+cardDisclosure expanded regionId name message =
+    let action = (if expanded then "Hide details for " else "Show details for ") ++ name in
+    Html.button
+        [ class ("btn-extras-toggle card-details-control" ++ (if expanded then " is-expanded" else ""))
+        , Html.Attributes.type_ "button"
+        , Html.Attributes.id (regionId ++ "-toggle")
+        , Html.Attributes.title action
+        , attribute "aria-label" action
+        , attribute "aria-expanded" (if expanded then "true" else "false")
+        , attribute "aria-controls" regionId
+        , onClick message
+        ]
+        [ horizontalDisclosureIcon expanded
+        , span [ class "card-details-label" ] [ text (if expanded then "Hide Details" else "Details") ]
+        ]
 
 
 disclosure : Bool -> String -> String -> msg -> Html msg

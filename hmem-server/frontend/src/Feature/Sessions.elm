@@ -1,4 +1,4 @@
-module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskActiveChoices, viewTaskActiveConversation, viewTaskEvidence, viewTaskIcon, viewWorkspaceInspector, taskActive, timestampSources, olderWindow, viewerReset)
+module Feature.Sessions exposing (reconcile, update, view, viewTaskPanel, viewTaskActive, viewTaskActiveChoices, viewTaskActiveConversation, viewTaskEvidence, viewTaskIcon, viewWorkspaceInspector, taskActive, taskEvidenceAvailable, timestampSources, olderWindow, viewerReset)
 
 import Api
 import ActorAttribution
@@ -138,7 +138,9 @@ reconcile ( model, command ) =
                         else if not entry.proven || entry.dirty /= entry.settled then accumulated
                         else case entry.data of
                             Just (Delivery.SessionsPage page) ->
-                                if filters.state == "" || not (List.isEmpty page.items) then Dict.insert task {present=not (List.isEmpty page.items),error=False,epoch=hintEpoch} accumulated else accumulated
+                                if not (List.isEmpty page.items) then Dict.insert task {present=True,error=False,epoch=hintEpoch} accumulated
+                                else if filters.state == "" then Dict.insert task {present=False,error=page.nextCursor /= Nothing,epoch=hintEpoch} accumulated
+                                else accumulated
                             _ -> accumulated
                     Nothing -> accumulated
             _ -> accumulated
@@ -176,7 +178,7 @@ reconcile ( model, command ) =
             case resource ws target model of
                 Just entry ->
                     if entry.error /= Nothing then Dict.insert (sectionIdentity target) {result=Err "Sessions could not be loaded.",epoch=hintEpoch,cursor=sectionCursor target} accumulatedPages
-                    else if not entry.proven then accumulatedPages else
+                    else if not entry.proven || entry.dirty /= entry.settled then accumulatedPages else
                     case entry.data of
                         Just (Delivery.SessionsPage page) -> Dict.insert (sectionIdentity target) {result=Ok page,epoch=hintEpoch,cursor=sectionCursor target} accumulatedPages
                         _ -> accumulatedPages
@@ -302,7 +304,10 @@ reconcile ( model, command ) =
                 _ -> False)) |> Maybe.withDefault False
         retireInvalidTask = if invalidProject then (model.key |> Maybe.map (\key -> Nav.replaceUrl key (filterUrl model Nothing Nothing)) |> Maybe.withDefault Cmd.none) else if invalidTask then (model.key |> Maybe.map (\key -> Nav.replaceUrl key (filterUrl model current.projectFilter Nothing)) |> Maybe.withDefault Cmd.none) else Cmd.none
     in
-    ( next, Cmd.batch [ command, requests, bridge, retireInvalidTask ] )
+    let cards = next.cards
+        sections = List.foldl (\task currentSections -> if Dict.get task currentSections == Just "evidence" && taskEvidenceAvailable (Maybe.withDefault "" workspace) next task == Just False then Dict.insert task "work" currentSections else currentSections) cards.taskSections expandedTasks
+    in
+    ( { next | cards = { cards | taskSections = sections } }, Cmd.batch [ command, requests, bridge, retireInvalidTask ] )
 
 
 viewerReset : SessionsModel -> Maybe Int
@@ -762,10 +767,36 @@ effectiveActive workspace model session =
         _ -> True)
 
 
-taskAssociation : Model -> String -> Maybe Bool
-taskAssociation model task =
+taskAssociation : String -> Model -> String -> Maybe Bool
+taskAssociation workspace model task =
+    if model.sessions.workspace /= Just workspace || model.selectedWorkspaceId /= Just workspace || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then Nothing else
+    if model.sessions.epoch == model.sessionRequestEpoch && taskActive workspace model task && taskActivityCurrent workspace model task then Just True else
     Dict.get task model.sessions.taskAssociations |> Maybe.andThen (\hint ->
-        if hint.error || hint.epoch /= model.sessionDelivery.listInvalidation || model.sessions.epoch /= model.sessionRequestEpoch then Nothing else Just hint.present)
+        let negativePending = if hint.present then False else resource workspace (Delivery.TaskSessionsFiltered task {state="",freshness=""} Nothing) model
+                |> Maybe.map (\entry -> entry.error /= Nothing || not entry.proven || entry.dirty /= entry.settled || (case entry.data of
+                    Just (Delivery.SessionsPage page) -> not (List.isEmpty page.items) || page.nextCursor /= Nothing
+                    _ -> True)) |> Maybe.withDefault False
+        in if hint.error || hint.epoch /= model.sessionDelivery.listInvalidation || model.sessions.epoch /= model.sessionRequestEpoch || negativePending then Nothing else Just hint.present)
+
+
+taskEvidenceAvailable : String -> Model -> String -> Maybe Bool
+taskEvidenceAvailable workspace model task =
+    let
+        presence page = if not (List.isEmpty page.items) then Just True else if page.nextCursor == Nothing then Just False else Nothing
+        target = Delivery.TaskSessionsFiltered task {state="terminated",freshness=""} Nothing
+        cachedPresence = Dict.get (sectionKey True task) model.sessions.taskPages |> Maybe.andThen (\cached ->
+            if cached.epoch /= model.sessionDelivery.listInvalidation then Nothing else Result.toMaybe cached.result |> Maybe.andThen (\page ->
+                if not (List.isEmpty page.items) then Just True else if cached.cursor == Nothing then presence page else Nothing))
+        confirmed = if cachedPresence == Just True then Just True else case resource workspace target model of
+            Just entry -> if entry.error /= Nothing || not entry.proven || entry.dirty /= entry.settled then Nothing else case entry.data of
+                Just (Delivery.SessionsPage page) -> presence page
+                _ -> Nothing
+            Nothing -> cachedPresence
+    in
+    if model.sessions.workspace /= Just workspace || model.selectedWorkspaceId /= Just workspace || model.sessions.epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then Nothing
+    else if confirmed /= Nothing then confirmed
+    else if taskAssociation workspace model task == Just False then Just False
+    else Nothing
 
 
 taskActivityCurrent : String -> Model -> String -> Bool
@@ -777,7 +808,7 @@ taskActivityCurrent workspace model task =
     hintCurrent && pageCurrent
 
 taskCanOpen : String -> Model -> String -> Bool
-taskCanOpen workspace model task = model.sessions.workspace == Just workspace && taskAssociation model task == Just True
+taskCanOpen workspace model task = model.sessions.workspace == Just workspace && taskAssociation workspace model task == Just True
 
 
 viewTaskIcon : String -> Model -> String -> Html Msg
@@ -785,7 +816,7 @@ viewTaskIcon workspace model task =
     let
         hint = Dict.get task model.sessions.taskHints
         active = taskActive workspace model task
-        association = taskAssociation model task
+        association = taskAssociation workspace model task
         open = model.sessions.taskPanel == Just task
         activityCurrent = taskActivityCurrent workspace model task
         inactive = association == Just True && activityCurrent && (hint |> Maybe.map (\current -> not current.error && not current.active && current.epoch == model.sessionDelivery.listInvalidation) |> Maybe.withDefault False)
@@ -793,7 +824,7 @@ viewTaskIcon workspace model task =
         label = if open then "Hide Agents" else if empty then "No sessions" else "View Agents"
         status = if empty then " · no sessions associated with this task" else if active then " · active sessions" ++ (if association == Nothing || not activityCurrent then " · refreshing" else "") else if inactive then " · no active sessions" else if (hint |> Maybe.map .error |> Maybe.withDefault False) || (Dict.get task model.sessions.taskAssociations |> Maybe.map .error |> Maybe.withDefault False) then " · associations or activity unavailable" else " · checking associations and activity"
     in
-    button [class ("btn btn-secondary btn-sm task-sessions-icon" ++ (if active && not empty then " has-active-sessions" else "") ++ (if open then " selected" else "") ++ (if empty then " no-associated-sessions" else "")),disabled (not open && not (taskCanOpen workspace model task)),attribute "aria-label" label,attribute "aria-expanded" (if open then "true" else "false"),Html.Attributes.title (label ++ status),stopPropagationOn "click" (Decode.succeed (SessionsToggleDock task,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
+    if empty then text "" else button [class ("btn btn-secondary btn-sm task-sessions-icon" ++ (if active then " has-active-sessions" else "") ++ (if open then " selected" else "")),disabled (not open && not (taskCanOpen workspace model task)),attribute "aria-label" label,attribute "aria-expanded" (if open then "true" else "false"),Html.Attributes.title (label ++ status),stopPropagationOn "click" (Decode.succeed (SessionsToggleDock task,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
         ([if empty then text "" else if active then SessionActivityLight.view True status else if inactive then span [class "session-state-dot session-state-inactive",attribute "aria-hidden" "true"] [] else span [class "session-association-pending",attribute "aria-hidden" "true"] [text "…"]]
             ++ (if empty then [text label] else if open then [CardSections.horizontalDisclosureIcon True,text label] else [text label,CardSections.horizontalDisclosureIcon False]))
 

@@ -5,6 +5,7 @@ import AppShell
 import Dict
 import Expect
 import Feature.Sessions as Sessions
+import Feature.Cards as Cards
 import Feature.SessionDelivery as Delivery
 import Helpers
 import Http
@@ -23,6 +24,7 @@ suite : Test.Test
 suite =
     describe "Sessions production wire contract"
         [ describe "direct task association presence" associationTests
+        , describe "authoritative evidence availability" evidenceAvailabilityTests
         , describe "card-owned dock authority" dockTests
         , describe "same-authority metadata presentation" metadataPresentationTests
         , test "session and authority changes restore the compact linked-task default" <| \_ ->
@@ -651,12 +653,23 @@ associationTests =
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace unresolved "one") |> Query.has [Selector.tag "button",Selector.attribute (Html.Attributes.disabled True)]
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace unresolved "one") |> Query.hasNot [Selector.class "session-state-inactive"]
             ] ()
-    , test "current empty all-state direct membership shows a disabled no-session state" <| \_ ->
+    , test "current complete empty all-state direct membership omits the session control" <| \_ ->
         let (ready,_) = driveAssociations [] (Ok []) associationFixture
             toggled = Sessions.update (SessionsToggleDock "one") ready |> Tuple.first
         in Expect.all
             [ \_ -> Expect.equal (Just False,Nothing) (presence ready,toggled.sessions.taskPanel)
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.has [Selector.tag "button", Selector.attribute (Html.Attributes.disabled True), Selector.text "No sessions"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace ready "one") |> Query.hasNot [Selector.tag "button"]
+            ] ()
+    , test "an empty all-state page with a continuation never proves absent association" <| \_ ->
+        let entered=Sessions.reconcile (associationFixture,Cmd.none) |> Tuple.first
+            settled=List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) delivery) entered.sessionDelivery (Dict.values entered.sessionDelivery.physical)
+            allBusy=Sessions.reconcile ({entered | sessionDelivery=settled},Cmd.none) |> Tuple.first
+            partial=List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Just {createdAt="2026-10-24T00:00:00Z",id="older"}})) delivery) allBusy.sessionDelivery (Dict.values allBusy.sessionDelivery.physical)
+            final=Sessions.reconcile ({allBusy | sessionDelivery=partial},Cmd.none) |> Tuple.first
+        in Expect.all
+            [ \_ -> Expect.equal Nothing (presence final)
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace final "one") |> Query.has [Selector.tag "button"]
+            , \_ -> Expect.equal Nothing (Sessions.taskEvidenceAvailable workspace final "one")
             ] ()
     , test "terminated-only association retains an enabled grey toggle without an inline terminated reader" <| withSession (\session ->
         let (ready,_) = driveAssociations [] (Ok [{session | state=Api.SessionTerminated}]) associationFixture
@@ -730,7 +743,7 @@ associationTests =
             closed = Sessions.update (SessionsToggleDock "one") opened |> Tuple.first
         in Expect.all
             [ \_ -> Expect.equal (Nothing,Nothing) (denied.sessions.taskPanel,closed.sessions.taskPanel)
-            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace stale "one") |> Query.has [Selector.tag "button", Selector.attribute (Html.Attributes.disabled True), Selector.text "No sessions"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace stale "one") |> Query.hasNot [Selector.tag "button"]
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace opened "one") |> Query.has [Selector.text "Hide Agents"]
             ] ())
     , test "authority retirement clears association hints and late old admissions cannot restore them" <| withSession (\session ->
@@ -742,4 +755,48 @@ associationTests =
             late = List.foldl (\request delivery -> Delivery.settle request.id False (Ok (Delivery.SessionsPage {items=[session],nextCursor=Nothing})) delivery) retired.sessionDelivery requests
             final = Sessions.reconcile ({retired | sessionDelivery=late},Cmd.none) |> Tuple.first
         in Expect.equal (0,0) (Dict.size final.sessions.taskAssociations,Dict.size final.sessionDelivery.physical))
+    ]
+
+
+evidenceAvailabilityTests : List Test.Test
+evidenceAvailabilityTests =
+    let
+        base = associationFixture
+        cursor = {createdAt="2026-10-24T00:00:00Z",id="older"}
+        sample = Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
+        page items next = {items=items,nextCursor=next}
+        cached value before epoch =
+            let state=base.sessions in {base | sessions={state | taskPages=Dict.singleton "terminated:one" {result=value,cursor=before,epoch=epoch}}}
+        empty = cached (Ok (page [] Nothing)) Nothing base.sessionDelivery.listInvalidation
+        target = Delivery.TaskSessionsFiltered "one" {state="terminated",freshness=""} Nothing
+        resident dirty proven error =
+            let delivery=empty.sessionDelivery
+                entry={workspace=workspace,target=target,dirty=dirty,settled=0,data=Just (Delivery.SessionsPage (page [] Nothing)),ranges=[],error=error,proven=proven,incarnation=0,retry=Delivery.Available}
+            in {empty | sessionDelivery={delivery | resources=Dict.singleton (Delivery.key workspace target) entry}}
+        available model = Sessions.taskEvidenceAvailable workspace model "one"
+    in
+    [ test "only current complete first-page absence disables evidence" <| \_ ->
+        Expect.equal [Nothing,Just False,Nothing,Nothing,Nothing,Nothing]
+            [available base,available empty,available (cached (Ok (page [] (Just cursor))) Nothing base.sessionDelivery.listInvalidation),available (cached (Ok (page [] Nothing)) (Just cursor) base.sessionDelivery.listInvalidation),available (cached (Ok (page [] Nothing)) Nothing (base.sessionDelivery.listInvalidation-1)),available (cached (Err "unavailable") Nothing base.sessionDelivery.listInvalidation)]
+    , test "loading, proof retirement, errors and foreign workspace cannot reuse an empty cache" <| \_ ->
+        Expect.equal [Nothing,Nothing,Nothing,Nothing]
+            [available (resident 1 True Nothing),available (resident 0 False Nothing),available (resident 0 True (Just "failed")),Sessions.taskEvidenceAvailable "foreign" empty "one"]
+    , test "a terminated session including empty evidence is present rather than absent" <| \_ ->
+        case sample of
+            Just session ->
+                let present=cached (Ok (page [{session | state=Api.SessionTerminated,committedBytes=0,finalBytes=Just 0}] Nothing)) Nothing base.sessionDelivery.listInvalidation
+                    state=present.sessions
+                    conflicting={present | sessions={state | taskAssociations=Dict.singleton "one" {present=False,error=False,epoch=base.sessionDelivery.listInvalidation}}}
+                    later=cached (Ok (page [{session | state=Api.SessionTerminated}] Nothing)) (Just cursor) base.sessionDelivery.listInvalidation
+                in Expect.equal [Just True,Just True,Just True] [available present,available conflicting,available later]
+            Nothing -> Expect.fail "Invalid session fixture"
+    , test "confirmed no association also confirms no current session evidence" <| \_ ->
+        driveAssociations [] (Ok []) base |> Tuple.first |> available |> Expect.equal (Just False)
+    , test "selected empty Evidence falls back to Work and cannot be selected until available or unknown" <| \_ ->
+        let cards=empty.cards
+            selected={empty | cards={cards | expandedCards=Dict.singleton "one" True,taskSections=Dict.singleton "one" "evidence"}}
+            fallback=Sessions.reconcile (selected,Cmd.none) |> Tuple.first
+            denied=Cards.update (SetTaskCardSection "one" "evidence") fallback |> Tuple.first
+            unknown=Cards.update (SetTaskCardSection "one" "evidence") base |> Tuple.first
+        in Expect.equal [Just "work",Just "work",Just "evidence"] [Dict.get "one" fallback.cards.taskSections,Dict.get "one" denied.cards.taskSections,Dict.get "one" unknown.cards.taskSections]
     ]

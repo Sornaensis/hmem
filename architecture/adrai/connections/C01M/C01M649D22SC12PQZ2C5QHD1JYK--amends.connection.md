@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M649D22SC12PQZ2C5QHD1JYK"
+relation = "amends"
+from_record = "R01M649D22S2YMTJDV3HJF4ZF9A"
+subject_adr = "A01M39RCB0NC51143VRNQDG4R5Y"
+to_records = ["R01M39RCB3S47RNV388YXBX79GV"]
++++
+
+Limit session audit noise while preserving lifecycle evidence and independent live delivery.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjQ3ODcyN2E4ODM5YWJmNjE4ZTMxYTE1ZmFhNjQ5ZTRlNTNkOTUyYTAiLCJpIjoic2hhMjU2Ok5vbTE3a0ZEWEd5alRVTmF6RTItUHhPT2Z0ZzlmYlF1M0ZKRGhick9Gc1kiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTY0OUQyMlNDMTJQUVoyQzVRSEQxSllLIiwib3AiOiJPMDFNNjQ5RDIyUzJZTVRKRFYzSEpGNFpGOUEiLCJwIjpbIlIwMU0zOVJDQjNTNDdSTlYzODhZWEJYNzlHViJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpHODlLOXVTZGlkckFReGdCVHVoMWZFanRRdTRyUkhBb1B2VTU4Z3N1b0NJIiwidCI6MTc5MzI5MjkyOTExMywidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

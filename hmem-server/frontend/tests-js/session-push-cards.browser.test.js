@@ -66,7 +66,10 @@ test('Live becomes Quiet after thirty seconds without events while lifecycle act
   await h.start();await h.idle();h.active.last_seen_at=new Date(Date.now()-27000).toISOString();await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary').waitFor()
   await until(async()=>await page.locator('.session-summary').count()===0)
   await page.getByRole('button',{name:'Quiet',exact:true}).click();await page.locator('.session-summary').waitFor()
-  await page.getByRole('button',{name:'Projects',exact:true}).click();await until(async()=>await page.locator('#entity-'+h.fixture.tasks[0].id+' .task-sessions-icon').innerText()==='Active Agent →')
+  await page.getByRole('button',{name:'Projects',exact:true}).click()
+  const icon=page.locator('#entity-'+h.fixture.tasks[0].id+' > .card-header .task-sessions-icon')
+  await until(async()=>await icon.getAttribute('aria-label')==='View Agents'&&await icon.isEnabled()&&(await icon.getAttribute('class')).includes('has-active-sessions'))
+  assert.match(await icon.getAttribute('title'),/active sessions/);assert.equal(await icon.locator('.session-state-inactive').count(),0)
   assert.equal(h.active.state,'active');assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })

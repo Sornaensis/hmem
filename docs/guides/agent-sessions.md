@@ -18,6 +18,10 @@ no task links also qualify. A task in any other status, including a deleted task
 keeps the session open. Closing preserves the captured evidence and updates the
 green activity lights.
 
+Audit history records session start, actual termination and new task connections.
+Upload progress, heartbeats and runtime-label changes refresh live session views
+without adding audit entries. Repeating an operation adds no duplicate entry.
+
 Session cards show the running agent’s declared role, with its complete model,
 provider and reasoning setting in the label’s tooltip. Missing or historical
 role declarations display **Unknown role**. Runtime identity is explicitly

@@ -57,6 +57,8 @@ spec = do
         expectCode (SessionTaskNotInProgress (TE.decodeUtf8 status)) $ createSession env.pool metadata
         row <- importSession env.pool manifest
         importSession env.pool manifest `shouldReturn` row
+        boolean env ("SELECT count(*)=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"' AND action='create'") `shouldReturn` True
+        boolean env ("SELECT count(*)=1 FROM audit_log WHERE entity_type='task_session' AND new_values->>'session_id'='"<>uuid identifier<>"'") `shouldReturn` True
         expectCode SessionConflict $ importSession env.pool (manifest {finalSha256=sessionSha256 "different"})
         expectCode SessionConflict $ createSession env.pool metadata
         (row.importTaskId,row.importBytes,row.importSha256) `shouldBe` (Just task.id,Just (fromIntegral (BS.length body)),Just (sessionSha256 body))
@@ -69,7 +71,10 @@ spec = do
         rejectDb $ execute env ("UPDATE sessions SET state='terminated',terminated_at=clock_timestamp(),final_bytes=0,final_sha256='"<>TE.encodeUtf8 (sessionSha256 "")<>"',revision=revision+1 WHERE id='"<>uuid identifier<>"'")
         rejectDb $ execute env ("UPDATE sessions SET import_bytes=import_bytes+1 WHERE id='"<>uuid identifier<>"'")
         appended <- (.session) <$> append env workspace row body True
+        boolean env ("SELECT count(*)=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"'") `shouldReturn` True
         sealed <- terminateSession env.pool workspace identifier (receipt appended body)
+        terminateSession env.pool workspace identifier (receipt appended body) `shouldReturn` sealed
+        boolean env ("SELECT count(*)=2 AND count(*) FILTER (WHERE action='update' AND old_values->>'state'='active' AND new_values->>'state'='terminated')=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"'") `shouldReturn` True
         allBytes env workspace identifier `shouldReturn` body
         pageDone <- listTaskSessions env.pool workspace task.id Nothing 50
         map (.id) pageDone.items `shouldBe` [identifier]
@@ -567,7 +572,7 @@ spec = do
       replay <- setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 0 (Just second))
       replay `shouldBe` changed
       setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 1 (Just second)) `shouldReturn` changed
-      boolean env ("SELECT count(*)=3 AND bool_or(actor_id='manager' AND new_values->'runtime_identity'->>'model'='actual-model-b') FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"'") `shouldReturn` True
+      boolean env ("SELECT count(*)=1 AND bool_and(action='create' AND actor_id='connector' AND new_values->'runtime_identity'->>'model'='actual-model-a') FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"'") `shouldReturn` True
       boolean env ("SELECT NOT EXISTS(SELECT 1 FROM change_stream_outbox WHERE envelope#>>'{entity,type}'='agent_session' AND envelope#>>'{entity,id}'='"<>uuid identifier<>"' AND envelope#>>'{entity,action}'='updated' AND (envelope->'invalidations')::text LIKE '%active_sessions:%')") `shouldReturn` True
       retried <- withEffectiveActorContext (Just actor) $ createSession env.pool input
       retried `shouldBe` changed
@@ -584,6 +589,7 @@ spec = do
       sealed <- terminateSession env.pool workspace.id identifier (receipt cleared body)
       sealed.runtimeIdentity `shouldBe` Nothing
       sealed.runtimeRevision `shouldBe` 2
+      boolean env ("SELECT count(*)=2 AND count(*) FILTER (WHERE action='update' AND old_values->>'state'='active' AND new_values->>'state'='terminated')=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid identifier<>"'") `shouldReturn` True
       allBytes env workspace.id identifier `shouldReturn` body
       expectCode SessionTerminated $ setRuntimeIdentity env.pool workspace.id identifier (SetRuntimeIdentity 2 (Just first))
 
@@ -725,12 +731,13 @@ spec = do
           -- Continue the lifecycle against the current prospective contracts;
           -- the preservation assertion above still isolates the V044 upgrade.
           Migration.runMigrations pool source >>= (\result -> result.failed `shouldBe` Nothing)
+          execute env "CREATE TABLE runtime_current_audit_expected AS SELECT count(*) AS n FROM audit_log"
           Just original <- getSession pool workspace.id activeId
           let declaration=RuntimeIdentity "Known actual runtime" Nothing Nothing (Just "developer")
           resumed <- withEffectiveActorContext (Just actor) $ createSession pool (CreateSession activeId workspace.id "jsonl" "Legacy runtime capture" Nothing (Just declaration) workspace.id)
           resumed `shouldBe` original
           resumed.runtimeIdentity `shouldBe` Nothing
-          boolean env "SELECT (SELECT count(*) FROM audit_log)=(SELECT n FROM runtime_legacy_audit_expected)" `shouldReturn` True
+          boolean env "SELECT (SELECT count(*) FROM audit_log)=(SELECT n FROM runtime_current_audit_expected)" `shouldReturn` True
           updated <- setRuntimeIdentity pool workspace.id activeId (SetRuntimeIdentity 0 (Just declaration))
           updated.lastSeenAt `shouldBe` original.lastSeenAt
           updated.revision `shouldBe` original.revision
@@ -992,27 +999,52 @@ spec = do
       sealed.lastSeenAt `shouldBe` stale.lastSeenAt
       sealed.state `shouldBe` Terminated
 
-    it "omits heartbeat-only audit entries while preserving live events and meaningful session changes" $ \env -> do
-      (workspace,row) <- fresh env
+    it "audits only lifecycle boundaries and new task links while preserving live metadata events" $ \env -> do
+      (workspace,task,row) <- reaperFixture env
       let audits count = boolean env ("SELECT count(*)="<>count<>" FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid row.id<>"'") `shouldReturn` True
           events count = boolean env ("SELECT count(*)="<>count<>" FROM change_stream_outbox WHERE scope='workspace' AND envelope#>>'{entity,type}'='agent_session' AND envelope#>>'{entity,id}'='"<>uuid row.id<>"'") `shouldReturn` True
+          links count = boolean env ("SELECT count(*)="<>count<>" FROM audit_log WHERE entity_type='task_session' AND new_values->>'session_id'='"<>uuid row.id<>"'") `shouldReturn` True
       audits "1"
       events "1"
+      links "1"
+      createSession env.pool (CreateSession row.id workspace "jsonl" "Idle task capture" Nothing Nothing task.id) `shouldReturn` row
+      associateSessionTask env.pool workspace row.id task.id
+      audits "1"
+      events "1"
+      links "1"
       seen <- heartbeatSession env.pool workspace row.id
       seen.lastSeenAt `shouldSatisfy` (>row.lastSeenAt)
       audits "1"
       events "2"
       boolean env ("SELECT NOT EXISTS(SELECT 1 FROM change_stream_outbox e CROSS JOIN LATERAL jsonb_array_elements(e.envelope->'invalidations') target WHERE e.envelope#>>'{entity,id}'='"<>uuid row.id<>"' AND e.envelope#>>'{entity,action}'='updated' AND target->>'target' LIKE 'active_sessions:%')") `shouldReturn` True
       uploaded <- append env workspace seen "{}\n" False
-      audits "2"
+      audits "1"
       events "3"
-      _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "audit-model" Nothing Nothing (Just "developer"))))
-      audits "3"
+      replayed <- append env workspace seen "{}\n" False
+      replayed.session `shouldBe` uploaded.session
+      replayed.replayed `shouldBe` True
+      expectCode SessionConflict $ append env workspace seen "[]\n" False
+      let runtime = SetRuntimeIdentity 0 (Just (RuntimeIdentity "audit-model" Nothing Nothing (Just "developer")))
+      declared <- setRuntimeIdentity env.pool workspace row.id runtime
+      setRuntimeIdentity env.pool workspace row.id runtime `shouldReturn` declared
+      audits "1"
       events "4"
+      extra <- makeTask env workspace "Additional audited connection"
+      associateSessionTask env.pool workspace row.id extra.id
+      associateSessionTask env.pool workspace row.id extra.id
+      links "2"
+      audits "1"
+      events "4"
+      expectCode SessionConflict $ terminateSession env.pool workspace row.id (receipt uploaded.session "[]\n")
+      audits "1"
       sealed <- terminateSession env.pool workspace row.id (receipt uploaded.session "{}\n")
       sealed.state `shouldBe` Terminated
-      audits "4"
+      terminateSession env.pool workspace row.id (receipt uploaded.session "{}\n") `shouldReturn` sealed
+      expectCode SessionTerminated $ heartbeatSession env.pool workspace row.id
+      associateSessionTask env.pool workspace row.id extra.id
+      audits "2"
       events "5"
+      links "2"
       boolean env ("SELECT count(*)=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid row.id<>"' AND old_values->>'state'='active' AND new_values->>'state'='terminated'") `shouldReturn` True
 
     it "does not store raw bytes in audit or change events" $ \env -> do
@@ -1185,6 +1217,72 @@ spec = do
           allBytes env workspace row.id `shouldReturn` ""
 
   describe "Agent sessions migration" $ do
+    it "keeps only historical lifecycle and connection audits atomically without changing evidence or live history" $
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir = sandbox.sandboxRoot </> "before-v052"
+              upgradeDir = sandbox.sandboxRoot </> "only-v052"
+              filename = "V052__session_lifecycle_audit.sql"
+              env = TestEnv pool sandbox db
+          createDirectory beforeDir
+          createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V052" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
+          (workspace,row) <- fresh env
+          uploaded <- append env workspace row "{}\r\n" False
+          _ <- setRuntimeIdentity pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "historical-audit-model" Nothing Nothing (Just "developer"))))
+          sealed <- terminateSession pool workspace row.id (receipt uploaded.session "{}\r\n")
+          let fixture retained entity action old new = execute env
+                ("INSERT INTO audit_log(entity_type,entity_id,action,old_values,new_values,request_id) VALUES ('"<>entity<>"','historical-fixture','"<>action<>"',"<>old<>","<>new<>",'"<>retained<>"')")
+          forM_
+            [ ("agent_session","create","NULL","'{\"state\":\"active\"}'")
+            , ("agent_session","create","NULL","'{}'")
+            , ("agent_session","update","'{\"state\":\"active\"}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":\"active\",\"runtime_identity\":null}'","'{\"state\":\"terminated\",\"runtime_identity\":{\"model\":\"legacy\"}}'")
+            , ("task_session","create","NULL","'{\"session_id\":\"legacy\",\"task_id\":\"legacy-task\"}'")
+            , ("task","update","'{\"state\":\"active\"}'","'{\"state\":\"terminated\"}'")
+            , ("project","delete","'{}'","NULL")
+            ] $ \(entity,action,old,new) -> fixture "retain-lifecycle-fixture" entity action old new
+          forM_
+            [ ("agent_session","update","'{\"state\":\"active\",\"committed_bytes\":0}'","'{\"state\":\"active\",\"committed_bytes\":3}'")
+            , ("agent_session","update","'{\"state\":\"active\",\"last_seen_at\":\"old\"}'","'{\"state\":\"active\",\"last_seen_at\":\"new\"}'")
+            , ("agent_session","update","'{\"state\":\"terminated\"}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","NULL","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":null}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":false}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":1}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":[\"active\"]}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":{\"value\":\"active\"}}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":\"unknown\"}'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'[]'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'\"active\"'","'{\"state\":\"terminated\"}'")
+            , ("agent_session","update","'{\"state\":\"active\"}'","NULL")
+            , ("agent_session","update","'{\"state\":\"active\"}'","'{}'")
+            , ("agent_session","update","'{\"state\":\"active\"}'","'{\"state\":null}'")
+            , ("agent_session","update","'{\"state\":\"active\"}'","'{\"state\":[\"terminated\"]}'")
+            , ("agent_session","delete","'{\"state\":\"terminated\"}'","NULL")
+            , ("task_session","update","'{}'","'{}'")
+            , ("task_session","delete","'{}'","NULL")
+            ] $ \(entity,action,old,new) -> fixture "remove-lifecycle-fixture" entity action old new
+          execute env "CREATE TABLE pre_v052_audits AS TABLE audit_log; CREATE TABLE pre_v052_events AS TABLE change_stream_outbox; CREATE TABLE pre_v052_sessions AS SELECT to_jsonb(s) AS value FROM sessions s; CREATE TABLE pre_v052_links AS TABLE task_sessions; CREATE TABLE pre_v052_chunks AS TABLE session_chunks; CREATE TABLE pre_v052_function AS SELECT pg_get_functiondef('hmem_agent_session_change()'::regprocedure) AS value; CREATE TABLE expected_v052_audits AS SELECT * FROM audit_log WHERE request_id='retain-lifecycle-fixture' OR (request_id IS DISTINCT FROM 'remove-lifecycle-fixture' AND (entity_type NOT IN ('agent_session','task_session') OR action='create' OR (entity_type='agent_session' AND action='update' AND old_values->>'state'='active' AND new_values->>'state'='terminated')))"
+          bracket_
+            (execute env "CREATE FUNCTION lifecycle_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.version=52 THEN RAISE EXCEPTION 'injected lifecycle ledger failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER lifecycle_ledger_failure BEFORE INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION lifecycle_ledger_failure()")
+            (execute env "DROP TRIGGER lifecycle_ledger_failure ON schema_migrations; DROP FUNCTION lifecycle_ledger_failure()") $ do
+              Migration.runMigrations pool upgradeDir >>= (\result -> result.failed `shouldSatisfy` (/=Nothing))
+              boolean env "SELECT NOT EXISTS((TABLE audit_log EXCEPT TABLE pre_v052_audits) UNION ALL (TABLE pre_v052_audits EXCEPT TABLE audit_log)) AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=52) AND pg_get_functiondef('hmem_agent_session_change()'::regprocedure)=(SELECT value FROM pre_v052_function)" `shouldReturn` True
+          upgraded <- Migration.runMigrations pool upgradeDir
+          upgraded.failed `shouldBe` Nothing
+          upgraded.applied `shouldBe` [filename]
+          boolean env "SELECT NOT EXISTS((TABLE audit_log EXCEPT TABLE expected_v052_audits) UNION ALL (TABLE expected_v052_audits EXCEPT TABLE audit_log)) AND pg_get_functiondef('hmem_agent_session_change()'::regprocedure)<>(SELECT value FROM pre_v052_function)" `shouldReturn` True
+          boolean env "SELECT NOT EXISTS((TABLE change_stream_outbox EXCEPT TABLE pre_v052_events) UNION ALL (TABLE pre_v052_events EXCEPT TABLE change_stream_outbox)) AND NOT EXISTS((SELECT to_jsonb(s) FROM sessions s EXCEPT SELECT value FROM pre_v052_sessions) UNION ALL (SELECT value FROM pre_v052_sessions EXCEPT SELECT to_jsonb(s) FROM sessions s)) AND NOT EXISTS((TABLE task_sessions EXCEPT TABLE pre_v052_links) UNION ALL (TABLE pre_v052_links EXCEPT TABLE task_sessions)) AND NOT EXISTS((TABLE session_chunks EXCEPT TABLE pre_v052_chunks) UNION ALL (TABLE pre_v052_chunks EXCEPT TABLE session_chunks))" `shouldReturn` True
+          getSession pool workspace row.id `shouldReturn` Just sealed
+          allBytes env workspace row.id `shouldReturn` "{}\r\n"
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [])
+
     it "removes only historical heartbeat audits and installs the audit guard atomically" $
       withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
         bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do

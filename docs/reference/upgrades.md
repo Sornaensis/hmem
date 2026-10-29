@@ -1,5 +1,19 @@
 # Upgrade reference
 
+## Session lifecycle audit retention (V052)
+
+Take a verified backup, then apply the ordered migration chain before serving
+the matching build. V052 keeps session start, actual termination and new task
+connection audit records; it removes other historical session-family audit
+operations using their stored snapshots. Missing or malformed transition states
+are not termination evidence. All other audit entities, transcript bytes,
+session metadata, task links and canonical change-stream history are preserved.
+
+The trigger replacement, historical cleanup and ledger registration commit
+atomically; a failed migration can be retried after correcting its cause. There
+is no down migration for removed audit records. Recover them from the verified
+pre-change backup. See the [schema policy](schema.md#session-lifecycle-audit-policy-v052).
+
 ## Sealed archive maintenance (V050 and V051)
 
 Apply the ordered chain with a separate PostgreSQL migration administrator before

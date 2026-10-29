@@ -69,6 +69,7 @@ data-files:
     migrations/V049__historical_session_import.sql
     migrations/V050__sealed_session_archives.sql
     migrations/V051__session_archive_maintenance.sql
+    migrations/V052__session_lifecycle_audit.sql
 
 library
   exposed-modules:

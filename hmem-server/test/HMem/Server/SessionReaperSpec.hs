@@ -40,11 +40,12 @@ spec = around withTestEnv $ describe "abandoned session worker" $ do
       workspaceSessionActivity env.pool [workspace.id] `shouldReturn` [(workspace.id,False)]
       projectSessionActivity env.pool workspace.id [project.id] `shouldReturn` [(project.id,False)]
       queryBool env ("SELECT EXISTS(SELECT 1 FROM change_stream_outbox WHERE envelope#>>'{entity,type}'='agent_session' AND envelope#>>'{entity,id}'='"<>uuid first<>"' AND envelope#>>'{entity,action}'='updated' AND (envelope->'invalidations')::text LIKE '%active_sessions:%')") `shouldReturn` True
-      queryBool env ("SELECT EXISTS(SELECT 1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid first<>"' AND action='update' AND actor_id IS NULL AND new_values->>'state'='terminated')") `shouldReturn` True
+      queryBool env ("SELECT count(*)=2 AND count(*) FILTER (WHERE action='update' AND actor_id IS NULL AND old_values->>'state'='active' AND new_values->>'state'='terminated')=1 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid first<>"'") `shouldReturn` True
       second <- oldSession env workspace.id (Just project.id) True
       -- The cursor may need one empty page to wrap before discovering a row
       -- whose activity sorts before the previous cursor.
       awaitSealed env batches workspace.id second 8
+      queryBool env ("SELECT count(*)=2 FROM audit_log WHERE entity_type='agent_session' AND entity_id='"<>uuid first<>"'") `shouldReturn` True
     afterStop <- oldSession env workspace.id Nothing True
     threadDelay 50000
     Just row <- getSession env.pool workspace.id afterStop

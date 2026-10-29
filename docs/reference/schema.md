@@ -7,10 +7,10 @@ and its ledger entry in one transaction. A ledger failure rolls back installatio
 registered reruns do not repeat effects. It neither backfills historical events
 nor retires existing full/shell snapshots or resume bearers.
 
-Actual session creates, append counter updates, active heartbeats and termination
-write one `agent_session` audit and workspace event. From V048, timestamp-only
-heartbeats emit the workspace event without an audit. Exact create/append/seal
-retries and unchanged raw updates emit nothing. The explicit audit projection
+Session creation, append counter updates, active heartbeats, runtime changes and
+termination publish canonical workspace events. From V052, only creation and an
+actual active-to-terminated transition also write an `agent_session` audit.
+Exact create/append/seal retries and unchanged raw updates emit nothing. The explicit audit projection
 contains identity, format, state, timestamps, committed byte/record counts,
 revision, newline state and final receipt. No complete row or chunk is serialized.
 Audit request/actor/declaration fields and outbox cause/actor retain the existing
@@ -294,7 +294,8 @@ the ordinary termination invalidations. Manual termination remains unchanged.
 `V048__session_timestamp_audit_noise.sql` stops adding agent-session audit entries
 when only `last_seen_at` changes. Heartbeats still update the session timestamp
 and publish the existing live invalidations. Creation, transcript counters,
-runtime declarations and termination remain audited with their full snapshots.
+runtime declarations and termination remained audited with their full snapshots
+until V052 narrowed retention to lifecycle boundaries.
 
 The migration deletes historical `agent_session` `update` audit rows whose object
 snapshots have different string `last_seen_at` values and otherwise match exactly.
@@ -304,3 +305,26 @@ events are preserved. The trigger replacement, cleanup and version-48 ledger
 entry commit in one transaction; failure rolls all three back, and the migration
 runner skips an applied version. Removed heartbeat audit entries have no down
 migration; recovering them requires restoring a database backup.
+
+## Session lifecycle audit policy (V052)
+
+`V052__session_lifecycle_audit.sql` records one `agent_session/create` when a
+session starts, one `agent_session/update` when it actually becomes terminated,
+and one `task_session/create` for each new task connection, including the initial
+connection. Manager sealing, abandoned-session cleanup and historical import
+completion use the same transition rule. Retries and rejected operations add no
+duplicates. Append counters, heartbeats, runtime declarations and import progress
+remain live through the canonical outbox without adding audit rows.
+
+The migration retains session creates, connection creates and session updates
+whose recorded object snapshots explicitly change `state` from `active` to
+`terminated`. Both legacy and current projections store this field at the top
+level. Missing, null, scalar, composite or unrecognized state values cannot prove
+termination and their update records are removed, along with every other
+session-family operation. Classification uses only each audit entry's snapshots,
+never current session state. Every non-session audit row remains unchanged.
+
+Trigger replacement, cleanup and the version-52 ledger entry share one
+transaction. Failure restores the prior trigger and audit rows; an applied
+version is skipped. No transcript, session, connection or canonical change-stream
+history changes. Deleted audit rows can be recovered only from a prior backup.

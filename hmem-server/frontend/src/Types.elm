@@ -7,6 +7,7 @@ import Browser.Navigation as Nav
 import Dict exposing (Dict)
 import Feature.ChangeStream
 import Feature.SessionDelivery
+import Markdown.Block as MarkdownBlock
 import HierarchyViewport
 import Array exposing (Array)
 import ObservationViewport
@@ -1330,6 +1331,7 @@ type alias SessionsModel =
     , archive : Maybe SessionArchiveOperation
     , archiveMessageTask : Maybe String
     , archiveRequests : Dict Int CanonicalRequestGuard
+    , sealed : SealedSessionView
     , nextOperation : Int
     , saveMessage : String
     , heartbeats : Dict String String
@@ -1362,11 +1364,33 @@ emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, inspectedEvent = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
     , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
+    , sealed = emptySealedSessionView
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, taskAssociations = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
 
 
 type alias SessionArchiveOperation =
     { operation : Int, task : String, title : String, phase : String }
+
+
+type alias SealedSessionView =
+    { phase : String, error : Maybe String, http : Maybe { sequence : Int, path : String }
+    , rows : List SealedSessionPiece, first : String, last : String, more : Bool
+    , rawBytes : String, compressedBytes : String, archiveGeneration : String
+    , renderPart : Int, inspectorPart : Int, domEpoch : String
+    , markdown : { key : String, source : String, ast : Result String (List MarkdownBlock.Block), structured : Bool, complete : Bool, nextPart : Int, request : Int } }
+
+
+emptySealedSessionView : SealedSessionView
+emptySealedSessionView =
+    { phase = "preparing", error = Nothing, http = Nothing, rows = [], first = "", last = "", more = False
+    , rawBytes = "0", compressedBytes = "0", archiveGeneration = "", renderPart = 0, inspectorPart = 0, domEpoch = ""
+    , markdown = {key="",source="",ast=Err "not_loaded",structured=False,complete=False,nextPart=0,request=0} }
+
+
+type alias SealedSessionPiece =
+    { key : String, offset : String, kind : String, label : String, role : String, time : String
+    , ast : Result String (List MarkdownBlock.Block)
+    , group : String, count : String, open : Bool, groupOpen : Bool, body : Maybe { text : String, part : Int, more : Bool, tokens : List ( String, String ), format : String, structured : Bool, exception : Bool } }
 
 
 type alias SessionSaveOperation =

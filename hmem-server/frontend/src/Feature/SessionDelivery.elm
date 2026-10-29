@@ -27,6 +27,7 @@ type Target
     | SessionWindow String Int Int Bool
     | SessionSave String Int Int
     | TaskEvidenceArchive String Int
+    | SessionArchiveHttp String Int
 
 
 type Payload
@@ -86,6 +87,7 @@ key workspace target =
             SessionFacets kind project after selected -> "facets:" ++ kind ++ ":" ++ Maybe.withDefault "all" project ++ ":" ++ Maybe.withDefault "first" after ++ ":" ++ Maybe.withDefault "none" selected
             TaskSessionsFiltered task filters before -> "task-filter:" ++ task ++ ":" ++ filters.state ++ ":" ++ filters.freshness ++ ":" ++ cursor before
             TaskEvidenceArchive task operation -> "archive:" ++ task ++ ":" ++ String.fromInt operation
+            SessionArchiveHttp id sequence -> "sealed:" ++ id ++ ":" ++ String.fromInt sequence
             TaskSessions task before -> "task:" ++ task ++ ":" ++ cursor before
             SessionMetadata id -> "detail:" ++ id
             SessionTasks id after -> "links:" ++ id ++ ":" ++ Maybe.withDefault "first" after
@@ -288,7 +290,8 @@ invalidateSession workspace id =
         SessionBytes _ _ _ -> False
         SessionWindow _ _ _ _ -> False
         SessionSave _ _ _ -> False
-        TaskEvidenceArchive _ _ -> False))
+        TaskEvidenceArchive _ _ -> False
+        SessionArchiveHttp _ _ -> False))
 
 
 -- Progress does not change task/list membership. Reuse the selected session's
@@ -512,6 +515,7 @@ valid request payload =
         ( SessionFacets _ _ _ _, FacetsPage page ) -> List.length page.items <= 50
         ( TaskSessionsFiltered _ _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( TaskEvidenceArchive _ _, ArchiveDownloaded ) -> True
+        ( SessionArchiveHttp _ _, ArchiveDownloaded ) -> True
         ( TaskSessions _ _, SessionsPage page ) -> List.length page.items <= 50 && List.all (\session -> session.workspaceId == request.workspace) page.items
         ( SessionMetadata id, Metadata session ) -> sessionMatches id session
         ( SessionTasks _ _, TasksPage page ) -> List.length page.items <= 50
@@ -626,6 +630,7 @@ fetch apiUrl request toMsg =
         SessionFacets kind project after selected -> Api.fetchSessionFacets apiUrl request.workspace kind project after selected (Result.map FacetsPage >> toMsg)
         TaskSessionsFiltered task filters cursor -> Api.fetchFilteredAgentSessions apiUrl request.workspace (Just task) filters cursor 50 (Result.map SessionsPage >> toMsg)
         TaskEvidenceArchive _ _ -> Cmd.none
+        SessionArchiveHttp _ _ -> Cmd.none
         TaskSessions task cursor -> Api.fetchAgentSessions apiUrl request.workspace (Just task) cursor 50 (Result.map SessionsPage >> toMsg)
         SessionMetadata id -> Api.fetchAgentSession apiUrl request.workspace id (Result.map Metadata >> toMsg)
         SessionTasks id cursor -> Api.fetchSessionTasks apiUrl request.workspace id cursor 50 (Result.map TasksPage >> toMsg)

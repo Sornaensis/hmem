@@ -2398,6 +2398,9 @@ pumpSessionResources model =
                                     SessionDelivery.TaskEvidenceArchive _ _ ->
                                         let sessions=guarded.sessions in
                                         ({guarded | sessions={sessions | archiveRequests=Dict.insert request.id guard sessions.archiveRequests}},pendingCommands)
+                                    SessionDelivery.SessionArchiveHttp _ _ ->
+                                        let sessions=guarded.sessions in
+                                        ({guarded | sessions={sessions | archiveRequests=Dict.insert request.id guard sessions.archiveRequests}},pendingCommands)
                                     _ -> ( guarded, SessionDelivery.fetch model.flags.apiUrl request (SessionResourceFetched request.id guard) :: pendingCommands )
                             Nothing ->
                                 ( { current | sessionDelivery = SessionDelivery.settle request.id False (Err (Http.BadBody "Retired session authority")) current.sessionDelivery }, pendingCommands )

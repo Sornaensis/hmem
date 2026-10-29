@@ -1,6 +1,6 @@
 import { hierarchyFixture, openHierarchy } from '../hierarchy-fixture.mjs'
 import { createHash } from 'node:crypto'
-export async function openSessionExplorer({many=false,empty=false,creator=null,runtime=null,housekeeping=false,activeCount=1,savedCount=1,linkedCount=2,encrypted=false,timezoneId='UTC',stamp=new Date().toISOString(),eventTimes=[],launchOptions={},extraRecords=[],transcriptBytes=null}={}) {
+export async function openSessionExplorer({many=false,empty=false,creator=null,runtime=null,housekeeping=false,activeCount=1,savedCount=1,linkedCount=2,encrypted=false,timezoneId='UTC',stamp=new Date().toISOString(),eventTimes=[],launchOptions={},persistentProfile=null,extraRecords=[],transcriptBytes=null}={}) {
   const f=hierarchyFixture();f.projects=[{...f.projects[0],id:"50000000-0000-4000-8000-000000000001"}]
   f.tasks=Array.from({length:many?22:Math.max(2,linkedCount)},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null,project_id:f.projects[0].id}))
   const records=[
@@ -40,7 +40,8 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,r
   if(savedCount){Object.assign(saved,savedSessions[0]);savedSessions[0]=saved}
   for(const session of activeSessions)content.set(session.id,bytes)
   const allSessions=[...activeSessions,...savedSessions].sort((a,b)=>b.created_at.localeCompare(a.created_at)||b.id.localeCompare(a.id))
-  const h=await openHierarchy(f,[],null,{timezoneId},launchOptions),reads=[]
+  const h=await openHierarchy(f,[],null,{timezoneId},launchOptions,persistentProfile),reads=[]
+  try {
   let requestActive=0,peak=0
   const linked=new Set(many?[f.tasks.at(-1).id]:f.tasks.map(t=>t.id))
   const sessionLinks=new Map(allSessions.map(session=>[session.id,new Set(linked)]))
@@ -78,4 +79,10 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,r
     await h.page.evaluate(({workspace,session,revision})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'append-'+revision,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'append-'+revision,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:active.id,revision:active.revision})
   }
   return {...h,start:async(fragment="tab=projects",anchor=f.projects[0].id)=>h.start(fragment,anchor),active,saved,bytes,activeSessions,savedSessions,allSessions,sessionLinks,content,reads,peak:()=>peak,appendBytes,async appendRecords(...added){await appendBytes(Buffer.from(added.map(record=>JSON.stringify(record)).join('\n')+'\n'))},async associate(task){linked.add(task);sessionLinks.get(active.id)?.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
+  }catch(error){
+    if(!persistentProfile)throw error
+    error.setupOwner=h
+    try{await h.close()}catch(cleanup){const failure=new AggregateError([error,cleanup],'persistent_session_fixture_setup_cleanup_failed');failure.setupOwner=h;globalThis.retainedPersistentSessionFixtureSetupOwner=h;throw failure}
+    throw error
+  }
 }

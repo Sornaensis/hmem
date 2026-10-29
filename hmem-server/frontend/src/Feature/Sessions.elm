@@ -199,7 +199,7 @@ reconcile ( model, command ) =
                 if continueViewer then
                     { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = False, pending = False }
                 else
-                    { withDownloads | stamp = stamp, inspectedEvent = Nothing, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty }
+                    { withDownloads | stamp = stamp, inspectedEvent = Nothing, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
             else if transportChanged then
                 -- Retire response authority, not the presentation. Preserve the
                 -- finite end so a framed but unacknowledged short tail retries
@@ -212,7 +212,9 @@ reconcile ( model, command ) =
             _ -> Nothing)) workspace selected |> Maybe.withDefault Nothing
         beforeArchive = case metadata of
             Just session ->
-                if retired.start == Nothing then
+                if session.state == Api.SessionTerminated then
+                    { retired | start = Just 0, offset = 0, end = 0, resetPending = False, pending = False, rows = [] }
+                else if retired.start == Nothing then
                     let begin = max 0 (session.committedBytes - 2097152) in
                     { retired | start = Just begin, offset = begin, end = session.committedBytes, generation = retired.generation + 1 }
                 else if retired.following && retired.offset >= retired.end && not retired.pending then
@@ -220,8 +222,10 @@ reconcile ( model, command ) =
                 else retired
             Nothing -> retired
         current = beforeArchive
+        isSealed = metadata |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False
         window = Maybe.map2 (\ws session -> (ws,Delivery.SessionWindow session.id current.offset current.end (session.state == Api.SessionTerminated))) workspace metadata
-            |> Maybe.andThen (\target -> if current.loadWindow && current.error == Nothing && current.offset < current.end then Just target else Nothing)
+            |> Maybe.andThen (\target -> if not isSealed && current.loadWindow && current.error == Nothing && current.offset < current.end then Just target else Nothing)
+        sealedTarget = Maybe.map2 (\ws request -> (ws,Delivery.SessionArchiveHttp (Maybe.withDefault "" selected) request.sequence)) workspace current.sealed.http
         saveTarget = Maybe.map2 (\ws operation -> (ws,Delivery.SessionSave operation.session operation.offset (min 65536 (operation.size-operation.offset)))) workspace current.save
             |> Maybe.andThen (\target -> current.save |> Maybe.andThen (\operation -> if operation.phase == "writing" && not operation.pending && operation.offset < operation.size then Just target else Nothing))
         archiveTarget = Maybe.map2 (\ws archive -> (ws,Delivery.TaskEvidenceArchive archive.task archive.operation)) workspace current.archive |> Maybe.andThen (\target -> current.archive |> Maybe.andThen (\archive -> if archive.phase == "waiting" then Just target else Nothing))
@@ -229,6 +233,7 @@ reconcile ( model, command ) =
             (if model.activeTab == SessionsTab then [(ws,listTarget current),(ws,facetTarget "projects" current),(ws,facetTarget "tasks" current)] else []) ++
             (selected |> Maybe.map (\id -> [(ws,Delivery.SessionMetadata id)] ++ (if model.activeTab == SessionsTab then [(ws,Delivery.SessionTasks id current.linksCursor)] else [])) |> Maybe.withDefault []) ++
             (archiveTarget |> Maybe.map List.singleton |> Maybe.withDefault []) ++
+            (sealedTarget |> Maybe.map List.singleton |> Maybe.withDefault []) ++
             (saveTarget |> Maybe.map List.singleton |> Maybe.withDefault []) ++
             (List.map (\target -> (ws,target)) (List.take (if current.archive /= Nothing || current.save /= Nothing then 10 else 12) sectionReads)) ++
             (List.map (\target -> (ws,target)) hintTargets) ++
@@ -278,6 +283,12 @@ reconcile ( model, command ) =
             , ("nextOperation",Encode.int current.nextOperation)
             , ("saveOperation",(pending.save |> Maybe.map .operation |> Maybe.withDefault (pending.archive |> Maybe.map .operation |> Maybe.withDefault -1)) |> Encode.int)
             , ("archiveRequest",archiveRequest next)
+            , ("sealed",Encode.object
+                [("active",Encode.bool (isSealed && selected /= Nothing)),("stamp",Encode.string stamp),("load",Encode.int current.generation)
+                ,("workspace",Encode.string (Maybe.withDefault "" workspace)),("session",Encode.string (Maybe.withDefault "" selected)),("apiUrl",Encode.string model.flags.apiUrl)
+                ,("authority",Encode.string (model.sessionContext |> Maybe.map (\context -> Encode.encode 0 (Encode.list Encode.string [context.principal.actorType,context.principal.actorId,context.principal.authority,Maybe.withDefault "" context.principal.grantUserId])) |> Maybe.withDefault ""))])
+            , ("sealedRequest",sealedRequest next)
+            , ("sealedMarkdownAck",Encode.object [("stamp",Encode.string stamp),("load",Encode.int current.generation),("request",Encode.int current.sealed.markdown.request)])
             , ("saveChunk",if saveFailure == Nothing then Maybe.withDefault Encode.null savePayload else Encode.null)
             , ("heartbeats",Encode.list (\session -> Encode.object [("id",Encode.string session.id),("lastSeenAt",Encode.string session.lastSeenAt)]) heartbeatSources)
             ])
@@ -332,7 +343,7 @@ update msg model =
                             Delivery.SessionWindow _ _ _ _ -> Delivery.removeDemand ownedWorkspace target accumulated
                             _ -> accumulated) current state.owned)
             in
-            ( {model | sessions = {state | error = Nothing,pending = False,loadWindow = True
+            ( {model | sessions = {state | error = Nothing,pending = False,loadWindow = True, sealed = emptySealedSessionView
                     , start = if decodeRecovery then Just begin else state.start
                     , offset = if decodeRecovery then begin else state.offset
                     , generation = state.generation + 1,resetPending = decodeRecovery || state.resetPending}
@@ -397,7 +408,11 @@ receiveBridge value model =
             |> Decode.andThen (\record -> Decode.map (\anchor -> {record | presentationOffset=anchor}) (Decode.oneOf [Decode.field "presentationOffset" Decode.int,Decode.succeed record.offset]))
             |> Decode.andThen (\record -> Decode.map (\anchors -> {record | activityAnchors=anchors}) (Decode.oneOf [Decode.field "activityAnchors" (Decode.dict Decode.string),Decode.succeed Dict.empty]))
     in
-    if kind == "archive-http" then receiveArchiveHttp value model
+    if kind == "sealed-http" then
+        let sealed=state.sealed in
+        receiveArchiveHttp value {model | sessions={state | sealed=if sealed.http |> Maybe.map (.sequence >> (==) (field "sequence" Decode.int -1)) |> Maybe.withDefault False then {sealed | http=Nothing} else sealed}}
+    else if String.startsWith "sealed-" kind then receiveSealed value model
+    else if kind == "archive-http" then receiveArchiveHttp value model
     else if kind == "heartbeat-status" && stamp == state.stamp then
         case Decode.decodeValue (Decode.field "statuses" (Decode.dict Decode.string)) value of
             Ok statuses -> if Dict.size statuses <= 52 then
@@ -428,6 +443,82 @@ encodeReceipt : Api.AgentSession -> Encode.Value
 encodeReceipt session = Encode.object
     [("id",Encode.string session.id),("workspace",Encode.string session.workspaceId),("state",Encode.string (if session.state == Api.SessionTerminated then "terminated" else "active"))
     ,("finalBytes",session.finalBytes |> Maybe.map Encode.int |> Maybe.withDefault Encode.null),("finalSha256",session.finalSha256 |> Maybe.map Encode.string |> Maybe.withDefault Encode.null),("revision",Encode.int session.revision)]
+
+
+sealedRequest : Model -> Encode.Value
+sealedRequest model =
+    case model.sessions.sealed.http of
+        Nothing -> Encode.null
+        Just demand ->
+            Dict.values model.sessionDelivery.physical
+                |> List.filter (\request -> request.target == Delivery.SessionArchiveHttp (Maybe.withDefault "" model.sessions.selected) demand.sequence && Dict.member request.id model.sessions.archiveRequests)
+                |> List.head
+                |> Maybe.map (\request -> Encode.object [("id",Encode.int request.id),("sequence",Encode.int demand.sequence),("workspace",Encode.string request.workspace),("session",Encode.string (Maybe.withDefault "" model.sessions.selected)),("stamp",Encode.string model.sessions.stamp),("load",Encode.int model.sessions.generation),("archiveGeneration",Encode.string model.sessions.sealed.archiveGeneration)])
+                |> Maybe.withDefault Encode.null
+
+
+receiveSealed : Decode.Value -> Model -> ( Model, Cmd Msg )
+receiveSealed value model =
+    let
+        state = model.sessions
+        sealed = let previous = state.sealed in {previous | domEpoch=field "domEpoch" Decode.string previous.domEpoch}
+        field name decoder fallback = Decode.decodeValue (Decode.field name decoder) value |> Result.withDefault fallback
+        kind = field "kind" Decode.string ""
+        piece = Decode.map8 (\key offset blockKind label role time group count -> {key=key,offset=offset,kind=blockKind,label=label,role=role,time=time,group=group,count=count,open=False,groupOpen=False,body=Nothing,ast=Err "not_loaded"})
+            (Decode.field "key" Decode.string) (Decode.field "offset" Decode.string) (Decode.field "kind" Decode.string) (Decode.field "label" Decode.string)
+            (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "group" Decode.string) (Decode.field "count" Decode.string)
+            |> Decode.andThen (\row -> Decode.map3 (\open groupOpen body -> {row | open=open,groupOpen=groupOpen,body=body,ast=case body of
+                    Just content -> if content.format == "markdown" && not content.more && content.part == 0 then Markdown.Parser.parse content.text |> Result.mapError (always "parse error") else Err "not_loaded"
+                    Nothing -> Err "not_loaded"})
+                (Decode.field "open" Decode.bool) (Decode.field "groupOpen" Decode.bool)
+                (Decode.oneOf [Decode.field "body" (Decode.map7 (\text part more tokens format structured exception -> Just {text=text,part=part,more=more,tokens=tokens,format=format,structured=structured,exception=exception}) (Decode.field "text" Decode.string) (Decode.field "part" Decode.int) (Decode.field "more" Decode.bool) (Decode.oneOf [Decode.field "tokens" (Decode.list (Decode.map2 Tuple.pair (Decode.field "kind" Decode.string) (Decode.field "text" Decode.string))),Decode.succeed []]) (Decode.oneOf [Decode.field "format" Decode.string,Decode.succeed "markdown"]) (Decode.oneOf [Decode.field "structured" Decode.bool,Decode.succeed False]) (Decode.oneOf [Decode.field "exception" Decode.bool,Decode.succeed False])),Decode.succeed Nothing]))
+    in
+    if field "stamp" Decode.string "" /= state.stamp || field "generation" Decode.int -1 /= state.generation
+        || Just (field "workspace" Decode.string "") /= state.workspace || Just (field "session" Decode.string "") /= state.selected
+        || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then (model,Cmd.none)
+    else if kind == "sealed-demand" then
+        ({model | sessions={state | sealed={sealed | http=Just {sequence=field "sequence" Decode.int -1,path=field "path" Decode.string ""}}}},Cmd.none)
+    else if kind == "sealed-clear" then
+        ({model | sessions={state | inspectedEvent=Nothing,rows=[],sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,renderPart=0,inspectorPart=0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
+    else if kind == "sealed-error" then
+        let code=field "code" Decode.string "archive_failed" in
+        ({model | sessions={state | inspectedEvent=Nothing,sealed={sealed | phase="error",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown
+            ,error=Just (if code == "archive_cleanup_failed" then "Archive cleanup could not be confirmed. Reload this page before another archive." else if code == "archive_item_limit" then "One record exceeds the local view limit. The original transcript is still available to download." else if code == "archive_recovery_limit" then "Local archive recovery reached its directory limit. Close other archive tabs or clear this site's stored archive data before retrying." else if code == "archive_recovery_pending" then "Old local archives were removed. Retry to finish recovery." else code)}}},Cmd.none)
+    else if kind == "sealed-cancelled" then
+        ({model | sessions={state | inspectedEvent=Nothing,sealed={sealed | phase="cancelled",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown,error=Nothing}}},Cmd.none)
+    else if kind == "sealed-inspect" then
+        ({model | sessions={state | inspectedEvent=Just (field "key" Decode.string ""),sealed={sealed | inspectorPart=0}}},Cmd.none)
+    else if kind == "sealed-render" then
+        let part=field "part" Decode.int -1 in
+        if part < 0 || part > 100000 then (model,Cmd.none)
+        else ({model | sessions={state | sealed=if field "inspector" Decode.bool False then {sealed | inspectorPart=part} else {sealed | renderPart=part}}},Cmd.none)
+    else if kind == "sealed-disclosure" then
+        let key=field "key" Decode.string ""
+            open=field "open" Decode.bool False
+            updateDisclosure row=if row.key == key then {row | open=open} else if "group:" ++ row.group == key then {row | groupOpen=open} else row
+        in ({model | sessions={state | sealed={sealed | rows=List.map updateDisclosure sealed.rows}}},Cmd.none)
+    else if kind == "sealed-markdown-start" then
+        ({model | sessions={state | sealed={sealed | phase="reading-body",markdown={key=field "key" Decode.string "",source="",ast=Err "not_loaded",structured=False,complete=False,nextPart=0,request=0}}}},Cmd.none)
+    else if kind == "sealed-markdown-chunk" then
+        let
+            previous=sealed.markdown
+            textPart=field "text" Decode.string ""
+            complete=field "complete" Decode.bool False
+            source=previous.source++textPart
+        in
+        if field "key" Decode.string "" /= previous.key || field "part" Decode.int -1 /= previous.nextPart || String.length previous.source + String.length textPart > 1048576 then (model,Cmd.none)
+        else ({model | sessions={state | sealed={sealed | phase=if complete then "ready" else "reading-body",renderPart=0,inspectorPart=0
+            ,markdown={previous | source=source,ast=if complete then Markdown.Parser.parse source |> Result.mapError (always "parse error") else previous.ast,structured=field "structured" Decode.bool False,complete=complete,nextPart=previous.nextPart+1,request=field "request" Decode.int 0}}}},Cmd.none)
+    else if kind == "sealed-progress" then
+        ({model | sessions={state | sealed={sealed | phase=field "phase" Decode.string sealed.phase,rawBytes=field "rawBytes" Decode.string sealed.rawBytes,compressedBytes=field "compressedBytes" Decode.string sealed.compressedBytes,archiveGeneration=field "archiveGeneration" Decode.string sealed.archiveGeneration}}},Cmd.none)
+    else if kind == "sealed-page" then
+        case Decode.decodeValue (Decode.field "rows" (Decode.list piece)) value of
+            Ok rows ->
+                if List.length rows <= 200 && String.length (Encode.encode 0 value) <= 4194304 then
+                    ({model | sessions={state | sealed={sealed | phase="ready",error=Nothing,http=Nothing,rows=rows,first=field "first" Decode.string "",last=field "last" Decode.string "",more=field "more" Decode.bool False,archiveGeneration=field "archiveGeneration" Decode.string "",renderPart=if field "fromEnd" Decode.bool False then -1 else 0,inspectorPart=0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
+                else ({model | sessions={state | sealed={sealed | phase="error",rows=[],error=Just "archive_page_limit"}}},Cmd.none)
+            Err _ -> ({model | sessions={state | sealed={sealed | phase="error",rows=[],error=Just "archive_page_invalid"}}},Cmd.none)
+    else (model,Cmd.none)
 
 
 encodeSaveChunk : SessionSaveOperation -> Api.AgentSession -> Int -> String -> Encode.Value
@@ -642,18 +733,26 @@ inspectableEvents rows =
 viewEventInspector : String -> Model -> String -> Html Msg
 viewEventInspector workspace model id =
     let
-        selected = if resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .error |> (/=) Nothing then Nothing else model.sessions.inspectedEvent |> Maybe.andThen (\key -> List.filter (Tuple.first >> (==) key) (inspectableEvents model.sessions.rows) |> List.head)
+        archived = model.sessions.inspectedEvent |> Maybe.andThen (\key -> List.filter (.key >> (==) key) model.sessions.sealed.rows |> List.head
+            |> Maybe.andThen (\piece -> piece.body |> Maybe.map (\body -> (key,{kind=piece.kind,content=body.text,label=piece.label,tokens=body.tokens}))))
+        selected = if resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .error |> (/=) Nothing then Nothing else
+            model.sessions.inspectedEvent |> Maybe.andThen (\key -> List.filter (Tuple.first >> (==) key) (inspectableEvents model.sessions.rows) |> List.head) |> (\live -> if live == Nothing then archived else live)
         metadata = resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.andThen (\payload -> case payload of
             Delivery.Metadata session -> Just session
             _ -> Nothing)
+        ownerAttributes = if metadata |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then
+            [attribute "data-sealed-dom-owner" model.sessions.stamp,attribute "data-sealed-dom-load" (String.fromInt model.sessions.generation)] else []
+        renderHost = if metadata |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then
+            \attributes children -> Keyed.node "aside" attributes (sealedHostNodes model children)
+            else aside
     in
-    aside [class "session-event-inspector",attribute "aria-label" "Event inspector"]
+    renderHost [class "session-event-inspector",attribute "aria-label" "Event inspector"]
         [ div [class "session-inspector-heading"] [h4 [] [text "Event inspector"]]
-        , Keyed.node "div" [class "session-inspected-event"]
+        , Keyed.node "div" (class "session-inspected-event" :: ownerAttributes)
             (selected |> Maybe.map (\(key,block) -> [(model.sessions.stamp ++ ":" ++ key,div []
                 [h5 [] [text (if block.label == "" then "Activity details" else block.label)]
                 ,p [class "card-meta"] [text (if block.kind == "tool" then "Tool input" else if block.kind == "result" then "Tool result" else "Thinking summary")]
-                ,viewBlockContent block])]) |> Maybe.withDefault [("empty",p [class "empty-state"] [text (if model.sessions.inspectedEvent == Nothing then "Select Inspect on an activity event to read its details here." else "The selected event is outside this transcript window.")])])
+                ,if archived /= Nothing then viewSealedInspector model block else viewBlockContent block])]) |> Maybe.withDefault [("empty",p [class "empty-state"] [text (if model.sessions.inspectedEvent == Nothing then "Select Inspect on an activity event to read its details here." else "The selected event is outside this transcript window.")])])
         , metadata |> Maybe.map (\session -> details [class "session-inspector-identity"]
             [summary [] [text "Session identity"]
             ,dl []
@@ -875,7 +974,8 @@ viewRecords workspace model id =
         newest = session |> Maybe.map .committedBytes |> Maybe.withDefault state.offset
         rangeError = resource workspace (Delivery.SessionWindow id state.offset state.end False) model |> Maybe.andThen .error
     in
-    section [class "session-viewer",attribute "aria-label" "Session transcript"]
+    if session |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then viewSealedRecords model session
+    else section [class "session-viewer",attribute "aria-label" "Session transcript"]
         [div [class "sessions-toolbar"]
             [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
@@ -883,6 +983,115 @@ viewRecords workspace model id =
             (List.map (\item -> let (key,node) = viewTranscriptItem model item in (state.stamp ++ ":" ++ key,node)) (Transcript.project state.rows))
         ,if List.isEmpty state.rows then p [attribute "role" "status"] [text (if state.start == Nothing then "Loading transcript metadata…" else if state.offset < state.end then "Reading transcript…" else if newest == 0 then "This session has no committed records." else "No complete messages in this window.")] else text ""
         ,text "" ]
+
+
+viewSealedRecords : Model -> Maybe Api.AgentSession -> Html Msg
+viewSealedRecords model session =
+    let
+        state=model.sessions
+        sealed=state.sealed
+        action name label = button [attribute "data-sealed-action" name,attribute "data-sealed-owner" state.stamp,disabled (sealed.phase /= "ready" && name /= "cancel")] [text label]
+        openAttribute opened = if opened then [attribute "open" ""] else []
+        body piece = case piece.body of
+            Nothing -> Transcript.atom 0 (\_ -> text "")
+            Just content ->
+                let
+                    complete=sealed.markdown.key == piece.key && sealed.markdown.complete
+                    partial=content.format == "markdown" && (content.more || content.part>0)
+                    source=if complete then sealed.markdown.source else content.text
+                    renderedBody=if partial && not complete then Transcript.atom (1024+12*String.length state.stamp+12*String.length piece.key) (\_ -> button [attribute "data-sealed-action" "markdown",attribute "data-sealed-owner" state.stamp,attribute "data-sealed-key" piece.key] [text "Read complete message"])
+                        else if complete then Transcript.formattedAst sessionMarkdownRenderer source sealed.markdown.ast
+                        else if content.format == "markdown" then Transcript.formattedAst sessionMarkdownRenderer source piece.ast
+                        else sealedBlockFragment (if content.format == "json" then "tool" else piece.kind) source content.tokens
+                in Transcript.container 128 (div [])
+                [renderedBody
+                ,Transcript.atom (2048+12*String.length state.stamp+12*String.length piece.key) (\_ -> div []
+                    [if content.format == "json" && content.part > 0 then button [attribute "data-sealed-action" "body",attribute "data-sealed-owner" state.stamp,attribute "data-sealed-key" piece.key,attribute "data-sealed-part" (String.fromInt (content.part-1))] [text "Previous body part"] else text ""
+                    ,if content.format == "json" && content.more then button [attribute "data-sealed-action" "body",attribute "data-sealed-owner" state.stamp,attribute "data-sealed-key" piece.key,attribute "data-sealed-part" (String.fromInt (content.part+1))] [text "Continue body"] else text ""])]
+        pieceView piece =
+            Transcript.container (4096+24*String.length state.stamp+24*String.length piece.key+12*String.length piece.time+12*String.length piece.label+6*String.length piece.offset+6*String.length piece.role)
+                (\children -> article [class ("session-record session-role-" ++ piece.role),attribute "data-offset" piece.offset,attribute "data-block-key" piece.key]
+                    [div [class "session-record-meta"] [time [attribute "datetime" piece.time] [text (compactTimestamp model piece.time)],span [] [text (if piece.role == "user" then "You" else if piece.role == "assistant" then "Assistant" else if piece.role == "tool" then "Tool" else "Message")],if piece.body |> Maybe.map .exception |> Maybe.withDefault False then span [class "session-structured-json"] [text "Large structured reasoning · exact JSON"] else text ""]
+                    ,if piece.kind == "text" then div [] children
+                     else if piece.kind == "encrypted" then em [] [text "Thinking..."]
+                     else div [] [button [class "btn btn-sm session-inspect-event",attribute "data-sealed-action" "inspect",attribute "data-sealed-key" piece.key,attribute "data-sealed-owner" state.stamp] [text "Inspect ↗"]
+                        ,details ([class ("session-content-" ++ piece.kind),attribute "data-event-key" piece.key,attribute "data-sealed-key" piece.key,attribute "data-sealed-owner" state.stamp] ++ openAttribute piece.open)
+                            (summary [] [text (if piece.label == "" then "Thinking" else piece.label)]::children)]]) [body piece]
+        runs = List.foldr (\piece accumulated -> case accumulated of
+            run::rest -> if piece.group /= "" && (List.head run |> Maybe.map (.group >> (==) piece.group) |> Maybe.withDefault False) then (piece::run)::rest else [piece]::accumulated
+            [] -> [[piece]]) [] sealed.rows
+        runView run = case run of
+            [] -> Transcript.atom 0 (\_ -> text "")
+            first::_ ->
+                if first.group == "" then pieceView first
+                else Transcript.container (2048+12*String.length first.group+12*String.length state.stamp)
+                    (\children -> details ([class "session-activity-group",attribute "data-group-key" first.group,attribute "data-sealed-key" ("group:" ++ first.group),attribute "data-sealed-owner" state.stamp] ++ openAttribute first.groupOpen)
+                        [summary [] [text ("Activity · " ++ first.count ++ " events · " ++ String.fromInt (List.length run) ++ " on this page")]
+                        ,div [class "session-activity-records"] children]) (List.map pieceView run)
+        rendered = Transcript.renderPage (if sealed.markdown.complete then (if sealed.markdown.structured then 524288 else 1048576) else 2097152) sealed.renderPart (List.map runView runs)
+        message = case sealed.phase of
+            "ready" -> if List.isEmpty sealed.rows then "No matching messages on this page." else "Verified complete archive."
+            "cancelled" -> "Archive loading cancelled."
+            "downloading" -> "Downloading complete archive… " ++ sealed.compressedBytes ++ " bytes"
+            "decoding" -> "Verifying and indexing… " ++ sealed.rawBytes ++ " bytes"
+            "navigating" -> "Reading local index…"
+            "reading-body" -> "Reading the complete formatted message…"
+            "error" -> Maybe.withDefault "Archive could not load." sealed.error
+            _ -> "Preparing complete archive…"
+    in
+    Keyed.node "section" [class "session-viewer session-sealed-viewer",attribute "aria-label" "Session transcript"]
+        (sealedHostNodes model [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")
+        ,p [attribute "role" (if sealed.error == Nothing then "status" else "alert"),attribute "aria-live" "polite"] [text message]
+        ,div [class "sessions-toolbar"] [action "first" "First",action "previous" "Previous",action "next" "Next",action "last" "Last",action "cancel" "Cancel",button [onClick SessionsRetry] [text "Retry"]]
+        ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-search",Html.Attributes.placeholder "Search complete archive",attribute "maxlength" "256"] [],action "search" "Search",action "search-next" "Continue search"]
+        ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-position",Html.Attributes.placeholder "Original byte offset",attribute "inputmode" "numeric"] [],action "position" "Go to offset"]
+        ,sealedRenderControls model False rendered.part rendered.more
+        ,if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
+        ,div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "aria-label" "Verified archive records"] rendered.nodes])
+
+
+sealedHostKey : Model -> String
+sealedHostKey model =
+    Encode.encode 0 (Encode.list Encode.string [model.sessions.stamp,String.fromInt model.sessions.generation,model.sessions.sealed.domEpoch])
+
+
+sealedHostNodes : Model -> List (Html Msg) -> List (String,Html Msg)
+sealedHostNodes model =
+    List.indexedMap (\index node -> (sealedHostKey model ++ ":" ++ String.fromInt index,node))
+
+
+sealedBlockFragment : String -> String -> List (String,String) -> Transcript.Fragment Msg
+sealedBlockFragment kind content tokens =
+    if kind == "text" || kind == "thinking" then Transcript.formatted sessionMarkdownRenderer content
+    else Transcript.atom (1024+6*String.length content+40*List.length tokens) (\_ -> pre [class "session-tool-content"]
+        [code [class "language-json"] (if List.isEmpty tokens then [text content] else List.map (\(tokenKind,value) -> span [class ("json-" ++ tokenKind)] [text value]) tokens)])
+
+
+sealedRenderControls : Model -> Bool -> Int -> Bool -> Html Msg
+sealedRenderControls model inspector part more =
+    let
+        control next label=button [attribute "data-sealed-action" "render",attribute "data-sealed-owner" model.sessions.stamp,attribute "data-sealed-part" (String.fromInt next),attribute "data-sealed-inspector" (if inspector then "true" else "false")] [text label]
+    in div [class "sessions-toolbar session-render-continuation",attribute "data-render-part" (String.fromInt part),attribute "data-render-inspector" (if inspector then "true" else "false")]
+        [if part>0 then control (part-1) "Previous presentation" else text "",if more then control (part+1) "Continue presentation" else text ""]
+
+
+viewSealedInspector : Model -> Transcript.Block -> Html Msg
+viewSealedInspector model block =
+    let
+        selected=model.sessions.inspectedEvent |> Maybe.andThen (\targetKey -> List.filter (.key >> (==) targetKey) model.sessions.sealed.rows |> List.head)
+        content=selected |> Maybe.andThen .body
+        key=Maybe.withDefault "" model.sessions.inspectedEvent
+        complete=model.sessions.sealed.markdown.key == key && model.sessions.sealed.markdown.complete
+        partial=content |> Maybe.map (\body -> body.format == "markdown" && (body.more || body.part>0)) |> Maybe.withDefault False
+        source=if complete then model.sessions.sealed.markdown.source else block.content
+        kind=if content |> Maybe.map (.format >> (==) "json") |> Maybe.withDefault False then "tool" else block.kind
+        fragment=if complete then Transcript.formattedAst sessionMarkdownRenderer source model.sessions.sealed.markdown.ast
+            else if kind == "text" || kind == "thinking" then Transcript.formattedAst sessionMarkdownRenderer source (selected |> Maybe.map .ast |> Maybe.withDefault (Err "not_loaded"))
+            else sealedBlockFragment kind source block.tokens
+        rendered=Transcript.renderPage 262144 model.sessions.sealed.inspectorPart [fragment]
+    in
+    if partial && not complete then button [attribute "data-sealed-action" "markdown",attribute "data-sealed-owner" model.sessions.stamp,attribute "data-sealed-key" key] [text "Read complete message"]
+    else div [] (rendered.nodes ++ [sealedRenderControls model True rendered.part rendered.more])
 
 
 

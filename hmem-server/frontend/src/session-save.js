@@ -1,7 +1,306 @@
 import { createRecordFramer, decodeBase64 } from './session-viewer.js'
 import { sha256 } from '@noble/hashes/sha256'
+import { validateManifest } from './session-archive-worker.js'
+import {acquireArchiveCustody,deleteArchiveStage} from './session-archive-store.js'
 
 const hex = bytes => Array.from(bytes,byte => byte.toString(16).padStart(2,'0')).join('')
+
+export function createSealedViewer({send,fetchArchive,document,window,workerFactory=()=>new Worker(new URL('./session-archive-worker.js',import.meta.url),{type:'module'}),cleanupMs=10000,custodyFactory=acquireArchiveCustody,deleteStage=deleteArchiveStage}) {
+  let active=null,pending=null,sequence=0,authority=0,blocked=false,stopped='',authorityFence='',blockedNotice='',domEpoch=''
+  const clear=owned=>{
+    if(!owned || active!==owned || owned.domCleared)return
+    clearPageProgress(owned)
+    owned.domCleared=true
+    const candidates=[document.getElementById?.('session-records'),...(document.querySelectorAll?.('.session-inspected-event') || [])]
+    const nodes=candidates.filter(node=>node?.getAttribute?.('data-sealed-dom-owner')===owned.config.stamp && node.getAttribute('data-sealed-dom-load')===String(owned.config.load))
+    domEpoch=window.crypto.randomUUID()
+    // Capture the old hosts before Elm can replace them. The stamped clear
+    // retires model evidence and keys the replacement of their emptied trees.
+    event(owned,'clear')
+    for(const node of nodes)node.replaceChildren()
+  }
+  const identity=config=>JSON.stringify([config.stamp,config.load,config.authority,authority])
+  const event=(owned,kind,extra={})=>send({...extra,kind:'sealed-'+kind,stamp:owned.config.stamp,generation:owned.config.load,load:owned.config.load,request:extra.request ?? owned.lifecycleRequest,
+    workspace:owned.config.workspace,session:owned.config.session,archiveGeneration:owned.manifest?.generation_id || '',authEpoch:owned.authority,domEpoch})
+  const current=owned=>active===owned&&!owned.retired&&owned.authority===authority
+  function clearPageProgress(owned,operation) {
+    const pending=owned?.pageProgress
+    if(!pending || (operation && pending!==operation))return
+    owned.pageProgress=null
+    if(pending.timer!==null)window.clearTimeout(pending.timer)
+  }
+  function cleanupFailed(owned) {
+    blocked=true;pending=null;stopped=owned.identity;clear(owned)
+    blockedNotice=owned.identity
+    if(!owned.cleanupReported){owned.cleanupReported=true;event(owned,'error',{code:'archive_cleanup_failed'})}
+  }
+  function rpc(owned,kind,extra={}) {
+    const request=++sequence
+    return new Promise((resolve,reject)=>{
+      const timer=window.setTimeout(()=>{owned.waiters.delete(request);reject(Error(kind==='retire'?'archive_cleanup_failed':'archive_worker_timeout'))},kind==='finish'?owned.deadline:30000)
+      owned.waiters.set(request,{resolve,reject,timer})
+      owned.worker.postMessage({kind,stamp:owned.workerStamp,request,...extra},extra.bytes?[extra.bytes]:[])
+    })
+  }
+  async function retire(owned) {
+    if(!owned || owned.cleaning)return owned?.cleaning
+    clearPageProgress(owned)
+    owned.retired=true;owned.localIntent=null;owned.controller?.abort()
+    if(owned.markdownWaiter){window.clearTimeout(owned.markdownWaiter.timer);owned.markdownWaiter.reject(Error('retired_archive'));owned.markdownWaiter=null}
+    // Interrupt the current decode before awaiting the serialized cleanup.
+    if(owned.started)owned.worker.postMessage({kind:'interrupt',stamp:owned.workerStamp,request:++sequence})
+    window.clearTimeout(owned.timer)
+    owned.actualCleaning=(async()=>{
+      try {
+        await owned.transport?.catch(()=>{})
+        if(owned.transportCleanupFailed)throw Error('archive_cleanup_failed')
+        await owned.phaseTransition?.catch(()=>{})
+        if(owned.started&&owned.worker)await rpc(owned,'retire')
+        terminateWorker(owned)
+        if(owned.stageName&&owned.custody)await deleteStage(owned.stageName,owned.custody)
+        if(owned.releaseCustody){await owned.releaseCustody();owned.releaseCustody=null}
+        for(const waiter of owned.waiters.values()){window.clearTimeout(waiter.timer);waiter.reject(Error('retired_archive'))}
+        owned.waiters.clear()
+        if(active===owned)active=null
+        if(pending && !blocked){const latest=pending;pending=null;start(latest)}
+      } catch {
+        cleanupFailed(owned)
+      }
+    })()
+    let timer
+    const deadline=new Promise(resolve=>{timer=window.setTimeout(()=>{cleanupFailed(owned);resolve()},cleanupMs)})
+    // A finite failure disposition does not cancel or release the real join.
+    // The captured owner retains every handle until actualCleaning completes.
+    owned.cleaning=Promise.race([owned.actualCleaning,deadline]).finally(()=>window.clearTimeout(timer))
+    return owned.cleaning
+  }
+  function failure(owned,error) {
+    if(!current(owned))return
+    clearPageProgress(owned)
+    stopped=owned.identity;clear(owned)
+    event(owned,'error',{code:error.name==='QuotaExceededError'?'archive_quota':error.message})
+    void retire(owned)
+  }
+  function demand(owned,path,kind) {
+    if(!current(owned))return
+    owned.demand={sequence:++sequence,path,kind}
+    event(owned,'demand',owned.demand)
+  }
+  function constructWorker(owned,mode) {
+    const incarnation=window.crypto.randomUUID(),worker=workerFactory({incarnation,mode})
+    owned.worker=worker;owned.incarnation=incarnation;owned.mode=mode
+    if(owned.workerStamp)owned.workerStamp={...owned.workerStamp,incarnation}
+    worker.onerror=()=>{if(owned.worker===worker&&owned.incarnation===incarnation)failure(owned,Error('archive_worker_failed'))}
+    worker.onmessage=({data})=>{
+      if(owned.worker!==worker||owned.incarnation!==incarnation||!owned.workerStamp||data.incarnation!==incarnation
+        ||data.workspace!==owned.workerStamp.workspace||data.session!==owned.workerStamp.session||data.generation!==owned.workerStamp.generation||data.load!==owned.workerStamp.load||data.authEpoch!==owned.workerStamp.authEpoch)return
+      if(data.kind==='progress'){if(current(owned))event(owned,'progress',data.phase==='ready'?{phase:'index-ready'}:data);return}
+      const waiter=owned.waiters.get(data.request);if(!waiter)return
+      owned.waiters.delete(data.request);window.clearTimeout(waiter.timer)
+      if(data.kind==='error')waiter.reject(Error(data.code));else waiter.resolve(data)
+    }
+  }
+  function terminateWorker(owned) {
+    const worker=owned.worker
+    if(worker){worker.onmessage=null;worker.onerror=null;worker.terminate();owned.worker=null}
+    owned.started=false
+  }
+  async function detachProcessor(owned) {
+    await rpc(owned,'finish');if(!current(owned))return
+    const response=await rpc(owned,'detach')
+    if(response.stage?.name!==owned.stageName||response.stage?.custody!==owned.custody||JSON.stringify(response.stage.manifest)!==JSON.stringify(owned.manifest))throw Error('archive_receipt_mismatch')
+    owned.detached=true;terminateWorker(owned)
+    if(current(owned))demand(owned,owned.config.apiUrl+owned.manifest.content_path,'revalidate')
+  }
+  async function adoptReader(owned) {
+    if(!current(owned)||!owned.detached)throw Error('retired_archive')
+    constructWorker(owned,'reader');owned.started=true
+    await rpc(owned,'adopt',{name:owned.stageName,custody:owned.custody,manifest:owned.manifest})
+    if(current(owned))await page(owned)
+  }
+
+  function start(config) {
+    const owned={config,authority,identity:identity(config),lifecycleRequest:++sequence,worker:null,waiters:new Map(),retired:false,started:false,manifest:null,page:{},deadline:125000}
+    active=owned
+    event(owned,'progress',{phase:'preparing',rawBytes:'0',compressedBytes:'0'})
+    try {
+      constructWorker(owned,'processor')
+      demand(owned,config.apiUrl+`/api/v1/workspaces/${encodeURIComponent(config.workspace)}/sessions/${encodeURIComponent(config.session)}/archive`,'manifest')
+    }catch(error){failure(owned,error)}
+  }
+  function drainLocalIntent(owned) {
+    if(!current(owned) || owned.pagePending || owned.markdownBusy)return
+    const intent=owned.localIntent;owned.localIntent=null
+    if(intent?.kind==='markdown'){
+      if(intent.page){owned.localIntent={kind:'markdown',key:intent.key};void page(owned,{...intent.page,bodyKey:intent.key},intent.key)}
+      else void readMarkdown(owned,intent.key)
+    }
+    else if(intent)void page(owned,intent.options)
+  }
+  async function page(owned,options={},visibleKey) {
+    if(!current(owned))return
+    if(owned.pagePending || owned.markdownBusy){owned.localIntent={kind:'page',options:{...options}};return}
+    owned.pagePending=true
+    const operation={timer:null};owned.pageProgress=operation
+    operation.timer=window.setTimeout(()=>{
+      operation.timer=null
+      if(current(owned) && owned.pagePending && owned.pageProgress===operation)event(owned,'progress',{phase:'navigating'})
+    },100)
+    try {
+      const result=await rpc(owned,'page',{page:options})
+      clearPageProgress(owned,operation)
+      if(current(owned) && visibleKey && !result.rows.some(row=>row.key===visibleKey))throw Error('archive_piece_missing')
+      if(current(owned)){owned.page=options;owned.first=result.first;owned.last=result.last;owned.searchAfter=result.searchAfter;owned.searchCursor=result.searchCursor;event(owned,'page',{...result,kind:undefined,fromEnd:!!options.last||!!options.before})}
+    }catch(error){clearPageProgress(owned,operation);failure(owned,error)}finally{clearPageProgress(owned,operation);owned.pagePending=false;drainLocalIntent(owned)}
+  }
+  async function smallJson(response,owned) {
+    if(!response.body)throw Error('archive_response_failed')
+    const reader=response.body.getReader(),parts=[];let count=0
+    let primary
+    try{while(true){const part=await reader.read();if(part.done)break;count+=part.value.length;if(count>65536)throw Error('manifest_limit');parts.push(part.value)}
+      const bytes=new Uint8Array(count);let at=0;for(const part of parts){bytes.set(part,at);at+=part.length}return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes))
+    }catch(error){primary=error;throw error}finally{await closeReader(reader,primary,owned)}
+  }
+  async function closeReader(reader,primary,owned) {
+    if(!reader)return
+    const timer=window.setTimeout(()=>{cleanupFailed(owned);void retire(owned)},cleanupMs)
+    try {
+      await reader.cancel(primary).catch(error=>{if(error!==primary)throw error})
+      await reader.closed.catch(error=>{if(error!==primary)throw error})
+      reader.releaseLock()
+    }catch(error){throw new AggregateError([primary,error].filter(Boolean),'archive_cleanup_failed')}
+    finally{window.clearTimeout(timer)}
+  }
+  function receiveHttp(request) {
+    const owned=active
+    if(!owned || !current(owned) || owned.demand?.sequence!==request.sequence){send({...request,kind:'sealed-http',request:request.id,sequence:request.sequence,status:0});return}
+    if(owned.http===request.id)return
+    owned.http=request.id;owned.controller=new AbortController()
+    const transportDemand=owned.demand
+    owned.transport=(async()=>{
+      let response,reader,status=0,next,primary
+      try {
+        const transport=await fetchArchive(transportDemand.path,{signal:owned.controller.signal,...(transportDemand.kind==='revalidate'?{headers:{'If-None-Match':owned.etag}}:{})})
+        response=transport.response;status=response.status
+        if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+        if(transportDemand.kind==='manifest') {
+          const value=await smallJson(response,owned)
+          if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+          if(status===202 && ['preparing','retrying'].includes(value.state)) {
+            if(value.workspace_id!==owned.config.workspace || value.session_id!==owned.config.session)throw Error('invalid_manifest')
+            event(owned,'progress',{phase:value.state,rawBytes:value.progress?.raw_bytes || '0',compressedBytes:value.progress?.compressed_bytes || '0'})
+            const delay=Math.min(60000,Math.max(500,Number(value.retry_after_ms)||1000))
+            next=()=>{owned.timer=window.setTimeout(()=>demandManifest(owned),delay)}
+          } else {
+            if(status!==200)throw Error(status===401||status===403?'archive_unauthorized':value.error || 'archive_unavailable')
+            owned.manifest=validateManifest(value,owned.config.workspace,owned.config.session)
+            owned.workerStamp={workspace:owned.config.workspace,session:owned.config.session,generation:value.generation_id,load:owned.config.load,authEpoch:owned.authority,incarnation:owned.incarnation}
+            owned.deadline=Number((BigInt(value.compressed_bytes)*2000n/12500000n)+120000n*((BigInt(value.raw_bytes)+1073741823n)/1073741824n || 1n)+5000n)
+            owned.stageName=window.crypto.randomUUID();owned.custody=window.crypto.randomUUID()
+            owned.custodyAcquisition=custodyFactory(owned.stageName)
+            owned.releaseCustody=await owned.custodyAcquisition
+            if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+            owned.started=true
+            await rpc(owned,'start',{name:owned.stageName,custody:owned.custody,manifest:value})
+            next=()=>demand(owned,owned.config.apiUrl+value.content_path,'content')
+          }
+        } else if(transportDemand.kind==='revalidate') {
+          if(status!==304||response.headers.get('ETag')!==owned.etag||!owned.detached)throw Error(status===401||status===403?'archive_unauthorized':'archive_revalidation_failed')
+          if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+          next=()=>{owned.phaseTransition=adoptReader(owned).catch(error=>failure(owned,error))}
+        } else {
+          const value=owned.manifest,headers=response.headers
+          owned.etag=headers.get('ETag')
+          if(!owned.etag||!/^"[^"\r\n]*"$/.test(owned.etag))throw Error('archive_response_mismatch')
+          reader=response.body?.getReader()
+          if(status!==200 || !response.body || !/^application\/gzip(?:;|$)/i.test(headers.get('Content-Type')||'') || headers.get('Content-Encoding')
+            || headers.get('Content-Length')!==value.compressed_bytes || headers.get('X-HMem-Archive-Generation')!==value.generation_id
+            || headers.get('X-HMem-Archive-SHA256')!==value.compressed_sha256 || headers.get('X-HMem-Archive-Raw-Bytes')!==value.raw_bytes
+            || headers.get('X-HMem-Archive-Raw-SHA256')!==value.raw_sha256)throw Error(status===401||status===403?'archive_unauthorized':'archive_response_mismatch')
+          while(true){if(!current(owned)||!transport.isCurrent())throw Error('retired_archive');const part=await reader.read();if(part.done)break
+            for(let at=0;at<part.value.length;at+=65536){if(!current(owned)||!transport.isCurrent())throw Error('retired_archive');const bytes=part.value.slice(at,at+65536);await rpc(owned,'chunk',{bytes:bytes.buffer})}}
+          if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+          next=()=>{owned.phaseTransition=detachProcessor(owned).catch(error=>failure(owned,error))}
+        }
+      } catch(error){primary=error;status=status>=400?status:0;if(error.message==='archive_cleanup_failed')owned.transportCleanupFailed=true;if(current(owned)){stopped=owned.identity;clear(owned);event(owned,'error',{code:error.message});queueMicrotask(()=>void retire(owned))}}
+      finally {
+        if(!reader && response?.body && !response.body.locked)reader=response.body.getReader()
+        try{await closeReader(reader,primary,owned)}catch{owned.transportCleanupFailed=true;cleanupFailed(owned)}
+        // Exact transport completion owns physical release, including stale work.
+        if(!owned.transportCleanupFailed)event(owned,'http',{request:request.id,sequence:request.sequence,status:status>=200&&status<300?200:status})
+        if(current(owned)&&next)queueMicrotask(next)
+      }
+    })()
+  }
+  const demandManifest=owned=>demand(owned,owned.config.apiUrl+`/api/v1/workspaces/${encodeURIComponent(owned.config.workspace)}/sessions/${encodeURIComponent(owned.config.session)}/archive`,'manifest')
+  async function readMarkdown(owned,key) {
+    if(!current(owned))return
+    if(owned.pagePending||owned.markdownBusy){owned.localIntent={kind:'markdown',key,page:{...owned.page}};return}
+    owned.markdownBusy=true
+    event(owned,'markdown-start',{key})
+    let bytes=0
+    try {
+      for(let part=0;;part++){
+        if(!current(owned))throw Error('retired_archive')
+        const result=await rpc(owned,'body',{key,part}),body=result.body
+        if(!current(owned))throw Error('retired_archive')
+        if(result.key!==key || body.part!==part || body.format!=='markdown')throw Error('archive_body_mismatch')
+        const size=new TextEncoder().encode(body.text).length;bytes+=size
+        if(size>65536 || bytes>1048576)throw Error('archive_body_limit')
+        const request=++sequence
+        const acknowledged=new Promise((resolve,reject)=>{
+          const timer=window.setTimeout(()=>{owned.markdownWaiter=null;reject(Error('archive_body_ack_timeout'))},10000)
+          owned.markdownWaiter={request,resolve,reject,timer}
+        })
+        event(owned,'markdown-chunk',{request,key,part,text:body.text,structured:!!body.structured,complete:!body.more})
+        await acknowledged
+        if(!body.more)break
+      }
+    }catch(error){failure(owned,error)}finally{owned.markdownBusy=false;drainLocalIntent(owned)}
+  }
+  document.addEventListener('click',domEvent=>{
+    const button=domEvent.target?.closest?.('[data-sealed-action]'),owned=active
+    if(!button || !owned || !current(owned) || button.getAttribute('data-sealed-owner')!==owned.config.stamp)return
+    const action=button.getAttribute('data-sealed-action');domEvent.preventDefault()
+    if(action==='cancel'){stopped=owned.identity;pending=null;clear(owned);event(owned,'cancelled');void retire(owned)}
+    else if(action==='first')void page(owned)
+    else if(action==='last')void page(owned,{last:true})
+    else if(action==='next')void page(owned,{after:owned.last})
+    else if(action==='search-next')void page(owned,{query:owned.page.query,after:owned.searchAfter,searchCursor:owned.searchCursor})
+    else if(action==='previous')void page(owned,{before:owned.first})
+    else if(action==='body')void page(owned,{...owned.page,bodyKey:button.getAttribute('data-sealed-key'),bodyPart:Number(button.getAttribute('data-sealed-part'))})
+    else if(action==='inspect'){const key=button.getAttribute('data-sealed-key');event(owned,'inspect',{key});void page(owned,{...owned.page,bodyKey:key})}
+    else if(action==='render')event(owned,'render',{part:Number(button.getAttribute('data-sealed-part')),inspector:button.getAttribute('data-sealed-inspector')==='true'})
+    else if(action==='markdown')void readMarkdown(owned,button.getAttribute('data-sealed-key'))
+    else if(action==='search'){const input=document.getElementById('sealed-search');void page(owned,{query:input?.value || ''})}
+    else if(action==='position'){const input=document.getElementById('sealed-position');void page(owned,{offset:input?.value || '0'})}
+  })
+  document.addEventListener('toggle',domEvent=>{
+    const node=domEvent.target,owned=active,key=node.getAttribute?.('data-sealed-key')
+    if(!key || !owned || !current(owned) || node.getAttribute('data-sealed-owner')!==owned.config.stamp)return
+    event(owned,'disclosure',{key,open:node.open})
+    void rpc(owned,'disclosure',{key,open:node.open}).then(()=>{if(node.open && !key.startsWith('group:'))return page(owned,{...owned.page,bodyKey:key})}).catch(error=>failure(owned,error))
+  },true)
+  window.addEventListener?.('pagehide',()=>{pending=null;clear(active);void retire(active)})
+  return {
+    configure(config,request,markdownAck) {
+      const bodyOwner=active
+      if(bodyOwner?.markdownWaiter && current(bodyOwner) && markdownAck?.stamp===bodyOwner.config.stamp && markdownAck.load===bodyOwner.config.load && markdownAck.request===bodyOwner.markdownWaiter.request){
+        const waiter=bodyOwner.markdownWaiter;bodyOwner.markdownWaiter=null;window.clearTimeout(waiter.timer);waiter.resolve()
+      }
+      if(active && config?.active && config.authority!==active.config.authority){authority++;clear(active)}
+      if(blocked && config?.active && blockedNotice!==identity(config)){
+        blockedNotice=identity(config)
+        send({kind:'sealed-error',stamp:config.stamp,generation:config.load,load:config.load,request:++sequence,workspace:config.workspace,session:config.session,archiveGeneration:'',authEpoch:authority,code:'archive_cleanup_failed'})
+      }
+      if(!config || !config.active){pending=null;stopped='';if(active){clear(active);void retire(active)}}
+      else if(!blocked && config.stamp!==authorityFence && identity(config)!==stopped && (!active || active.identity!==identity(config))){pending=config;if(active){clear(active);void retire(active)}else{pending=null;start(config)}}
+      if(request)receiveHttp(request)
+    },
+    retireAuthority(){authorityFence=active?.config.stamp || '';authority++;pending=null;if(active){clear(active);event(active,'cancelled');void retire(active)}},
+    snapshot:()=>({active:!!active,pending:!!pending,blocked})
+  }
+}
 
 export function createEvidenceWriter(writable, session, isCurrent = () => true) {
   if (!session || session.state !== 'terminated' || !Number.isSafeInteger(session.finalBytes) || session.finalBytes < 0 || !/^[a-f0-9]{64}$/.test(session.finalSha256)) throw new Error('invalid_receipt')
@@ -45,10 +344,11 @@ export function createEvidenceWriter(writable, session, isCurrent = () => true) 
 
 // Elm owns demand and the two HTTP slots. This bridge only consumes one
 // validated chunk at a time and acknowledges it before Elm can rearm demand.
-export function installSessionBridge(app, { document = globalThis.document, window = globalThis.window, now = () => Date.now(), fetchArchive = async()=>{throw Error('archive_transport_unavailable')} } = {}) {
+export function installSessionBridge(app, { document = globalThis.document, window = globalThis.window, now = () => Date.now(), fetchArchive = async()=>{throw Error('archive_transport_unavailable')}, workerFactory } = {}) {
   let stamp = '', viewerStamp = '', generation = -1, framer = null, viewerIntent = 0
   let activeSave = null
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))
+  const sealed=createSealedViewer({send,fetchArchive,document,window,workerFactory})
   let heartbeatKey = ''
   let viewerScope = '', presentation = null
   const disclosureKey = node => {
@@ -237,6 +537,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   })
   queueMicrotask(()=>send({kind:'save-capability',supported:typeof window.showSaveFilePicker === 'function'}))
   app.ports.sessionBridgeCommand.subscribe(command => {
+    sealed.configure(command.sealed,command.sealedRequest,command.sealedMarkdownAck)
     const downloadStamp = command.downloadStamp ?? command.stamp
     if (downloadStamp !== stamp) { stamp = downloadStamp; void retireSave() }
     if (command.stamp !== viewerStamp) {
@@ -332,4 +633,5 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       send({ kind:'viewer-error',...captured })
     }
   })
+  return {retireAuthority:()=>sealed.retireAuthority()}
 }

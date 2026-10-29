@@ -1,8 +1,9 @@
 # Sealed session archives
 
 This is the implementation contract for post-seal storage and full-session
-viewing. The codec probe below establishes feasibility, not completion of the
-database, HTTP or browser implementation.
+viewing. The standalone codec probe and client qualification below have separate
+scopes; final database/HTTP/browser integration and rollout belong to the aggregate
+qualification.
 
 ## Representation
 
@@ -407,24 +408,43 @@ Manifests use `no-store`. Browser local-data ownership still requires the client
 logout/principal-switch invalidation described below.
 
 The sealed viewer waits for this object; it does not fall back to raw range
-viewing. A worker stages the complete compressed download in a private local
-generation and verifies compressed count/hash. Only after complete transfer
-does it stream decompression into an OPFS raw file, incrementally hash bytes
-with the existing SHA-256 library, and build a persistent record/event index.
-Validate gzip termination and the original final count/hash before publishing
-the local generation or showing transcript content. A failed transfer,
-decompression, parse, hash or quota check publishes nothing.
+viewing. A processor Worker stages the complete compressed download in private
+OPFS and verifies its generation, count and SHA-256 before reopening it for
+single-member native gzip decoding. It streams exact raw bytes into another
+OPFS file while hashing and building an IndexedDB semantic index. Decoder EOF,
+strict UTF-8/JSONL framing and the original 64-bit count/hash must all pass before
+any transcript is published. Transfer, decoding, parsing, integrity and actual
+quota failures publish nothing. Accepted download counts and decoding progress
+are coalesced to about one update per second; phase entry and terminal events
+remain immediate.
 
-Factor the existing incremental framing/presentation into an indexed sink.
-Retain cross-record `pairOccurrence` matching, activity-group anchors/upserts,
-disclosure identity and ordering; independently parsing each page is insufficient.
-Store raw record offsets and event/occurrence references locally. Commit at most
-256 index records or 1 MiB per batch, with backpressure. Keep worker messages,
-navigation reads and the DOM bounded by the existing 200-row/4 MiB presentation
-window while allowing navigation across the entire verified session. A page
-reserves 128 KiB for hydrated bodies and 1 MiB of wire data within that combined
-ceiling. Exact pretty output is produced lazily in chunks of at most 16 Ki UTF-16
-units/64 KiB UTF-8, with bounded tokenization.
+One admitted load has sequential processor and reader incarnations. The bridge
+holds its per-generation Web Lock continuously from creation through deletion.
+Before acknowledging detach, the processor joins its decoder/source pipeline,
+every IndexedDB transaction terminal event and actual file-handle closure. The
+bridge fences old callbacks and invokes terminate() before constructing the
+reader. It first performs a current-authorized conditional content GET with the
+stored authority-bound ETag; only the matching 304 permits adoption. This
+revalidation cost is included in selection-to-view timing. The reader opens the
+existing exact owner/schema/generation/codec/receipts/raw length without recovery,
+creation, upgrade or another decode. Raw/index data stay immutable; bounded
+disclosure updates remain supported. Public Worker termination provides no
+native-thread or RSS-reclamation acknowledgement, so this contract does not
+claim physical thread nonoverlap or immediate memory release.
+
+The shared framing/semantic transition preserves adjacent occurrence matching,
+activity anchors, disclosure identity and source order. Persist source/block
+references and bounded cursor indexes rather than all-session maps or growing
+group arrays. Index batches are at most 256 records/1 MiB. The current page
+admits at most 64 rows within the 200-row/4 MiB serialized-and-mounted ceiling,
+reserving 128 KiB for hydrated bodies and 1 MiB for wire data. Search and cursor
+continuations reach the complete verified session, including huge groups and
+multi-block records. A single item that cannot fit the wire limit gives an
+explicit local-view resource error; original downloads remain available.
+Exact pretty output is generated lazily in at most 16 Ki UTF-16 units/64 KiB
+UTF-8 parts, with lossless tokenization. Complete Markdown blocks retain fence,
+reference, list and table context while rendered continuations bound expanded
+attributes and DOM content before mounting.
 
 One explicit presentation exception applies to structured reasoning objects
 whose exact pretty-printed JSON exceeds 1,048,576 UTF-8 bytes: show the complete
@@ -433,44 +453,49 @@ Objects at or below that limit, normal text/thinking Markdown, pairing and
 activity grouping keep their existing semantics. This exception does not
 increase memory budgets or introduce a virtual Markdown parser.
 
-Cancel download, decoding and indexing on selection change, explicit cancel,
-authorization loss or disposal. Tag every message with session, generation and
-load token; stale completions cannot replace the current view. Close worker
-handles before deleting staging. Keep only the current private generation;
-selection change, authority withdrawal and cancellation delete it. Revisiting a
-session performs fresh authorized manifest and content GETs, with no
-cross-selection verified cache. Pages within the current verified generation
-read local data without HTTP. Logout,
-principal switch and credential/session changes retire ownership even when
-workspace/session IDs stay the same.
+Selection change, cancel, authorization loss and disposal immediately clear owned
+transcript and inspector evidence and retire the exact load/incarnation. Stale
+messages cannot repopulate it. Close streams, files and IndexedDB before deleting
+staging; uncertain cleanup retains actual capabilities and blocks replacement.
+Keep only the current private generation. Revisiting a session performs fresh
+authorized manifest and content GETs; there is no cross-selection cache. Local
+pages use no HTTP. Their verified raw-read cache has exactly two reused 64 KiB
+buffers, copies returned bytes, and is invalidated on writes and retirement.
+Logout, principal switch and credential/session changes retire ownership even
+when workspace/session IDs remain the same.
 
-Worker, gzip `DecompressionStream`, worker OPFS, IndexedDB and Web Locks are
-required. A per-local-UUID lock protects each live tab through actual cleanup;
-there is no lifetime origin mutex. The versioned
-`hmem-session-archives-v1/owner.json` layout marks owned generations. Recovery
-examines at most 128 entries and removes at most eight marked stale UUIDs per
-admission, skipping live owners and unknown entries. Exhausting the eight-stale
-cleanup budget gives a retry that makes real progress. More than 128 preserved
-entries produces terminal `archive_recovery_limit` with close-other-tabs/private-
-storage remediation; live and unknown entries remain preserved. Cleanup failures
-retain ownership until the same outstanding cleanup completes.
+Worker, gzip DecompressionStream, worker OPFS, IndexedDB and Web Locks are
+required. These are same-origin resources: OPFS and Web Locks require a secure
+context, and synchronous OPFS handles are dedicated-Worker APIs. See the
+[File System specification](https://fs.spec.whatwg.org/) and
+[Web Locks interfaces](https://w3c.github.io/web-locks/#navigator-mixins).
+Production deployment requires HTTPS and the actual capabilities. The tested
+HTTP loopback origin is potentially trustworthy under
+[Secure Contexts](https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy);
+this does not establish support for remote HTTP origins or cross-origin storage.
 
-The initial qualification platform is desktop Windows Chromium, matching the
-repository's native test platform; record actual browser/build/device versions.
-Run browser qualification in a normal persistent disk-backed profile with a
-storage canary. Capability checks do not establish private/incognito profile
-behavior; record the profile and storage evidence with each qualification result.
-Require those capabilities by feature detection. Other browsers must pass the same integration gates before
-being advertised. Missing capabilities or insufficient quota produce an explicit
-unsupported/resource error, never a reduced raw-window view. Before transfer,
-check storage estimates against compressed + raw bytes plus an index allowance;
-recheck after each batch and handle actual quota errors. Estimates do not promise
-that a large session will fit. Local disk grows with compressed bytes, raw bytes
-and index size; processing memory must not grow with transcript size.
+A per-local-UUID lock protects each live tab through actual cleanup; there is no
+lifetime origin mutex. The versioned `hmem-session-archives-v1/<local-uuid>/owner.json` layout
+marks owned generations. Recovery examines at most 128 entries and removes at
+most eight marked stale UUIDs per admission, skipping live owners and unknown
+entries. Exhausting the eight-stale cleanup budget permits a retry that makes
+real progress. More than 128 preserved entries produces terminal
+archive_recovery_limit with close-other-tabs/private-storage guidance; live and
+unknown entries remain preserved.
+
+The qualified platform is Windows Chromium in a normal persistent disk-backed
+profile, with an actual close/reopen storage canary. Other browsers/profile modes
+must pass the same integration gates before being advertised. Missing
+capabilities produce an explicit unsupported state. Storage estimates are
+advisory: low or unavailable estimates do not reject otherwise successful writes.
+Actual QuotaExceededError is authoritative and follows owned cleanup. Local disk
+grows with compressed bytes, raw bytes and index size; estimates do not promise
+that a session will fit.
 
 ## Budgets and remaining qualification
 
-These are prospective implementation gates, not measured product results:
+These limits apply to implementation qualification. Client measurements below
+cover the selected frontend fixture; server and aggregate gates remain separate:
 
 | Work | Limit |
 | --- | --- |
@@ -498,6 +523,67 @@ quota cleanup, framing across index/page boundaries and complete 1 GiB viewing.
 The final task owns matching database/HTTP/browser acceptance and rollout; an
 isolated codec result cannot close those gates. Backfill and raw cleanup remain
 disabled until compatible readers and the full-object path pass qualification.
+
+### Client qualification scope
+
+On 2026-10-29 the matching frontend candidate passed deterministic valid JSONL
+archives at 1 MiB, 100 MiB and 1 GiB on Windows 10.0.26200 x64, Chromium
+151.0.7922.34 and Node 24.15.0. The fixture streams 1024-byte UTF-8/CRLF records
+with seed 0x51a7 through the controlled 100 Mbit/s loopback HTTP service. Exact
+raw/gzip receipts, source/assets, process images and device inputs are retained
+in the [bounded qualification record](../../hmem-server/frontend/perf/session-archive.qualification.json).
+This is frontend/private-storage and mock HTTP authority qualification, not the
+final PostgreSQL/server integration or rollout gate.
+The full-view clock starts before selecting an already-ready archive and includes
+content preflight, transfer, verification, reader handoff and first-page display.
+It excludes seal/compression-to-archive-ready latency. Aggregate qualification
+measures that interval and any click-while-preparing total separately.
+
+| Raw size | Gzip bytes | Acknowledgement ms | Verified view ms | Navigation p95 ms | Sampled private increment MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 MiB | 6,240 | 10.9 | 213.9 | 13.5 | 77.25 |
+| 100 MiB | 573,001 | 17.8 | 8,420.8 | 13.4 | 86.50 |
+| 1 GiB | 5,861,585 | 8.1 | 94,621.5 | 13.4 | 124.43 |
+
+Each vector starts with a fresh normal profile and an ACTIVE viewer baseline
+without an archive Worker or staged generation. The primary metric sums native
+private footprints for all five owned browser processes across download,
+indexing, processor/reader handoff and 20 local navigation actions plus final
+Last. Background memory dumps are causally bound to one successful explicit
+global-request span and exact per-process lineage; the CDP request GUID and
+legacy export row ID are recorded separately. Ordered page/processor/reader
+isolate measurements are secondary diagnostics. No forced GC or observer-cost
+subtraction is used. These are sampled maxima, not continuous peaks or RSS:
+maximum observation gaps were 397/1,145/1,393 ms respectively. Required disk
+counts, file sizes and storage checks run after the final product-memory sample,
+with verification/transaction closure and complete fixture cleanup still required
+before success. All three vectors satisfied the original 128 MiB, acknowledgement,
+navigation and full-view limits at this declared scope.
+
+The retained matched active/live comparison used five warmups and 40 measured
+selections and live updates per bundle, alternating historical b742/current
+bundles. Selection and update p95 ratios were 1.018 and 1.019, below 1.10. Later
+changes are archive-only and reuse that result by unchanged executed-path
+validation; its original asset binding remains explicit. Earlier memory and
+setup failures remain immutable in the current record's fixed encoded family
+and [historical record](../../hmem-server/frontend/perf/session-archive.historical.json);
+passing vectors do not relabel them.
+
+An inherited elm-markdown 7.0.1 limitation remains: 1000 adjacent reference links
+in one paragraph with an approximately 8 KiB destination overflow InlineParser's
+stack in both current ACTIVE and historical b742 ACTIVE rendering. The failing
+raw fixture SHA-256 is 4c6584a5f5063b5a4393f37b95ac2ce949d311a16f03e7af68559095f35d32e9.
+It is not a passing archive gate. The supported continuation case uses 1000
+separate paragraphs, verifies every exact destination and bounds more than 8 MiB
+of expanded href content within the mounted ceiling. No parser fork or silent
+plain-text fallback is used.
+
+The two qualification files are limited to 1 MiB each/2 MiB total. Task 6 owns
+them and its contained scratch through verified handoff, then Task 8/repository
+maintainers retain required input and benchmark evidence until an approved
+successor preserves or supersedes those facts. Raw fixtures/traces and routine
+logs are not retained. The final task must reconcile served frontend/backend
+bindings and integrated acceptance before enabling backfill or reclamation.
 
 ## Reproducible codec baseline
 

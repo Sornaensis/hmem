@@ -1,3 +1,4 @@
+import archiveResourceWorkerUrl from './session-archive-worker.js?worker&url'
 import { installSearchNavigation } from './search-navigation.js'
 import { installSearchEditViewport } from './search-edit-viewport.js'
 import { installObservationSearch } from './observation-search.js'
@@ -368,6 +369,7 @@ let lastUnauthorizedNotificationAt = 0
 let notifyUnauthorized = function () {}
 let lastAuthTokenSignature = authTokenSignature()
 let authTokenGeneration = 0
+let sessionBridge = null
 
 function isApiRequestUrl(rawUrl) {
   try {
@@ -457,6 +459,7 @@ const app = Elm.Main.init({
 })
 
 notifyUnauthorized = function () {
+  sessionBridge?.retireAuthority()
   const now = Date.now()
   if (now - lastUnauthorizedNotificationAt < 2000) return
   lastUnauthorizedNotificationAt = now
@@ -466,6 +469,7 @@ notifyUnauthorized = function () {
 function notifyAuthTokenChanged(force) {
   const signature = authTokenSignature()
   if (!force && signature === lastAuthTokenSignature) return
+  sessionBridge?.retireAuthority()
   if (signature !== lastAuthTokenSignature) authTokenGeneration += 1
   lastAuthTokenSignature = signature
   if (app.ports.authTokenChanged) app.ports.authTokenChanged.send(signature !== null)
@@ -740,11 +744,11 @@ installSearchNavigation(app)
 installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)
-installSessionBridge(app, { async fetchArchive(url, {signal}) {
+sessionBridge = installSessionBridge(app, { workerFactory:({incarnation,mode})=>new Worker(archiveResourceWorkerUrl+'?'+new URLSearchParams({incarnation,phase:mode}),{type:'module'}), async fetchArchive(url, {signal,headers}) {
   if(!isApiRequestUrl(url))throw new Error('invalid_archive_origin')
   const generation=authTokenGeneration,signature=authTokenSignature()
   const isCurrent=()=>generation===authTokenGeneration&&signature===authTokenSignature()
-  const response=await fetch(url,{method:'GET',headers:authHeaderObject(),credentials:'include',signal})
+  const response=await fetch(url,{method:'GET',headers:{...authHeaderObject(),...(headers?.['If-None-Match']?{'If-None-Match':headers['If-None-Match']}: {})},credentials:'include',signal})
   if(response.status===401&&isCurrent())notifyUnauthorized()
   return {response,isCurrent}
 } })

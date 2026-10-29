@@ -19,49 +19,71 @@ export function decodeBase64(value) {
 const string = value => typeof value === 'string' ? value : ''
 const printable = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2) || ''
 const short = value => string(value).replace(/^mcp__/, '').replaceAll('__', ' · ').replace(/\s+/g,' ').slice(0,96)
+const archiveBlocks=Symbol('archiveBlocks'),archiveVisible=Symbol('archiveVisible')
+const blocksFor=row=>row[archiveBlocks] || JSON.parse(row.text)
 
 export function toolPayload(value, field = 'input') {
   let parsed = value
   if (typeof value === 'string') { try { parsed = JSON.parse(value) } catch { parsed = {[field]:value} } }
   if (parsed === undefined) parsed = null
   const text = JSON.stringify(parsed, null, 2)
+  return {text,tokens:payloadTokens(text)}
+}
+
+export function payloadTokens(text) {
   const tokens = []
   let through = 0
   for (const match of text.matchAll(/"(?:\\.|[^"\\])*"\s*:|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[^"\w-]+/g)) {
-    if (tokens.length === 2048) { tokens.push({text:text.slice(through),kind:'punctuation'}); break }
+    if (match.index !== through) return [{text,kind:'punctuation'}]
+    if (tokens.length === 2048) { tokens.push({text:text.slice(through),kind:'punctuation'}); return tokens }
     const [value] = match
     tokens.push({text:value,kind:value.trim().endsWith(':')?'key':value.startsWith('"')?'string':/^-?\d/.test(value)?'number':/^(true|false|null)$/.test(value)?'literal':'punctuation'})
     through = match.index + value.length
   }
-  return {text,tokens}
+  if (through !== text.length) return [{text,kind:'punctuation'}]
+  return tokens
 }
 
 // Presentation never changes the stored record or its byte boundaries.
-export function presentation(value, raw) {
+export function presentation(value, raw, {archive=false}={}) {
   const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
   const time = string(object.timestamp || object.time)
   const block = (kind, text, label = '') => ({kind, text:string(text), label:string(label).slice(0,256)})
   const tool = (kind, value, name = '') => {
-    const payload = toolPayload(value,kind === 'result'?'output':'input')
-    const first = payload.text.split('\n').map(line=>line.trim()).find(line=>line.includes(':')) || ''
+    const field=kind === 'result'?'output':'input'
+    let payload
+    if(archive) {
+      let parsed=value
+      if(typeof value==='string'){try{parsed=JSON.parse(value)}catch{parsed={[field]:value}}}
+      payload={text:JSON.stringify(parsed ?? null),tokens:[]}
+    }else payload=toolPayload(value,field)
+    const first = (archive ? prettyPayloadSlice(JSON.parse(payload.text)).text : payload.text).split('\n').map(line=>line.trim()).find(line=>line.includes(':')) || ''
     return {...block(kind,payload.text,`${kind === 'result'?'Result':'Call'}${name?' · '+short(name):''}${first?' · '+short(first.replace(/,$/,'')):''}`),tokens:payload.tokens}
   }
   const contentBlocks = content => (Array.isArray(content) ? content : [{type:typeof content === 'string'?'text':'unknown',text:content}]).flatMap(part => {
-    if (!part || typeof part !== 'object' || Array.isArray(part)) return [block('unknown',printable(part),'Content')]
-    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [block('unknown',printable(part),'Content')]
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return [block('unknown',archive?'':printable(part),'Content')]
+    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [block('unknown',archive?'':printable(part),'Content')]
     if (['redacted_thinking','encrypted_thinking'].includes(part.type) || (['thinking','reasoning'].includes(part.type) && (part.encrypted_content || part.encrypted))) return [block('encrypted','','Thinking...')]
     if (['thinking','reasoning','summary_text'].includes(part.type)) return [block('thinking',part.thinking || part.text,'Thinking')]
     if (part.type === 'tool_use') return [tool('tool',part.input,part.name)]
     if (part.type === 'tool_result') return [tool('result',part.content,part.is_error ? 'error' : part.tool_use_id)]
-    return [block('unknown',printable(part),'Attachment / content')]
+    return [block('unknown',archive?'':printable(part),'Attachment / content')]
   })
-  const conversation = (role,blocks,extra={}) => ({type:'conversation',role:string(role).slice(0,256)||'assistant',time,text:JSON.stringify(blocks),...extra})
+  const conversation = (role,blocks,extra={}) => {
+    const row={type:'conversation',role:string(role).slice(0,256)||'assistant',time,text:JSON.stringify(blocks),...extra}
+    // Archive indexing keeps one bounded row and its adjacent occurrence. These
+    // private refs avoid reparsing normalized blocks and never enter JSON/IDB.
+    if(archive)Object.defineProperty(row,archiveBlocks,{value:blocks})
+    return row
+  }
   if (object.type === 'response_item') {
     const item=object.payload || {}
     if(item.type === 'message') return conversation(item.role || 'assistant',contentBlocks(item.content))
     if(['function_call','custom_tool_call'].includes(item.type)) return conversation('assistant',[tool('tool',item.arguments ?? item.input,item.name)])
     if(['function_call_output','custom_tool_call_output'].includes(item.type)) return conversation('tool',[tool('result',item.output,item.call_id)])
-    if(item.type === 'reasoning') return conversation('assistant',[item.encrypted_content ? block('encrypted','','Thinking...') : block('thinking', (Array.isArray(item.summary) ? item.summary.map(part=>part?.text || '').join('\n') : printable(item.summary)),'Thinking')])
+    if(item.type === 'reasoning') return conversation('assistant',[item.encrypted_content ? block('encrypted','','Thinking...')
+      : archive && !Array.isArray(item.summary) && typeof item.summary!=='string' ? {...block('thinking',JSON.stringify(item.summary) || '','Thinking'),pretty:true}
+      : block('thinking', (Array.isArray(item.summary) ? item.summary.map(part=>part?.text || '').join('\n') : printable(item.summary)),'Thinking')])
   }
   if (['assistant','user'].includes(object.type) && object.message) {
     const message=object.message
@@ -73,6 +95,114 @@ export function presentation(value, raw) {
   }
   if(typeof object.text === 'string' || typeof object.content === 'string') return {type:string(object.type),role:string(object.role),time,text:typeof object.text === 'string' ? object.text : object.content}
   return {type:'unknown',role:'',time,text:''}
+}
+
+// JSON.stringify(value,null,2) as bounded output pieces. A valid small deeply
+// nested value can have hundreds of MiB of indentation; never form that string.
+export function createPrettyPayloadReader(value,limit=16384) {
+  function* chunks() {
+    const stack=[{value,depth:0}]
+    while(stack.length) {
+      const item=stack.pop()
+      if(item.keys) {
+        if(item.index===item.keys.length){yield '\n'+' '.repeat(item.depth*2)+(item.array?']':'}');continue}
+        yield (item.index?',\n':'\n')+' '.repeat((item.depth+1)*2)
+        const key=item.keys[item.index++]
+        if(!item.array)yield JSON.stringify(key)+': '
+        stack.push(item,{value:item.value[key],depth:item.depth+1})
+      }else if(item.value && typeof item.value==='object') {
+        const array=Array.isArray(item.value),keys=Object.keys(item.value)
+        yield array?'[':'{'
+        if(keys.length)stack.push({...item,keys,index:0,array});else yield array?']':'}'
+      }else yield JSON.stringify(item.value)
+    }
+  }
+  const iterator=chunks();let pending='',at=0,done=false,part=0
+  function advance(){while(at===pending.length&&!done){const next=iterator.next();done=!!next.done;pending=next.value || '';at=0}}
+  return {read(){
+    const parts=[];let size=0
+    advance()
+    while(!done && size<limit) {
+      let end=Math.min(pending.length,at+limit-size)
+      if(end<pending.length && /[\uD800-\uDBFF]/.test(pending[end-1]) && /[\uDC00-\uDFFF]/.test(pending[end]))end--
+      if(end===at)break
+      parts.push(pending.slice(at,end));size+=end-at;at=end
+      advance()
+    }
+    return {text:parts.join(''),part:part++,more:!done}
+  }}
+}
+
+export function prettyPayloadSlice(value,part=0,limit=16384) {
+  if(!Number.isSafeInteger(part)||part<0)throw Error('invalid_body_part')
+  const reader=createPrettyPayloadReader(value,limit);let result
+  for(let index=0;index<=part;index++)result=reader.read()
+  return result
+}
+
+export function visibleBlocks(row) {
+  if (row.type === 'unknown') return []
+  if (row.type !== 'conversation') return row.text.trim() ? [[0,{kind:'text',text:row.text,label:''}]] : []
+  if(row[archiveVisible])return row[archiveVisible]
+  const visible=blocksFor(row).map((part,index)=>[index,part]).filter(([,part])=>
+    part.kind === 'encrypted' || (['text','thinking'].includes(part.kind) && part.text.trim())
+    || (['tool','result'].includes(part.kind) && (part.text.trim() || part.label.trim())))
+  if(row[archiveBlocks])Object.defineProperty(row,archiveVisible,{value:visible})
+  return visible
+}
+
+export function pairOccurrence(previous,row) {
+  if (!previous || previous.type !== 'conversation' || row.type !== 'conversation') return false
+  const sameText=(first,second)=>{
+    if(!first.pretty && !second.pretty)return first.text===second.text
+    if(first.pretty && second.pretty)return first.text===second.text
+    const deferred=first.pretty?first:second,plain=first.pretty?second:first
+    if(!deferred.text)return !plain.text
+    const reader=createPrettyPayloadReader(JSON.parse(deferred.text));let at=0
+    while(true){const part=reader.read();if(plain.text.slice(at,at+part.text.length)!==part.text)return false;at+=part.text.length
+      if(at>plain.text.length)return false;if(!part.more)return at===plain.text.length}
+  }
+  const sameContent=()=>{
+    if(previous.role!==row.role)return false
+    const before=blocksFor(previous),after=blocksFor(row)
+    return before.length===after.length && before.every((block,index)=>block.kind===after[index].kind && sameText(block,after[index]))
+  }
+  const paired = Boolean(previous.eventEnvelope)!==Boolean(row.eventEnvelope)
+    && (previous.pairedOffset === undefined || previous.pairedOffset === row.offset)
+    && (row.pairedOffset === undefined || row.pairedOffset === previous.offset)
+    && sameContent()
+  const firstTime=Date.parse(previous.time),lastTime=Date.parse(row.time)
+  if(paired && Number.isFinite(firstTime) && Number.isFinite(lastTime) && Math.abs(firstTime-lastTime)<=100) {
+    const canonical = row.eventEnvelope ? previous : row
+    canonical.presentationOffset = (typeof row.presentationOffset === 'string'
+      ? BigInt(previous.presentationOffset) < BigInt(row.presentationOffset)
+      : previous.presentationOffset < row.presentationOffset) ? previous.presentationOffset : row.presentationOffset
+    previous.pairedOffset = row.offset; row.pairedOffset = previous.offset
+    return true
+  }
+  return false
+}
+
+// Both adapters use source adjacency, including invisible metadata, and retain
+// one previous occurrence plus the current activity anchor.
+export function semanticTransition(row, previous, anchor) {
+  const paired = pairOccurrence(previous,row)
+  if (paired && !row.eventEnvelope) row.activityAnchors = previous.activityAnchors
+  const visible = visibleBlocks(row)
+  if (!row.activityAnchors) {
+    row.activityAnchors = {}
+    for (const [index,part] of visible) {
+      if (part.kind === 'text') anchor = null
+      else {
+        anchor ??= `${row.presentationOffset}:${index}`
+        row.activityAnchors[index] = anchor
+      }
+    }
+  }
+  row.category = visible.some(([,part])=>part.kind === 'text') ? 'message' : visible.length ? 'activity' : null
+  return {row, previous:row.type === 'conversation' ? row : null, anchor, paired,
+    retired:paired && previous.eventEnvelope ? previous.offset : null,
+    hidden:row.eventEnvelope && row.pairedOffset !== undefined}
 }
 
 export function createRecordFramer(startOffset = 0) {
@@ -108,20 +238,8 @@ export function createRecordFramer(startOffset = 0) {
     if (old !== -1) {
       retained -= rows[old].bytes; rows.splice(old,1)
     }
-    const paired = !replacement && pairOccurrence(previousRecord,row)
-    if (paired && !row.eventEnvelope) row.activityAnchors = previousRecord.activityAnchors
-    const visible = visibleBlocks(row)
-    if (!row.activityAnchors) {
-      row.activityAnchors = {}
-      for (const [index,part] of visible) {
-        if (part.kind === 'text') activityAnchor = null
-        else {
-          activityAnchor ??= `${row.presentationOffset}:${index}`
-          row.activityAnchors[index] = activityAnchor
-        }
-      }
-    }
-    row.category = visible.some(([,part])=>part.kind === 'text') ? 'message' : visible.length ? 'activity' : null
+    const transition = semanticTransition(row,replacement ? null : previousRecord,activityAnchor)
+    activityAnchor = transition.anchor
     // Pairing is a property of adjacent source occurrences, not of the retained
     // display rows. Unknown metadata cannot pair two otherwise distant messages.
     previousRecord = row.type === 'conversation' ? row : null
@@ -141,31 +259,6 @@ export function createRecordFramer(startOffset = 0) {
         retained -= removed.bytes; bytes -= removed.bytes; count--
       }
     }
-  }
-  function visibleBlocks(row) {
-    if (row.type === 'unknown') return []
-    if (row.type !== 'conversation') return row.text.trim() ? [[0,{kind:'text',text:row.text}]] : []
-    return JSON.parse(row.text).map((part,index)=>[index,part]).filter(([,part])=>
-      part.kind === 'encrypted' || (['text','thinking'].includes(part.kind) && part.text.trim())
-      || (['tool','result'].includes(part.kind) && (part.text.trim() || part.label.trim())))
-  }
-  function pairOccurrence(previous,row) {
-    if (!previous || previous.type !== 'conversation' || row.type !== 'conversation') return false
-    const fingerprint = row => row.role+':'+JSON.stringify(JSON.parse(row.text).map(({kind,text})=>({kind,text})))
-    const paired = Boolean(previous.eventEnvelope)!==Boolean(row.eventEnvelope)
-      && (previous.pairedOffset === undefined || previous.pairedOffset === row.offset)
-      && (row.pairedOffset === undefined || row.pairedOffset === previous.offset)
-      && fingerprint(previous)===fingerprint(row)
-    const firstTime=Date.parse(previous.time),lastTime=Date.parse(row.time)
-    // Pair before bounded eviction, so an arriving canonical record retains
-    // the occurrence identity even if this same push retires its envelope.
-    if(paired && Number.isFinite(firstTime) && Number.isFinite(lastTime) && Math.abs(firstTime-lastTime)<=100) {
-      const canonical = row.eventEnvelope ? previous : row
-      canonical.presentationOffset = Math.min(previous.presentationOffset,row.presentationOffset)
-      previous.pairedOffset = row.offset; row.pairedOffset = previous.offset
-      return true
-    }
-    return false
   }
   function snapshot() {
     return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createObservationDiscoveryAdapter } from './support/observation-discovery-adapter.mjs'
-import { readFile } from 'node:fs/promises'
+import { readFile, lstat, realpath } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { resolve, sep } from 'node:path'
 import { chromium } from '@playwright/test'
@@ -118,7 +118,7 @@ const socketScript = () => {
   new MutationObserver(() => { window.hierarchyMaximum = Math.max(window.hierarchyMaximum, document.querySelectorAll('[data-hierarchy-key]').length) }).observe(document, { childList: true, subtree: true })
 }
 
-export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = [], authority = null, pageOptions = {}, launchOptions = {}) {
+export async function openHierarchy(fixture = hierarchyFixture(), additionalFixtures = [], authority = null, pageOptions = {}, launchOptions = {}, persistentProfile = null) {
   const fixtures = [fixture, ...additionalFixtures]
   const staticRoot = resolve(process.cwd(), '../static')
   const server = createServer(async (request, response) => {
@@ -131,7 +131,8 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
     catch { response.writeHead(404); response.end() }
   })
   await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen))
-  let browser, browserServer
+  let browser, browserServer, persistentContext, persistentLaunch, persistentClosing, persistentClosed=false, serverClosing, browserImage
+  const setupOwner = persistentProfile ? { profile: persistentProfile.path, get context() { return persistentContext }, get browser() { return browser }, get server() { return server }, get pendingLaunch() { return persistentLaunch }, close: () => retire() } : null
   const held = new Set(), controls = [], requests = [], errors = [], unhandled = []
   let principalId = 'fixture-user'
   const discovery = createObservationDiscoveryAdapter(fixtures, { allObservations: allFixtureObservations, actor: () => principalId })
@@ -139,6 +140,24 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
   async function retire() {
     for (const release of held) release()
     for (const control of controls) control.release()
+    if (persistentProfile) {
+      const failures=[]
+      try {
+        if(persistentContext && !persistentClosed) {
+          if(!persistentClosing) {
+            const closing=persistentContext.close();persistentClosing=closing
+            closing.then(()=>{persistentClosed=true},()=>{if(persistentClosing===closing)persistentClosing=null})
+          }
+          await bounded(persistentClosing,5000,'Owned persistent context close')
+          assert.equal(browser.isConnected(),false,'Persistent close must close the owned browser')
+        }
+      } catch(error) { failures.push(error) }
+      if(!serverClosing)serverClosing=new Promise((resolveClose,rejectClose)=>server.close(error=>error?rejectClose(error):resolveClose()))
+      try { server.closeAllConnections();await bounded(serverClosing,5000,'Owned persistent HTTP server close') } catch(error) { failures.push(error) }
+      if(failures.length)throw new AggregateError(failures,'persistent_fixture_cleanup_failed')
+      if(globalThis.retainedPersistentFixtureSetupOwner===setupOwner)delete globalThis.retainedPersistentFixtureSetupOwner
+      return
+    }
     try {
       try { if (browser) await bounded(browser.close(), 5000, 'Owned browser close') }
       finally { if (browserServer) await bounded(Promise.resolve().then(() => browserServer.close()), 5000, 'Owned Chromium retirement') }
@@ -148,9 +167,30 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
     }
   }
   try {
-    browserServer = await chromium.launchServer({ headless: true, ...launchOptions })
-    browser = await chromium.connect(browserServer.wsEndpoint())
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', ...pageOptions })
+    let page
+    if (persistentProfile) {
+      const profile = resolve(persistentProfile.path), scratch = resolve('../../.scratch/sealed-archives-e0ac6260')
+      assert.ok(profile.startsWith(scratch + sep) && /^archive-profile-[a-f0-9-]{36}$/.test(profile.slice(scratch.length + 1)))
+      assert.equal((await lstat(profile)).isSymbolicLink(), false)
+      assert.equal(await realpath(profile), profile, 'Owned browser profile cannot traverse reparse points')
+      assert.equal(await realpath(scratch), scratch)
+      persistentLaunch = chromium.launchPersistentContext(profile, { headless: true, ...launchOptions, executablePath: persistentProfile.executable, viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', ...pageOptions })
+      persistentContext = await persistentLaunch
+      browser = persistentContext.browser()
+      if(persistentProfile.afterAcquire)await persistentProfile.afterAcquire({context:persistentContext,browser})
+      const identity = await browser.newBrowserCDPSession()
+      try {
+        const processes = (await identity.send('SystemInfo.getProcessInfo')).processInfo.filter(process => process.type === 'browser')
+        assert.equal(processes.length, 1)
+        browserImage = { pid: processes[0].id, executable: persistentProfile.executable, mode: 'persistent', profile }
+      } finally { await identity.detach() }
+      page = persistentContext.pages()[0] || await persistentContext.newPage()
+    } else {
+      browserServer = await chromium.launchServer({ headless: true, ...launchOptions })
+      browser = await chromium.connect(browserServer.wsEndpoint())
+      browserImage = { pid: browserServer.process().pid, executable: browserServer.process().spawnfile, mode: 'nonpersistent' }
+      page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', ...pageOptions })
+    }
     page.on('pageerror', error => errors.push(error.message))
     await page.addInitScript(socketScript)
     await page.route('**/api/v1/**', async route => {
@@ -273,7 +313,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
     })
     const settleScroll = () => page.evaluate(async () => { const scroll = document.getElementById('main-content-scroll'); let previous = null, stable = 0; const deadline = performance.now() + 1000; while (performance.now() < deadline && stable < 3) { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); const geometry = [scroll.scrollTop, scroll.scrollHeight].join(':'); stable = geometry === previous ? stable + 1 : 0; previous = geometry }; if (stable < 3) throw new Error('Scroll geometry did not settle before complete logical scan');  })
     const origin = 'http://127.0.0.1:' + server.address().port
-    return { page, fixture, discovery, requests, errors, unhandled, origin, bounded, setPrincipal(id) { principalId = id },
+    return { page, fixture, discovery, requests, errors, unhandled, origin, bounded, browserImage, setPrincipal(id) { principalId = id },
       gate(match, options = {}) { let release, arrivedResolve; const wait = new Promise(resolveRelease => { release = resolveRelease }); const arrived = new Promise(resolveArrival => { arrivedResolve = resolveArrival }); const control = { match, ...options, wait, release, arrived, arrivedResolve, used: false }; controls.push(control); return control },
       async start(fragment = 'tab=projects', anchor = 'root-project') { await page.goto(origin + '/workspace/' + fixture.workspace.id + '#' + fragment); try { await page.locator('#entity-' + anchor).waitFor({ timeout: 10000 }) } catch (error) { throw new Error(error.message + '\n' + JSON.stringify({ errors, navigation: requests.filter(r=>r.kind).slice(0,8), geometry:await page.evaluate(()=>({top:document.getElementById('main-content-scroll')?.scrollTop,keys:[...document.querySelectorAll('[data-hierarchy-key]')].slice(0,4).map(row=>row.dataset.hierarchyKey)})), text: (await page.locator('body').innerText()).slice(0, 1200) })) } },
       async idle() { await page.waitForFunction(() => !document.querySelector('.loading-indicator')); const deadline = Date.now() + 10000; let quiet = 0, count = requests.length; while (Date.now() < deadline) { if (!activeBranches && !activeDetails && requests.every(r => r.done) && requests.length === count) { quiet++; if (quiet >= 5) break } else quiet = 0; count = requests.length; await page.waitForTimeout(20) }; assert.ok(quiet >= 5 && activeBranches === 0 && activeDetails === 0 && requests.every(r => r.done), 'Controlled routes must reach stable quiet: ' + JSON.stringify({ quiet, activeBranches, activeDetails, unfinished: requests.filter(r => !r.done).slice(-8) })); assert.deepEqual(errors, []); assert.deepEqual(unhandled, []) },
@@ -282,5 +322,14 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       caps() { return { maxBranches, maxDetails, activeBranches, activeDetails } },
       async close() { await retire() }
     }
-  } catch (error) { await retire(); throw error }
+  } catch (error) {
+    if(!persistentProfile){await retire();throw error}
+    error.setupOwner=setupOwner
+    try { await retire() } catch(cleanup) {
+      const failure=new AggregateError([error,cleanup],'persistent_fixture_setup_cleanup_failed');failure.setupOwner=setupOwner
+      setupOwner.failure=failure;globalThis.retainedPersistentFixtureSetupOwner=setupOwner
+      throw failure
+    }
+    throw error
+  }
 }

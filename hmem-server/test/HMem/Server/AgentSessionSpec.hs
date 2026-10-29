@@ -184,8 +184,8 @@ spec = describe "Agent session HTTP" $ do
       let env=ctx.localEnv; app=ctx.localApplication
           declared=object ["role" .= ("Connector" :: Text),"model-id" .= ("codex:connection-model:high" :: Text)]
           headers=[("X-HMem-Bot-Identity",LBS.toStrict (encode declared))]
-          a=Core.RuntimeIdentity "actual-target-a" Nothing Nothing (Just "developer")
-          b=Core.RuntimeIdentity "actual-target-b" (Just "Provider") Nothing (Just "reviewer")
+          a=Core.RuntimeIdentity "actual-target-a" Nothing Nothing (Just "developer") (Just "codex")
+          b=Core.RuntimeIdentity "actual-target-b" (Just "Provider") Nothing (Just "reviewer") (Just "other-harness")
       workspace <- createTestWorkspace env "http-runtime"
       initial <- makeTask env workspace.id
       identifier <- UUID.nextRandom
@@ -621,6 +621,7 @@ spec = describe "Agent session HTTP" $ do
       field ["components","schemas","SetRuntimeIdentity","required"] document `shouldBe` Just (toJSON (["expected_runtime_revision","runtime_identity"] :: [Text]))
       forM_ [("SetRuntimeIdentity","runtime_identity"),("CreateSessionRequest","initial_runtime_identity")] $ \(schema,property) ->
         field ["components","schemas",schema,"properties",property,"required"] document `shouldBe` Just (toJSON (["model","role"] :: [Text]))
+      field ["components","schemas","RuntimeIdentity","properties","harness","type"] document `shouldBe` Just (String "string")
       field ["components","schemas","CreateSessionRequest","required"] document `shouldBe` Just (toJSON (["id","format_label","title","task_id"] :: [Text]))
 
 sessions :: UUID -> BS.ByteString

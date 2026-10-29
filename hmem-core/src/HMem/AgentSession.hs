@@ -50,18 +50,18 @@ defaultSessionFilter = SessionFilter Nothing Nothing Nothing Nothing
 -- Legacy declarations may have no role; new declarations identify the running
 -- agent's role independently of the immutable connection caller.
 data RuntimeIdentity = RuntimeIdentity
-  { model :: !Text, provider :: !(Maybe Text), reasoning :: !(Maybe Text), role :: !(Maybe Text)
+  { model :: !Text, provider :: !(Maybe Text), reasoning :: !(Maybe Text), role :: !(Maybe Text), harness :: !(Maybe Text)
   } deriving stock (Show, Eq, Generic)
 instance ToJSON RuntimeIdentity where toJSON = genericToJSON jsonOptions
 instance FromJSON RuntimeIdentity where
   parseJSON = withObject "RuntimeIdentity" $ \o -> do
-    unless (all (`elem` ["model","provider","reasoning","role"]) (KM.keys o)) (fail "Unsupported runtime identity fields")
-    identity <- RuntimeIdentity <$> o .: "model" <*> o .:? "provider" <*> o .:? "reasoning" <*> o .:? "role"
+    unless (all (`elem` ["model","provider","reasoning","role","harness"]) (KM.keys o)) (fail "Unsupported runtime identity fields")
+    identity <- RuntimeIdentity <$> o .: "model" <*> o .:? "provider" <*> o .:? "reasoning" <*> o .:? "role" <*> o .:? "harness"
     unless (runtimeIdentityValid identity) (fail "Runtime identity requires a short model name and valid optional metadata")
     pure identity
 
 runtimeIdentityValid :: RuntimeIdentity -> Bool
-runtimeIdentityValid identity = valid 256 identity.model && all (maybe True (valid 128)) [identity.provider,identity.reasoning,identity.role]
+runtimeIdentityValid identity = valid 256 identity.model && all (maybe True (valid 128)) [identity.provider,identity.reasoning,identity.role,identity.harness]
   where valid limit value = not (T.null value) && value == T.strip value && not (T.any (== '\0') value) && BS.length (TE.encodeUtf8 value) <= limit
 
 runtimeDeclarationValid :: RuntimeIdentity -> Bool

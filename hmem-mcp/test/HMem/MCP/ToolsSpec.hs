@@ -47,7 +47,7 @@ spec = do
     it "forwards explicit runtime declarations and null clearing separately from connection attribution" $ do
       requests <- newTVarIO []
       withSessionMock requests $ \manager base -> do
-        let runtime=object ["model" .= ("Actual target model" :: Text),"role" .= ("reviewer" :: Text)]
+        let runtime=object ["model" .= ("Actual target model" :: Text),"role" .= ("reviewer" :: Text),"harness" .= ("explicit-harness" :: Text)]
             args revision value=object ["workspace_id" .= workspaceId,"session_id" .= observationId,"expected_runtime_revision" .= (revision :: Int),"runtime_identity" .= value]
         changed <- call manager base "session_set_runtime" (args 0 runtime)
         jsonPath ["summary","runtime_identity"] changed `shouldBe` Just runtime
@@ -82,8 +82,9 @@ spec = do
       create `shouldSatisfy` contains "VERY SHORT DESCRIPTIVE TITLE"
       jsonPath ["inputSchema","properties","parent_session_id","type"] create `shouldBe` Just (String "string")
       create `shouldSatisfy` contains "running agent role"
-      forM_ [value | value <- toolDefinitions, jsonField "name" value `elem` map (Just . String) ["session_create","session_set_runtime"]] $ \definition ->
+      forM_ [value | value <- toolDefinitions, jsonField "name" value `elem` map (Just . String) ["session_create","session_set_runtime"]] $ \definition -> do
         definition `shouldSatisfy` contains "\"model\",\"role\""
+        definition `shouldSatisfy` contains "\"harness\""
 
     it "rejects strict input, unsupported bounds and missing workspace with fixed errors before forwarding" $ do
       requests <- newTVarIO []
@@ -97,6 +98,7 @@ spec = do
         ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text)])
         ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text),"task_id" .= Null])
         ,("session_create", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"title" .= ("Capture running task" :: Text),"format_label" .= ("jsonl" :: Text),"task_id" .= ("invalid-task" :: Text)])
+        ,("session_set_runtime", object ["workspace_id" .= workspaceId,"session_id" .= observationId,"expected_runtime_revision" .= (0 :: Int),"runtime_identity" .= object ["model" .= ("actual" :: Text),"role" .= ("developer" :: Text),"harness" .= (" invalid " :: Text)]])
         ,("session_terminate", object ["workspace_id" .= workspaceId, "session_id" .= observationId, "expected_offset" .= ("secret-value" :: Text)])] $ \(name,args) -> do
           result <- handleToolCall manager base Nothing testIdentity (object ["name" .= (name :: Text), "arguments" .= args])
           jsonPath ["structuredContent", "error", "code"] result `shouldBe` Just (String "invalid_arguments")

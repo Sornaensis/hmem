@@ -267,7 +267,9 @@ hint. A successful projection omits deleted targets, clearing activity to unknow
 restoration can establish activity again without treating omission as inactivity.
 
 New nonnull session runtime declarations require `model` and the actual running
-agent's `role`; provider/reasoning are optional. Role is a trimmed nonblank string
+agent's `role`; harness/provider/reasoning are optional. Harness names the actual
+runtime application and is never inferred from provider, format or caller.
+Optional strings and role are trimmed, nonblank values
 of at most 128 UTF-8 bytes, independent of the immutable connection caller.
 V046 preserves legacy roleless declarations and their append, heartbeat, resume
 and sealed-evidence lifecycle. No role is inferred or backfilled.

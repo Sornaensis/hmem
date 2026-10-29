@@ -224,7 +224,7 @@ instance ToSchema AgentSession.RuntimeIdentity where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy
     pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
-      & description ?~ "Explicit running-agent role and model, separate from connection caller attribution. New nonnull declarations require role and model; legacy stored declarations may lack role. Provider and reasoning are optional.")
+      & description ?~ "Explicit running-agent role and model, separate from connection caller attribution. New nonnull declarations require role and model; legacy stored declarations may lack role. Harness, provider and reasoning are optional. Harness names the actual runtime application; never infer it from provider, transcript format or connection caller.")
 instance ToSchema AgentSession.SetRuntimeIdentity where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy

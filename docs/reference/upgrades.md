@@ -1,5 +1,12 @@
 # Upgrade reference
 
+## Runtime harness declaration (V053)
+
+Apply V053 before sending the optional runtime `harness` field. It extends the
+existing validator and records its ledger entry in one transaction. Session
+rows, legacy declarations, creator attribution, transcript bytes and sealed
+receipts remain unchanged. Older clients can continue omitting the field.
+
 ## Session lifecycle audit retention (V052)
 
 Take a verified backup, then apply the ordered migration chain before serving

@@ -349,8 +349,8 @@ spec = describe "Session follower" $ do
   it "preserves canonical runtime switches and unknown clearing through stale-start declarations and continuing capture" $
     withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withRegistry fast $ \registry -> do
       sid <- UUID.nextRandom
-      let a=Core.RuntimeIdentity "Target runtime A" Nothing Nothing (Just "developer")
-          b=Core.RuntimeIdentity "Target runtime B" Nothing (Just "high") (Just "reviewer")
+      let a=Core.RuntimeIdentity "Target runtime A" Nothing Nothing (Just "developer") (Just "codex")
+          b=Core.RuntimeIdentity "Target runtime B" Nothing (Just "high") (Just "reviewer") (Just "other-harness")
           upload=payload <$> handleUploadTool registry manager base Nothing identity "session_upload_start"
             (object ["workspace_id" .= wid,"session_id" .= sid,"path" .= path,"title" .= ("Test session work" :: Text),"format_label" .= ("jsonl" :: Text),"initial_runtime_identity" .= a,"task_id" .= wid])
       _ <- upload

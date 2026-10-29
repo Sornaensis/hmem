@@ -194,7 +194,12 @@ functions, guards and ledger registration commit or roll back together.
 
 `sessions.runtime_identity` is nullable JSONB: unknown is SQL NULL; a declaration
 contains a required trimmed `model` (1–256 UTF-8 bytes) and optional known
-`provider`/`reasoning` strings (1–128 bytes each). No other keys are accepted.
+`provider`/`reasoning` strings (1–128 bytes each). V046 also admits the running
+agent's `role`, required for new declarations while preserving legacy roleless
+values. V053 admits optional `harness` with the same 1–128 byte grammar. It names
+the actual runtime application independently of provider, format and connection
+attribution. No other keys are accepted. V053 changes only validation and its
+migration ledger; it does not backfill or rewrite session rows or receipts.
 The server normalizes omitted/null optional components to omission. The runtime
 is declared by an authorized caller, not inferred or independently verified;
 immutable `creator_actor_*`/`creator_bot_identity` remain original connection

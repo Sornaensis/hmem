@@ -46,8 +46,14 @@ suite =
                 explicit=canonicalPage |> String.replace "\"state\":\"active\"" "\"state\":\"active\",\"runtime_identity\":{\"model\":\"Actual target\"},\"runtime_revision\":3"
                 known=Decode.decodeString Api.sessionPageDecoder explicit |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
             in
-            Expect.equal ((Just Nothing,Just 0),(Just (Just {model="Actual target",provider=Nothing,reasoning=Nothing,role=Nothing}),Just 3,Just (Just "Sandbox Superadmin")))
+            Expect.equal ((Just Nothing,Just 0),(Just (Just {model="Actual target",provider=Nothing,reasoning=Nothing,role=Nothing,harness=Nothing}),Just 3,Just (Just "Sandbox Superadmin")))
                 ((Maybe.map .runtimeIdentity absent,Maybe.map .runtimeRevision absent),(Maybe.map .runtimeIdentity known,Maybe.map .runtimeRevision known,Maybe.map (.creator >> .actorLabel) known))
+        , test "runtime harness is explicit and optional on the wire" <| \_ ->
+            let
+                decode fields = canonicalPage |> String.replace "\"state\":\"active\"" ("\"state\":\"active\",\"runtime_identity\":{" ++ fields ++ "}") |> Decode.decodeString Api.sessionPageDecoder |> Result.toMaybe |> Maybe.andThen (.items >> List.head) |> Maybe.andThen .runtimeIdentity |> Maybe.andThen .harness
+            in
+            Expect.equal [Just "actual-harness",Nothing,Nothing]
+                [decode "\"model\":\"Actual model\",\"harness\":\"actual-harness\"",decode "\"model\":\"Legacy model\",\"provider\":\"not-a-harness\"",decode "\"model\":\"Legacy model\",\"harness\":null"]
         , test "present malformed optional fields remain errors" <| \_ ->
             case Decode.decodeString Api.sessionPageDecoder (String.replace "\"state\":\"active\"" "\"state\":\"active\",\"final_bytes\":\"invalid\"" canonicalPage) of
                 Err _ -> Expect.pass
@@ -493,7 +499,7 @@ metadataPresentationTests =
         in Expect.equal (Just (Delivery.Metadata session),Just Nothing,1)
             (payload detailTarget completed,Dict.get (Delivery.key workspace detailTarget) completed.resources |> Maybe.map .error,Dict.size completed.physical))
     , test "fresh empty membership and cleared runtime replace old presentation instead of falling back" <| withMetadata (\session ->
-        let initial={session | runtimeIdentity=Just {model="Previous runtime",provider=Nothing,reasoning=Nothing,role=Nothing}}
+        let initial={session | runtimeIdentity=Just {model="Previous runtime",provider=Nothing,reasoning=Nothing,role=Nothing,harness=Nothing}}
             (busy,requests)=Delivery.invalidateWorkspace workspace (ready initial) |> Delivery.admit workspace
             changed={session | state=Api.SessionTerminated,runtimeIdentity=Nothing,runtimeRevision=1}
             settled=List.foldl (\request current -> if request.target==detailTarget then Delivery.settle request.id True (Ok (Delivery.Metadata changed)) current else if request.target==listTarget then Delivery.settle request.id True (Ok (Delivery.SessionsPage {items=[],nextCursor=Nothing})) current else current) busy requests

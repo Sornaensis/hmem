@@ -264,7 +264,7 @@ spec = describe "canonical change-stream loopback" $ do
             let body="{\"message\":\"private output\"}\n"
             _ <- AgentDB.appendSession ctx.deployedEnv.pool target.id created.id (Agent.AppendSession 0 0 body False)
             _ <- AgentDB.heartbeatSession ctx.deployedEnv.pool target.id created.id
-            _ <- AgentDB.setRuntimeIdentity ctx.deployedEnv.pool target.id created.id (Agent.SetRuntimeIdentity 0 (Just (Agent.RuntimeIdentity "Actual runtime" Nothing Nothing (Just "developer"))))
+            _ <- AgentDB.setRuntimeIdentity ctx.deployedEnv.pool target.id created.id (Agent.SetRuntimeIdentity 0 (Just (Agent.RuntimeIdentity "Actual runtime" Nothing Nothing (Just "developer") Nothing)))
             dispatchAfter before
             marker <- Project.createProject ctx.deployedEnv.pool (CreateProject current.id Nothing "Selected marker" Nothing Nothing Nothing)
             record <- latestOutbox ctx scope

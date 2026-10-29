@@ -509,7 +509,9 @@ V044 adds nullable `sessions.runtime_identity` and nonnegative, non-null
 target model, separate from immutable `creator_*` connection attribution. Legacy
 runtime remains unknown. Active declarations use an isolated revision-guarded
 update without changing transcript cursors, bytes/hash or heartbeat activity;
-sealed metadata remains immutable. See the [schema reference](docs/reference/schema.md#session-runtime-identity-v044).
+sealed metadata remains immutable. V053 accepts optional explicit runtime
+`harness` without backfilling rows or changing columns, ownership or receipts.
+See the [schema reference](docs/reference/schema.md#session-runtime-identity-v044).
 
 V045 adds an insert-only deferred constraint trigger: each new session must have
 at least one live same-workspace `in_progress` task association at transaction

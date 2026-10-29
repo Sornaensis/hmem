@@ -665,13 +665,16 @@ compactSessionCard model session extra link actions =
 viewSessionIdentity : Api.AgentSession -> Html Msg
 viewSessionIdentity session =
     let
-        runtime = session.runtimeIdentity |> Maybe.map (\identity -> String.join " · " (List.filterMap identityValue [Just identity.model,identity.provider,identity.reasoning])) |> Maybe.withDefault "Unknown"
+        component get = session.runtimeIdentity |> Maybe.andThen get |> identityValue |> Maybe.withDefault "unknown"
+        runtime = component .harness ++ ":" ++ component (Just << .model) ++ ":" ++ component .reasoning
         label = if session.state == Api.SessionActive then "Running agent" else "Session agent"
-        role = session.runtimeIdentity |> Maybe.andThen .role |> identityValue |> Maybe.withDefault "Unknown role"
+        role = component .role
+        visible = "[" ++ role ++ "] " ++ runtime
+        provider = session.runtimeIdentity |> Maybe.andThen .provider |> identityValue |> Maybe.map (\value -> " · Provider: " ++ value) |> Maybe.withDefault ""
     in
     span [class "session-identity"]
-        [span [class "session-runtime actor-attribution-kind",attribute "aria-label" (label ++ ": " ++ role ++ ". " ++ runtime),Html.Attributes.title (label ++ ": " ++ role ++ " · " ++ runtime)]
-            [span [class "session-runtime-value"] [text role]]]
+        [span [class "session-runtime actor-attribution-kind",attribute "aria-label" (label ++ ": " ++ visible),Html.Attributes.title (label ++ ": " ++ visible ++ provider)]
+            [span [class "session-runtime-value"] [text visible]]]
 
 
 viewDetail : String -> Model -> String -> Html Msg

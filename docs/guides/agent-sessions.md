@@ -22,11 +22,11 @@ Audit history records session start, actual termination and new task connections
 Upload progress, heartbeats and runtime-label changes refresh live session views
 without adding audit entries. Repeating an operation adds no duplicate entry.
 
-Session cards show the running agent’s declared role, with its complete model,
-provider and reasoning setting in the label’s tooltip. Missing or historical
-role declarations display **Unknown role**. Runtime identity is explicitly
-supplied; it is never inferred from the connection caller. The original caller
-remains stored with the evidence.
+Session cards and readers show `[role] harness:model:reasoning`. Each missing
+component displays `unknown`; long labels wrap. Provider metadata remains in the
+tooltip. Runtime identity is explicitly supplied, never inferred from the
+connection caller, provider or transcript format. The original caller remains
+stored with the evidence.
 Conversation text renders as Markdown. Tool calls and results expand on demand,
 and thinking starts hidden. Consecutive thinking, tool calls and results appear
 as one collapsed **Activity** group with a timestamp and event count. Expand it
@@ -77,7 +77,9 @@ Existing links and resumed captures remain valid after completion. Each task can
 link to several sessions. The local path stays in the MCP process.
 
 When known, supply `initial_runtime_identity`, for example
-`{"model":"actual-target-model","role":"Developer"}`. A new non-null declaration requires the actual short agent role and model. Add `provider` or `reasoning` only when known.
+`{"model":"actual-target-model","role":"Developer","harness":"codex"}`.
+A new non-null declaration requires the actual short agent role and model.
+Add `harness`, `provider` or `reasoning` only when known.
 This describes the captured session, not necessarily your own accepted MCP
 identity. Omit it or use null if unknown. It initializes a new session only;
 creation retries and resumed uploaders preserve the current declaration.

@@ -102,8 +102,10 @@ revision, newline status and any final byte count/SHA-256. Results keep immutabl
 from the caller or format. All new session results include `structuredContent`.
 
 `initial_runtime_identity` initializes NEW sessions only, for example
-`{"model":"actual-target-model","role":"developer"}`; `provider` and `reasoning`
-are optional known values. New nonnull declarations require the running agent's
+`{"model":"actual-target-model","role":"developer","harness":"codex"}`;
+`harness`, `provider` and `reasoning` are optional known values. Harness names the
+actual runtime application; never derive it from provider, format or caller.
+New nonnull declarations require the running agent's
 actual role, independently of the caller. Model names contain 1–256 UTF-8 bytes;
 role and optional values contain 1–128.
 Values must be trimmed and nonblank. Omitted/null means unknown. Creation

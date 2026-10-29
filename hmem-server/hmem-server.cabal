@@ -70,6 +70,7 @@ data-files:
     migrations/V050__sealed_session_archives.sql
     migrations/V051__session_archive_maintenance.sql
     migrations/V052__session_lifecycle_audit.sql
+    migrations/V053__session_runtime_harness.sql
 
 library
   exposed-modules:

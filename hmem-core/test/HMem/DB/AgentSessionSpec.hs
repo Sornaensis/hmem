@@ -131,7 +131,7 @@ spec = do
       uploaded <- append env workspace row "{}\r\n" False
       let input = receipt uploaded.session "{}\r\n"
           during = do
-            _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "actual" Nothing Nothing (Just "Developer"))))
+            _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "actual" Nothing Nothing (Just "Developer") Nothing)))
             _ <- terminateSession env.pool workspace row.id input
             pure ()
       sealed <- terminateSessionWithHook env.pool during workspace row.id input
@@ -297,7 +297,7 @@ spec = do
           during = do
             seen <- atomicModifyIORef' once (\old -> (True,old))
             if seen then pure () else do
-              _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "actual-model" Nothing Nothing (Just "Developer"))))
+              _ <- setRuntimeIdentity env.pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "actual-model" Nothing Nothing (Just "Developer") Nothing)))
               pure ()
       result <- timeout 5000000 (sealIdleSessionWithClock env.pool (pure (addUTCTime 7200 row.lastSeenAt)) during row)
       Just (Just sealed) <- pure result
@@ -545,6 +545,49 @@ spec = do
           savedOrphan.finalSha256 `shouldBe` Just (sessionSha256 "")
           savedOrphan.state `shouldBe` Terminated
 
+    it "decodes optional runtime harness without inferring legacy metadata and rejects malformed declarations" $ \_ -> do
+      let legacy = RuntimeIdentity "model" Nothing Nothing Nothing Nothing
+          parse = Aeson.fromJSON @RuntimeIdentity
+      parse (Aeson.object ["model" Aeson..= ("model" :: T.Text)]) `shouldBe` Aeson.Success legacy
+      parse (Aeson.object ["model" Aeson..= ("model" :: T.Text),"harness" Aeson..= Aeson.Null]) `shouldBe` Aeson.Success legacy
+      forM_ [Aeson.String "", Aeson.String " harness ", Aeson.String (T.replicate 129 "x"), Aeson.String "bad\0harness", Aeson.Bool True] $ \value ->
+        parse (Aeson.object ["model" Aeson..= ("model" :: T.Text),"harness" Aeson..= value]) `shouldSatisfy` (\result -> case result of Aeson.Error _ -> True; _ -> False)
+
+    it "upgrades populated runtime harness validation without backfilling metadata or evidence" $ \_ ->
+      withTestSandbox $ \sandbox -> withSandboxedEnv sandbox $ withSandboxedPostgres sandbox $ \db ->
+        bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+          source <- resolveMigrationsDir sandbox.sandboxRepoRoot
+          let beforeDir=sandbox.sandboxRoot </> "before-v053"
+              upgradeDir=sandbox.sandboxRoot </> "only-v053"
+              filename="V053__session_runtime_harness.sql"
+              env=TestEnv pool sandbox db
+              legacy=RuntimeIdentity "Legacy runtime" Nothing Nothing (Just "developer") Nothing
+              declared=legacy {harness=Just "codex"}
+              body="{\"message\":\"original runtime bytes\"}\r\n"
+          createDirectory beforeDir
+          createDirectory upgradeDir
+          files <- listDirectory source
+          forM_ (filter (\name -> name < "V053" && ".sql" `T.isSuffixOf` T.pack name) files) $ \name -> copyFile (source </> name) (beforeDir </> name)
+          copyFile (source </> filename) (upgradeDir </> filename)
+          Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
+          workspace <- createTestWorkspace env "legacy-harness-upgrade"
+          task <- makeTask env workspace.id "Legacy harness task"
+          let create title = do
+                identifier <- UUID.nextRandom
+                createSession pool (CreateSession identifier workspace.id "jsonl" title Nothing (Just legacy) task.id)
+          active <- create "Legacy active runtime" >>= \row -> (.session) <$> append env workspace.id row body False
+          sealed <- create "Legacy sealed runtime" >>= \row -> terminateSession pool workspace.id row.id (receipt row "")
+          execute env "CREATE TABLE harness_upgrade_audit_expected AS SELECT count(*) AS n FROM audit_log"
+          Migration.runMigrations pool upgradeDir >>= (\result -> result.applied `shouldBe` [filename])
+          getSession pool workspace.id active.id `shouldReturn` Just active
+          getSession pool workspace.id sealed.id `shouldReturn` Just sealed
+          boolean env "SELECT (SELECT count(*) FROM audit_log)=(SELECT n FROM harness_upgrade_audit_expected)" `shouldReturn` True
+          updated <- setRuntimeIdentity pool workspace.id active.id (SetRuntimeIdentity 0 (Just declared))
+          updated.runtimeIdentity `shouldBe` Just declared
+          (updated.committedBytes,updated.revision,updated.lastSeenAt,updated.creatorBotIdentity) `shouldBe` (active.committedBytes,active.revision,active.lastSeenAt,active.creatorBotIdentity)
+          allBytes env workspace.id active.id `shouldReturn` body
+          expectCode SessionTerminated $ setRuntimeIdentity pool workspace.id sealed.id (SetRuntimeIdentity 0 (Just declared))
+
     it "keeps runtime declarations separate from immutable caller and transcript receipts, including retry and clear" $ \env -> do
       workspace <- createTestWorkspace env "runtime-identities"
       initial <- makeTask env workspace.id "Runtime session task"
@@ -553,8 +596,8 @@ spec = do
       updater <- either (fail . T.unpack) pure (mkBotIdentity "Manager" "codex:another-connection-model:low")
       let actor = EffectiveActor ActorBot "connector" "Connector" (Just caller)
           manager = EffectiveActor ActorBot "manager" "Manager" (Just updater)
-          first = RuntimeIdentity "actual-model-a" Nothing Nothing (Just "developer")
-          second = RuntimeIdentity "actual-model-b" (Just "Known provider") (Just "high") (Just "reviewer")
+          first = RuntimeIdentity "actual-model-a" Nothing Nothing (Just "developer") (Just "codex")
+          second = RuntimeIdentity "actual-model-b" (Just "Known provider") (Just "high") (Just "reviewer") (Just "other-harness")
           input = CreateSession identifier workspace.id "jsonl" "Separate runtime identity" Nothing (Just first) initial.id
           body = "{\"text\":\"original bytes\"}\r\n"
           stable row = ((row.creatorActorType,row.creatorActorId,row.creatorActorLabel,row.creatorBotIdentity),
@@ -586,6 +629,8 @@ spec = do
         rejectDb $ execute env ("UPDATE sessions SET "<>mutation<>" WHERE id='"<>uuid identifier<>"'")
       forM_ ["'{}'", "'{\"model\":\"\"}'", "'{\"model\":\" valid \"}'", "'{\"model\":\"A\",\"invented\":\"B\"}'", "'{\"model\":\"A\",\"provider\":null}'"] $ \value ->
         rejectDb $ execute env ("UPDATE sessions SET runtime_identity="<>value<>"::jsonb,runtime_revision=runtime_revision+1 WHERE id='"<>uuid identifier<>"'")
+      forM_ ["null","\"\"","\" harness \"","true","123","\""<>B8.replicate 129 'x'<>"\""] $ \harnessValue ->
+        rejectDb $ execute env ("UPDATE sessions SET runtime_identity='{\"model\":\"Other\",\"role\":\"developer\",\"harness\":"<>harnessValue<>"}',runtime_revision=runtime_revision+1 WHERE id='"<>uuid identifier<>"'")
       sealed <- terminateSession env.pool workspace.id identifier (receipt cleared body)
       sealed.runtimeIdentity `shouldBe` Nothing
       sealed.runtimeRevision `shouldBe` 2
@@ -595,7 +640,7 @@ spec = do
 
     it "serializes competing runtime changes with append and sealing without sharing transcript revisions" $ \env -> do
       (workspace,row) <- fresh env
-      let a=RuntimeIdentity "Model A" Nothing Nothing (Just "developer"); b=RuntimeIdentity "Model B" Nothing Nothing (Just "developer")
+      let a=RuntimeIdentity "Model A" Nothing Nothing (Just "developer") Nothing; b=RuntimeIdentity "Model B" Nothing Nothing (Just "developer") Nothing
       bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \firstPool ->
         bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \secondPool ->
           bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \probePool -> do
@@ -650,7 +695,7 @@ spec = do
               upgradeDir=sandbox.sandboxRoot </> "only-v046"
               filename="V046__session_runtime_roles.sql"
               env=TestEnv pool sandbox db
-              legacy=RuntimeIdentity "Legacy runtime" Nothing Nothing Nothing
+              legacy=RuntimeIdentity "Legacy runtime" Nothing Nothing Nothing Nothing
               declared=legacy {role=Just "developer"}
               body="{\"message\":\"legacy bytes\"}\r\n"
           createDirectory beforeDir
@@ -733,7 +778,7 @@ spec = do
           Migration.runMigrations pool source >>= (\result -> result.failed `shouldBe` Nothing)
           execute env "CREATE TABLE runtime_current_audit_expected AS SELECT count(*) AS n FROM audit_log"
           Just original <- getSession pool workspace.id activeId
-          let declaration=RuntimeIdentity "Known actual runtime" Nothing Nothing (Just "developer")
+          let declaration=RuntimeIdentity "Known actual runtime" Nothing Nothing (Just "developer") Nothing
           resumed <- withEffectiveActorContext (Just actor) $ createSession pool (CreateSession activeId workspace.id "jsonl" "Legacy runtime capture" Nothing (Just declaration) workspace.id)
           resumed `shouldBe` original
           resumed.runtimeIdentity `shouldBe` Nothing
@@ -1024,7 +1069,7 @@ spec = do
       replayed.session `shouldBe` uploaded.session
       replayed.replayed `shouldBe` True
       expectCode SessionConflict $ append env workspace seen "[]\n" False
-      let runtime = SetRuntimeIdentity 0 (Just (RuntimeIdentity "audit-model" Nothing Nothing (Just "developer")))
+      let runtime = SetRuntimeIdentity 0 (Just (RuntimeIdentity "audit-model" Nothing Nothing (Just "developer") Nothing))
       declared <- setRuntimeIdentity env.pool workspace row.id runtime
       setRuntimeIdentity env.pool workspace row.id runtime `shouldReturn` declared
       audits "1"
@@ -1233,7 +1278,7 @@ spec = do
           Migration.runMigrations pool beforeDir >>= (\result -> result.failed `shouldBe` Nothing)
           (workspace,row) <- fresh env
           uploaded <- append env workspace row "{}\r\n" False
-          _ <- setRuntimeIdentity pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "historical-audit-model" Nothing Nothing (Just "developer"))))
+          _ <- setRuntimeIdentity pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "historical-audit-model" Nothing Nothing (Just "developer") Nothing)))
           sealed <- terminateSession pool workspace row.id (receipt uploaded.session "{}\r\n")
           let fixture retained entity action old new = execute env
                 ("INSERT INTO audit_log(entity_type,entity_id,action,old_values,new_values,request_id) VALUES ('"<>entity<>"','historical-fixture','"<>action<>"',"<>old<>","<>new<>",'"<>retained<>"')")
@@ -1302,7 +1347,7 @@ spec = do
           execute env "CREATE TABLE heartbeat_audit_ids AS SELECT id FROM audit_log WHERE entity_type='agent_session' AND action='update'"
           boolean env "SELECT count(*)=1 FROM heartbeat_audit_ids" `shouldReturn` True
           uploaded <- append env workspace row "{}\n" False
-          _ <- setRuntimeIdentity pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "upgrade-model" Nothing Nothing (Just "developer"))))
+          _ <- setRuntimeIdentity pool workspace row.id (SetRuntimeIdentity 0 (Just (RuntimeIdentity "upgrade-model" Nothing Nothing (Just "developer") Nothing)))
           sealed <- terminateSession pool workspace row.id (receipt uploaded.session "{}\n")
           -- Minimal legacy snapshots exercise cleanup without newer runtime keys.
           execute env "INSERT INTO audit_log(entity_type,entity_id,action,old_values,new_values,request_id) VALUES ('agent_session','legacy-heartbeat','update','{\"state\":\"active\",\"last_seen_at\":\"old\"}','{\"state\":\"active\",\"last_seen_at\":\"new\"}','remove-heartbeat')"

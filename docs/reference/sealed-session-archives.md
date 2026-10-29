@@ -585,6 +585,91 @@ successor preserves or supersedes those facts. Raw fixtures/traces and routine
 logs are not retained. The final task must reconcile served frontend/backend
 bindings and integrated acceptance before enabling backfill or reclamation.
 
+### Integrated database, HTTP and client qualification
+
+The [integrated qualification record](../../tools/session-archive.integration-qualification.json)
+retains actual 1 MiB, 100 MiB and 1 GiB isolated PostgreSQL runs on the same
+Windows/persistent-browser target. The 100 MiB and 1 GiB cases complete real
+publication, two independent full client transfers and verified views, raw
+reclamation, 20 archived ranges, eight advancing evidence windows, first/half/full
+prefix proofs, exact append replay and the entire streamed ZIP including raw
+SHA-256 and CRC32. The 1 GiB case reads all 1,048,576 records; its full proof and
+ZIP results are executed measurements. No large-path result is extrapolated.
+Browser-on-restored-derivative and private-pipe handshake qualification are
+explicitly deferred/unqualified after user-approved scope assessment and
+independent review. The failed borrower produced no passing browser receipt;
+its exact failed reply stage remains unknown. Its code was removed by an exact
+inverse to the measured sources. The unchanged rollback HTTP/static selector
+then completed with one unique fresh intended-case receipt; the Stack tool
+omitted its numeric Hspec total. Independent aggregate review remains pending.
+Follow-up `0c439241-64ce-4f39-8722-df9f5c68caed`, **Qualify restored prior-backend
+browser orchestration**, owns the deferred orchestration qualification; it does
+not change the data, security, resource or product limits above.
+
+| Raw size | Actual gzip bytes | Seal to ready ms | Preparing selection to view ms | Fresh ready selection to view ms | Foreground p95 ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 MiB | 6,236 | 2,327.0 | 2,642.6 | 435.3 | Inconclusive |
+| 100 MiB | 575,969 | 7,202.8 | 18,179.6 | 11,085.5 | 0.881 |
+| 1 GiB | 5,894,432 | 37,719.6 | 156,289.0 | 121,607.1 | 0.704 |
+
+These are observed unadjusted qualification clocks. Seal-to-ready includes a
+deliberate worker pause, raw baseline where enabled, idle sampling and foreground
+baseline. Preparing-to-view includes the remaining paused work; both client view
+clocks include deliberate compressed-EOF holds. No intervals are subtracted.
+The GiB first observed-ready-to-verified-view clock was 124,420.0 ms; it and the
+fresh ready-view clock independently satisfy the unchanged 125,943.1 ms product
+formula. First/Last automation wall times are content checks, separate from
+Task 6's client-side navigation p95 qualification.
+
+Matching ordinary foreground phases use five warmups then 40 sequential
+`GET /api/v1/workspaces` requests with 20 ms post-response pacing. The real
+browser's passive readiness responses are observed in both phases; no manual
+manifest polling is added to the timed load. All request start/header/body/end
+times and identities are retained. Narrow private status requests outside the
+timed phases calibrate the PostgreSQL clock. The union of caller clock intervals
+is widened by 1 ms on each side; width above 10 ms or any load interval outside
+the conservative persisted draft-created-to-published bracket is inconclusive.
+This bracket measures processing/publication, not uninterrupted compression CPU.
+Both larger cases have 40/40 coverage and satisfy the unchanged 1.10 p95 bound.
+The tiny case published before admission and remains performance-inconclusive.
+
+The largest sampled incremental current application working set was 15,847,424
+bytes in the GiB run, below 128 MiB over the matching baseline. The harness
+samples its current process with `WorkingSetSize` and `GetProcessTimes` at a
+requested 20 ms cadence; actual counts and maximum gaps are retained by phase.
+PostgreSQL buffers/processes are separate observations. This is no continuous
+peak, browser RSS or whole-host bound. Deleted raw rows do not imply immediate
+physical relation shrinkage; allocated pages and WAL are reported separately.
+
+Earlier failed protocols remain in the record, including the 1.196 foreground
+ratio from an unmatched observer schedule. The original 100 MiB cleanup receipt
+also remains intact: its `recovered=true` label came from interpreting a
+maintenance count as a recovery boolean. Actual normal native exit, pipe joins
+and sandbox removal had independently passed. Command-correlated recovery
+classification was repaired, causally checked and correctly reports false in the
+GiB run. No repeated vector was run solely to change that historical label.
+
+Restore evidence is composed at explicit scopes: a current-source entropy 2 MiB
+strict dump into a template0 empty replacement checks archive-only full reads;
+earlier GiB restore evidence retains its different V051/qualifier provenance.
+The integrated GiB proof/ZIP/content result above closes those separate large
+read gaps. The unchanged reviewed rollback derivative passed fresh strict empty
+restore, archive-only HTTP fidelity and actual final served frontend hashes.
+Its fresh receipt verifies the required six assets plus unchanged icon/logo SVGs.
+Both native handles and dump/restore helpers joined, followed by strict borrowed
+PostgreSQL and root cleanup before receipt creation. This HTTP check does not
+replace the deferred restored-browser result. The removed borrower incorrectly
+required exactly six entries while the selector supplies all eight; this is a
+source-supported explanation, while its missing runtime error stage remains
+unknown. Backfill and raw reclamation remain disabled by
+default; qualification does not enable or deploy them.
+
+This additional aggregate is limited to 2 MiB and is retained by repository
+maintainers until replaced or feature retirement. Task 8 owns one contained
+scratch root with a configured 8 GiB admission ceiling and finite cleanup;
+unresolved targeted diagnostics expire when their issue closes. Retained Task 7
+inputs stay under canonical custody until final aggregate/rebind approval.
+
 ## Reproducible codec baseline
 
 Run the standalone C probe in a verified task-owned scratch directory with a

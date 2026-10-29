@@ -163,6 +163,14 @@ keep the toggle and grey light; checking or unavailable activity stays explicit.
 Saved transcripts and downloads remain under **Evidence**. Session ancestry stays
 separate from linked tasks; unavailable or truncated context is labeled.
 
+For a finished session, **Preparing complete archive…** means its full transcript
+is still being prepared. Once ready, the viewer downloads and verifies the
+complete archive before showing messages. **First**, **Last** and search then
+read the local verified transcript. Provider records without supported message
+content can correctly show **No matching messages on this page**. Use **Cancel**
+to stop loading, or **Retry** after a reported failure. Keep the page open during
+large downloads and follow any local-storage guidance shown with an error.
+
 Live transcripts keep recent agent messages visible while tool activity arrives.
 Expanded activity and tool details stay open during synchronization. Reading
 above the end keeps your place; following resumes when you scroll to the end.

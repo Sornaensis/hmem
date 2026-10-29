@@ -79,6 +79,7 @@ executables:
   hmem-test-harness:
     main:        Main.hs
     source-dirs: app-harness
+    c-sources: cbits/archive_qualification.c
     ghc-options:
       - -threaded
       - -rtsopts

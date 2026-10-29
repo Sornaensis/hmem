@@ -407,6 +407,8 @@ executable hmem-server
 
 executable hmem-test-harness
   main-is: Main.hs
+  c-sources:
+      cbits/archive_qualification.c
   other-modules:
       Paths_hmem_server
   hs-source-dirs:

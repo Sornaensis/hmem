@@ -6,44 +6,30 @@ import { join, resolve } from 'node:path'
 import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 const until=async(fn)=>{const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,25))}throw new Error('Explorer did not converge')}
 
-test('event inspector follows current authorized source and keeps lineage separate from linked tasks',{timeout:60000},async()=>{
+test('embedded and workspace readers omit lineage and inspector while native transcript details remain usable',{timeout:60000},async()=>{
  const h=await openSessionExplorer({runtime:{model:'Declared runtime',role:'Reviewer'}}),{page}=h
  try{
-  h.active.title='Inspect session activity'
-  h.active.parent_session_id=h.saved.id
-  h.active.ancestors=[{id:h.saved.id,title:'Completed parent',format_label:'Provider-neutral JSONL',state:'terminated',parent_session_id:null}]
-  h.active.ancestors_truncated=true
-  await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').click()
+  h.active.title='Read session activity';h.active.parent_session_id=h.saved.id
+  h.active.ancestors=[{id:h.saved.id,title:'Completed parent',format_label:'Provider-neutral JSONL',state:'terminated',parent_session_id:null}];h.active.ancestors_truncated=true
+  await h.start();await h.idle()
+  const card=page.locator('#entity-'+h.fixture.tasks[0].id);await until(()=>card.locator('.task-sessions-icon').isEnabled());await card.locator('.task-sessions-icon').click()
   await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
-  const lineage=page.getByRole('region',{name:'Selected session lineage'})
-  assert.match(await lineage.innerText(),/Completed parent.*ancestry context.*terminated/s)
-  assert.match(await lineage.innerText(),/16-level context limit/)
-  assert.equal(await page.locator('.session-summary-heading').filter({hasText:'Completed parent'}).count(),0)
-  assert.ok(!h.reads.some(read=>read.path.endsWith('/sessions/'+h.saved.id)),'context does not fetch an out-of-page parent')
-  const inspector=page.getByRole('complementary',{name:'Event inspector'})
-  assert.equal(await inspector.locator('pre').count(),0)
-  await page.locator('.session-activity-group').first().locator(':scope > summary').click()
-  const inspect=page.locator('.session-content-tool').first().locator('..').getByRole('button',{name:/Inspect event/})
-  await inspect.focus();await page.keyboard.press('Enter')
-  assert.deepEqual(JSON.parse(await inspector.locator('pre').textContent()),{path:'src/Feature/Sessions.elm'})
-  await inspector.getByText('Session identity',{exact:true}).click()
-  assert.match(await inspector.innerText(),/Runtime declaration\s+Reviewer · Declared runtime/)
-  assert.match(await inspector.innerText(),/Created by\s+Unknown/)
-  await page.evaluate(()=>{window.inspectedPayload=document.querySelector('.session-inspected-event pre')})
-  await h.appendRecords({text:'A same-session update keeps the selected event.'})
-  await page.getByText('A same-session update keeps the selected event.',{exact:true}).waitFor({state:'attached'})
-  assert.equal(await inspect.getAttribute('aria-pressed'),'true')
-  assert.ok(await page.evaluate(()=>window.inspectedPayload===document.querySelector('.session-inspected-event pre')))
-  const screenshots=resolve('../../output/ui-refinement');await mkdir(screenshots,{recursive:true})
-  for(const [width,name] of [[1440,'sessions-desktop'],[430,'sessions-narrow']]){
-   await page.setViewportSize({width,height:1000})
-   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))
-   await page.screenshot({path:join(screenshots,name+'.png'),fullPage:true})
-   if(width===430){await page.locator('.session-conversation').scrollIntoViewIfNeeded();await page.screenshot({path:join(screenshots,'sessions-narrow-conversation.png'),fullPage:true});await inspector.scrollIntoViewIfNeeded();await page.screenshot({path:join(screenshots,'sessions-narrow-inspector.png'),fullPage:true})}
+  for(const embedded of [true,false]){
+   if(!embedded){await card.getByRole('link',{name:'Open full session \u2197'}).click();await page.locator('.session-detail').waitFor();await page.locator('.session-record').first().waitFor();await h.idle();await until(async()=>await page.locator('.session-activity-group').first().getAttribute('open')==='')}
+   assert.equal(await page.locator('.session-ancestor-path,.session-event-inspector,.session-inspect-event').count(),0)
+   const group=page.locator('.session-activity-group').first();if(await group.getAttribute('open')===null)await group.locator(':scope > summary').click()
+   const tool=group.locator('.session-content-tool').first();if(await tool.getAttribute('open')===null)await tool.locator(':scope > summary').click()
+   assert.deepEqual(JSON.parse(await tool.locator('pre').textContent()),{path:'src/Feature/Sessions.elm'})
+   const thinking=group.locator('.session-content-thinking').first();if(await thinking.getAttribute('open')===null)await thinking.locator(':scope > summary').click();assert.equal(await thinking.getAttribute('open'),'');assert.match(await thinking.innerText(),/Private reasoning stays collapsed/);assert.ok(await thinking.locator('.markdown-content').isVisible())
+   await page.evaluate(()=>{window.nativeToolPayload=document.querySelector('.session-content-tool pre')})
+   await h.appendRecords({text:'A same-session update preserves native disclosures '+embedded});await page.getByText('A same-session update preserves native disclosures '+embedded,{exact:true}).waitFor({state:'attached'})
+   assert.equal(await tool.getAttribute('open'),'');assert.ok(await page.evaluate(()=>window.nativeToolPayload===document.querySelector('.session-content-tool pre')))
   }
-  await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
-  await page.getByText('Saved session',{exact:true}).waitFor()
-  assert.equal(await page.locator('.session-inspected-event pre').count(),0,'another session never inherits the earlier tool payload')
+  assert.equal(await page.getByRole('complementary',{name:'Session hierarchy'}).count(),1)
+  assert.ok(!h.reads.some(read=>read.path.endsWith('/sessions/'+h.saved.id)),'removed lineage never hydrates an out-of-page parent')
+  for(const width of [1440,430]){await page.setViewportSize({width,height:1000});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))}
+  await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id);await page.getByText('Saved session',{exact:true}).waitFor()
+  assert.equal(await page.locator('.session-ancestor-path,.session-event-inspector,.session-inspect-event').count(),0);await page.getByRole('button',{name:/Download session/}).waitFor()
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -165,7 +151,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   await until(async()=>await card.locator('.has-active-sessions').count()===1)
   await card.locator('.btn-extras-toggle').click();await h.idle()
   const active=card.locator('.task-session-dock'),evidence=card.locator('.task-session-evidence')
-  await card.locator(':scope > .card-header .task-sessions-icon').click();await card.getByRole('button',{name:'Evidence',exact:true}).click();await evidence.locator('summary').click()
+  await card.locator(':scope > .card-header .task-sessions-icon').click();await card.getByRole('button',{name:'Evidence',exact:true}).click();await until(async()=>await card.getByRole('button',{name:'Evidence',exact:true}).getAttribute('aria-pressed')==='true')
   await card.locator('.task-session-work-context').getByRole('button',{name:/Codex/}).waitFor()
   assert.equal(await card.locator('.card-extras .task-session-active').count(),0);assert.equal(await card.locator('.card-section-button[aria-pressed="true"]').innerText(),'Evidence');assert.equal(await card.locator('.task-dependencies-section').count(),1)
   const downloadPromise=page.waitForEvent('download');await evidence.getByRole('button',{name:/Download session/}).click();const download=await downloadPromise

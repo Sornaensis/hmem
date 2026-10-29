@@ -269,8 +269,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     else if(action==='search-next')void page(owned,{query:owned.page.query,after:owned.searchAfter,searchCursor:owned.searchCursor})
     else if(action==='previous')void page(owned,{before:owned.first})
     else if(action==='body')void page(owned,{...owned.page,bodyKey:button.getAttribute('data-sealed-key'),bodyPart:Number(button.getAttribute('data-sealed-part'))})
-    else if(action==='inspect'){const key=button.getAttribute('data-sealed-key');event(owned,'inspect',{key});void page(owned,{...owned.page,bodyKey:key})}
-    else if(action==='render')event(owned,'render',{part:Number(button.getAttribute('data-sealed-part')),inspector:button.getAttribute('data-sealed-inspector')==='true'})
+    else if(action==='render')event(owned,'render',{part:Number(button.getAttribute('data-sealed-part'))})
     else if(action==='markdown')void readMarkdown(owned,button.getAttribute('data-sealed-key'))
     else if(action==='search'){const input=document.getElementById('sealed-search');void page(owned,{query:input?.value || ''})}
     else if(action==='position'){const input=document.getElementById('sealed-position');void page(owned,{offset:input?.value || '0'})}

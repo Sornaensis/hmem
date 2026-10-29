@@ -1333,7 +1333,6 @@ type alias SessionsModel =
     { workspace : Maybe String
     , epoch : Int
     , selected : Maybe String
-    , inspectedEvent : Maybe String
     , viewerScope : String
     , returnTaskPanel : Maybe String
     , cursor : Maybe Api.SessionCursor
@@ -1395,7 +1394,7 @@ type alias SessionRecord =
 
 emptySessionsModel : SessionsModel
 emptySessionsModel =
-    { workspace = Nothing, epoch = 0, selected = Nothing, inspectedEvent = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
+    { workspace = Nothing, epoch = 0, selected = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, showAllLinkedTasks = False, today = "", owned = []
     , filters = Api.defaultSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
     , sealed = emptySealedSessionView
@@ -1410,14 +1409,14 @@ type alias SealedSessionView =
     { phase : String, error : Maybe String, http : Maybe { sequence : Int, path : String }
     , rows : List SealedSessionPiece, first : String, last : String, more : Bool
     , rawBytes : String, compressedBytes : String, archiveGeneration : String
-    , renderPart : Int, inspectorPart : Int, domEpoch : String
+    , renderPart : Int, domEpoch : String
     , markdown : { key : String, source : String, ast : Result String (List MarkdownBlock.Block), structured : Bool, complete : Bool, nextPart : Int, request : Int } }
 
 
 emptySealedSessionView : SealedSessionView
 emptySealedSessionView =
     { phase = "preparing", error = Nothing, http = Nothing, rows = [], first = "", last = "", more = False
-    , rawBytes = "0", compressedBytes = "0", archiveGeneration = "", renderPart = 0, inspectorPart = 0, domEpoch = ""
+    , rawBytes = "0", compressedBytes = "0", archiveGeneration = "", renderPart = 0, domEpoch = ""
     , markdown = {key="",source="",ast=Err "not_loaded",structured=False,complete=False,nextPart=0,request=0} }
 
 
@@ -1522,7 +1521,6 @@ type Msg
     | SessionsNextPage Api.SessionCursor
     | SessionsToggleDock String
     | SessionsSelectDock String String
-    | SessionsInspect String String
     | SetTaskCardSection String String
     | SetProjectCardSection String String
     | SessionsPreviousPage

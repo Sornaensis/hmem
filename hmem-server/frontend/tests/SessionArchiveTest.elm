@@ -44,12 +44,12 @@ suite =
                 markdown=empty.markdown
                 owned={base | selectedWorkspaceId=Just ws,auth={status=AuthReady,mode=Just "test"}
                     ,sessionContext=Just {authMode="test",effectiveActor=Nothing,principal={actorType="user",actorId="actor",actorLabel="Actor",authority="local",grantUserId=Nothing},globalPermissions={createWorkspace=False,superadmin=True},workspace=Just {workspaceId=ws,role=Just "read",canRead=True,canEdit=False,canAdmin=False}}
-                    ,sessions={state | workspace=Just ws,selected=Just "s",stamp="owner",generation=7,inspectedEvent=Just "piece",rows=[SessionRecord 0 32 "secret" "\n" "conversation" "assistant" "" "secret" 0 Dict.empty],sealed={empty | domEpoch="old",rows=[piece],markdown={markdown | key="piece",source="secret source",complete=True}}}}
+                    ,sessions={state | workspace=Just ws,selected=Just "s",stamp="owner",generation=7,rows=[SessionRecord 0 32 "secret" "\n" "conversation" "assistant" "" "secret" 0 Dict.empty],sealed={empty | domEpoch="old",rows=[piece],markdown={markdown | key="piece",source="secret source",complete=True}}}}
                 event stamp generation epoch=SessionsBridgeEvent (Encode.object [("kind",Encode.string "sealed-clear"),("stamp",Encode.string stamp),("generation",Encode.int generation),("workspace",Encode.string ws),("session",Encode.string "s"),("domEpoch",Encode.string epoch)])
                 cleared=Sessions.update (event "owner" 7 "new") owned |> Tuple.first
                 stale=Sessions.update (event "old-owner" 7 "retired") cleared |> Tuple.first
                 late=Sessions.update (event "owner" 6 "old") stale |> Tuple.first
             in
-            Expect.equal {epoch="new",rows=0,rawRows=0,inspector=Nothing,source="",complete=False}
-                {epoch=late.sessions.sealed.domEpoch,rows=List.length late.sessions.sealed.rows,rawRows=List.length late.sessions.rows,inspector=late.sessions.inspectedEvent,source=late.sessions.sealed.markdown.source,complete=late.sessions.sealed.markdown.complete}
+            Expect.equal {epoch="new",rows=0,rawRows=0,source="",complete=False}
+                {epoch=late.sessions.sealed.domEpoch,rows=List.length late.sessions.sealed.rows,rawRows=List.length late.sessions.rows,source=late.sessions.sealed.markdown.source,complete=late.sessions.sealed.markdown.complete}
         ]

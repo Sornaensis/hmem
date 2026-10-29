@@ -1763,18 +1763,18 @@ test('known credential switch and authorization loss synchronously retire visibl
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     const group=h.page.locator('.session-activity-group').first();await group.locator(':scope > summary').click()
-    await group.locator('.session-record').filter({has:h.page.locator('.session-content-tool')}).first().locator('.session-inspect-event').click()
-    await h.page.locator('.session-inspected-event pre').waitFor()
-    assert.equal(await h.page.locator('.session-inspected-event').evaluate(node=>node.parentElement.tagName),'ASIDE')
+    await group.locator('.session-content-tool').first().locator(':scope > summary').click()
+    await group.locator('.session-content-tool pre').first().waitFor()
+    assert.equal(await h.page.locator('.session-event-inspector,.session-inspect-event,.session-ancestor-path').count(),0)
     assert.equal(await h.page.locator('#session-records').evaluate(node=>node.parentElement.tagName),'SECTION')
-    const cancelled=await h.page.evaluate(()=>{document.querySelector('[data-sealed-action="cancel"]').click();return {records:document.getElementById('session-records').children.length,inspector:document.querySelector('.session-inspected-event').children.length}})
+    const cancelled=await h.page.evaluate(()=>{document.querySelector('[data-sealed-action="cancel"]').click();return {records:document.getElementById('session-records').children.length,inspector:document.querySelector('.session-inspected-event')?.children.length || 0}})
     assert.deepEqual(cancelled,{records:0,inspector:0})
     await h.page.getByText('Archive loading cancelled.',{exact:true}).waitFor()
     await h.page.locator('.session-sealed-viewer').getByRole('button',{name:'Retry',exact:true}).click()
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     await group.locator(':scope > summary').click()
-    await group.locator('.session-record').filter({has:h.page.locator('.session-content-tool')}).first().locator('.session-inspect-event').click()
-    await h.page.locator('.session-inspected-event pre').waitFor()
+    await group.locator('.session-content-tool').first().locator(':scope > summary').click()
+    await group.locator('.session-content-tool pre').first().waitFor()
     const before=await h.page.evaluate(async()=>{const root=await(await navigator.storage.getDirectory()).getDirectoryHandle('hmem-session-archives-v1');const names=[];for await(const[name]of root.entries())names.push(name);return names})
     switched=true
     const ack=await h.page.evaluate(()=>{const start=performance.now();localStorage.setItem('hmem-auth-token','fixture-changed-credential');dispatchEvent(new StorageEvent('storage',{key:'hmem-auth-token',newValue:'fixture-changed-credential'}));return {ms:performance.now()-start,children:document.getElementById('session-records')?.children.length || 0,inspector:document.querySelector('.session-inspected-event')?.children.length || 0}})
@@ -1785,7 +1785,7 @@ test('known credential switch and authorization loss synchronously retire visibl
     const lost=await h.page.evaluate(async()=>{await new Promise(resolve=>{const request=new XMLHttpRequest();request.open('GET','/api/v1/fixture-unauthorized');request.send();request.addEventListener('loadend',resolve)});return document.getElementById('session-records')?.children.length || 0})
     assert.equal(lost,0)
     assert.equal(await h.page.evaluate(()=>document.querySelector('.session-inspected-event')?.children.length || 0),0)
-    assert.deepEqual(h.errors,[],'clearing and later Inspect must not corrupt Elm virtual DOM ownership')
+    assert.deepEqual(h.errors,[],'clearing and reopening transcript details must not corrupt Elm virtual DOM ownership')
     assert.ok(!h.reads.some(row=>row.path.endsWith('/evidence')))
   }finally{release?.();await h.close()}
 })
@@ -1886,7 +1886,7 @@ test('production Cancel retires a held content request before it can publish',{t
   }finally{release?.();await h.close()}
 })
 
-test('production Inspect hydrates the current source block into its bounded inspector',{timeout:60000},async()=>{
+test('production sealed transcript details hydrate the source block without a separate inspector',{timeout:60000},async()=>{
   const h=await openSessionExplorer()
   try {
     const raw=h.content.get(h.saved.id),gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip)
@@ -1894,9 +1894,9 @@ test('production Inspect hydrates the current source block into its bounded insp
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     const group=h.page.locator('.session-activity-group').first();await group.locator(':scope > summary').click()
-    const record=group.locator('.session-record').filter({has:h.page.locator('.session-content-tool')}).first();await record.locator('.session-inspect-event').click()
-    const inspector=h.page.locator('.session-event-inspector .session-inspected-event');await inspector.locator('pre').waitFor({timeout:2000})
-    assert.deepEqual(JSON.parse(await inspector.locator('pre').innerText()),{path:'src/Feature/Sessions.elm'});assert.ok(await inspector.locator('.json-key').count()>0)
+    const tool=group.locator('.session-content-tool').first();await tool.locator(':scope > summary').click();await tool.locator('pre').waitFor({timeout:2000})
+    assert.deepEqual(JSON.parse(await tool.locator('pre').innerText()),{path:'src/Feature/Sessions.elm'});assert.ok(await tool.locator('.json-key').count()>0)
+    assert.equal(await h.page.locator('.session-ancestor-path,.session-event-inspector,.session-inspect-event').count(),0)
     assert.deepEqual(h.errors,[])
   }finally{await h.close()}
 })
@@ -1916,16 +1916,16 @@ test('resolved Markdown reference expansion is paged before mounting every exact
     await h.page.getByRole('button',{name:'Read complete message',exact:true}).click()
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     await h.page.locator('#session-records a').first().waitFor()
-    await h.page.waitForFunction(destination=>document.querySelector('#session-records a')?.getAttribute('href')===destination && document.querySelector('.session-render-continuation[data-render-inspector="false"]')?.getAttribute('data-render-part')==='0',destination)
+    await h.page.waitForFunction(destination=>document.querySelector('#session-records a')?.getAttribute('href')===destination && document.querySelector('.session-render-continuation')?.getAttribute('data-render-part')==='0',destination)
     let total=0,turns=0,maxBytes=0
     while(true){
       const state=await h.page.locator('#session-records').evaluate((node,destination)=>({links:node.querySelectorAll('a').length,exact:[...node.querySelectorAll('a')].every(link=>link.getAttribute('href')===destination),bytes:new TextEncoder().encode(node.outerHTML).length}),destination)
       assert.equal(state.exact,true);total+=state.links;maxBytes=Math.max(maxBytes,state.bytes)
       const wire=await h.page.evaluate(()=>window.archiveTelemetry.maxPageBytes);assert.ok(state.bytes+wire<=4194304)
-      const next=h.page.locator('.session-render-continuation[data-render-inspector="false"]').getByRole('button',{name:'Continue presentation',exact:true})
+      const next=h.page.locator('.session-render-continuation').getByRole('button',{name:'Continue presentation',exact:true})
       if(!await next.count())break
       const target=Number(await next.getAttribute('data-sealed-part'));await next.click()
-      await h.page.waitForFunction(target=>document.querySelector('.session-render-continuation[data-render-inspector="false"]')?.getAttribute('data-render-part')===String(target),target)
+      await h.page.waitForFunction(target=>document.querySelector('.session-render-continuation')?.getAttribute('data-render-part')===String(target),target)
       assert.ok(++turns<100)
     }
     assert.equal(total,1000);assert.ok(turns>0);assert.ok(maxBytes<4194304);assert.deepEqual(h.errors,[])
@@ -1993,9 +1993,9 @@ test('ordered-list ordinals and table column/header context survive rendered con
         links+=current.links;assert.ok(current.exactLinks);assert.ok(current.bytes<=2097152)
         for(const item of current.items){assert.ok([1,2,3].includes(item.ordinal));counts[item.ordinal]+=item.links}
         for(const cell of current.columns){assert.equal(cell.column,'2');assert.equal(cell.header,'Column B')}
-        const next=h.page.locator('.session-render-continuation[data-render-inspector="false"]').getByRole('button',{name:'Continue presentation',exact:true})
+        const next=h.page.locator('.session-render-continuation').getByRole('button',{name:'Continue presentation',exact:true})
         if(!await next.count())break
-        const target=Number(await next.getAttribute('data-sealed-part'));await next.click();await h.page.waitForFunction(target=>document.querySelector('.session-render-continuation[data-render-inspector="false"]')?.getAttribute('data-render-part')===String(target),target);assert.ok(++turns<100)
+        const target=Number(await next.getAttribute('data-sealed-part'));await next.click();await h.page.waitForFunction(target=>document.querySelector('.session-render-continuation')?.getAttribute('data-render-part')===String(target),target);assert.ok(++turns<100)
       }
       assert.equal(links,example.links);if(example.kind==='list')assert.deepEqual(counts,{1:300,2:300,3:300});assert.deepEqual(h.errors,[])
     }finally{await h.close()}

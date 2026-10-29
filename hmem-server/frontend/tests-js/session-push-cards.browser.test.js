@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { join } from 'node:path'
 import {createHash} from 'node:crypto'
+import {gzipSync} from 'node:zlib'
 import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
 const downloadedBytes=async download=>{const chunks=[];for await(const chunk of await download.createReadStream())chunks.push(chunk);return Buffer.concat(chunks)}
@@ -16,7 +17,7 @@ for(const dock of [false,true])test(`initial ${dock?'task dock':'Sessions list a
   await h.start();let index=0
   producer=(async()=>{while(running){await h.appendRecords({type:'response_item',payload:{type:'function_call',name:'busy_tool',arguments:JSON.stringify({index:index++})}});await sleep(35)}})()
   if(dock){const icon=page.locator('#entity-'+h.fixture.tasks[0].id+' .task-sessions-icon');await until(()=>icon.isEnabled());await icon.click()}
-  else{await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').first().click();await until(async()=>await page.locator('.session-task-card').count()===2)}
+  else{await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').first().click();await page.locator('.session-linked-tasks > summary').click();await until(async()=>await page.locator('.session-task-cards .popover-card').count()===2)}
   await page.getByText('Visible latest agent response',{exact:true}).waitFor();assert.ok(running,'load completed during active progress, without reselection')
   const prose=page.getByText('Visible latest agent response',{exact:true}),group=page.locator('.session-activity-group').last();await group.locator(':scope > summary').click();await group.evaluate(node=>window.busyGroup=node);await prose.evaluate(node=>window.busyProse=node)
   const latest=await group.locator('article').last().getAttribute('data-offset');await until(async()=>await group.locator('article').last().getAttribute('data-offset')!==latest)
@@ -69,15 +70,35 @@ test('Live becomes Quiet after thirty seconds without events while lifecycle act
   assert.equal(h.active.state,'active');assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
-test('an append racing a sealed live range recovers canonical proof without removing admitted prose or disclosures',{timeout:30000},async()=>{
- const h=await openSessionExplorer(),{page}=h;let race=false,conflicts=0,phase='initial'
+test('an append racing a sealed live range waits for verified archive ownership and retains transcript capabilities',{timeout:30000},async()=>{
+ const h=await openSessionExplorer(),{page}=h;let race=false,conflicts=0,phase='initial',releaseArchive,contentStarted=false
+ const archiveGate=new Promise(resolve=>{releaseArchive=resolve}),generation='33333333-3333-4333-8333-333333333333'
+ const hash=bytes=>createHash('sha256').update(bytes).digest('hex')
  try{
+  await page.route('**/sessions/'+h.active.id+'/archive**',async route=>{
+   const raw=h.content.get(h.active.id),gzip=gzipSync(raw),url=new URL(route.request().url())
+   if(!url.pathname.endsWith('/content'))return route.fulfill({json:{workspace_id:h.fixture.workspace.id,session_id:h.active.id,state:'ready',generation_id:generation,codec:'gzip-v1',raw_bytes:String(raw.length),raw_records:String(h.active.committed_records),raw_sha256:hash(raw),compressed_bytes:String(gzip.length),compressed_sha256:hash(gzip),content_path:`/api/v1/workspaces/${h.fixture.workspace.id}/sessions/${h.active.id}/archive/${generation}/content`}})
+   contentStarted=true;await archiveGate
+   const etag='"seal-race-verified-archive"'
+   if(route.request().headers()['if-none-match'])return route.fulfill({status:304,headers:{ETag:etag}})
+   return route.fulfill({body:gzip,headers:{ETag:etag,'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)}})
+  })
   await page.route('**/sessions/*/transcript?*',async route=>{if(race){race=false;conflicts++;Object.assign(h.active,{state:'terminated',terminated_at:new Date().toISOString(),final_bytes:h.active.committed_bytes,final_sha256:createHash('sha256').update(h.content.get(h.active.id)).digest('hex')});await route.fulfill({status:409,json:{error:'session_terminated'}})}else await route.fallback()})
   await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').first().click();const prose=page.getByRole('heading',{name:'A calmer session explorer'});await prose.waitFor({timeout:8000});phase='open-group';const group=page.locator('.session-activity-group').first();await group.locator(':scope > summary').click();await prose.evaluate(node=>window.sealProse=node);await group.evaluate(node=>window.sealGroup=node)
-  phase='append';race=true;await h.appendRecords(message('Last committed reply before seal'));phase='render-final-reply'
+  phase='append';race=true;await h.appendRecords(message('Last committed reply before seal'));phase='verified-seal-transfer'
+  await until(()=>contentStarted);assert.equal(await page.getByText('Last committed reply before seal',{exact:true}).count(),0,'sealed content is not published before complete transfer and receipt verification');assert.equal(await page.locator('.session-sealed-viewer #session-records .session-record').count(),0,'no sealed transcript is published before complete verification');releaseArchive()
+  await page.getByText('Verified complete archive.',{exact:true}).waitFor();phase='render-final-reply'
   await page.getByText('Last committed reply before seal',{exact:true}).waitFor({timeout:8000});phase='render-sealed';await page.getByText('Saved session',{exact:true}).waitFor({state:'attached',timeout:8000});await page.getByRole('button',{name:/Download session/}).waitFor({timeout:8000})
-  assert.equal(conflicts,1);assert.equal(await page.evaluate(()=>window.sealProse.isConnected&&window.sealGroup.isConnected&&window.sealGroup.open),true);assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
- }catch(error){throw Error(JSON.stringify({phase,conflicts,reads:h.reads.slice(-12),text:(await page.locator('body').innerText()).slice(-1500),error:error.message}))}finally{await h.close()}
+  assert.equal(conflicts,1);await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
+  const sealedGroup=page.locator('.session-activity-group').first();await sealedGroup.locator(':scope > summary').click()
+  const tool=page.locator('.session-content-tool').first();await tool.locator(':scope > summary').click();await tool.locator('.json-key').first().waitFor()
+  assert.deepEqual(JSON.parse(await tool.locator('pre').textContent()),{path:'src/Feature/Sessions.elm'})
+  const thinking=page.locator('.session-content-thinking').first(),thinkingGroup=thinking.locator('xpath=ancestor::details[contains(@class,"session-activity-group")]')
+  if(await thinkingGroup.getAttribute('open')===null)await thinkingGroup.locator(':scope > summary').click()
+  await thinking.locator(':scope > summary').click();await page.getByText('Private reasoning stays collapsed.',{exact:true}).waitFor()
+  const download=page.waitForEvent('download');await page.getByRole('button',{name:/Download session/}).click();assert.deepEqual(await downloadedBytes(await download),h.content.get(h.active.id))
+  assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+ }catch(error){throw Error(JSON.stringify({phase,conflicts,reads:h.reads.slice(-12),text:(await page.locator('body').innerText()).slice(-1500),error:error.message}))}finally{releaseArchive();await h.close()}
 })
 test('non-admin Home closes the probe-to-subscribe gap and reconnects its separate activity capability',{timeout:30000},async()=>{
  const h=await openSessionExplorer(),{page}=h;let active=false,reads=0,tickets=0,baselineResolve;const baselineStarted=new Promise(resolve=>baselineResolve=resolve)

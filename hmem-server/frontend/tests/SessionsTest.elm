@@ -412,6 +412,17 @@ metadataPresentationTests =
             settled = update session (update newer initial)
         in Expect.equal (Just (Delivery.Metadata newer),Just (Delivery.SessionsPage {items=[newer],nextCursor=Nothing}))
             (payload detailTarget settled,payload listTarget settled))
+    , test "opt-in activity progress preserves known Live members and freshness-independent unions" <| withMetadata (\session ->
+        let
+            dirty activity contains =
+                let target=Delivery.WorkspaceSessionsFiltered {state="",freshness="",activity=Just activity} Nothing
+                    seed=ready session
+                    seeded={seed | resources=Dict.insert (Delivery.key workspace target) (entry target (Delivery.SessionsPage {items=if contains then [session] else [],nextCursor=Nothing})) seed.resources}
+                    changed=Delivery.invalidateProgress workspace sessionId seeded
+                in Dict.get (Delivery.key workspace target) changed.resources |> Maybe.map (\resource -> resource.dirty/=resource.settled) |> Maybe.withDefault False
+            activities=["","live","quiet","completed","live,quiet","live,completed","quiet,completed","live,quiet,completed"]
+        in Expect.equal [(False,False),(False,True),(True,True),(False,False),(False,False),(False,True),(True,True),(False,False)]
+            (List.map (\activity -> (dirty activity True,dirty activity False)) activities))
     , test "unselected progress refreshes only its displayed pages and freshness membership" <| withMetadata (\session ->
         let
             fresh = Delivery.WorkspaceSessionsFiltered {state="active",freshness="fresh",activity=Nothing} Nothing

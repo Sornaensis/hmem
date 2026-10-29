@@ -311,7 +311,13 @@ invalidateProgress workspace id state =
                         contains = case resource.data of
                             Just (SessionsPage page) -> List.any (.id >> (==) id) page.items
                             _ -> False
-                        freshnessChanged filters = filters.activity /= Nothing || (filters.freshness /= "" && (filters.freshness /= "fresh" || not contains))
+                        freshnessChanged filters = case filters.activity of
+                            Nothing -> filters.freshness /= "" && (filters.freshness /= "fresh" || not contains)
+                            Just activity ->
+                                let selected=String.split "," activity
+                                    live=List.member "live" selected
+                                    quiet=List.member "quiet" selected
+                                in (live && not quiet && not contains) || (quiet && not live)
                         freshness = case resource.target of
                             WorkspaceSessionsFiltered filters _ -> freshnessChanged filters
                             ScopedSessions _ _ filters _ -> freshnessChanged filters

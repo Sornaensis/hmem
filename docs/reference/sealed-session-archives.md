@@ -665,10 +665,26 @@ unknown. Backfill and raw reclamation remain disabled by
 default; qualification does not enable or deploy them.
 
 This additional aggregate is limited to 2 MiB and is retained by repository
-maintainers until replaced or feature retirement. Task 8 owns one contained
-scratch root with a configured 8 GiB admission ceiling and finite cleanup;
-unresolved targeted diagnostics expire when their issue closes. Retained Task 7
-inputs stay under canonical custody until final aggregate/rebind approval.
+maintainers until replaced or feature retirement. Task 8 used one contained
+scratch root with a configured 8 GiB admission ceiling and finite cleanup.
+The exact Task 6, 7 and 8 project scratch roots were removed after required
+receipts and scope decisions were retained: 711,909,718 bytes in total.
+
+Cleanup remains partial. The stopped external fixture
+`C:/Users/Sornaensis/AppData/Local/Temp/hmem-sandbox-81555910deb94fde`
+is retained as cleanup debt, not release evidence: 87,573,976 bytes, 2,026 files
+and 40 directories. Recorded exact native and PostgreSQL exits and scoped
+closure checks establish no remaining live dependency; this is not a new global
+process-absence claim. Automatic approval review rejected its deletion because
+the human approval covered process shutdown, not irreversible external file
+deletion. No retry or bypass occurred.
+
+The canonical hmem maintainer/orchestrator owns this bounded custody under TODO
+`a0bf4079-6fba-4442-855b-7f3e7e303492`, **Resolve stopped archive fixture file
+custody**. No further writes, growth, runtime reuse, move, prune or deletion are
+authorized. Review by **2026-11-05**; this is neither an automation nor an
+automatic deletion date. Removal requires direct human file-deletion approval.
+The deferral changes none of the integrity, security, resource or product limits.
 
 ## Reproducible codec baseline
 

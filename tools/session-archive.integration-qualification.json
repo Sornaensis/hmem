@@ -7703,5 +7703,52 @@
     "stock_runtime": "Stack MCP stack_test targets hmem-server:test:hmem-server-test ta '--match \"Archive maintenance rollback/runs the reviewed prior backend derivative against restored archive-only data and current static assets\"' include_warnings:true: isErrorfalse/content{},one unique fresh intended-case receipt,numeric Hspec total omitted.",
     "rollout": "No deployment/push/default backfill or reclaim enablement."
   },
-  "remaining": "Final independent aggregate/documentation/commit/custody review only; deferred browser/private-pipe followup stays TODO separately. Defaults remain OFF; no deployment."
+  "cleanup_custody": {
+    "status": "PARTIAL cleanup: three workspace roots removed; stopped external TEMP fixture retained as cleanup debt, not release evidence",
+    "workspace_disposal": {
+      "removed_bytes": 711909718,
+      "roots": [
+        {
+          "path": "D:/Projects/hmem/.scratch/sealed-archives-e0ac6260",
+          "bytes": 208611572,
+          "files": 2402,
+          "state": "confirmed absent"
+        },
+        {
+          "path": "D:/Projects/hmem/.scratch/sealed-archives-8ff1e216",
+          "bytes": 503297543,
+          "files": 1058,
+          "state": "confirmed absent"
+        },
+        {
+          "path": "D:/Projects/hmem/.scratch/sealed-archives-4a40c671",
+          "bytes": 603,
+          "files": 3,
+          "state": "confirmed absent"
+        }
+      ],
+      "method": "Exact canonical task ownership/recursive non-reparse/no embedded Git/retained evidence hash checks, native PowerShell Remove-Item -LiteralPath with finite15s command supervision and actual pipeline joins; no broad sweep or source/evidence changes."
+    },
+    "external_retained": {
+      "path": "C:/Users/Sornaensis/AppData/Local/Temp/hmem-sandbox-81555910deb94fde",
+      "bytes": 87573976,
+      "files": 2026,
+      "directories": 40,
+      "owner": "Canonical hmem maintainer/orchestrator",
+      "followup_task": "a0bf4079-6fba-4442-855b-7f3e7e303492",
+      "followup_title": "Resolve stopped archive fixture file custody",
+      "review_by": "2026-11-05",
+      "review_policy": "Review date only; no automation or automatic deletion.",
+      "restrictions": "No further writes, growth, runtime reuse, move, prune or deletion. Direct human approval for this file removal is required before deletion.",
+      "known_stopped_state": "Recorded external recovery: exact native534964/PPID970836/start2026-10-29T14:59:59.7581640Z joined exit-1, then exact PG873708/PPID970836/start14:59:55.2872210Z on port51845 joined exit0 after supported graceful fast stop. Known PG identities/listener/exact-datadir process matches were0; postmaster.pid absent. No live dependency remains under those recorded facts; this is not a new global process-absence claim.",
+      "evidence_disposition": "Fixture files are cleanup debt, not required release evidence. Required receipts/product scope are retained in this committed aggregate and immutable managed perf/history/tools files."
+    },
+    "automatic_review": {
+      "outcome": "External deletion rejected before execution; stopped without retry, alternative or bypass.",
+      "exact_reason": "This command recursively deletes an external TEMP sandbox containing 87MB and 2,026 files; despite narrow identity and containment checks, the user explicitly authorized process shutdown, not this irreversible file deletion, and coordinator approval cannot substitute for direct user authorization.",
+      "authorization_scope": "The earlier direct human approval authorized exact process shutdown only; no fresh human file-deletion approval is claimed."
+    },
+    "qualification_scope": "This bounded nondeletion deferral does not change integrity, security, resource or product budgets. It does not support an all-scratch-removed or all-cleanup-complete claim."
+  },
+  "remaining": "Qualification implementation committed at c6541979248612b3b17423863f44f6c8927ce177; restored-browser/private-pipe followup0c439241-64ce-4f39-8722-df9f5c68caed remains DEFERRED/UNQUALIFIED. Stopped external fixture custody follows TODOa0bf4079-6fba-4442-855b-7f3e7e303492 with direct human file approval before removal; cleanup is partial. Defaults stay OFF; no deployment."
 }

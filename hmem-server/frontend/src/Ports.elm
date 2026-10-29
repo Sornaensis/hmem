@@ -95,6 +95,9 @@ port observationPreferencesReceived : (Encode.Value -> msg) -> Sub msg
 port onMainContentScroll : (Float -> msg) -> Sub msg
 
 
+port restoreAuditViewport : Encode.Value -> Cmd msg
+
+
 port onHierarchyViewport : (Encode.Value -> msg) -> Sub msg
 
 

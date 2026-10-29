@@ -303,7 +303,11 @@ suite =
             , \source -> Main.update (FocusEntityKeepForward "task" parent.id) source |> Tuple.first
             , \source -> Main.update (FocusBreadcrumbNav source.focus.historyIndex) source |> Tuple.first
             , \source -> captureSearchJump "task" parent.id source
-            , \source -> Main.update (NavigateToAuditEntity auditEntry) source |> Tuple.first ]
+            , \source ->
+                let audit = source.auditLog
+                    ready = { source | auditLog = { audit | activeNavigationId = Just 1 } }
+                    guard = { sessionEpoch = source.sessionRequestEpoch, workspaceId = source.selectedWorkspaceId, page = source.page, tab = source.activeTab, route = Url.toString source.url, queryId = audit.nextRequestId, navigationId = 1, principal = Maybe.map .principal source.sessionContext, authMode = Maybe.map .authMode source.sessionContext }
+                in Main.update (GotAuditNavigationViewport guard auditEntry { workspaceId = workspaceId, kind = Types.AuditTask, id = parent.id } (Ok 0)) ready |> Tuple.first ]
                 |> List.map check
                 |> Expect.equal (List.repeat 6 { base = Just "normal-base", query = "normal-base", show = Types.ShowProjectsOnly, submitted = Nothing, results = Nothing
                     , requested = Just False, current = True, replaced = False, child = False })

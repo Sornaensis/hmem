@@ -990,6 +990,12 @@ route msg model =
         GotAuditLog _ _ _ ->
             Ok (Feature.AuditLog.update msg model)
 
+        NavigateToAuditRelated _ _ ->
+            Ok (Feature.AuditLog.update msg model)
+
+        GotAuditNavigationViewport _ _ _ _ ->
+            Ok (Feature.AuditLog.update msg model)
+
         GotEntityHistory _ _ ->
             Ok (Feature.AuditLog.update msg model)
 

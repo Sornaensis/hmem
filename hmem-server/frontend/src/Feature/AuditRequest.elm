@@ -14,7 +14,7 @@ replace filters model =
     let
         state = model.auditLog
     in
-    restore filters { model | auditLog = { state | expandedEntries = Dict.empty, revertConfirmation = Nothing, revertInFlight = False } }
+    restore filters { model | auditLog = { state | expandedEntries = Dict.empty, revertConfirmation = Nothing, revertInFlight = False, restoreScrollY = Nothing, pendingReturn = Nothing } }
 
 
 restore : AuditLogFilters -> Model -> ( Model, Cmd Msg )
@@ -47,6 +47,7 @@ start clearEntries filters model =
             , loading = True
             , loadingFilters = Just filters
             , activeRequest = Just request
+            , activeNavigationId = Nothing
             , nextRequestId = state.nextRequestId + 1
             , error = Nothing
         }

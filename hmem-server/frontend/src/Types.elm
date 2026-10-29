@@ -986,6 +986,9 @@ type alias FocusReturnContext =
     , auditFilters : Maybe AuditLogFilters
     , auditExpandedEntryId : Maybe String
     , auditEntryExpanded : Maybe Bool
+    , auditScrollY : Maybe Float
+    , auditPrincipal : Maybe Api.SessionPrincipal
+    , auditAuthMode : Maybe String
     }
 
 
@@ -1091,7 +1094,11 @@ type alias AuditLogModel =
     , loadingFilters : Maybe AuditLogFilters
     , activeRequest : Maybe AuditRequestIdentity
     , nextRequestId : Int
+    , activeNavigationId : Maybe Int
+    , nextNavigationId : Int
     , error : Maybe String
+    , restoreScrollY : Maybe Float
+    , pendingReturn : Maybe FocusReturnContext
     , filters : AuditLogFilters
     , expandedEntries : Dict String Bool
     , revertConfirmation : Maybe Api.AuditLogEntry
@@ -1241,6 +1248,22 @@ type alias AuditRequestIdentity =
     , workspaceId : Maybe String
     , audience : Maybe { authMode : String, actorType : String, actorId : String, authority : String, grantUserId : Maybe String }
     }
+
+
+type AuditTargetKind
+    = AuditProject
+    | AuditTask
+    | AuditObservation
+    | AuditSession
+    | AuditWorkspace
+
+
+type alias AuditDestination =
+    { workspaceId : String, kind : AuditTargetKind, id : String }
+
+
+type alias AuditNavigationGuard =
+    { sessionEpoch : Int, workspaceId : Maybe String, page : Page, tab : WorkspaceTab, route : String, queryId : Int, navigationId : Int, principal : Maybe Api.SessionPrincipal, authMode : Maybe String }
 
 
 type alias DragInfo =
@@ -1801,6 +1824,8 @@ type Msg
     | FocusEntity String String
     | FocusEntityKeepForward String String
     | NavigateToAuditEntity Api.AuditLogEntry
+    | NavigateToAuditRelated Api.AuditLogEntry AuditDestination
+    | GotAuditNavigationViewport AuditNavigationGuard Api.AuditLogEntry AuditDestination (Result () Float)
     | OpenAuditDiff Api.AuditLogEntry String
     | OpenAuditDiffFrom String Api.AuditLogEntry String
     | CloseAuditDiff

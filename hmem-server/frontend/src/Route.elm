@@ -8,6 +8,7 @@ import Dict
 import Feature.Search
 import Feature.DataLoading
 import Feature.Dependencies
+import Feature.Focus
 import Feature.Editing
 import Feature.Observation
 import Feature.Timeline
@@ -179,12 +180,7 @@ handleUrlChangeWithoutProtectedExit url model =
 
                                 else
                                     model.focus.historyIndex
-                            , returnContext =
-                                if focusChangedExternally then
-                                    Nothing
-
-                                else
-                                    currentFocus.returnContext
+                            , returnContext = Feature.Focus.returnContextForUrl url currentFocus
                         }
 
                     currentEditing =
@@ -365,7 +361,7 @@ handleUrlChangeWithoutProtectedExit url model =
                                     Nothing ->
                                         []
                             , historyIndex = 0
-                            , returnContext = returnContextForFocusedRoute wsId frag.focus currentFocus
+                            , returnContext = Feature.Focus.returnContextForUrl url currentFocus
                         }
 
                     currentEditing =
@@ -534,6 +530,8 @@ handleUrlChangeWithoutProtectedExit url model =
                         , expandedEntries = restoredExpandedEntries
                         , revertConfirmation = Nothing
                         , revertInFlight = False
+                        , pendingReturn = returnContext |> Maybe.andThen (\context -> if context.source == ReturnFromGlobalAudit then Just context else Nothing)
+                        , restoreScrollY = returnContext |> Maybe.andThen (\context -> if context.source == ReturnFromGlobalAudit then context.auditScrollY else Nothing)
                     }
 
                 currentFocus =

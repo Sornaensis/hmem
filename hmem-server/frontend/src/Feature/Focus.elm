@@ -1,4 +1,4 @@
-module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, shouldShowReturnContext, timelineReturnContext, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
+module Feature.Focus exposing (auditDestinationStatus, auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, returnContextForUrl, restoreAuditReturnAuthority, shouldShowReturnContext, timelineReturnContext, update, viewAuditReturn, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
 
 import Api
 import Feature.AuditRequest as AuditRequest
@@ -11,6 +11,7 @@ import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import String
 import Types exposing (..)
+import Url
 
 
 init : Maybe ( String, String ) -> FocusModel
@@ -44,6 +45,9 @@ timelineReturnContext workspaceId timeline event =
     , auditFilters = Nothing
     , auditExpandedEntryId = Nothing
     , auditEntryExpanded = Nothing
+    , auditScrollY = Nothing
+    , auditPrincipal = Nothing
+    , auditAuthMode = Nothing
     }
 
 
@@ -73,6 +77,9 @@ auditReturnContext source workspaceId filters entryExpanded entry ( targetType, 
         else
             Nothing
     , auditEntryExpanded = Just entryExpanded
+    , auditScrollY = Nothing
+    , auditPrincipal = Nothing
+    , auditAuthMode = Nothing
     }
 
 
@@ -88,6 +95,82 @@ nonEmptyMaybe value =
 clearReturnContext : FocusModel -> FocusModel
 clearReturnContext focusModel =
     { focusModel | returnContext = Nothing }
+
+
+{-| Return ownership follows the actual selected destination, including tabs
+whose selection is intentionally independent of hierarchy focus.
+-}
+returnContextForUrl : Url.Url -> FocusModel -> Maybe FocusReturnContext
+returnContextForUrl url focusModel =
+    let
+        fragment = Helpers.parseFragment url.fragment
+        value key = url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (\pair -> case String.split "=" pair of
+            [ name, raw ] -> if name == key then Url.percentDecode raw else Nothing
+            _ -> Nothing) |> List.head
+    in
+    focusModel.returnContext |> Maybe.andThen (\context ->
+        let
+            workspaceMatches = url.path == "/workspace/" ++ context.workspaceId
+            destinationMatches = case context.entityType of
+                "project" -> fragment.tab == ProjectsTab && fragment.focus == Just ( "project", context.entityId )
+                "task" -> fragment.tab == ProjectsTab && fragment.focus == Just ( "task", context.entityId )
+                "observation" -> fragment.tab == ObservationsTab && fragment.focus == Nothing && fragment.observationId == Just context.entityId
+                "agent_session" -> fragment.tab == SessionsTab && fragment.focus == Nothing && value "session" == Just context.entityId
+                "workspace" -> fragment.tab == ProjectsTab && fragment.focus == Nothing && context.entityId == context.workspaceId
+                _ -> False
+        in if workspaceMatches && destinationMatches then Just context else Nothing)
+
+
+restoreAuditReturnAuthority : Model -> Api.SessionContext -> Model -> Model
+restoreAuditReturnAuthority previous session model =
+    let
+        owns value = value.auditPrincipal == Just session.principal && value.auditAuthMode == Just session.authMode
+        context = returnContextForUrl model.url previous.focus |> Maybe.andThen (\value ->
+            if value.source == ReturnFromTimeline || owns value then Just value else Nothing)
+        state = model.focus
+        pending = previous.auditLog.pendingReturn |> Maybe.andThen (\value ->
+            let sourceMatches = case model.page of
+                    AuditLogPage -> value.source == ReturnFromGlobalAudit
+                    WorkspacePage workspace -> value.source == ReturnFromWorkspaceAudit && model.activeTab == AuditTab && (value.auditFilters |> Maybe.andThen .workspaceId) == Just workspace
+                    _ -> False
+            in if owns value && sourceMatches then Just value else Nothing)
+        audit = model.auditLog
+        rejected = previous.auditLog.pendingReturn /= Nothing && pending == Nothing
+        filters = audit.filters
+        clearedFilters = { filters | workspaceId = case model.page of
+                WorkspacePage workspace -> Just workspace
+                _ -> Nothing
+            , entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, offset = Nothing }
+        restoredAudit = case pending of
+            Just value -> { audit | pendingReturn = pending, filters = Maybe.withDefault audit.filters value.auditFilters, expandedEntries = expandedEntriesForReturn value, restoreScrollY = value.auditScrollY }
+            Nothing -> if rejected then { audit | pendingReturn = Nothing, restoreScrollY = Nothing, filters = clearedFilters, entries = [], expandedEntries = Dict.empty, entryBaseOffset = 0, hasMore = False, loading = False, loadingFilters = Nothing, activeRequest = Nothing, activeNavigationId = Nothing, error = Nothing } else audit
+    in
+    { model | focus = { state | returnContext = context }, auditLog = restoredAudit }
+
+
+viewAuditReturn : Model -> Html Msg
+viewAuditReturn model =
+    case model.focus.returnContext of
+        Just context ->
+            if context.source /= ReturnFromTimeline then
+                div [ class "audit-return-bar" ] [ button [ class "btn btn-secondary focus-return-btn", onClick ReturnToFocusSource ] [ text (focusReturnContextLabel context) ] ]
+            else text ""
+        Nothing -> text ""
+
+
+auditDestinationStatus : Model -> Maybe String
+auditDestinationStatus model =
+    model.focus.returnContext |> Maybe.andThen (\context ->
+        if context.source /= ReturnFromTimeline && List.member context.entityType [ "project", "task" ] then
+            case Dict.get (context.entityType ++ ":" ++ context.entityId) model.dataLoading.navigationFocuses of
+                Just request ->
+                    if request.inFlight then Just "Loading entity destination..."
+                    else if not request.succeeded then Just "Entity destination unavailable. It may no longer exist or be accessible."
+                    else Nothing
+                Nothing -> Just "Loading entity destination..."
+        else if context.source /= ReturnFromTimeline && context.entityType == "observation" && model.observations.detailError /= Nothing then
+            Just "Entity destination unavailable. It may no longer exist or be accessible."
+        else Nothing)
 
 
 shouldShowReturnContext : FocusModel -> Bool
@@ -310,11 +393,11 @@ returnToWorkspaceAuditSource context model =
             model.auditLog
 
         restoredAuditLog =
-            { currentAuditLog | expandedEntries = expandedEntriesForReturn context }
+            { currentAuditLog | expandedEntries = expandedEntriesForReturn context, restoreScrollY = context.auditScrollY, pendingReturn = Just context }
 
         nextModel =
             { model
-                | selectedWorkspaceId = Just context.workspaceId
+                | selectedWorkspaceId = filters.workspaceId
                 , activeTab = AuditTab
                 , focus = clearFocusForReturn model.focus
                 , auditLog = restoredAuditLog
@@ -325,7 +408,7 @@ returnToWorkspaceAuditSource context model =
     in
     ( requestedModel
     , Cmd.batch
-        [ pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment AuditTab Nothing Nothing)
+        [ pushUrl model.key ("/workspace/" ++ Maybe.withDefault context.workspaceId filters.workspaceId ++ "#" ++ buildFragment AuditTab Nothing Nothing)
         , requestCmd
         ]
     )
@@ -448,6 +531,7 @@ viewFocusBreadcrumbBar model =
                 returnSection =
                     case model.focus.returnContext of
                         Just context ->
+                            if context.source /= ReturnFromTimeline then [] else
                             [ button [ class "focus-return-btn", onClick ReturnToFocusSource, title context.label ] [ text (focusReturnContextLabel context) ]
                             , span [ class "focus-crumb-sep" ] [ text " › " ]
                             ]

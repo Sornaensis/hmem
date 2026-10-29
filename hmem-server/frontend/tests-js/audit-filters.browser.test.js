@@ -12,7 +12,7 @@ const event = (fixture, id, kind = 'task', action = 'update') => ({
 
 async function setup() {
   const f = hierarchyFixture()
-  f.projects = [f.projects[0]]; f.tasks = []
+  f.projects = [{ ...f.projects[0], id: "50000000-0000-4000-8000-000000000001" }]; f.tasks = []
   const second = { ...f, workspace: { ...f.workspace, id: 'other-workspace', name: 'Other workspace' }, projects: [], tasks: [] }
   const h = await openHierarchy(f, [second])
   const events = [
@@ -61,10 +61,10 @@ async function callbacksSettled(h, response) {
 }
 async function change(h, action, match) {
   const response = h.page.waitForResponse(response => { const url = new URL(response.url()); return url.pathname === '/api/v1/audit' && match(Object.fromEntries(url.searchParams)) })
-  await action(); await response; await settled(h)
+  await action(); await callbacksSettled(h, await response); await settled(h)
 }
 async function workspaceAudit(h) {
-  await h.start(); await h.idle()
+  await h.start("tab=projects", h.f.projects[0].id); await h.idle()
   await change(h, () => h.page.getByRole('button', { name: 'Audit', exact: true }).click(), query => query.workspace_id === h.f.workspace.id)
 }
 
@@ -137,13 +137,13 @@ test('production audit rejects stale A-B-A and load-more completions and recover
 
 test('production audit return restores filters, selected event and page while workspace changes retire old reads', { timeout: 45000 }, async () => {
   const h = await setup()
-  h.events.unshift(event(h.f, 'root-project', 'project'))
+  h.events.unshift(event(h.f, h.f.projects[0].id, 'project'))
   try {
     await workspaceAudit(h)
     await change(h, () => h.page.getByLabel('Entity type', { exact: true }).selectOption('project'), query => query.entity_type === 'project')
     await h.page.locator('.audit-expand-icon').click()
     await h.page.getByRole('complementary', { name: 'Selected audit event', exact: true }).waitFor()
-    await h.page.locator('.audit-entry .audit-entity-summary').click()
+    await h.page.locator('.audit-entry .audit-entity-link').click()
     await h.page.getByRole('button', { name: 'Back to workspace Audit entry', exact: true }).waitFor()
     await change(h, () => h.page.getByRole('button', { name: 'Back to workspace Audit entry', exact: true }).click(), query => query.entity_type === 'project')
     assert.equal(await h.page.getByLabel('Entity type', { exact: true }).inputValue(), 'project')

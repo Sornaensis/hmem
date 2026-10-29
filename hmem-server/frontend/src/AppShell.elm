@@ -261,6 +261,7 @@ handleOwnedRaw ownedMsg model =
                                     |> Feature.WorkspaceAdmin.reconcileSessionAuthority
                                     |> Feature.Observation.reconcileCurationPermission
                                     |> updateLoadingAfterSession model expectedWorkspace sessionContext
+                                    |> Feature.Focus.restoreAuditReturnAuthority model sessionContext
                                     |> prepareSessionNavigation model expectedWorkspace sessionContext
                                     |> restoreObservationUrlOnAdmission model expectedWorkspace sessionContext
 
@@ -341,7 +342,7 @@ handleOwnedRaw ownedMsg model =
                             failedWorkspace = model.workspaceAdmin.authorizationPending |> Maybe.map .workspaceId
                                 |> Maybe.map Just |> Maybe.withDefault model.workspaceAdmin.authorizationFailure
                         in
-                        ( { cleared | workspaceAdmin = { admin | authorizationFailure = failedWorkspace } }
+                        ( { cleared | workspaceAdmin = { admin | authorizationFailure = failedWorkspace }, focus = if authStatusFromSessionError result == AuthRequired then cleared.focus else let state = cleared.focus in { state | returnContext = Feature.Focus.returnContextForUrl model.url model.focus } }
                         , disconnectWebSocket ()
                         )
 
@@ -711,7 +712,7 @@ restoreObservationUrlOnAdmission previous expectedWorkspace sessionContext model
                 { model
                     | observations = Helpers.restoreObservationQuery context.query { state | selectedId = context.fragment.observationId, linkNotice = context.notice, searchOriginDetail = Helpers.isObservationSearchUrl model.url }
                     , activeTab = if model.url.fragment == Nothing then model.activeTab else context.fragment.tab
-                    , focus = if model.url.fragment == Nothing then model.focus else Feature.Focus.init context.fragment.focus
+                    , focus = if model.url.fragment == Nothing then model.focus else let fresh = Feature.Focus.init context.fragment.focus in { fresh | returnContext = model.focus.returnContext }
                 }
             else
                 model
@@ -958,7 +959,7 @@ clearSessionScopedState model =
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
         , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
-        , auditLog = let empty = Feature.AuditLog.init in { empty | nextRequestId = model.auditLog.nextRequestId }
+        , auditLog = let empty = Feature.AuditLog.init in { empty | nextRequestId = model.auditLog.nextRequestId, nextNavigationId = model.auditLog.nextNavigationId }
         , auditDiff = let state = model.auditDiff in { state | dialog = Nothing }
         , timeline = Feature.Timeline.init
         , workspaceAdmin = Feature.WorkspaceAdmin.retireSessionState model.workspaceAdmin
@@ -1017,7 +1018,8 @@ viewDocument model =
                 text ""
             , Keyed.node "div"
                 [ class "main-content", id "main-content-scroll" ]
-                [ ( "retained-observation-draft", Feature.Observation.viewRetainedDraft model )
+                [ ( "audit-return", Feature.Focus.viewAuditReturn model )
+                , ( "retained-observation-draft", Feature.Observation.viewRetainedDraft model )
                 , ( pageKey model.page, viewPage model )
                 ]
             , Toast.view model.toast

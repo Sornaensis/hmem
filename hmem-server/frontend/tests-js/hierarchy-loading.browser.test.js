@@ -213,7 +213,7 @@ test('uncached external focus and browser history preserve restrictive filters w
 
 test('search Audit card and breadcrumb focus preserve filters and restore their source context', { timeout: 60000 }, async () => {
   const fixture = hierarchyFixture(), root = fixture.projects[0], template = fixture.tasks[0]
-  const parent = { ...template, id: 'shared-target', title: 'Needle parent', project_id: root.id, parent_id: null, status: 'todo', priority: 3 }
+  const parent = { ...template, id: '10000000-0000-4000-8000-000000000099', title: 'Needle parent', project_id: root.id, parent_id: null, status: 'todo', priority: 3 }
   fixture.projects = [root]
   fixture.tasks = [parent, ...['done', 'cancelled'].map((status, index) => ({ ...template, id: 'shared-child-' + index, project_id: root.id, parent_id: parent.id, status, priority: index + 6 }))]
   fixture.timelineEvents = [focusEvent(fixture, 'task', parent.id)]
@@ -232,7 +232,7 @@ test('search Audit card and breadcrumb focus preserve filters and restore their 
     await h.page.getByRole('button', { name: 'Jump To task: ' + parent.title, exact: true }).waitFor({ state: 'visible' })
     await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
     await h.page.locator('#timeline-event-filtered-focus').click()
-    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('#entity-' + parent.id).waitFor({ state: 'visible' }); await h.idle()
     await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), { schema_version: 1, type: 'change', event: {
       schema_version: 1, event_id: 'focused-search-refresh', scope: 'workspace', workspace_id: fixture.workspace.id, occurred_at: '2026-10-16T00:00:00Z',
       transaction: { id: 'focused-search-refresh', cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
@@ -249,7 +249,7 @@ test('search Audit card and breadcrumb focus preserve filters and restore their 
     await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
     const sameTargetStart = h.requests.length
     await h.page.locator('#timeline-event-filtered-focus').click()
-    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('#entity-' + parent.id).waitFor({ state: 'visible' }); await h.idle()
     const sameTargetRequests = h.requests.slice(sameTargetStart)
     const sameTargetBranch = sameTargetRequests.filter(r => r.kind === 'task' && r.parent === parent.id)
     assert.equal(sameTargetBranch.length, 1, 'Returning from search completes the preserved restrictive branch once')
@@ -264,19 +264,19 @@ test('search Audit card and breadcrumb focus preserve filters and restore their 
     await h.page.locator('.focus-clear-btn').click(); await h.idle()
     await query.fill('needle')
     await h.page.getByRole('button', { name: 'Jump To task: ' + parent.title, exact: true }).click()
-    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible', timeout: 10000 }); await h.idle()
+    await h.page.locator('#entity-' + parent.id).waitFor({ state: 'visible', timeout: 10000 }); await h.idle()
     assert.equal(await focusedQuery.inputValue(), 'needle')
     await h.page.locator('.focus-crumb-link').getByText(root.name, { exact: true }).click()
     await h.page.locator('#entity-' + root.id).waitFor({ state: 'visible' }); await h.idle()
     await h.page.locator('.focus-crumb-link').getByText(parent.title, { exact: true }).click()
-    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('#entity-' + parent.id).waitFor({ state: 'visible' }); await h.idle()
     assert.equal(await focusedQuery.inputValue(), 'needle')
     assert.equal(await h.page.locator('.focused-search-filter-bar .filter-select').first().inputValue(), 'exact')
     await h.page.locator('.focus-clear-btn').click(); await h.idle()
     assert.equal(await hierarchyQuery.inputValue(), 'needle'); assert.equal(await h.page.locator('.filter-select').first().inputValue(), 'exact')
     await h.page.getByRole('button', { name: 'Audit', exact: true }).click()
-    await h.page.locator('.audit-entity-summary').first().click()
-    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('.audit-entity-link').first().click()
+    await h.page.locator('#entity-' + parent.id).waitFor({ state: 'visible' }); await h.idle()
     assert.equal(await focusedQuery.inputValue(), 'needle')
     assert.equal(await h.page.locator('.focused-search-filter-bar .filter-select').first().inputValue(), 'exact')
     await h.page.getByRole('button', { name: 'Back to workspace Audit entry', exact: true }).click()
@@ -286,14 +286,14 @@ test('search Audit card and breadcrumb focus preserve filters and restore their 
     await h.page.locator('.filter-bar').getByRole('button', { name: 'All', exact: true }).click()
     await h.page.locator('.filter-select').first().selectOption('any'); await hierarchyQuery.fill(''); await h.idle()
     await h.page.locator('#entity-' + root.id + ' .entity-type-project').first().dblclick()
-    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible' }); await h.idle()
-    await h.page.locator('#entity-shared-target .entity-type-label').first().dblclick()
-    await h.page.locator('#entity-shared-target').waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('#entity-' + parent.id).waitFor({ state: 'visible' }); await h.idle()
+    await h.page.locator('#entity-' + parent.id + ' .entity-type-label').first().dblclick()
+    await h.page.locator('#entity-' + parent.id).waitFor({ state: 'visible' }); await h.idle()
     assert.equal(await focusedQuery.inputValue(), '')
     assert.equal(await h.page.locator('.focused-search-filter-bar .filter-select').first().inputValue(), 'any')
     assert.equal(await h.page.locator('#entity-shared-child-1').count(), 0)
     await h.page.locator('.focus-clear-btn').click(); await h.idle()
-    assert.equal(await h.page.locator('#entity-shared-target').count(), 1)
+    assert.equal(await h.page.locator('#entity-' + parent.id).count(), 1)
     assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
   } finally { await h.close() }
 })

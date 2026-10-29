@@ -5612,3 +5612,10 @@ textarea.observation-edit-content {
 @media (max-width: 650px) {
   .page:has(.workspace-tree-layout) { padding-bottom: 4rem; }
 }
+/* Audit destination controls own only their inline text; row space inspects. */
+.audit-entity-link { display: inline; width: auto; max-width: 100%; padding: 0; margin: 0; border: 0; background: none; color: var(--accent); font: inherit; text-align: left; white-space: normal; cursor: pointer; text-decoration: underline; text-underline-offset: .15em; }
+.audit-entity-link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.audit-entity-summary, .audit-entity-summary:hover { cursor: default; text-decoration: none; }
+.audit-target-copy { margin-left: .25rem; }
+.audit-target-unavailable { color: var(--text-muted); font-size: .85em; }
+.audit-return-bar { padding: .5rem 1rem; }

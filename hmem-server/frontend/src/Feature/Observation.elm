@@ -584,7 +584,7 @@ selectTreePath path model =
 
 finishTreeReveal : Model -> (Model, Cmd Msg)
 finishTreeReveal model =
-    if model.observations.searchOriginDetail then
+    if model.observations.searchOriginDetail || (model.observations.selectedId |> Maybe.map (\observationId -> isAuditObservation observationId model) |> Maybe.withDefault False) then
         ( model, Cmd.none )
     else
     let state = model.observations
@@ -1493,8 +1493,8 @@ updateRaw msg model =
                     Ok observation ->
                         if observation.id == observationId && observation.workspaceId == workspaceId then
                             ( updateObservation
-                                (acceptFetchedDetail observation
-                                    >> revealTreeSelection observation
+                                (acceptFetchedDetail (isAuditObservation observationId model) observation
+                                    >> (if isAuditObservation observationId model then identity else revealTreeSelection observation)
                                     >> (\state -> { state | detailLoading = False, detailError = Nothing, activeDetailRequest = Nothing })
                                 )
                                 model
@@ -1505,6 +1505,9 @@ updateRaw msg model =
                             ( updateObservation (\state -> { state | detailLoading = False, detailError = Just "Observation detail did not match this workspace.", activeDetailRequest = Nothing, treeSelectionPending = False }) model, Cmd.none )
 
                     Err (Http.BadStatus 404) ->
+                        if isAuditObservation observationId model then
+                            ( updateObservation (\state -> { state | selectedDetail = Nothing, detailLoading = False, detailError = Just "Entity destination unavailable. It may no longer exist or be accessible.", activeDetailRequest = Nothing, treeSelectionPending = False }) model, Cmd.none )
+                        else
                         let
                             ( cleaned, cleanupCmd ) =
                                 reconcileDeletedObservation observationId model
@@ -3232,7 +3235,12 @@ selectRouteObservation observationId model =
     let state = model.observations
         tree = state.tree
         (selected, command) = selectObservation observationId {model | observations = {state | treeSelectionPending = False, tree = {tree | revealTarget = Nothing}}}
-    in (armTreeRoute selected, command)
+    in (if isAuditObservation observationId selected then { selected | observations = let current = selected.observations in { current | treeSelectionPending = False } } else armTreeRoute selected, command)
+
+
+isAuditObservation : String -> Model -> Bool
+isAuditObservation observationId model =
+    model.focus.returnContext |> Maybe.map (\context -> context.source /= ReturnFromTimeline && context.entityType == "observation" && context.entityId == observationId && model.selectedWorkspaceId == Just context.workspaceId) |> Maybe.withDefault False
 
 
 selectObservation : String -> Model -> ( Model, Cmd Msg )
@@ -3690,10 +3698,10 @@ withRetainedCanonical observationId state existing =
 saved tree/list results. Actual mutation and invalidation paths retain their
 normal refresh behavior.
 -}
-acceptFetchedDetail : Api.Observation -> ObservationModel -> ObservationModel
-acceptFetchedDetail observation state =
+acceptFetchedDetail : Bool -> Api.Observation -> ObservationModel -> ObservationModel
+acceptFetchedDetail detached observation state =
     let accepted = applyCanonicalObservation observation state in
-    if state.searchOriginDetail then
+    if detached || state.searchOriginDetail then
         { accepted | items = state.items, matchEvidence = state.matchEvidence
             , resultsStale = state.resultsStale, workspaceCounts = state.workspaceCounts, counts = state.counts
             , refreshPending = state.refreshPending, refreshPass = state.refreshPass }
@@ -4869,7 +4877,7 @@ viewObservations workspace model =
                 Just message -> p noticeAttributes [ text message ]
                 Nothing -> if Result.toMaybe (Helpers.completeObservationUrl model) == Nothing then p noticeAttributes [ text Helpers.excludedObservationNotice ] else text ""
           else text ""
-        , viewObservationsStateWithPermission model.timestamps (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
+        , viewObservationsStateWithSelection (state.selectedId |> Maybe.map (\observationId -> isAuditObservation observationId model) |> Maybe.withDefault False) model.timestamps (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
         ]
 
 
@@ -4880,6 +4888,11 @@ viewObservationsState display workspace state =
 
 viewObservationsStateWithPermission : TimestampDisplay.State -> Bool -> Api.Workspace -> ObservationModel -> Html Msg
 viewObservationsStateWithPermission display canEdit workspace state =
+    viewObservationsStateWithSelection False display canEdit workspace state
+
+
+viewObservationsStateWithSelection : Bool -> TimestampDisplay.State -> Bool -> Api.Workspace -> ObservationModel -> Html Msg
+viewObservationsStateWithSelection forceDetached display canEdit workspace state =
     if workspace.workspaceType /= Api.Repository then
         div [ class "empty-state observation-state observation-state-unavailable" ]
             [ h3 [] [ text "Observations unavailable" ]
@@ -4906,7 +4919,7 @@ viewObservationsStateWithPermission display canEdit workspace state =
                     ]
                     [ if state.searchOriginDetail && state.selectedId /= Nothing then
                         viewSearchDetailState display state
-                      else if state.selectedId /= Nothing && selectedOwner state == Nothing && not (treeMode state.requestMode) then
+                      else if state.selectedId /= Nothing && selectedOwner state == Nothing && (forceDetached || not (treeMode state.requestMode)) then
                         div [ class "card observation-result observation-detached", attribute "data-observation-detached" "true" ]
                             [ p [ class "form-help", attribute "role" "status" ] [ text "Selected observation is outside the displayed result rows. Loaded counts and file-match evidence are unchanged." ]
                             , case state.selectedDetail of

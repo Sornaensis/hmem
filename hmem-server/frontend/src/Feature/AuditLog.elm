@@ -2,11 +2,15 @@ module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, audi
 
 import ActorAttribution
 import Api
+import AuditNavigation
+import Browser.Dom
 import Dict
 import Feature.Focus as Focus
 import Feature.FocusedFilters
 import Feature.AuditDiff
 import Feature.AuditRequest as AuditRequest
+import Feature.Observation
+import Feature.DataLoading
 import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, pushUrl)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -14,9 +18,12 @@ import Html.Events exposing (..)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
+import Ports
+import Task
 import Toast exposing (addToast)
 import TimestampDisplay
 import Types exposing (..)
+import Url
 
 
 init : AuditLogModel
@@ -31,7 +38,11 @@ init =
     , loadingFilters = Nothing
     , activeRequest = Nothing
     , nextRequestId = 1
+    , activeNavigationId = Nothing
+    , nextNavigationId = 1
     , error = Nothing
+    , restoreScrollY = Nothing
+    , pendingReturn = Nothing
     , filters = { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
     , expandedEntries = Dict.empty
     , revertConfirmation = Nothing
@@ -43,86 +54,30 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         NavigateToAuditEntity auditEntry ->
-            let
-                -- Extract workspace_id from the entry's values
-                extractWsId val =
-                    Decode.decodeValue (Decode.field "workspace_id" Decode.string) val |> Result.toMaybe
+            case AuditNavigation.resolve auditEntry of
+                Just destination ->
+                    captureAuditNavigation auditEntry destination model
 
-                orElseMaybe fallback primary =
-                    case primary of
-                        Just _ ->
-                            primary
-
-                        Nothing ->
-                            fallback
-
-                mWorkspaceId =
-                    case auditEntry.workspaceId of
-                        Just _ ->
-                            auditEntry.workspaceId
-
-                        Nothing ->
-                            orElseMaybe
-                                (Maybe.andThen extractWsId auditEntry.oldValues)
-                                (Maybe.andThen extractWsId auditEntry.newValues)
-
-                resolvedTarget =
-                    resolveAuditNavigationTarget auditEntry
-
-                returnSource =
-                    auditReturnSource model
-
-                entryExpanded =
-                    Dict.get auditEntry.id model.auditLog.expandedEntries |> Maybe.withDefault False
-
-                returnFilters =
-                    auditReturnFilters auditEntry.id model.auditLog
-            in
-            case resolvedTarget of
                 Nothing ->
-                    addToast Warning "Cannot navigate to this entity type" model
+                    addToast Warning "Entity destination unavailable" model
 
-                Just ( targetType, targetId ) ->
-                    case mWorkspaceId of
-                        Just wsId ->
-                            let
-                                targetTab =
-                                    case targetType of
-                                        "observation" ->
-                                            ObservationsTab
+        NavigateToAuditRelated auditEntry destination ->
+            if List.any (Tuple.second >> (==) destination) (AuditNavigation.related auditEntry) then
+                captureAuditNavigation auditEntry destination model
+            else
+                ( model, Cmd.none )
 
-                                        _ ->
-                                            ProjectsTab
-
-                                focusEntry =
-                                    ( targetType, targetId )
-
-                                focusModel =
-                                    model.focus
-
-                                newHistory =
-                                    List.take (focusModel.historyIndex + 1) focusModel.history ++ [ focusEntry ]
-
-                                newIndex =
-                                    List.length newHistory - 1
-                            in
-                            ( updateFocusModel
-                                (\fc ->
-                                    { fc
-                                        | focusedEntity = Just focusEntry
-                                        , breadcrumbAnchor = Just focusEntry
-                                        , history = newHistory
-                                        , historyIndex = newIndex
-                                        , returnContext = Just (Focus.auditReturnContext returnSource wsId returnFilters entryExpanded auditEntry focusEntry)
-                                    }
-                                )
-                                { model | selectedWorkspaceId = Just wsId, activeTab = targetTab, search = Feature.FocusedFilters.clearTransientSearchState model.search }
-                                |> Feature.FocusedFilters.enter
-                            , pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry) Nothing)
-                            )
-
-                        Nothing ->
-                            addToast Warning "Cannot navigate: entity workspace unknown" model
+        GotAuditNavigationViewport guard auditEntry destination result ->
+            if guard.sessionEpoch /= model.sessionRequestEpoch || guard.workspaceId /= model.selectedWorkspaceId
+                || guard.page /= model.page || guard.queryId /= model.auditLog.nextRequestId
+                || guard.tab /= model.activeTab || guard.route /= Url.toString model.url || model.auditDiff.dialog /= Nothing
+                || model.auditLog.activeNavigationId /= Just guard.navigationId || model.auth.status /= AuthReady then
+                ( model, Cmd.none )
+            else
+                if guard.principal /= Maybe.map .principal model.sessionContext || guard.authMode /= Maybe.map .authMode model.sessionContext then
+                    ( model, Cmd.none )
+                else
+                    navigateAuditEntity (Result.withDefault model.mainContentScrollY result) auditEntry destination model
 
         GotAuditLog request requestedFilters result ->
             if not (AuditRequest.matches request requestedFilters model) then
@@ -146,10 +101,14 @@ update msg model =
                                     , loadingFilters = Nothing
                                     , activeRequest = Nothing
                                     , error = Nothing
+                                    , restoreScrollY = Nothing
+                                    , pendingReturn = Nothing
                                 }
                             )
                             model
-                        , Cmd.none
+                        , model.auditLog.restoreScrollY
+                            |> Maybe.map (\scrollY -> Ports.restoreAuditViewport (Encode.object [ ( "stamp", Encode.string (String.fromInt model.sessionRequestEpoch ++ ":" ++ String.fromInt model.auditLog.nextRequestId) ), ( "top", Encode.float scrollY ) ]))
+                            |> Maybe.withDefault Cmd.none
                         )
 
                     Err _ ->
@@ -264,7 +223,7 @@ update msg model =
                 current =
                     Dict.get entryId model.auditLog.expandedEntries |> Maybe.withDefault False
             in
-            ( updateAuditLogModel (\al -> { al | expandedEntries = if current then Dict.empty else Dict.singleton entryId True }) model
+            ( updateAuditLogModel (\al -> { al | expandedEntries = if current then Dict.empty else Dict.singleton entryId True, activeNavigationId = Nothing }) model
             , Cmd.none
             )
 
@@ -454,7 +413,7 @@ viewAuditEntries model emptyMessage =
         div [ class "empty-state" ] [ text emptyMessage ]
 
     else
-        div [ class "audit-log-list audit-ledger", attribute "aria-label" "Audit ledger" ]
+        div [ class "audit-log-list audit-ledger", attribute "aria-label" "Audit ledger", attribute "data-audit-viewport" (String.fromInt model.sessionRequestEpoch ++ ":" ++ String.fromInt model.auditLog.nextRequestId) ]
             [ div [ class "audit-ledger-rows" ]
                 ([ div [ class "audit-ledger-head" ] [ span [] [ text "Time / actor" ], span [] [ text "Change" ] ] ]
                     ++ (model.auditLog.error |> Maybe.map (\message -> [ div [ class "error-message", attribute "role" "alert" ] [ text message ] ]) |> Maybe.withDefault [])
@@ -539,51 +498,53 @@ validAuditDate raw =
                 False
 
 
-resolveAuditNavigationTarget : Api.AuditLogEntry -> Maybe ( String, String )
-resolveAuditNavigationTarget entry =
+captureAuditNavigation : Api.AuditLogEntry -> AuditDestination -> Model -> ( Model, Cmd Msg )
+captureAuditNavigation entry destination model =
     let
-        extractField field val =
-            Decode.decodeValue (Decode.field field Decode.string) val |> Result.toMaybe
-
-        fromValues field =
-            let
-                fromNew =
-                    Maybe.andThen (extractField field) entry.newValues
-
-                fromOld =
-                    Maybe.andThen (extractField field) entry.oldValues
-            in
-            case fromNew of
-                Just _ ->
-                    fromNew
-
-                Nothing ->
-                    fromOld
+        state = model.auditLog
+        guard = { sessionEpoch = model.sessionRequestEpoch, workspaceId = model.selectedWorkspaceId, page = model.page, tab = model.activeTab, route = Url.toString model.url, queryId = state.nextRequestId, navigationId = state.nextNavigationId, principal = Maybe.map .principal model.sessionContext, authMode = Maybe.map .authMode model.sessionContext }
     in
-    case entry.entityType of
-        "memory_link" ->
-            fromValues "source_id" |> Maybe.map (\id -> ( "memory", id ))
+    ( { model | auditLog = { state | activeNavigationId = Just guard.navigationId, nextNavigationId = state.nextNavigationId + 1 } }
+    , Browser.Dom.getViewportOf "main-content-scroll"
+        |> Task.map (.viewport >> .y)
+        |> Task.mapError (\_ -> ())
+        |> Task.attempt (GotAuditNavigationViewport guard entry destination)
+    )
 
-        "memory_tag" ->
-            fromValues "memory_id" |> Maybe.map (\id -> ( "memory", id ))
 
-        "memory_category_link" ->
-            fromValues "memory_id" |> Maybe.map (\id -> ( "memory", id ))
-
-        "project_memory_link" ->
-            fromValues "project_id" |> Maybe.map (\id -> ( "project", id ))
-
-        "task_memory_link" ->
-            fromValues "task_id" |> Maybe.map (\id -> ( "task", id ))
-
-        "task_dependency" ->
-            fromValues "task_id" |> Maybe.map (\id -> ( "task", id ))
-
-        "workspace_group_member" ->
-            Nothing
-
-        _ ->
-            Just ( entry.entityType, entry.entityId )
+navigateAuditEntity : Float -> Api.AuditLogEntry -> AuditDestination -> Model -> ( Model, Cmd Msg )
+navigateAuditEntity scrollY entry destination model =
+    let
+        targetType = AuditNavigation.destinationType destination
+        target = ( targetType, destination.id )
+        maybeFocus = if List.member destination.kind [ AuditProject, AuditTask ] then Just target else Nothing
+        targetTab = case destination.kind of
+            AuditObservation -> ObservationsTab
+            AuditSession -> SessionsTab
+            _ -> ProjectsTab
+        original = Focus.auditReturnContext (auditReturnSource model) destination.workspaceId (auditReturnFilters entry.id model.auditLog)
+            (Dict.get entry.id model.auditLog.expandedEntries |> Maybe.withDefault False) entry target
+        context = { original | auditScrollY = Just scrollY, auditPrincipal = Maybe.map .principal model.sessionContext, auditAuthMode = Maybe.map .authMode model.sessionContext }
+        state = model.auditLog
+        prepared =
+            { model
+                | selectedWorkspaceId = Just destination.workspaceId
+                , activeTab = targetTab
+                , auditLog = { state | activeNavigationId = Nothing }
+                , observations = Feature.Observation.clearSelection model.observations
+                , search = Feature.FocusedFilters.clearTransientSearchState model.search
+                , focus = { focusedEntity = maybeFocus, breadcrumbAnchor = maybeFocus, history = Maybe.map List.singleton maybeFocus |> Maybe.withDefault [], historyIndex = 0, returnContext = Just context }
+            }
+                |> Feature.FocusedFilters.enter
+        ( verified, verifyCmd ) =
+            if maybeFocus /= Nothing && model.page == WorkspacePage destination.workspaceId then
+                Feature.DataLoading.revalidateNavigationFocus destination.workspaceId targetType destination.id prepared
+            else
+                ( prepared, Cmd.none )
+    in
+    ( verified
+    , Cmd.batch [ verifyCmd, pushUrl model.key (AuditNavigation.destinationUrl destination), Browser.Dom.setViewportOf "main-content-scroll" 0 0 |> Task.attempt (\_ -> NoOp) ]
+    )
 
 
 auditEntitySummary : Model -> Api.AuditLogEntry -> String
@@ -1427,7 +1388,7 @@ viewAuditLogEntry model entry =
             auditEntitySummary model entry
 
         navigable =
-            resolveAuditNavigationTarget entry /= Nothing
+            AuditNavigation.resolve entry /= Nothing
 
         diffField =
             if entry.action == Api.AuditUpdate then
@@ -1436,18 +1397,9 @@ viewAuditLogEntry model entry =
                 Nothing
 
         summaryAttrs =
-            if navigable then
-                [ class "audit-entity-summary"
-                , stopPropagationOn "click" (Decode.succeed ( NavigateToAuditEntity entry, True ))
-                , title ("Go to " ++ entry.entityType)
-                ]
-
-            else
-                [ class "audit-entity-summary audit-entity-no-nav"
-                , title entry.entityType
-                ]
+            [ class "audit-entity-summary" ]
     in
-    div [ class ("audit-entry" ++ (if expanded then " audit-entry-selected" else "")) ]
+    div [ id ("audit-event-" ++ entry.id), class ("audit-entry" ++ (if expanded then " audit-entry-selected" else "")) ]
         [ div [ class "audit-entry-row", onClick (ToggleAuditExpand entry.id) ]
             [ div [ class "audit-ledger-when" ] [ span [ class "audit-timestamp" ] [ text (TimestampDisplay.lookup model.timestamps entry.changedAt) ], span [ class "audit-actor" ] [ ActorAttribution.viewInline entry ] ]
             , div [ class "audit-ledger-change" ]
@@ -1463,7 +1415,7 @@ viewAuditLogEntry model entry =
             , span [ class ("audit-action-badge " ++ actionClass) ] [ text actionLabel ]
             , span [ class "audit-entity-type" ] [ text (if entry.entityType == "observation" || entry.entityType == "memory" then "Observations" else entry.entityType) ]
             , span summaryAttrs
-                [ viewAuditSummary model entry
+                [ viewAuditNavigationSummary model entry
                 ]
             , case auditStatusChange entry of
                 Just ( oldStatus, newStatus ) ->
@@ -1855,7 +1807,7 @@ viewAuditContext model entry =
             (List.concatMap (\( labelText, valueText ) ->
                 if labelText == "Target entity" then
                     [ dt [ class "audit-detail-label" ] [ text labelText ]
-                    , dd [ class "audit-detail-value" ] [ text (valueText ++ " · "), viewAuditSummary model entry ] ]
+                    , dd [ class "audit-detail-value" ] [ text (valueText ++ " · "), viewAuditNavigationSummary model entry ] ]
                 else viewAuditDetailItem model.timestamps ( labelText, valueText )) (auditContextDetailItemsForView model entry))
         ]
 
@@ -1863,6 +1815,30 @@ viewAuditContext model entry =
 {-| Only raw typed fields supply identifier payloads. User names and content do
 not become identifiers when they happen to look like an abbreviated fallback.
 -}
+viewAuditNavigationSummary : Model -> Api.AuditLogEntry -> Html Msg
+viewAuditNavigationSummary model entry =
+    let
+        link message labelText = button [ class "audit-entity-link", type_ "button", stopPropagationOn "click" (Decode.succeed ( message, True )) ] [ text labelText ]
+        targetName destination = case destination.kind of
+            AuditTask -> Dict.get destination.id model.tasks |> Maybe.map .title |> Maybe.withDefault (String.left 8 destination.id)
+            AuditProject -> Dict.get destination.id model.projects |> Maybe.map .name |> Maybe.withDefault (String.left 8 destination.id)
+            _ -> String.left 8 destination.id
+        copy destination = Helpers.copyableValue "audit-target-copy" (AuditNavigation.destinationType destination ++ " ID") destination.id "⧉"
+        hasName = List.any (\field ->
+            let read = Maybe.andThen (Decode.decodeValue (Decode.field field flexibleStringDecoder) >> Result.toMaybe)
+            in read entry.newValues /= Nothing || read entry.oldValues /= Nothing) [ "name", "title", "content" ]
+        primary = case AuditNavigation.resolve entry of
+            Just destination ->
+                let relationship = List.member entry.entityType [ "task_session", "task_dependency" ]
+                    labelText = if relationship then (if destination.kind == AuditSession then "Session " else "") ++ targetName destination else auditEntitySummary model entry
+                in [ link (NavigateToAuditEntity entry) labelText ] ++ (if relationship || not hasName then [ copy destination ] else [])
+            Nothing -> [ viewAuditSummary model entry, span [ class "audit-target-unavailable", title "Entity destination unavailable" ] [ text " · Destination unavailable" ] ]
+        secondary = AuditNavigation.related entry |> List.concatMap (\( labelText, destination ) ->
+            [ text " · ", link (NavigateToAuditRelated entry destination) (labelText ++ ": " ++ targetName destination), copy destination ])
+    in
+    span [] (primary ++ secondary)
+
+
 viewAuditSummary : Model -> Api.AuditLogEntry -> Html Msg
 viewAuditSummary model entry =
     let

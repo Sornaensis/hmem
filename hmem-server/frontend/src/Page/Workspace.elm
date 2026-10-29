@@ -46,6 +46,9 @@ viewWorkspaceContent wsId model =
     if model.auth.status == AuthReady && not (Permissions.canReadCurrentWorkspace model) then
         viewUnauthorizedWorkspace model
 
+    else if Feature.Focus.auditDestinationStatus model /= Nothing then
+        div [ class "empty-state audit-destination-status", attribute "role" "status" ] [ text (Maybe.withDefault "Entity destination unavailable." (Feature.Focus.auditDestinationStatus model)) ]
+
     else
         case Dict.get wsId model.workspaces of
             Nothing ->

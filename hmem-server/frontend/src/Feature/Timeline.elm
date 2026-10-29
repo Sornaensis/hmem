@@ -921,7 +921,7 @@ timelineRangeLabel display since until =
 
 viewTimelineHistogram : TimestampDisplay.State -> TimelineModel -> Html Msg
 viewTimelineHistogram display timeline =
-    div [ class "timeline-chart-panel" ]
+    div [ class "timeline-chart-panel timeline-plot-container" ]
         [ viewTimelineHistogramControls timeline
         , p [ class "timeline-line-filter-label" ] [ text "Lifecycle line filters" ]
         , viewTimelineChartToggles timeline.chartSeries

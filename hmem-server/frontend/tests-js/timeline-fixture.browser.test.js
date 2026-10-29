@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { chromium } from '@playwright/test'
 
-const fixtureBundle = resolve(process.cwd(), '.timeline-fixture-test.js')
+const fixtureBundle = process.env.HMEM_TIMELINE_FIXTURE_BUNDLE || resolve(process.cwd(), '.timeline-fixture-test.js')
 
 async function startFixtureServer() {
   const [ bundle, stylesheet, timestampBridge, entrypoint, fixtureHtml ] = await Promise.all([

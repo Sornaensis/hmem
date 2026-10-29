@@ -5438,7 +5438,7 @@ textarea.observation-edit-content {
 .workspace-context-persistent .focused-search-filter-bar .filter-bar { flex: 1 1 100%; margin: 0; padding: 0; border: 0; }
 
 /* Timeline retains its chart canvas and real lifecycle controls inside shared sections. */
-.timeline-panel { max-width: 78rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); min-width: 0; }
+.timeline-panel { max-width: none; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-surface); min-width: 0; }
 .timeline-panel-header { padding: 10px 14px; margin: 0; border-bottom: 1px solid var(--border); }
 .timeline-panel-header h3 { font-size: 18px; line-height: 1.4; font-weight: 500; }
 .timeline-panel-header p { font-size: 12px; line-height: 1.5; }
@@ -5448,7 +5448,7 @@ textarea.observation-edit-content {
 .timeline-graph-control :is(input, select) { font-size: 14px; min-height: 32px; border-radius: 8px; }
 .timeline-chart-toggles { gap: 8px; margin-bottom: 14px; }
 .timeline-series-toggle { min-height: 32px; font-size: 14px; }
-.timeline-events-section { padding: 14px; min-width: 0; }
+.timeline-events-section { padding: 14px; min-width: 0; max-width:78rem; }
 .timeline-events-section .timeline-filter-bar { margin: 0 0 14px; padding: 0; background: transparent; border: 0; }
 .timeline-events-section .timeline-event-list { gap: 14px; }
 .timeline-panel .timeline-state, .timeline-panel .timeline-stale-notice { padding: 14px; }
@@ -5688,3 +5688,6 @@ textarea.observation-edit-content {
   .sessions-page .sessions-layout:not(:has(.session-conversation-grid)) > .sessions-list { grid-column:1; grid-row:2; }
   .sessions-page .sessions-layout > .session-detail.empty-state { grid-column:1; grid-row:1; }
 }
+
+/* The plot owns the full content row; event filters/cards keep their own cap. */
+.timeline-plot-container { width:100%; min-width:0; box-sizing:border-box; }

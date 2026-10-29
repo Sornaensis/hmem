@@ -904,11 +904,12 @@ viewTaskActiveWithChoices includeChoices workspace model task =
     aside [class "task-session-dock",attribute "aria-label" "Task active agents",attribute "aria-busy" (if fresh then "false" else "true"),stopPropagationOn "click" (Decode.succeed (NoOp,True)),stopPropagationOn "dblclick" (Decode.succeed (NoOp,True))]
         [div [class "task-session-context-grid"]
             [model.sessions.selected |> Maybe.map (\id -> div [class "task-session-transcript"]
-                [a [class "btn btn-sm task-session-open-full",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"]
-                ,resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.map (\payload -> case payload of
+                [resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.map (\payload -> case payload of
                     Delivery.Metadata session -> div [class "task-session-selected-context"] [h4 [] [text (sessionTitle session)],viewAncestorPath session]
                     _ -> text "") |> Maybe.withDefault (text "")
-                ,viewRecords workspace model id]) |> Maybe.withDefault (div [class "empty-state"] [text "Select an active session to read its recent conversation."])
+                ,viewRecords workspace model id
+                ,div [class "task-session-footer"]
+                    [a [class "btn btn-sm task-session-open-full",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"]]]) |> Maybe.withDefault (div [class "empty-state"] [text "Select an active session to read its recent conversation."])
             ,if includeChoices then viewTaskActiveChoices workspace model task else text ""
             ]]
 

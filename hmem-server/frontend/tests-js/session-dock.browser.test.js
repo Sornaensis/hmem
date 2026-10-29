@@ -7,6 +7,43 @@ const card=(h,index)=>h.page.locator('#entity-'+h.fixture.tasks[index].id)
 const agent=(h,index)=>card(h,index).locator(':scope > .card-header .task-sessions-icon')
 const changed=async(h,session)=>h.page.evaluate(({workspace,session})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'dock-change-'+Date.now(),scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'dock-change',cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:h.fixture.workspace.id,session})
 
+test('dock keeps long task descriptions beside the reader and stretches a vertical agent hierarchy with a footer destination',{timeout:60000},async()=>{
+ const h=await openSessionExplorer({activeCount:14,runtime:{model:'A long runtime identity for checking the available card width',role:'Developer',reasoning:'high'}}),{page}=h
+ const description='Task context remains visible while reading an agent conversation. '+('Long context and acceptance criteria. '.repeat(18))
+ h.fixture.tasks[0].description=description
+ h.activeSessions[1].parent_session_id=h.active.id
+ h.activeSessions[2].parent_session_id=h.activeSessions[1].id
+ try{
+  await h.start();await until(()=>agent(h,0).isEnabled());await agent(h,0).click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
+  const owner=card(h,0),choices=owner.locator(':scope > .task-session-context-choices'),picker=choices.locator('.task-session-picker'),reader=owner.locator('.task-session-transcript'),footer=reader.locator(':scope > .task-session-footer'),full=footer.getByRole('link',{name:'Open full session ↗'})
+  assert.equal(await owner.getByText(description,{exact:true}).isVisible(),true)
+  const extras=owner.locator('.btn-extras-toggle');await extras.click();assert.equal(await owner.getByText(description,{exact:true}).isVisible(),true);await extras.click();assert.equal(await owner.getByText(description,{exact:true}).isVisible(),true)
+  assert.equal(await choices.locator('.session-tree-children .session-tree-children .task-session-choice').count(),1,'child hierarchy remains nested')
+  for(const [width,zoom] of [[1920,1],[1440,1],[900,1],[430,1],[1440,1.5]]){
+   await page.setViewportSize({width,height:1000});await page.evaluate(zoom=>{document.documentElement.style.zoom=String(zoom)},zoom);await h.idle()
+   const layout=await owner.evaluate(el=>{
+    const box=n=>n.getBoundingClientRect().toJSON(),choices=el.querySelector(':scope > .task-session-context-choices'),picker=choices.querySelector('.task-session-picker'),transcript=el.querySelector('.task-session-transcript'),link=transcript.querySelector('.task-session-open-full'),footer=link.parentElement
+    return {card:box(el),work:box(el.querySelector(':scope > .task-card-work')),dock:box(el.querySelector(':scope > .task-session-dock')),choices:box(choices),reader:box(transcript),footer:box(footer),link:box(link),roots:[...picker.querySelectorAll(':scope > .session-summaries > .session-tree-node')].map(box),scrollHeight:picker.scrollHeight,clientHeight:picker.clientHeight,overflow:getComputedStyle(picker).overflowY,pageOverflow:document.documentElement.scrollWidth>innerWidth}
+   })
+   assert.equal(layout.pageOverflow,false)
+   for(let i=1;i<layout.roots.length;i++)assert.ok(layout.roots[i].top>=layout.roots[i-1].bottom-1,'top-level threads stack vertically')
+   assert.ok(layout.scrollHeight>layout.clientHeight,'long agent hierarchy scrolls internally');assert.equal(layout.overflow,'auto')
+   assert.ok(Math.abs(layout.link.right-layout.footer.right)<1,'full-session action is right-aligned')
+   assert.ok(layout.footer.top>=layout.reader.top+layout.reader.height-layout.footer.height-1,'full-session action is the reader footer')
+   if(width===1920){assert.ok(layout.dock.left>=layout.work.right-1);assert.ok(layout.choices.left>=layout.dock.right-1);assert.ok(Math.abs(layout.choices.height-layout.dock.height)<1,'Active Agents fills the shared content height')}
+   if(process.env.HMEM_DOCK_SCREENSHOTS && (width===1920 || width===430)){
+    await page.setViewportSize({width,height:6000});await h.idle();await owner.screenshot({path:join(process.env.HMEM_DOCK_SCREENSHOTS,'task-agent-long-'+width+'.png')});await page.setViewportSize({width,height:1000})
+   }
+  }
+  await page.evaluate(()=>{document.documentElement.style.zoom=''})
+  await picker.evaluate(el=>{el.scrollTop=el.scrollHeight});await choices.locator('.task-session-choice').last().getByRole('button').click();await h.idle()
+  const selected=await choices.locator('[aria-pressed="true"]').getAttribute('aria-pressed');assert.equal(selected,'true')
+  const destination=await full.getAttribute('href');assert.ok(destination.includes('&task='+h.fixture.tasks[0].id));assert.ok(destination.includes('session='+h.activeSessions.at(-1).id))
+  await full.click();await until(()=>page.url().includes('tab=sessions'));assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('session'),h.activeSessions.at(-1).id)
+  assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[]);assert.ok(h.peak()<=2)
+ }finally{await h.close()}
+})
+
 test('task-owned Active Agent dock retains task context, grouped transcript, evidence and a single viewer across switches',{timeout:60000},async()=>{
  const h=await openSessionExplorer({activeCount:2,runtime:{model:'Dock runtime',role:'Developer',reasoning:'high'}}),{page}=h
  const other=h.activeSessions[1],bytes=Buffer.from(JSON.stringify({type:'response_item',timestamp:new Date().toISOString(),payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'The second agent transcript.'}]}})+'\n')

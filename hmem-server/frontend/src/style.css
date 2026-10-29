@@ -5310,12 +5310,13 @@ textarea.observation-edit-content {
 .task-card-with-dock > .task-session-dock { grid-column: 2; grid-row: 1 / span 10; padding: 16px; margin: 0; border-top: 0; border-left: 1px solid var(--border); }
 .task-session-context-grid { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .task-session-context-choices { width: 100%; }
-.task-session-context-choices .session-summaries { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; }
+.task-session-context-choices .session-summaries { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .task-session-context-choices .session-tree-children { margin-left: 8px; padding-left: 8px; }
 .task-session-context-choices .session-tree-flat { margin-left: 0; padding-left: 0; }
 .task-session-context-choices .task-session-choice { width: 100%; margin: 0; }
 .task-session-transcript { width: 100%; min-width: 0; }
-.task-session-transcript .task-session-open-full { display: inline-flex; align-items: center; min-height: 32px; margin-bottom: 10px; }
+.task-session-footer { display: flex; justify-content: flex-end; margin-top: 10px; }
+.task-session-transcript .task-session-open-full { display: inline-flex; align-items: center; min-height: 32px; }
 .task-session-dock :is(button, select, .session-summary-link) { min-height: 32px; }
 .task-session-dock .session-ancestor-path { margin: 10px 0; padding: 10px; }
 .task-card-with-dock .card-fact select { max-width: 100%; }
@@ -5351,7 +5352,6 @@ textarea.observation-edit-content {
   .task-card-with-dock > .task-session-dock { grid-column: 1; grid-row: auto; padding: 14px; margin: 0; border-top: 1px solid var(--border); border-left: 0; }
 }
 
-.task-session-context-choices .task-session-picker { max-height: 240px; }
 .task-session-context-choices .task-session-choice { max-width: 430px; }
 
 /* Selected metadata fallbacks occupy the same context row as its loaded header. */
@@ -5590,11 +5590,12 @@ textarea.observation-edit-content {
 .workspace-tree-content .task-card-work > .card-summary { margin: 0; padding: 0 14px 10px; font-size: 12px; }
 .workspace-tree-content .task-card-work > .card-body { padding: 0 14px 14px; font-size: 14px; gap: 10px; }
 .workspace-tree-content .task-card-work > .card-inline-actions { margin: 0; padding: 8px 14px; gap: 8px; flex-wrap: wrap; }
-.task-card-with-dock { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(180px, .7fr); }
+.task-card-with-dock { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(180px, .7fr); align-items: stretch; }
 .task-card-with-dock > .card-header { grid-column: 1 / -1; grid-row: 1; }
 .task-card-with-dock > .task-card-work { grid-column: 1; grid-row: 2; }
 .task-card-with-dock > .task-session-dock { grid-column: 2; grid-row: 2; border-left: 1px solid var(--border); }
-.task-card-with-dock > .task-session-context-choices { grid-column: 3; grid-row: 2; border-top: 0; border-left: 1px solid var(--border); margin: 0; }
+.task-card-with-dock > .task-session-context-choices { grid-column: 3; grid-row: 2; display: flex; flex-direction: column; min-height: 0; border-top: 0; border-left: 1px solid var(--border); margin: 0; }
+.task-card-with-dock > .task-session-context-choices .task-session-picker { flex: 1 1 0; min-height: 180px; max-height: none; overflow: auto; }
 .task-card-with-dock > .card-footer, .task-card-with-dock > .tree-children, .task-card-with-dock > .tree-tasks { grid-column: 1 / -1; }
 .task-session-context-grid { flex-direction: row; align-items: flex-start; }
 .task-session-context-grid > .task-session-transcript { flex: 1 1 0; }
@@ -5612,6 +5613,7 @@ textarea.observation-edit-content {
   .task-card-with-dock > .task-card-work { grid-column: 1; grid-row: 2; }
   .task-card-with-dock > .task-session-dock { grid-column: 1; grid-row: 3; border-left: 0; border-top: 1px solid var(--border); }
   .task-card-with-dock > .task-session-context-choices { grid-column: 1; grid-row: 4; border-left: 0; border-top: 1px solid var(--border); }
+  .task-card-with-dock > .task-session-context-choices .task-session-picker { flex-basis: auto; max-height: min(540px, 65vh); }
 }
 @media (max-width: 650px) {
   .sessions-page .sessions-layout { grid-template-columns: minmax(0, 1fr); }

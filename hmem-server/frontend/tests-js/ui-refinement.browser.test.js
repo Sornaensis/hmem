@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 
 const until=async fn=>{const end=Date.now()+12000;while(Date.now()<end){if(await fn())return;await new Promise(done=>setTimeout(done,25))}throw Error('UI refinement did not converge')}
-const shots=resolve('../../output/ui-refinement')
+const shots=resolve('../../.tmp/ui-refinement')
 const screenshot=async(page,name)=>{await mkdir(shots,{recursive:true});await page.screenshot({path:resolve(shots,name+'.png'),fullPage:true})}
 
 test('local card sections retain task operations and a single contextual preview under persistent workspace controls',{timeout:60000},async()=>{

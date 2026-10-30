@@ -15,7 +15,7 @@ import {pipeline,finished} from 'node:stream/promises'
 import {chromium} from '@playwright/test'
 
 const repo=resolve(import.meta.dirname,'../../..')
-const taskRoot=join(repo,'.scratch','sealed-archives-4a40c671')
+const taskRoot=join(repo,'.tmp','sealed-archives-4a40c671')
 const scratchCeiling=8*1024**3
 const smokeAllowance=1024**3
 const integrationCases=Object.freeze({

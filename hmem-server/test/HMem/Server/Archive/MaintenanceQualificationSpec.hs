@@ -147,15 +147,15 @@ qualify recipe chunkCount=do
         (name,start)<-readIORef currentPhase
         measured<-readIORef phases
         retained<-sandboxLifetimeFailures life
-        let path=repoRoot </> ".scratch" </> "sealed-archives-8ff1e216" </> "failed-"<>T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
-        createDirectoryIfMissing True (repoRoot </> ".scratch" </> "sealed-archives-8ff1e216")
+        let path=repoRoot </> ".tmp" </> "sealed-archives-8ff1e216" </> "failed-"<>T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
+        createDirectoryIfMissing True (repoRoot </> ".tmp" </> "sealed-archives-8ff1e216")
         LBS.writeFile path (encode (object ["owner".=("Task7"::Text),"expiry".=("Resolve diagnostic at issue resolution/task closure"::Text),"run_id".=runId,"recipe".=recipe,"chunks".=chunkCount,"failed_phase".=name,"observed_phase_seconds".=(fromIntegral (now-start)/1000000000::Double),"completed_phases".=measured,"cause".=T.take 8192 cause,"retained_lifetime_failures".=retained]))
   attempt<-try @SomeException $ timeout 250000000 $ withSandboxedTestEnvBorrowed life acquire drain $ \admin owned -> do
     setupEnd<-getMonotonicTimeNSec
     modifyIORef' phases (<>[object ["phase".=("setup"::Text),"elapsed_seconds".=(fromIntegral (setupEnd-phaseStart)/1000000000::Double),"outcome".=("success"::Text)]])
     let env=admin {pool=owned.runtimePool}
         rawBytes=fromIntegral chunkCount*1048576::Int64
-        receiptPath=admin.testSandbox.sandboxRepoRoot </> ".scratch" </> "sealed-archives-8ff1e216" </> T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
+        receiptPath=admin.testSandbox.sandboxRepoRoot </> ".tmp" </> "sealed-archives-8ff1e216" </> T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
     begin<-getMonotonicTimeNSec
     cpuBegin<-getCPUTime
     lsnStart<-text admin "SELECT pg_current_wal_insert_lsn()::text"
@@ -236,7 +236,7 @@ qualify recipe chunkCount=do
     pgVersion<-text admin "SELECT version()"
     helpers<-readIORef owned.helperReceipts
     measured<-readIORef phases
-    createDirectoryIfMissing True (admin.testSandbox.sandboxRepoRoot </> ".scratch" </> "sealed-archives-8ff1e216")
+    createDirectoryIfMissing True (admin.testSandbox.sandboxRepoRoot </> ".tmp" </> "sealed-archives-8ff1e216")
     let receipt=object
           ["format_version".=(1::Int),"owner".=("Task7 until verified handoff, then Task8"::Text),"expiry".=("Task8 aggregate reconciliation/closure"::Text),"run_id".=runId
           ,"base_revision".=("b7428aa960d0b526fb85e33146f36374f3b8b109"::Text),"recipe".=recipe,"seed".=(1::Int),"record_bytes".=(1024::Int),"append_bytes".=(1048576::Int)

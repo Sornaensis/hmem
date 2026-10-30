@@ -49,8 +49,8 @@ const recordTraceManifestPath = isolatedOutputs?.traceManifest || (evidenceTask 
 const WARMUPS = HARNESS_CONFIGURATION.warmups
 const PRODUCTION_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const SAMPLES = HARNESS_CONFIGURATION.samples
-const expandedScratch = path.resolve(frontendRoot, '..', '..', '.scratch', 'expanded-navigation-perf')
-const tracePath = evidencePlan.trace || (evidenceRevision === 'expanded-hierarchy.v1' ? path.join(expandedScratch, 'large-expanded-trace.zip') : path.join(here, '.artifacts', 'large-baseline-trace.zip'))
+const expandedScratch = path.resolve(frontendRoot, '..', '..', '.tmp', 'expanded-navigation-perf')
+const tracePath = evidencePlan.trace || (evidenceRevision === 'expanded-hierarchy.v1' ? path.join(expandedScratch, 'large-expanded-trace.zip') : path.resolve(frontendRoot, '..', '..', '.tmp', 'performance', 'large-baseline-trace.zip'))
 
 if (!['record', 'check'].includes(mode)) throw new Error('usage: node perf/harness.mjs <record|check> [--output path --trace-output path]')
 if ((outputArgument !== -1 && !process.argv[outputArgument + 1]) || (traceOutputArgument !== -1 && !process.argv[traceOutputArgument + 1])) throw new Error('--output and --trace-output require paths')
@@ -148,13 +148,13 @@ export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write =
   ]).concat([evidenceDiffPath, path.join(here, 'final-working-tree.complete.diff')]).map(normalizedRepositoryPath))
   const trackedPaths = capture.read(['diff', '--name-only', evidenceBaseCommit, '--'], { label: 'tracked path list' }).toString('utf8')
     .trim().split(/\r?\n/).filter(Boolean)
-    .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.scratch/expanded-navigation-perf/'))
+    .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.tmp/expanded-navigation-perf/'))
   const trackedDiff = trackedPaths.length === 0
     ? Buffer.alloc(0)
     : capture.read(['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--', ...trackedPaths], { label: 'tracked complete diff' })
   const untrackedPaths = capture.read(['ls-files', '--others', '--exclude-standard'], { label: 'untracked path list' }).toString('utf8')
     .trim().split(/\r?\n/).filter(Boolean)
-    .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.scratch/expanded-navigation-perf/'))
+    .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.tmp/expanded-navigation-perf/'))
   const diff = Buffer.concat([trackedDiff, ...untrackedPaths.map(relative => untrackedFileDiff(repositoryRoot, relative, capture))])
   write(evidenceDiffPath, diff)
   const baselineAtBase = capture.read(['show', `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`], { label: 'immutable baseline at review base' })
@@ -2655,7 +2655,7 @@ async function main() {
         ...(evidencePlan.isolatedEvidence ? { captureOptions: traceCaptureOptions, temporaryLimitBytes: 64 * 1024 * 1024 } : {}),
         capturedRun: 'large sample 5/5 after two warmups',
         verifiedDuringRecord: true,
-        retention: evidencePlan.isolatedEvidence ? 'temporary trace under the verified outside-repository task directory; removed before successful qualification; verified provenance remains in the retained trace manifest' : evidenceRevision === 'expanded-hierarchy.v1' ? 'generated under task-owned .scratch/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available' : 'generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
+        retention: evidencePlan.isolatedEvidence ? 'temporary trace under the verified outside-repository task directory; removed before successful qualification; verified provenance remains in the retained trace manifest' : evidenceRevision === 'expanded-hierarchy.v1' ? 'generated under task-owned .tmp/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available' : 'generated under ignored .tmp/performance, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
       }
     }
     const result = {

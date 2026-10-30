@@ -304,7 +304,7 @@ export async function networkProxy(target, initialPolicy = {}, observe = () => {
 export async function makeScratch(path, task = CONTRACT.task) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw new Error('Explicit scratch task UUID required')
   const root = resolve(path)
-  ownedPath(join(repo, '.scratch'), root)
+  ownedPath(join(repo, '.tmp'), root)
   await mkdir(dirname(root), { recursive: true })
   await mkdir(root) // Never adopt a preexisting directory.
   await writeFile(join(root, 'owner.json'), JSON.stringify({ task, owner: 'sync_developer', pid: process.pid, created: new Date().toISOString() }))
@@ -313,7 +313,7 @@ export async function makeScratch(path, task = CONTRACT.task) {
     async clean() {
       const owner = JSON.parse(await readFile(join(root, 'owner.json'), 'utf8'))
       if (owner.task !== task || owner.pid !== process.pid) throw new Error('Scratch ownership changed')
-      ownedPath(join(repo, '.scratch'), root)
+      ownedPath(join(repo, '.tmp'), root)
       await rm(root, { recursive: true, force: false, maxRetries: 3, retryDelay: 200 })
       await assert.rejects(access(root), error => error.code === 'ENOENT')
     } }
@@ -1578,7 +1578,7 @@ async function main() {
     if (bytes.length > 262144) throw new Error('Build input receipt exceeds bound')
     expectedBuild = { ...JSON.parse(bytes), receiptSha256: sha(bytes) }
   }
-  const scratch = await makeScratch(options.scratch || join(repo, '.scratch/responsive-sessions-baseline-6bfb2638'), options['task-id'] || CONTRACT.task)
+  const scratch = await makeScratch(options.scratch || join(repo, '.tmp/responsive-sessions-baseline-6bfb2638'), options['task-id'] || CONTRACT.task)
   runDeadline = now() + 20 * 60 * 1000
   let stack, output, failure
   try {

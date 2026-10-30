@@ -121,6 +121,7 @@ pgdata/
 **/*.sql.gz
 
 # Logs and temporary files
+.tmp/
 *.log
 **/*.log
 logs/

@@ -59,6 +59,9 @@ Desktop.ini
 # Workspace marker
 .hmem.workspace
 
+# Local scratch work (see docs/reference/scratch-work.md)
+/.tmp/
+
 # Logs
 *.log
 

@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 
-const scratch = resolve('../../.scratch/audit-ui-b2a5acef')
+const scratch = resolve('../../.tmp/audit-ui-b2a5acef')
 const palette = { '--bg': '#f1f5f9', '--bg-surface': '#ffffff', '--bg-elevated': '#e2e8f0', '--text': '#0f172a', '--text-muted': '#475569', '--border': '#94a3b8', '--accent': '#4f46e5', '--accent-hover': '#4338ca' }
 const settle = h => h.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 async function snapshot(h, name) {

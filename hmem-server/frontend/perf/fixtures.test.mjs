@@ -1511,7 +1511,7 @@ test('paint receipt lifetimes reject retired callbacks, ABA and unsuccessful ful
 })
 
 const writerRepositoryRoot = path.resolve(here, '../../..')
-const writerScratchRoot = path.join(writerRepositoryRoot, '.scratch', 'expanded-navigation-perf')
+const writerScratchRoot = path.join(writerRepositoryRoot, '.tmp', 'expanded-navigation-perf')
 function withWriterScratch(action) {
   fs.mkdirSync(writerScratchRoot, { recursive: true })
   const directory = fs.mkdtempSync(path.join(writerScratchRoot, 'writer-'))

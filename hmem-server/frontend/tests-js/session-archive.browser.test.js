@@ -392,7 +392,7 @@ test('observer transition fence joins matched detach and stale topology without 
 })
 
 async function tinyIsolateCapability(image,body) {
-  const scratch=resolve('../../.scratch/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
+  const scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
   body.current();await mkdir(profile)
   let launch,h,isolate,primary;const receipt={purpose:'tiny-public-CDP-isolate-capability',status:'running'}
   try{
@@ -525,7 +525,7 @@ test('paired native memory dump modes retain process coverage',{skip:process.env
   assert.equal(evidence.taskId,'e0ac6260-641c-4891-b4c1-cc3694f31158')
   const image=evidence.browserImage || evidence.attempts[0].browserImage,executable=image.path
   assert.equal(await hashFile(executable),image.sha256)
-  const scratch=resolve('../../.scratch/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
+  const scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
   assert.ok(profile.startsWith(scratch+sep));await mkdir(profile)
   const receipt={kind:'paired-memory-dump-mode',at:new Date().toISOString(),deterministic:false,categoryConfig:{includedCategories:['disabled-by-default-memory-infra']},capCharacters:16777216,diagnosticUnit:'decoded UTF16 characters',browserImage:image,sourceHashes:{},snapshots:[],status:'running'}
   for(const path of ['tests-js/session-archive.browser.test.js','tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs'])receipt.sourceHashes[path]=await hashFile(path)
@@ -575,7 +575,7 @@ test('paired native memory dump modes retain process coverage',{skip:process.env
 for(const mode of ['setup-cleanup-failure','late-launch'])test('persistent fixture owner retains '+mode,{timeout:30000},async()=>{
   const probe=await openSessionExplorer(),executable=probe.browserImage.executable
   await probe.close()
-  const scratch=resolve('../../.scratch/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
+  const scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
   await mkdir(profile)
   let owner,release,primary,context
   try {
@@ -620,7 +620,7 @@ test('persistent profile canary and repeated native tracing idle control',{skip:
   assert.equal(evidence.taskId,'e0ac6260-641c-4891-b4c1-cc3694f31158')
   const image=evidence.browserImage || evidence.attempts[0].browserImage,executable=image.path
   assert.equal(await hashFile(executable),image.sha256)
-  const scratch=resolve('../../.scratch/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
+  const scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
   assert.ok(profile.startsWith(scratch+sep));await mkdir(profile)
   const inputs={};for(const path of ['tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','tests-js/session-archive.browser.test.js'])inputs[path]=await hashFile(path)
   const receipt={at:new Date().toISOString(),kind:'persistent-profile-and-idle-tracing',contextMode:'task-owned persistent normal profile',method:'56 separate native Tracing.start/end snapshots; no archive processing during idle control; no forced GC',inputReferenceAttempt:0,inputHashes:inputs,browserImage:image,nodeImage:{path:process.execPath,sha256:await hashFile(process.execPath)},sources:[{url:'https://playwright.dev/docs/api/class-browsercontext',fact:'Nonpersistent browser contexts do not write browsing data to disk.'},{url:'https://chromium.googlesource.com/chromium/src/+/main/storage/browser/file_system/file_system_options.h',fact:'FileSystemOptions receives profile mode and force-in-memory choices; incognito filesystems use memory.'},{url:'https://raw.githubusercontent.com/chromium/chromium/main/storage/browser/file_system/file_system_options.cc',fact:'is_in_memory returns force_in_memory_ || is_incognito().'}],samples:[],status:'running'}
@@ -698,7 +698,7 @@ async function nativeProbe(h,raw,bytes,{prelude='',manifest=makeManifest(h,raw,b
 // Finite task-owned inputs. One 64 KiB raw block, one gzip history and one
 // compressed file; no raw fixture or full-input Buffer exists at scale.
 async function scaleFixture(rawBytes,{signal}={}) {
-  const scratch=resolve('../../.scratch/sealed-archives-e0ac6260')
+  const scratch=resolve('../../.tmp/sealed-archives-e0ac6260')
   await mkdir(scratch,{recursive:true})
   const file=resolve(scratch,'browser-'+randomUUID()+'.gz')
   assert.ok(file.startsWith(scratch+sep))
@@ -1150,7 +1150,7 @@ test('matched active live comparison uses historical and current served bundles'
   assert.ok(!globalThis.retainedArchiveQualificationOwner||globalThis.retainedArchiveQualificationOwner.closed)
   assert.ok(!globalThis.retainedPersistentFixtureLaunchOwner||globalThis.retainedPersistentFixtureLaunchOwner.closed)
   const image=evidence.browserImage;assert.equal(await hashFile(image.path),image.sha256)
-  const scratch=await realpath(resolve('../../.scratch/sealed-archives-e0ac6260')),baselineRoot=resolve(scratch,'baseline-static'),buildPath=resolve(scratch,'historical-b742/build-inputs.json'),buildBytes=await readFile(buildPath),build=JSON.parse(buildBytes)
+  const scratch=await realpath(resolve('../../.tmp/sealed-archives-e0ac6260')),baselineRoot=resolve(scratch,'baseline-static'),buildPath=resolve(scratch,'historical-b742/build-inputs.json'),buildBytes=await readFile(buildPath),build=JSON.parse(buildBytes)
   assert.equal(build.sourceRevision,'b7428aa960d0b526fb85e33146f36374f3b8b109');assert.equal(build.zipSha256,'ccf428aa6a87a80ad1a83c9dd12f4356784d9587dc462f89056747c8492c49b8')
   const common={'assets/index-BNSYx-iy.css':'1e1ba27f0dfbe1d166d59a3f6e9fe8a39f6599042ae0c289629167a8aa8f2101','assets/vendor-W2tPfneV.js':'c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147'}
   const oldExpected={...common,'index.html':'0a51be961ba5d303fd301ca9be9410c3afe36bb1be4cac22cb945c99dcc9f5cf','assets/index-Ym7d4U9A.js':'0e42b9f42c24a5af117e0d15df95209212d858d09c62fd3ee0ea5c0c4bfa2a35'}
@@ -1292,7 +1292,7 @@ test('ready idle control has exactly94 observations and owned retirement stops f
 
 test('ready archive idle same-cadence memory control',{skip:process.env.HMEM_ARCHIVE_READY_IDLE!=='1',timeout:220000},async()=>{
   for(const flag of ['HMEM_ARCHIVE_SCALE','HMEM_ARCHIVE_MEMORY_CAUSAL','HMEM_ARCHIVE_NAV_CAUSAL','HMEM_ARCHIVE_HEAP_AUXILIARY','HMEM_ARCHIVE_MATCHED'])assert.notEqual(process.env[flag],'1','idle control has a distinct purpose')
-  const path=resolve('perf/session-archive.qualification.json'),evidence=await readQualificationEvidence(path),before=hash(await readFile(path)),scratch=resolve('../../.scratch/sealed-archives-e0ac6260')
+  const path=resolve('perf/session-archive.qualification.json'),evidence=await readQualificationEvidence(path),before=hash(await readFile(path)),scratch=resolve('../../.tmp/sealed-archives-e0ac6260')
   assert.ok(evidence.diagnostics.length<4);assert.ok(Buffer.byteLength(JSON.stringify(evidence))+131072<=1048576,'reserve bounded idle receipt before launch')
   const image=evidence.browserImage;assert.equal(await hashFile(image.path),image.sha256)
   const receipt={kind:'ready-archive-idle-same-dump-cadence',status:'running',at:new Date().toISOString(),purpose:'Natural application idle plus measurement; application timers remain active. Diagnostic only, not pure tracing or resource acceptance; no subtraction from prior failures.',contextMode:'task-owned persistent normal profile',observationsAfterBaseline:94,expectedTotalNativeSamples:95,cadenceMs:1000,memoryDumpMode:'background',deterministic:false,limits:{ownedBodyMs:180000,commandMs:2000,dumpMs:10000,lastSamples:8},phaseBoundary:'No page, navigation or disk-count operations between Ready and final idle measurement; disk verification follows all measurements.',browserImage:image,inputHashes:{},samples:[],maxima:{privateBytes:null,incrementBytes:null,perProcess:{},isolates:{},gapMs:0}}
@@ -1408,7 +1408,7 @@ test('scale qualification uses actual complete browser archives',{skip:process.e
     attempt.currentCase=observations
     try {
       body.current();fixture=await scaleFixture(mebibytes*1048576,{signal:trackIsolates?body.abort.signal:undefined});body.current();http=await fixtureHttp(fixture);body.current()
-      if(persistent){const scratch=resolve('../../.scratch/sealed-archives-e0ac6260');profile=resolve(scratch,'archive-profile-'+randomUUID());assert.ok(profile.startsWith(scratch+sep));await mkdir(profile);attempt.retainedProfile=profile;attempt.profileCleanup='pending confirmed browser closure'}
+      if(persistent){const scratch=resolve('../../.tmp/sealed-archives-e0ac6260');profile=resolve(scratch,'archive-profile-'+randomUUID());assert.ok(profile.startsWith(scratch+sep));await mkdir(profile);attempt.retainedProfile=profile;attempt.profileCleanup='pending confirmed browser closure'}
       if(persistent){body.current();profileLaunch=ownedPersistentFixture({path:profile,executable:persistentImage.path});if(trackIsolates)body.owner=profileLaunch;h=await profileLaunch.get()}else h=await openSessionExplorer()
       body.current()
       http.setOrigin(h.origin)
@@ -1506,7 +1506,7 @@ test('scale qualification uses actual complete browser archives',{skip:process.e
       assert.deepEqual(http.snapshot().failures,[]);assert.ok(!h.reads.some(row=>row.path.endsWith('/evidence')))
     }catch(error){isolate ||= error.isolateOwner;caseFailure=error;attempt.partial={mebibytes,phase:viewBegan?'frontend-view':'setup',failure:error.message,diagnostic:error.diagnostic,elapsedViewMs:viewBegan?performance.now()-viewBegan:null,lastSamples:samples.slice(-8),fixture:fixture?{rawBytes:fixture.rawBytes,rawRecords:fixture.rawRecords,rawSha256:fixture.rawSha256,compressedBytes:fixture.compressedBytes,compressedSha256:fixture.compressedSha256,recipe:fixture.recipe}:null,http:http?.snapshot()};throw error}
     finally{
-      const cleanupOwner={h,http,fixture,profile,profileLaunch,removeProfile:profile?async()=>{if(trackIsolates?profileLaunch&&!profileLaunch.closed:!profileLaunch?.closed)throw Error('profile_closure_unconfirmed');assert.equal(await realpath(profile),profile);assert.equal((await lstat(profile)).isSymbolicLink(),false);assert.ok(profile.startsWith(await realpath(resolve('../../.scratch/sealed-archives-e0ac6260'))+sep));await rm(profile,{recursive:true,maxRetries:0});attempt.profileCleanup='confirmed';delete attempt.retainedProfile}:null}
+      const cleanupOwner={h,http,fixture,profile,profileLaunch,removeProfile:profile?async()=>{if(trackIsolates?profileLaunch&&!profileLaunch.closed:!profileLaunch?.closed)throw Error('profile_closure_unconfirmed');assert.equal(await realpath(profile),profile);assert.equal((await lstat(profile)).isSymbolicLink(),false);assert.ok(profile.startsWith(await realpath(resolve('../../.tmp/sealed-archives-e0ac6260'))+sep));await rm(profile,{recursive:true,maxRetries:0});attempt.profileCleanup='confirmed';delete attempt.retainedProfile}:null}
       try {
         await closeIsolateAndFixture(isolate,cleanupOwner,caseFailure);if(trackIsolates)body.owner=null
       }catch(error){attempt.cleanupFailure={message:error.message,causes:error.errors?.map(value=>value.message).slice(0,3),stage:cleanupOwner.cleanupStage,profile,fixture:fixture?.file};throw error}
@@ -1515,7 +1515,7 @@ test('scale qualification uses actual complete browser archives',{skip:process.e
   finally{clearTimeout(bodyTimer);if(trackIsolates)attempt[isolateDiagnostic?'diagnosticBodyElapsedMs':'overallBodyElapsedMs']=performance.now()-body.began;if(body.retirement)attempt[isolateDiagnostic?'diagnosticDeadlineRetirement':'overallOwnedRetirement']=body.retirementResult?.error?{failure:body.retirementResult.error.message}:body.owner&&!body.owner.closed?{retained:'actual fixture retirement is still owned by cleanup'}:{closed:true}}
   const changed=[];for(const[label,path]of Object.entries(inputPaths))if((label.endsWith('-image')?await hashFile(path):hash(await readFile(path)))!==inputHashes[label])changed.push(label)
   attempt.changedInputs=changed;if(changed.length){attempt.status='failed';primary ||= Error('qualification_input_drift')}
-  const path=resolve('perf/session-archive.qualification.json'),scratch=resolve('../../.scratch/sealed-archives-e0ac6260')
+  const path=resolve('perf/session-archive.qualification.json'),scratch=resolve('../../.tmp/sealed-archives-e0ac6260')
   let evidence={schemaVersion:1,taskId:'e0ac6260-641c-4891-b4c1-cc3694f31158',scope:'Frontend-only controlled loopback HTTP/file preflight; no PostgreSQL/backend qualification. Native private-footprint phase samples are not RSS or a continuous peak.',owner:'Task6 viewer developer until verified handoff; then Task8 owner/repository maintainers',retention:'Required compact benchmark evidence until a reviewed Task8 aggregate supersedes or reconciles it.',attempts:[]}
   try{const previous=await readQualificationEvidence(path);assert.equal(previous.taskId,evidence.taskId);evidence=previous}catch(error){if(error.code!=='ENOENT')throw error}
   if(evidence.historicalVectors){assert.ok(Array.isArray(evidence.historicalVectors.attempts)&&evidence.historicalVectors.attempts.length<=6,'at most six immutable historical vectors');assert.deepEqual(evidence.historicalVectors.attempts.map(value=>hash(Buffer.from(JSON.stringify(value)))),evidence.historicalVectors.attemptObjectSha256,'historical vectors must remain unchanged')}
@@ -1611,7 +1611,7 @@ for(const delivery of ['fast','slow'])test('production local navigation status c
 
 
 test('tiny production handoff retains generation custody and reopens the compiled tagged reader',{timeout:60000},async()=>{
-  const evidence=await readQualificationEvidence(),image=evidence.browserImage,scratch=resolve('../../.scratch/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
+  const evidence=await readQualificationEvidence(),image=evidence.browserImage,scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
   assert.equal(await hashFile(image.path),image.sha256);await mkdir(profile)
   let launch,h,isolate,primary,releaseConditional,releaseContent,deadlineFailure,deadlineReject
   const nativeSamples=[]

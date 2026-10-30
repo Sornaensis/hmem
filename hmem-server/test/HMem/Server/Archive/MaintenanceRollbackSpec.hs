@@ -79,7 +79,7 @@ spec=describe "Archive maintenance rollback" $ do
       doesFileExist output `shouldReturn` False
   it "runs the reviewed prior backend derivative against restored archive-only data and current static assets" $ do
     root<-resolveRepoRoot
-    let executable=root </> ".scratch" </> "sealed-archives-8ff1e216" </> "rollback-bin-v2" </> "hmem-server.exe"
+    let executable=root </> ".tmp" </> "sealed-archives-8ff1e216" </> "rollback-bin-v2" </> "hmem-server.exe"
     exists<-doesFileExist executable
     if not exists then pendingWith "Explicit release qualifier: build the reviewed tools/session-archive-rollback-compat.json candidate first"
       else rollbackProbe root executable
@@ -97,7 +97,7 @@ rollbackProbe root executable=do
   field ["patch","sha256"] recipe `shouldBe` Just (String patchHash)
   case field ["patch","files"] recipe of
     Just (Array files) -> forM_ files $ \entry -> case (field ["path"] entry,field ["after_sha256"] entry) of
-      (Just (String path),Just (String digest)) -> fileHash (root </> ".scratch" </> "sealed-archives-8ff1e216" </> "rollback-b742" </> T.unpack path) `shouldReturn` digest
+      (Just (String path),Just (String digest)) -> fileHash (root </> ".tmp" </> "sealed-archives-8ff1e216" </> "rollback-b742" </> T.unpack path) `shouldReturn` digest
       _ -> expectationFailure "Malformed reviewed rollback source manifest"
     _ -> expectationFailure "Missing reviewed rollback source manifest"
   life<-newSandboxLifetime
@@ -254,7 +254,7 @@ rollbackProbe root executable=do
         Just failure -> throwIO (ioeSetLocation failure (ioeGetLocation failure<>"; rollback-probe "<>take 4096 diagnostic))
         Nothing -> throwIO primary
   Just value<-readIORef receipt
-  let path=root </> ".scratch" </> "sealed-archives-8ff1e216" </> "rollback-"<>show runId<>".json"
+  let path=root </> ".tmp" </> "sealed-archives-8ff1e216" </> "rollback-"<>show runId<>".json"
   LBS.writeFile path (encode value)
 
 data NativeProbeCleanupFailure = NativeProbeCleanupFailure SomeException String deriving stock (Show)

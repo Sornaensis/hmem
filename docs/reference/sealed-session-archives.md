@@ -325,7 +325,7 @@ TOAST, index, dictionary and ledger totals, plus actual WAL, staging and backup
 sizes before making storage-saving claims.
 
 The implementation owner's disposable qualification area is
-`.scratch/sealed-archives-8ff1e216`, transferred to Task 8 after verified handoff.
+`.tmp/sealed-archives-8ff1e216`, transferred to Task 8 after verified handoff.
 Required receipts and the active rollback source/binary remain through frontend
 rebind and aggregate approval, then Task 8 disposes that scratch. Existing
 harness sandboxes separately own their ephemeral PostgreSQL databases and process

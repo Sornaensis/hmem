@@ -88,3 +88,4 @@ for setup and usage.
 - [Database diagram](database.md) and [schema behavior](docs/reference/schema.md)
 - [Upgrades](docs/reference/upgrades.md)
 - [Frontend development](hmem-server/frontend/development.md)
+- [Local scratch work](docs/reference/scratch-work.md)

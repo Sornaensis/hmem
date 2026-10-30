@@ -536,7 +536,7 @@ verifyQualificationRoot :: FilePath -> IO ()
 verifyQualificationRoot root = do
   repo <- canonicalizePath "."
   actual <- canonicalizePath root
-  expected <- canonicalizePath (repo </> ".scratch" </> "sealed-archives-4a40c671")
+  expected <- canonicalizePath (repo </> ".tmp" </> "sealed-archives-4a40c671")
   exists <- doesDirectoryExist actual
   unless (exists && equalFilePath actual expected) $
     fail "Archive qualification requires the existing exact Task8 scratch root"

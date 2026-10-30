@@ -50,7 +50,7 @@ Codex MCP workspace.
 Use named Playwright CLI sessions against this same isolated harness for the
 two-client request-budget, selected-bucket, background catch-up, disconnect/replay,
 and forced-resync checks. Retain the required screenshots, snapshots, network
-output, and traces under `output/playwright/<label>/`, with the executing task
+output, and traces under `.tmp/playwright/<label>/`, with the executing task
 owning its label and specifying the retention/cleanup disposition. Preserve
 existing required evidence. Performance qualification has separate
 [commands and evidence rules](../perf/performance.md).

@@ -271,7 +271,7 @@ unjoined sandbox or adopts an existing scratch directory.
 The native MCP component mode uses an explicit task and scratch owner:
 
 ```powershell
-node hmem-server/frontend/perf/session-sync.mjs mcp --base-sha <exact-coordinator-base> --task-id 6e70b1ee-a329-4b22-95a6-cc49d3474499 --scratch .scratch/responsive-sessions-mcp-6e70b1ee --output hmem-server/frontend/perf/session-sync.mcp.json
+node hmem-server/frontend/perf/session-sync.mjs mcp --base-sha <exact-coordinator-base> --task-id 6e70b1ee-a329-4b22-95a6-cc49d3474499 --scratch .tmp/responsive-sessions-mcp-6e70b1ee --output hmem-server/frontend/perf/session-sync.mcp.json
 ```
 
 This mode starts the real native server and MCP without frontend assets or
@@ -399,7 +399,7 @@ subsequent seal.
 The database component command requires a completed build pairing:
 
 ```text
-node hmem-server/frontend/perf/session-sync.mjs db --base-sha <exact-launch-base> --task-id e04fbd45-9e61-405b-9196-c51a153f8cd8 --scratch .scratch/responsive-sessions-db-e04fbd45 --build-inputs hmem-server/frontend/perf/session-sync.db.build-inputs.json --output hmem-server/frontend/perf/session-sync.db.json
+node hmem-server/frontend/perf/session-sync.mjs db --base-sha <exact-launch-base> --task-id e04fbd45-9e61-405b-9196-c51a153f8cd8 --scratch .tmp/responsive-sessions-db-e04fbd45 --build-inputs hmem-server/frontend/perf/session-sync.db.build-inputs.json --output hmem-server/frontend/perf/session-sync.db.json
 ```
 
 Capture production source/package inputs before the coordinated native compile,

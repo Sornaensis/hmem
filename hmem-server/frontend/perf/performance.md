@@ -337,7 +337,7 @@ attempts remaining cleanup and records failed qualification; informational timin
 PASS cannot override record, prerequisite, or retirement failure.
 
 Observation traces use `temporary/large-observation-trace.zip`; expanded hierarchy
-uses task-owned `.scratch/expanded-navigation-perf/`. Verify/hash/size and retire
+uses task-owned `.tmp/expanded-navigation-perf/`. Verify/hash/size and retire
 the owned transient archive before success; manifests state it is unavailable.
 Observation capture spans the full final large sample with DOM/network snapshots,
 source capture disabled, and optional screenshot previews disabled. Exact options

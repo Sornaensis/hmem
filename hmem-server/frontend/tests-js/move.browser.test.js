@@ -39,7 +39,7 @@ function authority(data) {
   }
 }
 
-const visualDirectory = process.env.HMEM_MOVE_VISUAL_DIR || '.task-scratch/move-dialog'
+const visualDirectory = process.env.HMEM_MOVE_VISUAL_DIR || '../../.tmp/move-dialog'
 const dialog = h => h.page.locator('#move-dialog')
 async function expand(h,kind,id) {
   await h.scrollTo(kind+':'+id)

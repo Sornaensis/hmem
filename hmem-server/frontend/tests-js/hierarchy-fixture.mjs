@@ -169,7 +169,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
   try {
     let page
     if (persistentProfile) {
-      const profile = resolve(persistentProfile.path), scratch = resolve('../../.scratch/sealed-archives-e0ac6260')
+      const profile = resolve(persistentProfile.path), scratch = resolve('../../.tmp/sealed-archives-e0ac6260')
       assert.ok(profile.startsWith(scratch + sep) && /^archive-profile-[a-f0-9-]{36}$/.test(profile.slice(scratch.length + 1)))
       assert.equal((await lstat(profile)).isSymbolicLink(), false)
       assert.equal(await realpath(profile), profile, 'Owned browser profile cannot traverse reparse points')

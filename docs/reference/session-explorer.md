@@ -10,6 +10,15 @@ canonical envelope arrives later or its hidden counterpart leaves the window.
 The retained rows carry only bounded pairing metadata; raw offsets, delimiters
 and evidence bytes still describe the canonical record.
 
+Session cards, task docks and session details use canonical nullable
+`last_activity_at`, independently of the bounded transcript window. Missing or
+pending values display **Unavailable**, with no receipt/lifecycle-clock fallback.
+Same-cursor projection completion can refine null metadata; delayed pending or
+older summaries cannot overwrite a known maximum under the current read
+authority. Live/Quiet and separately labelled lifecycle times retain their own
+clocks. See [transcript occurrence time](session-occurrence.md) for eligibility,
+historical correction and the server's exact cursor contract.
+
 Consecutive thinking, tool calls, results and inspectable Codex events share a collapsed activity group,
 including a run that currently has only one event. User and agent prose stays
 outside the disclosure and splits runs, including within mixed Claude content.

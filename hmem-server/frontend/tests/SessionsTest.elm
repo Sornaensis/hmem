@@ -51,6 +51,11 @@ suite =
             in
             Expect.equal ((Just Nothing,Just 0),(Just (Just {model="Actual target",provider=Nothing,reasoning=Nothing,role=Nothing,harness=Nothing}),Just 3,Just (Just "Sandbox Superadmin")))
                 ((Maybe.map .runtimeIdentity absent,Maybe.map .runtimeRevision absent),(Maybe.map .runtimeIdentity known,Maybe.map .runtimeRevision known,Maybe.map (.creator >> .actorLabel) known))
+        , test "canonical occurrence is optional nullable metadata and never inferred from transport timestamps" <| \_ ->
+            let
+                decode extra=canonicalPage |> String.replace "\"state\":\"active\"" ("\"state\":\"active\"" ++ extra) |> Decode.decodeString Api.sessionPageDecoder |> Result.toMaybe |> Maybe.andThen (.items >> List.head) |> Maybe.andThen .lastActivityAt
+            in Expect.equal [Nothing,Nothing,Just "2026-10-23T09:00:00Z"]
+                (List.map decode ["",",\"last_activity_at\":null",",\"last_activity_at\":\"2026-10-23T09:00:00Z\""])
         , test "runtime harness is explicit and optional on the wire" <| \_ ->
             let
                 decode fields = canonicalPage |> String.replace "\"state\":\"active\"" ("\"state\":\"active\",\"runtime_identity\":{" ++ fields ++ "}") |> Decode.decodeString Api.sessionPageDecoder |> Result.toMaybe |> Maybe.andThen (.items >> List.head) |> Maybe.andThen .runtimeIdentity |> Maybe.andThen .harness
@@ -442,6 +447,24 @@ metadataPresentationTests =
             settled = requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata old)) busy) |> Maybe.withDefault busy
         in Expect.equal (Just (Delivery.Metadata newer),Just (Delivery.SessionsPage {items=[newer],nextCursor=Nothing}))
             (payload detailTarget settled,payload listTarget settled))
+    , test "same-cursor occurrence completion refines pending metadata and rejects stale pending or older replies" <| withMetadata (\session ->
+        let
+            completed={session | lastActivityAt=Just "2026-10-23T20:46:19.5Z"}
+            update value current =
+                let (busy,requests)=Delivery.invalidateProgress workspace sessionId current |> Delivery.admit workspace
+                in requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata value)) busy) |> Maybe.withDefault busy
+            refined=update completed (ready session)
+            old={completed | lastActivityAt=Just "2026-10-23T20:46:19Z"}
+            settled=update old (update session refined)
+        in Expect.equal (Just (Delivery.Metadata completed),Just (Delivery.SessionsPage {items=[completed],nextCursor=Nothing}))
+            (payload detailTarget settled,payload listTarget settled))
+    , test "a newer committed cursor may explicitly await its canonical occurrence projection" <| withMetadata (\session ->
+        let
+            known={session | lastActivityAt=Just "2026-10-23T20:46:19Z"}
+            pending={session | committedBytes=session.committedBytes+3,revision=session.revision+1,lastActivityAt=Nothing}
+            (busy,requests)=Delivery.invalidateProgress workspace sessionId (ready known) |> Delivery.admit workspace
+            settled=requestFor detailTarget requests |> Maybe.map (\request -> Delivery.settle request.id True (Ok (Delivery.Metadata pending)) busy) |> Maybe.withDefault busy
+        in Expect.equal (Just (Delivery.Metadata pending)) (payload detailTarget settled))
     , test "fresh metadata revealing a title or lifecycle change conservatively rechecks list membership" <| withMetadata (\session ->
         let
             (busy,requests) = Delivery.invalidateProgress workspace sessionId (ready session) |> Delivery.admit workspace

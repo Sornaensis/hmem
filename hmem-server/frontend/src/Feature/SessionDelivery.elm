@@ -472,6 +472,7 @@ monotonic previous incoming =
             next.committedBytes >= old.committedBytes && next.revision >= old.revision
                 && next.runtimeRevision >= old.runtimeRevision
                 && heartbeatMonotonic old.lastSeenAt next.lastSeenAt
+                && occurrenceMonotonic old next
                 && (old.state /= Api.SessionTerminated || next.state == Api.SessionTerminated)
         (Just (SessionsPage old),SessionsPage next) ->
             List.all (\session -> old.items |> List.filter (.id >> (==) session.id) |> List.head |> Maybe.map (\prior -> monotonic (Just (Metadata prior)) (Metadata session)) |> Maybe.withDefault True) next.items
@@ -508,6 +509,17 @@ heartbeatMonotonic old next =
     in
     case (stamp old,stamp next) of
         (Just before,Just after) -> before <= after
+        _ -> True
+
+
+-- Same-cursor derivation completes independently of transcript revision. A
+-- delayed pending response cannot undo a completed projection in another cache.
+-- A genuinely newer cursor may be pending until its canonical derivation ends.
+occurrenceMonotonic : Api.AgentSession -> Api.AgentSession -> Bool
+occurrenceMonotonic old next =
+    case (old.lastActivityAt,next.lastActivityAt) of
+        (Just before,Just after) -> heartbeatMonotonic before after
+        (Just _,Nothing) -> next.committedBytes > old.committedBytes
         _ -> True
 
 

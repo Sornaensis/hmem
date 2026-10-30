@@ -50,7 +50,13 @@ alternate branches, and ancestry outside the current window is not expanded.
 
 The transcript follows new activity while you are near its end. Scroll up to read
 without losing your position; returning to the end resumes following. Event times use your browser’s local time:
-HH:MM today, or YYYY-MM-DD HH:MM on other days. Session cards show last activity,
+HH:MM today, or YYYY-MM-DD HH:MM on other days. Session cards and session details
+show **Last activity** from the latest eligible occurrence in the complete
+committed transcript. Uploads, heartbeats and saving a session do not change that
+time; an older arrival cannot move it backward. **Unavailable** means the
+transcript has no recognized time or its historical summary is still preparing.
+An Activity group's final event may be older than the session's Last activity.
+Live/Quiet continues to describe transport freshness,
 and green lights in the workspace sidebar indicate active sessions, including quiet ones.
 
 A task card’s **Active Agent →** button docks its active sessions and transcript

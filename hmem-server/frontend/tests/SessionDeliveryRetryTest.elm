@@ -20,7 +20,7 @@ sample : Api.AgentSession
 sample =
     { id=session,workspaceId=workspace,formatLabel="jsonl",state=Api.SessionActive
     ,creator={actorType=Nothing,actorId=Nothing,actorLabel=Nothing,botIdentity=Nothing}
-    ,createdAt="2026-01-01T00:00:00Z",lastSeenAt="2026-01-01T00:00:00Z"
+    ,createdAt="2026-01-01T00:00:00Z",lastSeenAt="2026-01-01T00:00:00Z",lastActivityAt=Nothing
     ,committedBytes=64,committedRecords=1,revision=1,endsWithNewline=True
     ,terminatedAt=Nothing,finalBytes=Nothing,finalSha256=Nothing,title=Nothing,parentSessionId=Nothing
     ,ancestors=[],ancestorsTruncated=False,runtimeIdentity=Nothing,runtimeRevision=0 }

@@ -675,8 +675,7 @@ compactSessionCard model session extra link actions =
                 [span [class "session-state-dot",attribute "aria-label" (if active then "Active" else "Terminated")] [],strong [Html.Attributes.title (sessionTitle session)] [text (sessionTitle session)]]
             ,if List.isEmpty session.ancestors then text "" else span [class "session-parent-context",Html.Attributes.title path] [text path]
             ,viewSessionIdentity session
-            ,span [class "session-latest-activity"]
-                [text "Last activity · ",time [attribute "datetime" (sessionActivity session)] [text (compactTimestamp model (sessionActivity session))]]
+            ,viewSessionActivity model session
             ] :: actions)
 
 
@@ -703,7 +702,7 @@ viewDetail workspace model id =
                 [ div [class "session-detail-title"] [h3 [] [text (sessionTitle session)],span [class "card-meta session-lifecycle"] [text (if session.state == Api.SessionTerminated then "Saved session" else "Active session")],span [class "card-meta session-freshness"] [text (case Dict.get session.id model.sessions.heartbeats of
                     Just "Fresh" -> " · Live"
                     Just "Stale (30s)" -> " · Quiet"
-                    _ -> "")]]
+                    _ -> "")],text " · ",viewSessionActivity model session]
                 ,viewSave model session
                 ,a [class "btn btn-sm",href (filterUrl model model.sessions.projectFilter model.sessions.taskFilter),attribute "aria-label" "Close session"] [text "✕"]]
             _ -> resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .error |> Maybe.map (\_ -> p [attribute "role" "alert"] [text "Session could not be loaded.",button [onClick SessionsRetry] [text "Retry"]]) |> Maybe.withDefault (p [attribute "role" "status"] [text "Loading session…"])
@@ -1172,9 +1171,12 @@ timestampSources model =
             Delivery.SessionsPage page -> List.map sessionActivity page.items
             _ -> []) |> Maybe.withDefault []
         cards = Dict.values model.sessions.taskPages |> List.concatMap (\cached -> Result.toMaybe cached.result |> Maybe.map (.items >> List.map sessionActivity) |> Maybe.withDefault [])
+        selected = model.sessions.workspace |> Maybe.andThen (\workspace -> model.sessions.selected |> Maybe.andThen (\id -> resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data)) |> Maybe.map (\value -> case value of
+            Delivery.Metadata session -> [sessionActivity session]
+            _ -> []) |> Maybe.withDefault []
         transcript = List.map .time model.sessions.rows ++ List.map .time model.sessions.sealed.rows ++ List.map .endTime model.sessions.sealed.rows
     in
-    if model.activeTab == SessionsTab then list ++ transcript else if model.activeTab == ProjectsTab then cards ++ (if model.sessions.taskPanel /= Nothing then transcript else []) else []
+    if model.activeTab == SessionsTab then list ++ selected ++ transcript else if model.activeTab == ProjectsTab then cards ++ (if model.sessions.taskPanel /= Nothing then selected ++ transcript else []) else []
 
 
 availableSessions : Model -> List Api.AgentSession
@@ -1187,7 +1189,15 @@ availableSessions model =
 
 sessionActivity : Api.AgentSession -> String
 sessionActivity session =
-    if session.state == Api.SessionTerminated then Maybe.withDefault session.lastSeenAt session.terminatedAt else session.lastSeenAt
+    session.lastActivityAt |> identityValue |> Maybe.withDefault ""
+
+
+viewSessionActivity : Model -> Api.AgentSession -> Html Msg
+viewSessionActivity model session =
+    let source = sessionActivity session in
+    span [class "session-latest-activity"]
+        [text "Last activity · ",if source == "" then span [attribute "aria-label" "Last activity unavailable"] [text "Unavailable"]
+         else time [attribute "datetime" source] [text (compactTimestamp model source)]]
 
 
 viewArchive : Model -> String -> Html Msg

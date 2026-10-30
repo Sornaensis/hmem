@@ -36,7 +36,7 @@ model =
 sample : Api.AgentSession
 sample =
     {id="session",workspaceId="a",formatLabel="jsonl",state=Api.SessionActive,creator={actorType=Nothing,actorId=Nothing,actorLabel=Nothing,botIdentity=Nothing}
-    ,createdAt="2026-01-01T00:00:00Z",lastSeenAt="2026-01-01T00:00:00Z",committedBytes=96,committedRecords=1,revision=1,endsWithNewline=True
+    ,createdAt="2026-01-01T00:00:00Z",lastSeenAt="2026-01-01T00:00:00Z",lastActivityAt=Nothing,committedBytes=96,committedRecords=1,revision=1,endsWithNewline=True
     ,terminatedAt=Nothing,finalBytes=Nothing,finalSha256=Nothing,title=Nothing,parentSessionId=Nothing,ancestors=[],ancestorsTruncated=False,runtimeIdentity=Nothing,runtimeRevision=0}
 
 

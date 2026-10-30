@@ -139,7 +139,7 @@ test('lazy pretty output preserves exact formatting without expanding a 202MB va
   assert.ok(row.text.length<1048576);assert.equal(JSON.parse(row.text)[0].tokens.length,0)
 })
 function memoryStore(){const tables=Object.fromEntries(['records','pieces','groups','meta','disclosures'].map(name=>[name,new Map()]));const compressed=[],raw=[];let published=false,closed=false
-  return {tables,get published(){return published},get closed(){return closed},put(name,value){tables[name].set(value.key,structuredClone(value))},async get(name,key){return tables[name].get(key)},async flush(){},writeCompressed(_,bytes){compressed.push(bytes.slice())},writeRaw(_,bytes){raw.push(bytes.slice())},async detach(){closed=true},async compressedStream(){return new Blob(compressed).stream()},readRaw(start,end){return Buffer.concat(raw).subarray(Number(start),Number(end))},async publish(){published=true},async closeAndDelete(){closed=true},async scan(name,{after,before,limit}){let rows=[...tables[name].values()].sort((a,b)=>a.key.localeCompare(b.key));if(after)rows=rows.filter(row=>row.key>after);if(before)return rows.filter(row=>row.key<before).slice(-limit);return rows.slice(0,limit)},async readPageMetadata(pieces){return pieces.map(piece=>({open:tables.disclosures.get(piece.key)?.open || false,groupOpen:piece.group?tables.disclosures.get('group:'+piece.group)?.open || false:false,count:piece.group?tables.groups.get(piece.group)?.count || '0':'0'}))},async disclosure(key,open){tables.disclosures.set(key,{key,open})}}
+  return {tables,get published(){return published},get closed(){return closed},put(name,value){tables[name].set(value.key,structuredClone(value))},async get(name,key){return tables[name].get(key)},async flush(){},writeCompressed(_,bytes){compressed.push(bytes.slice())},writeRaw(_,bytes){raw.push(bytes.slice())},async detach(){closed=true},async compressedStream(){return new Blob(compressed).stream()},readRaw(start,end){return Buffer.concat(raw).subarray(Number(start),Number(end))},async publish(){published=true},async closeAndDelete(){closed=true},async scan(name,{after,before,limit}){let rows=[...tables[name].values()].sort((a,b)=>a.key.localeCompare(b.key));if(after)rows=rows.filter(row=>row.key>after);if(before)return rows.filter(row=>row.key<before).slice(-limit);return rows.slice(0,limit)},async readPageMetadata(pieces){return pieces.map(piece=>({open:tables.disclosures.get(piece.key)?.open || false,groupOpen:piece.group?tables.disclosures.get('group:'+piece.group)?.open || false:false,count:piece.group?tables.groups.get(piece.group)?.count || '0':'0',endTime:piece.group?tables.groups.get(piece.group)?.endTime || '':''}))},async disclosure(key,open){tables.disclosures.set(key,{key,open})}}
 }
 async function stagedEngine(values,prepare,action){
   const prior=globalThis.Worker;globalThis.Worker=class{}
@@ -208,7 +208,7 @@ test('held enqueue retirement and failed enqueue preserve failure and never publ
 
 async function indexed(values,action){
   const prior=globalThis.Worker;globalThis.Worker=class{}
-  const raw=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')+'\n'),gzip=gzipSync(raw),store=memoryStore(),engine=createArchiveEngine({openStore:async()=>store})
+  const raw=Buffer.isBuffer(values)?values:Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')+'\n'),gzip=gzipSync(raw),store=memoryStore(),engine=createArchiveEngine({openStore:async()=>store})
   try{await engine.start({name:'test',stamp:{workspace,session},manifest:manifest(raw,gzip)});for(let at=0;at<gzip.length;at+=65536)await engine.chunk(gzip.subarray(at,at+65536));await engine.finish();await action(engine,store)}
   finally{await engine.cleanup();globalThis.Worker=prior}
 }
@@ -473,6 +473,38 @@ test('huge activity groups and multi-block records retain indexed continuation a
   })
 })
 
+test('sealed event groups expose the complete final occurrence time on every page and search',async()=>{
+ const event=(index,timestamp)=>({type:'event_msg',timestamp,payload:{type:'future_event',index,result:'needle '+index}})
+ for(const final of ['2026-10-30T09:00:00Z',undefined,'invalid']){
+  const values=Array.from({length:140},(_,index)=>event(index,index===139?final:'2026-10-30T12:00:00Z'))
+  await indexed(values,async(engine,store)=>{
+   const expected=final==='2026-10-30T09:00:00Z'?final:''
+   const first=await engine.page(),last=await engine.page({last:true}),search=await engine.page({query:'needle 0'})
+   assert.equal(first.rows.length,64);assert.equal(last.rows.length,64)
+   for(const page of [first,last,search])assert.ok(page.rows.every(row=>row.kind==='event'&&row.endTime===expected&&row.count==='140'))
+   const row=first.rows[0];await engine.disclosure(row.key,true)
+   const opened=await engine.page();assert.equal(opened.rows[0].body.format,'json');assert.deepEqual(JSON.parse(opened.rows[0].body.text),values[0].payload)
+   assert.equal(store.tables.groups.size,1);assert.equal([...store.tables.groups.values()][0].endTime,expected)
+  })
+ }
+})
+
+test('raw deep and precision event evidence indexes and hydrates without lossy serialization',async()=>{
+ const raw=Buffer.from('{"type":"event_msg","payload":{"type":"precision","n":9007199254740993,"overflow":1e400,"negative":-0,"escaped":"\\u0061","padding":"'+'x'.repeat(19000)+'"}}\n'+
+  '{"type":"event_msg","payload":'+'['.repeat(10000)+'0'+']'.repeat(10000)+'}\n')
+ await indexed(raw,async(engine,store)=>{
+  const first=await engine.page(),piece=first.rows[0]
+  assert.equal(first.rows.length,2);assert.equal(store.tables.records.size,2)
+  await engine.disclosure(piece.key,true)
+  const opened=await engine.page({bodyKey:piece.key}),part=opened.rows[0].body
+  const next=await engine.hydrate(piece.key,1),text=part.text+next.body.text
+  assert.equal(part.more,true);assert.equal(next.body.more,false)
+  for(const token of ['9007199254740993','1e400','-0','\\u0061'])assert.ok(text.includes(token),token)
+  const deep=await engine.hydrate(first.rows[1].key,0)
+  assert.equal(deep.body.text.length,16384);assert.equal(deep.body.more,true);assert.equal(deep.body.format,'json')
+ })
+})
+
 test('search reaches late and cross-part UTF8 text through bounded no-match and body cursors',async()=>{
   await indexed([...Array.from({length:300},(_,index)=>({text:'ordinary '+index})),{text:'x'.repeat(16380)+'Needle😀after'}],async engine=>{
     const first=await engine.page({query:'Needle😀'});assert.equal(first.rows.length,0);assert.equal(first.more,true);assert.ok(first.searchAfter)
@@ -709,7 +741,7 @@ test('sealed local intents retain only the latest page or Markdown demand throug
 })
 
 test('a fitting raw record and index item cannot produce an empty nonadvancing oversized wire page',async()=>{
-  const huge={timestamp:'x'.repeat(1048400),type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'x'}]}}
+  const huge={timestamp:'2026-10-30T00:00:00.'+'0'.repeat(1048379)+'Z',type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'x'}]}}
   const raw=Buffer.from(JSON.stringify(huge)+'\n');assert.ok(raw.length<=1048576)
   await indexed([huge],async(engine,store)=>{
     const piece=[...store.tables.pieces.values()][0]

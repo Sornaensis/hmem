@@ -79,7 +79,7 @@ test('real store pending flush retains terminal ownership through retirement or 
 
 test('page metadata uses one bounded readonly transaction with aligned scalar defaults and shared groups',async()=>{
   const state=controlledStore(),store=await state.open(),pieces=[{key:'a',group:'g'},{key:'b',group:'g'},{key:'c',group:'missing'},{key:'d',group:''}]
-  state.values.set('disclosures:a',{open:true});state.values.set('disclosures:group:g',{open:true});state.values.set('groups:g',{count:'99'})
+  state.values.set('disclosures:a',{open:true});state.values.set('disclosures:group:g',{open:true});state.values.set('groups:g',{count:'99',endTime:'2026-10-30T11:00:00Z'})
   try{
     let settled=false
     const reading=store.readPageMetadata(pieces);reading.then(()=>{settled=true})
@@ -89,7 +89,7 @@ test('page metadata uses one bounded readonly transaction with aligned scalar de
     state.respond(tx);await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,false,'request success is not terminal acknowledgement')
     await assert.rejects(store.readPageMetadata(pieces),/archive_page_read_busy/)
     state.complete(tx)
-    assert.deepEqual(await reading,[{open:true,groupOpen:true,count:'99'},{open:false,groupOpen:true,count:'99'},{open:false,groupOpen:false,count:'0'},{open:false,groupOpen:false,count:'0'}])
+    assert.deepEqual(await reading,[{open:true,groupOpen:true,count:'99',endTime:'2026-10-30T11:00:00Z'},{open:false,groupOpen:true,count:'99',endTime:'2026-10-30T11:00:00Z'},{open:false,groupOpen:false,count:'0',endTime:''},{open:false,groupOpen:false,count:'0',endTime:''}])
     const before=state.transactions.length
     await assert.rejects(store.readPageMetadata(Array.from({length:65},(_,index)=>({key:String(index),group:''}))),/page_limit/)
     assert.equal(state.transactions.length,before)
@@ -243,9 +243,10 @@ test('borrowed verified detach joins actual transactions and handles then reader
   await reader.closeAndDelete();assert.equal(state.closedHandles,3);assert.equal(state.removed,true)
 })
 test('adoption mismatch missing stage and accidental upgrade never expose or rewrite a reader',async()=>{
-  for(const mismatch of ['manifest','schema','keyPath','raw-length','marker','missing','upgrade']){
+  for(const mismatch of ['manifest','schema','keyPath','raw-length','marker','missing','upgrade','old-index']){
     const state=controlledStore(),{store,manifest}=await verifiedBorrowedStore(state);await store.detach()
     if(mismatch==='schema')state.db.version=2
+    if(mismatch==='old-index'){const verified=state.values.get('meta:verified');delete verified.indexVersion}
     if(mismatch==='keyPath')state.wrongKeyPath=true
     if(mismatch==='raw-length')state.files.set('raw.jsonl',new Uint8Array([1]))
     if(mismatch==='marker'){const marker=JSON.parse(new TextDecoder().decode(state.files.get('owner.json')));marker.custody='wrong';state.files.set('owner.json',new TextEncoder().encode(JSON.stringify(marker)))}

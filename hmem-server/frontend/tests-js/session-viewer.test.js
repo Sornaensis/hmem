@@ -4,6 +4,36 @@ import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, MAX_OC
 import {copilotRecords,piRecords} from './support/native-session-fixtures.mjs'
 const encode = value => new TextEncoder().encode(value)
 
+test('meaningful unhandled Codex events retain exact inspectable JSON and activity source order',()=>{
+ const payload={type:'future_event',message:'<script>inert</script>',details:{values:[null,false,7,'λ😀']}},values=[
+  {type:'event_msg',timestamp:'2026-10-30T12:30:00Z',payload},
+  {type:'event_msg',timestamp:'2026-10-30T11:30:00+01:00',payload:{type:'another_event',result:'older final event'}},
+  {type:'event_msg',timestamp:'invalid',time:'2026-10-30T15:00:00Z',payload:{type:'last_event',result:42}},
+  {type:'event_msg',payload:{type:'token_count',message:'hidden'}},
+  {type:'event_msg',payload:{type:'agent_message',message:'Visible supported message'}}
+ ]
+ const bytes=encode(values.map(value=>JSON.stringify(value)+'\r\n').join('')),rows=createRecordFramer().push(0,bytes,true).rows
+ assert.equal(rows.length,4);assert.deepEqual(rows.map(row=>row.time),['2026-10-30T12:30:00Z','2026-10-30T11:30:00+01:00','',''])
+ assert.deepEqual(JSON.parse(JSON.parse(rows[0].text)[0].text),payload);assert.equal(JSON.parse(rows[0].text)[0].kind,'event')
+ assert.equal(JSON.parse(rows[0].text)[0].label,'Event · future_event');assert.doesNotMatch(rows[0].text,/Unsupported transcript content/)
+ assert.equal(rows[1].activityAnchors[0],rows[0].activityAnchors[0]);assert.equal(rows[2].activityAnchors[0],rows[0].activityAnchors[0])
+ assert.equal(JSON.parse(rows[3].text)[0].kind,'text');assert.equal(rows[0].raw,JSON.stringify(values[0]));assert.equal(rows[0].delimiter,'\r\n')
+ for(const timestamp of ['2026-02-30T00:00:00Z','2026-10-30T00:00:00',1793361600])assert.equal(presentation({type:'event_msg',timestamp,payload},'').time,'')
+})
+
+test('raw Codex event payloads retain scalar tokens and avoid recursion at ten thousand levels',()=>{
+ const raw='{"type":"event_msg","payload":{"type":"precision","n":9007199254740993,"overflow":1e400,"underflow":1e-400,"negative":-0,"escaped":"\\u0061","duplicate":1,"duplicate":2}}'
+ const row=createRecordFramer().push(0,encode(raw+'\n'),true).rows[0],source=JSON.parse(row.text)[0].text
+ assert.equal(source,raw.slice(raw.indexOf('{',raw.indexOf('payload')), -1));assert.equal(row.raw,raw)
+ for(const token of ['9007199254740993','1e400','1e-400','-0','\\u0061','"duplicate":1,"duplicate":2'])assert.ok(source.includes(token),token)
+ const duplicate='{"payload":{"result":"first"},"type":"event_msg","pay\\u006coad":{"result":9007199254740993}}'
+ assert.equal(JSON.parse(presentation(JSON.parse(duplicate),duplicate).text)[0].text,'{"result":9007199254740993}')
+ const deep='{"type":"event_msg","payload":'+'['.repeat(10000)+'0'+']'.repeat(10000)+'}'
+ const framed=createRecordFramer().push(0,encode(deep+'\n'),true).rows[0]
+ assert.equal(framed.raw,deep);assert.equal(JSON.parse(framed.text)[0].text,'['.repeat(10000)+'0'+']'.repeat(10000))
+ assert.equal(JSON.parse(presentation(JSON.parse(deep),'').text)[0].text,JSON.parse(framed.text)[0].text,'the no-source fallback is iterative too')
+})
+
 test('native Copilot data envelopes retain each request, execution and result occurrence with exact evidence offsets',()=>{
  const source=copilotRecords.map(value=>JSON.stringify(value)+'\r\n').join(''),bytes=encode(source),framer=createRecordFramer()
  for(let at=0;at<bytes.length;at+=37)framer.push(at,bytes.subarray(at,at+37),at+37>=bytes.length)
@@ -229,8 +259,16 @@ test('finite mid-record windows omit leading fragments and preserve exact offset
   const framer=createRecordFramer(10), chunk=encode('fragment\r\n{"text":"kept"}\n{"partial":')
   const result=framer.push(10,chunk,true)
   assert.equal(result.rows.length,1); assert.equal(result.rows[0].offset,20); assert.ok(result.pendingBytes>0)
+  assert.match(result.notice,/Incomplete record/)
   assert.deepEqual(framer.push(10,chunk,true),result)
   assert.throws(()=>framer.push(0,chunk),/range_gap/)
+})
+
+test('leading fragments are skipped silently while real finite boundary diagnostics remain',()=>{
+ const framer=createRecordFramer(17),bytes=encode('omitted fragment\n{"text":"kept"}\n'),result=framer.push(17,bytes,true)
+ assert.equal(result.notice,'');assert.equal(result.rows.length,1);assert.equal(result.rows[0].text,'kept');assert.equal(result.rows[0].offset,34)
+ const partial=encode('{"text":"unfinished'),next=framer.push(result.through,partial,true)
+ assert.match(next.notice,/Incomplete record/);assert.equal(next.rows[0].text,'kept')
 })
 
 test('rejects noncanonical base64 and overlarge records explicitly', () => {

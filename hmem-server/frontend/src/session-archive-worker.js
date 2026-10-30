@@ -1,5 +1,5 @@
 import {sha256} from '@noble/hashes/sha256'
-import {MAX_RECORD_BYTES,presentation,semanticTransition,visibleBlocks,createPrettyPayloadReader,payloadTokens} from './session-viewer.js'
+import {MAX_RECORD_BYTES,presentation,semanticTransition,visibleBlocks,createPrettyPayloadReader,createRawPayloadReader,payloadTokens} from './session-viewer.js'
 import {openArchiveStore,decimal,fileOffset,pieceKey,positionKey,serializedBytes,IO_BYTES,PAGE_ROWS,PAGE_BYTES} from './session-archive-store.js'
 
 const utf8=new TextDecoder('utf-8',{fatal:true}),encoder=new TextEncoder()
@@ -115,7 +115,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       const [index,block]=blocks[at],identity=row.activityAnchors[index] || ''
       if(block.kind!=='text'){
         if(group?.key!==identity)return store.get('groups',identity).then(value=>{current();group=value || {key:identity,count:'0'};return indexBlocks(row,transition,blocks,at)})
-        if(!transition.paired)group={...group,count:(BigInt(group.count)+1n).toString()}
+        group={...group,endTime:row.time,...(!transition.paired?{count:(BigInt(group.count)+1n).toString()}:{})}
         const pending=store.put('groups',group)
         if(pending)return pending.then(()=>afterGroup(row,transition,blocks,at))
       }
@@ -136,8 +136,8 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
     const raw=utf8.decode(bytes.subarray(0,length)),value=JSON.parse(raw),row=presentation(value,raw,{archive:true,piVersion:piece.piVersion ?? null})
     const block=row.type==='conversation'?JSON.parse(row.text)[piece.index]:{kind:'text',text:row.text,label:''}
     if(!block || block.kind!==piece.kind)throw Error('index_mismatch')
-    if(['tool','result'].includes(block.kind) || block.pretty) {
-      const parsed=JSON.parse(block.text)
+    if(['tool','result','event'].includes(block.kind) || block.pretty) {
+      const parsed=block.kind==='event'?null:JSON.parse(block.text)
       let format='json'
       let exception=false
       if(block.pretty){
@@ -145,7 +145,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
         while(size<=1048576){const value=probe.read();size+=encoder.encode(value.text).length;if(!value.more){format=size<=1048576?'markdown':'json';break}}
         exception=format==='json'
       }
-      const next={key:piece.key,reader:createPrettyPayloadReader(parsed),next:0,recent:[],format,structured:!!block.pretty,exception}
+      const next={key:piece.key,reader:block.kind==='event'?createRawPayloadReader(block.text):createPrettyPayloadReader(parsed),next:0,recent:[],format,structured:!!block.pretty,exception}
       if(pin || !formatter)formatter=next
       let value
       for(let index=0;index<=part;index++){current();value=next.reader.read();if(index && index%256===0)await new Promise(resolve=>setTimeout(resolve,0))}

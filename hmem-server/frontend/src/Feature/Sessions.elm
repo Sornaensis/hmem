@@ -476,9 +476,10 @@ receiveSealed value model =
         sealed = let previous = state.sealed in {previous | domEpoch=field "domEpoch" Decode.string previous.domEpoch}
         field name decoder fallback = Decode.decodeValue (Decode.field name decoder) value |> Result.withDefault fallback
         kind = field "kind" Decode.string ""
-        piece = Decode.map8 (\key offset blockKind label role time group count -> {key=key,offset=offset,kind=blockKind,label=label,role=role,time=time,group=group,count=count,open=False,groupOpen=False,body=Nothing,ast=Err "not_loaded"})
+        piece = Decode.map8 (\key offset blockKind label role time group count -> {key=key,offset=offset,kind=blockKind,label=label,role=role,time=time,group=group,count=count,endTime="",open=False,groupOpen=False,body=Nothing,ast=Err "not_loaded"})
             (Decode.field "key" Decode.string) (Decode.field "offset" Decode.string) (Decode.field "kind" Decode.string) (Decode.field "label" Decode.string)
             (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "group" Decode.string) (Decode.field "count" Decode.string)
+            |> Decode.andThen (\row -> Decode.map (\endTime -> {row | endTime=endTime}) (Decode.oneOf [Decode.field "endTime" Decode.string,Decode.succeed ""]))
             |> Decode.andThen (\row -> Decode.map3 (\open groupOpen body -> {row | open=open,groupOpen=groupOpen,body=body,ast=case body of
                     Just content -> if content.format == "markdown" && not content.more && content.part == 0 then Markdown.Parser.parse content.text |> Result.mapError (always "parse error") else Err "not_loaded"
                     Nothing -> Err "not_loaded"})
@@ -1037,7 +1038,7 @@ viewSealedRecords context model session =
                 if first.group == "" then pieceView first
                 else Transcript.container (2048+12*String.length first.group+12*String.length state.stamp)
                     (\children -> details ([class "session-activity-group",attribute "data-group-key" first.group,attribute "data-sealed-key" ("group:" ++ first.group),attribute "data-sealed-owner" state.stamp] ++ openAttribute first.groupOpen)
-                        [summary [] [text ("Activity · " ++ first.count ++ " events · " ++ String.fromInt (List.length run) ++ " on this page")]
+                        [summary [class "session-activity-summary"] [activityTimestamp model first.endTime,text ("Activity · " ++ first.count ++ " events · " ++ String.fromInt (List.length run) ++ " on this page")]
                         ,div [class "session-activity-records"] children]) (List.map pieceView run)
         rendered = Transcript.renderPage (if sealed.markdown.complete then (if sealed.markdown.structured then 524288 else 1048576) else 2097152) sealed.renderPart (List.map runView runs)
         message = case sealed.phase of
@@ -1101,12 +1102,12 @@ viewTranscriptItem model item =
         Transcript.Activity pieces ->
             let
                 firstKey = List.head pieces |> Maybe.map (\piece -> Maybe.withDefault piece.key piece.activityAnchor) |> Maybe.withDefault ""
-                firstTime = List.filterMap (\piece -> if piece.record.time == "" then Nothing else Just piece.record.time) pieces |> List.head |> Maybe.withDefault ""
+                finalTime = List.reverse pieces |> List.head |> Maybe.map (.record >> .time) |> Maybe.withDefault ""
                 count = List.map (.blocks >> List.length) pieces |> List.sum
             in
             ("activity:" ++ firstKey,details [class "session-activity-group",attribute "data-group-key" firstKey]
                 [ summary [class "session-activity-summary"]
-                    [if firstTime == "" then text "" else time [class "session-event-time",attribute "datetime" firstTime] [text (compactTimestamp model firstTime)]
+                    [activityTimestamp model finalTime
                     ,span [] [text ("Activity · " ++ String.fromInt count ++ (if count == 1 then " event" else " events"))]]
                 ,Keyed.node "div" [class "session-activity-records"] (List.map (\piece -> (piece.key,viewTranscriptPiece model piece)) pieces)])
 
@@ -1129,7 +1130,15 @@ viewTranscriptBlock model key block =
 
 viewBlockContent : Transcript.Block -> Html Msg
 viewBlockContent block =
-    if block.kind == "thinking" then sessionMarkdown block.content else pre [class "session-tool-content"] [code [class "language-json"] (if List.isEmpty block.tokens then [text block.content] else List.map (\(kind,content) -> span [class ("json-" ++ kind)] [text content]) block.tokens)]
+    if block.kind == "thinking" then sessionMarkdown block.content
+    else if block.kind == "event" then Html.node "session-event-json" [attribute "payload" block.content] []
+    else pre [class "session-tool-content"] [code [class "language-json"] (if List.isEmpty block.tokens then [text block.content] else List.map (\(kind,content) -> span [class ("json-" ++ kind)] [text content]) block.tokens)]
+
+
+activityTimestamp : Model -> String -> Html Msg
+activityTimestamp model source =
+    if source == "" then span [class "session-event-time",attribute "aria-label" "Activity time unavailable"] [text "Time unavailable"]
+    else time [class "session-event-time",attribute "datetime" source] [text (compactTimestamp model source)]
 
 
 sessionMarkdown : String -> Html Msg
@@ -1163,8 +1172,9 @@ timestampSources model =
             Delivery.SessionsPage page -> List.map sessionActivity page.items
             _ -> []) |> Maybe.withDefault []
         cards = Dict.values model.sessions.taskPages |> List.concatMap (\cached -> Result.toMaybe cached.result |> Maybe.map (.items >> List.map sessionActivity) |> Maybe.withDefault [])
+        transcript = List.map .time model.sessions.rows ++ List.map .time model.sessions.sealed.rows ++ List.map .endTime model.sessions.sealed.rows
     in
-    if model.activeTab == SessionsTab then list ++ List.map .time model.sessions.rows else if model.activeTab == ProjectsTab then cards ++ (if model.sessions.taskPanel /= Nothing then List.map .time model.sessions.rows else []) else []
+    if model.activeTab == SessionsTab then list ++ transcript else if model.activeTab == ProjectsTab then cards ++ (if model.sessions.taskPanel /= Nothing then transcript else []) else []
 
 
 availableSessions : Model -> List Api.AgentSession

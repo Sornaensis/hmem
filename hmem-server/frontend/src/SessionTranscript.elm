@@ -291,6 +291,7 @@ visible block =
         "encrypted" -> True
         "tool" -> String.trim block.content /= "" || String.trim block.label /= ""
         "result" -> String.trim block.content /= "" || String.trim block.label /= ""
+        "event" -> String.trim block.content /= "" || String.trim block.label /= ""
         "thinking" -> String.trim block.content /= ""
         "text" -> String.trim block.content /= ""
         _ -> False

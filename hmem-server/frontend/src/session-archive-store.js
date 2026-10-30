@@ -4,6 +4,7 @@ export const BATCH_ROWS = 256
 export const BATCH_BYTES = 1048576
 export const PAGE_ROWS = 64
 export const PAGE_BYTES = 4194304
+export const INDEX_VERSION = 2
 const encoder = new TextEncoder()
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const NAMESPACE='hmem-session-archives-v1'
@@ -220,7 +221,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       if(result.error)throw result.error
       if(closed)throw Error('retired_store')
       const indexes=new Map(groups.map((key,index)=>[key,index]))
-      return pieces.map((piece,index)=>{const group=indexes.get(piece.group);return {open:values[index]?.open || false,groupOpen:group===undefined?false:values[pieces.length+group]?.open || false,count:group===undefined?'0':values[pieces.length+groups.length+group]?.count || '0'}})
+      return pieces.map((piece,index)=>{const group=indexes.get(piece.group),summary=group===undefined?null:values[pieces.length+groups.length+group];return {open:values[index]?.open || false,groupOpen:group===undefined?false:values[pieces.length+group]?.open || false,count:summary?.count || '0',endTime:summary?.endTime || ''}})
     }finally{await terminal;if(pageRead===owned)pageRead=null}
   }
   async function closeHandles() {
@@ -276,6 +277,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       const ending=await terminal;transactions.delete(terminal)
       if(primary)throw primary;if(ending.error)throw ending.error
       if(JSON.stringify(verified?.manifest)!==JSON.stringify(adoptManifest))throw Error('archive_receipt_mismatch')
+      if(verified.indexVersion!==INDEX_VERSION)throw Error('archive_index_stale')
     }
     const compressedFile=await directory.getFileHandle('compressed.gz',{create:!adoptManifest})
     const rawFile=await directory.getFileHandle('raw.jsonl',{create:!adoptManifest})
@@ -297,7 +299,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       readRaw:(start,end)=>rawReads.read(start,end),
       retireReads:()=>rawReads.retire(),
       async detach(){if(!custody||adoptManifest)throw Error('archive_custody_required');await closeHandles()},
-      async publish(manifest){if(adoptManifest)throw Error('archive_read_only');if(closed)throw Error('retired_store');raw.flush();await put('meta',{key:'verified',manifest});await flush();if(closed)throw Error('retired_store');rawReads.publish(manifest.raw_bytes)},
+      async publish(manifest){if(adoptManifest)throw Error('archive_read_only');if(closed)throw Error('retired_store');raw.flush();await put('meta',{key:'verified',manifest,indexVersion:INDEX_VERSION});await flush();if(closed)throw Error('retired_store');rawReads.publish(manifest.raw_bytes)},
       async disclosure(key,open){await put('disclosures',{key,open});await flush()},
       closeAndDelete
     }

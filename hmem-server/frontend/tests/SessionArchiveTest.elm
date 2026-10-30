@@ -40,7 +40,7 @@ suite =
                 base=AppShell.initModel Nothing url (WorkspacePage ws) flags Nothing {tab=SessionsTab,focus=Nothing,observationId=Nothing}
                 state=base.sessions
                 empty=emptySealedSessionView
-                piece={key="piece",offset="0",kind="tool",label="secret",role="tool",time="",ast=Err "not_loaded",group="",count="0",open=True,groupOpen=False,body=Nothing}
+                piece={key="piece",offset="0",kind="tool",label="secret",role="tool",time="",ast=Err "not_loaded",group="",count="0",endTime="",open=True,groupOpen=False,body=Nothing}
                 markdown=empty.markdown
                 owned={base | selectedWorkspaceId=Just ws,auth={status=AuthReady,mode=Just "test"}
                     ,sessionContext=Just {authMode="test",effectiveActor=Nothing,principal={actorType="user",actorId="actor",actorLabel="Actor",authority="local",grantUserId=Nothing},globalPermissions={createWorkspace=False,superadmin=True},workspace=Just {workspaceId=ws,role=Just "read",canRead=True,canEdit=False,canAdmin=False}}

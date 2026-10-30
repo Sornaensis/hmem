@@ -1,3 +1,5 @@
+import {parseInstant} from './timestamp-display.js'
+
 // Frame exact bytes before decoding UTF-8. A raw window and a JSONL record
 // have separate bounds: one record may span more than four HTTP chunks.
 export const MAX_RECORD_BYTES = 1048576
@@ -21,6 +23,74 @@ const printable = value => typeof value === 'string' ? value : JSON.stringify(va
 const short = value => string(value).replace(/^mcp__/, '').replaceAll('__', ' · ').replace(/\s+/g,' ').slice(0,96)
 const archiveBlocks=Symbol('archiveBlocks'),archiveVisible=Symbol('archiveVisible')
 const blocksFor=row=>row[archiveBlocks] || JSON.parse(row.text)
+
+const jsonSpace=character=>character===' ' || character==='\n' || character==='\r' || character==='\t'
+const skipJsonSpace=(source,start)=>{while(jsonSpace(source[start]))start++;return start}
+function jsonStringEnd(source,start) {
+  for(let at=start+1;at<source.length;at++) {
+    if(source[at]==='\\')at++
+    else if(source[at]==='"')return at+1
+  }
+  throw Error('invalid_json_record')
+}
+function jsonValueEnd(source,start) {
+  if(source[start]==='"')return jsonStringEnd(source,start)
+  if(source[start]==='{' || source[start]==='[') {
+    let depth=1,at=start+1
+    while(depth && at<source.length) {
+      if(source[at]==='"'){at=jsonStringEnd(source,at);continue}
+      if(source[at]==='{' || source[at]==='[')depth++
+      else if(source[at]==='}' || source[at]===']')depth--
+      at++
+    }
+    if(depth)throw Error('invalid_json_record')
+    return at
+  }
+  let at=start
+  while(at<source.length && !jsonSpace(source[at]) && !',}]'.includes(source[at]))at++
+  return at
+}
+
+// The record has already passed JSON validation. Locate the effective root
+// payload without serializing its parsed Numbers or recursing through its tree.
+// Escaped property names and duplicate root keys follow JSON.parse's last key.
+function rawEventPayload(source) {
+  if(typeof source!=='string')return null
+  let at=skipJsonSpace(source,0),payload=null
+  if(source[at]!=='{')return null
+  at=skipJsonSpace(source,at+1)
+  while(at<source.length && source[at]!=='}') {
+    const keyEnd=jsonStringEnd(source,at),key=JSON.parse(source.slice(at,keyEnd))
+    const begin=skipJsonSpace(source,skipJsonSpace(source,keyEnd)+1),end=jsonValueEnd(source,begin)
+    if(key==='payload')payload=source.slice(begin,end)
+    at=skipJsonSpace(source,end)
+    if(source[at]!==',')break
+    at=skipJsonSpace(source,at+1)
+  }
+  return payload
+}
+
+// Direct presentation callers may lack original text. Keep that fallback
+// iterative too; production events always use their lossless raw payload span.
+function compactPayload(value) {
+  const stack=[{value}],parts=[]
+  while(stack.length) {
+    const item=stack.pop()
+    if(item.literal!==undefined){parts.push(item.literal);continue}
+    const value=item.value
+    if(value && typeof value==='object') {
+      const array=Array.isArray(value),keys=Object.keys(value)
+      parts.push(array?'[':'{');stack.push({literal:array?']':'}'})
+      for(let index=keys.length-1;index>=0;index--) {
+        const key=keys[index]
+        stack.push({value:value[key]})
+        if(!array)stack.push({literal:JSON.stringify(key)+':'})
+        if(index)stack.push({literal:','})
+      }
+    }else parts.push(JSON.stringify(value) ?? 'null')
+  }
+  return parts.join('')
+}
 
 // Unknown marker-only metadata has no conversational content. Inspect a finite
 // number of values; ambiguous large/deep structures get a notice, never a dump.
@@ -71,7 +141,8 @@ export function payloadTokens(text) {
 // Presentation never changes the stored record or its byte boundaries.
 export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
-  const time = string(object.timestamp || object.time)
+  const sourceTime = string(object.timestamp || object.time)
+  const time = parseInstant(sourceTime) ? sourceTime : ''
   const block = (kind, text, label = '') => ({kind, text:string(text), label:string(label).slice(0,256)})
   // A bounded indication preserves deliberate metadata hiding without making
   // unsupported meaningful records look like an empty conversation.
@@ -182,15 +253,18 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
     const payload=object.payload,thinking=payload.type==='agent_reasoning'
     return conversation(payload.type==='user_message'?'user':'assistant',[block(thinking?'thinking':'text',payload.message || payload.text)],{eventEnvelope:true})
   }
+  if(object.type==='event_msg'){
+    if(['token_count','turn_aborted','task_started','task_complete'].includes(object.payload?.type) || !hasMeaningfulContent(object))return hidden()
+    return conversation('assistant',[block('event',rawEventPayload(raw) ?? compactPayload(object.payload ?? null),`Event${object.payload?.type?' · '+short(object.payload.type):''}`)])
+  }
   if(typeof object.text === 'string' || typeof object.content === 'string') return {type:string(object.type),role:string(object.role),time,text:typeof object.text === 'string' ? object.text : object.content}
   const metadata=['metadata','session_meta','turn_context','session.start','session.shutdown','session.end','session.idle','session.usage_info','session.model_change','session.mode_changed','session.title_changed','assistant.turn_start','assistant.turn_end','assistant.usage',
     'session.resume','session.context_changed','session.info','session.plan_changed','session.workspace_file_changed','session.compaction_start','pending_messages.modified','command.queued','permission.requested','permission.completed','hook.start','skill.invoked','subagent.started','subagent.completed','subagent.selected','subagent.deselected','exit_plan_mode.completed']
   // Keep failure/control changes that could explain missing output visible.
   if(['hook.end','command.completed','permission.completed'].includes(object.type) && object.data?.success===false)return conversation('notice',[block('text',`Transcript operation failed (${short(object.type)}). Original evidence is preserved.`)])
   if(['hook.end','command.completed'].includes(object.type) && !object.data?.error && object.data?.success!==false)return hidden()
-  const codexMetadata=object.type==='event_msg' && ['token_count','turn_aborted','task_started','task_complete'].includes(object.payload?.type)
   const envelope=typeof object.type==='string' || ['payload','data','message','content'].some(key=>Object.hasOwn(object,key))
-  if((!metadata.includes(object.type) || object.data?.error || object.data?.success===false) && !codexMetadata && envelope && hasMeaningfulContent(object))return conversation('notice',[unsupported(object.type)])
+  if((!metadata.includes(object.type) || object.data?.error || object.data?.success===false) && envelope && hasMeaningfulContent(object))return conversation('notice',[unsupported(object.type)])
   return {type:'unknown',role:'',time,text:''}
 }
 
@@ -214,7 +288,42 @@ export function createPrettyPayloadReader(value,limit=16384) {
       }else yield JSON.stringify(item.value)
     }
   }
-  const iterator=chunks();let pending='',at=0,done=false,part=0
+  return payloadPartReader(chunks(),limit)
+}
+
+// Format validated source tokens, preserving numeric precision, exponents,
+// duplicate keys and string escapes. Neither parsing nor output uses recursion;
+// even indentation is generated in finite pieces for deeply nested evidence.
+export function createRawPayloadReader(source,limit=16384) {
+  JSON.parse(source)
+  function* chunks() {
+    let at=0,depth=0,previous=''
+    function* indent(){for(let left=depth*2;left>0;left-=8192)yield ' '.repeat(Math.min(8192,left))}
+    while((at=skipJsonSpace(source,at))<source.length) {
+      const begin=at,character=source[at]
+      if(character==='"')at=jsonStringEnd(source,at)
+      else if('{}[],:'.includes(character))at++
+      else {while(at<source.length && !jsonSpace(source[at]) && !'{}[],:'.includes(source[at]))at++}
+      const token=source.slice(begin,at)
+      if(character==='{' || character==='[') {
+        yield token;depth++
+        const next=source[skipJsonSpace(source,at)]
+        if(next!=='}' && next!==']'){yield '\n';yield* indent()}
+      }else if(character==='}' || character===']') {
+        depth--
+        if(previous!=='{' && previous!=='['){yield '\n';yield* indent()}
+        yield token
+      }else if(character===','){yield ',\n';yield* indent()}
+      else if(character===':')yield ': '
+      else yield token
+      previous=character
+    }
+  }
+  return payloadPartReader(chunks(),limit)
+}
+
+function payloadPartReader(iterator,limit) {
+  let pending='',at=0,done=false,part=0
   function advance(){while(at===pending.length&&!done){const next=iterator.next();done=!!next.done;pending=next.value || '';at=0}}
   return {read(){
     const parts=[];let size=0
@@ -243,7 +352,7 @@ export function visibleBlocks(row) {
   if(row[archiveVisible])return row[archiveVisible]
   const visible=blocksFor(row).map((part,index)=>[index,part]).filter(([,part])=>
     part.kind === 'encrypted' || (['text','thinking'].includes(part.kind) && part.text.trim())
-    || (['tool','result'].includes(part.kind) && (part.text.trim() || part.label.trim())))
+    || (['tool','result','event'].includes(part.kind) && (part.text.trim() || part.label.trim())))
   if(row[archiveBlocks])Object.defineProperty(row,archiveVisible,{value:visible})
   return visible
 }
@@ -307,8 +416,7 @@ export function createRecordFramer(startOffset = 0) {
   if (!Number.isSafeInteger(startOffset) || startOffset < 0) throw new Error('invalid_offset')
   let through = startOffset, start = startOffset, skipping = startOffset !== 0
   let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput, previousRecord, activityAnchor = null,piVersion=null
-  const leadingNotice = skipping ? 'Window begins inside a possible record; the leading fragment is omitted.' : ''
-  let notice = leadingNotice
+  let notice = ''
   function append(bytes) {
     if (!bytes.length) return
     if (pendingSize + bytes.length > MAX_RECORD_BYTES + 2) throw new Error('record_limit')
@@ -324,7 +432,7 @@ export function createRecordFramer(startOffset = 0) {
     catch (error) { if (final) { notice = 'Incomplete UTF-8 record at this finite window boundary.'; return }; throw error }
     let value
     try { value = JSON.parse(raw) } catch { if (final) { notice = 'Incomplete record at this finite window boundary.'; return }; throw new Error('invalid_json_record') }
-    notice = leadingNotice
+    notice = ''
     if(value?.type==='session')piVersion=Number.isInteger(value.version)?value.version:'invalid'
     const row = { offset:start, presentationOffset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw,{piVersion}) }
     const replacement = previousRecord?.offset === start ? previousRecord : null

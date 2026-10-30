@@ -1423,7 +1423,7 @@ emptySealedSessionView =
 type alias SealedSessionPiece =
     { key : String, offset : String, kind : String, label : String, role : String, time : String
     , ast : Result String (List MarkdownBlock.Block)
-    , group : String, count : String, open : Bool, groupOpen : Bool, body : Maybe { text : String, part : Int, more : Bool, tokens : List ( String, String ), format : String, structured : Bool, exception : Bool } }
+    , group : String, count : String, endTime : String, open : Bool, groupOpen : Bool, body : Maybe { text : String, part : Int, more : Bool, tokens : List ( String, String ), format : String, structured : Bool, exception : Bool } }
 
 
 type alias SessionSaveOperation =

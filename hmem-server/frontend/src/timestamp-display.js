@@ -2,7 +2,7 @@ const BATCH_SIZE = 128
 
 // Require an explicit RFC3339 offset: browser-dependent local parsing must never
 // reinterpret an API instant. Validate the calendar before Date can normalize it.
-function parseInstant(source) {
+export function parseInstant(source) {
   if (typeof source !== 'string') return null
   const match = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?([Zz]|[+-]\d{2}:\d{2})$/.exec(source)
   if (!match) return null

@@ -9,6 +9,34 @@ const call=name=>({type:'response_item',payload:{type:'function_call',name,argum
 const result=()=>({type:'response_item',payload:{type:'function_call_output',call_id:'call-1',output:'{"ok":true}'}})
 const message=text=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})
 
+test('Codex event JSON stays inert and expanded while the group follows final-entry time',{timeout:60000},async()=>{
+ const first='2026-10-30T12:00:00Z',final='2026-10-30T09:00:00Z'
+ const event=(timestamp,payload)=>({type:'event_msg',timestamp,payload})
+ const h=await openSessionExplorer({extraRecords:[message('Before inspectable events.')]});const {page}=h
+ try{
+  await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').click();await page.getByText('Before inspectable events.',{exact:true}).waitFor()
+  const payload={type:'future_event',message:'<img src=x onerror="window.injected=true">',values:[null,false,7,'λ😀'],large:'x'.repeat(19000)}
+  await h.appendRecords(event(first,payload))
+  const group=page.locator('.session-activity-group').last();await until(async()=>await group.locator(':scope > summary time').getAttribute('datetime')===first)
+  assert.equal(await group.getAttribute('open'),null);await group.locator(':scope > summary').click()
+  const disclosure=group.locator('.session-content-event').first();assert.equal(await disclosure.getAttribute('open'),null);await disclosure.locator('summary').click()
+  const json=disclosure.locator('session-event-json');await json.locator('pre').waitFor({timeout:3000});const begin=await json.locator('pre').textContent()
+  await json.getByRole('button',{name:'Continue JSON',exact:true}).click();const end=await json.locator('pre').textContent()
+  assert.deepEqual(JSON.parse(begin+end),payload);assert.equal(await page.locator('#session-records img').count(),0);assert.equal(await page.evaluate(()=>window.injected),undefined)
+  await json.evaluate(el=>window.eventPayloadNode=el)
+  await h.appendRecords(event(final,{type:'older_final_event',result:42}))
+  await until(async()=>await group.locator(':scope > summary time').getAttribute('datetime')===final)
+  assert.equal(await group.getAttribute('open'),'');assert.equal(await disclosure.getAttribute('open'),'')
+  assert.equal(await json.evaluate(el=>el===window.eventPayloadNode),true);assert.equal(await json.locator('pre').textContent(),end)
+  await h.appendRecords(event(undefined,{type:'undated_final_event',result:true}))
+  await group.locator(':scope > summary').getByText('Time unavailable',{exact:true}).waitFor();assert.equal(await group.locator(':scope > summary time').count(),0)
+  await h.appendRecords(message('After inspectable events.'));await page.getByText('After inspectable events.',{exact:true}).waitFor()
+  assert.equal(await page.getByText(/Unsupported transcript content \(event_msg\)/).count(),0)
+  for(const width of [1440,430]){await page.setViewportSize({width,height:1000});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))}
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
 test('mixed native blocks collect activity without hiding or reordering prose',{timeout:60000},async()=>{
  const h=await openSessionExplorer({extraRecords:[{type:'assistant',message:{role:'assistant',content:[
   {type:'text',text:'Visible before activity.'},{type:'thinking',thinking:'Grouped reasoning.'},{type:'tool_use',name:'Search',input:{query:'safe example'}},
@@ -21,8 +49,8 @@ test('mixed native blocks collect activity without hiding or reordering prose',{
   const groups=page.locator('.session-activity-group');assert.equal(await groups.count(),4)
   assert.equal(await groups.locator('.session-record:not(.session-record-activity)').count(),0,'messages never enter activity disclosures')
   assert.equal(await groups.evaluateAll(elements=>elements.every(el=>!el.open)),true)
-  const order=await page.locator('#session-records').evaluate(el=>[...el.children].slice(-5).map(child=>child.matches('details')?child.querySelector('summary span').textContent:child.querySelector('.session-record-text').textContent))
-  assert.deepEqual(order,['Visible before activity.','Activity · 2 events','Visible between activity.','Activity · 2 events','Visible after activity.'])
+  const order=await page.locator('#session-records').evaluate(el=>[...el.children].slice(-5).flatMap(child=>child.matches('details')?[child.querySelector('summary span').textContent]:[...child.querySelectorAll('.session-record-text')].map(node=>node.textContent)))
+  assert.deepEqual(order,['Visible before activity.','Activity · 2 events','Unsupported transcript content (unknown). Original evidence is preserved.','Visible between activity.','Activity · 2 events','Visible after activity.'])
   for(const text of ['Visible before activity.','Visible between activity.','Visible after activity.'])assert.equal(await page.getByText(text,{exact:true}).isVisible(),true)
   const mixed=groups.nth(2);await mixed.locator(':scope > summary').focus();await page.keyboard.press('Enter');assert.equal(await mixed.getAttribute('open'),'')
   const tool=mixed.locator('.session-content-tool');assert.equal(await tool.getAttribute('open'),null);await tool.locator('summary').click()

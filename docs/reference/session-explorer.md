@@ -10,11 +10,17 @@ canonical envelope arrives later or its hidden counterpart leaves the window.
 The retained rows carry only bounded pairing metadata; raw offsets, delimiters
 and evidence bytes still describe the canonical record.
 
-Consecutive thinking, tool calls and results share a collapsed activity group,
+Consecutive thinking, tool calls, results and inspectable Codex events share a collapsed activity group,
 including a run that currently has only one event. User and agent prose stays
 outside the disclosure and splits runs, including within mixed Claude content.
 Hidden unknown and empty blocks neither create groups nor split them. Each group
-shows its first timestamp and event count. Individual thinking and formatted tool
+shows the final entry's occurrence timestamp and event count. An undated or invalid
+final entry shows **Time unavailable**, even when an earlier entry has a valid time.
+Times select the outer `timestamp || time` using the native JavaScript truthy
+precedence: absent, null, empty-string, false and zero primary values select
+`time`; a truthy invalid primary does not fall back. The selected value must be
+an explicit-offset RFC3339 string; numeric epochs and invalid calendar dates are
+unavailable. Individual thinking and formatted tool
 payload disclosures remain available inside it; encrypted reasoning shows only
 *Thinking...*. Source-position keys preserve native disclosure state as a run
 grows or a message closes it. State belongs to the current session/authority and
@@ -40,7 +46,17 @@ guarantee their equivalence. Tool result disclosures retain both model-facing
 and detailed content. Ephemeral deltas/progress and routine session/turn metadata
 stay hidden. Native model fields do not replace authoritative runtime metadata.
 
-Unsupported meaningful records and content blocks show a short indication of
+Meaningful unhandled Codex `event_msg` records become Activity events labelled by
+their payload type. Their original payload tokens expand as inert formatted JSON,
+preserving numeric precision, exponent spellings, duplicate keys and string escapes,
+with bounded continuation for large or deeply nested payloads. Supported messages
+and reasoning keep their existing presentation; token counts and routine Codex
+task/turn metadata stay hidden. Sealed group indexes retain the complete run's
+final time independently of the current page or search result. Derived index
+version 2 invalidates old summaries; reload rebuilds them from verified evidence
+without changing transcript bytes or receipts.
+
+Other unsupported meaningful records and content blocks show a short indication of
 their type without dumping their JSON. Original evidence remains available
 through the verified download path. Windows containing only unsupported meaningful
 content settle with an indication. Discriminator/flag-only marker metadata stays
@@ -48,7 +64,8 @@ hidden and does not consume the visible history reserve. Known hook, command and
 permission failures have an explicit failure indication even without error details;
 successful controls remain hidden. Unknown-content inspection visits at most 256
 values and 16 levels; larger ambiguous structures receive an indication.
-Malformed JSON reports a settled framing error. Incomplete finite tails retain
+Leading partial records are skipped silently when a bounded read starts inside
+a record. Malformed JSON reports a settled framing error. Incomplete finite tails retain
 their bytes and show a boundary notice until completed; neither state read-loops.
 
 pi coverage targets persisted session schema **3**, pinned to official

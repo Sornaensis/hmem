@@ -21,6 +21,15 @@ tests =
                 |> Transcript.project
                 |> List.map shape
                 |> Expect.equal [ ( "activity", [ "thinking", "tool", "result" ] ), ( "message", [ "text" ] ), ( "activity", [ "tool" ] ) ]
+        , test "inspectable events join activity and retain source order around messages" <| \_ ->
+            [ record 1 [ block "event" "{\"result\":42}" ]
+            , record 2 [ block "thinking" "plan" ]
+            , record 3 [ block "text" "visible" ]
+            , record 4 [ block "event" "null" ]
+            ]
+                |> Transcript.project
+                |> List.map shape
+                |> Expect.equal [ ( "activity", [ "event", "thinking" ] ), ( "message", [ "text" ] ), ( "activity", [ "event" ] ) ]
         , test "mixed native content keeps its exact order and original block identities" <| \_ ->
             record 10 [ block "text" "before", block "thinking" "plan", block "unknown" "hidden", block "tool" "{}", block "text" "middle", block "result" "{}", block "encrypted" "", block "text" "after" ]
                 |> List.singleton

@@ -75,6 +75,62 @@ async function installArchive(h){
   return route.fulfill({json:{workspace_id:h.fixture.workspace.id,session_id:id,state:'ready',generation_id:generation,codec:'gzip-v1',raw_bytes:String(raw.length),raw_records:String(raw.toString('utf8').split('\n').filter(Boolean).length),raw_sha256:hash(raw),compressed_bytes:String(gzip.length),compressed_sha256:hash(gzip),content_path:`/api/v1/workspaces/${h.fixture.workspace.id}/sessions/${id}/archive/${generation}/content`}})
  })
 }
+
+test('sealed inspectable events rebuild an old index and retain the complete group time across pages and reload',{timeout:60000},async()=>{
+ const final='2026-10-30T09:00:00Z',values=Array.from({length:140},(_,index)=>({type:'event_msg',timestamp:index===139?final:'2026-10-30T12:00:00Z',payload:{type:'future_event',index,result:'needle '+index}}))
+ const raw=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')+'\n'),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
+ try{
+  // Downgrade one real completed derived index immediately before adoption.
+  // The current viewer must discard it and rebuild from the same evidence.
+  await page.addInitScript(()=>{
+   const NativeWorker=window.Worker
+   window.Worker=class extends NativeWorker {
+    postMessage(message,transfer){
+     if(message.kind!=='adopt' || window.oldEventIndexInjected)return super.postMessage(message,transfer)
+     window.oldEventIndexInjected=true
+     const send=()=>super.postMessage(message,transfer),opening=indexedDB.open('hmem-session-archive-v1-'+message.name)
+     opening.onsuccess=()=>{const db=opening.result,tx=db.transaction('meta','readwrite'),store=tx.objectStore('meta'),request=store.get('verified')
+      request.onsuccess=()=>store.put({...request.result,indexVersion:1});tx.oncomplete=()=>{db.close();send()};tx.onerror=()=>{db.close();throw Error('index downgrade fixture failed')}
+     }
+    }
+   }
+  })
+  await installArchive(h);await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
+  await page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:8000}).catch(async error=>{console.error(JSON.stringify({phase:'stale-index-rebuild',text:(await page.locator('body').innerText()).slice(-1400),errors:h.errors}));throw error});assert.equal(await page.evaluate(()=>window.oldEventIndexInjected),true)
+  const group=page.locator('.session-activity-group').first(),footer=page.locator('.session-archive-footer')
+  assert.equal(await group.locator(':scope > summary time').getAttribute('datetime'),final);assert.match(await group.locator(':scope > summary').innerText(),/140 events/)
+  await group.locator(':scope > summary').click();const event=group.locator('.session-content-event').first();await event.locator('summary').click();await event.locator('pre').waitFor()
+  assert.deepEqual(JSON.parse(await event.locator('pre').textContent()),values[0].payload)
+  await footer.getByRole('button',{name:'Last',exact:true}).click();await until(async()=>await page.locator('.session-record').last().getAttribute('data-offset')===String(raw.lastIndexOf(Buffer.from(JSON.stringify(values[139])))))
+  assert.equal(await page.locator('.session-activity-group').first().locator(':scope > summary time').getAttribute('datetime'),final)
+  for(const width of [1440,430]){await page.setViewportSize({width,height:1000});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))}
+  await page.reload();await page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:20000})
+  assert.equal(await page.locator('.session-activity-group').first().locator(':scope > summary time').getAttribute('datetime'),final)
+  assert.equal(hash(h.content.get(h.saved.id)),hash(raw));assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
+ }finally{await h.close()}
+})
+
+test('raw event JSON preserves deep and numeric source tokens in live and sealed browsers',{timeout:60000},async()=>{
+ const numeric='{"type":"event_msg","payload":{"type":"precision","n":9007199254740993,"overflow":1e400,"negative":-0,"escaped":"\\u0061","padding":"'+'x'.repeat(19000)+'"}}\n'
+ const deep='{"type":"event_msg","payload":'+'['.repeat(10000)+'0'+']'.repeat(10000)+'}\n'
+ const raw=Buffer.from(numeric+deep),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
+ const exact=text=>{for(const token of ['9007199254740993','1e400','-0','\\u0061'])assert.ok(text.includes(token),token+' preserved')}
+ try{
+  await installArchive(h);await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id)
+  const group=page.locator('.session-activity-group').first();await group.locator(':scope > summary').click()
+  let events=group.locator('.session-content-event'),first=events.first();await first.locator('summary').click()
+  const json=first.locator('session-event-json');await json.locator('pre').waitFor();const begin=await json.locator('pre').textContent()
+  await json.getByRole('button',{name:'Continue JSON',exact:true}).click();exact(begin+await json.locator('pre').textContent())
+  await events.nth(1).locator('summary').click();const deepJson=events.nth(1).locator('session-event-json');await deepJson.locator('pre').waitFor()
+  assert.equal((await deepJson.locator('pre').textContent()).length,16384);await deepJson.getByRole('button',{name:'Continue JSON',exact:true}).click();assert.equal((await deepJson.locator('pre').textContent()).length,16384)
+  await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id);await page.getByText('Verified complete archive.',{exact:true}).waitFor()
+  const sealed=page.locator('.session-activity-group').first();await sealed.locator(':scope > summary').click();events=sealed.locator('.session-content-event');first=events.first();await first.locator('summary').click();await first.locator('pre').waitFor()
+  const sealedBegin=await first.locator('pre').textContent(),article=first.locator('..').locator('..')
+  await article.getByRole('button',{name:'Continue body',exact:true}).click();await until(async()=>await first.locator('pre').textContent()!==sealedBegin)
+  exact(sealedBegin+await first.locator('pre').textContent());await events.nth(1).locator('summary').click();await events.nth(1).locator('pre').waitFor();assert.equal((await events.nth(1).locator('pre').textContent()).length,16384)
+  assert.deepEqual(h.content.get(h.saved.id),raw);assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
+ }finally{await h.close()}
+})
 const nativeMessage=(format,index,text)=>format==='Copilot'?{type:'assistant.message',id:'extra-'+index,parentId:null,data:{messageId:'message-'+index,content:text}}:{type:'message',id:'extra-'+index,parentId:index%7?'extra-'+(index-1):'p1',timestamp:'2026-10-30T10:20:00Z',message:{role:'assistant',content:[{type:'text',text}],timestamp:1793355600000}}
 
 for(const [format,native,first]of[['Copilot',copilotRecords,'Inspect café λ😀'],['pi',piRecords,'Inspect pi café λ😀']])test(format+' native live/dock/archive history preserves evidence while a connected normal-motion ring advances',{timeout:60000},async()=>{

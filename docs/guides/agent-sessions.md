@@ -32,14 +32,16 @@ tooltip. Runtime identity is explicitly supplied, never inferred from the
 connection caller, provider or transcript format. The original caller remains
 stored with the evidence.
 Conversation text renders as Markdown. Tool calls and results expand on demand,
-and thinking starts hidden. Consecutive thinking, tool calls and results appear
+and thinking starts hidden. Consecutive thinking, tool calls, results and Codex events appear
 as one collapsed **Activity** group with a timestamp and event count. Expand it
 to inspect the individual events; user and agent messages stay visible outside
 the group. Messages split activity runs, including messages mixed with tools in
 one native record. An expanded run stays expanded as live events arrive or the
-view synchronizes.
+view synchronizes. The group time comes from its final event; an undated final
+event shows **Time unavailable**.
 Expanded tool payloads display formatted, highlighted
-JSON. Encrypted or redacted thinking displays *Thinking...*. Copilot and pi
+JSON. Other meaningful Codex events also expand to their original JSON payload;
+use **Continue JSON** or **Continue body** to read longer payloads. Encrypted or redacted thinking displays *Thinking...*. Copilot and pi
 native captures show their messages and tools; unsupported meaningful content
 has a short notice while routine metadata stays hidden. Copilot tool requests
 and execution starts are separately labelled and share their tool-call ID.

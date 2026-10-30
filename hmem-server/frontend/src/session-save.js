@@ -2,11 +2,12 @@ import { createRecordFramer, decodeBase64 } from './session-viewer.js'
 import { sha256 } from '@noble/hashes/sha256'
 import { validateManifest } from './session-archive-worker.js'
 import {acquireArchiveCustody,deleteArchiveStage} from './session-archive-store.js'
+import {installEventPayload} from './session-event-json.js'
 
 const hex = bytes => Array.from(bytes,byte => byte.toString(16).padStart(2,'0')).join('')
 
 export function createSealedViewer({send,fetchArchive,document,window,workerFactory=()=>new Worker(new URL('./session-archive-worker.js',import.meta.url),{type:'module'}),cleanupMs=10000,custodyFactory=acquireArchiveCustody,deleteStage=deleteArchiveStage}) {
-  let active=null,pending=null,sequence=0,authority=0,blocked=false,stopped='',authorityFence='',blockedNotice='',domEpoch=''
+  let active=null,pending=null,sequence=0,authority=0,blocked=false,stopped='',authorityFence='',blockedNotice='',domEpoch='',indexRetry=''
   const clear=owned=>{
     if(!owned || active!==owned || owned.domCleared)return
     clearPageProgress(owned)
@@ -115,7 +116,14 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
   async function adoptReader(owned) {
     if(!current(owned)||!owned.detached)throw Error('retired_archive')
     constructWorker(owned,'reader');owned.started=true
-    await rpc(owned,'adopt',{name:owned.stageName,custody:owned.custody,manifest:owned.manifest})
+    try{await rpc(owned,'adopt',{name:owned.stageName,custody:owned.custody,manifest:owned.manifest})}
+    catch(error){
+      // A previous derived index is disposable; rebuild from verified evidence.
+      if(error.message!=='archive_index_stale' || indexRetry===owned.identity)throw error
+      // Retirement joins this phase transition; do not await that join here.
+      if(current(owned)){indexRetry=owned.identity;pending=owned.config;stopped='';void retire(owned)}
+      return
+    }
     if(current(owned))await page(owned)
   }
 
@@ -354,6 +362,7 @@ export function createEvidenceWriter(writable, session, isCurrent = () => true) 
 // Elm owns demand and the two HTTP slots. This bridge only consumes one
 // validated chunk at a time and acknowledges it before Elm can rearm demand.
 export function installSessionBridge(app, { document = globalThis.document, window = globalThis.window, now = () => Date.now(), fetchArchive = async()=>{throw Error('archive_transport_unavailable')}, workerFactory } = {}) {
+  installEventPayload(window)
   let stamp = '', viewerStamp = '', generation = -1, framer = null, viewerIntent = 0
   let activeSave = null
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))

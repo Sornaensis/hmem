@@ -1689,7 +1689,7 @@ test('production sealed view uses complete gzip only and preserves lazy tool dis
     await tool.locator('summary').click();await tool.locator('pre').waitFor();assert.ok((await tool.locator('pre').innerText()).includes('src/Feature/Sessions.elm'))
     const size=await h.page.locator('#session-records').evaluate(node=>new TextEncoder().encode(node.outerHTML).length)
     assert.ok(size<4194304);assert.ok(await h.page.locator('.session-record').count()<=64)
-    await h.page.getByRole('button',{name:'Last',exact:true}).click();await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
+    assert.equal(await h.page.getByRole('button',{name:'Last',exact:true}).isDisabled(),true,'a complete single-page archive has no later page')
     assert.equal(reads.length,3,'ordinary local navigation performs no HTTP')
     const loaded=await boundedMemorySnapshot(h)
     console.log(JSON.stringify({memoryCapability:{browserImage,baseline,loaded}}))

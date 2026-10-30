@@ -6,9 +6,13 @@ license:             MPL-2.0
 author:              hmem contributors
 category:            Database
 
+extra-source-files:
+  - test/fixtures/session-occurrence-parity.json
+
 dependencies:
   - base >= 4.7 && < 5
   - aeson >= 2.0
+  - scientific
   - async
   - containers
   - crypton

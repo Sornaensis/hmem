@@ -1,5 +1,20 @@
 # Schema reference
 
+## Transcript occurrence projection (V054)
+
+`session_occurrences` is a replaceable sidecar with one composite workspace/session
+foreign key. It stores the derivation version, processed byte cursor, one pending
+record (at most 1 MiB), nullable maximum occurrence time and winning raw offset,
+and the pi schema version needed across windows. It does not update `sessions`,
+chunks, sealed receipts or audit rows. V054 installs the table, metadata helper,
+compact completion invalidation and ledger atomically; a failed ledger write
+rolls back all changes. Existing rows need no synchronous migration-time scan.
+
+Canonical session metadata exposes `last_activity_at` only when version 1 has
+processed exactly `committed_bytes` with no pending record. Otherwise it is null,
+including empty or unsupported evidence. See [occurrence semantics](session-occurrence.md)
+for extraction rules, incremental correction and worker ownership.
+
 ## Agent session change delivery (V042)
 
 `V042__agent_session_change_delivery.sql` installs dedicated audit/outbox triggers

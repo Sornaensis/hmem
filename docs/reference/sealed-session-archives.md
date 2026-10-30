@@ -1,5 +1,10 @@
 # Sealed session archives
 
+Session `last_activity_at` is a separate [occurrence projection](session-occurrence.md).
+It can be rebuilt from verified gzip evidence after raw reclamation, without
+changing sealed canonical metadata, original bytes or archive receipts. Archive
+backfill/reclamation controls do not disable this bounded metadata correction.
+
 This is the implementation contract for post-seal storage and full-session
 viewing. The standalone codec probe and client qualification below have separate
 scopes; final database/HTTP/browser integration and rollout belong to the aggregate

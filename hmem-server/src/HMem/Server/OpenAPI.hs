@@ -220,7 +220,10 @@ instance ToSchema AgentSession.AgentSession where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy
     NamedSchema _ runtimeSchema <- declareNamedSchema (Proxy @AgentSession.RuntimeIdentity)
-    pure $ NamedSchema name (schema & properties . at "runtime_identity" ?~ Inline (runtimeSchema & nullable ?~ True))
+    pure $ NamedSchema name (schema
+      & properties . at "runtime_identity" ?~ Inline (runtimeSchema & nullable ?~ True)
+      & properties . at "last_activity_at" ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "date-time" & nullable ?~ True
+        & description ?~ "Maximum eligible committed transcript occurrence; null while pending or unknown. Independent of transport freshness and lifecycle."))
 instance ToSchema AgentSession.RuntimeIdentity where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy

@@ -108,6 +108,7 @@ data AgentSession = AgentSession
   , runtimeRevision :: !Int64
   , createdAt :: !UTCTime
   , lastSeenAt :: !UTCTime
+  , lastActivityAt :: !(Maybe UTCTime)
   , committedBytes :: !Int64
   , committedRecords :: !Int64
   , revision :: !Int64
@@ -119,14 +120,17 @@ data AgentSession = AgentSession
   , importBytes :: !(Maybe Int64)
   , importSha256 :: !(Maybe Text)
   } deriving stock (Show, Eq, Generic)
-instance ToJSON AgentSession where toJSON = genericToJSON jsonOptions
+instance ToJSON AgentSession where
+  toJSON session = case genericToJSON jsonOptions session of
+    Object value -> Object (KM.insert "last_activity_at" (toJSON session.lastActivityAt) value)
+    value -> value
 instance FromJSON AgentSession where
   parseJSON = withObject "AgentSession" $ \o -> AgentSession
     <$> o .: "id" <*> o .: "workspace_id" <*> o .: "format_label"
     <*> o .:? "title" <*> o .:? "parent_session_id" <*> o .:? "ancestors" .!= [] <*> o .:? "ancestors_truncated" .!= False
     <*> o .: "state" <*> o .:? "creator_actor_type" <*> o .:? "creator_actor_id" <*> o .:? "creator_actor_label" <*> o .:? "creator_bot_identity"
     <*> o .:? "runtime_identity" <*> o .:? "runtime_revision" .!= 0
-    <*> o .: "created_at" <*> o .: "last_seen_at" <*> o .: "committed_bytes" <*> o .: "committed_records" <*> o .: "revision"
+    <*> o .: "created_at" <*> o .: "last_seen_at" <*> o .:? "last_activity_at" <*> o .: "committed_bytes" <*> o .: "committed_records" <*> o .: "revision"
     <*> o .: "ends_with_newline" <*> o .:? "terminated_at" <*> o .:? "final_bytes" <*> o .:? "final_sha256"
     <*> o .:? "import_task_id" <*> o .:? "import_bytes" <*> o .:? "import_sha256"
 

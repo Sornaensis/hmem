@@ -2,8 +2,8 @@ module HMem.Server.Archive.WorkerSpec (spec) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently, withAsync, cancel, waitCatch)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
-import Control.Exception (bracket, try, finally, uninterruptibleMask_)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, tryReadMVar)
+import Control.Exception (bracket, try, finally, uninterruptibleMask_, fromException)
 import Control.Monad (foldM, forM_)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -12,15 +12,23 @@ import Data.Bits (xor, shiftL, shiftR, (.&.))
 import Data.Word (Word64)
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
+import Data.Pool (Pool, destroyAllResources)
+import Data.Text qualified as T
+import Hasql.Connection qualified as H
+import Hasql.Decoders qualified as D
+import Hasql.Encoders qualified as E
+import Hasql.Statement qualified as St
 import Hasql.Session qualified as S
 import System.Timeout (timeout)
 import Test.Hspec
 
 import HMem.AgentSession
+import HMem.AgentSession.Occurrence qualified as Occurrence
 import HMem.DB.AgentSession
-import HMem.DB.Pool (runSession)
+import HMem.DB.Pool (runSession, createPool)
 import HMem.DB.Pool (runTransaction)
 import HMem.DB.SessionArchive qualified as DB
+import HMem.DB.SessionArchive.Maintenance qualified as Maintenance
 import HMem.DB.Task qualified as Task
 import HMem.DB.TestHarness
 import HMem.Server.Archive.Worker
@@ -30,6 +38,66 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = around withTestEnv $ describe "Archive worker" $ do
+  it "retains both failed worker drains and re-drains every actual child from the aggregate receipt" $ \_ -> bounded $ do
+    archiveReady <- newEmptyMVar
+    occurrenceReady <- newEmptyMVar
+    releaseArchive <- newEmptyMVar
+    releaseOccurrence <- newEmptyMVar
+    archiveFinished <- newEmptyMVar
+    occurrenceFinished <- newEmptyMVar
+    let controlled ready release finished =
+          (putMVar ready () >> uninterruptibleMask_ (takeMVar release)) `finally` putMVar finished ()
+    worker <- startArchiveWorkerWithLoops
+      (controlled archiveReady releaseArchive archiveFinished)
+      (controlled occurrenceReady releaseOccurrence occurrenceFinished)
+    let recover = do
+          _ <- tryPutMVar releaseArchive ()
+          _ <- tryPutMVar releaseOccurrence ()
+          timeout 6000000 (stopArchiveWorker worker) `shouldReturn` Just ()
+    (do
+      timeout 1000000 (takeMVar archiveReady) `shouldReturn` Just ()
+      timeout 1000000 (takeMVar occurrenceReady) `shouldReturn` Just ()
+      stopped <- timeout 6000000 (try @ArchiveDrainFailure (stopArchiveWorker worker))
+      receipt <- case stopped of Just (Left failure) -> pure failure; _ -> expectationFailure "Expected two retained failed drains" >> fail "missing drain receipt"
+      let ArchiveDrainFailure failures=receipt
+      length failures `shouldBe` 2
+      case failures of
+        [(first,_),(second,_)] -> first `shouldNotBe` second
+        _ -> expectationFailure "Expected both distinct actual owners"
+      forM_ failures $ \(_,failure) -> (fromException failure :: Maybe ArchiveFailure) `shouldSatisfy` (\case Just (ArchiveJoinFailure _) -> True; _ -> False)
+      tryReadMVar archiveFinished `shouldReturn` Nothing
+      tryReadMVar occurrenceFinished `shouldReturn` Nothing
+      _ <- tryPutMVar releaseArchive ()
+      _ <- tryPutMVar releaseOccurrence ()
+      timeout 6000000 (retryArchiveDrain receipt) `shouldReturn` Just ()
+      timeout 1000000 (takeMVar archiveFinished) `shouldReturn` Just ()
+      timeout 1000000 (takeMVar occurrenceFinished) `shouldReturn` Just ()) `finally` recover
+
+  it "corrects historical gzip-only occurrence metadata without altering sealed receipts" $ \env -> bounded $ do
+    let body="{\"timestamp\":\"2026-10-30T12:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"custom_event\",\"detail\":\"archived activity\"}}\r\n"
+    (w,sealed,_) <- fixture env [body]
+    lease <- claim env
+    prepared <- compressArchive env.pool lease
+    verifyAndPublishArchive env.pool lease prepared
+    withOccurrenceRuntime env $ \pool -> do
+      Maintenance.configureMaintenance pool Maintenance.EnableReclamation
+      Just reclaim <- Maintenance.claimReclamation pool
+      runReclamationLeaseWith (pure ()) pool reclaim
+    runSession env.pool (S.statement () (St.Statement
+      ("SELECT NOT EXISTS(SELECT 1 FROM session_chunks WHERE session_id='"<>uuid sealed.id<>"')")
+      E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) False)) `shouldReturn` True
+    execute env ("DELETE FROM session_occurrences WHERE session_id='"<>uuid sealed.id<>"'")
+    bracket (startArchiveWorker env.pool) stopArchiveWorker $ \_ -> do
+      let await = getSession env.pool w sealed.id >>= \case
+            Just row | row.lastActivityAt/=Nothing -> pure ()
+            _ -> threadDelay 10000 >> await
+      timeout 10000000 await `shouldReturn` Just ()
+    Just corrected <- getSession env.pool w sealed.id
+    corrected.lastActivityAt `shouldBe` Occurrence.parseOccurrenceTime "2026-10-30T12:00:00Z"
+    (corrected.finalBytes,corrected.finalSha256,corrected.revision,corrected.lastSeenAt) `shouldBe`
+      (sealed.finalBytes,sealed.finalSha256,sealed.revision,sealed.lastSeenAt)
+    readSessionRange env.pool w sealed.id 0 maxSessionRangeBytes >>= \r -> r.bytes `shouldBe` body
+
   it "publishes empty, CRLF/UTF-8, final-no-LF and maximum-record evidence without changing its receipt or task" $ \env -> bounded $ do
     forM_ [[],["{}\r\n[\"\195\166\"]"],["{}","\n[]\n"],["{}","\r\n[]\r\n"],["\""<>BS.replicate 1048574 120<>"\""],replicate 4 (BS.concat (replicate 60000 "{}\n"))<>["[]"]] $ \chunks -> do
       (w,sealed,taskId) <- fixture env chunks
@@ -199,6 +267,16 @@ execute :: TestEnv -> ByteString -> IO ()
 execute env sql = runSession env.pool (S.sql sql)
 uuid :: UUID -> ByteString
 uuid = B8.pack . show
+
+withOccurrenceRuntime :: TestEnv -> (Pool H.Connection -> IO a) -> IO a
+withOccurrenceRuntime admin use = do
+  identifier <- UUID.nextRandom
+  let role="occurrence_runtime_"<>B8.filter (/='-') (uuid identifier)
+      create=execute admin ("CREATE ROLE "<>role<>" LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; GRANT USAGE ON SCHEMA public TO "<>role<>"; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO "<>role<>"; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO "<>role)
+      dropRole=execute admin ("DROP OWNED BY "<>role<>"; DROP ROLE "<>role)
+  bracket create (const dropRole) $ \_ -> bracket
+    (createPool (admin.testDb.testDbConnStr<>" user="<>T.pack (B8.unpack role)) 2 30 30000)
+    destroyAllResources use
 
 entropyText :: Word64 -> Int -> ByteString
 entropyText seed count = fst $ BS.unfoldrN count (\state ->

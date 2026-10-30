@@ -1,8 +1,9 @@
 -- | One application-owned post-seal worker. No connection survives a DB call.
 module HMem.Server.Archive.Worker
-  ( ArchiveWorker, ArchiveFailure(..), PreparedArchive(..)
+  ( ArchiveWorker, ArchiveFailure(..), ArchiveDrainFailure(..), retryArchiveDrain, PreparedArchive(..)
   , startArchiveWorker, stopArchiveWorker, runArchiveLease
   , startArchiveWorkerWith
+  , startArchiveWorkerWithLoops
   , runArchiveLeaseWith
   , compressArchive, verifyAndPublishArchive, archiveAttemptMicros
   , verifyAndPublishArchiveWith
@@ -11,7 +12,7 @@ module HMem.Server.Archive.Worker
 
 import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId, threadDelay, throwTo)
 import Control.Concurrent.MVar
-import Control.Exception (Exception, SomeException, SomeAsyncException, bracket, catch, finally, fromException, mask, throwIO, try)
+import Control.Exception (Exception, SomeException, SomeAsyncException, bracket, catch, finally, fromException, mask, throwIO, try, onException)
 import Control.Monad (unless, void, forever)
 import Crypto.Hash (Context, SHA256, Digest, hashInit, hashUpdate, hashFinalize)
 import Data.ByteString (ByteString)
@@ -22,6 +23,8 @@ import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Hasql.Connection qualified as H
+import GHC.Clock (getMonotonicTimeNSec)
+import Data.Word (Word64)
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 
@@ -30,14 +33,20 @@ import HMem.DB.SessionArchive qualified as DB
 import HMem.DB.SessionArchive.Maintenance qualified as Maintenance
 import HMem.Server.Archive.Maintenance qualified as Reclamation
 import HMem.SessionArchive.Codec qualified as Codec
+import HMem.Server.SessionOccurrence qualified as Occurrence
 
 -- A failed join carries the exact unfinished capability, including when its
 -- parent has exited. A later stop retries that child rather than a bare error.
 data ArchiveFailure = ArchiveFailure Text | ArchiveJoinFailure OwnedThread deriving stock (Show, Eq)
 instance Exception ArchiveFailure
+
+-- Every failed drain keeps its actual owner and original exception. In
+-- particular, a second failed drain cannot replace the first capability.
+newtype ArchiveDrainFailure = ArchiveDrainFailure [(OwnedThread,SomeException)] deriving stock (Show)
+instance Exception ArchiveDrainFailure
 data OwnedThread = OwnedThread ThreadId (MVar (Either SomeException ())) deriving stock (Eq)
 instance Show OwnedThread where show (OwnedThread tid _) = "pending archive thread " <> show tid
-newtype ArchiveWorker = ArchiveWorker OwnedThread
+data ArchiveWorker = ArchiveWorker OwnedThread OwnedThread
 data PreparedArchive = PreparedArchive
   { receipt :: !DB.ArchiveReceipt, encoded :: !Codec.CodecResult
   , partCount :: !Int64, ledgerCount :: !Int64
@@ -59,23 +68,62 @@ spawnOwned action = mask $ \_ -> do
 -- Completion is retained. A timed-out join is an explicit failed drain; callers
 -- must keep dependent pools and sandbox resources until this handle joins.
 stopOwned :: OwnedThread -> IO ()
-stopOwned owned@(OwnedThread tid finished) = do
-  result <- timeout 5000000 (killThread tid >> readMVar finished)
+stopOwned owned = getMonotonicTimeNSec >>= \now -> stopOwnedUntil (now+5000000000) owned
+
+stopOwnedUntil :: Word64 -> OwnedThread -> IO ()
+stopOwnedUntil deadline owned@(OwnedThread tid finished) = do
+  remaining <- remainingMicros deadline
+  result <- timeout remaining (killThread tid >> readMVar finished)
   case result of
     Nothing -> throwIO (ArchiveJoinFailure owned)
     Just (Right ()) -> pure ()
     Just (Left failure) -> case fromException failure :: Maybe SomeAsyncException of
       Just _ -> pure ()
       Nothing -> case fromException failure :: Maybe ArchiveFailure of
-        Just (ArchiveJoinFailure child) -> stopOwned child
-        _ -> throwIO failure
+        Just (ArchiveJoinFailure child) -> stopOwnedUntil deadline child
+        _ -> case fromException failure of
+          Just (ArchiveDrainFailure children) -> drainOwnedUntil deadline (map fst children)
+          Nothing -> throwIO failure
+
+remainingMicros :: Word64 -> IO Int
+remainingMicros deadline = do
+  now <- getMonotonicTimeNSec
+  pure $ if now>=deadline then 0 else fromIntegral ((deadline-now) `div` 1000)
+
+drainOwned :: [OwnedThread] -> IO ()
+drainOwned owners = getMonotonicTimeNSec >>= \now -> drainOwnedUntil (now+5000000000) owners
+
+-- Divide one absolute five-second drain budget among remaining real owners, so
+-- every child gets a cancellation/join attempt even when the first is blocked.
+drainOwnedUntil :: Word64 -> [OwnedThread] -> IO ()
+drainOwnedUntil deadline owners = collect owners [] >>= \case
+  [] -> pure ()
+  [(_,failure)] -> throwIO failure -- retain the established single-failure API
+  failures -> throwIO (ArchiveDrainFailure (reverse failures))
+  where
+    collect [] failures = pure failures
+    collect remaining@(owner:rest) failures = do
+      budget <- remainingMicros deadline
+      now <- getMonotonicTimeNSec
+      let share=fromIntegral (budget `div` length remaining)*1000
+      result <- try @SomeException (stopOwnedUntil (min deadline (now+share)) owner)
+      collect rest $ case result of Left failure -> (owner,failure):failures; Right () -> failures
+
+retryArchiveDrain :: ArchiveDrainFailure -> IO ()
+retryArchiveDrain (ArchiveDrainFailure failures) = drainOwned (map fst failures)
+
+failedDrain :: SomeException -> Bool
+failedDrain failure = case fromException failure :: Maybe ArchiveFailure of
+  Just (ArchiveJoinFailure _) -> True
+  _ -> case fromException failure :: Maybe ArchiveDrainFailure of Just _ -> True; Nothing -> False
 
 startArchiveWorker :: Pool H.Connection -> IO ArchiveWorker
 startArchiveWorker = startArchiveWorkerWith (pure ()) (pure ())
 
 -- | Test-only seams for an active attempt and the owned renewal finalizer.
 startArchiveWorkerWith :: IO () -> IO () -> Pool H.Connection -> IO ArchiveWorker
-startArchiveWorkerWith afterCompression renewalCleanup pool = ArchiveWorker <$> spawnOwned loop
+startArchiveWorkerWith afterCompression renewalCleanup pool =
+  startArchiveWorkerWithLoops loop (Occurrence.runOccurrenceWorker pool)
   where
     loop = do
       synchronous (do
@@ -89,16 +137,22 @@ startArchiveWorkerWith afterCompression renewalCleanup pool = ArchiveWorker <$> 
       threadDelay 100000
       loop
 
+-- | Controlled worker loops for causal ownership/drain tests. Production uses
+-- the independent archive and occurrence loops above under the same owner.
+startArchiveWorkerWithLoops :: IO () -> IO () -> IO ArchiveWorker
+startArchiveWorkerWithLoops archiveAction occurrenceAction = mask $ \_ -> do
+  occurrence <- spawnOwned occurrenceAction
+  archive <- spawnOwned archiveAction `onException` stopOwned occurrence
+  pure (ArchiveWorker archive occurrence)
+
 stopArchiveWorker :: ArchiveWorker -> IO ()
-stopArchiveWorker (ArchiveWorker thread) = stopOwned thread
+stopArchiveWorker (ArchiveWorker thread occurrence) = drainOwned [thread,occurrence]
 
 synchronous :: IO a -> IO a -> IO a
 synchronous action fallback = action `catch` \(failure :: SomeException) ->
   case fromException failure :: Maybe SomeAsyncException of
     Just _ -> throwIO failure
-    Nothing -> case fromException failure :: Maybe ArchiveFailure of
-      Just (ArchiveJoinFailure _) -> throwIO failure
-      _ -> fallback
+    Nothing -> if failedDrain failure then throwIO failure else fallback
 
 -- Checked integer arithmetic before conversion to the platform timeout type.
 archiveAttemptMicros :: Int64 -> Int
@@ -134,9 +188,7 @@ runArchiveLeaseInternal afterCompression renewalCleanup pool lease = mask $ \res
     Right () -> pure ()
     Left failure -> do
       -- Do not attempt any dependent DB cleanup after unconfirmed child drain.
-      case fromException failure :: Maybe ArchiveFailure of
-        Just (ArchiveJoinFailure _) -> throwIO failure
-        _ -> do
+      if failedDrain failure then throwIO failure else do
           let code = case fromException failure :: Maybe SomeAsyncException of
                 Just _ -> "archive_cancelled"
                 Nothing -> case fromException failure :: Maybe ArchiveFailure of
@@ -168,7 +220,7 @@ runReclamationLeaseWith beforeVerification pool lease=mask $ \restore -> do
     result<-timeout (archiveAttemptMicros lease.manifest.rawBytes) (Reclamation.runReclamation beforeVerification pool lease)
     check (result==Just ()) "archive_maintenance_timeout"
   case outcome of
-    Left failure | Just (ArchiveJoinFailure _) <- fromException failure -> throwIO failure
+    Left failure | failedDrain failure -> throwIO failure
     _ -> do
       case outcome of
         Left failure | Nothing <- (fromException failure :: Maybe SomeAsyncException) ->

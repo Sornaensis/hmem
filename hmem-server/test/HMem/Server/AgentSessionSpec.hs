@@ -29,6 +29,7 @@ import Network.Wai.Test (SRequest(..), SResponse(..), runSession, srequest)
 import Test.Hspec
 
 import HMem.AgentSession qualified as Core
+import HMem.AgentSession.Occurrence qualified as Occurrence
 import HMem.AgentSession.Transport
 import HMem.Config qualified as Config
 import HMem.DB.AgentSession qualified as DB
@@ -47,6 +48,29 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Agent session HTTP" $ do
+
+  it "delivers canonical nullable transcript occurrence in append, list, detail and range metadata" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+          body="{\"timestamp\":\"2026-10-30T12:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"custom_event\",\"detail\":\"HTTP activity\"}}\n"
+      workspace <- createTestWorkspace env "http-occurrence"
+      row <- seed env workspace.id
+      let root=sessions workspace.id; target=root<>"/"<>uuid row.id
+      initial <- call app methodGet target [] "" >>= decoded @Core.AgentSession
+      initial.lastActivityAt `shouldBe` Nothing
+      uploaded <- post app (target<>"/append") [] (toJSON $ AppendSessionRequest 0 0 (encodeSessionBytes body) False) >>= decoded @AppendSessionResponse
+      let expected=Occurrence.parseOccurrenceTime "2026-10-30T12:00:00Z"
+      uploaded.session.lastActivityAt `shouldBe` expected
+      detail <- call app methodGet target [] "" >>= decoded @Core.AgentSession
+      detail.lastActivityAt `shouldBe` expected
+      listed <- call app methodGet root [] "" >>= decoded @Value
+      field ["items"] listed `shouldSatisfy` (\case
+        Just (Array items) -> any (\item -> field ["last_activity_at"] item == Just (toJSON expected)) items
+        _ -> False)
+      read <- call app methodGet (target<>"/transcript") [] "" >>= decoded @SessionRangeResponse
+      read.session.lastActivityAt `shouldBe` expected
+      heart <- post app (target<>"/heartbeat") [] Null >>= decoded @Core.AgentSession
+      heart.lastActivityAt `shouldBe` expected
 
   it "HistoricalImport authorizes a completed task, binds its manifest and downloads byte-identical evidence" $
     withLocalSandboxAppContext $ \ctx -> do

@@ -204,6 +204,25 @@ spec = do
       length observed `shouldBe` 2
       map (.requestPath) observed `shouldBe` replicate 2 ("/api/v1/workspaces/" <> T.unpack workspaceId <> "/sessions")
 
+    it "preserves canonical nullable occurrence metadata through actual HTTP session tools" $
+      withSessionProxyApp $ \workspace manager base -> do
+        let sid=read (T.unpack observationId) :: UUID
+            arguments=object ["workspace_id" .= workspace,"session_id" .= sid]
+            invoke name args=call manager base name args
+            bytes="{\"timestamp\":\"2026-10-30T12:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"custom_event\",\"detail\":\"MCP activity\"}}\n"
+        initial <- invoke "task_create" (object ["workspace_id" .= workspace,"title" .= ("Occurrence task" :: Text)])
+        let Just taskId=jsonPath ["summary","id"] initial
+        _ <- invoke "task_start" (object ["task_id" .= taskId])
+        _ <- invoke "session_create" (object ["workspace_id" .= workspace,"session_id" .= sid,"task_id" .= taskId,"format_label" .= ("codex-jsonl" :: Text),"title" .= ("Occurrence metadata" :: Text)])
+        empty <- invoke "session_detail" arguments
+        jsonField "last_activity_at" empty `shouldBe` Just Null
+        uploaded <- sessionHTTP manager base workspace sid "/append" (toJSON (SessionWire.AppendSessionRequest 0 0 (SessionWire.encodeSessionBytes bytes) False))
+        statusCode (Client.responseStatus uploaded) `shouldBe` 200
+        detail <- invoke "session_detail" arguments
+        jsonField "last_activity_at" detail `shouldBe` Just (String "2026-10-30T12:00:00Z")
+        listed <- invoke "session_list" (object ["workspace_id" .= workspace])
+        jsonField "items" listed `shouldSatisfy` maybe False (contains "2026-10-30T12:00:00Z")
+
     it "reconstructs exact UTF-8 CRLF evidence through actual HTTP, retries an explicit seal, rejects later ingestion and allows later task links" $
       withSessionProxyApp $ \workspace manager base -> do
         let sid = read (T.unpack observationId) :: UUID

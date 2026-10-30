@@ -183,6 +183,16 @@ resync, refresh demanded metadata/lists through these bounded HTTP routes, then
 read only missing byte windows from the returned canonical cursor. Heartbeat
 freshness uses `last_seen_at` independently of active/terminated lifecycle.
 
+Session metadata includes nullable `last_activity_at`: the greatest validated
+eligible transcript occurrence, independent of `last_seen_at`, creation and
+termination. Lists, detail, append/replay, heartbeat, runtime and evidence
+metadata share this projection. Pending historical derivation and unknown or
+undated content return null. Heartbeats and metadata changes cannot manufacture
+an occurrence time. Correction completion emits a metadata-only invalidation
+without changing evidence, lifecycle, transport freshness or audit history.
+The [occurrence reference](docs/reference/session-occurrence.md) specifies the
+finite native envelope set and bounded resumable correction.
+
 Explicit `/terminate` seals already committed server bytes. It atomically
 compares the expected cursor/revision, final size and server-computed SHA-256.
 It uploads nothing, requires no live uploader, and changes no task status. Live,

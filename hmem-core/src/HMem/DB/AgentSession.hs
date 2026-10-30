@@ -11,9 +11,10 @@ module HMem.DB.AgentSession
   , ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), newReaderCache, closeReaderCache, readSessionRangeWithCache
   , ArchiveReadFailure(..)
   , readSessionEvidenceRange, readSessionEvidenceRangeWithCache
+  , deriveSessionOccurrence
   ) where
 
-import Control.Exception (throwIO, bracket, mask, onException, catch)
+import Control.Exception (throwIO, bracket, mask, onException, catch, evaluate)
 import Control.Concurrent.MVar
 import Control.Monad (foldM, forM_)
 import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
@@ -36,6 +37,8 @@ import Hasql.Pipeline qualified as P
 import Hasql.Statement qualified as St
 
 import HMem.AgentSession
+import HMem.AgentSession.Occurrence qualified as Occurrence
+import HMem.DB.SessionOccurrence qualified as OccurrenceDB
 import HMem.DB.Pool (runSession, runTransaction)
 import HMem.DB.RequestContext (EffectiveActor(..), actorTypeToText, currentEffectiveActor)
 import HMem.DB.SessionArchive.Reader (ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), ArchiveReadFailure(..), newReaderCache, closeReaderCache)
@@ -284,7 +287,13 @@ appendSession pool workspace identifier input = do
     || input.expectedOffset < 0 || input.expectedRevision < 0 || input.expectedRevision == maxBound
     then invalid "Append requires nonnegative cursor and 1 to 1048576 bytes"
     else pure ()
-  -- Active appends retain the original transaction and query path. Only a
+  projectionAvailable <- OccurrenceDB.available pool
+  checkpoint <- if projectionAvailable then OccurrenceDB.checkpoint pool workspace identifier else pure Nothing
+  let previous = maybe Occurrence.emptyOccurrence id checkpoint
+  projected <- if projectionAvailable && previous.processedBytes == input.expectedOffset
+    then Just <$> evaluate (Occurrence.feedOccurrence input.allowFinalRecord input.bytes previous)
+    else pure Nothing
+  -- Active appends retain the canonical evidence transaction. Only a
   -- terminal row with no exact raw replay leaves a candidate for archive
   -- decoding after this transaction has released its lock and pool lease.
   result <- checked pool $ do
@@ -301,6 +310,9 @@ appendSession pool workspace identifier input = do
           then pure $ problem SessionConflict "Append cursor does not match the committed session"
           else do
             S.statement (identifier,input) appendStatement
+            forM_ projected $ \summary -> do
+              _ <- OccurrenceDB.saveCheckpoint workspace identifier input.expectedOffset summary
+              pure ()
             result <- S.statement (workspace,identifier) (getStatement False)
             pure $ case result of
               Just updated -> Right (Right (SessionAppendResult updated False))
@@ -325,6 +337,31 @@ appendSession pool workspace identifier input = do
       if replay then pure (SessionAppendResult sealed True)
         else throwIO (SessionException SessionTerminated "Session is terminated")
 
+-- | One resumable one-MiB turn over a frozen committed prefix. Parsing and
+-- verified archive decoding happen without a session lock or pool lease. The
+-- checkpoint CAS and session lock fence concurrent appends, sealing and workers.
+deriveSessionOccurrence :: Pool Hasql.Connection -> UUID -> UUID -> IO ()
+deriveSessionOccurrence pool workspace identifier = do
+  found <- getSession pool workspace identifier
+  forM_ found $ \row -> do
+    checkpoint <- OccurrenceDB.checkpoint pool workspace identifier
+    let previous=maybe Occurrence.emptyOccurrence id checkpoint
+        offset=previous.processedBytes
+    if offset>row.committedBytes then invalid "Occurrence checkpoint exceeds evidence" else pure ()
+    bytes <- readSessionPrefixWindow pool workspace identifier row.committedBytes offset
+    let end=offset+fromIntegral (BS.length bytes)
+    summary <- evaluate (Occurrence.feedOccurrence (end==row.committedBytes) bytes previous)
+    if BS.length summary.pending > maxSessionRecordBytes then invalid "Occurrence record exceeds canonical bound" else pure ()
+    _ <- runTransaction pool $ do
+      current <- S.statement (workspace,identifier) (getStatement True)
+      case current of
+        Just latest | end<=latest.committedBytes -> do
+          saved <- OccurrenceDB.saveCheckpoint workspace identifier offset summary
+          if saved && end==latest.committedBytes && BS.null summary.pending
+            then OccurrenceDB.publishCheckpoint workspace identifier else pure False
+        _ -> pure False
+    pure ()
+
 replayStatement :: St.Statement (UUID,Int64,Int64,ByteString,Bool) Bool
 replayStatement = St.Statement
   "SELECT EXISTS(SELECT 1 FROM session_chunks WHERE session_id=$1 AND start_offset=$2 AND revision=$3 AND data=$4 AND allow_final_record=$5)"
@@ -348,7 +385,7 @@ heartbeatSession pool workspace identifier = checked pool $ do
     Just row | row.state == Terminated -> pure $ problem SessionTerminated "Session is terminated"
     Just _ -> do
       row <- S.statement (workspace,identifier) $ St.Statement
-        "UPDATE sessions s SET last_seen_at=greatest(last_seen_at,clock_timestamp()) WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s)"
+        "UPDATE sessions s SET last_seen_at=greatest(last_seen_at,clock_timestamp()) WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s) || hmem_session_ancestor_context(s.id)"
         pairParams (D.singleRow jsonRow) True
       pure (Right row)
 
@@ -615,7 +652,7 @@ eligibleStatement = St.Statement
 
 sealStatement :: St.Statement (UUID,UUID,Text) AgentSession
 sealStatement = St.Statement
-  "UPDATE sessions s SET state='terminated',terminated_at=clock_timestamp(),final_bytes=committed_bytes,final_sha256=$3,revision=revision+1 WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s)"
+  "UPDATE sessions s SET state='terminated',terminated_at=clock_timestamp(),final_bytes=committed_bytes,final_sha256=$3,revision=revision+1 WHERE workspace_id=$1 AND id=$2 RETURNING to_jsonb(s) || hmem_session_ancestor_context(s.id)"
   (param (\(a,_,_) -> a) E.uuid <> param (\(_,b,_) -> b) E.uuid <> param (\(_,_,c) -> c) E.text)
   (D.singleRow jsonRow) True
 

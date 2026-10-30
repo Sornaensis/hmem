@@ -143,6 +143,16 @@ classDiagram
       BIGINT? import_bytes
       TEXT? import_sha256
     }
+    class session_occurrences {
+      UUID session_id PK FK
+      UUID workspace_id FK
+      INTEGER derivation_version
+      BIGINT processed_bytes
+      BYTEA pending
+      TIMESTAMPTZ? last_activity_at
+      BIGINT? source_offset
+      INTEGER? pi_version
+    }
     class session_chunks {
       UUID session_id PK FK
       BIGINT start_offset PK
@@ -444,6 +454,7 @@ classDiagram
   users "1" --> "0..*" auth_sessions : user_id
   workspaces "1" --> "0..*" sessions : workspace_id NO ACTION
   sessions "1" --> "0..*" session_chunks : session_id NO ACTION
+  sessions "1" --> "0..1" session_occurrences : id + workspace_id NO ACTION
   sessions "1" --> "0..1" session_archive_jobs : id + workspace_id NO ACTION
   session_archive_jobs "1" --> "0..*" session_archive_generations : session_id + workspace_id NO ACTION
   session_archive_generations "0..1" <-- "0..1" session_archive_jobs : generation_id + session_id + workspace_id NO ACTION
@@ -468,6 +479,7 @@ classDiagram
   note for workspaces "UNIQUE (gh_owner, gh_repo)\nWHERE both are non-null AND deleted_at IS NULL"
   note for observations "UNIQUE (id, workspace_id)\nembedding: vector(1536), nullable; present only with pgvector enabled"
   note for sessions "UNIQUE (id, workspace_id)\nLive rows require a same-transaction in_progress task link; imports require their declared historical task\nOptional same-workspace parent fixed at creation\nNew titles: 1–80 UTF-8 bytes; legacy title NULL\nstate: active or terminated; sealed metadata immutable"
+  note for session_occurrences "Replaceable derivation; session rows and evidence stay immutable\nVersion > 0; processed_bytes >= 0; pending <= min(processed_bytes, 1 MiB)\nlast_activity_at and source_offset both NULL or both non-NULL\n0 <= source_offset < processed_bytes\nOnly an exact current version/cursor with empty pending is public authority"
   sessions "0..1" --> "0..*" sessions : parent_session_id, workspace_id
   note for session_chunks "UNIQUE (session_id, revision)\n1 to 1048576 raw bytes; immutable ordered append\nV051 verified maintenance may reclaim complete raw rows"
   note for session_archive_jobs "UNIQUE (session_id, workspace_id)\nState: queued, running, retry, ready, failed\nCurrent-generation FK deferred until commit"

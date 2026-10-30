@@ -48,6 +48,12 @@ servers still require their ordinary credentials and grants.
 
 ## Errors and compatibility
 
+Session summary/detail and canonical delivery metadata include nullable
+`last_activity_at`, the maximum eligible transcript occurrence. Missing fields
+from older servers decode as unknown. This value is independent of uploader
+acknowledgements, `last_seen_at`, lifecycle and task connections. Pending or
+unrecognized evidence stays null; see [occurrence rules](../docs/reference/session-occurrence.md).
+
 Before declaration, ordinary calls return a tool result with `isError: true` and
 instructions to call `set_workspace`; supplying `workspace_id` on that call does
 not bypass startup. Missing identity, unknown keys, invalid workspace values, or

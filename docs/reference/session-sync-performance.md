@@ -52,6 +52,13 @@ uncontrolled OS filesystem caches are never described as cold disk.
 
 ## Measurement boundaries
 
+Transcript occurrence time (`last_activity_at`) is content metadata, not a
+performance measurement clock. Source-to-commit and transport freshness keep the
+authorities below. Occurrence extraction handles one bounded append before its
+evidence transaction; historical correction advances independent one-MiB turns.
+See [occurrence semantics](session-occurrence.md). These correctness changes do
+not claim a new performance qualification for the historical matrix.
+
 - Source time is recorded at the actual source write and mapped to its byte
   boundary. PostgreSQL `pg_xact_commit_timestamp(session_chunks.xmin)` supplies
   the corresponding committed chunk's timestamp on the same host clock.

@@ -13,10 +13,13 @@ author:         hmem contributors
 maintainer:     hmem contributors
 license:        MPL-2.0
 build-type:     Simple
+extra-source-files:
+    test/fixtures/session-occurrence-parity.json
 
 library
   exposed-modules:
       HMem.AgentSession
+      HMem.AgentSession.Occurrence
       HMem.AgentSession.Transport
       HMem.BotIdentity
       HMem.Config
@@ -37,6 +40,7 @@ library
       HMem.DB.SessionArchive
       HMem.DB.SessionArchive.Maintenance
       HMem.DB.SessionArchive.Reader
+      HMem.DB.SessionOccurrence
       HMem.DB.Task
       HMem.DB.TestHarness
       HMem.DB.Timeline
@@ -87,6 +91,7 @@ library
     , random
     , rel8
     , resource-pool >=0.4
+    , scientific
     , temporary
     , text
     , time
@@ -98,6 +103,7 @@ test-suite hmem-core-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      HMem.AgentSession.OccurrenceSpec
       HMem.BotIdentitySpec
       HMem.ConfigSpec
       HMem.DB.AgentSessionSpec
@@ -117,6 +123,7 @@ test-suite hmem-core-test
       HMem.DB.SessionArchive.MaintenanceSpec
       HMem.DB.SessionArchive.ReaderSpec
       HMem.DB.SessionArchiveSpec
+      HMem.DB.SessionOccurrenceSpec
       HMem.DB.TaskSpec
       HMem.DB.TestHarnessSpec
       HMem.DB.TimelineSpec
@@ -168,6 +175,7 @@ test-suite hmem-core-test
     , random
     , rel8
     , resource-pool >=0.4
+    , scientific
     , temporary
     , text
     , time

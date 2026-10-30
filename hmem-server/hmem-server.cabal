@@ -71,6 +71,7 @@ data-files:
     migrations/V051__session_archive_maintenance.sql
     migrations/V052__session_lifecycle_audit.sql
     migrations/V053__session_runtime_harness.sql
+    migrations/V054__session_occurrences.sql
 
 library
   exposed-modules:
@@ -105,6 +106,7 @@ library
       HMem.Server.ObservationDiscovery
       HMem.Server.OpenAPI
       HMem.Server.SessionArchive
+      HMem.Server.SessionOccurrence
       HMem.Server.SessionPrefix
       HMem.Server.SessionReaper
       HMem.Server.Snapshot

@@ -1111,7 +1111,7 @@ epoch = UTCTime (fromGregorian 2026 1 1) 0
 
 fakeMetadata :: UUID -> Int -> Value
 fakeMetadata sid count = toJSON (Core.AgentSession sid workspace "jsonl" Nothing Nothing [] False Core.Active Nothing Nothing Nothing Nothing Nothing 0
-  epoch epoch (fromIntegral count) 0 0 True Nothing Nothing Nothing Nothing Nothing Nothing)
+  epoch epoch Nothing (fromIntegral count) 0 0 True Nothing Nothing Nothing Nothing Nothing Nothing)
 
 -- Controlled HTTP fixture for tests of local scheduling/receipts. Canonical
 -- boundary validation and authenticated audiences are separately exercised by

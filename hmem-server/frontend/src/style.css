@@ -5691,3 +5691,8 @@ textarea.observation-edit-content {
 
 /* The plot owns the full content row; event filters/cards keep their own cap. */
 .timeline-plot-container { width:100%; min-width:0; box-sizing:border-box; }
+
+/* Workspace completed readers keep archive controls beneath the conversation. */
+.sessions-page .session-sealed-workspace > .session-identity { flex:0 0 auto; }
+.sessions-page .session-sealed-workspace > .session-archive-status { margin:.25rem 0 .5rem; }
+.sessions-page .session-archive-footer { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:.35rem; padding-top:.5rem; border-top:1px solid var(--border); }

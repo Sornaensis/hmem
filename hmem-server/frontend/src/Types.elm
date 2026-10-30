@@ -1405,8 +1405,8 @@ type alias SessionArchiveOperation =
 
 
 type alias SealedSessionView =
-    { phase : String, error : Maybe String, http : Maybe { sequence : Int, path : String }
-    , rows : List SealedSessionPiece, first : String, last : String, more : Bool
+    { phase : String, error : Maybe String, canRetry : Bool, http : Maybe { sequence : Int, path : String }
+    , rows : List SealedSessionPiece, first : String, last : String, more : Bool, canPrevious : Bool, canNext : Bool
     , rawBytes : String, compressedBytes : String, archiveGeneration : String
     , renderPart : Int, domEpoch : String
     , markdown : { key : String, source : String, ast : Result String (List MarkdownBlock.Block), structured : Bool, complete : Bool, nextPart : Int, request : Int } }
@@ -1414,7 +1414,7 @@ type alias SealedSessionView =
 
 emptySealedSessionView : SealedSessionView
 emptySealedSessionView =
-    { phase = "preparing", error = Nothing, http = Nothing, rows = [], first = "", last = "", more = False
+    { phase = "preparing", error = Nothing, canRetry = False, http = Nothing, rows = [], first = "", last = "", more = False, canPrevious = False, canNext = False
     , rawBytes = "0", compressedBytes = "0", archiveGeneration = "", renderPart = 0, domEpoch = ""
     , markdown = {key="",source="",ast=Err "not_loaded",structured=False,complete=False,nextPart=0,request=0} }
 

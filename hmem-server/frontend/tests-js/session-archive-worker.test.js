@@ -625,20 +625,20 @@ test('sealed local intents retain only the latest page or Markdown demand throug
     fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})
   })
   const until=async predicate=>{for(let turn=0;turn<100&&!predicate();turn++)await new Promise(resolve=>setImmediate(resolve));assert.ok(predicate(),'bounded latest-intent completion')}
-  const click=(action,key='')=>listeners.get('click')({target:{closest:()=>({getAttribute:name=>name==='data-sealed-action'?action:name==='data-sealed-key'?key:name==='data-sealed-owner'?config.stamp:null})},preventDefault(){}})
+  const click=(action,key='')=>listeners.get('click')({target:{closest:()=>({getAttribute:name=>name==='data-sealed-action'?action:name==='data-sealed-key'?key:name==='data-sealed-part'?'0':name==='data-sealed-owner'?config.stamp:null})},preventDefault(){}})
   const pageResult=(message,rows=[{key:'source-a'},{key:'source-b'}])=>workers.at(-1).reply(message,{kind:'page',rows,first:'first',last:'last',more:false})
   try{
     viewer.configure(config);await until(()=>workers.at(-1)?.pages.length===1);const worker=workers.at(-1)
-    click('inspect','superseded');click('last');search='latest-search';click('search')
+    click('body','superseded');click('last');search='latest-search';click('search')
     assert.equal(worker.pages.length,1)
     pageResult(worker.pages[0]);await until(()=>worker.pages.length===2)
     assert.deepEqual(worker.pages[1].page,{query:'latest-search'});assert.equal(worker.bodies.length,0)
-    click('first');click('last');click('inspect','chosen-body')
+    click('first');click('last');click('body','chosen-body')
     pageResult(worker.pages[1]);await until(()=>worker.pages.length===3)
     assert.equal(worker.pages[2].page.bodyKey,'chosen-body')
     pageResult(worker.pages[2]);await until(()=>events.filter(event=>event.kind==='sealed-page').length===3)
     click('markdown','source-a');await until(()=>worker.bodies.length===1)
-    click('inspect','superseded-body');click('last');search='after-markdown';click('search')
+    click('body','superseded-body');click('last');search='after-markdown';click('search')
     assert.equal(worker.pages.length,3,'busy Markdown owns its one body request')
     worker.reply(worker.bodies[0],{kind:'body',key:'source-a',body:{part:0,text:'complete',format:'markdown',more:false}})
     await until(()=>worker.pages.length===4);assert.deepEqual(worker.pages[3].page,{query:'after-markdown'})
@@ -652,7 +652,7 @@ test('sealed local intents retain only the latest page or Markdown demand throug
     assert.equal(worker.bodies[1].key,'source-b','latest Markdown intent restores its visible owner after held Next')
     worker.reply(worker.bodies[1],{kind:'body',key:'source-b',body:{part:0,text:'complete',format:'markdown',more:false}})
     await until(()=>events.filter(event=>event.kind==='sealed-markdown-chunk').length===2)
-    click('last');await until(()=>worker.pages.length===6);click('inspect','retired-body')
+    click('last');await until(()=>worker.pages.length===6);click('body','retired-body')
     const published=events.filter(event=>event.kind==='sealed-page').length
     viewer.retireAuthority();await until(()=>worker.terminated)
     pageResult(worker.pages[5]);await new Promise(resolve=>setImmediate(resolve))
@@ -820,4 +820,34 @@ test('sequential processor reader handoff keeps custody, current authorization a
       assert.equal(locked,false);assert.equal(deleted,true);assert.equal(physical,0);assert.ok(maxPhysical<=2);assert.equal(order.at(-1),'lock-released')
     }
   }
+})
+
+
+test('ordinary archive pages and fresh owners cannot inherit hidden search or offset options',async()=>{
+ const events=[],listeners=new Map(),workers=[];let viewer,requestId=0
+ let config={active:true,stamp:'embedded',load:1,workspace,session,authority:'principal',apiUrl:''}
+ const document={getElementById:id=>id==='sealed-search'?{value:'needle'}:id==='sealed-position'?{value:'4096'}:{replaceChildren(){}},querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)}
+ class Worker{
+  pages=[]
+  reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+  postMessage(message){if(message.kind==='interrupt')return;if(message.kind==='page'){this.pages.push(message);return}queueMicrotask(()=>this.reply(message,{kind:message.kind==='retire'?'cleaned':'ack'}))}
+  terminate(){this.terminated=true}
+ }
+ const raw=Buffer.from('0\n'),gzip=gzipSync(raw)
+ viewer=createPhaseBridgeFixture({document,window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){}},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
+ const until=async fn=>{for(let i=0;i<100&&!fn();i++)await new Promise(r=>setImmediate(r));assert.ok(fn(),'bounded ordinary page ownership')}
+ const click=(action,stamp=config.stamp)=>listeners.get('click')({target:{closest:()=>({getAttribute:name=>name==='data-sealed-action'?action:name==='data-sealed-owner'?stamp:name==='data-sealed-key'?'a':name==='data-sealed-part'?'0':null})},preventDefault(){}})
+ const respond=(worker,index)=>worker.reply(worker.pages[index],{kind:'page',rows:[{key:'a'}],first:'a',last:'z',more:true})
+ try{
+  viewer.configure(config);await until(()=>workers.at(-1)?.pages.length===1);const worker=workers.at(-1);respond(worker,0);await until(()=>events.some(e=>e.kind==='sealed-page'))
+  click('search');await until(()=>worker.pages.length===2);assert.deepEqual(worker.pages[1].page,{query:'needle'});respond(worker,1);await until(()=>events.filter(e=>e.kind==='sealed-page').length===2)
+  click('body');await until(()=>worker.pages.length===3);assert.equal(worker.pages[2].page.query,'needle');respond(worker,2);await until(()=>events.filter(e=>e.kind==='sealed-page').length===3)
+  click('next');await until(()=>worker.pages.length===4);assert.deepEqual(worker.pages[3].page,{after:'z'});respond(worker,3);await until(()=>events.filter(e=>e.kind==='sealed-page').length===4)
+  click('position');await until(()=>worker.pages.length===5);assert.deepEqual(worker.pages[4].page,{offset:'4096'});respond(worker,4);await until(()=>events.filter(e=>e.kind==='sealed-page').length===5)
+  click('first');await until(()=>worker.pages.length===6);assert.deepEqual(worker.pages[5].page,{});respond(worker,5);await until(()=>events.filter(e=>e.kind==='sealed-page').length===6)
+  config={...config,stamp:'workspace',load:2};viewer.configure(config);await until(()=>workers.at(-1)!==worker&&workers.at(-1).pages.length===1)
+  assert.equal(worker.terminated,true);assert.deepEqual(workers.at(-1).pages[0].page,{})
+  click('search','embedded');assert.equal(workers.at(-1).pages.length,1,'retired embedded action cannot filter workspace owner')
+  respond(workers.at(-1),0);await until(()=>events.some(e=>e.kind==='sealed-page'&&e.stamp==='workspace'))
+ }finally{viewer.configure(null);await until(()=>workers.every(w=>w.terminated))}
 })

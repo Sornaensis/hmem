@@ -57,7 +57,7 @@ test('sealed controls and maximum wrapped runtime remain reachable in a short na
   assert.ok(await page.locator('#session-records').evaluate(n=>n.clientHeight>0),JSON.stringify(await page.evaluate(()=>Object.fromEntries(['.sessions-layout','.session-detail','.session-viewer','#session-records'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect();return [selector,{top:r.top,bottom:r.bottom,height:r.height,client:n.clientHeight,scroll:n.scrollHeight,overflow:getComputedStyle(n).overflowY}]})))))
   for(const zoom of [1,1.5]){
    await page.evaluate(z=>{document.body.style.zoom=String(z)},zoom)
-   for(const selector of ['.session-detail-header','.session-sealed-viewer > .session-identity','#sealed-search','#sealed-position','.session-sealed-viewer .sessions-toolbar:has(button,input)','#session-records']){
+   for(const selector of ['.session-detail-header','.session-sealed-viewer > .session-identity','.session-archive-footer','#session-records']){
     for(const element of await page.locator(selector).all()){
      await element.scrollIntoViewIfNeeded()
      assert.ok(await element.evaluate(node=>{const r=node.getBoundingClientRect(),main=document.querySelector('#main-content-scroll').getBoundingClientRect(),pane=document.querySelector('.sessions-layout').getBoundingClientRect();return r.height>0&&r.bottom>Math.max(main.top,pane.top)&&r.top<Math.min(main.bottom,pane.bottom)}),selector+' at '+zoom)
@@ -69,13 +69,8 @@ test('sealed controls and maximum wrapped runtime remain reachable in a short na
    await until(async()=>await page.locator('.session-render-continuation').getAttribute('data-render-part')==='1')
    await page.getByRole('button',{name:'Previous presentation',exact:true}).click()
    await until(async()=>await page.locator('.session-render-continuation').getAttribute('data-render-part')==='0')
-   await page.locator('#sealed-search').fill('x')
-   await page.locator('[data-sealed-action=search]').click()
-   await until(async()=>await page.locator('[data-sealed-action=position]').isEnabled())
-   await page.locator('#sealed-position').fill('0');await page.locator('[data-sealed-action=position]').click()
-   await until(async()=>await page.locator('[data-sealed-action=first]').isEnabled())
-   await page.locator('[data-sealed-action=first]').click()
-   await page.locator('#session-records .session-record').first().waitFor()
+   assert.equal(await page.locator('#sealed-search,#sealed-position').count(),0)
+   assert.equal(await page.locator('.session-archive-footer [data-sealed-action=first]').isDisabled(),true)
    assert.ok(await page.locator('#session-records').evaluate(n=>n.clientHeight>0))
    const sidebar=await page.evaluate(()=>Object.fromEntries(['.sessions-list','.session-hierarchy','.session-linked-tasks','.session-linked-content'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect();return [selector,{top:r.top,bottom:r.bottom,client:n.clientHeight,scroll:n.scrollHeight,overflow:getComputedStyle(n).overflowY}]})))
    assert.ok(sidebar['.session-hierarchy'].client>0,JSON.stringify({zoom,...sidebar}))

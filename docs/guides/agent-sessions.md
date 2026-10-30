@@ -54,6 +54,12 @@ it without leaving the task. Expanded task cards keep saved captures under
 focuses a linked task; **More tasks** and **First tasks** navigate bounded pages.
 The transcript, linked tasks and hierarchy scroll within the available viewport.
 
+The completed reader in workspace Sessions places **First**, **Previous**, **Next**
+and **Last** beneath the conversation. **Cancel** appears while an archive operation
+is running; **Retry** appears after a recoverable error or cancellation. A cleanup
+failure requires reloading the page. Expand activity,
+complete-message and presentation controls when needed to read larger content.
+
 **Download** retrieves the original saved JSONL and checks its final byte count and
 SHA-256 before handing it to the browser. Keep the page open until the download
 starts. Active sessions remain available for exploration; termination

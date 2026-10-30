@@ -23,7 +23,8 @@ import Url
 suite : Test.Test
 suite =
     describe "Sessions production wire contract"
-        [ describe "direct task association presence" associationTests
+        [ describe "workspace completed reader" completedReaderTests
+        , describe "direct task association presence" associationTests
         , describe "authoritative evidence availability" evidenceAvailabilityTests
         , describe "card-owned dock authority" dockTests
         , describe "same-authority metadata presentation" metadataPresentationTests
@@ -820,4 +821,52 @@ evidenceAvailabilityTests =
             denied=Cards.update (SetTaskCardSection "one" "evidence") fallback |> Tuple.first
             unknown=Cards.update (SetTaskCardSection "one" "evidence") base |> Tuple.first
         in Expect.equal [Just "work",Just "work",Just "evidence"] [Dict.get "one" fallback.cards.taskSections,Dict.get "one" denied.cards.taskSections,Dict.get "one" unknown.cards.taskSections]
+    ]
+
+
+completedReaderTests : List Test.Test
+completedReaderTests =
+    let
+        metadata = Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
+        model phase =
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                delivery = entered.sessionDelivery
+                target = Delivery.SessionMetadata sessionId
+                resource = {workspace=workspace,target=target,dirty=0,settled=0,data=Maybe.map (\session -> Delivery.Metadata {session | state=Api.SessionTerminated}) metadata,ranges=[],error=Nothing,proven=True,incarnation=0,retry=Delivery.Available}
+                state = entered.sessions
+                sealed = state.sealed
+            in {entered | sessionDelivery={delivery | resources=Dict.insert (Delivery.key workspace target) resource delivery.resources},sessions={state | taskPanel=Just "one",sealed={sealed | phase=phase,canRetry=True,canPrevious=False,canNext=True}}}
+        workspaceView phase = Query.fromHtml (Sessions.view workspace (model phase))
+    in
+    [ test "workspace omits search and offsets but embedded reader keeps their controls" <| \_ ->
+        Expect.all
+            [ \_ -> workspaceView "ready" |> Query.hasNot [Selector.id "sealed-search"]
+            , \_ -> workspaceView "ready" |> Query.hasNot [Selector.id "sealed-position"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace (model "ready") "one") |> Query.has [Selector.id "sealed-search"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace (model "ready") "one") |> Query.has [Selector.id "sealed-position"]
+            ] ()
+    , test "reload-only cleanup failure hides workspace Retry without changing embedded recovery" <| \_ ->
+        let
+            ready = model "ready"
+            state = ready.sessions
+            packet = Encode.object [("kind",Encode.string "sealed-error"),("stamp",Encode.string state.stamp),("generation",Encode.int state.generation),("workspace",Encode.string workspace),("session",Encode.string sessionId),("code",Encode.string "archive_cleanup_failed")]
+            failed = Sessions.update (SessionsBridgeEvent packet) ready |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Query.fromHtml (Sessions.view workspace failed) |> Query.hasNot [Selector.text "Retry"]
+            , \_ -> Query.fromHtml (Sessions.view workspace failed) |> Query.has [Selector.text "Archive cleanup could not be confirmed. Reload this page before another archive."]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace failed "one") |> Query.has [Selector.text "Retry"]
+            ] ()
+    , test "workspace footer uses accepted availability and contextual recovery" <| \_ ->
+        Expect.all
+            [ \_ -> workspaceView "ready" |> Query.find [Selector.class "session-archive-footer"] |> Query.has [Selector.text "Next"]
+            , \_ -> workspaceView "ready" |> Query.find [Selector.attribute (Html.Attributes.attribute "data-sealed-action" "previous")] |> Query.has [Selector.attribute (Html.Attributes.disabled True)]
+            , \_ -> workspaceView "ready" |> Query.hasNot [Selector.text "Cancel"]
+            , \_ -> workspaceView "ready" |> Query.hasNot [Selector.text "Retry"]
+            , \_ -> workspaceView "downloading" |> Query.has [Selector.text "Cancel"]
+            , \_ -> workspaceView "downloading" |> Query.hasNot [Selector.text "Retry"]
+            , \_ -> workspaceView "cancelled" |> Query.has [Selector.text "Retry"]
+            , \_ -> workspaceView "error" |> Query.has [Selector.text "Retry"]
+            ] ()
     ]

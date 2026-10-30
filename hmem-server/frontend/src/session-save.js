@@ -150,7 +150,17 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       const result=await rpc(owned,'page',{page:options})
       clearPageProgress(owned,operation)
       if(current(owned) && visibleKey && !result.rows.some(row=>row.key===visibleKey))throw Error('archive_piece_missing')
-      if(current(owned)){owned.page=options;owned.first=result.first;owned.last=result.last;owned.searchAfter=result.searchAfter;owned.searchCursor=result.searchCursor;event(owned,'page',{...result,kind:undefined,fromEnd:!!options.last||!!options.before})}
+      if(current(owned)){
+        // Preserve proven endpoints across bounded ordinary reads. `more` is
+        // directional and may conservatively include an exact-size boundary.
+        const ordinary=!options.query&&options.offset===undefined
+        if(ordinary&&!options.after&&!options.before&&!options.last)owned.startKey=result.first
+        if(ordinary&&options.last)owned.endKey=result.last
+        const canPrevious=ordinary&&owned.startKey&&result.first===owned.startKey?false:!!options.after||!!options.offset||!!options.query||((!!options.before||!!options.last)&&!!result.more)
+        const canNext=ordinary&&owned.endKey&&result.last===owned.endKey?false:!options.last&&(!!options.before||!!result.more)
+        owned.page=options;owned.first=result.first;owned.last=result.last;owned.searchAfter=result.searchAfter;owned.searchCursor=result.searchCursor
+        event(owned,'page',{...result,kind:undefined,fromEnd:!!options.last||!!options.before,canPrevious,canNext})
+      }
     }catch(error){clearPageProgress(owned,operation);failure(owned,error)}finally{clearPageProgress(owned,operation);owned.pagePending=false;drainLocalIntent(owned)}
   }
   async function smallJson(response,owned) {

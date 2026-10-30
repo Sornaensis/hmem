@@ -491,10 +491,10 @@ receiveSealed value model =
     else if kind == "sealed-demand" then
         ({model | sessions={state | sealed={sealed | http=Just {sequence=field "sequence" Decode.int -1,path=field "path" Decode.string ""}}}},Cmd.none)
     else if kind == "sealed-clear" then
-        ({model | sessions={state | rows=[],sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,renderPart=0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
+        ({model | sessions={state | rows=[],sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,canPrevious=False,canNext=False,renderPart=0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
     else if kind == "sealed-error" then
         let code=field "code" Decode.string "archive_failed" in
-        ({model | sessions={state | sealed={sealed | phase="error",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown
+        ({model | sessions={state | sealed={sealed | phase="error",canRetry=code /= "archive_cleanup_failed",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown
             ,error=Just (if code == "archive_cleanup_failed" then "Archive cleanup could not be confirmed. Reload this page before another archive." else if code == "archive_item_limit" then "One record exceeds the local view limit. The original transcript is still available to download." else if code == "archive_recovery_limit" then "Local archive recovery reached its directory limit. Close other archive tabs or clear this site's stored archive data before retrying." else if code == "archive_recovery_pending" then "Old local archives were removed. Retry to finish recovery." else code)}}},Cmd.none)
     else if kind == "sealed-cancelled" then
         ({model | sessions={state | sealed={sealed | phase="cancelled",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown,error=Nothing}}},Cmd.none)
@@ -525,7 +525,7 @@ receiveSealed value model =
         case Decode.decodeValue (Decode.field "rows" (Decode.list piece)) value of
             Ok rows ->
                 if List.length rows <= 200 && String.length (Encode.encode 0 value) <= 4194304 then
-                    ({model | sessions={state | sealed={sealed | phase="ready",error=Nothing,http=Nothing,rows=rows,first=field "first" Decode.string "",last=field "last" Decode.string "",more=field "more" Decode.bool False,archiveGeneration=field "archiveGeneration" Decode.string "",renderPart=if field "fromEnd" Decode.bool False then -1 else 0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
+                    ({model | sessions={state | sealed={sealed | phase="ready",error=Nothing,http=Nothing,rows=rows,first=field "first" Decode.string "",last=field "last" Decode.string "",more=field "more" Decode.bool False,canPrevious=field "canPrevious" Decode.bool False,canNext=field "canNext" Decode.bool False,archiveGeneration=field "archiveGeneration" Decode.string "",renderPart=if field "fromEnd" Decode.bool False then -1 else 0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
                 else ({model | sessions={state | sealed={sealed | phase="error",rows=[],error=Just "archive_page_limit"}}},Cmd.none)
             Err _ -> ({model | sessions={state | sealed={sealed | phase="error",rows=[],error=Just "archive_page_invalid"}}},Cmd.none)
     else (model,Cmd.none)
@@ -708,7 +708,7 @@ viewDetail workspace model id =
             _ -> resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .error |> Maybe.map (\_ -> p [attribute "role" "alert"] [text "Session could not be loaded.",button [onClick SessionsRetry] [text "Retry"]]) |> Maybe.withDefault (p [attribute "role" "status"] [text "Loading session…"])
         , div [class "session-conversation-grid"]
             [ div [class "session-conversation"]
-              [ viewRecords workspace model id ] ]
+              [ viewRecords WorkspaceReader workspace model id ] ]
         ,p [class "session-download-status",attribute "role" "status",attribute "aria-live" "polite"] [text (if model.sessions.archiveMessageTask == Nothing || model.sessions.saveBlocked then model.sessions.saveMessage else "")] ]
 
 
@@ -902,7 +902,7 @@ viewTaskActiveWithChoices includeChoices workspace model task =
                 [resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.map (\payload -> case payload of
                     Delivery.Metadata session -> div [class "task-session-selected-context"] [h4 [] [text (sessionTitle session)]]
                     _ -> text "") |> Maybe.withDefault (text "")
-                ,viewRecords workspace model id
+                ,viewRecords EmbeddedReader workspace model id
                 ,div [class "task-session-footer"]
                     [a [class "btn btn-sm task-session-open-full",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"]]]) |> Maybe.withDefault (div [class "empty-state"] [text "Select an active session to read its recent conversation."])
             ,if includeChoices then viewTaskActiveChoices workspace model task else text ""
@@ -960,8 +960,13 @@ viewTaskSection evidence workspace model task =
         ,if evidence && model.sessions.archive == Nothing && model.sessions.saveMessage /= "" && (model.sessions.archiveMessageTask == Nothing || model.sessions.archiveMessageTask == Just task || model.sessions.saveBlocked) then p [class "card-meta",attribute "role" "status"] [text model.sessions.saveMessage] else text ""]
 
 
-viewRecords : String -> Model -> String -> Html Msg
-viewRecords workspace model id =
+type ReaderContext
+    = WorkspaceReader
+    | EmbeddedReader
+
+
+viewRecords : ReaderContext -> String -> Model -> String -> Html Msg
+viewRecords context workspace model id =
     let
         state = model.sessions
         session = resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.andThen (\payload -> case payload of
@@ -970,7 +975,7 @@ viewRecords workspace model id =
         newest = session |> Maybe.map .committedBytes |> Maybe.withDefault state.offset
         rangeError = resource workspace (Delivery.SessionWindow id state.offset state.end False) model |> Maybe.andThen .error
     in
-    if session |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then viewSealedRecords model session
+    if session |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then viewSealedRecords context model session
     else section [class "session-viewer",attribute "aria-label" "Session transcript"]
         [div [class "sessions-toolbar"]
             [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
@@ -981,12 +986,23 @@ viewRecords workspace model id =
         ,text "" ]
 
 
-viewSealedRecords : Model -> Maybe Api.AgentSession -> Html Msg
-viewSealedRecords model session =
+viewSealedRecords : ReaderContext -> Model -> Maybe Api.AgentSession -> Html Msg
+viewSealedRecords context model session =
     let
         state=model.sessions
         sealed=state.sealed
         action name label = button [attribute "data-sealed-action" name,attribute "data-sealed-owner" state.stamp,disabled (sealed.phase /= "ready" && name /= "cancel")] [text label]
+        workspaceReader = context == WorkspaceReader
+        workspaceAction name label available = button [class "btn btn-sm",attribute "data-sealed-action" name,attribute "data-sealed-owner" state.stamp,disabled (sealed.phase /= "ready" || not available)] [text label]
+        busy = List.member sealed.phase ["preparing","retrying","downloading","decoding","index-ready","navigating","reading-body"]
+        footer = div [class "session-archive-footer",attribute "aria-label" "Transcript pages"]
+            [ workspaceAction "first" "First" sealed.canPrevious
+            , workspaceAction "previous" "Previous" sealed.canPrevious
+            , workspaceAction "next" "Next" sealed.canNext
+            , workspaceAction "last" "Last" sealed.canNext
+            , if busy then button [class "btn btn-sm",attribute "data-sealed-action" "cancel",attribute "data-sealed-owner" state.stamp] [text "Cancel"] else text ""
+            , if (sealed.phase == "error" && sealed.canRetry) || sealed.phase == "cancelled" then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""
+            ]
         openAttribute opened = if opened then [attribute "open" ""] else []
         body piece = case piece.body of
             Nothing -> Transcript.atom 0 (\_ -> text "")
@@ -1034,15 +1050,21 @@ viewSealedRecords model session =
             "error" -> Maybe.withDefault "Archive could not load." sealed.error
             _ -> "Preparing complete archive…"
     in
-    Keyed.node "section" [class "session-viewer session-sealed-viewer",attribute "aria-label" "Session transcript"]
-        (sealedHostNodes model [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")
-        ,p [attribute "role" (if sealed.error == Nothing then "status" else "alert"),attribute "aria-live" "polite"] [text message]
-        ,div [class "sessions-toolbar"] [action "first" "First",action "previous" "Previous",action "next" "Next",action "last" "Last",action "cancel" "Cancel",button [onClick SessionsRetry] [text "Retry"]]
-        ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-search",Html.Attributes.placeholder "Search complete archive",attribute "maxlength" "256"] [],action "search" "Search",action "search-next" "Continue search"]
-        ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-position",Html.Attributes.placeholder "Original byte offset",attribute "inputmode" "numeric"] [],action "position" "Go to offset"]
-        ,sealedRenderControls model rendered.part rendered.more
-        ,if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
-        ,div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "aria-label" "Verified archive records"] rendered.nodes])
+    let
+        identity = session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")
+        status = p [class (if workspaceReader then "session-archive-status card-meta" else ""),attribute "role" (if sealed.error == Nothing then "status" else "alert"),attribute "aria-live" "polite"] [text message]
+        records = div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "aria-label" "Verified archive records"] rendered.nodes
+        presentation = if workspaceReader && rendered.part == 0 && not rendered.more then text "" else sealedRenderControls model rendered.part rendered.more
+        budgetError = if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
+        children = if workspaceReader then [identity,status,presentation,budgetError,records,footer] else
+            [identity,status
+            ,div [class "sessions-toolbar"] [action "first" "First",action "previous" "Previous",action "next" "Next",action "last" "Last",action "cancel" "Cancel",button [onClick SessionsRetry] [text "Retry"]]
+            ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-search",Html.Attributes.placeholder "Search complete archive",attribute "maxlength" "256"] [],action "search" "Search",action "search-next" "Continue search"]
+            ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-position",Html.Attributes.placeholder "Original byte offset",attribute "inputmode" "numeric"] [],action "position" "Go to offset"]
+            ,presentation,budgetError,records]
+    in
+    Keyed.node "section" [class ("session-viewer session-sealed-viewer" ++ (if workspaceReader then " session-sealed-workspace" else "")),attribute "aria-label" "Session transcript"]
+        (sealedHostNodes model children)
 
 
 sealedHostKey : Model -> String

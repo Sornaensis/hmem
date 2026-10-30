@@ -102,6 +102,14 @@ so a selection beyond the current option page remains visible. Errors preserve
 selection; successful authority retires only deleted, foreign-workspace or
 out-of-project selections, while valid zero-match activity scopes remain selected.
 
+The workspace completed reader omits archive search and raw-byte jumps. Its
+ordinary bounded paging controls sit in the footer, with availability derived
+from the accepted local page request and result. Runtime identity and compact
+verification feedback precede the transcript without a growing utility area.
+Embedded readers retain their existing search, offset and paging controls.
+Changing the existing reader owner resets local query/offset options; ordinary
+paging replaces them, while body/disclosure hydration preserves its origin page.
+
 Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.
 The selected Live/Quiet/Completed activity union applies before pagination; Live

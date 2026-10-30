@@ -257,7 +257,7 @@ suite =
                 in
                 Cards.viewProjectsTree workspaceId recovering
                     |> Query.fromHtml
-                    |> Query.has [ Selector.text "60/75 tasks remaining" ]
+                    |> Query.has [ Selector.text "60/70 tasks remaining" ]
         , test "known empty project counts remain visible" <|
             \_ ->
                 DataLoading.mergeNavigationSummaries [ project "empty" ] [] model

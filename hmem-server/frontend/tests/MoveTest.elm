@@ -172,8 +172,10 @@ suite =
                 startup = loading.startupAdmission
                 permit = loading.backgroundAdmission
                 focused = opened.focus
+                cards = opened.cards
                 queued = Loading.beginNavigationBranch "project" "ws" (Just "destination")
                     { opened | focus = { focused | focusedEntity = Just ( "project", "destination" ) }
+                        , cards = { cards | collapsedNodes = Dict.insert "proj-destination" False cards.collapsedNodes }
                         , dataLoading = { loading | projectCardSummaries = Dict.singleton "destination" (project "destination" Nothing), startupAdmission = { startup | authorized = True, phase = StartupAdmission.Normal, initialWaveOpened = True }, backgroundAdmission = { permit | workspaceId = Just "ws", sessionEpoch = opened.sessionRequestEpoch, filterFingerprint = Loading.navigationFilterFingerprint opened, rootGeneration = Nothing, remaining = 6, acknowledged = True }, navigationVisibilityActive = False } }
                     |> Tuple.first
                 resumed = Move.reconcile (step CloseMove queued, Cmd.none) |> Tuple.first

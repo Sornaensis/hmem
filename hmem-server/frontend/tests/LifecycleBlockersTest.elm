@@ -1105,7 +1105,8 @@ suite =
                     deps = lifecycleModel.dependencies
                     parent = taskWithStatus "parent" Nothing (Just "project-a") Api.Blocked
                     rollup = { openSubtaskCount = 2, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False, inProgressSubtaskCount = 1, canStartSubtasks = True, ownOpenDependencyCount = Just 0 }
-                    source readiness = { lifecycleModel | tasks = Dict.singleton "parent" parent, dependencies = { deps | taskReadinessRollups = Dict.singleton "parent" readiness } }
+                    cards = lifecycleModel.cards
+                    source readiness = { lifecycleModel | tasks = Dict.singleton "parent" parent, dependencies = { deps | taskReadinessRollups = Dict.singleton "parent" readiness }, cards = { cards | collapsedNodes = Dict.insert "task-parent" True cards.collapsedNodes } }
                     card readiness = Feature.Cards.viewProjectsTree "workspace-a" (source readiness) |> Query.fromHtml |> Query.find [ Selector.id "entity-parent" ]
                 in
                 Expect.all
@@ -1663,10 +1664,14 @@ lifecycleModel =
 
         search =
             base.search
+
+        cards =
+            base.cards
     in
     { base
         | auth = { status = Types.AuthReady, mode = Just "local" }
         , search = { search | filterProjectStatuses = [], filterTaskStatuses = [] }
+        , cards = { cards | collapsedNodes = Dict.fromList [ ( "proj-project-a", False ), ( "proj-ancestor", False ), ( "task-parent", False ), ( "task-eligible-parent", False ) ] }
         , sessionContext = Just (sessionContext "local" "user" "local_superadmin" True True (Just "admin"))
         , projects = Dict.singleton "project-a" (project "project-a" Nothing)
         , dependencies = { dependencies | projectReadinessRollups = Dict.singleton "project-a" { openProjectCount = 0, inProgressTaskCount = 0, closedProjectCount = 0, openTaskCount = 1, doneTaskCount = 1, cancelledTaskCount = 2, blockedTaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False } }

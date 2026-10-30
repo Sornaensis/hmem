@@ -19,7 +19,7 @@ authority. Live/Quiet and separately labelled lifecycle times retain their own
 clocks. See [transcript occurrence time](session-occurrence.md) for eligibility,
 historical correction and the server's exact cursor contract.
 
-Consecutive thinking, tool calls, results and inspectable Codex events share a collapsed activity group,
+Consecutive thinking, tool calls, results and inspectable JSON payloads share a collapsed activity group,
 including a run that currently has only one event. User and agent prose stays
 outside the disclosure and splits runs, including within mixed Claude content.
 Hidden unknown and empty blocks neither create groups nor split them. Each group
@@ -62,17 +62,20 @@ with bounded continuation for large or deeply nested payloads. Supported message
 and reasoning keep their existing presentation; token counts and routine Codex
 task/turn metadata stay hidden. Sealed group indexes retain the complete run's
 final time independently of the current page or search result. Derived index
-version 2 invalidates old summaries; reload rebuilds them from verified evidence
+version 3 invalidates old summaries; reload rebuilds them from verified evidence
 without changing transcript bytes or receipts.
 
-Other unsupported meaningful records and content blocks show a short indication of
-their type without dumping their JSON. Original evidence remains available
-through the verified download path. Windows containing only unsupported meaningful
-content settle with an indication. Discriminator/flag-only marker metadata stays
+Unfamiliar meaningful records, content blocks and tool variants use labelled,
+expandable JSON payloads with the same bounded continuation controls. Raw source
+tokens are preserved where available; an unfamiliar tool payload does not imply
+execution. Image/file/audio attachments expose only descriptive metadata, not
+encoded bodies. Original evidence remains available through verified downloads.
+Windows containing only unfamiliar meaningful content settle with inspectable
+payloads. Discriminator/flag-only marker metadata and routine `session.usage_record` stay
 hidden and does not consume the visible history reserve. Known hook, command and
 permission failures have an explicit failure indication even without error details;
 successful controls remain hidden. Unknown-content inspection visits at most 256
-values and 16 levels; larger ambiguous structures receive an indication.
+values and 16 levels; larger ambiguous structures use the bounded JSON viewer.
 Leading partial records are skipped silently when a bounded read starts inside
 a record. Malformed JSON reports a settled framing error. Incomplete finite tails retain
 their bytes and show a boundary notice until completed; neither state read-loops.
@@ -84,7 +87,7 @@ and [content types](https://github.com/earendil-works/pi/blob/4a080252f06caf63a5
 Nested user/assistant/system messages, thinking, tool calls/results, visible
 custom messages, bash execution, compaction and branch summaries are presented.
 Redacted thinking and opaque signatures are hidden. Images and Copilot
-attachments receive a bounded unsupported-content notice. Custom extension
+attachments expose descriptive JSON metadata without encoded bodies. Custom extension
 state and `display: false` messages remain hidden; bash `excludeFromContext`
 affects model context rather than display visibility.
 
@@ -96,7 +99,7 @@ window/page. Hidden metadata is not mistaken for a history boundary. Native
 entry ancestry is separate from hmem session parents. Context edits receive an
 indication while original displayed history remains intact. Headerless windows
 state that their schema version is unverified; known unsupported versions show
-notices rather than being interpreted as v3. Both framing paths retain only one
+labelled JSON rather than being interpreted as v3. Both framing paths retain only one
 header-version scalar, and archive pieces retain it for identical rehydration.
 
 ## Bounded presentation and transport

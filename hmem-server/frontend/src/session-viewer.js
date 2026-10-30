@@ -51,23 +51,37 @@ function jsonValueEnd(source,start) {
   return at
 }
 
-// The record has already passed JSON validation. Locate the effective root
-// payload without serializing its parsed Numbers or recursing through its tree.
-// Escaped property names and duplicate root keys follow JSON.parse's last key.
-function rawEventPayload(source) {
-  if(typeof source!=='string')return null
-  let at=skipJsonSpace(source,0),payload=null
-  if(source[at]!=='{')return null
-  at=skipJsonSpace(source,at+1)
-  while(at<source.length && source[at]!=='}') {
-    const keyEnd=jsonStringEnd(source,at),key=JSON.parse(source.slice(at,keyEnd))
-    const begin=skipJsonSpace(source,skipJsonSpace(source,keyEnd)+1),end=jsonValueEnd(source,begin)
-    if(key==='payload')payload=source.slice(begin,end)
-    at=skipJsonSpace(source,end)
-    if(source[at]!==',')break
+// The record has already passed JSON validation. Locate an effective nested
+// value without serializing parsed Numbers or recursing through its tree.
+// Escaped property names and duplicate keys follow JSON.parse's last key.
+function createRawJsonLocator(source) {
+  const containers=new Map(),valid=typeof source==='string' && !!source.trim()
+  function children(span) {
+    if(containers.has(span.start))return containers.get(span.start)
+    let at=skipJsonSpace(source,span.start),index=0
+    const array=source[at]==='[',values=new Map()
+    if(!array && source[at]!=='{')return null
     at=skipJsonSpace(source,at+1)
+    while(at<span.end && !'}]'.includes(source[at])) {
+      let key=index++
+      if(!array){const end=jsonStringEnd(source,at);key=JSON.parse(source.slice(at,end));at=skipJsonSpace(source,skipJsonSpace(source,end)+1)}
+      const end=jsonValueEnd(source,at)
+      values.set(key,{start:at,end})
+      at=skipJsonSpace(source,end)
+      if(source[at]!==',')break
+      at=skipJsonSpace(source,at+1)
+    }
+    containers.set(span.start,values)
+    return values
   }
-  return payload
+  // Cache direct child spans once per visited container. Wide native arrays
+  // then cost one scan, rather than rescanning all siblings for every block.
+  return (path=[])=>{
+    if(!valid)return null
+    let span={start:skipJsonSpace(source,0),end:source.length}
+    for(const wanted of path){span=children(span)?.get(wanted);if(!span)return null}
+    return source.slice(span.start,span.end)
+  }
 }
 
 // Direct presentation callers may lack original text. Keep that fallback
@@ -93,7 +107,7 @@ function compactPayload(value) {
 }
 
 // Unknown marker-only metadata has no conversational content. Inspect a finite
-// number of values; ambiguous large/deep structures get a notice, never a dump.
+// number of values; ambiguous large/deep structures use the bounded JSON viewer.
 function hasMeaningfulContent(value) {
   const pending=[{value,depth:0}],discriminators=new Set(['type','id','parentid','sessionid','messageid','toolcallid','timestamp','time','version'])
   let budget=256
@@ -141,12 +155,15 @@ export function payloadTokens(text) {
 // Presentation never changes the stored record or its byte boundaries.
 export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const rawValue=createRawJsonLocator(raw)
   const sourceTime = string(object.timestamp || object.time)
   const time = parseInstant(sourceTime) ? sourceTime : ''
   const block = (kind, text, label = '') => ({kind, text:string(text), label:string(label).slice(0,256)})
-  // A bounded indication preserves deliberate metadata hiding without making
-  // unsupported meaningful records look like an empty conversation.
-  const unsupported = type => block('text',`Unsupported transcript content (${short(type) || 'unrecognized record'}). Original evidence is preserved.`)
+  // Reuse the raw-token pager for unfamiliar content, including nested blocks.
+  // It preserves source spelling and produces deep indentation only on demand.
+  const payload = (type,value=object,path=[]) => block('event',(path && rawValue(path)) ?? compactPayload(value),`Payload · ${short(type) || 'record'}`)
+  const attachmentMetadata = value => Object.fromEntries(['type','mimeType','mime_type','name','filename','size'].filter(key=>['string','number'].includes(typeof value?.[key])).map(key=>[key,value[key]]))
+  const attachment = value => payload(value?.type || 'attachment',attachmentMetadata(value),null)
   const tool = (kind, value, name = '') => {
     const field=kind === 'result'?'output':'input'
     let payload
@@ -158,15 +175,17 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
     const first = (archive ? prettyPayloadSlice(JSON.parse(payload.text)).text : payload.text).split('\n').map(line=>line.trim()).find(line=>line.includes(':')) || ''
     return {...block(kind,payload.text,`${kind === 'result'?'Result':'Call'}${name?' · '+short(name):''}${first?' · '+short(first.replace(/,$/,'')):''}`),tokens:payload.tokens}
   }
-  const contentBlocks = content => (Array.isArray(content) ? content : [{type:typeof content === 'string'?'text':'unknown',text:content}]).flatMap(part => {
-    if (!part || typeof part !== 'object' || Array.isArray(part)) return [unsupported('content block')]
-    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [unsupported(part.type)]
+  const contentBlocks = (content,path) => (Array.isArray(content) ? content : [{type:typeof content === 'string'?'text':'unknown',text:content}]).flatMap((part,index) => {
+    const source=Array.isArray(content)?[...path,index]:path,value=Array.isArray(content)?part:content
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return [payload('content block',value,source)]
+    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [payload(part.type,value,source)]
     if (['redacted_thinking','encrypted_thinking'].includes(part.type) || (['thinking','reasoning'].includes(part.type) && (part.encrypted_content || part.encrypted || part.redacted===true))) return [block('encrypted','','Thinking...')]
     if (['thinking','reasoning','summary_text'].includes(part.type)) return [block('thinking',part.thinking || part.text,'Thinking')]
     if (part.type === 'tool_use') return [tool('tool',part.input,part.name)]
     if (part.type === 'toolCall') return [tool('tool',part.argumentsError?{notice:'Malformed tool arguments',error:part.argumentsError}:part.arguments,`${short(part.name)} · ${short(part.id)}`)]
     if (part.type === 'tool_result') return [tool('result',part.content,part.is_error ? 'error' : part.tool_use_id)]
-    return [unsupported(part.type || 'attachment / content')]
+    if(['image','image_url','input_image','audio','input_audio','file','document','video'].includes(part.type))return [attachment(part)]
+    return [payload(part.type || 'content block',value,source)]
   })
   const conversation = (role,blocks,extra={}) => {
     const row={type:'conversation',role:string(role).slice(0,256)||'assistant',time,text:JSON.stringify(blocks),...extra}
@@ -177,7 +196,7 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   }
   const hidden=()=>({type:'unknown',role:'',time,text:''})
   if(object.ephemeral===true || ['assistant.message_delta','assistant.reasoning_delta','assistant.streaming_delta','tool.execution_partial_result','tool.execution_progress'].includes(object.type))return hidden()
-  if(object.type==='session')return object.version===3?hidden():conversation('notice',[unsupported(`pi session version ${short(String(object.version))}`)],{piVersion:Number.isInteger(object.version)?object.version:'invalid'})
+  if(object.type==='session')return object.version===3?hidden():conversation('notice',[payload(`pi session version ${short(String(object.version))}`)],{piVersion:Number.isInteger(object.version)?object.version:'invalid'})
   const piTypes=['message','compaction','branch_summary','custom_message','model_change','thinking_level_change','custom','label','context_edit','session_info','usage']
   const piEntry=typeof object.id==='string' && Object.hasOwn(object,'parentId') && (piTypes.includes(object.type) || (!object.data && !string(object.type).includes('.')))
   if(piEntry || (object.type==='message' && object.message)) {
@@ -189,21 +208,21 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
       const context={...block('text',`pi history: ${relation}. Source order may include alternate branches; ancestry is not expanded and parent context may be outside this window.${piVersion===null?' Schema version is not established in this window.':''}`),nativeContext:true}
       return conversation(role,[context,...blocks],extra)
     }
-    if(piVersion!==null && piVersion!==3)return native('notice',[unsupported(`pi session version ${short(String(piVersion))}`)])
-    if(!piEntry || (object.parentId!==null && typeof object.parentId!=='string'))return native('notice',[unsupported('pi entry relationship')])
+    if(piVersion!==null && piVersion!==3)return native('notice',[payload(`pi session version ${short(String(piVersion))}`)])
+    if(!piEntry || (object.parentId!==null && typeof object.parentId!=='string'))return native('notice',[payload('pi entry relationship')])
     if(object.type==='message') {
       const message=object.message || {},role=message.role
-      if(['user','assistant','system'].includes(role))return native(role,contentBlocks(message.content))
+      if(['user','assistant','system'].includes(role))return native(role,contentBlocks(message.content,['message','content']))
       if(role==='toolResult')return native('tool',[tool('result',message.content,`${message.isError?'error · ':''}${short(message.toolName)} · ${short(message.toolCallId)}`)])
-      if(role==='custom')return message.display===true?native('assistant',contentBlocks(message.content)):hidden()
+      if(role==='custom')return message.display===true?native('assistant',contentBlocks(message.content,['message','content'])):hidden()
       if(['branchSummary','compactionSummary'].includes(role))return native('notice',[block('text',`${role==='branchSummary'?'Branch summary':'Compaction summary'}: ${string(message.summary)}`)])
       if(role==='bashExecution')return native('tool',[tool('tool',{command:message.command},'bash'),tool('result',{output:message.output,exitCode:message.exitCode,cancelled:message.cancelled,truncated:message.truncated},'bash')])
-      return native('notice',[unsupported(`pi message role ${short(role)}`)])
+      return native('notice',[payload(`pi message role ${short(role)}`)])
     }
-    if(object.type==='custom_message')return native('assistant',contentBlocks(object.content))
+    if(object.type==='custom_message')return native('assistant',contentBlocks(object.content,['content']))
     if(['compaction','branch_summary'].includes(object.type))return native('notice',[block('text',`${object.type==='compaction'?'Compaction summary':'Branch summary'}${object.type==='compaction'?' · first kept '+short(object.firstKeptEntryId):' · from '+short(object.fromId)}: ${string(object.summary)}`)])
     if(object.type==='context_edit')return native('notice',[block('text','Native context edit recorded. This source-order history preserves the original entries; the edit is not applied to the displayed transcript.')])
-    return native('notice',[unsupported(`pi entry ${short(object.type)}`)])
+    return native('notice',[payload(`pi entry ${short(object.type)}`)])
   }
   // Copilot persisted session events use data, not a Codex payload envelope.
   // Requests and execution starts are distinct source events, explicitly named
@@ -216,29 +235,31 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
       return result
     }
     if(object.type==='user.message') {
-      const blocks=typeof data.content==='string'?[block('text',data.content)]:[unsupported(object.type)]
-      if(Array.isArray(data.attachments) && data.attachments.length)blocks.push(unsupported(`Copilot attachments · ${data.attachments.length}`))
-      else if(data.attachments && !Array.isArray(data.attachments))blocks.push(unsupported('Copilot attachments'))
+      const blocks=typeof data.content==='string'?[block('text',data.content)]:[payload(object.type,data.content,['data','content'])]
+      if(Array.isArray(data.attachments) && data.attachments.length)blocks.push(payload(`Copilot attachments · ${data.attachments.length}`,data.attachments.map(attachmentMetadata),null))
+      else if(data.attachments && !Array.isArray(data.attachments))blocks.push(attachment(data.attachments))
       return conversation('user',blocks)
     }
     if(object.type==='assistant.message') {
       const blocks=[]
       if(typeof data.reasoningText==='string' && data.reasoningText)blocks.push(block('thinking',data.reasoningText,'Message thinking'))
       if(typeof data.content==='string' && data.content)blocks.push(block('text',data.content))
-      if(Array.isArray(data.toolRequests))for(const request of data.toolRequests) {
-        if(request && typeof request==='object')blocks.push(nativeTool('tool',request.arguments,request.name,request.toolCallId,'Request'))
-        else blocks.push(unsupported('tool request'))
+      else if(Object.hasOwn(data,'content') && typeof data.content!=='string')blocks.push(payload('assistant.message content',data.content,['data','content']))
+      if(Array.isArray(data.toolRequests))for(const [index,request] of data.toolRequests.entries()) {
+        if(request && typeof request==='object' && typeof request.name==='string' && Object.hasOwn(request,'arguments'))blocks.push(nativeTool('tool',request.arguments,request.name,request.toolCallId,'Request'))
+        else blocks.push(payload('tool request',request,['data','toolRequests',index]))
       }
-      return conversation('assistant',blocks.length?blocks:[unsupported(object.type)])
+      else if(Object.hasOwn(data,'toolRequests'))blocks.push(payload('tool requests',data.toolRequests,['data','toolRequests']))
+      return conversation('assistant',blocks.length?blocks:[payload(object.type)])
     }
     if(object.type==='tool.execution_start')return conversation('assistant',[nativeTool('tool',data.arguments,data.toolName,data.toolCallId,'Execution')])
     if(object.type==='tool.execution_complete')return conversation('tool',[nativeTool('result',data.success===false?{error:data.error ?? data.result ?? 'No error detail recorded'}:data.result ?? {notice:'No result recorded'},'',data.toolCallId,data.success===false?'Error result':'Result')])
-    if(object.type==='assistant.reasoning')return conversation('assistant',typeof data.content==='string'?[block('thinking',data.content,`Reasoning${data.reasoningId?' · '+short(data.reasoningId):''}`)]:[unsupported(object.type)])
+    if(object.type==='assistant.reasoning')return conversation('assistant',typeof data.content==='string'?[block('thinking',data.content,`Reasoning${data.reasoningId?' · '+short(data.reasoningId):''}`)]:[payload(object.type)])
   }
-  if(['user.message','assistant.message','assistant.reasoning','tool.execution_start','tool.execution_complete'].includes(object.type))return conversation('notice',[unsupported(object.type)])
+  if(['user.message','assistant.message','assistant.reasoning','tool.execution_start','tool.execution_complete'].includes(object.type))return conversation('notice',[payload(object.type)])
   if (object.type === 'response_item') {
     const item=object.payload || {}
-    if(item.type === 'message') return conversation(item.role || 'assistant',contentBlocks(item.content))
+    if(item.type === 'message') return conversation(item.role || 'assistant',contentBlocks(item.content,['payload','content']))
     if(['function_call','custom_tool_call'].includes(item.type)) return conversation('assistant',[tool('tool',item.arguments ?? item.input,item.name)])
     if(['function_call_output','custom_tool_call_output'].includes(item.type)) return conversation('tool',[tool('result',item.output,item.call_id)])
     if(item.type === 'reasoning') return conversation('assistant',[item.encrypted_content ? block('encrypted','','Thinking...')
@@ -247,7 +268,7 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   }
   if (['assistant','user'].includes(object.type) && object.message) {
     const message=object.message
-    return conversation(message.role || object.type,typeof message.content === 'string' ? [block('text',message.content)] : contentBlocks(message.content))
+    return conversation(message.role || object.type,typeof message.content === 'string' ? [block('text',message.content)] : contentBlocks(message.content,['message','content']))
   }
   if(object.type === 'event_msg' && ['agent_message','user_message','agent_reasoning'].includes(object.payload?.type)) {
     const payload=object.payload,thinking=payload.type==='agent_reasoning'
@@ -255,16 +276,16 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   }
   if(object.type==='event_msg'){
     if(['token_count','turn_aborted','task_started','task_complete'].includes(object.payload?.type) || !hasMeaningfulContent(object))return hidden()
-    return conversation('assistant',[block('event',rawEventPayload(raw) ?? compactPayload(object.payload ?? null),`Event${object.payload?.type?' · '+short(object.payload.type):''}`)])
+    return conversation('assistant',[block('event',rawValue(['payload']) ?? compactPayload(object.payload ?? null),`Event${object.payload?.type?' · '+short(object.payload.type):''}`)])
   }
   if(typeof object.text === 'string' || typeof object.content === 'string') return {type:string(object.type),role:string(object.role),time,text:typeof object.text === 'string' ? object.text : object.content}
-  const metadata=['metadata','session_meta','turn_context','session.start','session.shutdown','session.end','session.idle','session.usage_info','session.model_change','session.mode_changed','session.title_changed','assistant.turn_start','assistant.turn_end','assistant.usage',
+  const metadata=['metadata','session_meta','turn_context','session.start','session.shutdown','session.end','session.idle','session.usage_info','session.usage_record','session.model_change','session.mode_changed','session.title_changed','assistant.turn_start','assistant.turn_end','assistant.usage',
     'session.resume','session.context_changed','session.info','session.plan_changed','session.workspace_file_changed','session.compaction_start','pending_messages.modified','command.queued','permission.requested','permission.completed','hook.start','skill.invoked','subagent.started','subagent.completed','subagent.selected','subagent.deselected','exit_plan_mode.completed']
   // Keep failure/control changes that could explain missing output visible.
   if(['hook.end','command.completed','permission.completed'].includes(object.type) && object.data?.success===false)return conversation('notice',[block('text',`Transcript operation failed (${short(object.type)}). Original evidence is preserved.`)])
   if(['hook.end','command.completed'].includes(object.type) && !object.data?.error && object.data?.success!==false)return hidden()
   const envelope=typeof object.type==='string' || ['payload','data','message','content'].some(key=>Object.hasOwn(object,key))
-  if((!metadata.includes(object.type) || object.data?.error || object.data?.success===false) && envelope && hasMeaningfulContent(object))return conversation('notice',[unsupported(object.type)])
+  if((!metadata.includes(object.type) || object.data?.error || object.data?.success===false) && envelope && hasMeaningfulContent(object))return conversation('notice',[payload(`${object.type || 'record'}${object.payload?.type?' · '+object.payload.type:''}`)])
   return {type:'unknown',role:'',time,text:''}
 }
 

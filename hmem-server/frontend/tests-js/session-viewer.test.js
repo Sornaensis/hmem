@@ -48,27 +48,56 @@ test('native Copilot data envelopes retain each request, execution and result oc
  for(const value of [copilotRecords[2],copilotRecords[3]])assert.ok(createRecordFramer().push(0,encode(JSON.stringify(value)+'\n'),true).rows.length===1,'request-only and execution-only windows remain readable')
 })
 
-test('unsupported meaningful content is bounded and truthful while native metadata and deltas stay hidden',()=>{
+test('unfamiliar meaningful content becomes labeled JSON while native metadata and deltas stay hidden',()=>{
  const values=[{type:'session_meta',payload:{secret:'hidden'}},{type:'turn_context',payload:{secret:'hidden'}},{type:'event_msg',payload:{type:'token_count',secret:'hidden'}},{type:'assistant.message_delta',data:{deltaContent:'partial hidden'}},{type:'future.output',data:{newContent:'do not dump '+ 'x'.repeat(10000)}},{type:'assistant',message:{content:[{type:'future_block',secret:'do not dump'}]}}]
  const bytes=encode(values.map(value=>JSON.stringify(value)).join('\n')+'\n'),view=createRecordFramer().push(0,bytes,true)
  assert.equal(view.rows.length,2);assert.equal(view.through,bytes.length);assert.equal(view.pendingBytes,0)
- for(const row of view.rows){assert.match(row.text,/Unsupported transcript content/);assert.ok(row.text.length<256);assert.doesNotMatch(row.text,/do not dump|partial hidden|secret/)}
+ for(const [index,row] of view.rows.entries()){const part=JSON.parse(row.text)[0];assert.equal(part.kind,'event');assert.match(part.label,/Payload · future/);assert.deepEqual(JSON.parse(part.text),index?values[5].message.content[0]:values[4]);assert.doesNotMatch(row.text,/Unsupported transcript content|partial hidden/)}
  const missing=presentation({type:'tool.execution_complete',data:{toolCallId:'missing',success:true}},'')
  assert.match(missing.text,/No result recorded/)
  for(const content of ['', 'Mixed attachment message']){
   const attachment={type:'user.message',data:{content,attachments:[{type:'file',path:'private-path-must-not-dump'}]}},row=createRecordFramer().push(0,encode(JSON.stringify(attachment)+'\n'),true).rows[0]
-  assert.ok(row);assert.match(row.text,/Copilot attachments/);assert.doesNotMatch(row.text,/private-path-must-not-dump/)
+  assert.ok(row);assert.match(row.text,/Payload · Copilot attachments/);assert.doesNotMatch(row.text,/private-path-must-not-dump/)
  }
  const image={...piRecords[1],message:{role:'user',content:[{type:'image',data:'base64-secret',mimeType:'image/png'}]}}
  const imageRow=createRecordFramer().push(0,encode(JSON.stringify(image)+'\n'),true).rows[0]
- assert.match(imageRow.text,/Unsupported transcript content \(image\)/);assert.doesNotMatch(imageRow.text,/base64-secret/)
- for(const metadata of [{type:'assistant.usage',data:{inputTokens:42}},{type:'session_info',id:'info',parentId:'p1',name:'private-session-name'},{type:'usage',id:'usage',parentId:'info',inputTokens:42}])assert.equal(createRecordFramer().push(0,encode(JSON.stringify(metadata)+'\n'),true).rows.length,0)
+ assert.match(imageRow.text,/Payload · image/);assert.doesNotMatch(imageRow.text,/base64-secret/)
+ for(const metadata of [{type:'session.usage_record',data:{inputTokens:42,outputTokens:7}},{type:'assistant.usage',data:{inputTokens:42}},{type:'session_info',id:'info',parentId:'p1',name:'private-session-name'},{type:'usage',id:'usage',parentId:'info',inputTokens:42}])assert.equal(createRecordFramer().push(0,encode(JSON.stringify(metadata)+'\n'),true).rows.length,0)
  for(const type of ['assistant.streaming_delta','session.resume','session.context_changed','session.info','session.plan_changed','session.workspace_file_changed','session.compaction_start','pending_messages.modified','command.queued','command.completed','permission.requested','permission.completed','hook.start','hook.end','skill.invoked','subagent.started','subagent.completed','subagent.selected','subagent.deselected','exit_plan_mode.completed'])assert.equal(createRecordFramer().push(0,encode(JSON.stringify({type,data:{routine:'hidden'}})+'\n'),true).rows.length,0,type+' is routine control metadata')
- for(const type of ['session.error','session.warning','subagent.failed','session.truncation','session.snapshot_rewind','session.compaction_complete','hook.end','command.completed','permission.completed'])assert.match(presentation({type,data:{error:{message:'reported failure or history change'}}},'').text,/Unsupported transcript content/,type+' must retain an indication')
- for(const data of [undefined,null,42,'invalid']){const row=presentation({type:'assistant.message',id:'malformed-copilot',parentId:null,data},'');assert.match(row.text,/Unsupported transcript content \(assistant.message\)/);assert.doesNotMatch(row.text,/pi history/)}
+ for(const type of ['session.error','session.warning','subagent.failed','session.truncation','session.snapshot_rewind','session.compaction_complete','hook.end','command.completed','permission.completed']){const part=JSON.parse(presentation({type,data:{error:{message:'reported failure or history change'}}},'').text)[0];assert.equal(part.kind,'event');assert.ok(part.label.includes(type));assert.equal(JSON.parse(part.text).data.error.message,'reported failure or history change')}
+ for(const data of [undefined,null,42,'invalid']){const row=presentation({type:'assistant.message',id:'malformed-copilot',parentId:null,data},'');assert.match(row.text,/Payload · assistant.message/);assert.doesNotMatch(row.text,/pi history/)}
  for(const value of [{type:'mystery',payload:{preserved:true}},{type:'event_msg',payload:{type:'novel_event',preserved:true}},{type:'future',data:{id:'opaque-id',type:'marker',parentId:'opaque-parent',timestamp:'2026-10-30',version:3,preserved:false}}])assert.equal(createRecordFramer().push(0,encode(JSON.stringify(value)+'\n'),true).rows.length,0,'discriminator/flag-only metadata stays hidden')
- for(const content of [false,null,0,42,{},[],{unknown:true}])assert.match(presentation({type:'future.output',data:{content}},'').text,/Unsupported transcript content/)
- for(const data of [{answer:42},{novel:'meaningful output'},{nested:{child:{result:false}}},{newContent:{unknown:true}},{items:[false,true]}])assert.match(presentation({type:'future.output',data},'').text,/Unsupported transcript content/)
+ for(const content of [false,null,0,42,{},[],{unknown:true}])assert.match(presentation({type:'future.output',data:{content}},'').text,/Payload · future.output/)
+ for(const data of [{answer:42},{novel:'meaningful output'},{nested:{child:{result:false}}},{newContent:{unknown:true}},{items:[false,true]}])assert.match(presentation({type:'future.output',data},'').text,/Payload · future.output/)
+})
+
+test('unfamiliar tool and nested content JSON retains exact tokens without recursive serialization',()=>{
+ const values=[
+  ['{"type":"response_item","payload":{"type":"future_tool_call","arguments":{"n":9007199254740993,"n":1e400}}}', '{"type":"response_item","payload":{"type":"future_tool_call","arguments":{"n":9007199254740993,"n":1e400}}}'],
+  ['{"type":"assistant","message":{"content":[{"type":"text","text":"Before"},{"type":"future_block","n":9007199254740993,"n":-0},{"type":"text","text":"After"}]}}','{"type":"future_block","n":9007199254740993,"n":-0}'],
+  ['{"type":"assistant.message","data":{"toolRequests":[{"type":"novel_tool","input":{"n":1e-400}}]}}','{"type":"novel_tool","input":{"n":1e-400}}']
+ ]
+ for(const [raw,expected] of values){const row=createRecordFramer().push(0,encode(raw+'\r\n'),true).rows[0],part=JSON.parse(row.text).find(block=>block.kind==='event');assert.equal(part.text,expected);assert.match(part.label,/Payload/);assert.doesNotMatch(part.label,/Execution|Call/);assert.equal(row.raw,raw);assert.equal(row.end,encode(raw+'\r\n').length)}
+ const raw='{"type":"future.tool","data":'+'['.repeat(10000)+'0'+']'.repeat(10000)+'}',row=createRecordFramer().push(0,encode(raw+'\n'),true).rows[0]
+ assert.equal(JSON.parse(row.text)[0].text,raw);assert.equal(JSON.parse(presentation(JSON.parse(raw),'').text)[0].text,raw)
+ const mixed={type:'assistant.message',data:{content:{future:'content'},reasoningText:'Known thinking',toolRequests:{future:'request'}}},blocks=JSON.parse(presentation(mixed,'').text)
+ assert.deepEqual(blocks.map(block=>block.kind),['thinking','event','event']);assert.deepEqual(blocks.slice(1).map(block=>JSON.parse(block.text)),[mixed.data.content,mixed.data.toolRequests])
+})
+
+test('wide unfamiliar content and tool requests retain exact sibling spans within a finite presentation budget',()=>{
+ const count=8000,content=Array.from({length:count},(_,index)=>`{"type":"future_block","index":${index},"n":9007199254740993}`),requests=Array.from({length:count},(_,index)=>`{"type":"novel_tool","index":${index},"input":{"n":1e400}}`)
+ const cases=[
+  [`{"type":"assistant","message":{"content":[{"type":"stale"}],"co\\u006etent":[${content.join(',')}]}}`,content],
+  [`{"type":"assistant.message","data":{"toolRequests":[],"toolRequests":[${requests.join(',')}]}}`,requests]
+ ]
+ for(const [raw,want] of cases){
+  assert.ok(encode(raw).length<1048576)
+  const value=JSON.parse(raw),started=performance.now(),row=presentation(value,raw),elapsed=performance.now()-started,blocks=JSON.parse(row.text)
+  assert.equal(blocks.length,count);assert.equal(blocks[0].text,want[0]);assert.equal(blocks.at(-1).text,want.at(-1));assert.ok(blocks.every(block=>block.kind==='event'))
+  // The former repeated full-array scan takes several seconds at this width.
+  // Keep ample headroom for CI while rejecting that main-thread regression.
+  assert.ok(elapsed<1500,`${count} sibling payloads took ${Math.round(elapsed)} ms`)
+ }
 })
 
 test('pi v3 source history distinguishes native parents, alternate branches and later roots without exposing hidden state',()=>{
@@ -98,7 +127,7 @@ test('known operation failure flags remain explicit without error details while 
 test('pi header versions and bounded windows have explicit support and ancestry limits',()=>{
  for(const version of [1,2,99,'invalid']){
   const bytes=encode([{type:'session',version},piRecords[1]].map(value=>JSON.stringify(value)).join('\n')+'\n'),view=createRecordFramer().push(0,bytes,true)
-  assert.equal(view.rows.length,2);assert.match(view.rows[1].text,/Unsupported transcript content/);assert.doesNotMatch(view.rows[1].text,/Inspect pi café/)
+  assert.equal(view.rows.length,2);assert.match(view.rows[1].text,/Payload · pi session version/);assert.equal(JSON.parse(JSON.parse(view.rows[1].text).at(-1).text).type,'message')
  }
  const bytes=encode('leading fragment\n'+JSON.stringify(piRecords[5])+'\n'),view=createRecordFramer(123).push(123,bytes,true)
  assert.equal(view.rows.length,1);assert.match(view.rows[0].text,/entry p5 → parent p1/);assert.match(view.rows[0].text,/parent context may be outside this window/);assert.match(view.rows[0].text,/Schema version is not established/)

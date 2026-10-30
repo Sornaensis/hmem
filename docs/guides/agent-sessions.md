@@ -42,8 +42,8 @@ event shows **Time unavailable**.
 Expanded tool payloads display formatted, highlighted
 JSON. Other meaningful Codex events also expand to their original JSON payload;
 use **Continue JSON** or **Continue body** to read longer payloads. Encrypted or redacted thinking displays *Thinking...*. Copilot and pi
-native captures show their messages and tools; unsupported meaningful content
-has a short notice while routine metadata stays hidden. Copilot tool requests
+native captures show their messages and tools. Unfamiliar meaningful content
+expands as labelled JSON while routine metadata stays hidden. Copilot tool requests
 and execution starts are separately labelled and share their tool-call ID.
 pi history shows each native entry's parent or root: source order can include
 alternate branches, and ancestry outside the current window is not expanded.

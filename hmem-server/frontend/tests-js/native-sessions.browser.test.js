@@ -77,7 +77,7 @@ async function installArchive(h){
 }
 
 test('sealed inspectable events rebuild an old index and retain the complete group time across pages and reload',{timeout:60000},async()=>{
- const final='2026-10-30T09:00:00Z',values=Array.from({length:140},(_,index)=>({type:'event_msg',timestamp:index===139?final:'2026-10-30T12:00:00Z',payload:{type:'future_event',index,result:'needle '+index}}))
+ const final='2026-10-30T09:00:00Z',values=Array.from({length:140},(_,index)=>({type:index===0?'future.tool_call':'event_msg',timestamp:index===139?final:'2026-10-30T12:00:00Z',payload:{type:'future_event',index,result:'needle '+index,...(index===0?{large:'x'.repeat(19000)}:{})}}))
  const raw=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')+'\n'),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
  try{
   // Downgrade one real completed derived index immediately before adoption.
@@ -90,7 +90,7 @@ test('sealed inspectable events rebuild an old index and retain the complete gro
      window.oldEventIndexInjected=true
      const send=()=>super.postMessage(message,transfer),opening=indexedDB.open('hmem-session-archive-v1-'+message.name)
      opening.onsuccess=()=>{const db=opening.result,tx=db.transaction('meta','readwrite'),store=tx.objectStore('meta'),request=store.get('verified')
-      request.onsuccess=()=>store.put({...request.result,indexVersion:1});tx.oncomplete=()=>{db.close();send()};tx.onerror=()=>{db.close();throw Error('index downgrade fixture failed')}
+      request.onsuccess=()=>store.put({...request.result,indexVersion:2});tx.oncomplete=()=>{db.close();send()};tx.onerror=()=>{db.close();throw Error('index downgrade fixture failed')}
      }
     }
    }
@@ -100,7 +100,9 @@ test('sealed inspectable events rebuild an old index and retain the complete gro
   const group=page.locator('.session-activity-group').first(),footer=page.locator('.session-archive-footer')
   assert.equal(await group.locator(':scope > summary time').getAttribute('datetime'),final);assert.match(await group.locator(':scope > summary').innerText(),/140 events/)
   await group.locator(':scope > summary').click();const event=group.locator('.session-content-event').first();await event.locator('summary').click();await event.locator('pre').waitFor()
-  assert.deepEqual(JSON.parse(await event.locator('pre').textContent()),values[0].payload)
+  assert.match(await event.locator('summary').innerText(),/Payload · future.tool_call · future_event/)
+  const firstBody=await event.locator('pre').textContent();await event.getByRole('button',{name:'Continue body',exact:true}).click();await until(async()=>await event.locator('pre').textContent()!==firstBody)
+  assert.deepEqual(JSON.parse(firstBody+await event.locator('pre').textContent()),values[0])
   await footer.getByRole('button',{name:'Last',exact:true}).click();await until(async()=>await page.locator('.session-record').last().getAttribute('data-offset')===String(raw.lastIndexOf(Buffer.from(JSON.stringify(values[139])))))
   assert.equal(await page.locator('.session-activity-group').first().locator(':scope > summary time').getAttribute('datetime'),final)
   for(const width of [1440,430]){await page.setViewportSize({width,height:1000});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))}
@@ -167,7 +169,7 @@ for(const [format,native,first]of[['Copilot',copilotRecords,'Inspect café λ�
 })
 
 for(const [scenario,bytes,expected]of[
- ['unsupported-only',Buffer.from('{"type":"future.output","data":{"content":{"unknown":true}}}\n'),'Unsupported transcript content'],
+ ['unfamiliar-only',Buffer.from(JSON.stringify({type:'future.output',data:{content:{unknown:true,large:'x'.repeat(19000)}}})+'\n'),'Payload · future.output'],
  ['failure-without-error',Buffer.from('{"type":"hook.end","data":{"success":false}}\n'),'Transcript operation failed (hook.end). Original evidence is preserved.'],
  ['malformed',Buffer.from('{\n'),'Record window could not be decoded. Retry or load another window.'],
  ['partial',Buffer.from('{"type":'),'Incomplete record at this finite window boundary.'],
@@ -175,8 +177,13 @@ for(const [scenario,bytes,expected]of[
  const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h;let probing=false
  try{
   await page.emulateMedia({reducedMotion:'no-preference'});await activeControl(h);await h.start();await h.idle();await startProbe(page);probing=true
-  await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a[href*="'+h.active.id+'"]').click();await page.getByText(scenario==='partial'?'No complete messages in this window.':expected,{exact:false}).first().waitFor()
+  await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a[href*="'+h.active.id+'"]').click()
+  if(scenario==='unfamiliar-only')await page.locator('.session-activity-group').first().locator(':scope > summary').click()
+  await page.getByText(scenario==='partial'?'No complete messages in this window.':expected,{exact:false}).first().waitFor()
   assert.equal(await page.getByText(expected,{exact:false}).count(),1,'the finite input has an explicit visible disposition')
+  if(scenario==='unfamiliar-only'){
+   const event=page.locator('.session-content-event').first();await event.locator('summary').click();const json=event.locator('session-event-json'),first=await json.locator('pre').textContent();await json.getByRole('button',{name:'Continue JSON',exact:true}).click();assert.deepEqual(JSON.parse(first+await json.locator('pre').textContent()),JSON.parse(bytes.toString()));assert.equal(await page.getByText(/Unsupported transcript content/).count(),0)
+  }
   await h.idle();const reads=h.reads.filter(value=>value.path.endsWith('/transcript')).length;await delay(500);assert.equal(h.reads.filter(value=>value.path.endsWith('/transcript')).length,reads,'settled input does not request-loop');assert.equal(await page.getByText('Reading transcript…',{exact:true}).count(),0);assert.equal(await page.getByText('Loading transcript metadata…',{exact:true}).count(),0)
   await stopProbe(page,scenario);probing=false;assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
  }finally{if(probing)await page.evaluate(()=>window.nativeRingProbe?.stop()).catch(()=>{});await h.close()}

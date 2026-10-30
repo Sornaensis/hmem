@@ -225,7 +225,7 @@ test('native Copilot occurrences index and hydrate with the same visible blocks 
    for(const field of ['offset','end','index','kind','label'])assert.equal(piece[field],want[field])
    const hydrated=await engine.hydrate(piece.key,0)
    assert.equal(hydrated.body.more,false)
-   if(['tool','result'].includes(want.kind))assert.deepEqual(JSON.parse(hydrated.body.text),JSON.parse(want.block.text))
+   if(['tool','result','event'].includes(want.kind))assert.deepEqual(JSON.parse(hydrated.body.text),JSON.parse(want.block.text))
    else assert.equal(hydrated.body.text,want.block.text)
   }
   assert.equal(store.tables.records.size,values.length);assert.equal(page.more,false)
@@ -243,7 +243,7 @@ test('pi version context, parent history and hidden display flags agree in live,
     const piece=page.rows[at],{row,index,block}=expected[at]
     assert.equal(piece.offset,String(row.offset));assert.equal(piece.index,index);assert.equal(piece.kind,block.kind);assert.equal(piece.label,block.label)
     const result=await engine.hydrate(piece.key,0)
-    if(['tool','result'].includes(block.kind))assert.deepEqual(JSON.parse(result.body.text),JSON.parse(block.text))
+    if(['tool','result','event'].includes(block.kind))assert.deepEqual(JSON.parse(result.body.text),JSON.parse(block.text))
     else assert.equal(result.body.text,block.text)
    }
    assert.equal(page.more,false)

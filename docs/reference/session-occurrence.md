@@ -40,7 +40,7 @@ Eligible native occurrences are:
   versions and hidden native controls are excluded. The one schema scalar is
   carried between scan windows.
 
-Generic text objects, unsupported notices, empty content, ephemeral progress,
+Generic text objects, unfamiliar-record JSON fallbacks, empty content, ephemeral progress,
 native housekeeping and unknown envelopes are not occurrences. Meaningful
 Codex fallback detection uses the viewer's finite 256-value/16-level inspection:
 the whole outer event starts at depth zero. Content keys, nonempty trimmed
@@ -50,7 +50,7 @@ The finite budget follows `Object.keys` order and LIFO traversal, including
 numeric-key ordering and duplicate keys' first positions/final values. Trimming
 uses ECMAScript whitespace: U+FEFF is empty, while U+0085 and U+200B stay visible.
 Copilot native events require an object `data` envelope; malformed arrays and
-scalars remain unsupported notices and cannot supply occurrence authority.
+scalars remain presentation-only JSON fallbacks and cannot supply occurrence authority.
 Before ordinary JSON decoding, a lexical pass replaces containers below depth
 32 with an ambiguous-content marker in the interpretation buffer. This bounds
 decoder recursion while preserving the viewer's shallower ambiguity rule and

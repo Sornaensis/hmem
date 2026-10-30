@@ -136,6 +136,13 @@ Workspace headers count all open projects and tasks, including collapsed,
 unloaded, nested and unassigned work. Filters do not change these totals.
 Loading, updating and unavailable totals are labeled; failures offer **Retry**.
 
+Project task counts and task subtask counts include open and done work; cancelled
+work contributes zero. Mixed groups show the open fraction remaining, and groups
+with only done work say **all done**. A project with no open or done tasks shows
+**0 tasks**; an empty subtask count is omitted. Cancelled records remain available
+through the **Cancelled** filter and history. Completed and archived subprojects
+continue to count as closed.
+
 Scroll to reach loaded hierarchy and Observation results. Root **Load more** is
 explicit. Project and task branches start collapsed; open a branch or choose
 **Expand All** to reveal its children. Expanded branches continue automatically. Incomplete or failed branches

@@ -27,12 +27,50 @@ const both = async (h, text) => {
 }
 const push = (h, frames) => h.page.evaluate(frames=>window.pushHierarchyFrames(frames),frames)
 
+for (const [name, statuses, label] of [
+  ['mixed', ['todo','blocked','done','done','done','cancelled','cancelled','cancelled','cancelled'], '2/5'],
+  ['done', ['done','done','done','cancelled','cancelled','cancelled','cancelled'], '3'],
+  ['cancelled', ['cancelled','cancelled','cancelled','cancelled'], '0'],
+]) test('production card totals exclude cancelled work: '+name, {timeout:60000}, async()=>{
+  const data=hierarchyFixture(),root=data.projects[0],base=data.tasks[0]
+  data.projects=[root]
+  data.tasks=[...statuses.map((status,i)=>({...base,id:'project-'+i,title:'Project '+i,status,parent_id:null})),
+    {...base,id:'parent',title:'Parent',project_id:null,parent_id:null,dependency_count:1},
+    ...statuses.map((status,i)=>({...base,id:'child-'+i,title:'Child '+i,status,project_id:null,parent_id:'parent'}))]
+  data.dependencies=[{task_id:'parent',depends_on_id:'project-0'}]
+  const h=await openHierarchy(data)
+  const projectSummary=h.page.locator('#entity-root-project > .card > .card-summary')
+  const taskSummary=h.page.locator('#entity-parent > .task-card-work > .card-summary')
+  try{
+    await h.start();await h.idle()
+    const suffix=name==='mixed'?' remaining':name==='done'?' (all done)':''
+    assert.equal(await projectSummary.innerText(),label+' tasks'+suffix)
+    assert.equal(await taskSummary.innerText(),name==='cancelled'?'1 dependency':label+' subtasks'+suffix+' · '+(name==='mixed'?'1 open dependency':'1 dependency'))
+    const original=await projectSummary.innerText()
+    await h.page.getByRole('button',{name:'Cancelled',exact:true}).click();await h.idle()
+    assert.equal(await projectSummary.innerText(),original,'Explicit cancelled filtering does not change canonical totals')
+    await h.page.locator('#entity-root-project .tree-toggle').click();await h.idle()
+    await h.page.locator('#entity-project-'+statuses.indexOf('cancelled')).waitFor()
+    if(name==='mixed'){
+      data.tasks.find(row=>row.id==='project-0').status='cancelled'
+      await push(h,[event(data,'project-0','updated',1)]);await h.idle()
+      assert.equal(await projectSummary.innerText(),'1/4 tasks remaining')
+      data.tasks.find(row=>row.id==='project-0').status='todo'
+      await push(h,[event(data,'project-0','updated',2)]);await h.idle()
+      assert.equal(await projectSummary.innerText(),original,'Reopening restores the planning denominator')
+    }
+    assert.ok(h.caps().maxBranches<=4);assert.ok(h.caps().maxDetails<=6)
+    assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
+  }finally{await h.close()}
+})
+
 test('production headers include unloaded 60-task work and survive partial pages, collapse and filters', {timeout:60000}, async()=>{
   const data=fixture(),h=await openHierarchy(data)
   try{
     const first=h.gate(r=>r.kind==='project'&&r.parent==='root-project'&&r.taskOffset===0,{hold:true})
     const second=h.gate(r=>r.kind==='project'&&r.parent==='root-project'&&r.taskOffset===50,{hold:true})
-    await h.start()
+    await h.start();await h.idle()
+    await h.page.locator('#entity-root-project .tree-toggle').click()
     await h.bounded(first.arrived,10000,'First child page')
     await both(h,'2 open projects · 62 open tasks')
     assert.equal(await h.page.locator('[data-hierarchy-key^="task:task-"]').count(),0,'Parent task pages are still held')

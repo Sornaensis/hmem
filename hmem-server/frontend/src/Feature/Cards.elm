@@ -1782,9 +1782,9 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                         |> Maybe.map .openTaskCount
                         |> Maybe.withDefault 0
 
-                closedTasks =
+                doneTasks =
                     maybeProjectRollup
-                        |> Maybe.map (\rollup -> rollup.doneTaskCount + rollup.cancelledTaskCount)
+                        |> Maybe.map .doneTaskCount
                         |> Maybe.withDefault 0
 
                 dependencyBlockedTasks =
@@ -1799,13 +1799,13 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
 
                 summaryParts =
                     List.filterMap identity
-                        [ countLabel remainingSubprojects closedSubprojects "subproject" "subprojects"
+                        [ countLabel "closed" remainingSubprojects closedSubprojects "subproject" "subprojects"
                         , case maybeProjectRollup of
                             Nothing ->
                                 Just "Task counts unavailable"
 
                             Just _ ->
-                                countLabel remainingTasks closedTasks "task" "tasks" |> Maybe.withDefault "0 tasks" |> Just
+                                countLabel "done" remainingTasks doneTasks "task" "tasks" |> Maybe.withDefault "0 tasks" |> Just
                         , if dependencyBlockedTasks > 0 then
                             Just (countPhrase dependencyBlockedTasks "blocked task" "blocked tasks")
 
@@ -2382,18 +2382,18 @@ viewTaskCardBody descendants projection showProject model task =
             remainingSubtasks =
                 case maybeRollup of
                     Just rollup -> rollup.openSubtaskCount
-                    Nothing -> if descendants then childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length else 0
+                    Nothing -> childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
 
-            closedSubtasks =
+            doneSubtasks =
                 case maybeRollup of
-                    Just rollup -> rollup.doneSubtaskCount + rollup.cancelledSubtaskCount
-                    Nothing -> if descendants then List.length childTasks - remainingSubtasks else 0
+                    Just rollup -> rollup.doneSubtaskCount
+                    Nothing -> childTasks |> List.filter (\t -> t.status == Api.Done) |> List.length
 
             depCount =
                 task.dependencyCount
 
             subtaskLabel =
-                countLabel remainingSubtasks closedSubtasks "subtask" "subtasks"
+                countLabel "done" remainingSubtasks doneSubtasks "subtask" "subtasks"
 
             summaryParts =
                 List.filterMap identity
@@ -3275,20 +3275,20 @@ taskTreePassesFilters task allTasks taskFilter =
             (List.filter (\t -> t.parentId == Just task.id) allTasks)
 
 
-countLabel : Int -> Int -> String -> String -> Maybe String
-countLabel remaining closed noun pluralNoun =
+countLabel : String -> Int -> Int -> String -> String -> Maybe String
+countLabel completedWord remaining completed noun pluralNoun =
     let
         total =
-            remaining + closed
+            remaining + completed
     in
     if total == 0 then
         Nothing
 
-    else if closed == 0 then
+    else if completed == 0 then
         Just (String.fromInt total ++ " " ++ (if total > 1 then pluralNoun else noun))
 
     else if remaining == 0 then
-        Just (String.fromInt total ++ " " ++ (if total > 1 then pluralNoun else noun) ++ " (all closed)")
+        Just (String.fromInt total ++ " " ++ (if total > 1 then pluralNoun else noun) ++ " (all " ++ completedWord ++ ")")
 
     else
         Just (String.fromInt remaining ++ "/" ++ String.fromInt total ++ " " ++ pluralNoun ++ " remaining")

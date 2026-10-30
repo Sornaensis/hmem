@@ -100,6 +100,12 @@ feedback, and an unavailable state with Retry when a read fails. Canonical plann
 changes and resynchronization refresh the totals through one coalesced physical
 request; workspace, session and audience changes retire old responses.
 
+Card planning totals use canonical open + done counts, excluding cancelled while
+retaining the raw rollup counters. Readiness takes precedence over cached navigation
+summaries; the loaded-child fallback counts Done explicitly. Task totals say all
+done, while completed/archived subprojects retain all closed wording. These labels
+do not change lifecycle, deletion-impact or filter membership counts.
+
 Subject Tree path cards use decorative parent and sibling connectors derived from
 the logical preorder. Incomplete sibling lists keep a dashed continuation.
 Connector intervals stop within their owning tree across viewport gaps; deep

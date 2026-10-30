@@ -49,6 +49,13 @@ async function setup() {
 }
 
 async function history(h, kind, id) {
+  if (kind === 'task') {
+    for (const [ancestorKind, ancestorId] of [['project', 'root-project'], ...(id === 'child' ? [['task', 'parent']] : [])]) {
+      await h.scrollTo(ancestorKind + ':' + ancestorId)
+      const toggle = h.page.locator('#entity-' + ancestorId + ' .tree-toggle').first()
+      if ((await toggle.textContent()).trim() === '▶') { await toggle.click(); await h.idle() }
+    }
+  }
   await h.scrollTo(kind + ':' + id)
   const card = h.page.locator('#entity-' + id)
   await card.locator('.btn-extras-toggle').first().click()
@@ -310,7 +317,7 @@ test('production current errors preserve historical comparison, reject mismatche
     await h.page.waitForFunction(() => document.querySelector('#audit-diff-dialog .audit-diff-content')?.textContent.includes('Old specification'))
     await close(h)
     h.events[1].old_values.description = null; h.events[1].new_values.description = ''
-    await h.page.reload(); await h.page.locator('#entity-parent').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent')
+    await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent')
     assert.match(await dialog(h).locator('.audit-diff-endpoints').innerText(), /Explicit null.*Empty string/s)
     assert.doesNotMatch(await content(h).innerText(), /No differences/)
   } finally { await h.close() }
@@ -324,12 +331,12 @@ test('production navigation/workspace and authorization retirement prevent stale
     await dialog(h).getByRole('button', { name: 'Against current', exact: true }).click(); await held.arrived
     await h.page.evaluate(() => { location.hash = 'tab=projects&focus=task:child' })
     await dialog(h).waitFor({ state: 'detached' }); held.release(); await h.idle()
-    await h.page.goto(h.origin + '/workspace/' + h.f.workspace.id); await h.page.locator('#entity-parent').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent', 'title')
+    await h.page.goto(h.origin + '/workspace/' + h.f.workspace.id); await h.page.locator('#entity-root-project').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent', 'title')
     const oldWorkspace = h.control('task', 'parent', { hold: true })
     await dialog(h).getByRole('button', { name: 'Against current', exact: true }).click(); await oldWorkspace.arrived
     await h.page.evaluate(id => { history.pushState({}, '', '/workspace/' + id); dispatchEvent(new PopStateEvent('popstate')) }, h.second.workspace.id)
     await dialog(h).waitFor({ state: 'detached' }); oldWorkspace.release(); await h.idle()
-    await h.page.goto(h.origin + '/workspace/' + h.f.workspace.id); await h.page.locator('#entity-parent').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent', 'title')
+    await h.page.goto(h.origin + '/workspace/' + h.f.workspace.id); await h.page.locator('#entity-root-project').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent', 'title')
     const retired = h.control('task', 'parent', { hold: true })
     await dialog(h).getByRole('button', { name: 'Against current', exact: true }).click(); await retired.arrived
     h.revoke()
@@ -363,7 +370,7 @@ test('production equal/typed/missing/malformed endpoints and complete large-inpu
     for (const [before, after, endpoints, output] of cases) {
       h.events[1].old_values.description = before
       h.events[1].new_values.description = after
-      await h.page.reload(); await h.page.locator('#entity-parent').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent')
+      await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent')
       assert.match(await dialog(h).locator('.audit-diff-endpoints').innerText(), endpoints)
       assert.match(await content(h).innerText(), output)
       if (before?.includes?.('COMPLETE OLD END')) {

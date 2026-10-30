@@ -76,6 +76,8 @@ test('blocked task menus show all statuses with only blocked and cancelled enabl
     try {
       await h.page.addInitScript(id => localStorage.setItem('hmem-ws-' + id, JSON.stringify({ filterTaskStatuses:['todo', 'in_progress', 'blocked', 'done', 'cancelled'] })), data.workspace.id)
       await h.start(); await h.idle()
+      await h.page.locator('#entity-root-project .tree-toggle').click(); await h.idle()
+      if (inherited) { await h.page.locator('#entity-child-project .tree-toggle').click(); await h.idle() }
       for (const id of ['cancel-work', 'resume-work']) {
         await h.scrollTo('task:' + id)
         assert.equal(await control(id).inputValue(), 'blocked')
@@ -112,7 +114,12 @@ test('two independent clients converge after canonical pause/resume, including c
   const oldBranch = b.gate(r => r.kind === 'project' && r.parent === 'hidden-project', { hold:true })
   let oldNext, oldReady
   try {
-    await a.start(); await b.start(); await b.bounded(oldBranch.arrived, 10000, 'Hidden branch arrival')
+    await a.start(); await b.start(); await a.idle(); await b.idle()
+    await a.page.locator('#entity-root-project .tree-toggle').click(); await a.idle()
+    await b.page.locator('#entity-root-project .tree-toggle').click(); await b.idle()
+    await b.scrollTo('project:hidden-project')
+    await b.page.locator('#entity-hidden-project .tree-toggle').first().click()
+    await b.bounded(oldBranch.arrived, 10000, 'Hidden branch arrival')
     await b.page.locator('#entity-hidden-project .tree-toggle').first().click(); oldBranch.release()
     await a.idle(); await b.idle()
     assert.equal(await b.page.locator('#entity-hidden-work').count(), 0)

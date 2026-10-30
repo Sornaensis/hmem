@@ -14,7 +14,7 @@ test('production hierarchy orders blocked parents with running children and refr
   const h = await openHierarchy(fixture)
   try {
     await h.start(); await h.idle()
-    await h.page.locator('#entity-parent .tree-toggle').click(); await h.idle()
+    assert.equal((await h.page.locator('#entity-parent .tree-toggle').textContent()).trim(), '▶')
     const order = () => h.page.locator('[data-hierarchy-key^="task:"]').evaluateAll(rows => rows.map(row => row.dataset.hierarchyKey))
     assert.deepEqual(await order(), ['task:running', 'task:parent', 'task:todo'])
     assert.equal(await h.page.locator('#entity-parent .status-select').inputValue(), 'blocked')

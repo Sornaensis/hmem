@@ -41,6 +41,11 @@ function authority(data) {
 
 const visualDirectory = process.env.HMEM_MOVE_VISUAL_DIR || '.task-scratch/move-dialog'
 const dialog = h => h.page.locator('#move-dialog')
+async function expand(h,kind,id) {
+  await h.scrollTo(kind+':'+id)
+  const toggle=h.page.locator('#entity-'+id+' .tree-toggle').first()
+  if ((await toggle.textContent()).trim()==='▶') { await toggle.click(); await h.idle() }
+}
 async function open(h,kind,id) {
   await h.scrollTo(kind+':'+id)
   await h.page.locator('#move-origin-'+kind+'-'+id).click()
@@ -57,11 +62,12 @@ function frame(f,kind,id,eventId,requestId='foreign-request',invalidations=[{kin
 test('production task move refreshes live subtasks and root placement without unrelated field changes', {timeout:45000}, async()=>{
   const f=fixture(), a=authority(f), h=await openHierarchy(f,[],a)
   try {
-    await h.start(); await h.idle(); await h.scrollTo('task:parent')
+    await h.start(); await h.idle(); await expand(h,'project','root-project'); await expand(h,'task','parent')
     await open(h,'task','parent')
     await choose(h,'Destination'); await save(h); await h.idle()
     assert.equal(await dialog(h).count(),0)
     assert.equal(f.tasks.find(t=>t.id==='child').project_id,'destination')
+    await expand(h,'project','destination')
     await h.scrollTo('task:child')
     const childRow=h.page.locator('#entity-child')
     assert.equal(await childRow.count(),1)
@@ -97,7 +103,7 @@ test('subtask detach is explained and only placement fields are submitted', {tim
 test('project move carries subtree and can return to workspace root; current/self/subtree choices disabled', {timeout:45000}, async()=>{
   const f=fixture(), h=await openHierarchy(f,[],authority(f))
   try {
-    await h.start(); await h.idle(); await open(h,'project','root-project')
+    await h.start(); await h.idle(); await expand(h,'project','root-project'); await open(h,'project','root-project')
     assert.equal(await dialog(h).getByRole('button',{name:'Workspace root',exact:true}).isDisabled(),true)
     assert.equal(await dialog(h).locator('.move-project-choice').filter({hasText:'root-project'}).isDisabled(),true)
     assert.equal(await dialog(h).getByRole('button',{name:'Collapse root-project',exact:true}).count(),1)
@@ -105,6 +111,7 @@ test('project move carries subtree and can return to workspace root; current/sel
     await choose(h,'Destination'); await save(h); await h.idle()
     assert.equal(f.projects.find(p=>p.id==='root-project').parent_id,'destination')
     assert.equal(f.projects.find(p=>p.id==='nested').parent_id,'root-project')
+    await expand(h,'project','destination')
     await h.scrollTo('project:root-project'); await open(h,'project','root-project')
     await choose(h,'Workspace root')
     if (process.env.HMEM_MOVE_VISUALS === '1') {
@@ -134,7 +141,7 @@ test('project move carries subtree and can return to workspace root; current/sel
 test('search discovers unloaded descendants and description matches, statuses/main state remain independent; keyboard and responsive layout', {timeout:45000}, async()=>{
   const f=fixture(), h=await openHierarchy(f,[],authority(f))
   try {
-    await h.start(); await h.idle()
+    await h.start(); await h.idle(); await expand(h,'project','root-project')
     const mainBefore=await h.page.locator('#entity-root-project .tree-toggle').first().innerText()
     await open(h,'task','parent')
     assert.equal(await h.page.locator('#move-search').evaluate(e=>document.activeElement===e),true)
@@ -202,7 +209,7 @@ test('continuous bounded picker scrolling and retry preserve incomplete diagnost
 test('server refusal retains selection; duplicate submission and closed-dialog acknowledgement are fenced', {timeout:45000}, async()=>{
   const f=fixture(), a=authority(f), h=await openHierarchy(f,[],a)
   try {
-    await h.start(); await h.idle(); await open(h,'task','parent'); await choose(h,'Destination')
+    await h.start(); await h.idle(); await expand(h,'project','root-project'); await open(h,'task','parent'); await choose(h,'Destination')
     a.fail=true
     const refusal=h.gate(r=>r.method==='PUT',{error:409})
     await save(h); await refusal.arrived; await h.idle()
@@ -224,7 +231,7 @@ test('server refusal retains selection; duplicate submission and closed-dialog a
 test('foreign canonical task placement retires pending authority; permission loss retires dialog and header actions', {timeout:45000}, async()=>{
   const f=fixture(), h=await openHierarchy(f,[],authority(f))
   try {
-    await h.start(); await h.idle(); await open(h,'task','parent'); await choose(h,'Destination')
+    await h.start(); await h.idle(); await expand(h,'project','root-project'); await open(h,'task','parent'); await choose(h,'Destination')
     const held=h.gate(r=>r.method==='PUT',{hold:true})
     await save(h); await h.bounded(held.arrived,10000,'held stale mutation')
     f.tasks.find(t=>t.id==='parent').project_id=null
@@ -244,7 +251,7 @@ test('foreign canonical task placement retires pending authority; permission los
 test('own project event before acknowledgement preserves exact saving authority', {timeout:30000}, async()=>{
   const f=fixture(), h=await openHierarchy(f,[],authority(f))
   try {
-    await h.start(); await h.idle(); await open(h,'project','root-project'); await choose(h,'Destination')
+    await h.start(); await h.idle(); await expand(h,'project','root-project'); await open(h,'project','root-project'); await choose(h,'Destination')
     const held=h.gate(r=>r.method==='PUT',{hold:true})
     await save(h); const receipt=await h.bounded(held.arrived,10000,'project acknowledgement')
     await h.page.evaluate(frames=>window.pushHierarchyFrames(frames),[frame(f,'project','root-project','own-move',receipt.update.request_id)])
@@ -252,6 +259,7 @@ test('own project event before acknowledgement preserves exact saving authority'
     assert.equal(await dialog(h).count(),1)
     held.release(); await h.idle()
     assert.equal(await dialog(h).count(),0)
+    await expand(h,'project','destination')
     await h.scrollTo('project:root-project'); await open(h,'project','root-project')
     assert.match(await dialog(h).locator('.move-current').innerText(),/Destination/)
   } finally { await h.close() }
@@ -392,7 +400,7 @@ for (const newParentFirst of [true,false]) {
 test('all status filters off retain root confirmation after a live project refresh', {timeout:45000}, async()=>{
   const f=fixture(), p=f.projects[0], h=await openHierarchy(f,[],authority(f))
   try {
-    await h.start(); await h.idle(); await open(h,'task','parent')
+    await h.start(); await h.idle(); await expand(h,'project','root-project'); await open(h,'task','parent')
     await dialog(h).getByRole('button',{name:'active',exact:true}).click(); await h.idle()
     await dialog(h).getByRole('button',{name:'paused',exact:true}).click(); await h.idle()
     assert.equal(await dialog(h).locator('.filter-pill-active').count(),0)

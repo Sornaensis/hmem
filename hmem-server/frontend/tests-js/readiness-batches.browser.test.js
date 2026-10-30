@@ -26,7 +26,12 @@ test('dependency ancestors refresh through bounded readiness summaries without o
   ]
   const h = await openHierarchy(fixture)
   try {
-    await h.start(); await h.scrollTo('task:child'); await h.idle()
+    await h.start(); await h.idle()
+    for (const [kind, id] of [['project', 'root-project'], ['project', 'nested-project'], ['task', 'parent']]) {
+      await h.scrollTo(kind + ':' + id)
+      await h.page.locator('#entity-' + id + ' .tree-toggle').first().click(); await h.idle()
+    }
+    await h.scrollTo('task:child'); await h.idle()
     const mark = h.requests.length
     for (const action of ['created', 'deleted']) {
       fixture.dependencies = action === 'created' ? [{ task_id: 'child', depends_on_id: 'prerequisite' }] : []

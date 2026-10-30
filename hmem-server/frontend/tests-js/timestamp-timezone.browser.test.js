@@ -92,6 +92,7 @@ for (const [zone, expected, next, live, rangeStart, rangeEnd] of [
   const h = await openTimezone(zone)
   try {
     await h.start(); await h.idle()
+    await h.page.locator('#entity-root-project .tree-toggle').click(); await h.idle()
     await textEquals(h.page, '.workspace-details .workspace-detail:nth-last-child(2) .workspace-detail-value', expected)
     await textIncludes(h.page, '#entity-root-project .card-meta-group', 'Created: ' + expected)
     await textIncludes(h.page, '#entity-timezone-task .card-meta-group', 'Updated: ' + expected)
@@ -190,6 +191,7 @@ test('real formatting replies are presentation only and reload adopts a changed 
   })
   try {
     await h.start(); await h.idle()
+    await h.page.locator('#entity-root-project .tree-toggle').click(); await h.idle()
     await h.page.waitForFunction(() => window.timestampReplyJobs.length > 0)
     assert.ok(await h.page.evaluate(() => window.timestampRuntimeRepliesPassed > 0), 'Unrelated discovery runtime replies must pass while formatting is held')
     assert.ok(await h.page.evaluate(() => window.timestampReplyJobs.every(callback => String(callback).includes('timestampsFormatted'))), 'Only actual timestamp replies are held')

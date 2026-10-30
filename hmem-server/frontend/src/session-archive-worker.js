@@ -24,14 +24,15 @@ export function archiveChunkOffset(base,local) {
   return base+BigInt(local)
 }
 export function createArchiveFramer() {
-  let offset=0n,start=0n,size=0
+  let offset=0n,start=0n,size=0,piVersion=null
   const pending=new Uint8Array(MAX_RECORD_BYTES+2)
   function record(end,delimiter) {
     const length=size-(delimiter==='\r\n'?1:0)
     if(length>MAX_RECORD_BYTES)throw Error('record_limit')
     const raw=utf8.decode(pending.subarray(0,length))
     let value;try{value=JSON.parse(raw)}catch{throw Error('invalid_json_record')}
-    const row=presentation(value,raw,{archive:true})
+    if(value?.type==='session')piVersion=Number.isInteger(value.version)?value.version:'invalid'
+    const row=presentation(value,raw,{archive:true,piVersion})
     Object.assign(row,{offset:start.toString(),presentationOffset:start.toString(),end:end.toString(),delimiter})
     size=0;start=end;return row
   }
@@ -101,7 +102,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
   }
   function writePiece(row,index,block) {
     return store.put('pieces',{key:pieceKey(row.presentationOffset,index),offset:row.offset,end:row.end,delimiter:row.delimiter,index,kind:block.kind,
-      label:block.label || '',role:row.role,time:row.time,group:row.activityAnchors[index] || ''})
+      label:block.label || '',role:row.role,time:row.time,group:row.activityAnchors[index] || '',...(Object.hasOwn(row,'piVersion')?{piVersion:row.piVersion}:{})})
   }
   function afterGroup(row,transition,blocks,at) {
     current()
@@ -132,7 +133,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
     }
     const bytes=store.readRaw(piece.offset,piece.end)
     const length=bytes.length-piece.delimiter.length
-    const raw=utf8.decode(bytes.subarray(0,length)),value=JSON.parse(raw),row=presentation(value,raw,{archive:true})
+    const raw=utf8.decode(bytes.subarray(0,length)),value=JSON.parse(raw),row=presentation(value,raw,{archive:true,piVersion:piece.piVersion ?? null})
     const block=row.type==='conversation'?JSON.parse(row.text)[piece.index]:{kind:'text',text:row.text,label:''}
     if(!block || block.kind!==piece.kind)throw Error('index_mismatch')
     if(['tool','result'].includes(block.kind) || block.pretty) {

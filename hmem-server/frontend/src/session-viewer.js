@@ -22,6 +22,30 @@ const short = value => string(value).replace(/^mcp__/, '').replaceAll('__', ' ·
 const archiveBlocks=Symbol('archiveBlocks'),archiveVisible=Symbol('archiveVisible')
 const blocksFor=row=>row[archiveBlocks] || JSON.parse(row.text)
 
+// Unknown marker-only metadata has no conversational content. Inspect a finite
+// number of values; ambiguous large/deep structures get a notice, never a dump.
+function hasMeaningfulContent(value) {
+  const pending=[{value,depth:0}],discriminators=new Set(['type','id','parentid','sessionid','messageid','toolcallid','timestamp','time','version'])
+  let budget=256
+  while(pending.length) {
+    if(--budget<0)return true
+    const {value,depth}=pending.pop()
+    if(typeof value==='string'){if(value.trim())return true;continue}
+    if(typeof value==='number')return true
+    if(!value || typeof value!=='object')continue
+    if(depth===16)return true
+    if(Array.isArray(value)){if(value.length)return true;continue}
+    const keys=Object.keys(value)
+    if(keys.length>budget)return true
+    for(const key of keys) {
+      if(discriminators.has(key.toLowerCase()))continue
+      if(/(?:content|message|text|output|result|summary|error|warning|answer)$|^(?:arguments|input|toolrequests|thinking|reasoningtext)$/i.test(key))return true
+      pending.push({value:value[key],depth:depth+1})
+    }
+  }
+  return false
+}
+
 export function toolPayload(value, field = 'input') {
   let parsed = value
   if (typeof value === 'string') { try { parsed = JSON.parse(value) } catch { parsed = {[field]:value} } }
@@ -45,10 +69,13 @@ export function payloadTokens(text) {
 }
 
 // Presentation never changes the stored record or its byte boundaries.
-export function presentation(value, raw, {archive=false}={}) {
+export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
   const time = string(object.timestamp || object.time)
   const block = (kind, text, label = '') => ({kind, text:string(text), label:string(label).slice(0,256)})
+  // A bounded indication preserves deliberate metadata hiding without making
+  // unsupported meaningful records look like an empty conversation.
+  const unsupported = type => block('text',`Unsupported transcript content (${short(type) || 'unrecognized record'}). Original evidence is preserved.`)
   const tool = (kind, value, name = '') => {
     const field=kind === 'result'?'output':'input'
     let payload
@@ -61,13 +88,14 @@ export function presentation(value, raw, {archive=false}={}) {
     return {...block(kind,payload.text,`${kind === 'result'?'Result':'Call'}${name?' · '+short(name):''}${first?' · '+short(first.replace(/,$/,'')):''}`),tokens:payload.tokens}
   }
   const contentBlocks = content => (Array.isArray(content) ? content : [{type:typeof content === 'string'?'text':'unknown',text:content}]).flatMap(part => {
-    if (!part || typeof part !== 'object' || Array.isArray(part)) return [block('unknown',archive?'':printable(part),'Content')]
-    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [block('unknown',archive?'':printable(part),'Content')]
-    if (['redacted_thinking','encrypted_thinking'].includes(part.type) || (['thinking','reasoning'].includes(part.type) && (part.encrypted_content || part.encrypted))) return [block('encrypted','','Thinking...')]
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return [unsupported('content block')]
+    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [unsupported(part.type)]
+    if (['redacted_thinking','encrypted_thinking'].includes(part.type) || (['thinking','reasoning'].includes(part.type) && (part.encrypted_content || part.encrypted || part.redacted===true))) return [block('encrypted','','Thinking...')]
     if (['thinking','reasoning','summary_text'].includes(part.type)) return [block('thinking',part.thinking || part.text,'Thinking')]
     if (part.type === 'tool_use') return [tool('tool',part.input,part.name)]
+    if (part.type === 'toolCall') return [tool('tool',part.argumentsError?{notice:'Malformed tool arguments',error:part.argumentsError}:part.arguments,`${short(part.name)} · ${short(part.id)}`)]
     if (part.type === 'tool_result') return [tool('result',part.content,part.is_error ? 'error' : part.tool_use_id)]
-    return [block('unknown',archive?'':printable(part),'Attachment / content')]
+    return [unsupported(part.type || 'attachment / content')]
   })
   const conversation = (role,blocks,extra={}) => {
     const row={type:'conversation',role:string(role).slice(0,256)||'assistant',time,text:JSON.stringify(blocks),...extra}
@@ -76,6 +104,67 @@ export function presentation(value, raw, {archive=false}={}) {
     if(archive)Object.defineProperty(row,archiveBlocks,{value:blocks})
     return row
   }
+  const hidden=()=>({type:'unknown',role:'',time,text:''})
+  if(object.ephemeral===true || ['assistant.message_delta','assistant.reasoning_delta','assistant.streaming_delta','tool.execution_partial_result','tool.execution_progress'].includes(object.type))return hidden()
+  if(object.type==='session')return object.version===3?hidden():conversation('notice',[unsupported(`pi session version ${short(String(object.version))}`)],{piVersion:Number.isInteger(object.version)?object.version:'invalid'})
+  const piTypes=['message','compaction','branch_summary','custom_message','model_change','thinking_level_change','custom','label','context_edit','session_info','usage']
+  const piEntry=typeof object.id==='string' && Object.hasOwn(object,'parentId') && (piTypes.includes(object.type) || (!object.data && !string(object.type).includes('.')))
+  if(piEntry || (object.type==='message' && object.message)) {
+    if(['model_change','thinking_level_change','custom','label','session_info','usage'].includes(object.type))return hidden()
+    if(object.type==='custom_message' && object.display!==true)return hidden()
+    const extra={piVersion}
+    const native=(role,blocks)=>{
+      const relation=object.parentId===null?`root ${short(object.id)}`:`entry ${short(object.id)} → parent ${short(object.parentId) || 'unavailable'}`
+      const context={...block('text',`pi history: ${relation}. Source order may include alternate branches; ancestry is not expanded and parent context may be outside this window.${piVersion===null?' Schema version is not established in this window.':''}`),nativeContext:true}
+      return conversation(role,[context,...blocks],extra)
+    }
+    if(piVersion!==null && piVersion!==3)return native('notice',[unsupported(`pi session version ${short(String(piVersion))}`)])
+    if(!piEntry || (object.parentId!==null && typeof object.parentId!=='string'))return native('notice',[unsupported('pi entry relationship')])
+    if(object.type==='message') {
+      const message=object.message || {},role=message.role
+      if(['user','assistant','system'].includes(role))return native(role,contentBlocks(message.content))
+      if(role==='toolResult')return native('tool',[tool('result',message.content,`${message.isError?'error · ':''}${short(message.toolName)} · ${short(message.toolCallId)}`)])
+      if(role==='custom')return message.display===true?native('assistant',contentBlocks(message.content)):hidden()
+      if(['branchSummary','compactionSummary'].includes(role))return native('notice',[block('text',`${role==='branchSummary'?'Branch summary':'Compaction summary'}: ${string(message.summary)}`)])
+      if(role==='bashExecution')return native('tool',[tool('tool',{command:message.command},'bash'),tool('result',{output:message.output,exitCode:message.exitCode,cancelled:message.cancelled,truncated:message.truncated},'bash')])
+      return native('notice',[unsupported(`pi message role ${short(role)}`)])
+    }
+    if(object.type==='custom_message')return native('assistant',contentBlocks(object.content))
+    if(['compaction','branch_summary'].includes(object.type))return native('notice',[block('text',`${object.type==='compaction'?'Compaction summary':'Branch summary'}${object.type==='compaction'?' · first kept '+short(object.firstKeptEntryId):' · from '+short(object.fromId)}: ${string(object.summary)}`)])
+    if(object.type==='context_edit')return native('notice',[block('text','Native context edit recorded. This source-order history preserves the original entries; the edit is not applied to the displayed transcript.')])
+    return native('notice',[unsupported(`pi entry ${short(object.type)}`)])
+  }
+  // Copilot persisted session events use data, not a Codex payload envelope.
+  // Requests and execution starts are distinct source events, explicitly named
+  // and correlated rather than guessing that every request was executed.
+  if (object.data && typeof object.data === 'object' && !Array.isArray(object.data)) {
+    const data=object.data
+    const nativeTool=(kind,value,name,id,phase)=>{
+      const result=tool(kind,value,name)
+      result.label=`${phase}${name?' · '+short(name):''}${id?' · '+short(id):''}`.slice(0,256)
+      return result
+    }
+    if(object.type==='user.message') {
+      const blocks=typeof data.content==='string'?[block('text',data.content)]:[unsupported(object.type)]
+      if(Array.isArray(data.attachments) && data.attachments.length)blocks.push(unsupported(`Copilot attachments · ${data.attachments.length}`))
+      else if(data.attachments && !Array.isArray(data.attachments))blocks.push(unsupported('Copilot attachments'))
+      return conversation('user',blocks)
+    }
+    if(object.type==='assistant.message') {
+      const blocks=[]
+      if(typeof data.reasoningText==='string' && data.reasoningText)blocks.push(block('thinking',data.reasoningText,'Message thinking'))
+      if(typeof data.content==='string' && data.content)blocks.push(block('text',data.content))
+      if(Array.isArray(data.toolRequests))for(const request of data.toolRequests) {
+        if(request && typeof request==='object')blocks.push(nativeTool('tool',request.arguments,request.name,request.toolCallId,'Request'))
+        else blocks.push(unsupported('tool request'))
+      }
+      return conversation('assistant',blocks.length?blocks:[unsupported(object.type)])
+    }
+    if(object.type==='tool.execution_start')return conversation('assistant',[nativeTool('tool',data.arguments,data.toolName,data.toolCallId,'Execution')])
+    if(object.type==='tool.execution_complete')return conversation('tool',[nativeTool('result',data.success===false?{error:data.error ?? data.result ?? 'No error detail recorded'}:data.result ?? {notice:'No result recorded'},'',data.toolCallId,data.success===false?'Error result':'Result')])
+    if(object.type==='assistant.reasoning')return conversation('assistant',typeof data.content==='string'?[block('thinking',data.content,`Reasoning${data.reasoningId?' · '+short(data.reasoningId):''}`)]:[unsupported(object.type)])
+  }
+  if(['user.message','assistant.message','assistant.reasoning','tool.execution_start','tool.execution_complete'].includes(object.type))return conversation('notice',[unsupported(object.type)])
   if (object.type === 'response_item') {
     const item=object.payload || {}
     if(item.type === 'message') return conversation(item.role || 'assistant',contentBlocks(item.content))
@@ -94,6 +183,14 @@ export function presentation(value, raw, {archive=false}={}) {
     return conversation(payload.type==='user_message'?'user':'assistant',[block(thinking?'thinking':'text',payload.message || payload.text)],{eventEnvelope:true})
   }
   if(typeof object.text === 'string' || typeof object.content === 'string') return {type:string(object.type),role:string(object.role),time,text:typeof object.text === 'string' ? object.text : object.content}
+  const metadata=['metadata','session_meta','turn_context','session.start','session.shutdown','session.end','session.idle','session.usage_info','session.model_change','session.mode_changed','session.title_changed','assistant.turn_start','assistant.turn_end','assistant.usage',
+    'session.resume','session.context_changed','session.info','session.plan_changed','session.workspace_file_changed','session.compaction_start','pending_messages.modified','command.queued','permission.requested','permission.completed','hook.start','skill.invoked','subagent.started','subagent.completed','subagent.selected','subagent.deselected','exit_plan_mode.completed']
+  // Keep failure/control changes that could explain missing output visible.
+  if(['hook.end','command.completed','permission.completed'].includes(object.type) && object.data?.success===false)return conversation('notice',[block('text',`Transcript operation failed (${short(object.type)}). Original evidence is preserved.`)])
+  if(['hook.end','command.completed'].includes(object.type) && !object.data?.error && object.data?.success!==false)return hidden()
+  const codexMetadata=object.type==='event_msg' && ['token_count','turn_aborted','task_started','task_complete'].includes(object.payload?.type)
+  const envelope=typeof object.type==='string' || ['payload','data','message','content'].some(key=>Object.hasOwn(object,key))
+  if((!metadata.includes(object.type) || object.data?.error || object.data?.success===false) && !codexMetadata && envelope && hasMeaningfulContent(object))return conversation('notice',[unsupported(object.type)])
   return {type:'unknown',role:'',time,text:''}
 }
 
@@ -192,6 +289,7 @@ export function semanticTransition(row, previous, anchor) {
   if (!row.activityAnchors) {
     row.activityAnchors = {}
     for (const [index,part] of visible) {
+      if (part.nativeContext) continue
       if (part.kind === 'text') anchor = null
       else {
         anchor ??= `${row.presentationOffset}:${index}`
@@ -199,7 +297,7 @@ export function semanticTransition(row, previous, anchor) {
       }
     }
   }
-  row.category = visible.some(([,part])=>part.kind === 'text') ? 'message' : visible.length ? 'activity' : null
+  row.category = visible.some(([,part])=>part.kind === 'text' && !part.nativeContext) ? 'message' : visible.length ? 'activity' : null
   return {row, previous:row.type === 'conversation' ? row : null, anchor, paired,
     retired:paired && previous.eventEnvelope ? previous.offset : null,
     hidden:row.eventEnvelope && row.pairedOffset !== undefined}
@@ -208,7 +306,7 @@ export function semanticTransition(row, previous, anchor) {
 export function createRecordFramer(startOffset = 0) {
   if (!Number.isSafeInteger(startOffset) || startOffset < 0) throw new Error('invalid_offset')
   let through = startOffset, start = startOffset, skipping = startOffset !== 0
-  let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput, previousRecord, activityAnchor = null
+  let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput, previousRecord, activityAnchor = null,piVersion=null
   const leadingNotice = skipping ? 'Window begins inside a possible record; the leading fragment is omitted.' : ''
   let notice = leadingNotice
   function append(bytes) {
@@ -227,7 +325,8 @@ export function createRecordFramer(startOffset = 0) {
     let value
     try { value = JSON.parse(raw) } catch { if (final) { notice = 'Incomplete record at this finite window boundary.'; return }; throw new Error('invalid_json_record') }
     notice = leadingNotice
-    const row = { offset:start, presentationOffset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw) }
+    if(value?.type==='session')piVersion=Number.isInteger(value.version)?value.version:'invalid'
+    const row = { offset:start, presentationOffset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw,{piVersion}) }
     const replacement = previousRecord?.offset === start ? previousRecord : null
     if (replacement && (replacement.raw === raw || (replacement.type === row.type && replacement.role === row.role && replacement.time === row.time && replacement.text === row.text))) {
       row.presentationOffset = replacement.presentationOffset

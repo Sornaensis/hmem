@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto'
 import {createArchiveFramer,archiveChunkOffset,createArchiveEngine,gzipPipeline} from '../src/session-archive-worker.js'
 import {createRecordFramer,semanticTransition,prettyPayloadSlice,presentation,visibleBlocks,payloadTokens} from '../src/session-viewer.js'
 import {createSealedViewer} from '../src/session-save.js'
+import {copilotRecords,piRecords} from './support/native-session-fixtures.mjs'
 
 const phaseFixtureETag='"fixture-authority-bound-archive"'
 // Fake transports still execute both production bridge incarnations. Disk and
@@ -211,6 +212,52 @@ async function indexed(values,action){
   try{await engine.start({name:'test',stamp:{workspace,session},manifest:manifest(raw,gzip)});for(let at=0;at<gzip.length;at+=65536)await engine.chunk(gzip.subarray(at,at+65536));await engine.finish();await action(engine,store)}
   finally{await engine.cleanup();globalThis.Worker=prior}
 }
+
+test('native Copilot occurrences index and hydrate with the same visible blocks and exact raw source as live framing',async()=>{
+ const values=[...copilotRecords,{type:'future.output',data:{content:{unrecognized:true}}}],raw=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')+'\n')
+ const live=createRecordFramer().push(0,raw,true).rows
+ await indexed(values,async(engine,store)=>{
+  assert.deepEqual(store.readRaw('0',String(raw.length)),raw)
+  const page=await engine.page(),expected=live.flatMap(row=>visibleBlocks(row).map(([index,block])=>({offset:String(row.offset),end:String(row.end),index,kind:block.kind,label:block.label,block})))
+  assert.equal(page.rows.length,expected.length)
+  for(let at=0;at<expected.length;at++){
+   const piece=page.rows[at],want=expected[at]
+   for(const field of ['offset','end','index','kind','label'])assert.equal(piece[field],want[field])
+   const hydrated=await engine.hydrate(piece.key,0)
+   assert.equal(hydrated.body.more,false)
+   if(['tool','result'].includes(want.kind))assert.deepEqual(JSON.parse(hydrated.body.text),JSON.parse(want.block.text))
+   else assert.equal(hydrated.body.text,want.block.text)
+  }
+  assert.equal(store.tables.records.size,values.length);assert.equal(page.more,false)
+ })
+})
+
+test('pi version context, parent history and hidden display flags agree in live, archive pages and body rehydration',async()=>{
+ for(const values of [piRecords,[{type:'session',version:99},piRecords[1]],piRecords.slice(5)]){
+  const raw=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')+'\n'),live=createRecordFramer().push(0,raw,true).rows
+  await indexed(values,async(engine,store)=>{
+   assert.deepEqual(store.readRaw('0',String(raw.length)),raw)
+   const expected=live.flatMap(row=>visibleBlocks(row).map(([index,block])=>({row,index,block}))),page=await engine.page()
+   assert.equal(page.rows.length,expected.length)
+   for(let at=0;at<expected.length;at++){
+    const piece=page.rows[at],{row,index,block}=expected[at]
+    assert.equal(piece.offset,String(row.offset));assert.equal(piece.index,index);assert.equal(piece.kind,block.kind);assert.equal(piece.label,block.label)
+    const result=await engine.hydrate(piece.key,0)
+    if(['tool','result'].includes(block.kind))assert.deepEqual(JSON.parse(result.body.text),JSON.parse(block.text))
+    else assert.equal(result.body.text,block.text)
+   }
+   assert.equal(page.more,false)
+  })
+ }
+})
+
+test('sealed known failure-without-error controls hydrate as explicit failures and successful counterparts remain hidden',async()=>{
+ const values=['hook.end','command.completed','permission.completed'].flatMap(type=>[{type,data:{success:true}},{type,data:{success:false}}])
+ await indexed(values,async(engine,store)=>{
+  const page=await engine.page();assert.equal(page.rows.length,3);assert.equal(store.tables.records.size,6)
+  for(let at=0;at<page.rows.length;at++){const result=await engine.hydrate(page.rows[at].key,0);assert.match(result.body.text,/Transcript operation failed/);assert.ok(result.body.text.includes(values[at*2+1].type));assert.equal(result.body.more,false)}
+ })
+})
 
 test('accepted compressed progress crosses the real bridge before held EOF and suppresses stale or cancelled work',async()=>{
   const priorWorker=globalThis.Worker,priorPerformance=Object.getOwnPropertyDescriptor(globalThis,'performance')

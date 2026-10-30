@@ -79,7 +79,17 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,r
     Object.assign(active,{committed_bytes:data.length,committed_records:active.committed_records+count,revision:active.revision+1,last_seen_at:new Date().toISOString()})
     await h.page.evaluate(({workspace,session,revision})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'append-'+revision,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'append-'+revision,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:active.id,revision:active.revision})
   }
-  return {...h,start:async(fragment="tab=projects",anchor=f.projects[0].id)=>h.start(fragment,anchor),active,saved,bytes,activeSessions,savedSessions,allSessions,sessionLinks,content,reads,peak:()=>peak,appendBytes,async appendRecords(...added){await appendBytes(Buffer.from(added.map(record=>JSON.stringify(record)).join('\n')+'\n'))},async associate(task){linked.add(task);sessionLinks.get(active.id)?.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
+  return {...h,start:async(fragment="tab=projects",anchor=f.projects[0].id)=>{
+    await h.start(fragment,anchor)
+    // Session/dock fixtures need mounted task cards; the product starts its
+    // hierarchy collapsed. Establish this test setup through the public UI.
+    if(new URLSearchParams(fragment).get('tab')==='projects'){
+      await h.idle()
+      await h.page.getByRole('button',{name:'Expand All',exact:true}).click()
+      await h.idle()
+      if(f.tasks[0] && ['todo','in_progress','blocked'].includes(f.tasks[0].status))await h.scrollTo('task:'+f.tasks[0].id)
+    }
+  },active,saved,bytes,activeSessions,savedSessions,allSessions,sessionLinks,content,reads,peak:()=>peak,appendBytes,async appendRecords(...added){await appendBytes(Buffer.from(added.map(record=>JSON.stringify(record)).join('\n')+'\n'))},async associate(task){linked.add(task);sessionLinks.get(active.id)?.add(task);await h.page.evaluate(({workspace,session,task})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'association-'+task,scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'associate-'+task,cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'task_session',id:session+':'+task,action:'created'},invalidations:[{kind:'entity',target:'task_session:'+session+':'+task},{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'task_sessions:'+task},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:f.workspace.id,session:activeId,task})}}
   }catch(error){
     if(!persistentProfile)throw error
     error.setupOwner=h

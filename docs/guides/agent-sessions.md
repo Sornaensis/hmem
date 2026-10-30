@@ -39,7 +39,12 @@ the group. Messages split activity runs, including messages mixed with tools in
 one native record. An expanded run stays expanded as live events arrive or the
 view synchronizes.
 Expanded tool payloads display formatted, highlighted
-JSON. Encrypted thinking displays *Thinking...*; unrecognized records stay hidden.
+JSON. Encrypted or redacted thinking displays *Thinking...*. Copilot and pi
+native captures show their messages and tools; unsupported meaningful content
+has a short notice while routine metadata stays hidden. Copilot tool requests
+and execution starts are separately labelled and share their tool-call ID.
+pi history shows each native entry's parent or root: source order can include
+alternate branches, and ancestry outside the current window is not expanded.
 
 The transcript follows new activity while you are near its end. Scroll up to read
 without losing your position; returning to the end resumes following. Event times use your browser’s local time:

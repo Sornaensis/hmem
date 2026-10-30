@@ -24,6 +24,55 @@ Tool inputs and outputs are formatted JSON with bounded syntax-token spans;
 non-JSON strings use an input/output wrapper. Markdown links permit HTTP, HTTPS, mailto
 and local fragments; raw HTML is not executed and images display their alt text.
 
+## Native transcript coverage
+
+Copilot support targets persisted `events.jsonl` envelopes (`type`, `data`,
+`timestamp`, `id`, `parentId`), validated against the official
+[v0.1.32 generated event schema](https://github.com/github/copilot-sdk/blob/396e8b3c04175dcf2fd1c7c34950c3fc0a5395e8/python/copilot/generated/session_events.py).
+The synthetic non-secret fixtures follow that schema; this is not a claim that
+every future CLI/SDK version has been validated. User/assistant content,
+message reasoning, standalone reasoning, tool requests, execution starts and
+success/error results render in source order. Requests and execution starts are
+distinct labelled occurrences with the same tool-call ID; a request is not proof
+of execution. Request-only and execution-only windows remain readable. Separate
+reasoning events and message reasoning are retained because the schema does not
+guarantee their equivalence. Tool result disclosures retain both model-facing
+and detailed content. Ephemeral deltas/progress and routine session/turn metadata
+stay hidden. Native model fields do not replace authoritative runtime metadata.
+
+Unsupported meaningful records and content blocks show a short indication of
+their type without dumping their JSON. Original evidence remains available
+through the verified download path. Windows containing only unsupported meaningful
+content settle with an indication. Discriminator/flag-only marker metadata stays
+hidden and does not consume the visible history reserve. Known hook, command and
+permission failures have an explicit failure indication even without error details;
+successful controls remain hidden. Unknown-content inspection visits at most 256
+values and 16 levels; larger ambiguous structures receive an indication.
+Malformed JSON reports a settled framing error. Incomplete finite tails retain
+their bytes and show a boundary notice until completed; neither state read-loops.
+
+pi coverage targets persisted session schema **3**, pinned to official
+[pi v1.4.0 session entries](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/coding-agent/src/core/session-manager.ts),
+[message types](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/coding-agent/src/core/messages.ts)
+and [content types](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/ai/src/types.ts).
+Nested user/assistant/system messages, thinking, tool calls/results, visible
+custom messages, bash execution, compaction and branch summaries are presented.
+Redacted thinking and opaque signatures are hidden. Images and Copilot
+attachments receive a bounded unsupported-content notice. Custom extension
+state and `display: false` messages remain hidden; bash `excludeFromContext`
+affects model context rather than display visibility.
+
+Each displayed pi entry identifies its native root or entry/parent relationship.
+This is source-order history that may include alternate branches and later roots;
+it does not select an active branch or flatten ancestry into an implied linear
+conversation. Ancestry is not expanded and a parent may be outside the bounded
+window/page. Hidden metadata is not mistaken for a history boundary. Native
+entry ancestry is separate from hmem session parents. Context edits receive an
+indication while original displayed history remains intact. Headerless windows
+state that their schema version is unverified; known unsupported versions show
+notices rather than being interpreted as v3. Both framing paths retain only one
+header-version scalar, and archive pieces retain it for identical rehydration.
+
 ## Bounded presentation and transport
 
 - Session list and task-section pages contain at most 50 summaries. Each task has
@@ -198,6 +247,29 @@ project and task, following task parent links even when a child has no project I
 A workspace includes active sessions with no task links. Deleted targets and
 terminated sessions do not contribute. The shared ring is decorative; reduced
 motion leaves it static and an accessible label identifies activity.
+
+The 2026-10-30 frozen-ring investigation used the optimized production frontend
+in headless Chromium at 1440 × 1000, with the pinned synthetic Copilot and pi
+histories above, unsupported-only, failure-without-detail, malformed and partial
+streams. A connected sidebar ring was sampled every 80 ms through live loading,
+append, canonical refresh, task docking, active-to-terminated archive preparation,
+paging and byte-verified download. Copilot advanced 3549.9 ms over 46 observations;
+pi advanced 3483.2 ms over 45. Controls advanced 1466.6–1533.3 ms over 20–21
+observations. All stayed visible with normal motion, a running 1.8-second
+animation, changing transforms, zero animation replacements/resets and no
+sampled progression gap above 93.6 ms. The rAF fallback saw a maximum 16.8 ms
+frame gap; the available Long Tasks observer reported none. Reduced-motion
+controls were intentionally static and retained their accessible activity label.
+
+No stopped rotation was reproduced, so no causal CSS/animation fix is claimed.
+The original failing transcript and interactive browser/display/GPU conditions
+were unavailable; that reproduction gap remains. Separate failing-before browser
+checks established two reader-status defects: a finite-tail notice was stored
+but not displayed, and malformed empty input could still say “Reading transcript”.
+Both view cases were corrected without changing activity lifecycle or animation.
+Run the targeted native regression from `hmem-server/frontend` with
+`node --test --test-concurrency=1 tests-js/native-sessions.browser.test.js` after
+`npm run build`.
 
 `GET /api/v1/session-activity` returns boolean rows for at most 50 combined unique
 `workspace_id` and `project_id` targets. Project IDs require one explicit

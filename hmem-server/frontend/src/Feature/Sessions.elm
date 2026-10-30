@@ -982,8 +982,8 @@ viewRecords context workspace model id =
         ,if state.error /= Nothing || rangeError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
         ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "aria-label" "Bounded transcript records"]
             (List.map (\item -> let (key,node) = viewTranscriptItem model item in (state.stamp ++ ":" ++ key,node)) (Transcript.project state.rows))
-        ,if List.isEmpty state.rows then p [attribute "role" "status"] [text (if state.start == Nothing then "Loading transcript metadata…" else if state.offset < state.end then "Reading transcript…" else if newest == 0 then "This session has no committed records." else "No complete messages in this window.")] else text ""
-        ,text "" ]
+        ,if List.isEmpty state.rows && state.error == Nothing && rangeError == Nothing then p [attribute "role" "status"] [text (if state.start == Nothing then "Loading transcript metadata…" else if state.offset < state.end then "Reading transcript…" else if newest == 0 then "This session has no committed records." else "No complete messages in this window.")] else text ""
+        ,if state.notice /= "" then p [attribute "role" "status"] [text state.notice] else text "" ]
 
 
 viewSealedRecords : ReaderContext -> Model -> Maybe Api.AgentSession -> Html Msg

@@ -1034,6 +1034,7 @@ model : Model
 model =
     AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
         |> AppShell.finalizeInit (WorkspacePage workspaceId)
+        |> (\initial -> let cards = initial.cards in { initial | cards = { cards | nodesCollapsedByDefault = False } })
 
 
 flags : Flags

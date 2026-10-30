@@ -453,6 +453,7 @@ handleOwnedRaw ownedMsg model =
 
                 collapsedNodesChanged =
                     loaded.cards.collapsedNodes /= model.cards.collapsedNodes
+                        || loaded.cards.nodesCollapsedByDefault /= model.cards.nodesCollapsedByDefault
 
                 canReloadNavigation =
                     loaded.auth.status == AuthReady

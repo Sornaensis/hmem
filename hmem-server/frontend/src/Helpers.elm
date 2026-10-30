@@ -583,11 +583,10 @@ encodeFilterState original =
         , ( "filterTags", Encode.list Encode.string model.search.filterTags )
         , ( "collapsedNodes"
           , model.cards.collapsedNodes
-                |> Dict.toList
-                |> List.filter (\( k, v ) -> v && not (String.startsWith "group-" k))
-                |> List.map (\( k, _ ) -> k)
-                |> Encode.list Encode.string
+                |> Dict.filter (\key _ -> not (String.startsWith "group-" key))
+                |> Encode.dict identity Encode.bool
           )
+        , ( "nodesCollapsedByDefault", Encode.bool model.cards.nodesCollapsedByDefault )
         ]
 
 
@@ -650,8 +649,12 @@ applyStoredFilters json model =
                 ]
 
         decodeCollapsed =
-            Decode.list Decode.string
-                |> Decode.map (\ids -> Dict.fromList (List.map (\id -> ( id, True )) (List.filter (not << String.startsWith "group-") ids)))
+            Decode.oneOf
+                [ Decode.dict Decode.bool
+                , Decode.list Decode.string
+                    |> Decode.map (\ids -> Dict.fromList (List.map (\id -> ( id, True )) ids))
+                ]
+                |> Decode.map (Dict.filter (\key _ -> not (String.startsWith "group-" key)))
 
         currentSearch =
             Feature.FocusedFilters.normalSearch model
@@ -678,6 +681,7 @@ applyStoredFilters json model =
         updatedCards =
             { currentCards
                 | collapsedNodes = Decode.decodeValue (Decode.field "collapsedNodes" decodeCollapsed) json |> Result.withDefault currentCards.collapsedNodes
+                , nodesCollapsedByDefault = Decode.decodeValue (Decode.field "nodesCollapsedByDefault" Decode.bool) json |> Result.withDefault True
             }
     in
     { model
@@ -1647,7 +1651,7 @@ isExpanded model cardId =
 
 isCollapsed : Model -> String -> Bool
 isCollapsed model nodeId =
-    Dict.get nodeId model.cards.collapsedNodes |> Maybe.withDefault False
+    Dict.get nodeId model.cards.collapsedNodes |> Maybe.withDefault model.cards.nodesCollapsedByDefault
 
 
 editingValue : Model -> String -> String -> Maybe String
@@ -2133,7 +2137,7 @@ projectNextDemandIsActive projectId model =
                         && (case value.parentId of
                             Nothing -> True
                             Just parent ->
-                                Dict.get ("proj-" ++ parent) model.cards.collapsedNodes /= Just True
+                                not (isCollapsed model ("proj-" ++ parent))
                                     && visible (Set.insert id visited) parent)
     in
     Dict.get projectId model.cards.expandedCards == Just True && visible Set.empty projectId

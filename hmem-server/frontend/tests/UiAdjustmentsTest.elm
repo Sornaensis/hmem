@@ -5,6 +5,7 @@ import AppShell exposing (AppShellOwnedMsg(..))
 import Dict
 import Expect
 import Feature.DataLoading as DataLoading
+import Feature.Cards as Cards
 import Feature.Groups as Groups
 import Feature.Search as Search
 import Feature.WorkspaceAdmin as Admin
@@ -22,7 +23,34 @@ import Url
 suite : Test
 suite =
     describe "Workspace UI refinements"
-        [ test "workspace filters cannot change globally collapsed groups" <|
+        [ test "fresh hierarchy and first per-card toggles use collapsed defaults" <|
+            \_ ->
+                let
+                    opened = Cards.update (ToggleTreeNode "proj-p") base |> Tuple.first
+                    reopened = Cards.update (ToggleTreeNode "task-t") base |> Tuple.first
+                in
+                Expect.equal [ True, True, False, False, True ]
+                    [ Helpers.isCollapsed base "proj-p", Helpers.isCollapsed base "task-t", Helpers.isCollapsed opened "proj-p", Helpers.isCollapsed reopened "task-t", Helpers.isCollapsed opened "proj-later" ]
+        , test "bulk hierarchy intent includes newly arriving nodes and survives storage" <|
+            \_ ->
+                let
+                    expanded = Cards.update ExpandAllNodes base |> Tuple.first
+                    restored = Helpers.applyStoredFilters (Helpers.encodeFilterState expanded) base
+                    closed = Cards.update CollapseAllNodes restored |> Tuple.first
+                in
+                Expect.equal [ False, False, True, True ]
+                    [ Helpers.isCollapsed expanded "proj-later", Helpers.isCollapsed restored "task-later", Helpers.isCollapsed closed "proj-later", Helpers.isCollapsed closed "task-later" ]
+        , test "saved hierarchy keeps both explicit override states and ignores old group keys" <|
+            \_ ->
+                let
+                    cards = base.cards
+                    chosen = { base | cards = { cards | collapsedNodes = Dict.fromList [ ( "proj-open", False ), ( "task-closed", True ), ( "group-g", False ) ] } }
+                    restored = Helpers.applyStoredFilters (Helpers.encodeFilterState chosen) base
+                    legacy = Helpers.applyStoredFilters (Encode.object [ ( "collapsedNodes", Encode.list Encode.string [] ) ]) (Cards.update ExpandAllNodes base |> Tuple.first)
+                in
+                Expect.equal [ False, True, False, True ]
+                    [ Helpers.isCollapsed restored "proj-open", Helpers.isCollapsed restored "task-closed", Dict.member "group-g" restored.cards.collapsedNodes, Helpers.isCollapsed legacy "proj-new" ]
+        , test "workspace filters cannot change globally collapsed groups" <|
             \_ ->
                 let
                     collapsed = Groups.update (ToggleWorkspaceGroup "g") base |> Tuple.first

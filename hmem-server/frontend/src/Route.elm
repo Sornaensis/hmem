@@ -427,6 +427,7 @@ handleUrlChangeWithoutProtectedExit url model =
                     updatedCards =
                         { currentCards
                             | collapsedNodes = Dict.empty
+                            , nodesCollapsedByDefault = True
                             , expandedCards = Dict.empty
                             , lastFocusClick = Nothing
                             , projectNextTasks = Dict.empty

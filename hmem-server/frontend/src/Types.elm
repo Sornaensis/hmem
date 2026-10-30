@@ -872,6 +872,7 @@ type alias CardsModel =
     , projectSections : Dict String String
     , expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
+    , nodesCollapsedByDefault : Bool
     , deleteConfirmation : Maybe DeleteConfirmation
     , lastFocusClick : Maybe FocusClick
     , projectNextTasks : Dict String (List Api.NextTaskCandidate)

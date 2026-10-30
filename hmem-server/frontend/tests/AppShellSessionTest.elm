@@ -415,7 +415,9 @@ workspace =
 paintEmptyRoot : Model -> Model
 paintEmptyRoot source =
     let
-        owned = DataLoading.syncPlanningCounts source |> Tuple.first
+        cards = source.cards
+        expanded = { source | cards = { cards | nodesCollapsedByDefault = False } }
+        owned = DataLoading.syncPlanningCounts expanded |> Tuple.first
         loading = owned.dataLoading
         startup = loading.startupAdmission
         postBootstrap = { owned | dataLoading = { loading | startupAdmission = { startup | phase = StartupAdmission.Normal } } }

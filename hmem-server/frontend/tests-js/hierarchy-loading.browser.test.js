@@ -1,6 +1,51 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
+import { hierarchyFixture, openHierarchy as openFreshHierarchy } from './hierarchy-fixture.mjs'
+
+// These navigation regressions explicitly exercise expanded hierarchy loading.
+async function openHierarchy(...args) {
+  const h = await openFreshHierarchy(...args)
+  await h.page.addInitScript(() => {
+    const id = location.pathname.split('/workspace/')[1]
+    if (!id) return
+    const key = 'hmem-ws-' + id
+    const saved = JSON.parse(localStorage.getItem(key) || '{}')
+    if (saved.nodesCollapsedByDefault === undefined) {
+      localStorage.setItem(key, JSON.stringify({ ...saved, nodesCollapsedByDefault: false }))
+    }
+  })
+  return h
+}
+
+test('fresh project and task hierarchy stays collapsed until explicitly opened and restores choices', { timeout: 60000 }, async () => {
+  const fixture = hierarchyFixture(), root = fixture.projects[0], task = fixture.tasks[0]
+  fixture.projects = [root, { ...root, id: 'nested-project', parent_id: root.id }]
+  fixture.tasks = [task, { ...task, id: 'subtask', parent_id: task.id }]
+  const h = await openFreshHierarchy(fixture)
+  try {
+    await h.start(); await h.idle()
+    assert.equal(await h.page.locator('#entity-nested-project').count(), 0)
+    assert.equal(await h.page.locator('#entity-task-000').count(), 0)
+    assert.equal(h.requests.filter(request => request.parent).length, 0)
+    await h.page.locator('#entity-root-project .tree-toggle').click(); await h.idle()
+    await h.page.locator('#entity-task-000').waitFor({ state: 'visible' })
+    assert.equal(await h.page.locator('#entity-subtask').count(), 0)
+    await h.page.locator('#entity-task-000 .tree-toggle').click(); await h.idle()
+    await h.page.locator('#entity-subtask').waitFor({ state: 'visible' })
+    await h.page.reload(); await h.idle()
+    await h.page.locator('#entity-subtask').waitFor({ state: 'visible' })
+    await h.page.locator('#entity-task-000 .tree-toggle').click(); await h.idle()
+    assert.equal(await h.page.locator('#entity-subtask').count(), 0)
+    await h.page.getByRole('button', { name: 'Expand All', exact: true }).click(); await h.idle()
+    await h.page.locator('#entity-subtask').waitFor({ state: 'visible' })
+    await h.page.getByRole('button', { name: 'Collapse All', exact: true }).click(); await h.idle()
+    assert.equal(await h.page.locator('#entity-subtask').count(), 0)
+    await h.page.reload(); await h.idle()
+    assert.equal(await h.page.locator('#entity-task-000').count(), 0)
+    assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
 
 function focusEvent(fixture, kind, id) {
   return { id: 'filtered-focus', workspace_id: fixture.workspace.id, event_type: 'updated', entity_type: kind, entity_id: id, title: 'Open filtered target', occurred_at: '2026-10-16T00:00:00Z', actor: null, project: null, parent_task: null, status_transition: null, navigation: { entity_type: kind, entity_id: id }, source_audit_id: null }
@@ -99,7 +144,7 @@ for (const kind of ['task', 'project']) test('cold focused ' + kind + ' URL inhe
     project_id: kind === 'project' ? target.id : root.id, parent_id: kind === 'task' ? target.id : null }
   fixture.projects = kind === 'project' ? [root, target] : [root]
   fixture.tasks = kind === 'task' ? [target, child] : [child]
-  const saved = { searchQuery: 'needle', filterShowOnly: 'tasks', filterPriority: { above: 5 }, filterShowEmptyProjects: false,
+  const saved = { nodesCollapsedByDefault: false, searchQuery: 'needle', filterShowOnly: 'tasks', filterPriority: { above: 5 }, filterShowEmptyProjects: false,
     filterProjectStatuses: ['paused'], filterTaskStatuses: ['todo'] }
   const h = await openHierarchy(fixture)
   try {
@@ -805,6 +850,8 @@ test('session authorization retires a held old response while preserving physica
     old.release();await h.idle()
     const keys=await h.logicalKeys()
     assert.equal([...keys].some(key=>key.includes('retired-session-')),false)
+    assert.deepEqual([...keys], ['project:root-project'], 'New session restores collapsed defaults')
+    await h.page.getByRole('button', { name: 'Expand All', exact: true }).click();await h.idle()
     await h.scrollTo('project:project-062');await h.scrollTo('task:task-120')
     assert.ok(h.caps().maxBranches<=4);assert.ok(h.caps().maxDetails<=6)
   } finally {await h.close()}
@@ -824,6 +871,8 @@ test('real workspace navigation rejects held old membership and completes the re
     await h.page.locator('#entity-replacement-root-project').waitFor()
     assert.equal(old.receipt.done,false)
     old.release();await h.idle()
+    assert.deepEqual([...await h.logicalKeys()], ['project:replacement-root-project'], 'New workspace starts collapsed')
+    await h.page.getByRole('button', { name: 'Expand All', exact: true }).click();await h.idle()
     const keys=await h.logicalKeys()
     for (const project of replacement.projects)assert.ok(keys.has('project:'+project.id),project.id)
     for (const task of replacement.tasks)assert.ok(keys.has('task:'+task.id),task.id)

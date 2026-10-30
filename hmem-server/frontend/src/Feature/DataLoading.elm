@@ -5,7 +5,7 @@ import Dict
 import Feature.Observation
 import Feature.ChangeStream
 import Feature.FocusedFilters
-import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity, taskPresentationOrder)
+import Helpers exposing (indexBy, isCollapsed, navigationPresentationWindow, presentationOrdinaryCapacity, taskPresentationOrder)
 import Http
 import Json.Encode as Encode
 import Permissions
@@ -417,7 +417,7 @@ navigationBranchExpanded key model =
         ordinaryRoot = model.focus.focusedEntity == Nothing
 
         projectExpanded visited id =
-            if Set.member ("project:" ++ id) visited || (Dict.get ("proj-" ++ id) model.cards.collapsedNodes |> Maybe.withDefault False) then
+            if Set.member ("project:" ++ id) visited || isCollapsed model ("proj-" ++ id) then
                 False
             else
                 case Dict.get id model.dataLoading.projectCardSummaries of
@@ -428,7 +428,7 @@ navigationBranchExpanded key model =
                             && (focused "project" id || (summary.parentId |> Maybe.map (projectExpanded (Set.insert ("project:" ++ id) visited)) |> Maybe.withDefault ordinaryRoot))
 
         taskExpanded visited id =
-            if Set.member ("task:" ++ id) visited || (Dict.get ("task-" ++ id) model.cards.collapsedNodes |> Maybe.withDefault False) then
+            if Set.member ("task:" ++ id) visited || isCollapsed model ("task-" ++ id) then
                 False
             else
                 case Dict.get id model.dataLoading.taskCardSummaries of
@@ -438,7 +438,11 @@ navigationBranchExpanded key model =
                             && (focused "task" id || not model.dataLoading.navigationVisibilityActive || Set.member id model.dataLoading.navigationVisibleTaskIds)
                             && (focused "task" id || (case summary.parentId of
                                     Just parent -> taskExpanded (Set.insert ("task:" ++ id) visited) parent
-                                    Nothing -> summary.projectId |> Maybe.map (projectExpanded visited) |> Maybe.withDefault ordinaryRoot
+                                    Nothing ->
+                                        if ordinaryRoot && model.search.filterShowOnly == ShowTasksOnly then
+                                            True
+                                        else
+                                            summary.projectId |> Maybe.map (projectExpanded visited) |> Maybe.withDefault ordinaryRoot
                                ))
     in
     case String.split ":" key of

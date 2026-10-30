@@ -137,7 +137,8 @@ unloaded, nested and unassigned work. Filters do not change these totals.
 Loading, updating and unavailable totals are labeled; failures offer **Retry**.
 
 Scroll to reach loaded hierarchy and Observation results. Root **Load more** is
-explicit; expanded branches continue automatically. Incomplete or failed branches
+explicit. Project and task branches start collapsed; open a branch or choose
+**Expand All** to reveal its children. Expanded branches continue automatically. Incomplete or failed branches
 show feedback and Retry. Filters preserve scroll position where the new content
 allows it. Without saved workspace filters, **Show** defaults to **All**,
 **Show empty projects** is checked, project filters select **Active** and

@@ -36,6 +36,21 @@ suite : Test
 suite =
     describe "bounded navigation response guards"
         [ signedOriginTest
+        , test "Tasks-only visible roots continue child pages without expanding their hidden project" <| \_ ->
+            let
+                search = model.search
+                cards = model.cards
+                parent = task "visible-parent" Nothing
+                fresh = { model | search = { search | filterShowOnly = Types.ShowTasksOnly }, cards = { cards | nodesCollapsedByDefault = True } }
+                seeded = loadRoot workspaceId [] [ { parent | hasChildren = True, directSubtaskCount = 51 } ] fresh
+                opened = Main.update (ToggleTreeNode "task-visible-parent") seeded |> Tuple.first |> painted
+                children = List.range 1 50 |> List.map (\n -> task ("child-" ++ String.fromInt n) (Just parent.id))
+                first = branchReply "task:visible-parent" [] children False True opened
+                continued = Dict.get "task:visible-parent" first.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.taskOffset, request.inFlight ))
+                complete = branchReply "task:visible-parent" [] [ task "last-child" (Just parent.id) ] False False first
+            in
+            Expect.equal { collapsedProject = True, continued = Just ( 50, True ), lastChild = True }
+                { collapsedProject = Helpers.isCollapsed complete "proj-parent", continued = continued, lastChild = Dict.member "last-child" complete.dataLoading.taskCardSummaries }
         , presentationTests
         , mutationPresentationTest
         , test "shared callback keeps successful owners independent from failed siblings and permits owner retry" <| \_ ->
@@ -3940,6 +3955,7 @@ initialModel =
     AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
         |> AppShell.finalizeInit (WorkspacePage workspaceId)
         |> (\initial -> { initial | auth = { status = AuthReady, mode = Just "test" } })
+        |> (\initial -> let cards = initial.cards in { initial | cards = { cards | nodesCollapsedByDefault = False } })
 
 
 rootLoadModel : Model

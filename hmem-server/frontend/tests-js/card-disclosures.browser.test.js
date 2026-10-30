@@ -41,6 +41,8 @@ for (const width of [1440, 430]) test(`native card details keyboard and unique r
   try {
     await h.page.setViewportSize({width,height:1000})
     await h.start(); await h.idle()
+    await h.page.getByRole('button', { name: 'Expand All', exact: true }).click(); await h.idle()
+    await h.page.keyboard.press('Tab')
     for (const key of ['project:root-project','project:nested-project','task:parent','task:child']) {
       const row = await h.scrollTo(key), control = row.locator('.btn-extras-toggle').first()
       await assertDetails(h.page,control,false)

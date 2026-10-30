@@ -74,6 +74,7 @@ init =
     , projectSections = Dict.empty
     , expandedCards = Dict.empty
     , collapsedNodes = Dict.empty
+    , nodesCollapsedByDefault = True
     , deleteConfirmation = Nothing
     , lastFocusClick = Nothing
     , projectNextTasks = Dict.empty
@@ -389,7 +390,7 @@ update msg model =
         ToggleTreeNode nodeId ->
             let
                 current =
-                    Dict.get nodeId model.cards.collapsedNodes |> Maybe.withDefault False
+                    isCollapsed model nodeId
 
                 newModel =
                     updateCardsModel
@@ -455,7 +456,7 @@ update msg model =
         ExpandAllNodes ->
             let
                 newModel =
-                    updateCardsModel (\records -> { records | collapsedNodes = Dict.empty }) model
+                    updateCardsModel (\records -> { records | collapsedNodes = Dict.empty, nodesCollapsedByDefault = False }) model
                         |> Feature.DataLoading.resetNavigationPresentations
             in
             let
@@ -466,22 +467,8 @@ update msg model =
 
         CollapseAllNodes ->
             let
-                projectNodes =
-                    model.projects
-                        |> Dict.values
-                        |> List.map (\record -> ( "proj-" ++ record.id, True ))
-
-                taskNodes =
-                    model.tasks
-                        |> Dict.values
-                        |> (\tasks ->
-                                tasks
-                                    |> List.filter (\task -> List.any (\t2 -> t2.parentId == Just task.id) tasks)
-                           )
-                        |> List.map (\record -> ( "task-" ++ record.id, True ))
-
                 newModel =
-                    updateCardsModel (\records -> { records | collapsedNodes = Dict.fromList (projectNodes ++ taskNodes) }) model
+                    updateCardsModel (\records -> { records | collapsedNodes = Dict.empty, nodesCollapsedByDefault = True }) model
                         |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, saveFiltersCmd newModel )
@@ -3541,6 +3528,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
                 || previous.dataLoading.navigationVisibleProjectIds /= model.dataLoading.navigationVisibleProjectIds
                 || previous.dataLoading.navigationVisibleTaskIds /= model.dataLoading.navigationVisibleTaskIds
                 || previous.cards.collapsedNodes /= model.cards.collapsedNodes
+                || previous.cards.nodesCollapsedByDefault /= model.cards.nodesCollapsedByDefault
                 || previous.focus.focusedEntity /= model.focus.focusedEntity
                 || previous.search.query /= model.search.query
                 || previous.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
@@ -3565,6 +3553,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
             sameContext && (filtersChanged || (old.preserveScroll
                 && (previous.dataLoading.rootNavigationRequest |> Maybe.map .generation) == (model.dataLoading.rootNavigationRequest |> Maybe.map .generation)
                 && previous.cards.collapsedNodes == model.cards.collapsedNodes
+                && previous.cards.nodesCollapsedByDefault == model.cards.nodesCollapsedByDefault
                 && previous.focus.focusedEntity == model.focus.focusedEntity))
         awaitingFilteredRoots =
             model.focus.focusedEntity == Nothing && previous.focus.focusedEntity == model.focus.focusedEntity && preserveScroll && (model.dataLoading.rootNavigationRequest

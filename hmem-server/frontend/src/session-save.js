@@ -11,6 +11,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
   const clear=owned=>{
     if(!owned || active!==owned || owned.domCleared)return
     clearPageProgress(owned)
+    owned.renderPending=null
     owned.domCleared=true
     const candidates=[document.getElementById?.('session-records'),...(document.querySelectorAll?.('.session-inspected-event') || [])]
     const nodes=candidates.filter(node=>node?.getAttribute?.('data-sealed-dom-owner')===owned.config.stamp && node.getAttribute('data-sealed-dom-load')===String(owned.config.load))
@@ -46,6 +47,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
   async function retire(owned) {
     if(!owned || owned.cleaning)return owned?.cleaning
     clearPageProgress(owned)
+    owned.renderPending=null
     owned.retired=true;owned.localIntent=null;owned.controller?.abort()
     if(owned.markdownWaiter){window.clearTimeout(owned.markdownWaiter.timer);owned.markdownWaiter.reject(Error('retired_archive'));owned.markdownWaiter=null}
     // Interrupt the current decode before awaiting the serialized cleanup.
@@ -124,7 +126,22 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       if(current(owned)){indexRetry=owned.identity;pending=owned.config;stopped='';void retire(owned)}
       return
     }
-    if(current(owned))await page(owned)
+    if(current(owned)){
+      const retry=owned.retryPage;owned.retryPage=null;owned.pagePending=false
+      await page(owned,retry?.options || {},retry?.visibleKey)
+    }
+  }
+
+  function retryPage(owned) {
+    if(!current(owned)||!owned.failedPage||owned.pagePending||owned.markdownBusy)return
+    owned.retryPage=owned.failedPage;owned.pagePending=true
+    event(owned,'progress',{phase:'navigating'})
+    owned.phaseTransition=(async()=>{
+      const response=await rpc(owned,'release-reader')
+      if(response.stage?.name!==owned.stageName||response.stage?.custody!==owned.custody||JSON.stringify(response.stage.manifest)!==JSON.stringify(owned.manifest))throw Error('archive_receipt_mismatch')
+      terminateWorker(owned)
+      if(current(owned))demand(owned,owned.config.apiUrl+owned.manifest.content_path,'revalidate')
+    })().catch(()=>{if(current(owned)){cleanupFailed(owned);void retire(owned)}})
   }
 
   function start(config) {
@@ -149,6 +166,11 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     if(!current(owned))return
     if(owned.pagePending || owned.markdownBusy){owned.localIntent={kind:'page',options:{...options}};return}
     owned.pagePending=true
+    owned.renderPending=null;owned.boundaryIntent=owned.viewportIntent || 0
+    const viewport=document.getElementById?.('session-records'),intent=owned.viewportIntent || 0
+    const previousTop=viewport?.scrollTop || 0
+    const bounds=viewport?.getBoundingClientRect?.()
+    const anchors=bounds?[...(viewport.querySelectorAll?.('[data-block-key]') || [])].filter(node=>node.getBoundingClientRect().bottom>bounds.top).slice(0,8).map(node=>({key:node.getAttribute('data-block-key'),top:node.getBoundingClientRect().top-bounds.top})):[]
     const operation={timer:null};owned.pageProgress=operation
     operation.timer=window.setTimeout(()=>{
       operation.timer=null
@@ -167,9 +189,23 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         const canPrevious=ordinary&&owned.startKey&&result.first===owned.startKey?false:!!options.after||!!options.offset||!!options.query||((!!options.before||!!options.last)&&!!result.more)
         const canNext=ordinary&&owned.endKey&&result.last===owned.endKey?false:!options.last&&(!!options.before||!!result.more)
         owned.page=options;owned.first=result.first;owned.last=result.last;owned.searchAfter=result.searchAfter;owned.searchCursor=result.searchCursor
+        owned.visibleRows=result.rows;owned.canPrevious=canPrevious;owned.canNext=canNext;owned.failedPage=null
+        owned.boundaryIntent=owned.viewportIntent || 0
         event(owned,'page',{...result,kind:undefined,fromEnd:!!options.last||!!options.before,canPrevious,canNext})
+        const revision=owned.presentationRevision=(owned.presentationRevision || 0)+1
+        const restore=attempt=>{
+          if(!current(owned) || revision!==owned.presentationRevision || intent!==(owned.viewportIntent || 0))return
+          const rendered=document.getElementById?.('session-records')
+          if(rendered?.getAttribute?.('data-sealed-first')!==result.first || rendered.getAttribute('data-sealed-last')!==result.last){if(attempt<4)window.requestAnimationFrame?.(()=>restore(attempt+1));return}
+          if(Math.abs(rendered.scrollTop-previousTop)>4)return
+          const box=rendered.getBoundingClientRect?.(),nodes=[...(rendered.querySelectorAll?.('[data-block-key]') || [])]
+          for(const anchor of anchors){const node=nodes.find(node=>node.getAttribute('data-block-key')===anchor.key);if(node&&box){rendered.scrollTop+=node.getBoundingClientRect().top-box.top-anchor.top;return}}
+          if(options.before||options.last)rendered.scrollTop=rendered.scrollHeight
+          else if(options.after)rendered.scrollTop=0
+        }
+        window.requestAnimationFrame?.(()=>restore(0))
       }
-    }catch(error){clearPageProgress(owned,operation);failure(owned,error)}finally{clearPageProgress(owned,operation);owned.pagePending=false;drainLocalIntent(owned)}
+    }catch(error){owned.failedPage={options:{...options},visibleKey};clearPageProgress(owned,operation);if(current(owned))event(owned,'error',{code:error.message})}finally{clearPageProgress(owned,operation);owned.pagePending=false;drainLocalIntent(owned)}
   }
   async function smallJson(response,owned) {
     if(!response.body)throw Error('archive_response_failed')
@@ -253,6 +289,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
   const demandManifest=owned=>demand(owned,owned.config.apiUrl+`/api/v1/workspaces/${encodeURIComponent(owned.config.workspace)}/sessions/${encodeURIComponent(owned.config.session)}/archive`,'manifest')
   async function readMarkdown(owned,key) {
     if(!current(owned))return
+    owned.renderPending=null;owned.boundaryIntent=owned.viewportIntent || 0
     if(owned.pagePending||owned.markdownBusy){owned.localIntent={kind:'markdown',key,page:{...owned.page}};return}
     owned.markdownBusy=true
     event(owned,'markdown-start',{key})
@@ -276,6 +313,35 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       }
     }catch(error){failure(owned,error)}finally{owned.markdownBusy=false;drainLocalIntent(owned)}
   }
+  function acknowledgeRender(owned) {
+    const handoff=owned?.renderPending
+    if(!handoff || handoff.scheduled || !current(owned))return
+    handoff.scheduled=true
+    const inspect=attempt=>{
+      if(!current(owned)||owned.renderPending!==handoff)return
+      const viewport=document.getElementById?.('session-records')
+      if(viewport?.getAttribute?.('data-sealed-dom-owner')===owned.config.stamp
+        && viewport.getAttribute('data-sealed-dom-load')===String(owned.config.load)
+        && viewport.getAttribute('data-sealed-first')===handoff.first && viewport.getAttribute('data-sealed-last')===handoff.last
+        && viewport.getAttribute('data-render-request')===String(handoff.request)
+        && viewport.getAttribute('data-render-part')===String(handoff.part)){
+        if((owned.viewportIntent || 0)===handoff.intent)viewport.scrollTop=handoff.direction==='previous'?viewport.scrollHeight:0
+        owned.boundaryIntent=owned.viewportIntent || 0
+        owned.renderPending=null
+      }else if(attempt<4)window.requestAnimationFrame?.(()=>inspect(attempt+1))
+      else handoff.scheduled=false
+    }
+    window.requestAnimationFrame?.(()=>inspect(0))
+  }
+  function renderPart(owned,part,direction) {
+    if(!current(owned)||owned.renderPending||!Number.isSafeInteger(part)||part<0||part>100000)return
+    const viewport=document.getElementById?.('session-records'),previous=Number(viewport?.getAttribute?.('data-render-part'))
+    const request=++sequence,intent=owned.viewportIntent || 0
+    owned.renderPending={request,part,direction:direction || (part<previous?'previous':'next'),first:owned.first,last:owned.last,intent}
+    owned.boundaryIntent=intent
+    event(owned,'render',{request,part})
+    acknowledgeRender(owned)
+  }
   document.addEventListener('click',domEvent=>{
     const button=domEvent.target?.closest?.('[data-sealed-action]'),owned=active
     if(!button || !owned || !current(owned) || button.getAttribute('data-sealed-owner')!==owned.config.stamp)return
@@ -286,12 +352,38 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     else if(action==='next')void page(owned,{after:owned.last})
     else if(action==='search-next')void page(owned,{query:owned.page.query,after:owned.searchAfter,searchCursor:owned.searchCursor})
     else if(action==='previous')void page(owned,{before:owned.first})
+    else if(action==='retry-page')retryPage(owned)
     else if(action==='body')void page(owned,{...owned.page,bodyKey:button.getAttribute('data-sealed-key'),bodyPart:Number(button.getAttribute('data-sealed-part'))})
-    else if(action==='render')event(owned,'render',{part:Number(button.getAttribute('data-sealed-part'))})
+    else if(action==='render')renderPart(owned,Number(button.getAttribute('data-sealed-part')))
     else if(action==='markdown')void readMarkdown(owned,button.getAttribute('data-sealed-key'))
     else if(action==='search'){const input=document.getElementById('sealed-search');void page(owned,{query:input?.value || ''})}
     else if(action==='position'){const input=document.getElementById('sealed-position');void page(owned,{offset:input?.value || '0'})}
   })
+  let boundary=''
+  for(const name of ['wheel','touchstart','touchmove','pointerdown','keydown'])document.addEventListener(name,domEvent=>{
+    const viewport=document.getElementById?.('session-records')
+    if(active && viewport && (viewport===domEvent.target || viewport.contains?.(domEvent.target))){
+      active.viewportIntent=(active.viewportIntent || 0)+1
+      const forward=['ArrowDown','PageDown','End',' '],backward=['ArrowUp','PageUp','Home']
+      const gesture=name==='wheel'&&typeof domEvent.deltaY==='number'&&domEvent.deltaY!==0 || name==='touchmove' || name==='pointerdown'&&domEvent.target===viewport || name==='keydown'&&(forward.includes(domEvent.key)||backward.includes(domEvent.key))
+      if(gesture){active.boundaryGesture=active.viewportIntent;active.boundaryDirection=name==='wheel'?(domEvent.deltaY<0?'previous':'next'):name==='keydown'?(backward.includes(domEvent.key)?'previous':'next'):'';window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:viewport}))}
+    }
+  },true)
+  const inspectSealedBoundary=domEvent=>{
+    const owned=active,viewport=domEvent.target
+    if(!owned || !current(owned) || owned.pagePending || owned.markdownBusy || owned.failedPage || owned.renderPending || (owned.boundaryGesture || 0)<=(owned.boundaryIntent || 0) || viewport?.id!=='session-records' || viewport.getAttribute?.('data-sealed-dom-owner')!==owned.config.stamp)return
+    const part=Number(viewport.getAttribute('data-render-part')),more=viewport.getAttribute('data-render-more')==='true'
+    const above=viewport.scrollTop<=96,below=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=96
+    const direction=above&&owned.boundaryDirection!=='next'&&(part>0||owned.canPrevious)?'previous':below&&owned.boundaryDirection!=='previous'&&(more||owned.canNext)?'next':''
+    const key=[owned.identity,owned.first,owned.last,part,direction].join(':')
+    if(!direction || key===boundary)return
+    boundary=key;owned.boundaryIntent=owned.viewportIntent || 0
+    if(direction==='previous' && part>0)renderPart(owned,part-1,direction)
+    else if(direction==='next' && more)renderPart(owned,part+1,direction)
+    else if(direction==='previous')void page(owned,{before:owned.visibleRows?.[Math.min(19,owned.visibleRows.length-1)]?.key || owned.first})
+    else void page(owned,{after:owned.visibleRows?.[Math.max(0,owned.visibleRows.length-20)]?.key || owned.last})
+  }
+  document.addEventListener('scroll',inspectSealedBoundary,true)
   document.addEventListener('toggle',domEvent=>{
     const node=domEvent.target,owned=active,key=node.getAttribute?.('data-sealed-key')
     if(!key || !owned || !current(owned) || node.getAttribute('data-sealed-owner')!==owned.config.stamp)return
@@ -313,6 +405,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       if(!config || !config.active){pending=null;stopped='';if(active){clear(active);void retire(active)}}
       else if(!blocked && config.stamp!==authorityFence && identity(config)!==stopped && (!active || active.identity!==identity(config))){pending=config;if(active){clear(active);void retire(active)}else{pending=null;start(config)}}
       if(request)receiveHttp(request)
+      if(active)acknowledgeRender(active)
     },
     retireAuthority(){authorityFence=active?.config.stamp || '';authority++;pending=null;if(active){clear(active);event(active,'cancelled');void retire(active)}},
     snapshot:()=>({active:!!active,pending:!!pending,blocked})
@@ -369,6 +462,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   const sealed=createSealedViewer({send,fetchArchive,document,window,workerFactory})
   let heartbeatKey = ''
   let viewerScope = '', presentation = null
+  let historyTransition = false, boundaryKey = '', restoreRevision = 0, resizeViewport=null, resizeSnapshot=null, resizeReady=false, lastFollowing=false, boundaryIntent=0
+  let disclosures = new Map()
   const disclosureKey = node => {
     const group = node.getAttribute?.('data-group-key')
     if(group!==null && group!==undefined)return 'group:'+group
@@ -393,6 +488,44 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   // anchoring. Actual input/disclosure events own intent; the position guard
   // below also detects later programmatic scrolling in either direction.
   for(const event of ['toggle','wheel','touchstart','pointerdown','keydown']) document.addEventListener(event,noteViewerIntent,true)
+  const inspectBoundary = event => {
+    const viewport=document.getElementById?.('session-records')
+    if(!viewport || (event && event.target!==viewport) || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp)return
+    const attr=name=>viewport.getAttribute?.('data-history-'+name)
+    if(attr('mode')!=='active')return
+    const atEnd=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=48
+    const logicalEnd=Number(attr('after'))>=Number(attr('latest'))
+    if(event)send({kind:'viewer-follow',stamp:viewerStamp,generation,following:atEnd&&logicalEnd})
+    if(attr('loading')==='true')return
+    if(viewerIntent<=boundaryIntent)return
+    const edge=viewport.scrollTop<=96 && Number(attr('before'))>0 ? 'older' : atEnd&&!logicalEnd ? 'newer' : ''
+    const key=[viewerStamp,generation,attr('before'),attr('after'),edge].join(':')
+    if(!edge || key===boundaryKey)return
+    boundaryKey=key;boundaryIntent=viewerIntent;send({kind:'viewer-boundary',stamp:viewerStamp,generation,edge})
+  }
+  document.addEventListener('scroll',inspectBoundary,true)
+  for(const name of ['wheel','keydown'])document.addEventListener(name,event=>{
+    const viewport=document.getElementById?.('session-records')
+    if(viewport && (event.target===viewport || viewport.contains?.(event.target)))requestAnimationFrame(()=>inspectBoundary({target:viewport}))
+  },true)
+  const captureResize = () => {
+    const viewport=document.getElementById?.('session-records'),bounds=viewport?.getBoundingClientRect?.()
+    if(!bounds || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp)return
+    resizeSnapshot={stamp:viewerStamp,generation,intent:viewerIntent,top:viewport.scrollTop,tail:viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=48,
+      anchors:[...(viewport.querySelectorAll?.('[data-block-key]') || [])].filter(node=>node.getBoundingClientRect().bottom>bounds.top).slice(0,8).map(node=>({key:node.getAttribute('data-block-key'),top:node.getBoundingClientRect().top-bounds.top}))}
+  }
+  document.addEventListener('scroll',event=>{if(event.target===document.getElementById?.('session-records'))captureResize()},true)
+  const resizeObserver=window.ResizeObserver?new window.ResizeObserver(()=>{
+    if(!resizeReady){resizeReady=true;captureResize();return}
+    const saved=resizeSnapshot,viewport=resizeViewport
+    if(!saved || saved.stamp!==viewerStamp || saved.generation!==generation || saved.intent!==viewerIntent || viewport!==document.getElementById?.('session-records'))return
+    if(lastFollowing&&saved.tail)viewport.scrollTop=viewport.scrollHeight
+    else {
+      const bounds=viewport.getBoundingClientRect(),nodes=[...viewport.querySelectorAll('[data-block-key]')]
+      for(const anchor of saved.anchors){const node=nodes.find(node=>node.getAttribute('data-block-key')===anchor.key);if(node){viewport.scrollTop+=node.getBoundingClientRect().top-bounds.top-anchor.top;break}}
+    }
+    captureResize()
+  }):null
   async function retireSave(owned = activeSave) {
     if (!owned) return true
     if (owned.cleanupFailed) return false
@@ -561,7 +694,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if (command.stamp !== viewerStamp) {
       const continuing=command.continueViewer===true && command.viewerScope===viewerScope
       viewerStamp = command.stamp
-      if(!continuing){framer=null;presentation=null}
+      if(!continuing){framer=null;presentation=null;disclosures.clear();boundaryKey=''}
       generation = -1
       if(continuing && presentation?.scope===viewerScope){
         const saved=presentation,owner=viewerStamp,scope=viewerScope,intent=viewerIntent,revision=command.generation
@@ -577,6 +710,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
             if(states.has(key))node.open=states.get(key)
           }
           viewport.scrollTop=saved.top
+          captureResize()
         })
       }
     }
@@ -603,8 +737,15 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(fingerprint!==heartbeatKey){heartbeatKey=fingerprint;send({kind:'heartbeat-status',stamp:viewerStamp,statuses,today})}
     if (command.generation < generation) return
     generation = command.generation
+    const currentViewport=document.getElementById?.('session-records')
+    lastFollowing=command.follow && currentViewport?.getAttribute?.('data-history-mode')!=='sealed'
+    if(resizeObserver && currentViewport!==resizeViewport){resizeObserver.disconnect();resizeViewport=currentViewport;resizeSnapshot=null;resizeReady=false;if(currentViewport){captureResize();resizeObserver.observe(currentViewport)}}
     if (command.reset !== null) {
-      framer = createRecordFramer(command.reset)
+      const anchors=(framer?.readerAnchors() || []).filter(row=>row.offset>=command.reset && row.offset<(command.windowEnd ?? Infinity))
+      const predecessor=command.direction==='forward'?framer?.predecessor(command.reset):null
+      framer = createRecordFramer(command.reset,command.direction ? {direction:command.direction,aligned:command.aligned,anchors,predecessor} : {})
+      historyTransition = command.historical===true
+      boundaryIntent=viewerIntent
     }
     if (!command.chunk) return
     const captured = { stamp:command.stamp, generation:command.generation, intent:viewerIntent }
@@ -615,7 +756,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const viewport = document.getElementById('session-records')
       const atTail = !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48
       const previousTop = viewport?.scrollTop || 0
-      const anchors = !atTail && viewport?.getBoundingClientRect && viewport?.querySelectorAll ? (()=>{
+      const anchors = (historyTransition || !atTail) && viewport?.getBoundingClientRect && viewport?.querySelectorAll ? (()=>{
         const bounds = viewport.getBoundingClientRect()
         const visible = selector => [...viewport.querySelectorAll(selector)].filter(node=>{
           const rect=node.getBoundingClientRect()
@@ -623,12 +764,23 @@ export function installSessionBridge(app, { document = globalThis.document, wind
         }).slice(0,8).map(node=>({attribute:node.hasAttribute('data-block-key')?'data-block-key':'data-group-key',key:node.getAttribute(node.hasAttribute('data-block-key')?'data-block-key':'data-group-key'),top:node.getBoundingClientRect().top-bounds.top}))
         return [...visible('[data-block-key]'),...visible('[data-group-key]')]
       })() : []
+      for(const node of viewport?.querySelectorAll?.('details') || []){
+        const key=disclosureKey(node)
+        if(key!==null){disclosures.delete(key);disclosures.set(key,node.open)}
+      }
+      while(disclosures.size>400)disclosures.delete(disclosures.keys().next().value)
       const result = framer.push(command.chunk.offset,bytes,command.chunk.final)
       // A finite captured end owns publication. A large initial window (or a
       // live burst) advances the bounded byte handshake without painting and
       // following every intermediate 64 KiB history fragment.
-      if (!command.chunk.final) { send({kind:'viewer-progress',...captured,through:result.through}); return }
+      if ((!result.rows.length && (!command.chunk.final || result.pendingBytes>0)) || (!command.chunk.final && (!command.direction || (historyTransition && command.direction==='tail')))) { send({kind:'viewer-progress',...captured,through:result.through,notice:result.notice}); return }
       send({kind:'viewer',...captured,...result})
+      const revision=++restoreRevision
+      if(disclosures.size)requestAnimationFrame(()=>{
+        if(revision!==restoreRevision || viewerStamp!==captured.stamp || generation!==captured.generation)return
+        const rendered=document.getElementById?.('session-records')
+        for(const node of rendered?.querySelectorAll?.('details') || []){const key=disclosureKey(node);if(disclosures.has(key))node.open=disclosures.get(key)}
+      })
       if (command.follow && atTail) requestAnimationFrame(() => {
         if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return
         const viewport = document.getElementById('session-records')
@@ -647,6 +799,15 @@ export function installSessionBridge(app, { document = globalThis.document, wind
           }
         }
       })
+      else if(historyTransition)requestAnimationFrame(()=>{
+        if(viewerStamp!==captured.stamp || generation!==captured.generation || viewerIntent!==captured.intent)return
+        const rendered=document.getElementById?.('session-records')
+        if(rendered)rendered.scrollTop=command.direction==='tail'?rendered.scrollHeight:0
+      })
+      historyTransition=false
+      if(command.direction)requestAnimationFrame(()=>requestAnimationFrame(()=>{
+        if(viewerStamp===captured.stamp && generation===captured.generation){captureResize();inspectBoundary()}
+      }))
     } catch {
       send({ kind:'viewer-error',...captured })
     }

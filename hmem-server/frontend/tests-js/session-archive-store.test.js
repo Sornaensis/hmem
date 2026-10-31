@@ -242,6 +242,18 @@ test('borrowed verified detach joins actual transactions and handles then reader
   const disclosure=reader.disclosure('remember',false);await new Promise(resolve=>setImmediate(resolve));state.complete(state.transactions.at(-1));await disclosure;assert.equal(state.values.get('disclosures:remember').open,false)
   await reader.closeAndDelete();assert.equal(state.closedHandles,3);assert.equal(state.removed,true)
 })
+test('verified reader release joins pending disclosure writes without deleting the custody stage',async()=>{
+ const state=controlledStore(),{store,manifest}=await verifiedBorrowedStore(state);await store.detach()
+ const adopting=state.open({custody:borrowedCustody,adoptManifest:manifest});await new Promise(resolve=>setImmediate(resolve));const metadata=state.transactions.at(-1);state.respond(metadata);state.complete(metadata);const reader=await adopting
+ const writing=reader.disclosure('kept',true);await new Promise(resolve=>setImmediate(resolve));let released=false
+ const release=reader.releaseReader().then(()=>{released=true})
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(released,false);assert.equal(state.closedHandles,2);assert.equal(state.removed,false)
+ state.complete(state.transactions.at(-1));await writing;await release
+ assert.equal(state.closedHandles,3);assert.equal(state.removed,false);assert.equal(state.values.get('disclosures:kept').open,true)
+ const nextAdoption=state.open({custody:borrowedCustody,adoptManifest:manifest});await new Promise(resolve=>setImmediate(resolve));const nextMetadata=state.transactions.at(-1);state.respond(nextMetadata);state.complete(nextMetadata);const next=await nextAdoption
+ assert.deepEqual([...next.readRaw('0','3')],[1,2,3]);await next.closeAndDelete();assert.equal(state.removed,true)
+})
+
 test('adoption mismatch missing stage and accidental upgrade never expose or rewrite a reader',async()=>{
   for(const mismatch of ['manifest','schema','keyPath','raw-length','marker','missing','upgrade','old-index']){
     const state=controlledStore(),{store,manifest}=await verifiedBorrowedStore(state);await store.detach()

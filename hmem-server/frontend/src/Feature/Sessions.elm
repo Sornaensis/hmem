@@ -202,7 +202,7 @@ reconcile ( model, command ) =
                 if continueViewer then
                     { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = False, pending = False }
                 else
-                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
+                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
             else if transportChanged then
                 -- Retire response authority, not the presentation. Preserve the
                 -- finite end so a framed but unacknowledged short tail retries
@@ -218,10 +218,10 @@ reconcile ( model, command ) =
                 if session.state == Api.SessionTerminated then
                     { retired | start = Just 0, offset = 0, end = 0, resetPending = False, pending = False, rows = [] }
                 else if retired.start == Nothing then
-                    let begin = max 0 (session.committedBytes - 2097152) in
-                    { retired | start = Just begin, offset = begin, end = session.committedBytes, generation = retired.generation + 1 }
+                    let begin = max 0 (session.committedBytes - 65536) in
+                    { retired | start = Just begin, offset = begin, end = session.committedBytes, historyBefore = begin, historyAfter = begin, windowDirection = "tail", windowAligned = False, generation = retired.generation + 1 }
                 else if retired.following && retired.offset >= retired.end && not retired.pending then
-                    { retired | end = min session.committedBytes (retired.offset + 2097152) }
+                    { retired | end = min session.committedBytes (retired.offset + 65536), loadWindow = True }
                 else retired
             Nothing -> retired
         current = beforeArchive
@@ -282,6 +282,10 @@ reconcile ( model, command ) =
             , ("generation",Encode.int current.generation)
             , ("reset",viewerReset current |> Maybe.map Encode.int |> Maybe.withDefault Encode.null)
             , ("follow",Encode.bool current.following)
+            , ("direction",Encode.string current.windowDirection)
+            , ("aligned",Encode.bool current.windowAligned)
+            , ("windowEnd",Encode.int current.end)
+            , ("historical",Encode.bool (not current.following && current.resetPending))
             , ("chunk",chunk |> Maybe.map (\range -> Encode.object [("offset",Encode.int range.offset),("nextOffset",Encode.int range.nextOffset),("dataBase64",Encode.string range.dataBase64),("final",Encode.bool (range.nextOffset >= current.end))]) |> Maybe.withDefault Encode.null)
             , ("nextOperation",Encode.int current.nextOperation)
             , ("saveOperation",(pending.save |> Maybe.map .operation |> Maybe.withDefault (pending.archive |> Maybe.map .operation |> Maybe.withDefault -1)) |> Encode.int)
@@ -377,8 +381,21 @@ update msg model =
         SessionsFollow following ->
             ( { model | sessions = { state | following = following, loadWindow = following, pending = False, generation = state.generation + 1, resetPending = following, start = if following then Nothing else state.start } }, Cmd.none )
         SessionsOlder ->
-            let (begin,end) = olderWindow state in
-            ( { model | sessions = { state | following = False, loadWindow = True, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, rows = [], error = Nothing } }, Cmd.none )
+            let
+                first = List.head state.rows |> Maybe.map .offset |> Maybe.withDefault state.historyBefore
+                end = List.take 20 state.rows |> List.filter (\row -> row.end - first <= 65536) |> List.reverse |> List.head |> Maybe.map .end |> Maybe.withDefault first
+                begin = max 0 (end - 2097152)
+            in
+            ( { model | sessions = { state | following = False, loadWindow = True, windowDirection = "tail", windowAligned = False, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
+        SessionsNewer ->
+            let
+                last = List.reverse state.rows |> List.head
+                begin = List.drop (max 0 (List.length state.rows - 20)) state.rows |> List.filter (\row -> state.historyAfter - row.offset <= 65536) |> List.head |> Maybe.map .offset |> Maybe.withDefault (last |> Maybe.map .end |> Maybe.withDefault state.historyAfter)
+                newest = state.selected |> Maybe.andThen (\id -> state.workspace |> Maybe.andThen (\ws -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data)) |> Maybe.andThen (\payload -> case payload of
+                    Delivery.Metadata session -> Just session.committedBytes
+                    _ -> Nothing) |> Maybe.withDefault state.end
+            in
+            ( { model | sessions = { state | following = False, loadWindow = True, windowDirection = "forward", windowAligned = True, start = Just begin, offset = begin, end = min newest (begin + 2097152), pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
         SessionsTick time ->
             let now = toFloat (Time.posixToMillis time)
                 refresh = (state.filters.freshness /= "" || state.filters.activity /= Nothing) && model.activeTab == SessionsTab && now-state.lastFilterRefresh >= 10000
@@ -403,7 +420,7 @@ olderWindow state =
     let
         -- A retained record's start is an exact JSONL boundary. End the older
         -- page there so the row cap cannot strand records between byte windows.
-        end = List.head state.rows |> Maybe.map .offset |> Maybe.withDefault (min state.end (Maybe.withDefault 0 state.start + 1048578))
+        end = List.head state.rows |> Maybe.map .offset |> Maybe.withDefault (if state.historyBefore > 0 then state.historyBefore else min state.end (Maybe.withDefault 0 state.start + 1048578))
     in (max 0 (end-2097152),end)
 
 
@@ -437,16 +454,30 @@ receiveBridge value model =
         ( {model | sessions = {state | saveCapability = Just (field "supported" Decode.bool False)}}, Cmd.none )
     else if String.startsWith "archive-" kind then receiveArchive value model
     else if String.startsWith "save-" kind then receiveSave value model
+    else if kind == "viewer-boundary" && stamp == state.stamp && generation == state.generation then
+        if state.pending || (state.loadWindow && state.offset < state.end) || state.error /= Nothing then (model,Cmd.none)
+        else if field "edge" Decode.string "" == "older" && state.historyBefore > 0 then update SessionsOlder model
+        else if field "edge" Decode.string "" == "newer" then update SessionsNewer model
+        else (model,Cmd.none)
+    else if kind == "viewer-follow" && stamp == state.stamp && generation == state.generation then
+        let following=field "following" Decode.bool False in
+        ( {model | sessions={state | following=following,loadWindow=if state.following && not following then False else if following then True else state.loadWindow}},Cmd.none )
     else if stamp /= state.stamp || generation /= state.generation || not state.pending then (model,Cmd.none)
     else if field "kind" Decode.string "" == "viewer-error" then
         ( {model | sessions = {state | pending = False, error = Just "Record window could not be decoded. Retry or load another window."}}, Cmd.none )
     else if through <= state.offset || through > min state.end (state.offset + 65536) then (model,Cmd.none)
     else if kind == "viewer-progress" then
-        ( {model | sessions = {state | offset = through,pending = False}}, Cmd.none )
+        ( {model | sessions = {state | offset = through,pending = False,notice = field "notice" Decode.string state.notice}}, Cmd.none )
     else case Decode.decodeValue (Decode.field "rows" (Decode.list row)) value of
         Ok rows ->
             if List.length rows <= 200 && List.sum (List.map (.raw >> String.length) rows) <= 4194304 then
-                ( {model | sessions = {state | offset = through, pending = False, rows = rows, notice = field "notice" Decode.string ""}}, Cmd.none )
+                if List.isEmpty rows && field "pendingBytes" Decode.int 0 > 0 then
+                    ( {model | sessions={state | offset=through,pending=False,notice=field "notice" Decode.string state.notice}},Cmd.none )
+                else if List.isEmpty rows && (field "skipping" Decode.bool False || field "needsLookback" Decode.bool False) && through >= state.end && Maybe.withDefault 0 state.start > max 0 (state.end - 2097152) then
+                    let begin = max 0 (state.end - 2097152) in
+                    ( {model | sessions={state | start=Just begin,offset=begin,pending=False,generation=state.generation+1,resetPending=True}},Cmd.none )
+                else
+                    ( {model | sessions = {state | offset = through, pending = False, rows = rows, historyBefore = field "before" Decode.int (Maybe.withDefault 0 state.start), historyAfter = through, loadWindow = not (field "pageFull" Decode.bool False), notice = field "notice" Decode.string ""}}, Cmd.none )
             else ( {model | sessions = {state | pending = False,error = Just "Viewer row budget exceeded."}}, Cmd.none )
         Err _ -> ( {model | sessions = {state | pending = False,error = Just "Invalid viewer response."}}, Cmd.none )
 
@@ -495,14 +526,16 @@ receiveSealed value model =
         ({model | sessions={state | rows=[],sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,canPrevious=False,canNext=False,renderPart=0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
     else if kind == "sealed-error" then
         let code=field "code" Decode.string "archive_failed" in
-        ({model | sessions={state | sealed={sealed | phase="error",canRetry=code /= "archive_cleanup_failed",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown
+        ({model | sessions={state | sealed={sealed | phase="error",canRetry=code /= "archive_cleanup_failed",http=Nothing
             ,error=Just (if code == "archive_cleanup_failed" then "Archive cleanup could not be confirmed. Reload this page before another archive." else if code == "archive_item_limit" then "One record exceeds the local view limit. The original transcript is still available to download." else if code == "archive_recovery_limit" then "Local archive recovery reached its directory limit. Close other archive tabs or clear this site's stored archive data before retrying." else if code == "archive_recovery_pending" then "Old local archives were removed. Retry to finish recovery." else code)}}},Cmd.none)
     else if kind == "sealed-cancelled" then
         ({model | sessions={state | sealed={sealed | phase="cancelled",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown,error=Nothing}}},Cmd.none)
     else if kind == "sealed-render" then
-        let part=field "part" Decode.int -1 in
-        if part < 0 || part > 100000 then (model,Cmd.none)
-        else ({model | sessions={state | sealed={sealed | renderPart=part}}},Cmd.none)
+        let part=field "part" Decode.int -1
+            request=field "request" Decode.int 0
+        in
+        if part < 0 || part > 100000 || request < sealed.renderRequest then (model,Cmd.none)
+        else ({model | sessions={state | sealed={sealed | renderPart=part,renderRequest=request}}},Cmd.none)
     else if kind == "sealed-disclosure" then
         let key=field "key" Decode.string ""
             open=field "open" Decode.bool False
@@ -980,7 +1013,11 @@ viewRecords context workspace model id =
         [div [class "sessions-toolbar"]
             [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
-        ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "aria-label" "Bounded transcript records"]
+        ,div [class "sessions-pagination",attribute "aria-label" "Conversation history"]
+            [button [class "btn btn-sm",onClick SessionsOlder,disabled (state.historyBefore <= 0 || state.pending || (state.loadWindow && state.offset < state.end))] [text "Earlier messages"]
+            ,span [attribute "role" "status"] [text (if state.pending || (state.loadWindow && state.offset < state.end) then "Loading conversation…" else if state.historyBefore <= 0 then "Beginning of conversation" else "Earlier history available")]
+            ,button [class "btn btn-sm",onClick SessionsNewer,disabled (state.historyAfter >= newest || state.pending || (state.loadWindow && state.offset < state.end))] [text "Newer messages"]]
+        ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-viewer-generation" (String.fromInt state.generation),attribute "data-history-mode" "active",attribute "data-history-before" (String.fromInt state.historyBefore),attribute "data-history-after" (String.fromInt state.historyAfter),attribute "data-history-latest" (String.fromInt newest),attribute "data-history-loading" (if state.pending || (state.loadWindow && state.offset < state.end) || rangeError /= Nothing || state.error /= Nothing then "true" else "false"),attribute "aria-label" "Bounded transcript records"]
             (List.map (\item -> let (key,node) = viewTranscriptItem model item in (state.stamp ++ ":" ++ key,node)) (Transcript.project state.rows))
         ,if List.isEmpty state.rows && state.error == Nothing && rangeError == Nothing then p [attribute "role" "status"] [text (if state.start == Nothing then "Loading transcript metadata…" else if state.offset < state.end then "Reading transcript…" else if newest == 0 then "This session has no committed records." else "No complete messages in this window.")] else text ""
         ,if state.notice /= "" then p [attribute "role" "status"] [text state.notice] else text "" ]
@@ -1001,7 +1038,7 @@ viewSealedRecords context model session =
             , workspaceAction "next" "Next" sealed.canNext
             , workspaceAction "last" "Last" sealed.canNext
             , if busy then button [class "btn btn-sm",attribute "data-sealed-action" "cancel",attribute "data-sealed-owner" state.stamp] [text "Cancel"] else text ""
-            , if (sealed.phase == "error" && sealed.canRetry) || sealed.phase == "cancelled" then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""
+            , if sealed.phase == "error" && sealed.canRetry && not (List.isEmpty sealed.rows) then button [class "btn btn-sm",attribute "data-sealed-action" "retry-page",attribute "data-sealed-owner" state.stamp] [text "Retry"] else if (sealed.phase == "error" && sealed.canRetry) || sealed.phase == "cancelled" then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""
             ]
         openAttribute opened = if opened then [attribute "open" ""] else []
         body piece = case piece.body of
@@ -1053,12 +1090,12 @@ viewSealedRecords context model session =
     let
         identity = session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")
         status = p [class (if workspaceReader then "session-archive-status card-meta" else ""),attribute "role" (if sealed.error == Nothing then "status" else "alert"),attribute "aria-live" "polite"] [text message]
-        records = div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "aria-label" "Verified archive records"] rendered.nodes
+        records = div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-history-mode" "sealed",attribute "aria-label" "Verified archive records"] rendered.nodes
         presentation = if workspaceReader && rendered.part == 0 && not rendered.more then text "" else sealedRenderControls model rendered.part rendered.more
         budgetError = if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
         children = if workspaceReader then [identity,status,presentation,budgetError,records,footer] else
             [identity,status
-            ,div [class "sessions-toolbar"] [action "first" "First",action "previous" "Previous",action "next" "Next",action "last" "Last",action "cancel" "Cancel",button [onClick SessionsRetry] [text "Retry"]]
+            ,div [class "sessions-toolbar"] [action "first" "First",action "previous" "Previous",action "next" "Next",action "last" "Last",action "cancel" "Cancel",if sealed.phase == "error" && sealed.canRetry && not (List.isEmpty sealed.rows) then button [attribute "data-sealed-action" "retry-page",attribute "data-sealed-owner" state.stamp] [text "Retry"] else button [onClick SessionsRetry] [text "Retry"]]
             ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-search",Html.Attributes.placeholder "Search complete archive",attribute "maxlength" "256"] [],action "search" "Search",action "search-next" "Continue search"]
             ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-position",Html.Attributes.placeholder "Original byte offset",attribute "inputmode" "numeric"] [],action "position" "Go to offset"]
             ,presentation,budgetError,records]

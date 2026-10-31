@@ -54,6 +54,28 @@ test('abort keeps ownership until the pending write has unwound',async()=>{
 
 const deferred = () => { let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return {promise,resolve,reject} }
 const flush = () => new Promise(done=>setImmediate(done))
+
+test('forward incomplete batches preserve the admitted page through a failed boundary and retry',async()=>{
+ const previous=globalThis.requestAnimationFrame,events=[];let incoming
+ globalThis.requestAnimationFrame=()=>0
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{addEventListener(){},getElementById:()=>null},window:{},now:()=>0})
+  const old=Buffer.from('{"text":"Already admitted conversation"}\n'),large=Buffer.from(JSON.stringify({text:'Next large message '+'x'.repeat(180000)})+'\n')
+  const command=(offset,bytes,final,extra={})=>incoming({stamp:'owner',generation:1,reset:null,chunk:{offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64'),final},follow:false,direction:'forward',aligned:true,...extra})
+  command(0,old,true,{reset:0});await flush()
+  command(old.length,large.subarray(0,65536),false,{generation:2,reset:old.length,historical:true})
+  await flush()
+  assert.equal(events.filter(event=>event.kind==='viewer-progress').at(-1).through,old.length+65536)
+  assert.deepEqual(events.filter(event=>event.kind==='viewer').at(-1).rows.map(row=>row.text),['Already admitted conversation'],'a failed next request leaves the usable page admitted')
+  // Transport failure sends no chunk. An explicit retry may replay the window;
+  // each incomplete response remains progress until the record is usable.
+  for(let at=0;at<large.length;at+=65536)command(old.length+at,large.subarray(at,at+65536),at+65536>=large.length,{generation:3,reset:at===0?old.length:null,historical:at===0})
+  await flush()
+  const published=events.filter(event=>event.kind==='viewer')
+  assert.equal(published.length,2);assert.match(published[1].rows[0].text,/^Next large message /)
+  assert.ok(events.filter(event=>event.kind==='viewer-progress').every(event=>!('rows' in event)))
+ }finally{globalThis.requestAnimationFrame=previous}
+})
 function bridgeFixture(picker) {
   let incoming,click
   const events=[],app={ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(value){events.push(value)}}}}

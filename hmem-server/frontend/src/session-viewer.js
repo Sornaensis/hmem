@@ -426,6 +426,11 @@ export function semanticTransition(row, previous, anchor) {
         row.activityAnchors[index] = anchor
       }
     }
+  } else {
+    for (const [index,part] of visible) {
+      if(part.nativeContext)continue
+      anchor = part.kind==='text' ? null : row.activityAnchors[index] ?? anchor
+    }
   }
   row.category = visible.some(([,part])=>part.kind === 'text' && !part.nativeContext) ? 'message' : visible.length ? 'activity' : null
   return {row, previous:row.type === 'conversation' ? row : null, anchor, paired,
@@ -433,11 +438,18 @@ export function semanticTransition(row, previous, anchor) {
     hidden:row.eventEnvelope && row.pairedOffset !== undefined}
 }
 
-export function createRecordFramer(startOffset = 0) {
+export function createRecordFramer(startOffset = 0, options = {}) {
   if (!Number.isSafeInteger(startOffset) || startOffset < 0) throw new Error('invalid_offset')
-  let through = startOffset, start = startOffset, skipping = startOffset !== 0
+  let through = startOffset, start = startOffset, skipping = startOffset !== 0 && !options.aligned
   let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput, previousRecord, activityAnchor = null,piVersion=null
+  if(options.predecessor) {
+    previousRecord=options.predecessor.row
+    activityAnchor=options.predecessor.anchor
+    piVersion=options.predecessor.piVersion
+  }
   let notice = ''
+  let before = startOffset, pageFull = false, completeRecords = 0
+  const anchors = new Map((options.anchors || []).slice(0,MAX_VIEW_ROWS).map(row=>[row.offset,row]))
   function append(bytes) {
     if (!bytes.length) return
     if (pendingSize + bytes.length > MAX_RECORD_BYTES + 2) throw new Error('record_limit')
@@ -453,9 +465,25 @@ export function createRecordFramer(startOffset = 0) {
     catch (error) { if (final) { notice = 'Incomplete UTF-8 record at this finite window boundary.'; return }; throw error }
     let value
     try { value = JSON.parse(raw) } catch { if (final) { notice = 'Incomplete record at this finite window boundary.'; return }; throw new Error('invalid_json_record') }
+    completeRecords++
     notice = ''
     if(value?.type==='session')piVersion=Number.isInteger(value.version)?value.version:'invalid'
     const row = { offset:start, presentationOffset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw,{piVersion}) }
+    const anchor = anchors.get(start)
+    if(anchor && anchor.raw === raw) {
+      row.presentationOffset = anchor.presentationOffset
+      row.activityAnchors = anchor.activityAnchors
+      if(anchor.pairedOffset!==undefined)row.pairedOffset=anchor.pairedOffset
+      const first=visibleBlocks(row).find(([,part])=>!part.nativeContext)
+      const carried=first && first[1].kind!=='text' ? anchor.activityAnchors?.[first[0]] : null
+      if(carried && activityAnchor && carried!==activityAnchor) {
+        // A backward overlap can discover an earlier part of the same run.
+        // Rebind only that retained run to the already mounted disclosure key.
+        const previous=activityAnchor
+        for(const item of rows)item.activityAnchors=Object.fromEntries(Object.entries(item.activityAnchors || {}).map(([key,value])=>[key,value===previous?carried:value]))
+        activityAnchor=carried
+      }
+    }
     const replacement = previousRecord?.offset === start ? previousRecord : null
     if (replacement && (replacement.raw === raw || (replacement.type === row.type && replacement.role === row.role && replacement.time === row.time && replacement.text === row.text))) {
       row.presentationOffset = replacement.presentationOffset
@@ -485,11 +513,27 @@ export function createRecordFramer(startOffset = 0) {
         const index = rows.findIndex(item=>item.category === row.category)
         const [removed] = rows.splice(index,1)
         retained -= removed.bytes; bytes -= removed.bytes; count--
+        if(options.direction === 'tail') {
+          // Reader pages describe a contiguous source span. Independent reserve
+          // eviction is useful to legacy callers, but cannot define a history
+          // cursor: it can strand activity between retained prose messages.
+          before = Math.max(before,removed.end)
+          rows = rows.filter(item=>{
+            if(item.offset < before) { retained -= item.bytes; return false }
+            return true
+          })
+          count = rows.filter(item=>item.category === row.category).length
+          bytes = rows.filter(item=>item.category === row.category).reduce((total,item)=>total+item.bytes,0)
+        }
       }
+      // A forward reader yields at a complete record boundary, before the next
+      // record could evict anything. One record is at most 1 MiB, so the byte
+      // threshold reserves that much headroom under the existing 2 MiB cap.
+      if(options.direction === 'forward' && (count >= MAX_OCCURRENCE_ROWS || bytes >= MAX_OCCURRENCE_BYTES-MAX_RECORD_BYTES)) pageFull = true
     }
   }
   function snapshot() {
-    return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice}
+    return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice,before,pageFull,skipping,needsLookback:startOffset>0&&!options.aligned&&completeRecords===0}
   }
 
   return {
@@ -501,9 +545,10 @@ export function createRecordFramer(startOffset = 0) {
       }
       lastInput = {offset,bytes:input.slice()}
       let begin = 0
+      let consumed = input.length
       for (let index = 0; index < input.length; index++) {
         if (input[index] !== 10) continue
-        if (skipping) { skipping = false; start = offset + index + 1 }
+        if (skipping) { skipping = false; start = offset + index + 1; before = start }
         else {
           append(input.subarray(begin,index))
           // CR belongs to the exact delimiter, even across HTTP boundaries.
@@ -519,12 +564,21 @@ export function createRecordFramer(startOffset = 0) {
           pending = []; pendingSize = 0; start = offset + index + 1
         }
         begin = index + 1
+        if(pageFull) { consumed = begin; break }
       }
-      if (!skipping) append(input.subarray(begin))
-      through += input.length
-      if (final && pendingSize && !skipping) record(through,'',true)
+      if (!skipping && !pageFull) append(input.subarray(begin))
+      through += consumed
+      if (final && pendingSize && !skipping && !pageFull) record(through,'',true)
       return snapshot()
     },
-    snapshot
+    snapshot,
+    readerAnchors:()=>rows.map(({offset,end,raw,presentationOffset,activityAnchors,pairedOffset})=>({offset,end,raw,presentationOffset,activityAnchors,pairedOffset})),
+    predecessor(offset) {
+      const row=rows.find(row=>row.end===offset)
+      if(!row)return null
+      let anchor=null
+      for(const [index,part] of visibleBlocks(row)){if(part.nativeContext)continue;anchor=part.kind==='text'?null:row.activityAnchors?.[index] ?? anchor}
+      return {row:{...row},anchor,piVersion}
+    }
   }
 }

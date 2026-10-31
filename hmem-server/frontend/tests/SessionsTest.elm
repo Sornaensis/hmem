@@ -24,6 +24,62 @@ suite : Test.Test
 suite =
     describe "Sessions production wire contract"
         [ describe "workspace completed reader" completedReaderTests
+        , test "an incomplete forward replacement and failed next boundary preserve the admitted conversation" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                reading={entered | sessions={old | start=Just 32,offset=32,end=180032,pending=True,rows=[sampleRecord],windowDirection="forward"}}
+                event=Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("through",Encode.int 65568),("pendingBytes",Encode.int 65536),("rows",Encode.list identity [])]
+                partial=Sessions.update (SessionsBridgeEvent event) reading |> Tuple.first
+                target=Delivery.SessionWindow sessionId 65568 180032 False
+                (metadataWaiting,metadataRequests)=Delivery.admit workspace (Delivery.demand workspace target Delivery.init)
+                metadata=Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
+                ready=metadata |> Maybe.map (\session -> List.foldl (\request delivery -> Delivery.settle request.id True (Ok (Delivery.Metadata session)) delivery) metadataWaiting metadataRequests) |> Maybe.withDefault metadataWaiting
+                (admitted,requests)=Delivery.admit workspace ready
+                failed=List.filter (.target >> (==) target) requests |> List.head |> Maybe.map (\request -> Delivery.settle request.id True (Err (Http.BadStatus 400)) admitted) |> Maybe.withDefault admitted
+                boundary={partial | sessionDelivery=failed}
+                retried=Sessions.update SessionsRetry boundary |> Tuple.first
+                failedBoundary=Dict.get (Delivery.key workspace target) failed.resources |> Maybe.andThen .error
+            in Expect.equal {admitted=[sampleRecord],retried=[sampleRecord],offset=65568,failed=True} {admitted=partial.sessions.rows,retried=retried.sessions.rows,offset=retried.sessions.offset,failed=failedBoundary /= Nothing}
+        , test "reader page backpressure acknowledges a partial physical chunk and pauses further demand" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                reading={entered | sessions={old | start=Just 0,offset=0,end=65536,pending=True,rows=[sampleRecord]}}
+                event=Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("through",Encode.int 32000),("before",Encode.int 0),("pageFull",Encode.bool True),("rows",Encode.list identity [])]
+                next=Sessions.update (SessionsBridgeEvent event) reading |> Tuple.first |> .sessions
+            in Expect.equal {offset=32000,after=32000,pending=False,loading=False} {offset=next.offset,after=next.historyAfter,pending=next.pending,loading=next.loadWindow}
+        , test "directional loading retains the current conversation until a matching page arrives" <| \_ ->
+            let
+                old=emptySessionsModel
+                model={sessionModel | sessions={old | historyBefore=3000000,historyAfter=3000032,rows=[{sampleRecord | offset=3000000,end=3000032}],offset=3000032,end=3000032}}
+                earlier=Sessions.update SessionsOlder model |> Tuple.first |> .sessions
+                later=Sessions.update SessionsNewer model |> Tuple.first |> .sessions
+            in Expect.equal {earlier=[{sampleRecord | offset=3000000,end=3000032}],later=[{sampleRecord | offset=3000000,end=3000032}],backward="tail",forward="forward",aligned=True}
+                {earlier=earlier.rows,later=later.rows,backward=earlier.windowDirection,forward=later.windowDirection,aligned=later.windowAligned}
+        , test "a maximum-sized overlap cannot strand forward traversal before the next record" <| \_ ->
+            let
+                old=emptySessionsModel
+                row={sampleRecord | offset=100,end=1048678}
+                model={sessionModel | sessions={old | historyBefore=100,historyAfter=row.end,rows=[row],offset=row.end,end=4000000}}
+                next=Sessions.update SessionsNewer model |> Tuple.first |> .sessions
+            in Expect.equal (Just row.end,row.end,True) (next.start,next.offset,next.windowAligned)
+        , test "backward overlap cannot consume its entire lookback with already mounted large records" <| \_ ->
+            let
+                old=emptySessionsModel
+                first={sampleRecord | offset=3000000,end=4048578}
+                last={sampleRecord | offset=4048578,end=5097156}
+                model={sessionModel | sessions={old | historyBefore=3000000,historyAfter=last.end,rows=[first,last],offset=last.end,end=last.end}}
+                next=Sessions.update SessionsOlder model |> Tuple.first |> .sessions
+            in Expect.equal (Just 902848,902848,3000000) (next.start,next.offset,next.end)
+        , test "a tail entirely inside one record expands once within the existing bounded lookback" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                reading={entered | sessions={old | start=Just 3000000,offset=3000000,end=3065536,pending=True}}
+                event=Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("through",Encode.int 3065536),("skipping",Encode.bool True),("rows",Encode.list identity [])]
+                next=Sessions.update (SessionsBridgeEvent event) reading |> Tuple.first |> .sessions
+            in Expect.equal {start=Just 968384,offset=968384,end=3065536,reset=True} {start=next.start,offset=next.offset,end=next.end,reset=next.resetPending}
         , describe "direct task association presence" associationTests
         , describe "authoritative evidence availability" evidenceAvailabilityTests
         , describe "card-owned dock authority" dockTests
@@ -862,7 +918,16 @@ completedReaderTests =
             in {entered | sessionDelivery={delivery | resources=Dict.insert (Delivery.key workspace target) resource delivery.resources},sessions={state | taskPanel=Just "one",sealed={sealed | phase=phase,canRetry=True,canPrevious=False,canNext=True}}}
         workspaceView phase = Query.fromHtml (Sessions.view workspace (model phase))
     in
-    [ test "workspace omits search and offsets but embedded reader keeps their controls" <| \_ ->
+    [ test "sealed render requests retain their acknowledgement stamp and reject older handoffs" <| \_ ->
+        let
+            ready=model "ready"
+            state=ready.sessions
+            packet request part=SessionsBridgeEvent (Encode.object [("kind",Encode.string "sealed-render"),("stamp",Encode.string state.stamp),("generation",Encode.int state.generation),("workspace",Encode.string workspace),("session",Encode.string sessionId),("request",Encode.int request),("part",Encode.int part)])
+            first=Sessions.update (packet 90 1) ready |> Tuple.first
+            stale=Sessions.update (packet 89 2) first |> Tuple.first
+            next=Sessions.update (packet 91 2) stale |> Tuple.first
+        in Expect.equal ((1,90),(1,90),(2,91)) ((first.sessions.sealed.renderPart,first.sessions.sealed.renderRequest),(stale.sessions.sealed.renderPart,stale.sessions.sealed.renderRequest),(next.sessions.sealed.renderPart,next.sessions.sealed.renderRequest))
+    , test "workspace omits search and offsets but embedded reader keeps their controls" <| \_ ->
         Expect.all
             [ \_ -> workspaceView "ready" |> Query.hasNot [Selector.id "sealed-search"]
             , \_ -> workspaceView "ready" |> Query.hasNot [Selector.id "sealed-position"]

@@ -275,16 +275,26 @@ remove their demand without releasing outstanding physical request slots.
 The viewer consumes finite windows of at most 2 MiB, one 64 KiB response at a
 time. JavaScript frames bytes before UTF-8 decoding, with one incomplete 1 MiB
 JSONL carry and one bounded adjacent-pair candidate, independently of the four
-raw-range cache slots. Presentation reserves the latest 100 prose-bearing
-occurrences and latest 100 activity-only occurrences independently, each limited
-to 2 MiB of original record bytes: at most 200 occurrences and 4 MiB combined.
+raw-range cache slots. Each contiguous reader page admits at most 100
+prose-bearing and 100 activity-only occurrences, each category limited to 2 MiB
+of original record bytes: at most 200 occurrences and 4 MiB combined.
 These are raw-byte budgets, not heap-size guarantees. A mixed occurrence counts
 once in the prose reserve. Unknown metadata and paired event envelopes consume
 neither reserve; genuine repeated messages remain separate source occurrences.
 An initial mid-record fragment is omitted. CRLF and byte offsets remain exact.
 
-Each finite window publishes its completed presentation once while framing
-acknowledgements continue per chunk. Its captured end stays fixed through an
+Initial tail demand reads 64 KiB, expanding to at most 2 MiB when no record
+boundary occurs in that lookback. Earlier/newer viewport demand and explicit
+controls traverse bounded record-aligned pages. Forward framing stops before
+eviction and acknowledges its exact consumed prefix; the unused suffix is
+requested through the ordinary delivery queue. Backward pages retain a
+contiguous suffix. Overlap is bounded by both occurrence count and bytes;
+maximum-sized records use exact boundaries instead. Private bounded predecessor
+and consumed-pair context preserves native occurrence identity across those
+boundaries. Reader batches publish progressively, while pending backward loads
+retain the current page until their overlapping replacement is complete.
+
+A window's captured end stays fixed through an
 unacknowledged-chunk retry, even if metadata reports newly committed bytes.
 Same-owner canonical resynchronization retires HTTP and bridge generations while
 preserving the framer, retained rows and native disclosure nodes. Source run

@@ -4,6 +4,78 @@ import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, MAX_OC
 import {copilotRecords,piRecords} from './support/native-session-fixtures.mjs'
 const encode = value => new TextEncoder().encode(value)
 
+test('directional reader pages traverse every interleaved occurrence without reserve gaps',()=>{
+ const values=Array.from({length:720},(_,i)=>i%7===0?{type:'event_msg',payload:{type:'agent_message',message:`message ${i}`}}:{type:'event_msg',payload:{type:'reader_activity',index:i}})
+ const bytes=encode(values.map(value=>JSON.stringify(value)+'\r\n').join(''))
+ const expected=[];let cursor=0
+ for(const value of values){expected.push(cursor);cursor+=encode(JSON.stringify(value)+'\r\n').length}
+ const visited=[];cursor=0
+ while(cursor<bytes.length){
+  const framer=createRecordFramer(cursor,{direction:'forward',aligned:true});let result
+  do {const next=Math.min(bytes.length,cursor+65536);result=framer.push(cursor,bytes.subarray(cursor,next),next===bytes.length);assert.ok(result.through>cursor);cursor=result.through}while(cursor<bytes.length&&!result.pageFull)
+  visited.push(...result.rows.map(row=>row.offset));assert.ok(result.rows.length<=MAX_VIEW_ROWS)
+ }
+ assert.deepEqual(visited,expected)
+ const reverse=[];let end=bytes.length
+ while(end>0){
+  const begin=Math.max(0,end-2097152),framer=createRecordFramer(begin,{direction:'tail'});let result
+  for(let at=begin;at<end;at+=65536)result=framer.push(at,bytes.subarray(at,Math.min(end,at+65536)),at+65536>=end)
+  reverse.unshift(...result.rows.map(row=>row.offset));assert.ok(result.before<end);end=result.before
+ }
+ assert.deepEqual(reverse,expected)
+})
+
+test('forward pages preserve split UTF8, CRLF, large records and growing finite EOF',()=>{
+ const source=Array.from({length:205},(_,i)=>JSON.stringify({type:'event_msg',payload:{type:'agent_message',message:`${i} λ😀 `+'x'.repeat(i===102?150000:4)}})).join('\r\n')
+ const bytes=encode(source),visited=[];let cursor=0
+ while(cursor<bytes.length){const framer=createRecordFramer(cursor,{direction:'forward',aligned:true});let result
+  do{const end=Math.min(bytes.length,cursor+997);result=framer.push(cursor,bytes.subarray(cursor,end),end===bytes.length);cursor=result.through}while(cursor<bytes.length&&!result.pageFull)
+  visited.push(...result.rows.map(row=>JSON.parse(row.raw).payload.message.split(' ')[0]))
+  if(cursor===bytes.length){const appended=encode('\r\n'+JSON.stringify({type:'event_msg',payload:{type:'agent_message',message:'205 appended'}})+'\n');const growing=framer.push(cursor,appended,true);assert.equal(growing.rows.filter(row=>JSON.parse(row.raw).payload.message.startsWith('204 ')).length,1)}
+ }
+ assert.deepEqual(visited,Array.from({length:205},(_,i)=>String(i)))
+})
+
+test('reader overlap keeps a consumed envelope pair and activity run context',()=>{
+ const event={type:'event_msg',timestamp:'2026-10-31T12:00:00.000Z',payload:{type:'agent_message',message:'same'}}
+ const canonical={type:'response_item',timestamp:event.timestamp,payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'same'}]}}
+ const values=[event,canonical,{...event,timestamp:'2026-10-31T12:00:00.010Z'},...Array.from({length:4},(_,i)=>({type:'event_msg',payload:{type:'tool_progress',i}}))]
+ const bytes=encode(values.map(value=>JSON.stringify(value)+'\n').join('')),framer=createRecordFramer(0,{direction:'tail'})
+ const original=framer.push(0,bytes,true),begin=original.rows[0].offset
+ const overlap=createRecordFramer(begin,{direction:'forward',aligned:true,anchors:framer.readerAnchors()}).push(begin,bytes.subarray(begin),true)
+ assert.deepEqual(overlap.rows.map(row=>row.presentationOffset),original.rows.map(row=>row.presentationOffset))
+ assert.equal(overlap.rows.filter(row=>JSON.parse(row.text).some(block=>block.kind==='text')).length,2,'consumed canonical cannot suppress the later genuine event')
+ assert.deepEqual(overlap.rows.map(row=>row.activityAnchors),original.rows.map(row=>row.activityAnchors))
+})
+
+test('consecutive maximum-sized records progress in both reader directions across byte windows',()=>{
+ const records=Array.from({length:5},(_,i)=>{const value={type:'event_msg',payload:{type:'agent_message',message:`${i} `}};const overhead=encode(JSON.stringify(value)).length;value.payload.message+='x'.repeat(1048576-overhead);return JSON.stringify(value)+'\r\n'})
+ const bytes=encode(records.join('')),expected=records.map((_,i)=>i*1048578),forward=[];let cursor=0,previous=null
+ while(cursor<bytes.length){const framer=createRecordFramer(cursor,{direction:'forward',aligned:true,predecessor:previous?.predecessor(cursor)});let result
+  do{const end=Math.min(bytes.length,cursor+65536);result=framer.push(cursor,bytes.subarray(cursor,end),end===bytes.length);assert.ok(result.through>cursor);cursor=result.through}while(cursor<bytes.length&&!result.pageFull)
+  forward.push(...result.rows.map(row=>row.offset));previous=framer
+ }
+ assert.deepEqual(forward,expected)
+ const backward=[];let end=bytes.length
+ while(end>0){const begin=Math.max(0,end-2097152),framer=createRecordFramer(begin,{direction:'tail'});let result
+  for(let at=begin;at<end;at+=65536)result=framer.push(at,bytes.subarray(at,Math.min(end,at+65536)),at+65536>=end)
+  assert.ok(result.rows.length>0);backward.unshift(...result.rows.map(row=>row.offset));assert.ok(result.before<end);end=result.before
+ }
+ assert.deepEqual(backward,expected)
+ const joined=createRecordFramer(expected[3],{direction:'forward',aligned:true}).push(expected[3],bytes.subarray(expected[3],expected[3]+65536),false)
+ assert.equal(joined.rows.length,0,'an aligned large record remains pending until complete')
+})
+
+test('backward overlap reconciles the entire retained activity run to one stable disclosure',()=>{
+ const bytes=encode(Array.from({length:500},(_,i)=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'read_'+i,arguments:JSON.stringify({data:'x'.repeat(400)})}})+'\n').join(''))
+ const begin=bytes.length-65536,old=createRecordFramer(begin,{direction:'tail'}),latest=old.push(begin,bytes.subarray(begin),true)
+ const end=latest.rows[19].end,older=createRecordFramer(0,{direction:'tail',anchors:old.readerAnchors()});let result
+ for(let at=0;at<end;at+=65536)result=older.push(at,bytes.subarray(at,Math.min(end,at+65536)),at+65536>=end)
+ const key=Object.values(latest.rows[0].activityAnchors)[0]
+ assert.deepEqual([...new Set(result.rows.flatMap(row=>Object.values(row.activityAnchors)))],[key])
+ assert.ok(result.rows[0].offset<latest.rows[0].offset)
+})
+
 test('meaningful unhandled Codex events retain exact inspectable JSON and activity source order',()=>{
  const payload={type:'future_event',message:'<script>inert</script>',details:{values:[null,false,7,'λ😀']}},values=[
   {type:'event_msg',timestamp:'2026-10-30T12:30:00Z',payload},

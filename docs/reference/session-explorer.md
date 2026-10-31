@@ -157,15 +157,20 @@ header-version scalar, and archive pieces retain it for identical rehydration.
   that preserve the session epoch. Physical request occupancy remains unchanged.
   Hierarchy restoration retains signed displacement above the hierarchy origin;
   row lookups and native scrolling retain their independent nonnegative bounds.
-- The live presentation retains the latest 100 prose-bearing occurrences and
-  latest 100 activity-only occurrences independently, each bounded to 2 MiB of
-  original record bytes (combined 200/4 MiB), plus a 1 MiB incomplete-record carry.
-  Hidden metadata and paired event envelopes consume neither visible reserve.
-  A record occupies at most 1 MiB. Transport uses finite 2 MiB windows in 64 KiB
-  chunks under the shared two-request admission. A finite window publishes and
-  positions once; same-authority synchronization preserves retained disclosures
-  and reading position. Only readers at the tail follow appends. Original evidence
-  bytes and bounded downloads are independent of this presentation retention.
+- Live reader pages contain a contiguous source span with at most 100
+  prose-bearing and 100 activity-only occurrences, each category bounded to
+  2 MiB of original record bytes (combined 200/4 MiB), plus a 1 MiB incomplete
+  record carry. Hidden metadata and paired event envelopes consume neither
+  visible budget. Initial tail demand reads 64 KiB and can expand to a bounded
+  2 MiB lookback when it starts inside a large record. Earlier and newer boundary
+  demand keeps every source occurrence reachable through record-aligned pages;
+  forward framing yields before a new occurrence could be discarded. Transport
+  remains in 64 KiB chunks under the shared two-request admission. Usable batches
+  publish progressively; pending history and failed requests preserve the loaded
+  page. Bounded overlap and disclosure flags preserve reading anchors through
+  history loads, appends, resizing and same-authority surface transfers. Only
+  readers at the logical tail follow appends. Original evidence bytes and bounded
+  downloads are independent of this presentation retention.
 
 Session titles are distinct from transcript format labels. The list is a bounded
 preorder of matching active sessions, with at most three levels of indentation.

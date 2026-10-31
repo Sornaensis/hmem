@@ -182,6 +182,14 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       downloadHash?.destroy();rawHash?.destroy();downloadHash=null;rawHash=null;previous=null;anchor=null;group=null;formatter=null
       return {name:stageName,custody:stageCustody,manifest}
     },
+    async releaseReader() {
+      // A failed command retires reads. The custody owner may still join and
+      // release this verified reader before authorizing a fresh incarnation.
+      if(mode!=='reader'||!published||!stageCustody||detached)throw Error('archive_unverified')
+      await store.releaseReader()
+      detached=true;retired=true;published=false;formatter=null;previous=null;anchor=null;group=null
+      return {name:stageName,custody:stageCustody,manifest}
+    },
     async chunk(bytes) {
       current();if(mode!=='processor')throw Error('archive_read_only')
       if(!(bytes instanceof Uint8Array) || bytes.length>IO_BYTES || published)throw Error('chunk_limit')
@@ -317,6 +325,7 @@ if(typeof self!=='undefined' && typeof document==='undefined' && typeof self.pos
       else if(data.kind==='chunk')await engine.chunk(new Uint8Array(data.bytes))
       else if(data.kind==='finish')await engine.finish()
       else if(data.kind==='detach'){const stage=await engine.detach();self.postMessage({...owner,kind:'detached',request:data.request,stage});return}
+      else if(data.kind==='release-reader'){const stage=await engine.releaseReader();self.postMessage({...owner,kind:'detached',request:data.request,stage});return}
       else if(data.kind==='page')self.postMessage({...owner,kind:'page',request:data.request,...await engine.page(data.page)})
       else if(data.kind==='body')self.postMessage({...owner,kind:'body',request:data.request,...await engine.hydrate(data.key,data.part)})
       else if(data.kind==='disclosure')await engine.disclosure(data.key,data.open)

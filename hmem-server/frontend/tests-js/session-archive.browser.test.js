@@ -32,6 +32,67 @@ const generation='33333333-3333-4333-8333-333333333333'
 const makeManifest=(h,raw,gzip)=>({workspace_id:h.fixture.workspace.id,session_id:h.saved.id,state:'ready',generation_id:generation,codec:'gzip-v1',raw_bytes:String(raw.length),raw_records:String(raw.length?raw.toString('utf8').split('\n').filter(Boolean).length:0),raw_sha256:hash(raw),compressed_bytes:String(gzip.length),compressed_sha256:hash(gzip),content_path:`/api/v1/workspaces/${h.fixture.workspace.id}/sessions/${h.saved.id}/archive/${generation}/content`})
 const workerAsset=async()=>'/assets/'+(await readdir('../static/assets')).find(name=>/^session-archive-worker-.*\.js$/.test(name))
 
+test('sealed boundary scrolling visits consecutive render parts and positions each stamped replacement',{timeout:45000},async()=>{
+ const destination='https://example.test/'+'x'.repeat(12000),markdown=Array.from({length:800},(_,i)=>`[Occurrence ${i}][r]`).join(' ')+'\n\n[r]: '+destination
+ const h=await openSessionExplorer({transcriptBytes:Buffer.from(JSON.stringify({text:markdown})+'\n')}),{page}=h
+ const view=()=>page.locator('#session-records').evaluate(node=>({part:Number(node.dataset.renderPart),request:Number(node.dataset.renderRequest),top:node.scrollTop,bottom:node.scrollHeight-node.scrollTop-node.clientHeight,occurrences:[...node.querySelectorAll('a')].map(link=>Number(link.textContent.split(' ')[1]))}))
+ try{
+  const raw=h.content.get(h.saved.id),gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip)
+  await page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})))
+  await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
+  await page.getByText('Verified complete archive.',{exact:true}).waitFor();await page.getByRole('button',{name:'Read complete message',exact:true}).click()
+  await page.waitForFunction(()=>document.querySelector('#session-records a')?.getAttribute('href')?.length>12000)
+  const viewport=page.locator('#session-records'),visited=(await view()).occurrences
+  for(let target=1;target<=3;target++){
+   await viewport.evaluate(node=>{node.scrollTop=node.scrollHeight;for(let i=0;i<5;i++)node.dispatchEvent(new Event('scroll'))});await h.idle()
+   const previous=await view();assert.equal(previous.part,target-1,'programmatic scrolls do not advance a presentation part')
+   await viewport.hover();await page.mouse.wheel(0,2000)
+   await page.waitForFunction(target=>{const node=document.getElementById('session-records');return Number(node.dataset.renderPart)===target&&node.scrollTop<=4},target)
+   await h.idle();const current=await view();assert.equal(current.part,target);assert.ok(current.request>previous.request)
+   visited.push(...current.occurrences)
+   await viewport.evaluate(node=>{for(let i=0;i<5;i++)node.dispatchEvent(new Event('scroll'))});await h.idle();assert.equal((await view()).part,target,'replacement scrolls cannot consume the previous gesture again')
+  }
+  assert.deepEqual(visited,Array.from({length:visited.length},(_,i)=>i),'consecutive mounted parts contain every expected occurrence once and in order')
+  await viewport.hover();await page.mouse.wheel(0,-2000)
+  await page.waitForFunction(()=>{const node=document.getElementById('session-records');return node.dataset.renderPart==='2'&&node.scrollHeight-node.scrollTop-node.clientHeight<=4})
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+test('failed native reader page retries through closed handles, revalidation and a fresh reader',{timeout:45000},async()=>{
+ const raw=Buffer.from(Array.from({length:180},(_,i)=>JSON.stringify({text:`Retry occurrence ${i}`})+'\n').join(''))
+ const h=await openSessionExplorer({transcriptBytes:raw}),conditional=[];let injected=false,readerIncarnations=0
+ try{
+  await h.page.route('**/assets/session-archive-worker-*.js*',async route=>{
+   const url=new URL(route.request().url())
+   if(url.searchParams.get('phase')!=='reader')return route.continue()
+   readerIncarnations++
+   if(injected)return route.continue();injected=true
+   const response=await route.fetch(),source=await response.text()
+   const prelude="let hmemRetryPages=0,hmemRetryFault=false;const hmemRetryTransaction=IDBDatabase.prototype.transaction;IDBDatabase.prototype.transaction=function(...args){if(hmemRetryFault){hmemRetryFault=false;throw Error('controlled_reader_page_failure')}return hmemRetryTransaction.apply(this,args)};Object.defineProperty(self,'onmessage',{configurable:true,set(handler){self.addEventListener('message',event=>{if(event.data.kind==='page'&&++hmemRetryPages===2)hmemRetryFault=true;handler(event)})}});\n"
+   await route.fulfill({response,body:prelude+source})
+  })
+  const gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip)
+  await h.page.route('**/sessions/**/archive**',phaseArchiveRoute(async route=>{
+   if(new URL(route.request().url()).pathname.endsWith('/content')){
+    if(route.request().headers()['if-none-match'])conditional.push(route.request().headers()['if-none-match'])
+    await route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip})
+   }else await route.fulfill({json:manifest})
+  }))
+  await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
+  await h.page.getByText('Retry occurrence 0',{exact:true}).waitFor()
+  const admitted=await h.page.locator('.session-record').evaluateAll(nodes=>nodes.map(node=>node.dataset.blockKey))
+  await h.page.getByRole('button',{name:'Next',exact:true}).click()
+  await h.page.getByText('controlled_reader_page_failure',{exact:true}).waitFor()
+  assert.deepEqual(await h.page.locator('.session-record').evaluateAll(nodes=>nodes.map(node=>node.dataset.blockKey)),admitted)
+  await h.page.getByRole('button',{name:'Retry',exact:true}).click()
+  await h.page.getByText('Retry occurrence 64',{exact:true}).waitFor()
+  assert.equal(readerIncarnations,2);assert.deepEqual(conditional,[phaseArchiveETag,phaseArchiveETag])
+  assert.equal(await h.page.getByText('Retry occurrence 0',{exact:true}).count(),0)
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
 
 const retainedFamilySha256='488805c6ff29f021b5f21ff3f9a14e632439f402b33f73a138c33b22d4f9102b'
 const retainedFamilyBytes=825435

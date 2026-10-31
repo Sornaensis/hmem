@@ -299,6 +299,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       readRaw:(start,end)=>rawReads.read(start,end),
       retireReads:()=>rawReads.retire(),
       async detach(){if(!custody||adoptManifest)throw Error('archive_custody_required');await closeHandles()},
+      async releaseReader(){if(!custody||!adoptManifest)throw Error('archive_reader_required');await closeHandles()},
       async publish(manifest){if(adoptManifest)throw Error('archive_read_only');if(closed)throw Error('retired_store');raw.flush();await put('meta',{key:'verified',manifest,indexVersion:INDEX_VERSION});await flush();if(closed)throw Error('retired_store');rawReads.publish(manifest.raw_bytes)},
       async disclosure(key,open){await put('disclosures',{key,open});await flush()},
       closeAndDelete

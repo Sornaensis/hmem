@@ -673,7 +673,7 @@ test('local page progress is coalesced at100ms with one owned timer and immediat
       supersededCallback();assert.equal(navigating(),1,'old operation cannot paint a newer pending operation')
       const pendingCallback=callbacks.at(-1),beforePages=events.filter(value=>value.kind==='sealed-page').length
       if(retirement==='complete'){page(worker,3);await until(()=>events.filter(value=>value.kind==='sealed-page').length===beforePages+1);assert.equal(timers.size,0);viewer.configure(null)}
-      else if(retirement==='error'){worker.reply(worker.pages[3],{kind:'error',code:'page_failed'});await until(()=>events.some(value=>value.kind==='sealed-error'&&value.code==='page_failed'))}
+      else if(retirement==='error'){worker.reply(worker.pages[3],{kind:'error',code:'page_failed'});await until(()=>events.some(value=>value.kind==='sealed-error'&&value.code==='page_failed'));assert.equal(timers.size,0);assert.equal(worker.retiring,null,'page failure preserves the verified stage until retry or explicit retirement');viewer.configure(null)}
       else if(retirement==='inactive')viewer.configure(null)
       else viewer.retireAuthority()
       await until(()=>worker.retiring);assert.equal(timers.size,0);assert.equal(worker.terminated,undefined);assert.equal(viewer.snapshot().active,true,'progress timer retirement cannot release the held RPC/Worker owner')
@@ -901,6 +901,64 @@ test('sequential processor reader handoff keeps custody, current authorization a
   }
 })
 
+
+test('sealed render handoffs require fresh boundary gestures and exact stamped DOM acknowledgement',async()=>{
+ const events=[],workers=[],listeners=new Map(),frames=[];let viewer,requestId=0
+ const raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'render-handoff',load:1,workspace,session,authority:'principal',apiUrl:''}
+ const attrs={'data-sealed-dom-owner':config.stamp,'data-sealed-dom-load':'1','data-sealed-first':'first','data-sealed-last':'last','data-render-part':'0','data-render-request':'0','data-render-more':'true'}
+ const viewport={id:'session-records',scrollTop:900,scrollHeight:1000,clientHeight:100,getAttribute:name=>attrs[name] ?? null,replaceChildren(){}}
+ class Worker{postMessage(message){if(message.kind==='interrupt')return;queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,request:message.request,...(message.kind==='page'?{kind:'page',rows:[{key:'first'}],first:'first',last:'last',more:true}:{kind:message.kind==='retire'?'cleaned':'ack'})}}))}terminate(){this.terminated=true}}
+ viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){},requestAnimationFrame:callback=>frames.push(callback)},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
+ const until=async fn=>{for(let i=0;i<100&&!fn();i++)await new Promise(resolve=>setImmediate(resolve));assert.ok(fn(),'bounded render handoff')}
+ const paint=()=>{for(let i=0;i<8&&frames.length;i++)frames.splice(0).forEach(callback=>callback())}
+ const scroll=()=>listeners.get('scroll')({target:viewport})
+ const renderEvents=()=>events.filter(event=>event.kind==='sealed-render')
+ try{
+  viewer.configure(config);await until(()=>events.some(event=>event.kind==='sealed-page'));paint()
+  for(let i=0;i<5;i++)scroll();assert.equal(renderEvents().length,0,'layout and programmatic scrolls admit no render boundary')
+  listeners.get('wheel')({target:viewport,deltaY:400});scroll();assert.equal(renderEvents().length,1)
+  const first=renderEvents()[0];attrs['data-render-part']='1';attrs['data-render-request']=String(first.request-1);paint()
+  assert.equal(viewport.scrollTop,900,'a stale render stamp cannot reposition the replacement')
+  scroll();assert.equal(renderEvents().length,1,'no second part can run before the first handoff is acknowledged')
+  attrs['data-render-request']=String(first.request);viewer.configure(config);paint();assert.equal(viewport.scrollTop,0)
+  viewport.scrollTop=900;for(let i=0;i<5;i++)scroll();assert.equal(renderEvents().length,1,'replacement/clamping scrolls cannot consume the old wheel gesture')
+  listeners.get('wheel')({target:viewport,deltaY:400});scroll();const second=renderEvents().at(-1);assert.equal(second.part,2)
+  attrs['data-render-part']='2';attrs['data-render-request']=String(second.request);paint();assert.equal(viewport.scrollTop,0)
+  assert.deepEqual(renderEvents().map(event=>event.part),[1,2])
+ }finally{viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated));paint()}
+})
+
+test('reader retry retains custody through held release, release failure and authority retirement',async()=>{
+ for(const scenario of ['retry','release-failure','retire']){
+  const events=[],workers=[],listeners=new Map();let viewer,requestId=0
+  const raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'reader-retry-'+scenario,load:1,workspace,session,authority:'principal',apiUrl:''}
+  class Worker{
+   pages=[]
+   reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+   postMessage(message){
+    if(message.kind==='interrupt')return
+    if(message.kind==='release-reader'){this.release=()=>this.reply(message,scenario==='release-failure'?{kind:'error',code:'archive_cleanup_failed'}:{kind:'detached',stage:{name:this.stage.name,custody:this.stage.custody,manifest:this.stage.manifest}});return}
+    if(message.kind==='start'||message.kind==='adopt')this.stage={name:message.name,custody:message.custody,manifest:message.manifest}
+    if(message.kind==='page'){this.pages.push(message);queueMicrotask(()=>this.reply(message,this.pages.length===2?{kind:'error',code:'page_failed'}:{kind:'page',rows:[{key:message.page.after?'next':'first'}],first:message.page.after?'next':'first',last:message.page.after?'next':'first',more:true}));return}
+    queueMicrotask(()=>this.reply(message,{kind:message.kind==='retire'?'cleaned':'ack'}))
+   }
+   terminate(){this.terminated=true}
+  }
+  viewer=createPhaseBridgeFixture({document:{getElementById:()=>null,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){}},workerFactory:()=>{assert.ok(workers.every(worker=>worker.terminated));const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
+  const until=async fn=>{for(let i=0;i<100&&!fn();i++)await new Promise(resolve=>setImmediate(resolve));assert.ok(fn(),'bounded retry '+scenario)}
+  const click=action=>listeners.get('click')({target:{closest:()=>({getAttribute:name=>name==='data-sealed-action'?action:name==='data-sealed-owner'?config.stamp:null})},preventDefault(){}})
+  try{
+   viewer.configure(config);await until(()=>events.some(event=>event.kind==='sealed-page'));const reader=workers.at(-1)
+   click('next');await until(()=>events.some(event=>event.kind==='sealed-error'&&event.code==='page_failed'))
+   click('retry-page');await until(()=>reader.release)
+   assert.equal(reader.terminated,undefined);assert.equal(workers.length,2);assert.equal(viewer.snapshot().active,true)
+   if(scenario==='retire'){viewer.retireAuthority();await new Promise(resolve=>setImmediate(resolve));assert.equal(reader.terminated,undefined);assert.equal(viewer.snapshot().active,true)}
+   reader.release()
+   if(scenario==='retry'){await until(()=>workers.length===3&&events.filter(event=>event.kind==='sealed-page').length===2);assert.equal(reader.terminated,true);assert.deepEqual(workers[2].pages[0].page,{after:'first'})}
+   else {await until(()=>!viewer.snapshot().active);assert.equal(workers.length,2);if(scenario==='release-failure')assert.equal(viewer.snapshot().blocked,true)}
+  }finally{viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated))}
+ }
+})
 
 test('ordinary archive pages and fresh owners cannot inherit hidden search or offset options',async()=>{
  const events=[],listeners=new Map(),workers=[];let viewer,requestId=0

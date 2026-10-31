@@ -995,6 +995,21 @@ completedReaderTests =
             blocked={failed | sessions={state | sealed={sealed | canRetry=False,error=Just "Reload required"}}}
             refused=Sessions.update SessionsJumpLatest blocked |> Tuple.first |> .sessions
         in Expect.equal ((state.generation+1,True),(state.generation,False,Just "Reload required")) ((retried.generation,retried.latestPending),(refused.generation,refused.latestPending,refused.latestError))
+    , test "matching latest render retires a historical anchor republished by an in-flight page" <| \_ ->
+        let
+            ready=model "ready"
+            jumped=Sessions.update SessionsJumpLatest ready |> Tuple.first
+            state=jumped.sessions
+            packet kind latest generation fields=SessionsBridgeEvent (Encode.object ([("kind",Encode.string kind),("stamp",Encode.string state.stamp),("generation",Encode.int generation),("workspace",Encode.string workspace),("session",Encode.string sessionId),("latestRequest",Encode.int latest)]++fields))
+            historical=Sessions.update (packet "sealed-follow" state.latestRequest state.generation [("manualUp",Encode.bool True),("fragmentAnchor",Encode.string "historical:content:0")]) jumped |> Tuple.first
+            render latest generation current=Sessions.update (packet "sealed-latest-render" latest generation [("request",Encode.int 90)]) current |> Tuple.first
+            stale=render (state.latestRequest-1) state.generation historical
+            wrong=render state.latestRequest (state.generation-1) historical
+            final=render state.latestRequest state.generation historical
+            cancelled=Sessions.update (packet "sealed-latest-cancelled" state.latestRequest state.generation []) historical |> Tuple.first |> render state.latestRequest state.generation
+        in Expect.equal
+            {stale="historical:content:0",wrong="historical:content:0",final={anchor="",part=-1,request=90,pending=True,manual=True},cancelled="historical:content:0"}
+            {stale=stale.sessions.presentationAnchor,wrong=wrong.sessions.presentationAnchor,final={anchor=final.sessions.presentationAnchor,part=final.sessions.sealed.renderPart,request=final.sessions.sealed.renderRequest,pending=final.sessions.latestPending,manual=final.sessions.manualUp},cancelled=cancelled.sessions.presentationAnchor}
     , test "sealed render requests retain their acknowledgement stamp and reject older handoffs" <| \_ ->
         let
             ready=model "ready"

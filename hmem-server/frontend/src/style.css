@@ -5706,7 +5706,7 @@ textarea.observation-edit-content {
 .session-jump-latest:focus-visible { outline:3px solid #6ee7ff; outline-offset:3px; }
 .session-jump-latest[aria-busy="true"] { border-style:dashed; }
 .session-latest-error { margin:.35rem 0; max-width:100%; padding:.4rem; border-radius:.4rem; background:rgba(18,26,36,.96); color:#fff; font-size:.8rem; }
-.sessions-page .session-viewer:has(> .session-latest-error, > .session-render-continuation) { min-height:min-content; }
-.sessions-page .session-viewer:has(> .session-latest-error, > .session-render-continuation) .session-records { min-height:calc(3lh + 3.75rem); contain:size; }
-@media (max-width:650px) { .sessions-page .sessions-layout:has(.session-latest-error, .session-render-continuation) { min-height:min-content; grid-template-rows:auto minmax(0,1fr); } }
+.sessions-page .session-viewer:has(> .session-latest-error, > .session-render-continuation, > .session-latest-overlay) { min-height:min-content; }
+.sessions-page .session-viewer:has(> .session-latest-error, > .session-render-continuation, > .session-latest-overlay) .session-records { min-height:calc(3lh + 3.75rem); contain:size; }
+@media (max-width:650px) { .sessions-page .sessions-layout:has(.session-latest-error, .session-render-continuation, .session-latest-overlay) { min-height:min-content; grid-template-rows:auto minmax(0,1fr); } }
 @media (prefers-reduced-motion:reduce) { .session-jump-latest { transition:none; scroll-behavior:auto; } }

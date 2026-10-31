@@ -788,8 +788,8 @@ receiveSealed value model =
         in
         if part < 0 || part > 100000 || request < sealed.renderRequest then (model,Cmd.none)
         else ({model | sessions={state | presentationAnchor="",sealed={sealed | renderPart=part,renderRequest=request}}},Cmd.none)
-    else if kind == "sealed-latest-render" && field "latestRequest" Decode.int -1 == state.latestRequest then
-        ({model | sessions={state | sealed={sealed | renderPart=-1,renderRequest=field "request" Decode.int sealed.renderRequest}}},Cmd.none)
+    else if kind == "sealed-latest-render" && state.latestPending && field "latestRequest" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | presentationAnchor="",sealed={sealed | renderPart=-1,renderRequest=field "request" Decode.int sealed.renderRequest}}},Cmd.none)
     else if kind == "sealed-latest-complete" && field "latestRequest" Decode.int -1 == state.latestRequest then
         ({model | sessions={state | latestPending=False,latestError=Nothing,manualUp=False,following=True}},Cmd.none)
     else if kind == "sealed-follow" then

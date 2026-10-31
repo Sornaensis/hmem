@@ -6,12 +6,18 @@ import Dict
 import SessionTranscript as Transcript exposing (Item(..))
 import Test exposing (..)
 import Types exposing (SessionRecord)
+import Html
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
 
 
 tests : Test
 tests =
     describe "Transcript activity runs"
-        [ test "visible prose splits runs while hidden records do not" <| \_ ->
+        [ test "a supported indivisible leaf can use more than one slice of the whole budget" <| \_ ->
+            let rendered=Transcript.renderWindow 100000 0 "" [Transcript.atom 45000 (\_ -> Html.text "large supported leaf")] in
+            Expect.all [\_ -> Expect.equal False rendered.error,\_ -> Html.div [] rendered.nodes |> Query.fromHtml |> Query.has [Selector.text "large supported leaf"]] ()
+        , test "visible prose splits runs while hidden records do not" <| \_ ->
             [ record 1 [ block "thinking" "plan", block "tool" "{}" ]
             , { empty | offset = 2, recordType = "unknown" }
             , record 3 [ block "result" "{}" ]
@@ -51,6 +57,14 @@ tests =
             [ start, appended, closed ]
                 |> List.map (Transcript.project >> List.head >> Maybe.map key)
                 |> Expect.equal [ Just "20:0", Just "20:0", Just "20:0" ]
+        , test "coalescing keeps exact source block indices across hidden siblings" <| \_ ->
+            record 10 [block "text" "first",block "unknown" "hidden",block "text" "later",block "thinking" "reason",block "unknown" "hidden",block "tool" "{}"]
+                |> List.singleton
+                |> Transcript.project
+                |> List.map (\item -> case item of
+                    Message piece -> piece.blockIndices
+                    Activity pieces -> List.concatMap .blockIndices pieces)
+                |> Expect.equal [[0,2],[3,5]]
         , test "empty and unknown blocks do not create groups or separate adjacent activity" <| \_ ->
             [ record 1 [ block "thinking" " ", block "text" "\n", block "unknown" "hidden" ]
             , record 2 [ block "encrypted" "" ]

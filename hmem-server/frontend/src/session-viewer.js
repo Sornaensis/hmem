@@ -1,4 +1,5 @@
 import {parseInstant} from './timestamp-display.js'
+import {sha256} from '@noble/hashes/sha256'
 
 // Frame exact bytes before decoding UTF-8. A raw window and a JSONL record
 // have separate bounds: one record may span more than four HTTP chunks.
@@ -441,15 +442,28 @@ export function semanticTransition(row, previous, anchor) {
 export function createRecordFramer(startOffset = 0, options = {}) {
   if (!Number.isSafeInteger(startOffset) || startOffset < 0) throw new Error('invalid_offset')
   let through = startOffset, start = startOffset, skipping = startOffset !== 0 && !options.aligned
-  let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput, previousRecord, activityAnchor = null,piVersion=null
+  let pending = [], pendingSize = 0, rows = [], retained = 0, lastInput, previousRecord, activityAnchor = options.runAnchor || null,piVersion=null
   if(options.predecessor) {
     previousRecord=options.predecessor.row
     activityAnchor=options.predecessor.anchor
     piVersion=options.predecessor.piVersion
   }
   let notice = ''
-  let before = startOffset, pageFull = false, completeRecords = 0
+  let before = startOffset, pageFull = false, completeRecords = 0, completeThrough = startOffset, parsedBefore=null,parsedOverlapEnd=startOffset
+  let discardedCount=0,discardedGroup,previousContribution=null,firstParsedRow=null
+  const groupDeltas=new Map()
+  const known=offset=>Number.isSafeInteger(options.knownBefore)&&Number.isSafeInteger(options.knownAfter)&&offset>=options.knownBefore&&offset<options.knownAfter
+  const bump=(key,count)=>{if(!key)return;const next=Math.max(0,(groupDeltas.get(key)||0)+count);if(next)groupDeltas.set(key,next);else groupDeltas.delete(key);while(groupDeltas.size>MAX_VIEW_ROWS)groupDeltas.delete(groupDeltas.keys().next().value)}
+  const groupsFor=row=>visibleBlocks(row).filter(([,part])=>!part.nativeContext&&part.kind!=='text').map(([index])=>row.activityAnchors?.[index]).filter(Boolean)
+  const discarded=row=>{
+    const parts=visibleBlocks(row).filter(([,part])=>!part.nativeContext),groups=groupsFor(row)
+    const group=parts.length&&groups.length===parts.length&&groups.every(key=>key===groups[0])?groups[0]:''
+    discardedCount+=Math.max(1,parts.length)
+    if(discardedGroup===undefined)discardedGroup=group
+    else if(discardedGroup!==group)discardedGroup=''
+  }
   const anchors = new Map((options.anchors || []).slice(0,MAX_VIEW_ROWS).map(row=>[row.offset,row]))
+  const runRanges=(options.runRanges || []).slice(0,MAX_VIEW_ROWS+1).filter(range=>range.group&&Number.isSafeInteger(Number(range.before))&&Number.isSafeInteger(Number(range.after))).map(range=>({...range,before:Number(range.before),after:Number(range.after)}))
   function append(bytes) {
     if (!bytes.length) return
     if (pendingSize + bytes.length > MAX_RECORD_BYTES + 2) throw new Error('record_limit')
@@ -466,23 +480,43 @@ export function createRecordFramer(startOffset = 0, options = {}) {
     let value
     try { value = JSON.parse(raw) } catch { if (final) { notice = 'Incomplete record at this finite window boundary.'; return }; throw new Error('invalid_json_record') }
     completeRecords++
+    completeThrough=end
+    if(parsedBefore===null){parsedBefore=start;parsedOverlapEnd=end}
     notice = ''
     if(value?.type==='session')piVersion=Number.isInteger(value.version)?value.version:'invalid'
     const row = { offset:start, presentationOffset:start, end, raw, delimiter, bytes:pendingSize + delimiter.length, ...presentation(value,raw,{piVersion}) }
     const anchor = anchors.get(start)
-    if(anchor && anchor.raw === raw) {
+    const provenRun=runRanges.find(range=>start>=range.before&&start<range.after)?.group
+    if(anchor && (anchor.raw === raw || anchor.rawHash===Array.from(sha256(bytes),byte=>byte.toString(16).padStart(2,'0')).join(''))) {
       row.presentationOffset = anchor.presentationOffset
       row.activityAnchors = anchor.activityAnchors
       if(anchor.pairedOffset!==undefined)row.pairedOffset=anchor.pairedOffset
       const first=visibleBlocks(row).find(([,part])=>!part.nativeContext)
-      const carried=first && first[1].kind!=='text' ? anchor.activityAnchors?.[first[0]] : null
+      const carried=first && first[1].kind!=='text' ? provenRun || anchor.activityAnchors?.[first[0]] : null
       if(carried && activityAnchor && carried!==activityAnchor) {
         // A backward overlap can discover an earlier part of the same run.
         // Rebind only that retained run to the already mounted disclosure key.
         const previous=activityAnchor
         for(const item of rows)item.activityAnchors=Object.fromEntries(Object.entries(item.activityAnchors || {}).map(([key,value])=>[key,value===previous?carried:value]))
+        if(firstParsedRow)firstParsedRow.activityAnchors=Object.fromEntries(Object.entries(firstParsedRow.activityAnchors || {}).map(([key,value])=>[key,value===previous?carried:value]))
+        if(discardedGroup===previous)discardedGroup=carried
+        if(groupDeltas.has(previous)){const count=groupDeltas.get(previous);groupDeltas.delete(previous);bump(carried,count)}
+        if(previousContribution)previousContribution.groups=previousContribution.groups.map(key=>key===previous?carried:key)
         activityAnchor=carried
       }
+    }
+    if(provenRun){
+      const previous=activityAnchor
+      if(previous&&previous!==provenRun){
+        for(const item of rows)item.activityAnchors=Object.fromEntries(Object.entries(item.activityAnchors || {}).map(([key,value])=>[key,value===previous?provenRun:value]))
+        if(firstParsedRow)firstParsedRow.activityAnchors=Object.fromEntries(Object.entries(firstParsedRow.activityAnchors || {}).map(([key,value])=>[key,value===previous?provenRun:value]))
+        if(discardedGroup===previous)discardedGroup=provenRun
+        if(groupDeltas.has(previous)){const count=groupDeltas.get(previous);groupDeltas.delete(previous);bump(provenRun,count)}
+        if(previousContribution)previousContribution.groups=previousContribution.groups.map(key=>key===previous?provenRun:key)
+      }
+      activityAnchor=provenRun
+      row.activityAnchors=Object.fromEntries(Object.entries(row.activityAnchors || {}).map(([key])=>[key,provenRun]))
+      if(!Object.keys(row.activityAnchors).length)delete row.activityAnchors
     }
     const replacement = previousRecord?.offset === start ? previousRecord : null
     if (replacement && (replacement.raw === raw || (replacement.type === row.type && replacement.role === row.role && replacement.time === row.time && replacement.text === row.text))) {
@@ -494,8 +528,22 @@ export function createRecordFramer(startOffset = 0, options = {}) {
     if (old !== -1) {
       retained -= rows[old].bytes; rows.splice(old,1)
     }
+    const predecessor=previousRecord
     const transition = semanticTransition(row,replacement ? null : previousRecord,activityAnchor)
     activityAnchor = transition.anchor
+    if(!firstParsedRow)firstParsedRow={offset:row.offset,end:row.end,rawHash:Array.from(sha256(bytes),byte=>byte.toString(16).padStart(2,'0')).join(''),presentationOffset:row.presentationOffset,activityAnchors:row.activityAnchors,pairedOffset:row.pairedOffset}
+    else if(transition.paired&&predecessor?.offset===firstParsedRow.offset){firstParsedRow.presentationOffset=predecessor.presentationOffset;firstParsedRow.pairedOffset=predecessor.pairedOffset}
+    if(replacement&&previousContribution)for(const key of previousContribution.groups)bump(key,-1)
+    let contribution=[]
+    if(transition.paired){
+      if(known(predecessor.offset)||known(row.offset)){
+        if(previousContribution)for(const key of previousContribution.groups)bump(key,-1)
+      }else contribution=previousContribution?.groups || []
+    }else if(!known(row.offset)){
+      contribution=groupsFor(row)
+      for(const key of contribution)bump(key,1)
+    }
+    previousContribution=row.type==='conversation'?{offset:row.offset,groups:contribution}:null
     // Pairing is a property of adjacent source occurrences, not of the retained
     // display rows. Unknown metadata cannot pair two otherwise distant messages.
     previousRecord = row.type === 'conversation' ? row : null
@@ -514,12 +562,13 @@ export function createRecordFramer(startOffset = 0, options = {}) {
         const [removed] = rows.splice(index,1)
         retained -= removed.bytes; bytes -= removed.bytes; count--
         if(options.direction === 'tail') {
+          discarded(removed)
           // Reader pages describe a contiguous source span. Independent reserve
           // eviction is useful to legacy callers, but cannot define a history
           // cursor: it can strand activity between retained prose messages.
           before = Math.max(before,removed.end)
           rows = rows.filter(item=>{
-            if(item.offset < before) { retained -= item.bytes; return false }
+            if(item.offset < before) { discarded(item);retained -= item.bytes; return false }
             return true
           })
           count = rows.filter(item=>item.category === row.category).length
@@ -533,7 +582,7 @@ export function createRecordFramer(startOffset = 0, options = {}) {
     }
   }
   function snapshot() {
-    return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,pendingBytes:pendingSize,retainedBytes:retained,notice,before,pageFull,skipping,needsLookback:startOffset>0&&!options.aligned&&completeRecords===0}
+    return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,completeThrough,parsedBefore:parsedBefore??before,parsedOverlapEnd,groups:Object.fromEntries(groupDeltas),discarded:discardedCount?{before:parsedBefore??before,after:before,count:discardedCount,group:discardedGroup||''}:null,pendingBytes:pendingSize,retainedBytes:retained,notice,before,pageFull,skipping,needsLookback:startOffset>0&&!options.aligned&&completeRecords===0}
   }
 
   return {
@@ -572,7 +621,7 @@ export function createRecordFramer(startOffset = 0, options = {}) {
       return snapshot()
     },
     snapshot,
-    readerAnchors:()=>rows.map(({offset,end,raw,presentationOffset,activityAnchors,pairedOffset})=>({offset,end,raw,presentationOffset,activityAnchors,pairedOffset})),
+    readerAnchors:()=>[...(firstParsedRow&&!rows.some(row=>row.offset===firstParsedRow.offset)?[firstParsedRow]:[]),...rows.slice(-(MAX_VIEW_ROWS-1))].map(({offset,end,raw,rawHash,presentationOffset,activityAnchors,pairedOffset})=>({offset,end,raw,rawHash,presentationOffset,activityAnchors,pairedOffset})),
     predecessor(offset) {
       const row=rows.find(row=>row.end===offset)
       if(!row)return null

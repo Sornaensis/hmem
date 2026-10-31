@@ -12,7 +12,17 @@ const phaseFixtureETag='"fixture-authority-bound-archive"'
 // decoder ownership is tested separately against the real store/native Worker.
 function createPhaseBridgeFixture(options) {
   let stage
-  return createSealedViewer({...options,custodyFactory:async()=>async()=>{},deleteStage:async()=>{},
+  const attributes={},thin={scrollTop:0,scrollHeight:0,clientHeight:0,replaceChildren(){}},prepared=new WeakSet()
+  const viewport=()=>{const candidate=options.document.getElementById?.('session-records'),node=candidate?.replaceChildren?candidate:thin
+    if(!prepared.has(node)){prepared.add(node);const get=node.getAttribute?.bind(node);node.getAttribute=name=>get?.(name) ?? attributes[name] ?? null;node.querySelectorAll ??= ()=>[];node.querySelector ??= ()=>null;node.setAttribute ??= (name,value)=>{attributes[name]=value}}
+    return node
+  }
+  // These phase fixtures publish their accepted window synchronously; real
+  // stamped DOM/position barriers remain covered by the mounted browser suite.
+  return createSealedViewer({...options,document:{...options.document,getElementById:id=>id==='session-records'?viewport():options.document.getElementById?.(id)},window:{...options.window,requestAnimationFrame:options.window.requestAnimationFrame || (callback=>setImmediate(callback))},send:event=>{
+    if(event.kind==='sealed-page')Object.assign(attributes,{'data-sealed-dom-owner':event.stamp,'data-sealed-dom-load':String(event.load),'data-sealed-page-request':String(event.request),'data-sealed-page-first':event.first,'data-sealed-page-last':event.last,'data-sealed-first':event.first,'data-sealed-last':event.last})
+    options.send(event)
+  },custodyFactory:async()=>async()=>{},deleteStage:async()=>{},
     async fetchArchive(url,request){
       if(request.headers?.['If-None-Match']){assert.equal(request.headers['If-None-Match'],phaseFixtureETag);return {isCurrent:()=>true,response:new Response(null,{status:304,headers:{ETag:phaseFixtureETag}})}}
       const result=await options.fetchArchive(url,request)
@@ -446,7 +456,7 @@ test('64-row pages preserve complete cursors, search, disclosure identity and ou
     const until=async predicate=>{for(let turn=0;turn<100&&!predicate();turn++)await new Promise(resolve=>setImmediate(resolve));assert.ok(predicate(),'bounded bridge completion')}
     try{
       viewer.configure(config);await until(()=>events.some(event=>event.kind==='sealed-page'))
-      const sentFirst=events.find(event=>event.kind==='sealed-page');assert.equal(sentFirst.rows.length,64);assert.equal(sentFirst.first,first.first)
+      const sentFirst=events.find(event=>event.kind==='sealed-page');assert.equal(sentFirst.rows.length,64);assert.equal(sentFirst.last,last.last,'new readers start at verified latest')
       listeners.get('click')({target:{closest:()=>({getAttribute:name=>name==='data-sealed-action'?'last':config.stamp})},preventDefault(){}})
       await until(()=>events.filter(event=>event.kind==='sealed-page').length===2)
       const sentLast=events.filter(event=>event.kind==='sealed-page').at(-1);assert.equal(sentLast.rows.length,64);assert.equal(sentLast.last,last.last)
@@ -684,6 +694,40 @@ test('local page progress is coalesced at100ms with one owned timer and immediat
   }
 })
 
+for(const input of ['End','Shift','touchstart','summary pointer'])test(`new scoped ${input} input retires a held disclosure transfer without stale publication or repeated reads`,async()=>{
+ const events=[],listeners=new Map(),workers=[],calls=[];let viewer,requestId=0,release
+ const key='0000000000000000000:0000000',config={active:true,stamp:'disclosure-transfer',load:1,workspace,session,authority:'principal',scope:'same-source',historical:true,apiUrl:''}
+ const viewport={id:'session-records',scrollTop:0,scrollHeight:100,clientHeight:100,getAttribute:name=>name==='data-sealed-dom-owner'?config.stamp:name==='data-sealed-dom-load'?'1':null,getBoundingClientRect:()=>({top:0,bottom:100,height:100}),querySelectorAll:()=>[],replaceChildren(){}}
+ class Worker{
+  reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+  postMessage(message){calls.push(message);if(message.kind==='interrupt')return
+   if(message.kind==='page'&&calls.filter(call=>call.kind==='page').length>3){queueMicrotask(()=>this.reply(message,{kind:'error',error:'controlled_repeated_page_guard'}));return}
+   if(message.kind==='disclosure'&&message.key==='group:run'){release=()=>this.reply(message,{kind:'ack'});return}
+   queueMicrotask(()=>this.reply(message,message.kind==='page'?{kind:'page',rows:[{key,kind:'tool',group:'run',groupOpen:false,open:false,body:{format:'json',text:'{}',part:0,more:false}}],first:key,last:key,more:false}:{kind:message.kind==='retire'?'cleaned':'ack'}))
+  }
+  terminate(){this.terminated=true}
+ }
+ const raw=Buffer.from('0\n'),gzip=gzipSync(raw)
+ viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){}},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},getActivePosition:()=>({key,fragment:key+':content:0',top:0,groupOpen:true,pieceOpen:true}),send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
+ const until=async predicate=>{for(let turn=0;turn<100&&!predicate();turn++)await new Promise(resolve=>setImmediate(resolve));assert.ok(predicate(),'bounded disclosure cancellation')}
+ try{
+  viewer.configure(config);await until(()=>!!release)
+  assert.equal(events.filter(event=>event.kind==='sealed-page').length,0,'held disclosure publishes no historical content')
+  if(input==='End'){listeners.get('keydown')({type:'keydown',target:viewport,key:'End',isTrusted:true});viewer.configure({...config,latestRequest:7})}
+  else if(input==='Shift')listeners.get('keydown')({type:'keydown',target:viewport,key:'Shift',isTrusted:true})
+  else if(input==='touchstart')listeners.get('touchstart')({type:'touchstart',target:viewport,touches:[{clientY:20}],isTrusted:true})
+  else {const summary={closest:()=>null};viewport.contains=node=>node===summary;listeners.get('pointerdown')({type:'pointerdown',target:summary,isTrusted:true})}
+  release();await until(()=>calls.filter(call=>call.kind==='page').length===2)
+  assert.equal(calls.filter(call=>call.kind==='disclosure').length,1,'cancelled snapshot cannot proceed to piece-open')
+  assert.deepEqual(calls.filter(call=>call.kind==='page')[1].page,input==='End'?{last:true}:{continuity:'handoff'},'latest wins, or the canceled snapshot recovers with one ordinary range read')
+  await until(()=>events.filter(event=>event.kind==='sealed-page').length===1)
+  assert.equal(!!events.filter(event=>event.kind==='sealed-page')[0].fromEnd,input==='End')
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(calls.filter(call=>call.kind==='page').length,2,'recovery is finite after non-navigation input as well as End')
+  assert.equal(events.some(event=>event.kind==='sealed-error'),false)
+  assert.equal(calls.filter(call=>call.kind==='body').length,0,'cancelled body position does not begin hydration')
+ }finally{release?.();viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated))}
+})
+
 test('sealed local intents retain only the latest page or Markdown demand through held operations and retirement',async()=>{
   const events=[],listeners=new Map(),workers=[];let viewer,requestId=0,search=''
   const config={active:true,stamp:'local-intent',load:1,workspace,session,authority:'principal',apiUrl:''}
@@ -722,20 +766,18 @@ test('sealed local intents retain only the latest page or Markdown demand throug
     worker.reply(worker.bodies[0],{kind:'body',key:'source-a',body:{part:0,text:'complete',format:'markdown',more:false}})
     await until(()=>worker.pages.length===4);assert.deepEqual(worker.pages[3].page,{query:'after-markdown'})
     click('markdown','source-b');assert.equal(worker.bodies.length,1)
-    pageResult(worker.pages[3],[{key:'new-page'}]);await until(()=>worker.pages.length===5)
-    assert.equal(worker.bodies.length,1,'old-row Markdown waits for its origin page to be restored')
-    assert.equal(worker.pages[4].page.bodyKey,'source-b')
-    pageResult(worker.pages[4],[{key:'source-b'}]);await until(()=>worker.bodies.length===2)
-    assert.equal(events.filter(event=>event.kind==='sealed-page').at(-1).rows[0].key,'source-b')
-    assert.equal(events.at(-1).kind,'sealed-markdown-start','origin page is published before its complete-body render sequence')
-    assert.equal(worker.bodies[1].key,'source-b','latest Markdown intent restores its visible owner after held Next')
+    pageResult(worker.pages[3],[{key:'new-page'}]);await until(()=>worker.bodies.length===2)
+    assert.equal(worker.pages.length,4,'a composed-window body lookup does not replace its conversation with an origin page')
+    assert.equal(events.filter(event=>event.kind==='sealed-page').at(-1).rows[0].key,'new-page')
+    assert.equal(events.at(-1).kind,'sealed-markdown-start','accepted source publication precedes the queued exact-body sequence')
+    assert.equal(worker.bodies[1].key,'source-b','latest Markdown intent keeps its exact source key after the held acquisition')
     worker.reply(worker.bodies[1],{kind:'body',key:'source-b',body:{part:0,text:'complete',format:'markdown',more:false}})
     await until(()=>events.filter(event=>event.kind==='sealed-markdown-chunk').length===2)
-    click('last');await until(()=>worker.pages.length===6);click('body','retired-body')
+    click('last');await until(()=>worker.pages.length===5);click('body','retired-body')
     const published=events.filter(event=>event.kind==='sealed-page').length
     viewer.retireAuthority();await until(()=>worker.terminated)
-    pageResult(worker.pages[5]);await new Promise(resolve=>setImmediate(resolve))
-    assert.equal(worker.pages.length,6);assert.equal(events.filter(event=>event.kind==='sealed-page').length,published)
+    pageResult(worker.pages[4]);await new Promise(resolve=>setImmediate(resolve))
+    assert.equal(worker.pages.length,5);assert.equal(events.filter(event=>event.kind==='sealed-page').length,published)
     assert.equal(workers.length,2);assert.ok(!events.some(event=>event.kind==='sealed-error'))
   }finally{viewer.configure(null);await until(()=>workers.at(-1).terminated)}
 })
@@ -902,12 +944,14 @@ test('sequential processor reader handoff keeps custody, current authorization a
 })
 
 
-test('sealed render handoffs require fresh boundary gestures and exact stamped DOM acknowledgement',async()=>{
+test('sealed continuous render admission retains manual intent and exact stamped DOM acknowledgement',async()=>{
  const events=[],workers=[],listeners=new Map(),frames=[];let viewer,requestId=0
  const raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'render-handoff',load:1,workspace,session,authority:'principal',apiUrl:''}
- const attrs={'data-sealed-dom-owner':config.stamp,'data-sealed-dom-load':'1','data-sealed-first':'first','data-sealed-last':'last','data-render-part':'0','data-render-request':'0','data-render-more':'true'}
- const viewport={id:'session-records',scrollTop:900,scrollHeight:1000,clientHeight:100,getAttribute:name=>attrs[name] ?? null,replaceChildren(){}}
- class Worker{postMessage(message){if(message.kind==='interrupt')return;queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,request:message.request,...(message.kind==='page'?{kind:'page',rows:[{key:'first'}],first:'first',last:'last',more:true}:{kind:message.kind==='retire'?'cleaned':'ack'})}}))}terminate(){this.terminated=true}}
+ const attrs={'data-sealed-dom-owner':config.stamp,'data-sealed-dom-load':'1','data-sealed-first':'first','data-sealed-last':'last','data-render-part':'1','data-render-request':'0','data-render-more':'true'}
+ let top=900
+ const rawGap={dataset:{gapBefore:'0000000000000000100:0000000',gapAfter:'0000000000000000200:0000000'},getBoundingClientRect:()=>({top:120,bottom:220,height:100})}
+ const viewport={id:'session-records',get scrollTop(){return top},set scrollTop(value){top=Math.max(0,Math.min(900,value))},scrollHeight:1000,clientHeight:100,getAttribute:name=>attrs[name] ?? null,setAttribute:(name,value)=>{attrs[name]=value},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),replaceChildren(){},querySelectorAll(selector){return selector==='[data-fragment-from]'?[{dataset:{fragmentFrom:String(Number(attrs['data-render-part'])+1),fragmentTo:String(Number(attrs['data-render-part'])+1)},getBoundingClientRect:()=>({top:70,bottom:150,height:80}),closest:()=>null}]:selector==='[data-history-gap="source"]'?[rawGap]:[]}}
+ class Worker{postMessage(message){if(message.kind==='interrupt')return;queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,request:message.request,...(message.kind==='page'?{kind:'page',rows:[{key:'first'}],first:'first',last:'last',more:false}:{kind:message.kind==='retire'?'cleaned':'ack'})}}))}terminate(){this.terminated=true}}
  viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){},requestAnimationFrame:callback=>frames.push(callback)},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
  const until=async fn=>{for(let i=0;i<100&&!fn();i++)await new Promise(resolve=>setImmediate(resolve));assert.ok(fn(),'bounded render handoff')}
  const paint=()=>{for(let i=0;i<8&&frames.length;i++)frames.splice(0).forEach(callback=>callback())}
@@ -915,16 +959,18 @@ test('sealed render handoffs require fresh boundary gestures and exact stamped D
  const renderEvents=()=>events.filter(event=>event.kind==='sealed-render')
  try{
   viewer.configure(config);await until(()=>events.some(event=>event.kind==='sealed-page'));paint()
-  for(let i=0;i<5;i++)scroll();assert.equal(renderEvents().length,0,'layout and programmatic scrolls admit no render boundary')
-  listeners.get('wheel')({target:viewport,deltaY:400});scroll();assert.equal(renderEvents().length,1)
-  const first=renderEvents()[0];attrs['data-render-part']='1';attrs['data-render-request']=String(first.request-1);paint()
-  assert.equal(viewport.scrollTop,900,'a stale render stamp cannot reposition the replacement')
+  for(let i=0;i<5;i++)scroll();assert.equal(renderEvents().length,0,'layout alone cannot invent manual history intent')
+  listeners.get('wheel')({type:'wheel',target:viewport,deltaY:-100});viewport.scrollTop=700;scroll();paint()
+  listeners.get('wheel')({type:'wheel',target:viewport,deltaY:100});viewport.scrollTop=800;scroll();assert.equal(renderEvents().length,1)
+  const first=renderEvents()[0];assert.equal(first.part,2);attrs['data-render-part']='2';attrs['data-render-request']=String(first.request-1);paint()
+  assert.equal(events.filter(event=>event.kind==='sealed-page').length,1,'cached presentation wins over the farther raw span in overscan')
+  assert.equal(viewport.scrollTop,800,'a stale render stamp cannot reposition the continuous window')
   scroll();assert.equal(renderEvents().length,1,'no second part can run before the first handoff is acknowledged')
-  attrs['data-render-request']=String(first.request);viewer.configure(config);paint();assert.equal(viewport.scrollTop,0)
-  viewport.scrollTop=900;for(let i=0;i<5;i++)scroll();assert.equal(renderEvents().length,1,'replacement/clamping scrolls cannot consume the old wheel gesture')
-  listeners.get('wheel')({target:viewport,deltaY:400});scroll();const second=renderEvents().at(-1);assert.equal(second.part,2)
-  attrs['data-render-part']='2';attrs['data-render-request']=String(second.request);paint();assert.equal(viewport.scrollTop,0)
-  assert.deepEqual(renderEvents().map(event=>event.part),[1,2])
+  attrs['data-render-request']=String(first.request);viewer.configure(config);paint();assert.equal(viewport.scrollTop,800)
+  assert.equal(renderEvents().length,2,'settled overscan automatically admits the adjacent continuation without another gesture')
+  const second=renderEvents().at(-1);assert.equal(second.part,3)
+  attrs['data-render-part']='3';attrs['data-render-request']=String(second.request);attrs['data-render-more']='false';viewport.querySelectorAll=()=>[];paint();assert.equal(viewport.scrollTop,800)
+  assert.deepEqual(renderEvents().map(event=>event.part),[2,3])
  }finally{viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated));paint()}
 })
 
@@ -1001,7 +1047,7 @@ test('ordinary archive pages and fresh owners cannot inherit hidden search or of
   click('position');await until(()=>worker.pages.length===5);assert.deepEqual(worker.pages[4].page,{offset:'4096'});respond(worker,4);await until(()=>events.filter(e=>e.kind==='sealed-page').length===5)
   click('first');await until(()=>worker.pages.length===6);assert.deepEqual(worker.pages[5].page,{});respond(worker,5);await until(()=>events.filter(e=>e.kind==='sealed-page').length===6)
   config={...config,stamp:'workspace',load:2};viewer.configure(config);await until(()=>workers.at(-1)!==worker&&workers.at(-1).pages.length===1)
-  assert.equal(worker.terminated,true);assert.deepEqual(workers.at(-1).pages[0].page,{})
+  assert.equal(worker.terminated,true);assert.deepEqual(workers.at(-1).pages[0].page,{last:true})
   click('search','embedded');assert.equal(workers.at(-1).pages.length,1,'retired embedded action cannot filter workspace owner')
   respond(workers.at(-1),0);await until(()=>events.some(e=>e.kind==='sealed-page'&&e.stamp==='workspace'))
  }finally{viewer.configure(null);await until(()=>workers.every(w=>w.terminated))}

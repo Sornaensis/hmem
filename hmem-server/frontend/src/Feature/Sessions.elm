@@ -6,7 +6,9 @@ import Browser.Navigation as Nav
 import CardSections
 import SessionActivityLight
 import SessionTranscript as Transcript
+import SessionWindow
 import Dict
+import Char
 import Feature.SessionDelivery as Delivery
 import Feature.WebSocket as WebSocket
 import Feature.DataLoading as DataLoading
@@ -200,14 +202,14 @@ reconcile ( model, command ) =
         retired =
             if old.stamp /= stamp then
                 if continueViewer then
-                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = False, pending = False }
+                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = False, pending = False, positionPending = False }
                 else
-                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, latestPending = False, latestError = Nothing, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
+                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, historyScanBefore = 0, historyScanAfter = 0, historyScanEnd = 0, historyTop = 0, historyBottom = 0, historyTopCount = 0, historyBottomCount = 0, historyTopGroup = "", historyBottomGroup = "", historyAnchor = "", historyHeights = Dict.empty, historyGaps = [], historyActivity = Dict.empty, historyClosed = Set.empty, historyOpen = Set.empty, windowPublication = 0, positionPending = False, presentationPart = -1, presentationAnchor = "", windowPurpose = "latest", manualUp = False, latestPending = False, latestError = Nothing, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
             else if transportChanged then
                 -- Retire response authority, not the presentation. Preserve the
                 -- finite end so a framed but unacknowledged short tail retries
                 -- exactly before newly committed bytes extend the next window.
-                { withDownloads | generation = old.generation + 1, pending = False }
+                { withDownloads | generation = old.generation + 1, pending = False, positionPending = False }
             else
                 withDownloads
         metadata = Maybe.map2 (\ws id -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen (\entry -> if entry.error == Nothing && entry.proven then entry.data else Nothing) |> Maybe.andThen (\value -> case value of
@@ -216,18 +218,19 @@ reconcile ( model, command ) =
         beforeArchive = case metadata of
             Just session ->
                 if session.state == Api.SessionTerminated then
-                    { retired | start = Just 0, offset = 0, end = 0, resetPending = False, pending = False, rows = [] }
+                    { retired | start = Just 0, offset = 0, end = 0, resetPending = False, pending = False, positionPending = False, rows = [] }
                 else if retired.start == Nothing then
                     let begin = max 0 (session.committedBytes - 65536) in
                     { retired | start = Just begin, offset = begin, end = session.committedBytes, historyBefore = begin, historyAfter = begin, windowDirection = "tail", windowAligned = False, generation = retired.generation + 1 }
-                else if retired.following && retired.offset >= retired.end && not retired.pending then
-                    { retired | end = min session.committedBytes (retired.offset + 65536), loadWindow = True }
+                else if retired.following && not retired.pending && not retired.positionPending && (not retired.loadWindow || retired.offset >= retired.end) && retired.historyAfter < session.committedBytes then
+                    let begin = List.drop (max 0 (List.length retired.rows-20)) retired.rows |> List.filter (\row -> retired.historyAfter-row.offset <= 65536) |> List.head |> Maybe.map .offset |> Maybe.withDefault (List.reverse retired.rows |> List.head |> Maybe.map .offset |> Maybe.withDefault retired.historyAfter) in
+                    { retired | start = Just begin, offset = begin, end = min session.committedBytes (begin + 2097152), generation = retired.generation + 1, resetPending = True, windowDirection = "forward", windowAligned = True, windowPurpose = "append", loadWindow = True }
                 else retired
             Nothing -> retired
         current = beforeArchive
         isSealed = metadata |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False
         window = Maybe.map2 (\ws session -> (ws,Delivery.SessionWindow session.id current.offset current.end (session.state == Api.SessionTerminated))) workspace metadata
-            |> Maybe.andThen (\target -> if not isSealed && current.loadWindow && current.error == Nothing && current.offset < current.end then Just target else Nothing)
+            |> Maybe.andThen (\target -> if not isSealed && not current.positionPending && current.loadWindow && current.error == Nothing && current.offset < current.end then Just target else Nothing)
         sealedTarget = Maybe.map2 (\ws request -> (ws,Delivery.SessionArchiveHttp (Maybe.withDefault "" selected) request.sequence)) workspace current.sealed.http
         saveTarget = Maybe.map2 (\ws operation -> (ws,Delivery.SessionSave operation.session operation.offset (min 65536 (operation.size-operation.offset)))) workspace current.save
             |> Maybe.andThen (\target -> current.save |> Maybe.andThen (\operation -> if operation.phase == "writing" && not operation.pending && operation.offset < operation.size then Just target else Nothing))
@@ -283,9 +286,15 @@ reconcile ( model, command ) =
             , ("reset",viewerReset current |> Maybe.map Encode.int |> Maybe.withDefault Encode.null)
             , ("follow",Encode.bool current.following)
             , ("direction",Encode.string current.windowDirection)
+            , ("purpose",Encode.string current.windowPurpose)
+            , ("knownBefore",Encode.int (if current.windowPurpose == "latest" then 0 else current.historyScanBefore))
+            , ("knownAfter",Encode.int (if current.windowPurpose == "latest" then 0 else current.historyScanAfter))
+            , ("runAnchor",Encode.string (if current.windowPurpose=="gap" then current.historyGaps |> List.filter (\gap -> gap.group/="" && (String.toInt gap.before |> Maybe.map (\begin -> begin <= Maybe.withDefault 0 current.start) |> Maybe.withDefault False) && (String.toInt gap.after |> Maybe.map (\finish -> finish > Maybe.withDefault 0 current.start) |> Maybe.withDefault False)) |> List.head |> Maybe.map .group |> Maybe.withDefault "" else ""))
+            , ("runRanges",Encode.list (\gap -> Encode.object [("before",Encode.string gap.before),("after",Encode.string gap.after),("group",Encode.string gap.group)]) (if current.windowPurpose=="latest" then [] else List.filter (\gap -> gap.group/="") current.historyGaps |> List.take 201))
             , ("aligned",Encode.bool current.windowAligned)
             , ("windowEnd",Encode.int current.end)
             , ("latest",Encode.object [("request",Encode.int current.latestRequest),("pending",Encode.bool current.latestPending)])
+            , ("publication",Encode.object [("request",Encode.int current.windowPublication),("pending",Encode.bool current.positionPending)])
             , ("historical",Encode.bool (not current.following && current.resetPending))
             , ("chunk",chunk |> Maybe.map (\range -> Encode.object [("offset",Encode.int range.offset),("nextOffset",Encode.int range.nextOffset),("dataBase64",Encode.string range.dataBase64),("final",Encode.bool (range.nextOffset >= current.end))]) |> Maybe.withDefault Encode.null)
             , ("nextOperation",Encode.int current.nextOperation)
@@ -293,6 +302,7 @@ reconcile ( model, command ) =
             , ("archiveRequest",archiveRequest next)
             , ("sealed",Encode.object
                 [("active",Encode.bool (isSealed && selected /= Nothing)),("stamp",Encode.string stamp),("load",Encode.int current.generation)
+                ,("scope",Encode.string viewerScope),("historical",Encode.bool current.manualUp),("anchor",Encode.string current.historyAnchor)
                 ,("latestRequest",Encode.int (if current.latestPending then current.latestRequest else -1))
                 ,("workspace",Encode.string (Maybe.withDefault "" workspace)),("session",Encode.string (Maybe.withDefault "" selected)),("apiUrl",Encode.string model.flags.apiUrl)
                 ,("authority",Encode.string (model.sessionContext |> Maybe.map (\context -> Encode.encode 0 (Encode.list Encode.string [context.principal.actorType,context.principal.actorId,context.principal.authority,Maybe.withDefault "" context.principal.grantUserId])) |> Maybe.withDefault ""))])
@@ -352,7 +362,7 @@ update msg model =
                             Delivery.SessionWindow _ _ _ _ -> Delivery.removeDemand ownedWorkspace target accumulated
                             _ -> accumulated) current state.owned)
             in
-            ( {model | sessions = {state | error = Nothing,pending = False,loadWindow = True, sealed = emptySealedSessionView
+            ( {model | sessions = {state | error = Nothing,pending = False,positionPending=False,loadWindow = True, sealed = emptySealedSessionView
                     , start = if decodeRecovery then Just begin else state.start
                     , offset = if decodeRecovery then begin else state.offset
                     , generation = state.generation + 1,resetPending = decodeRecovery || state.resetPending}
@@ -385,10 +395,11 @@ update msg model =
         SessionsOlder ->
             let
                 first = List.head state.rows |> Maybe.map .offset |> Maybe.withDefault state.historyBefore
-                end = List.take 20 state.rows |> List.filter (\row -> row.end - first <= 65536) |> List.reverse |> List.head |> Maybe.map .end |> Maybe.withDefault first
-                begin = max 0 (end - 2097152)
+                scanning = state.windowPurpose == "fill" && state.historyScanBefore < first
+                end = if scanning then state.historyScanEnd else List.take 20 state.rows |> List.filter (\row -> row.end - first <= 65536) |> List.reverse |> List.head |> Maybe.map .end |> Maybe.withDefault first
+                begin = max 0 (end - 65536)
             in
-            ( { model | sessions = { state | following = False, loadWindow = True, latestPending=False,latestError=Nothing,windowDirection = "tail", windowAligned = False, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
+            ( { model | sessions = { state | loadWindow = True, latestPending=False,latestError=Nothing,windowPurpose=if state.windowPurpose == "fill" then "fill" else "older",windowDirection = "tail", windowAligned = False, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
         SessionsNewer ->
             let
                 last = List.reverse state.rows |> List.head
@@ -397,18 +408,18 @@ update msg model =
                     Delivery.Metadata session -> Just session.committedBytes
                     _ -> Nothing) |> Maybe.withDefault state.end
             in
-            ( { model | sessions = { state | following = False, loadWindow = True, latestPending=False,latestError=Nothing,windowDirection = "forward", windowAligned = True, start = Just begin, offset = begin, end = min newest (begin + 2097152), pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
+            ( { model | sessions = { state | loadWindow = True, latestPending=False,latestError=Nothing,windowPurpose="newer",windowDirection = "forward", windowAligned = True, start = Just begin, offset = begin, end = min newest (begin + 2097152), pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
         SessionsJumpLatest ->
             let
                 sealed = state.selected |> Maybe.andThen (\id -> state.workspace |> Maybe.andThen (\ws -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data)) |> Maybe.map (\payload -> case payload of
                     Delivery.Metadata session -> session.state == Api.SessionTerminated
                     _ -> False) |> Maybe.withDefault False
-                next = {state | latestRequest=state.latestRequest+1,latestPending=True,latestError=Nothing}
+                next = {state | latestRequest=state.latestRequest+1,latestPending=True,latestError=Nothing,positionPending=False,presentationPart=-1,presentationAnchor=""}
                 delivery = if sealed then model.sessionDelivery else Maybe.map2 (\ws id -> Delivery.invalidateSession ws id model.sessionDelivery) state.workspace state.selected |> Maybe.withDefault model.sessionDelivery
                 restartSealed = sealed && List.isEmpty state.sealed.rows && List.member state.sealed.phase ["error","cancelled"]
                 sealedBlocked = sealed && state.sealed.phase == "error" && not state.sealed.canRetry
             in
-            ( {model | sessions=if sealedBlocked then {next | latestPending=False,latestError=state.sealed.error} else if restartSealed then {next | generation=state.generation+1,sealed=emptySealedSessionView} else if sealed then next else {next | following=True,loadWindow=True,windowDirection="tail",windowAligned=False,start=Nothing,pending=False,generation=state.generation+1,resetPending=True,error=Nothing},sessionDelivery=delivery},Cmd.none )
+            ( {model | sessions=if sealedBlocked then {next | latestPending=False,latestError=state.sealed.error} else if restartSealed then {next | generation=state.generation+1,sealed=emptySealedSessionView} else if sealed then next else {next | following=True,loadWindow=True,windowPurpose="latest",windowDirection="tail",windowAligned=False,start=Nothing,pending=False,generation=state.generation+1,resetPending=True,error=Nothing},sessionDelivery=delivery},Cmd.none )
         SessionsTick time ->
             let now = toFloat (Time.posixToMillis time)
                 refresh = (state.filters.freshness /= "" || state.filters.activity /= Nothing) && model.activeTab == SessionsTab && now-state.lastFilterRefresh >= 10000
@@ -426,6 +437,92 @@ update msg model =
                 cursor::rest -> ( {model | sessions = {state | taskCursors = Dict.insert task cursor state.taskCursors, taskPreviousPages = Dict.insert task rest state.taskPreviousPages}}, Cmd.none )
                 [] -> (model,Cmd.none)
         _ -> ( model, Cmd.none )
+
+
+recordSource : SessionRecord -> String
+recordSource row =
+    String.padLeft 20 '0' (String.fromInt row.offset)
+
+
+recordGroup : SessionRecord -> String
+recordGroup row =
+    case Transcript.project [row] of
+        [Transcript.Activity pieces] -> List.head pieces |> Maybe.andThen .activityAnchor |> Maybe.withDefault ""
+        _ -> ""
+
+
+composeRecords : Decode.Value -> Int -> Int -> Int -> List SessionRecord -> SessionsModel -> SessionsModel
+composeRecords packet before through completeThrough incoming state =
+    let
+        field name decoder fallback = Decode.decodeValue (Decode.field name decoder) packet |> Result.withDefault fallback
+        seeking = state.windowPurpose == "latest"
+        allPrevious = if seeking then [] else state.rows
+        compact row (kept,dropped,seen) =
+            let group=recordGroup row in
+            if List.member state.windowPurpose ["fill","gap"] && state.following && group/="" && Set.member group state.historyClosed then
+                if Set.member group seen then (kept,row::dropped,seen) else (row::kept,dropped,Set.insert group seen)
+            else (row::kept,dropped,seen)
+        (previous,compacted,_) = List.foldl compact ([],[],Set.empty) (List.reverse allPrevious)
+        policy = { identity = .presentationOffset >> String.fromInt, source = recordSource, bytes = \row -> max 0 (row.end-row.offset) }
+        anchor = if state.historyAnchor == "" then Nothing else Just state.historyAnchor
+        result = SessionWindow.composeRange (Just (String.padLeft 20 '0' (String.fromInt before),String.padLeft 20 '0' (String.fromInt completeThrough))) policy 200 4194304 anchor state.following (List.member state.windowPurpose ["older","fill"]) previous incoming
+        measured row = Dict.get (recordSource row) state.historyHeights |> Maybe.withDefault 64 |> max 32
+        extent = List.map measured >> List.sum
+        oldFirst = List.head previous |> Maybe.map .offset |> Maybe.withDefault before
+        oldLast = List.reverse previous |> List.head |> Maybe.map .end |> Maybe.withDefault through
+        refetchedBefore = List.filter (\row -> row.offset >= state.historyScanBefore && row.offset < oldFirst) result.addedBefore
+        refetchedAfter = List.filter (\row -> row.end <= state.historyScanAfter && row.end > oldLast) result.addedAfter
+        topCount = max 0 ((if seeking then 0 else state.historyTopCount) - List.length refetchedBefore + List.length result.removedBefore)
+        bottomCount = max 0 ((if seeking then 0 else state.historyBottomCount) - List.length refetchedAfter + List.length result.removedAfter)
+        top = clamp 0 10000000 ((if seeking then 0 else state.historyTop) - extent refetchedBefore + extent result.removedBefore)
+        bottom = clamp 0 10000000 ((if seeking then 0 else state.historyBottom) - extent refetchedAfter + extent result.removedAfter)
+        edgeGroup removed edge oldGroup =
+            let group = edge |> Maybe.map recordGroup |> Maybe.withDefault "" in
+            if group /= "" && List.all (recordGroup >> (==) group) removed && (oldGroup == "" || oldGroup == group) then group else ""
+        first = List.head result.rows
+        last = List.reverse result.rows |> List.head
+        newestRow = List.maximum (List.map .offset (previous ++ incoming)) |> Maybe.withDefault -1
+        after = last |> Maybe.map (\row -> if row.offset == newestRow then max through (if seeking then 0 else state.historyAfter) else row.end) |> Maybe.withDefault through
+        parsedBefore = field "parsedBefore" Decode.int before
+        scanBefore = if seeking || state.historyScanAfter == 0 then parsedBefore else min state.historyScanBefore parsedBefore
+        scanEnd = if seeking || state.historyScanAfter == 0 || parsedBefore < state.historyScanBefore then field "parsedOverlapEnd" Decode.int parsedBefore else state.historyScanEnd
+        gapForRows rows = case (List.head rows,List.reverse rows |> List.head) of
+            (Just head,Just tail) ->
+                let group=recordGroup head in
+                [{before=recordSource head,after=String.padLeft 20 '0' (String.fromInt tail.end),pixels=min 10000000 (extent rows),group=if group/="" && List.all (recordGroup >> (==) group) rows then group else ""}]
+            _ -> []
+        compactedRuns = List.foldl (\row runs -> Dict.update (recordGroup row) (\rows -> Just (Maybe.withDefault [] rows ++ [row])) runs) Dict.empty compacted |> Dict.values |> List.concatMap gapForRows
+        prefixDiscard = field "discarded" (Decode.map4 (\start finish count group -> [{before=String.padLeft 20 '0' (String.fromInt start),after=String.padLeft 20 '0' (String.fromInt finish),pixels=min 10000000 (64*toFloat count),group=group}]) (Decode.field "before" Decode.int) (Decode.field "after" Decode.int) (Decode.field "count" Decode.int) (Decode.field "group" Decode.string)) []
+        represented = Just (String.padLeft 20 '0' (String.fromInt before),String.padLeft 20 '0' (String.fromInt completeThrough))
+        gaps = SessionWindow.reconcileGaps represented (List.map (\row -> (recordSource row,String.padLeft 20 '0' (String.fromInt row.end))) result.rows)
+            (compactedRuns ++ gapForRows result.removedBefore ++ gapForRows result.removedAfter ++ prefixDiscard) (if seeking then [] else state.historyGaps)
+        deltas = field "groups" (Decode.dict Decode.int) Dict.empty |> Dict.toList |> List.take 200
+        activity = List.foldl (\(key,count) counts -> Dict.update key (\old -> Just (max 0 (Maybe.withDefault 0 old+count))) counts) (if seeking then Dict.empty else state.historyActivity) deltas
+        keptGroups = Set.fromList (List.map .group gaps ++ List.map recordGroup result.rows)
+        boundedActivity = Dict.filter (\key _ -> key/="" && Set.member key keptGroups) activity |> Dict.toList |> List.take 400 |> Dict.fromList
+        presentationAnchor =
+            if state.windowPurpose=="gap" && state.presentationAnchor=="" then
+                let target=String.toInt state.historyAnchor |> Maybe.withDefault before
+                    selected=List.filter (\row -> row.offset<=target) result.rows |> List.reverse |> List.head
+                in selected |> Maybe.andThen (\row -> Transcript.project [row] |> List.head) |> Maybe.andThen (\item -> case item of
+                    Transcript.Message piece -> Just (piece.key ++ ":")
+                    Transcript.Activity pieces -> List.head pieces |> Maybe.map (\piece -> piece.key ++ ":")) |> Maybe.withDefault ""
+            else state.presentationAnchor
+    in
+    { state | rows = result.rows
+        , historyBefore = first |> Maybe.map .offset |> Maybe.withDefault before
+        , historyAfter = after
+        , historyScanBefore = scanBefore
+        , historyScanAfter = max completeThrough (if seeking then 0 else state.historyScanAfter)
+        , historyScanEnd = scanEnd
+        , historyTop = if topCount == 0 then 0 else top
+        , historyBottom = if bottomCount == 0 then 0 else bottom
+        , historyTopCount = topCount, historyBottomCount = bottomCount
+        , historyTopGroup = if topCount == 0 then "" else edgeGroup result.removedBefore first (if seeking then "" else state.historyTopGroup)
+        , historyBottomGroup = if bottomCount == 0 then "" else edgeGroup result.removedAfter last (if seeking then "" else state.historyBottomGroup)
+        , historyGaps = gaps, historyActivity = boundedActivity, presentationAnchor=presentationAnchor
+        , windowPurpose = if seeking then "append" else state.windowPurpose
+    }
 
 
 olderWindow : SessionsModel -> ( Int, Int )
@@ -468,35 +565,78 @@ receiveBridge value model =
     else if String.startsWith "archive-" kind then receiveArchive value model
     else if String.startsWith "save-" kind then receiveSave value model
     else if kind == "latest-complete" && stamp == state.stamp && generation == state.generation && field "request" Decode.int -1 == state.latestRequest then
-        ({model | sessions={state | latestPending=False,latestError=Nothing,following=True,loadWindow=True}},Cmd.none)
+        ({model | sessions={state | latestPending=False,latestError=Nothing,following=True,manualUp=False,loadWindow=False}},Cmd.none)
     else if kind == "latest-error" && stamp == state.stamp && generation == state.generation && field "request" Decode.int -1 == state.latestRequest then
-        ({model | sessions={state | latestPending=False,latestError=Just "Latest messages could not be reached. Activate Jump to latest to retry."}},Cmd.none)
+        ({model | sessions={state | latestPending=False,latestError=Just "Latest messages could not be reached."}},Cmd.none)
     else if kind == "latest-cancelled" && stamp == state.stamp && generation == state.generation && field "request" Decode.int -1 == state.latestRequest then
         ({model | sessions={state | latestPending=False,following=False,loadWindow=False}},Cmd.none)
+    else if kind == "viewer-end" && stamp == state.stamp && generation == state.generation then update SessionsJumpLatest model
+    else if kind == "viewer-positioned" && stamp == state.stamp && generation == state.generation && field "publication" Decode.int -1 == state.windowPublication && state.positionPending then
+        ({model | sessions={state | positionPending=False,error=if field "failed" Decode.bool False then Just "Conversation position could not be restored. Please retry." else state.error}},Cmd.none)
     else if kind == "viewer-boundary" && stamp == state.stamp && generation == state.generation then
-        if state.pending || (state.loadWindow && state.offset < state.end) || state.error /= Nothing then (model,Cmd.none)
-        else if field "edge" Decode.string "" == "older" && state.historyBefore > 0 then update SessionsOlder model
-        else if field "edge" Decode.string "" == "newer" then update SessionsNewer model
-        else (model,Cmd.none)
+        let prepared={state | historyAnchor=field "anchor" Decode.string state.historyAnchor,presentationAnchor=field "fragmentAnchor" Decode.string state.presentationAnchor,historyHeights=field "heights" (Decode.dict Decode.float) state.historyHeights |> Dict.toList |> List.take 200 |> Dict.fromList,historyClosed=field "closedGroups" (Decode.list Decode.string) [] |> List.take 200 |> Set.fromList,windowPurpose=if field "fill" Decode.bool False then "fill" else state.windowPurpose}
+            next={model | sessions=prepared}
+        in
+        if state.pending || state.positionPending || (state.loadWindow && state.offset < state.end) || state.error /= Nothing then (next,Cmd.none)
+        else if field "edge" Decode.string "" == "gap" then
+            let
+                gapBefore = field "before" Decode.int -1
+                gapAfter = field "after" Decode.int -1
+                backward = field "direction" Decode.string "" == "tail"
+                neighbor = List.filter (\candidate -> candidate.offset >= gapAfter) state.rows |> List.head
+                target = gapBefore+round (toFloat (gapAfter-gapBefore)*clamp 0 1 (field "fraction" Decode.float 0))
+                interior = target-gapBefore>32768 && gapAfter-target>32768
+                finish = if interior then min gapAfter (target+16384) else if backward then neighbor |> Maybe.map (\candidate -> if candidate.end-gapAfter<=65536 then candidate.end else gapAfter) |> Maybe.withDefault gapAfter else min gapAfter (gapBefore+65536)
+                begin = if interior || backward then max gapBefore (finish-65536) else gapBefore
+                anchor = if prepared.historyAnchor/="" then prepared.historyAnchor else String.padLeft 20 '0' (String.fromInt (if interior then target else if backward then gapAfter else gapBefore))
+            in
+            if gapBefore<0 || gapAfter<=gapBefore || finish<=begin then (model,Cmd.none) else
+            ({next | sessions={prepared | start=Just begin,offset=begin,end=finish,pending=False,loadWindow=True,generation=state.generation+1,resetPending=True,windowPurpose="gap",windowDirection=if backward || interior then "tail" else "forward",windowAligned=not backward && not interior,historyAnchor=anchor,error=Nothing}},Cmd.none)
+        else if field "edge" Decode.string "" == "older" && (state.historyBefore > 0 || state.historyScanBefore > 0) then update SessionsOlder next
+        else if field "edge" Decode.string "" == "newer" then update SessionsNewer next
+        else (next,Cmd.none)
+    else if kind == "viewer-render" && stamp == state.stamp && generation == state.generation then
+        ({model | sessions={state | presentationPart=clamp 0 100000 (field "part" Decode.int 0),presentationAnchor=""}},Cmd.none)
+    else if kind == "viewer-disclosure" && stamp == state.stamp && generation == state.generation then
+        let key=field "key" Decode.string ""
+            opened=if field "open" Decode.bool False then Set.insert key state.historyOpen else Set.remove key state.historyOpen
+        in ({model | sessions={state | historyOpen=opened |> Set.toList |> List.take 400 |> Set.fromList}},Cmd.none)
     else if kind == "viewer-follow" && stamp == state.stamp && generation == state.generation then
-        let following=field "following" Decode.bool False in
-        ( {model | sessions={state | following=following,loadWindow=if state.following && not following then False else if following then True else state.loadWindow}},Cmd.none )
+        if state.latestPending then (model,Cmd.none) else
+        let manual=field "manualUp" Decode.bool state.manualUp
+            following=not manual
+        in
+        ( {model | sessions={state | manualUp=manual,following=following,historyAnchor=field "anchor" Decode.string state.historyAnchor,presentationPart=if following then -1 else state.presentationPart,presentationAnchor=if following then "" else state.presentationAnchor,loadWindow=if state.following && not following then False else state.loadWindow}},Cmd.none )
     else if stamp /= state.stamp || generation /= state.generation || not state.pending then (model,Cmd.none)
     else if field "kind" Decode.string "" == "viewer-error" then
         ( {model | sessions = {state | pending = False, error = Just "Record window could not be decoded. Retry or load another window."}}, Cmd.none )
     else if through <= state.offset || through > min state.end (state.offset + 65536) then (model,Cmd.none)
     else if kind == "viewer-progress" then
-        ( {model | sessions = {state | offset = through,pending = False,notice = field "notice" Decode.string state.notice}}, Cmd.none )
+        let
+            newest = state.selected |> Maybe.andThen (\id -> state.workspace |> Maybe.andThen (\ws -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data)) |> Maybe.andThen (\data -> case data of
+                Delivery.Metadata session -> Just session.committedBytes
+                _ -> Nothing) |> Maybe.withDefault state.end
+            grow = state.windowDirection=="forward" && through>=state.end && field "pendingBytes" Decode.int 0>0 && state.end<newest && state.end-Maybe.withDefault state.offset state.start<2097152
+        in
+        ( {model | sessions = {state | offset = through,pending = False,end=if grow then min newest (min (Maybe.withDefault state.offset state.start+2097152) (state.end+65536)) else state.end,notice = field "notice" Decode.string state.notice}}, Cmd.none )
     else case Decode.decodeValue (Decode.field "rows" (Decode.list row)) value of
         Ok rows ->
             if List.length rows <= 200 && List.sum (List.map (.raw >> String.length) rows) <= 4194304 then
                 if List.isEmpty rows && field "pendingBytes" Decode.int 0 > 0 then
                     ( {model | sessions={state | offset=through,pending=False,notice=field "notice" Decode.string state.notice}},Cmd.none )
-                else if List.isEmpty rows && (field "skipping" Decode.bool False || field "needsLookback" Decode.bool False) && through >= state.end && Maybe.withDefault 0 state.start > max 0 (state.end - 2097152) then
+                else if ((List.isEmpty rows && (field "skipping" Decode.bool False || field "needsLookback" Decode.bool False)) || (List.member state.windowPurpose ["older","fill"] && field "parsedBefore" Decode.int (field "before" Decode.int 0) >= (if state.windowPurpose=="fill" then state.historyScanBefore else state.historyBefore))) && through >= state.end && Maybe.withDefault 0 state.start > max 0 (state.end - 2097152) then
                     let begin = max 0 (state.end - 2097152) in
                     ( {model | sessions={state | start=Just begin,offset=begin,pending=False,generation=state.generation+1,resetPending=True}},Cmd.none )
                 else
-                    ( {model | sessions = {state | offset = through, pending = False, rows = rows, historyBefore = field "before" Decode.int (Maybe.withDefault 0 state.start), historyAfter = through, loadWindow = not (field "pageFull" Decode.bool False), notice = field "notice" Decode.string ""}}, Cmd.none )
+                    let composed=composeRecords value (field "before" Decode.int (Maybe.withDefault 0 state.start)) through (field "completeThrough" Decode.int through) rows state
+                        full=field "pageFull" Decode.bool False
+                    in
+                    ( {model | sessions = {composed | offset=through,pending=False,positionPending=field "publication" Decode.int 0 > 0,windowPublication=field "publication" Decode.int 0,loadWindow=through<state.end,notice=field "notice" Decode.string ""
+                        ,start=if full && through<state.end then Just through else state.start
+                        ,generation=if full && through<state.end then state.generation+1 else state.generation
+                        ,resetPending=full && through<state.end
+                        ,windowDirection=if full && through<state.end then "forward" else state.windowDirection
+                        ,windowAligned=if full && through<state.end then True else state.windowAligned}}, Cmd.none )
             else ( {model | sessions = {state | pending = False,error = Just "Viewer row budget exceeded."}}, Cmd.none )
         Err _ -> ( {model | sessions = {state | pending = False,error = Just "Invalid viewer response."}}, Cmd.none )
 
@@ -517,6 +657,99 @@ sealedRequest model =
                 |> List.head
                 |> Maybe.map (\request -> Encode.object [("id",Encode.int request.id),("sequence",Encode.int demand.sequence),("workspace",Encode.string request.workspace),("session",Encode.string (Maybe.withDefault "" model.sessions.selected)),("stamp",Encode.string model.sessions.stamp),("load",Encode.int model.sessions.generation),("archiveGeneration",Encode.string model.sessions.sealed.archiveGeneration)])
                 |> Maybe.withDefault Encode.null
+
+
+sealedPieceBytes : SealedSessionPiece -> Int
+sealedPieceBytes piece =
+    1024 + payloadBytes (Encode.list Encode.string [piece.key,piece.offset,piece.label,piece.role,piece.time,piece.group,piece.count,piece.endTime])
+        + (piece.body |> Maybe.map sealedBodyBytes |> Maybe.withDefault 0)
+
+
+payloadBytes : Encode.Value -> Int
+payloadBytes value =
+    Encode.encode 0 value |> String.foldl (\char count -> let code=Char.toCode char in count+(if code<128 then 1 else if code<2048 then 2 else if code<65536 then 3 else 4)) 0
+
+
+sealedBodyBytes : SealedSessionBody -> Int
+sealedBodyBytes body =
+    payloadBytes (Encode.object [("text",Encode.string body.text),("part",Encode.int body.part),("more",Encode.bool body.more),("format",Encode.string body.format),("structured",Encode.bool body.structured),("exception",Encode.bool body.exception)
+        ,("tokens",Encode.list (\(kind,token) -> Encode.object [("kind",Encode.string kind),("text",Encode.string token)]) body.tokens)])
+
+
+boundSealedContent : SessionsModel -> SealedSessionView -> SessionsModel
+boundSealedContent state sealed =
+    let
+        bodyCost key=Dict.get key sealed.bodies |> Maybe.map (List.map sealedBodyBytes >> List.sum) |> Maybe.withDefault 0
+        policy={identity=.key,source=.key,bytes=\item -> sealedPieceBytes item+bodyCost item.key}
+        anchor=if state.historyAnchor=="" then Nothing else Just state.historyAnchor
+        result=SessionWindow.compose policy 200 (4194304-2*payloadBytes (Encode.string sealed.markdown.source)) anchor state.following False sealed.rows []
+        retained=Set.fromList (List.map .key result.rows)
+        gapFor items=case (List.head items,List.reverse items |> List.head) of
+            (Just first,Just last) -> [{before=first.key,after=last.key ++ ":1",pixels=List.map (\item -> Dict.get item.key state.historyHeights |> Maybe.withDefault 64 |> max 32) items |> List.sum |> min 10000000,group=if first.group/="" && List.all (.group >> (==) first.group) items then first.group else ""}]
+            _ -> []
+        gaps=SessionWindow.reconcileGaps Nothing (List.map (\item -> (item.key,item.key ++ ":1")) result.rows) (gapFor result.removedBefore ++ gapFor result.removedAfter) state.historyGaps
+        firstKey=List.head result.rows |> Maybe.map .key |> Maybe.withDefault ""
+        lastKey=List.reverse result.rows |> List.head |> Maybe.map .key |> Maybe.withDefault ""
+    in {state | historyGaps=gaps,sealed={sealed | rows=result.rows,bodies=Dict.filter (\key _ -> Set.member key retained) sealed.bodies,first=firstKey,last=lastKey,canPrevious=not sealed.atBeginning || firstKey>sealed.scanFirst,canNext=not sealed.atLatest || lastKey<sealed.scanLast}}
+
+
+sealedBodyDecoder : Decode.Decoder SealedSessionBody
+sealedBodyDecoder =
+    Decode.map7 (\content part more tokens format structured exception -> {text=content,part=part,more=more,tokens=tokens,format=format,structured=structured,exception=exception})
+        (Decode.field "text" Decode.string) (Decode.field "part" Decode.int) (Decode.field "more" Decode.bool)
+        (Decode.oneOf [Decode.field "tokens" (Decode.list (Decode.map2 Tuple.pair (Decode.field "kind" Decode.string) (Decode.field "text" Decode.string))),Decode.succeed []])
+        (Decode.oneOf [Decode.field "format" Decode.string,Decode.succeed "markdown"])
+        (Decode.oneOf [Decode.field "structured" Decode.bool,Decode.succeed False]) (Decode.oneOf [Decode.field "exception" Decode.bool,Decode.succeed False])
+
+
+composeSealed : List SealedSessionPiece -> String -> String -> Int -> Bool -> Bool -> Bool -> (String,String) -> SessionsModel -> SessionsModel
+composeSealed incoming pageFirst pageLast request fromEnd canPrevious canNext represented state =
+    let
+        old = state.sealed
+        starting = List.isEmpty old.rows
+        seeking = state.latestPending
+        compact item (kept,dropped,seen) =
+            if state.windowPurpose=="fill" && state.following && item.group/="" && not item.groupOpen then
+                if Set.member item.group seen then (kept,item::dropped,seen) else (item::kept,dropped,Set.insert item.group seen)
+            else (item::kept,dropped,seen)
+        (previous,compacted,_) = List.foldl compact ([],[],Set.empty) (List.reverse (if seeking then [] else old.rows))
+        policy = { identity = .key, source = .key, bytes = sealedPieceBytes }
+        anchor = if state.historyAnchor == "" then Nothing else Just state.historyAnchor
+        preserveBody fresh = previous |> List.filter (.key >> (==) fresh.key) |> List.head |> Maybe.map (\cached -> case cached.body of
+            Just content -> if content.format=="markdown" && not content.more && content.part==0 then {fresh | body=cached.body,ast=cached.ast} else fresh
+            Nothing -> fresh) |> Maybe.withDefault fresh
+        bodyBytes = Dict.values old.bodies |> List.concat |> List.map sealedBodyBytes |> List.sum
+        result = SessionWindow.composeRange (Just represented) policy 200 (4194304-2*payloadBytes (Encode.string old.markdown.source)-bodyBytes) anchor state.following fromEnd previous (List.map preserveBody incoming)
+        first = List.head result.rows |> Maybe.map .key |> Maybe.withDefault ""
+        last = List.reverse result.rows |> List.head |> Maybe.map .key |> Maybe.withDefault ""
+        scanFirst = if old.scanFirst == "" || seeking then pageFirst else min old.scanFirst pageFirst
+        scanLast = if seeking then pageLast else max old.scanLast pageLast
+        atBeginning = (old.atBeginning && not seeking) || not canPrevious
+        atLatest = (old.atLatest && not seeking) || not canNext
+        measured row = Dict.get row.key state.historyHeights |> Maybe.withDefault 64 |> max 32
+        extent = List.map measured >> List.sum
+        refetchedBefore = List.filter (\row -> old.scanFirst /= "" && row.key >= old.scanFirst) result.addedBefore
+        refetchedAfter = List.filter (\row -> row.key <= old.scanLast) result.addedAfter
+        topCount = max 0 ((if starting || seeking then 0 else state.historyTopCount)-List.length refetchedBefore+List.length result.removedBefore)
+        bottomCount = max 0 ((if starting || seeking then 0 else state.historyBottomCount)-List.length refetchedAfter+List.length result.removedAfter)
+        top = clamp 0 10000000 ((if starting || seeking then 0 else state.historyTop)-extent refetchedBefore+extent result.removedBefore)
+        bottom = clamp 0 10000000 ((if starting || seeking then 0 else state.historyBottom)-extent refetchedAfter+extent result.removedAfter)
+        gapFor rows = case (List.head rows,List.reverse rows |> List.head) of
+            (Just head,Just tail) -> [{before=head.key,after=tail.key ++ ":1",pixels=min 10000000 (extent rows),group=if head.group/="" && List.all (.group >> (==) head.group) rows then head.group else ""}]
+            _ -> []
+        compactedRuns=List.foldl (\item runs -> Dict.update item.group (\items -> Just (Maybe.withDefault [] items ++ [item])) runs) Dict.empty compacted |> Dict.values |> List.concatMap gapFor
+        gaps=SessionWindow.reconcileGaps (Just represented) (List.map (\item -> (item.key,item.key ++ ":1")) result.rows)
+            (compactedRuns ++ gapFor result.removedBefore ++ gapFor result.removedAfter) (if starting || seeking then [] else state.historyGaps)
+        keptKeys=Set.fromList (List.map .key result.rows)
+        presentationAnchor=if state.windowPurpose=="gap" then result.rows |> List.filter (\item -> item.key>=state.historyAnchor) |> List.head |> Maybe.map (\item -> item.key ++ ":") |> Maybe.withDefault "" else state.presentationAnchor
+    in
+    {state | historyTop=if topCount==0 then 0 else top,historyBottom=if bottomCount==0 then 0 else bottom,historyTopCount=topCount,historyBottomCount=bottomCount,historyTopGroup="",historyBottomGroup="",historyGaps=gaps,presentationAnchor=presentationAnchor
+        ,sealed={old | phase="ready",error=Nothing,http=Nothing,rows=result.rows,first=first,last=last,pageFirst=pageFirst,pageLast=pageLast,pageRequest=request,scanFirst=scanFirst,scanLast=scanLast,atBeginning=atBeginning,atLatest=atLatest
+            ,canPrevious=not atBeginning || first>scanFirst,canNext=not atLatest || last<scanLast,more=not atLatest || last<scanLast
+            ,renderPart=if state.following || seeking then -1 else if starting then (if fromEnd then -1 else 0) else old.renderPart
+            ,bodies=Dict.filter (\key _ -> Set.member key keptKeys) old.bodies
+            ,markdown=if List.any (\row -> row.key==old.markdown.key) result.rows then old.markdown else emptySealedSessionView.markdown}
+    }
 
 
 receiveSealed : Decode.Value -> Model -> ( Model, Cmd Msg )
@@ -542,25 +775,28 @@ receiveSealed value model =
     else if kind == "sealed-demand" then
         ({model | sessions={state | sealed={sealed | http=Just {sequence=field "sequence" Decode.int -1,path=field "path" Decode.string ""}}}},Cmd.none)
     else if kind == "sealed-clear" then
-        ({model | sessions={state | rows=[],sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,canPrevious=False,canNext=False,renderPart=0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
+        ({model | sessions={state | rows=[],historyGaps=[],historyTop=0,historyBottom=0,sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,canPrevious=False,canNext=False,renderPart=0,bodies=Dict.empty,markdown=emptySealedSessionView.markdown}}},Cmd.none)
     else if kind == "sealed-error" then
         let code=field "code" Decode.string "archive_failed" in
         ({model | sessions={state | sealed={sealed | phase="error",canRetry=code /= "archive_cleanup_failed",http=Nothing
             ,error=Just (if code == "archive_cleanup_failed" then "Archive cleanup could not be confirmed. Reload this page before another archive." else if code == "archive_item_limit" then "One record exceeds the local view limit. The original transcript is still available to download." else if code == "archive_recovery_limit" then "Local archive recovery reached its directory limit. Close other archive tabs or clear this site's stored archive data before retrying." else if code == "archive_recovery_pending" then "Old local archives were removed. Retry to finish recovery." else code)}}},Cmd.none)
     else if kind == "sealed-cancelled" then
-        ({model | sessions={state | sealed={sealed | phase="cancelled",http=Nothing,rows=[],markdown=emptySealedSessionView.markdown,error=Nothing}}},Cmd.none)
+        ({model | sessions={state | sealed={sealed | phase="cancelled",http=Nothing,rows=[],bodies=Dict.empty,markdown=emptySealedSessionView.markdown,error=Nothing}}},Cmd.none)
     else if kind == "sealed-render" then
         let part=field "part" Decode.int -1
             request=field "request" Decode.int 0
         in
         if part < 0 || part > 100000 || request < sealed.renderRequest then (model,Cmd.none)
-        else ({model | sessions={state | sealed={sealed | renderPart=part,renderRequest=request}}},Cmd.none)
+        else ({model | sessions={state | presentationAnchor="",sealed={sealed | renderPart=part,renderRequest=request}}},Cmd.none)
     else if kind == "sealed-latest-render" && field "latestRequest" Decode.int -1 == state.latestRequest then
         ({model | sessions={state | sealed={sealed | renderPart=-1,renderRequest=field "request" Decode.int sealed.renderRequest}}},Cmd.none)
     else if kind == "sealed-latest-complete" && field "latestRequest" Decode.int -1 == state.latestRequest then
-        ({model | sessions={state | latestPending=False,latestError=Nothing}},Cmd.none)
+        ({model | sessions={state | latestPending=False,latestError=Nothing,manualUp=False,following=True}},Cmd.none)
+    else if kind == "sealed-follow" then
+        let manual=field "manualUp" Decode.bool state.manualUp in
+        ({model | sessions={state | manualUp=manual,following=not manual,historyAnchor=field "anchor" Decode.string state.historyAnchor,presentationAnchor=field "fragmentAnchor" Decode.string state.presentationAnchor,historyHeights=field "heights" (Decode.dict Decode.float) state.historyHeights |> Dict.toList |> List.take 200 |> Dict.fromList}},Cmd.none)
     else if kind == "sealed-latest-error" && field "latestRequest" Decode.int -1 == state.latestRequest then
-        ({model | sessions={state | latestPending=False,latestError=Just "Latest messages could not be reached. Activate Jump to latest to retry."}},Cmd.none)
+        ({model | sessions={state | latestPending=False,latestError=Just "Latest messages could not be reached."}},Cmd.none)
     else if kind == "sealed-latest-cancelled" && field "latestRequest" Decode.int -1 == state.latestRequest then
         ({model | sessions={state | latestPending=False}},Cmd.none)
     else if kind == "sealed-disclosure" then
@@ -570,6 +806,30 @@ receiveSealed value model =
         in ({model | sessions={state | sealed={sealed | rows=List.map updateDisclosure sealed.rows}}},Cmd.none)
     else if kind == "sealed-markdown-start" then
         ({model | sessions={state | sealed={sealed | phase="reading-body",markdown={key=field "key" Decode.string "",source="",ast=Err "not_loaded",structured=False,complete=False,nextPart=0,request=0}}}},Cmd.none)
+    else if kind == "sealed-body" then
+        case Decode.decodeValue (Decode.field "body" sealedBodyDecoder) value of
+            Ok content ->
+                let
+                    key=field "key" Decode.string ""
+                    cached=Dict.get key sealed.bodies |> Maybe.withDefault (sealed.rows |> List.filter (.key >> (==) key) |> List.head |> Maybe.andThen .body |> Maybe.map List.singleton |> Maybe.withDefault [])
+                    previous=if List.any (\part -> abs (part.part-content.part)<=1) cached then cached else []
+                    joined=content::List.filter (.part >> (/=) content.part) previous |> List.sortBy .part
+                    anchorPart=field "anchorPart" Decode.int content.part
+                    before=List.filter (\part -> part.part <= anchorPart) joined |> List.reverse |> List.take 2 |> List.reverse
+                    after=List.filter (\part -> part.part > anchorPart) joined |> List.take (max 0 (3-List.length before))
+                    parts=before++after
+                    cost values=List.sum (List.map sealedBodyBytes values)
+                    prune entries total kept=case entries of
+                        [] -> Dict.fromList kept
+                        (entryKey,values)::rest -> if total+cost values>4194304 then prune rest total kept else prune rest (total+cost values) ((entryKey,values)::kept)
+                    bodies=prune ((key,parts)::(Dict.toList sealed.bodies |> List.filter (Tuple.first >> (/=) key))) 0 []
+                    attach item=if item.key==key then {item | body=Just (if content.format=="json" then {content | text="",tokens=[],part=0,more=True} else content)} else item
+                in
+                if String.length content.text>65536 || not (List.any (.key >> (==) key) sealed.rows) then (model,Cmd.none)
+                else
+                    let markdown=sealed.markdown in
+                    ({model | sessions=boundSealedContent {state | presentationAnchor=if state.following || field "seekStart" Decode.bool False then "" else field "fragmentAnchor" Decode.string state.presentationAnchor} {sealed | rows=List.map attach sealed.rows,bodies=bodies,renderPart=if field "seekStart" Decode.bool False then 0 else sealed.renderPart,markdown={markdown | request=field "request" Decode.int markdown.request}}},Cmd.none)
+            Err _ -> (model,Cmd.none)
     else if kind == "sealed-markdown-chunk" then
         let
             previous=sealed.markdown
@@ -578,15 +838,23 @@ receiveSealed value model =
             source=previous.source++textPart
         in
         if field "key" Decode.string "" /= previous.key || field "part" Decode.int -1 /= previous.nextPart || String.length previous.source + String.length textPart > 1048576 then (model,Cmd.none)
-        else ({model | sessions={state | sealed={sealed | phase=if complete then "ready" else "reading-body",renderPart=0
-            ,markdown={previous | source=source,ast=if complete then Markdown.Parser.parse source |> Result.mapError (always "parse error") else previous.ast,structured=field "structured" Decode.bool False,complete=complete,nextPart=previous.nextPart+1,request=field "request" Decode.int 0}}}},Cmd.none)
+        else
+            let
+                parsed = if complete then Markdown.Parser.parse source |> Result.mapError (always "parse error") else previous.ast
+                saveBody item = if complete && item.key==previous.key then {item | ast=parsed,body=item.body |> Maybe.map (\content -> {content | text=source,part=0,more=False,tokens=[]})} else item
+            in
+            ({model | sessions=boundSealedContent state {sealed | phase=if complete then "ready" else "reading-body"
+                ,rows=List.map saveBody sealed.rows
+                ,markdown={previous | key=if complete then "" else previous.key,source=if complete then "" else source,ast=Err "not_loaded",structured=field "structured" Decode.bool False,complete=False,nextPart=previous.nextPart+1,request=field "request" Decode.int 0}}},Cmd.none)
     else if kind == "sealed-progress" then
         ({model | sessions={state | sealed={sealed | phase=field "phase" Decode.string sealed.phase,rawBytes=field "rawBytes" Decode.string sealed.rawBytes,compressedBytes=field "compressedBytes" Decode.string sealed.compressedBytes,archiveGeneration=field "archiveGeneration" Decode.string sealed.archiveGeneration}}},Cmd.none)
     else if kind == "sealed-page" then
         case Decode.decodeValue (Decode.field "rows" (Decode.list piece)) value of
             Ok rows ->
                 if List.length rows <= 200 && String.length (Encode.encode 0 value) <= 4194304 then
-                    ({model | sessions={state | sealed={sealed | phase="ready",error=Nothing,http=Nothing,rows=rows,first=field "first" Decode.string "",last=field "last" Decode.string "",more=field "more" Decode.bool False,canPrevious=field "canPrevious" Decode.bool False,canNext=field "canNext" Decode.bool False,archiveGeneration=field "archiveGeneration" Decode.string "",renderPart=if field "fromEnd" Decode.bool False then -1 else 0,markdown=emptySealedSessionView.markdown}}},Cmd.none)
+                    let composed=composeSealed rows (field "first" Decode.string "") (field "last" Decode.string "") (field "request" Decode.int 0) (field "fromEnd" Decode.bool False) (field "canPrevious" Decode.bool False) (field "canNext" Decode.bool False) (field "representedBefore" Decode.string (field "first" Decode.string ""),field "representedAfter" Decode.string (field "last" Decode.string "" ++ ":1")) {state | windowPurpose=field "purpose" Decode.string ""}
+                        next=composed.sealed
+                    in ({model | sessions={composed | sealed={next | archiveGeneration=field "archiveGeneration" Decode.string ""}}},Cmd.none)
                 else ({model | sessions={state | sealed={sealed | phase="error",rows=[],error=Just "archive_page_limit"}}},Cmd.none)
             Err _ -> ({model | sessions={state | sealed={sealed | phase="error",rows=[],error=Just "archive_page_invalid"}}},Cmd.none)
     else (model,Cmd.none)
@@ -1034,7 +1302,73 @@ viewLatestControl state =
 
 viewLatestError : SessionsModel -> Html Msg
 viewLatestError state =
-    state.latestError |> Maybe.map (\message -> p [class "session-latest-error",attribute "role" "alert"] [text message]) |> Maybe.withDefault (text "")
+    state.latestError |> Maybe.map (\_ -> p [class "session-latest-error",attribute "role" "alert"] [text "Latest messages could not be reached. ",button [class "btn btn-sm",onClick SessionsJumpLatest] [text "Retry"]]) |> Maybe.withDefault (text "")
+
+
+historyGap : SessionWindow.Gap -> Html Msg
+historyGap gap =
+    div [class "session-history-spacer",attribute "data-history-gap" "source",attribute "data-gap-before" gap.before,attribute "data-gap-after" gap.after,attribute "data-gap-group" gap.group,attribute "aria-hidden" "true",Html.Attributes.style "height" (String.fromFloat (max 1 gap.pixels) ++ "px")] []
+
+
+continuousTranscript : Model -> { nodes : List (String,Html Msg), part : Int, more : Bool, error : Bool }
+continuousTranscript model =
+    let
+        items = Transcript.project model.sessions.rows
+        group item = case item of
+            Transcript.Activity pieces -> List.head pieces |> Maybe.map (\piece -> Maybe.withDefault piece.key piece.activityAnchor) |> Maybe.withDefault ""
+            _ -> ""
+        groups = List.map group items |> Set.fromList
+        source item = case item of
+            Transcript.Message piece -> recordSource piece.record
+            Transcript.Activity pieces -> List.head pieces |> Maybe.map (.record >> recordSource) |> Maybe.withDefault ""
+        content = List.map (\item -> let (key,node)=activeTranscriptFragment model item in (source item,(model.sessions.stamp ++ ":" ++ key,node))) items
+        omitted = List.filter (\gap -> gap.group=="" || not (Set.member gap.group groups)) model.sessions.historyGaps
+            |> List.map (\gap -> (gap.before,(model.sessions.stamp ++ ":gap:" ++ gap.before ++ ":" ++ gap.after,Transcript.atom 1024 (\_ -> historyGap gap))))
+        entries=List.sortBy Tuple.first (content ++ omitted) |> List.map Tuple.second
+        rendered=Transcript.renderWindow 1048576 (if model.sessions.following then -1 else model.sessions.presentationPart) (if model.sessions.following then "" else model.sessions.presentationAnchor) (List.map Tuple.second entries)
+        renderKey sourceKey=String.toInt sourceKey |> Maybe.andThen (\index -> List.drop index entries |> List.head |> Maybe.map Tuple.first) |> Maybe.withDefault (model.sessions.stamp ++ ":" ++ sourceKey)
+    in {nodes=List.map2 (\sourceKey node -> (renderKey sourceKey,node)) rendered.keys rendered.nodes,part=rendered.part,more=rendered.more,error=rendered.error}
+
+
+activeTranscriptFragment : Model -> Transcript.Item -> (String,Transcript.Fragment Msg)
+activeTranscriptFragment model item =
+    let
+        state=model.sessions
+        opened key=Set.member key state.historyOpen
+        attrs key=if opened key then [attribute "open" ""] else []
+        blockFragment key source block =
+            if block.kind=="text" then Transcript.scoped source (Transcript.formatted sessionMarkdownRenderer block.content)
+            else if block.kind=="encrypted" then Transcript.atom 128 (\_ -> em [class "session-thinking"] [text "Thinking..."])
+            else
+                let body=if block.kind=="thinking" then Transcript.formatted sessionMarkdownRenderer block.content
+                         else if block.kind=="event" then Transcript.atom 262144 (\_ -> Html.node "session-event-json" [Html.Attributes.property "payload" (Encode.string block.content)] [])
+                         else sealedBlockFragment source "tool" block.content block.tokens
+                in Transcript.keyedContainer (1024+12*String.length key+12*String.length block.label)
+                    (\children -> div [class "session-event"] [Keyed.node "details" ([class ("session-content-" ++ block.kind),attribute "data-event-key" key] ++ attrs key) (("summary",summary [Html.Attributes.title block.label] [text (if block.label/="" then block.label else if block.kind=="thinking" then "Thinking" else "Tool activity")])::children)])
+                    (if opened key then [Transcript.scoped source body] else [])
+        pieceFragment piece =
+            let record=piece.record in
+            Transcript.scoped piece.key (Transcript.keyedContainer (4096+12*String.length piece.key+12*String.length record.time)
+                (\children -> article [class ("session-record session-role-" ++ record.role ++ (if piece.activity then " session-record-activity" else "")),attribute "data-offset" (String.fromInt record.offset),attribute "data-block-key" piece.key]
+                    [div [class "session-record-meta"] [if record.time=="" then text "" else time [class "session-event-time",attribute "datetime" record.time] [text (compactTimestamp model record.time)],if piece.activity then text "" else span [] [text (if record.role=="user" then "You" else if record.role=="tool" then "Tool" else if record.role=="assistant" then "Assistant" else "Message")]]
+                    ,Keyed.node "div" [] children])
+                (List.map2 (\index block -> blockFragment (piece.key ++ ":" ++ String.fromInt index) (String.padLeft 19 '0' (String.fromInt record.presentationOffset) ++ ":" ++ String.padLeft 7 '0' (String.fromInt index) ++ ":content") block) piece.blockIndices piece.blocks))
+    in case item of
+        Transcript.Message piece -> ("message:" ++ piece.key,pieceFragment piece)
+        Transcript.Activity pieces ->
+            let
+                firstKey=List.head pieces |> Maybe.map (\piece -> Maybe.withDefault piece.key piece.activityAnchor) |> Maybe.withDefault ""
+                finalTime=List.reverse pieces |> List.head |> Maybe.map (.record >> .time) |> Maybe.withDefault ""
+                loaded=List.sum (List.map (.blocks >> List.length) pieces)
+                count=max loaded (Dict.get firstKey state.historyActivity |> Maybe.withDefault loaded)
+                content=List.map (\piece -> (recordSource piece.record,(piece.key,pieceFragment piece))) pieces
+                gaps=List.filter (.group >> (==) firstKey) state.historyGaps |> List.map (\gap -> (gap.before,("gap:" ++ gap.before ++ ":" ++ gap.after,Transcript.atom 1024 (\_ -> historyGap gap))))
+                entries=List.sortBy Tuple.first (content ++ gaps) |> List.map Tuple.second
+                children rendered=List.map (\(key,node) -> (String.toInt key |> Maybe.andThen (\index -> List.drop index entries |> List.head |> Maybe.map Tuple.first) |> Maybe.withDefault key,node)) rendered
+                render body=details ([class "session-activity-group",attribute "data-group-key" firstKey] ++ attrs firstKey)
+                    [summary [class "session-activity-summary"] [activityTimestamp model finalTime,span [] [text ("Activity · " ++ String.fromInt count ++ (if count==1 then " event" else " events"))]]
+                    ,Keyed.node "div" [class "session-activity-records"] (children body)]
+            in ("activity:" ++ firstKey,Transcript.keyedContainer (2048+12*String.length firstKey) render (if opened firstKey then List.map Tuple.second entries else []))
 
 
 viewRecords : ReaderContext -> String -> Model -> String -> Html Msg
@@ -1047,6 +1381,7 @@ viewRecords context workspace model id =
         newest = session |> Maybe.map .committedBytes |> Maybe.withDefault state.offset
         rangeError = resource workspace (Delivery.SessionWindow id state.offset state.end False) model |> Maybe.andThen .error
         metadataError = resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .error
+        rendered = continuousTranscript model
     in
     if session |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then viewSealedRecords context model session
     else section [class "session-viewer",attribute "aria-label" "Session transcript"]
@@ -1054,12 +1389,9 @@ viewRecords context workspace model id =
             [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing || metadataError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
         ,viewLatestError state
-        ,div [class "sessions-pagination",attribute "aria-label" "Conversation history"]
-            [button [class "btn btn-sm",onClick SessionsOlder,disabled (state.historyBefore <= 0 || state.pending || (state.loadWindow && state.offset < state.end))] [text "Earlier messages"]
-            ,span [attribute "role" "status"] [text (if state.pending || (state.loadWindow && state.offset < state.end) then "Loading conversation…" else if state.historyBefore <= 0 then "Beginning of conversation" else "Earlier history available")]
-            ,button [class "btn btn-sm",onClick SessionsNewer,disabled (state.historyAfter >= newest || state.pending || (state.loadWindow && state.offset < state.end))] [text "Newer messages"]]
-        ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-viewer-generation" (String.fromInt state.generation),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "active",attribute "data-history-before" (String.fromInt state.historyBefore),attribute "data-history-after" (String.fromInt state.historyAfter),attribute "data-history-latest" (String.fromInt newest),attribute "data-history-loading" (if state.start == Nothing || state.pending || (state.loadWindow && state.offset < state.end) || rangeError /= Nothing || state.error /= Nothing then "true" else "false"),attribute "data-history-error" (if rangeError /= Nothing || state.error /= Nothing || metadataError /= Nothing then "true" else "false"),attribute "aria-label" "Bounded transcript records"]
-            (List.map (\item -> let (key,node) = viewTranscriptItem model item in (state.stamp ++ ":" ++ key,node)) (Transcript.project state.rows))
+        ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-viewer-generation" (String.fromInt state.generation),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-window-publication" (String.fromInt state.windowPublication),attribute "data-position-pending" (if state.positionPending then "true" else "false"),attribute "data-history-mode" "active",attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-history-before" (String.fromInt state.historyBefore),attribute "data-history-scan-before" (String.fromInt state.historyScanBefore),attribute "data-history-after" (String.fromInt state.historyAfter),attribute "data-history-latest" (String.fromInt newest),attribute "data-history-loading" (if state.start == Nothing || state.pending || state.positionPending || (state.loadWindow && state.offset < state.end) || rangeError /= Nothing || state.error /= Nothing then "true" else "false"),attribute "data-history-error" (if rangeError /= Nothing || state.error /= Nothing || metadataError /= Nothing then "true" else "false"),attribute "aria-label" "Session conversation"]
+            rendered.nodes
+        ,if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
         ,if List.isEmpty state.rows && state.error == Nothing && rangeError == Nothing then p [attribute "role" "status"] [text (if state.start == Nothing then "Loading transcript metadata…" else if state.offset < state.end then "Reading transcript…" else if newest == 0 then "This session has no committed records." else "No complete messages in this window.")] else text ""
         ,if state.notice /= "" then p [attribute "role" "status"] [text state.notice] else text ""
         ,viewLatestControl state ]
@@ -1070,43 +1402,43 @@ viewSealedRecords context model session =
     let
         state=model.sessions
         sealed=state.sealed
-        action name label = button [attribute "data-sealed-action" name,attribute "data-sealed-owner" state.stamp,disabled (sealed.phase /= "ready" && name /= "cancel")] [text label]
         workspaceReader = context == WorkspaceReader
-        workspaceAction name label available = button [class "btn btn-sm",attribute "data-sealed-action" name,attribute "data-sealed-owner" state.stamp,disabled (sealed.phase /= "ready" || not available)] [text label]
         busy = List.member sealed.phase ["preparing","retrying","downloading","decoding","index-ready","navigating","reading-body"]
-        footer = div [class "session-archive-footer",attribute "aria-label" "Transcript pages"]
-            [ workspaceAction "first" "First" sealed.canPrevious
-            , workspaceAction "previous" "Previous" sealed.canPrevious
-            , workspaceAction "next" "Next" sealed.canNext
-            , workspaceAction "last" "Last" sealed.canNext
-            , if busy then button [class "btn btn-sm",attribute "data-sealed-action" "cancel",attribute "data-sealed-owner" state.stamp] [text "Cancel"] else text ""
+        footer = div [class "session-archive-footer",attribute "aria-label" "Transcript status"]
+            [ if busy then button [class "btn btn-sm",attribute "data-sealed-action" "cancel",attribute "data-sealed-owner" state.stamp] [text "Cancel"] else text ""
             , if sealed.phase == "error" && sealed.canRetry && not (List.isEmpty sealed.rows) then button [class "btn btn-sm",attribute "data-sealed-action" "retry-page",attribute "data-sealed-owner" state.stamp] [text "Retry"] else if (sealed.phase == "error" && sealed.canRetry) || sealed.phase == "cancelled" then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""
             ]
         openAttribute opened = if opened then [attribute "open" ""] else []
         body piece = case piece.body of
-            Nothing -> Transcript.atom 0 (\_ -> text "")
+            Nothing -> Transcript.atom 1024 (\_ -> span [attribute "data-sealed-body-needed" piece.key,attribute "role" "status"] [text "Loading message…"])
             Just content ->
                 let
                     complete=sealed.markdown.key == piece.key && sealed.markdown.complete
                     partial=content.format == "markdown" && (content.more || content.part>0)
                     source=if complete then sealed.markdown.source else content.text
-                    renderedBody=if partial && not complete then Transcript.atom (1024+12*String.length state.stamp+12*String.length piece.key) (\_ -> button [attribute "data-sealed-action" "markdown",attribute "data-sealed-owner" state.stamp,attribute "data-sealed-key" piece.key] [text "Read complete message"])
+                    renderedBody=Transcript.scoped (piece.key ++ ":content") (if partial && not complete then Transcript.atom (1024+12*String.length state.stamp+12*String.length piece.key) (\_ -> span [attribute "data-sealed-body-needed" piece.key,attribute "data-body-format" "markdown",attribute "role" "status"] [text "Loading message…"])
                         else if complete then Transcript.formattedAst sessionMarkdownRenderer source sealed.markdown.ast
                         else if content.format == "markdown" then Transcript.formattedAst sessionMarkdownRenderer source piece.ast
-                        else sealedBlockFragment (if content.format == "json" then "tool" else piece.kind) source content.tokens
-                in Transcript.container 128 (div [])
-                [renderedBody
-                ,Transcript.atom (2048+12*String.length state.stamp+12*String.length piece.key) (\_ -> div []
-                    [if content.format == "json" && content.part > 0 then button [attribute "data-sealed-action" "body",attribute "data-sealed-owner" state.stamp,attribute "data-sealed-key" piece.key,attribute "data-sealed-part" (String.fromInt (content.part-1))] [text "Previous body part"] else text ""
-                    ,if content.format == "json" && content.more then button [attribute "data-sealed-action" "body",attribute "data-sealed-owner" state.stamp,attribute "data-sealed-key" piece.key,attribute "data-sealed-part" (String.fromInt (content.part+1))] [text "Continue body"] else text ""])]
+                        else sealedBlockFragment (piece.key ++ ":content") (if content.format == "json" then "tool" else piece.kind) source content.tokens)
+                    parts = Dict.get piece.key sealed.bodies |> Maybe.withDefault [content]
+                    firstPart = List.head parts |> Maybe.map .part |> Maybe.withDefault 0
+                    lastPart = List.reverse parts |> List.head |> Maybe.withDefault content
+                    omitted part anchor = Transcript.atom 1024 (\_ -> span [attribute "data-body-gap" piece.key,attribute "data-body-part" (String.fromInt part),attribute "data-body-anchor" (String.fromInt anchor),Html.Attributes.style "display" "block",Html.Attributes.style "height" "512px",attribute "aria-hidden" "true"] [])
+                    entries = (if firstPart>0 then [("before",omitted (firstPart-1) firstPart)] else [])
+                        ++ List.map (\part -> ("part:" ++ String.fromInt part.part,Transcript.scoped (piece.key ++ ":body:" ++ String.fromInt part.part) (Transcript.keyedContainer 128 (Keyed.node "div" [attribute "data-body-part-index" (String.fromInt part.part),attribute "data-body-key" piece.key]) [sealedBlockFragment (piece.key ++ ":body:" ++ String.fromInt part.part) "tool" part.text part.tokens]))) parts
+                        ++ (if lastPart.more then [("after",omitted (lastPart.part+1) lastPart.part)] else [])
+                    keyedChildren children = List.map (\(key,node) -> (String.toInt key |> Maybe.andThen (\index -> List.drop index entries |> List.head |> Maybe.map Tuple.first) |> Maybe.withDefault key,node)) children
+                in if content.format=="json" && content.text=="" && not (Dict.member piece.key sealed.bodies) then Transcript.atom 1024 (\_ -> span [attribute "data-sealed-body-needed" piece.key,attribute "role" "status"] [text "Loading message…"])
+                   else if content.format=="json" then Transcript.keyedContainer 128 (keyedChildren >> Keyed.node "div" [attribute "data-body-window" piece.key,attribute "data-body-parts" (List.map (.part >> String.fromInt) parts |> String.join ",")]) (List.map Tuple.second entries)
+                   else Transcript.keyedContainer 128 (Keyed.node "div" []) [renderedBody]
         pieceView piece =
-            Transcript.container (4096+24*String.length state.stamp+24*String.length piece.key+12*String.length piece.time+12*String.length piece.label+6*String.length piece.offset+6*String.length piece.role)
+            Transcript.scoped piece.key (Transcript.keyedContainer (4096+24*String.length state.stamp+24*String.length piece.key+12*String.length piece.time+12*String.length piece.label+6*String.length piece.offset+6*String.length piece.role)
                 (\children -> article [class ("session-record session-role-" ++ piece.role),attribute "data-offset" piece.offset,attribute "data-block-key" piece.key]
                     [div [class "session-record-meta"] [time [attribute "datetime" piece.time] [text (compactTimestamp model piece.time)],span [] [text (if piece.role == "user" then "You" else if piece.role == "assistant" then "Assistant" else if piece.role == "tool" then "Tool" else "Message")],if piece.body |> Maybe.map .exception |> Maybe.withDefault False then span [class "session-structured-json"] [text "Large structured reasoning · exact JSON"] else text ""]
-                    ,if piece.kind == "text" then div [] children
+                    ,if piece.kind == "text" then Keyed.node "div" [] children
                      else if piece.kind == "encrypted" then em [] [text "Thinking..."]
-                     else div [] [details ([class ("session-content-" ++ piece.kind),attribute "data-event-key" piece.key,attribute "data-sealed-key" piece.key,attribute "data-sealed-owner" state.stamp] ++ openAttribute piece.open)
-                            (summary [] [text (if piece.label == "" then "Thinking" else piece.label)]::children)]]) [body piece]
+                     else div [] [Keyed.node "details" ([class ("session-content-" ++ piece.kind),attribute "data-event-key" piece.key,attribute "data-sealed-key" piece.key,attribute "data-sealed-owner" state.stamp] ++ openAttribute piece.open)
+                            (("summary",summary [] [text (if piece.label == "" then "Thinking" else piece.label)])::children)]]) (if piece.kind=="text" || piece.open then [body piece] else []))
         runs = List.foldr (\piece accumulated -> case accumulated of
             run::rest -> if piece.group /= "" && (List.head run |> Maybe.map (.group >> (==) piece.group) |> Maybe.withDefault False) then (piece::run)::rest else [piece]::accumulated
             [] -> [[piece]]) [] sealed.rows
@@ -1114,13 +1446,23 @@ viewSealedRecords context model session =
             [] -> Transcript.atom 0 (\_ -> text "")
             first::_ ->
                 if first.group == "" then pieceView first
-                else Transcript.container (2048+12*String.length first.group+12*String.length state.stamp)
+                else
+                    let
+                        content=List.map (\piece -> (piece.key,(piece.key,pieceView piece))) run
+                        gaps=List.filter (.group >> (==) first.group) state.historyGaps |> List.map (\gap -> (gap.before,("gap:" ++ gap.before ++ ":" ++ gap.after,Transcript.atom 1024 (\_ -> historyGap gap))))
+                        entries=List.sortBy Tuple.first (content ++ gaps) |> List.map Tuple.second
+                    in Transcript.keyedContainer (2048+12*String.length first.group+12*String.length state.stamp)
                     (\children -> details ([class "session-activity-group",attribute "data-group-key" first.group,attribute "data-sealed-key" ("group:" ++ first.group),attribute "data-sealed-owner" state.stamp] ++ openAttribute first.groupOpen)
-                        [summary [class "session-activity-summary"] [activityTimestamp model first.endTime,text ("Activity · " ++ first.count ++ " events · " ++ String.fromInt (List.length run) ++ " on this page")]
-                        ,div [class "session-activity-records"] children]) (List.map pieceView run)
-        rendered = Transcript.renderPage (if sealed.markdown.complete then (if sealed.markdown.structured then 524288 else 1048576) else 2097152) sealed.renderPart (List.map runView runs)
+                        [summary [class "session-activity-summary"] [activityTimestamp model first.endTime,text ("Activity · " ++ first.count ++ " events")]
+                        ,Keyed.node "div" [class "session-activity-records"] (List.map (\(key,node) -> (String.toInt key |> Maybe.andThen (\index -> List.drop index entries |> List.head |> Maybe.map Tuple.first) |> Maybe.withDefault key,node)) children)]) (if first.groupOpen then List.map Tuple.second entries else [])
+        groups=Set.fromList (List.map .group sealed.rows)
+        rootContent=List.filterMap (\run -> List.head run |> Maybe.map (\piece -> (piece.key,(if piece.group=="" then "piece:" ++ piece.key else "group:" ++ piece.group,runView run)))) runs
+        rootOmitted=List.filter (\gap -> gap.group=="" || not (Set.member gap.group groups)) state.historyGaps |> List.map (\gap -> (gap.before,("gap:" ++ gap.before ++ ":" ++ gap.after,Transcript.atom 1024 (\_ -> historyGap gap))))
+        renderEntries=List.sortBy Tuple.first (rootContent ++ rootOmitted) |> List.map Tuple.second
+        structured=List.any (\piece -> piece.body |> Maybe.map (\content -> content.structured || content.exception) |> Maybe.withDefault False) sealed.rows
+        rendered = Transcript.renderWindow (if structured then 524288 else 1048576) sealed.renderPart (if state.following then "" else state.presentationAnchor) (List.map Tuple.second renderEntries)
         message = case sealed.phase of
-            "ready" -> if List.isEmpty sealed.rows then "No matching messages on this page." else "Verified complete archive."
+            "ready" -> if List.isEmpty sealed.rows then "This session has no messages." else "Verified complete archive."
             "cancelled" -> "Archive loading cancelled."
             "downloading" -> "Downloading complete archive… " ++ sealed.compressedBytes ++ " bytes"
             "decoding" -> "Verifying and indexing… " ++ sealed.rawBytes ++ " bytes"
@@ -1133,15 +1475,9 @@ viewSealedRecords context model session =
         identity = session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")
         status = p [class (if workspaceReader then "session-archive-status card-meta" else ""),attribute "role" (if sealed.error == Nothing then "status" else "alert"),attribute "aria-live" "polite"] [text message]
         lastProseMore = List.reverse sealed.rows |> List.head |> Maybe.map (\piece -> piece.kind == "text" && (piece.body |> Maybe.map .more |> Maybe.withDefault False) && not (sealed.markdown.complete && sealed.markdown.key == piece.key)) |> Maybe.withDefault False
-        records = div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-archive-can-next" (if sealed.canNext then "true" else "false"),attribute "data-last-prose-more" (if lastProseMore then "true" else "false"),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "sealed",attribute "aria-label" "Verified archive records"] rendered.nodes
-        presentation = if workspaceReader && rendered.part == 0 && not rendered.more then text "" else sealedRenderControls model rendered.part rendered.more
+        records = Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-sealed-page-request" (String.fromInt sealed.pageRequest),attribute "data-sealed-page-first" sealed.pageFirst,attribute "data-sealed-page-last" sealed.pageLast,attribute "data-sealed-scan-first" sealed.scanFirst,attribute "data-sealed-scan-last" sealed.scanLast,attribute "data-sealed-at-beginning" (if sealed.atBeginning then "true" else "false"),attribute "data-sealed-older-boundary" (List.take 20 sealed.rows |> List.reverse |> List.head |> Maybe.map .key |> Maybe.withDefault sealed.first),attribute "data-sealed-newer-boundary" (List.drop (max 0 (List.length sealed.rows-20)) sealed.rows |> List.head |> Maybe.map .key |> Maybe.withDefault sealed.last),attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-archive-can-previous" (if sealed.canPrevious then "true" else "false"),attribute "data-archive-can-next" (if sealed.canNext then "true" else "false"),attribute "data-last-prose-more" (if lastProseMore then "true" else "false"),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "sealed",attribute "data-presentation-anchor" state.presentationAnchor,attribute "data-following" (if state.following then "true" else "false"),attribute "aria-label" "Verified archive records"] (List.map2 (\key node -> (state.stamp ++ ":" ++ (String.toInt key |> Maybe.andThen (\index -> List.drop index renderEntries |> List.head |> Maybe.map Tuple.first) |> Maybe.withDefault key),node)) rendered.keys rendered.nodes)
         budgetError = if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
-        children = if workspaceReader then [identity,status,viewLatestError state,presentation,budgetError,records,footer] else
-            [identity,status,viewLatestError state
-            ,div [class "sessions-toolbar"] [action "first" "First",action "previous" "Previous",action "next" "Next",action "last" "Last",action "cancel" "Cancel",if sealed.phase == "error" && sealed.canRetry && not (List.isEmpty sealed.rows) then button [attribute "data-sealed-action" "retry-page",attribute "data-sealed-owner" state.stamp] [text "Retry"] else button [onClick SessionsRetry] [text "Retry"]]
-            ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-search",Html.Attributes.placeholder "Search complete archive",attribute "maxlength" "256"] [],action "search" "Search",action "search-next" "Continue search"]
-            ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-position",Html.Attributes.placeholder "Original byte offset",attribute "inputmode" "numeric"] [],action "position" "Go to offset"]
-            ,presentation,budgetError,records]
+        children = [identity,status,viewLatestError state,budgetError,records,footer]
     in
     Keyed.node "section" [class ("session-viewer session-sealed-viewer" ++ (if workspaceReader then " session-sealed-workspace" else "")),attribute "aria-label" "Session transcript"]
         (sealedHostNodes model (children ++ [viewLatestControl state]))
@@ -1157,61 +1493,21 @@ sealedHostNodes model =
     List.indexedMap (\index node -> (sealedHostKey model ++ ":" ++ String.fromInt index,node))
 
 
-sealedBlockFragment : String -> String -> List (String,String) -> Transcript.Fragment Msg
-sealedBlockFragment kind content tokens =
+sealedBlockFragment : String -> String -> String -> List (String,String) -> Transcript.Fragment Msg
+sealedBlockFragment scope kind content tokens =
     if kind == "text" || kind == "thinking" then Transcript.formatted sessionMarkdownRenderer content
-    else Transcript.atom (1024+6*String.length content+40*List.length tokens) (\_ -> pre [class "session-tool-content"]
-        [code [class "language-json"] (if List.isEmpty tokens then [text content] else List.map (\(tokenKind,value) -> span [class ("json-" ++ tokenKind)] [text value]) tokens)])
-
-
-sealedRenderControls : Model -> Int -> Bool -> Html Msg
-sealedRenderControls model part more =
-    let
-        control next label=button [attribute "data-sealed-action" "render",attribute "data-sealed-owner" model.sessions.stamp,attribute "data-sealed-part" (String.fromInt next)] [text label]
-    in div [class "sessions-toolbar session-render-continuation",attribute "data-render-part" (String.fromInt part)]
-        [if part>0 then control (part-1) "Previous presentation" else text "",if more then control (part+1) "Continue presentation" else text ""]
-
-
-viewTranscriptItem : Model -> Transcript.Item -> (String,Html Msg)
-viewTranscriptItem model item =
-    case item of
-        Transcript.Message piece ->
-            ("message:" ++ piece.key,viewTranscriptPiece model piece)
-
-        Transcript.Activity pieces ->
-            let
-                firstKey = List.head pieces |> Maybe.map (\piece -> Maybe.withDefault piece.key piece.activityAnchor) |> Maybe.withDefault ""
-                finalTime = List.reverse pieces |> List.head |> Maybe.map (.record >> .time) |> Maybe.withDefault ""
-                count = List.map (.blocks >> List.length) pieces |> List.sum
-            in
-            ("activity:" ++ firstKey,details [class "session-activity-group",attribute "data-group-key" firstKey]
-                [ summary [class "session-activity-summary"]
-                    [activityTimestamp model finalTime
-                    ,span [] [text ("Activity · " ++ String.fromInt count ++ (if count == 1 then " event" else " events"))]]
-                ,Keyed.node "div" [class "session-activity-records"] (List.map (\piece -> (piece.key,viewTranscriptPiece model piece)) pieces)])
-
-
-viewTranscriptPiece : Model -> Transcript.Piece -> Html Msg
-viewTranscriptPiece model piece =
-    let record = piece.record in
-    article [class ("session-record session-role-" ++ record.role ++ (if piece.activity then " session-record-activity" else "")),attribute "data-offset" (String.fromInt record.offset),attribute "data-block-key" piece.key]
-        [div [class "session-record-meta"] [if record.time == "" then text "" else time [class "session-event-time",attribute "datetime" record.time] [text (compactTimestamp model record.time)],if piece.activity then text "" else span [] [text (if record.role == "user" then "You" else if record.role == "tool" then "Tool" else if record.role == "assistant" then "Assistant" else "Message")]]
-        ,div [] (List.indexedMap (\index block -> viewTranscriptBlock model (piece.key ++ ":" ++ String.fromInt index) block) piece.blocks)]
-
-
-viewTranscriptBlock : Model -> String -> Transcript.Block -> Html Msg
-viewTranscriptBlock model key block =
-    if block.kind == "text" then sessionMarkdown block.content
-    else if block.kind == "encrypted" then em [class "session-thinking"] [text "Thinking..."]
-    else div [class "session-event"]
-        [ details [class ("session-content-" ++ block.kind),attribute "data-event-key" key] [summary [Html.Attributes.title block.label] [text (if block.label /= "" then block.label else if block.kind == "thinking" then "Thinking" else "Tool activity")],viewBlockContent block] ]
-
-
-viewBlockContent : Transcript.Block -> Html Msg
-viewBlockContent block =
-    if block.kind == "thinking" then sessionMarkdown block.content
-    else if block.kind == "event" then Html.node "session-event-json" [attribute "payload" block.content] []
-    else pre [class "session-tool-content"] [code [class "language-json"] (if List.isEmpty block.tokens then [text block.content] else List.map (\(kind,content) -> span [class ("json-" ++ kind)] [text content]) block.tokens)]
+    else
+        let
+            chunks tokenKind value start = if value=="" then [] else
+                let prefix=String.left 8192 value
+                    code=String.right 1 prefix |> String.uncons |> Maybe.map (Tuple.first >> Char.toCode) |> Maybe.withDefault 0
+                    following=String.slice 8192 8193 value |> String.uncons |> Maybe.map (Tuple.first >> Char.toCode) |> Maybe.withDefault 0
+                    length=String.length prefix-(if code>=55296 && code<=56319 && following>=56320 && following<=57343 then 1 else 0)
+                    part=String.left length value
+                in Transcript.scoped (scope ++ ":text:" ++ String.fromInt start) (Transcript.atom (256+6*String.length part+6*String.length tokenKind) (\_ -> span [class ("json-" ++ tokenKind),attribute "data-payload-start" (String.fromInt start)] [text part])) :: chunks tokenKind (String.dropLeft length value) (start+length)
+            indexed = List.foldl (\(tokenKind,value) (start,entries) -> (start+String.length value,(tokenKind,value,start)::entries)) (0,[]) (if List.isEmpty tokens then [("plain",content)] else tokens) |> Tuple.second |> List.reverse
+        in Transcript.keyedContainer 1024 (\children -> pre [class "session-tool-content"] [Keyed.node "code" [class "language-json"] children])
+            (List.concatMap (\(tokenKind,value,start) -> chunks tokenKind value start) indexed)
 
 
 activityTimestamp : Model -> String -> Html Msg
@@ -1219,12 +1515,6 @@ activityTimestamp model source =
     if source == "" then span [class "session-event-time",attribute "aria-label" "Activity time unavailable"] [text "Time unavailable"]
     else time [class "session-event-time",attribute "datetime" source] [text (compactTimestamp model source)]
 
-
-sessionMarkdown : String -> Html Msg
-sessionMarkdown content =
-    case Markdown.Parser.parse content |> Result.mapError (always "parse error") |> Result.andThen (Markdown.Renderer.render sessionMarkdownRenderer) of
-        Ok rendered -> div [class "markdown-content session-record-text"] rendered
-        Err _ -> pre [class "session-record-text"] [text content]
 
 compactTimestamp : Model -> String -> String
 compactTimestamp model source =

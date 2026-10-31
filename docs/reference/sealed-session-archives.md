@@ -440,20 +440,28 @@ claim physical thread nonoverlap or immediate memory release.
 The shared framing/semantic transition preserves adjacent occurrence matching,
 activity anchors, disclosure identity and source order. Persist source/block
 references and bounded cursor indexes rather than all-session maps or growing
-group arrays. Index batches are at most 256 records/1 MiB. The current page
-admits at most 64 rows within the 200-row/4 MiB serialized-and-mounted ceiling,
-reserving 128 KiB for hydrated bodies and 1 MiB for wire data. Search and cursor
-continuations reach the complete verified session, including huge groups and
-multi-block records. A single item that cannot fit the wire limit gives an
+group arrays. Index batches are at most 256 records/1 MiB. Each local acquisition
+admits at most 64 rows; ordered overlapping batches compose a continuous window
+bounded to 200 rows/4 MiB of retained serialized payload, including hydrated
+bodies and Markdown source. A newly selected archive starts at its verified end.
+In-flight Markdown source reserves twice its actual serialized UTF-8 size,
+including escaped controls, against that same aggregate ceiling.
+Scrolling automatically crosses exact source/block index cursors, render slices
+and body parts. Refetchable omitted spans keep the full session reachable,
+including huge groups and multi-block records. A single item that cannot fit the wire limit gives an
 explicit local-view resource error; original downloads remain available.
 Exact pretty output is generated lazily in at most 16 Ki UTF-16 units/64 KiB
 UTF-8 parts, with lossless tokenization. Complete Markdown blocks retain fence,
 reference, list and table context while rendered continuations bound expanded
-attributes and DOM content before mounting.
+attributes and DOM content before mounting. One shared rendered window charges
+all fragments, wrappers and omitted markers against 1 MiB for normal Markdown
+or 512 KiB for structured exact output. Keyed text fragments retain the user's
+visible text position through prepending and hydration; continuation has no
+presentation or body paging controls.
 
 One explicit presentation exception applies to structured reasoning objects
 whose exact pretty-printed JSON exceeds 1,048,576 UTF-8 bytes: show the complete
-JSON through exact paged output, with links and emphasis displayed literally.
+JSON through exact scroll-driven body continuation, with links and emphasis displayed literally.
 Objects at or below that limit, normal text/thinking Markdown, pairing and
 activity grouping keep their existing semantics. This exception does not
 increase memory budgets or introduce a virtual Markdown parser.

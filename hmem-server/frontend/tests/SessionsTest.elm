@@ -1,6 +1,7 @@
 module SessionsTest exposing (suite)
 
 import Api
+import Char
 import AppShell
 import Dict
 import Expect
@@ -32,6 +33,24 @@ suite =
                 next=Sessions.update SessionsJumpLatest historical |> Tuple.first |> .sessions
             in Expect.equal {rows=[sampleRecord],start=Nothing,following=True,pending=True,request=8,generation=old.generation+1,error=Nothing}
                 {rows=next.rows,start=next.start,following=next.following,pending=next.latestPending,request=next.latestRequest,generation=next.generation,error=next.latestError}
+        , test "queued historical follow cannot stop an accepted latest acquisition" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                jumped=Sessions.update SessionsJumpLatest entered |> Tuple.first
+                state=jumped.sessions
+                queued=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-follow"),("stamp",Encode.string state.stamp),("generation",Encode.int state.generation),("manualUp",Encode.bool True),("following",Encode.bool False)])
+                next=Sessions.update queued jumped |> Tuple.first |> .sessions
+            in Expect.equal (True,True,True) (next.latestPending,next.following,next.loadWindow)
+        , test "only matching active publication positioning releases the logical barrier" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                waiting={entered | sessions={old | positionPending=True,windowPublication=17}}
+                ack generation publication=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-positioned"),("stamp",Encode.string old.stamp),("generation",Encode.int generation),("publication",Encode.int publication)])
+                stale=Sessions.update (ack (old.generation-1) 17) waiting |> Tuple.first
+                wrong=Sessions.update (ack old.generation 18) stale |> Tuple.first
+                done=Sessions.update (ack old.generation 17) wrong |> Tuple.first
+            in Expect.equal (True,True,False) (stale.sessions.positionPending,wrong.sessions.positionPending,done.sessions.positionPending)
         , test "a stale latest completion cannot finish a newer jump" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -60,14 +79,14 @@ suite =
                 retried=Sessions.update SessionsRetry boundary |> Tuple.first
                 failedBoundary=Dict.get (Delivery.key workspace target) failed.resources |> Maybe.andThen .error
             in Expect.equal {admitted=[sampleRecord],retried=[sampleRecord],offset=65568,failed=True} {admitted=partial.sessions.rows,retried=retried.sessions.rows,offset=retried.sessions.offset,failed=failedBoundary /= Nothing}
-        , test "reader page backpressure acknowledges a partial physical chunk and pauses further demand" <| \_ ->
+        , test "reader backpressure acknowledges a physical chunk and continues the same logical conversation" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
                 old=entered.sessions
                 reading={entered | sessions={old | start=Just 0,offset=0,end=65536,pending=True,rows=[sampleRecord]}}
                 event=Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("through",Encode.int 32000),("before",Encode.int 0),("pageFull",Encode.bool True),("rows",Encode.list identity [])]
                 next=Sessions.update (SessionsBridgeEvent event) reading |> Tuple.first |> .sessions
-            in Expect.equal {offset=32000,after=32000,pending=False,loading=False} {offset=next.offset,after=next.historyAfter,pending=next.pending,loading=next.loadWindow}
+            in Expect.equal {offset=32000,after=32000,pending=False,loading=True} {offset=next.offset,after=next.historyAfter,pending=next.pending,loading=next.loadWindow}
         , test "directional loading retains the current conversation until a matching page arrives" <| \_ ->
             let
                 old=emptySessionsModel
@@ -83,14 +102,14 @@ suite =
                 model={sessionModel | sessions={old | historyBefore=100,historyAfter=row.end,rows=[row],offset=row.end,end=4000000}}
                 next=Sessions.update SessionsNewer model |> Tuple.first |> .sessions
             in Expect.equal (Just row.end,row.end,True) (next.start,next.offset,next.windowAligned)
-        , test "backward overlap cannot consume its entire lookback with already mounted large records" <| \_ ->
+        , test "backward scanning starts with a bounded request without replaying mounted maximum-sized records" <| \_ ->
             let
                 old=emptySessionsModel
                 first={sampleRecord | offset=3000000,end=4048578}
                 last={sampleRecord | offset=4048578,end=5097156}
                 model={sessionModel | sessions={old | historyBefore=3000000,historyAfter=last.end,rows=[first,last],offset=last.end,end=last.end}}
                 next=Sessions.update SessionsOlder model |> Tuple.first |> .sessions
-            in Expect.equal (Just 902848,902848,3000000) (next.start,next.offset,next.end)
+            in Expect.equal (Just 2934464,2934464,3000000) (next.start,next.offset,next.end)
         , test "a tail entirely inside one record expands once within the existing bounded lookback" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -942,6 +961,31 @@ completedReaderTests =
             state=ready.sessions
             next=Sessions.update SessionsJumpLatest ready |> Tuple.first |> .sessions
         in Expect.equal (state.generation,True,state.latestRequest+1) (next.generation,next.latestPending,next.latestRequest)
+    , test "partial multilingual Markdown and acquired rows share the actual serialized UTF8 cap" <| \_ ->
+        let
+            ready=model "ready"
+            state=ready.sessions
+            sealed=state.sealed
+            key index=String.padLeft 19 '0' (String.fromInt index) ++ ":0000000"
+            content=String.repeat 900000 "x"
+            piece index={key=key index,offset=String.fromInt index,kind="text",label="",role="assistant",time="",ast=Err "not_loaded",group="",count="0",endTime="",open=False,groupOpen=False,body=Just {text=content,part=0,more=False,tokens=[],format="markdown",structured=False,exception=False}}
+            source=String.repeat 120000 "界\t\n"
+            waiting={ready | sessions={state | following=True,sealed={sealed | rows=List.map piece [1,2,3],markdown={key=key 3,source="",ast=Err "not_loaded",structured=False,complete=False,nextPart=0,request=0}}}}
+            event fields=SessionsBridgeEvent (Encode.object ([("stamp",Encode.string state.stamp),("generation",Encode.int state.generation),("workspace",Encode.string workspace),("session",Encode.string sessionId)]++fields))
+            hydrate part current=Sessions.update (event [("kind",Encode.string "sealed-markdown-chunk"),("key",Encode.string (key 3)),("part",Encode.int part),("text",Encode.string (String.slice (part*16000) ((part+1)*16000) source)),("complete",Encode.bool False)]) current |> Tuple.first
+            partial=List.foldl hydrate waiting (List.range 0 ((String.length source-1)//16000))
+            bodyJson=Encode.object [("text",Encode.string content),("part",Encode.int 0),("more",Encode.bool False),("format",Encode.string "markdown")]
+            incoming=Encode.object [("key",Encode.string (key 4)),("offset",Encode.string "4"),("kind",Encode.string "text"),("role",Encode.string "assistant"),("label",Encode.string ""),("time",Encode.string ""),("group",Encode.string ""),("count",Encode.string "0"),("open",Encode.bool False),("groupOpen",Encode.bool False),("body",bodyJson)]
+            composed=Sessions.update (event [("kind",Encode.string "sealed-page"),("rows",Encode.list identity [incoming]),("first",Encode.string (key 4)),("last",Encode.string (key 4)),("representedBefore",Encode.string (key 4)),("representedAfter",Encode.string (key 4 ++ ":1"))]) partial |> Tuple.first
+            bytes value=Encode.encode 0 value |> String.foldl (\char total -> let code=Char.toCode char in total+(if code<128 then 1 else if code<2048 then 2 else if code<65536 then 3 else 4)) 0
+            retained current=2*bytes (Encode.string current.sessions.sealed.markdown.source)+List.sum (List.map (\row -> 1024+(row.body |> Maybe.map (.text >> Encode.string >> bytes) |> Maybe.withDefault 0)) current.sessions.sealed.rows)
+        in Expect.all
+            [\_ -> Expect.equal source partial.sessions.sealed.markdown.source
+            ,\_ -> Expect.equal 2 (List.length partial.sessions.sealed.rows)
+            ,\_ -> Expect.atMost 4194304 (retained partial)
+            ,\_ -> Expect.equal 2 (List.length composed.sessions.sealed.rows)
+            ,\_ -> Expect.atMost 4194304 (retained composed)
+            ] ()
     , test "latest retries a retired sealed reader but cannot bypass a cleanup failure" <| \_ ->
         let
             failed=model "error"
@@ -960,14 +1004,14 @@ completedReaderTests =
             stale=Sessions.update (packet 89 2) first |> Tuple.first
             next=Sessions.update (packet 91 2) stale |> Tuple.first
         in Expect.equal ((1,90),(1,90),(2,91)) ((first.sessions.sealed.renderPart,first.sessions.sealed.renderRequest),(stale.sessions.sealed.renderPart,stale.sessions.sealed.renderRequest),(next.sessions.sealed.renderPart,next.sessions.sealed.renderRequest))
-    , test "workspace omits search and offsets but embedded reader keeps their controls" <| \_ ->
+    , test "both continuous readers omit page-replacement search and offset controls" <| \_ ->
         Expect.all
             [ \_ -> workspaceView "ready" |> Query.hasNot [Selector.id "sealed-search"]
             , \_ -> workspaceView "ready" |> Query.hasNot [Selector.id "sealed-position"]
-            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace (model "ready") "one") |> Query.has [Selector.id "sealed-search"]
-            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace (model "ready") "one") |> Query.has [Selector.id "sealed-position"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace (model "ready") "one") |> Query.hasNot [Selector.id "sealed-search"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace (model "ready") "one") |> Query.hasNot [Selector.id "sealed-position"]
             ] ()
-    , test "reload-only cleanup failure hides workspace Retry without changing embedded recovery" <| \_ ->
+    , test "reload-only cleanup failure cannot offer Retry on either continuous reader" <| \_ ->
         let
             ready = model "ready"
             state = ready.sessions
@@ -977,12 +1021,13 @@ completedReaderTests =
         Expect.all
             [ \_ -> Query.fromHtml (Sessions.view workspace failed) |> Query.hasNot [Selector.text "Retry"]
             , \_ -> Query.fromHtml (Sessions.view workspace failed) |> Query.has [Selector.text "Archive cleanup could not be confirmed. Reload this page before another archive."]
-            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace failed "one") |> Query.has [Selector.text "Retry"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveConversation workspace failed "one") |> Query.hasNot [Selector.text "Retry"]
             ] ()
-    , test "workspace footer uses accepted availability and contextual recovery" <| \_ ->
+    , test "continuous workspace exposes accepted edge availability without page buttons and retains contextual recovery" <| \_ ->
         Expect.all
-            [ \_ -> workspaceView "ready" |> Query.find [Selector.class "session-archive-footer"] |> Query.has [Selector.text "Next"]
-            , \_ -> workspaceView "ready" |> Query.find [Selector.attribute (Html.Attributes.attribute "data-sealed-action" "previous")] |> Query.has [Selector.attribute (Html.Attributes.disabled True)]
+            [ \_ -> workspaceView "ready" |> Query.find [Selector.id "session-records"] |> Query.has [Selector.attribute (Html.Attributes.attribute "data-archive-can-next" "true")]
+            , \_ -> workspaceView "ready" |> Query.hasNot [Selector.attribute (Html.Attributes.attribute "data-sealed-action" "previous")]
+            , \_ -> workspaceView "ready" |> Query.hasNot [Selector.attribute (Html.Attributes.attribute "data-sealed-action" "next")]
             , \_ -> workspaceView "ready" |> Query.hasNot [Selector.text "Cancel"]
             , \_ -> workspaceView "ready" |> Query.hasNot [Selector.text "Retry"]
             , \_ -> workspaceView "downloading" |> Query.has [Selector.text "Cancel"]

@@ -6,22 +6,122 @@ import {installEventPayload} from './session-event-json.js'
 
 const hex = bytes => Array.from(bytes,byte => byte.toString(16).padStart(2,'0')).join('')
 
-export function updateLatestOverlay(viewport,logicalEnd) {
+// Sealed cursors stay exact even when the packed rank exceeds Number's range.
+export const indexedCursorRank=key=>{const [offset,index,sub]=String(key).split(':');return BigInt(offset||'0')*10000000n+BigInt(index||'0')+(sub?1n:0n)}
+export const indexedCursorKey=value=>(value/10000000n).toString().padStart(19,'0')+':'+(value%10000000n).toString().padStart(7,'0')
+
+function visibleConversationNode(node,viewport) {
+  for(let parent=node?.parentElement;parent&&parent!==viewport;parent=parent.parentElement){
+    if(parent.tagName==='DETAILS'&&!parent.open){
+      const summary=[...parent.children].find(child=>child.tagName==='SUMMARY')
+      if(!summary?.contains(node))return false
+    }
+  }
+  return (node?.getBoundingClientRect?.().height || 0)>0
+}
+
+function ownedPositionUnchanged(viewport,previous) {
+  if(Math.abs(viewport.scrollTop-previous)<=4)return true
+  const maximum=viewport.scrollHeight-viewport.clientHeight
+  return Number.isFinite(maximum)&&Math.abs(viewport.scrollTop-Math.max(0,Math.min(previous,maximum)))<=4
+}
+
+function payloadTextRange(node,offset) {
+  const doc=node.ownerDocument,walker=doc.createTreeWalker(node,4)
+  let text=walker.nextNode(),remaining=offset
+  while(text&&remaining>text.length){remaining-=text.length;text=walker.nextNode()}
+  if(!text)return null
+  const range=doc.createRange(),at=Math.min(remaining,text.length)
+  range.setStart(text,at);range.setEnd(text,Math.min(text.length,at+1))
+  return range
+}
+
+function visiblePayloadPosition(viewport,leaf) {
+  const box=viewport.getBoundingClientRect(),doc=viewport.ownerDocument
+  if(!doc||!leaf.querySelectorAll)return null
+  for(const span of leaf.querySelectorAll('[data-payload-start]')){
+    const r=span.getBoundingClientRect();if(!r.height||r.bottom<=box.top||r.top>=box.bottom)continue
+    let top=box.top,bottom=box.bottom,parent=span.parentElement
+    for(let depth=0;parent&&parent!==viewport&&depth<64;depth++,parent=parent.parentElement){const style=doc.defaultView.getComputedStyle(parent);if(/auto|scroll|hidden|clip/.test(style.overflowY)){const clip=parent.getBoundingClientRect();top=Math.max(top,clip.top+parent.clientTop);bottom=Math.min(bottom,clip.top+parent.clientTop+parent.clientHeight)}}
+    if(bottom<=top)continue
+    let first=0,last=span.textContent.length
+    while(first<last){const middle=Math.floor((first+last)/2),rect=payloadTextRange(span,middle)?.getBoundingClientRect();if(rect&&rect.bottom>top+1)last=middle;else first=middle+1}
+    const range=payloadTextRange(span,first),bounds=range?.getBoundingClientRect()
+    if(bounds?.height&&bounds.top<bottom){const pre=span.closest('pre'),inner=pre&&/auto|scroll/.test(doc.defaultView.getComputedStyle(pre).overflowY)&&pre.scrollHeight>pre.clientHeight+1;return {offset:Number(span.dataset.payloadStart)+first,top:bounds.top-box.top,innerTop:inner?bounds.top-pre.getBoundingClientRect().top:null}}
+  }
+  return null
+}
+
+function payloadChunkStart(body,offset) {
+  let start=0
+  for(const token of body.tokens?.length?body.tokens:[{text:body.text}]){
+    for(let at=0;at<token.text.length;){let length=Math.min(8192,token.text.length-at);const last=token.text.charCodeAt(at+length-1),next=token.text.charCodeAt(at+length);if(last>=0xd800&&last<=0xdbff&&next>=0xdc00&&next<=0xdfff)length--;if(offset<start+length)return start;start+=length;at+=length}
+  }
+  return Math.max(0,start-1)
+}
+
+// Input is only a candidate. Layout, publication and native anchoring can also
+// emit scroll events, so only actual movement after scoped input arms history.
+const readerScopeKey=value=>{try{const parsed=JSON.parse(value);return JSON.stringify(Array.isArray(parsed)&&parsed.length===5?parsed.slice(0,4):parsed)}catch{return value || ''}}
+
+export function createReaderScrollIntent() {
+  let scope='',manual=false,input=null,touchY=null,returning=false,positions=new WeakMap(),lastViewport=null,movement=0
+  return {
+    configure(value){const next=readerScopeKey(value);if(next!==scope){scope=next;manual=false;input=null;touchY=null;returning=false;positions=new WeakMap();lastViewport=null;movement=0}},
+    note(event,viewport){
+      if(!viewport || event.isTrusted===false || (event.target!==viewport&&!viewport.contains?.(event.target)))return
+      if(event.target!==viewport&&event.target?.closest?.('button,input,textarea,select,a,summary'))return
+      let direction=0
+      if(event.type==='wheel')direction=Math.sign(event.deltaY || 0)
+      else if(event.type==='keydown')direction=['ArrowUp','PageUp','Home'].includes(event.key)?-1:['ArrowDown','PageDown','End',' '].includes(event.key)?1:0
+      else if(event.type==='touchstart'){touchY=event.touches?.[0]?.clientY;return}
+      else if(event.type==='touchmove'){const y=event.touches?.[0]?.clientY;if(Number.isFinite(y)&&Number.isFinite(touchY))direction=Math.sign(touchY-y);touchY=y}
+      else if(event.type==='pointerdown'){
+        const box=viewport.getBoundingClientRect?.(),gutter=Math.max(12,(viewport.offsetWidth || 0)-viewport.clientWidth)
+        if(!box || event.clientX<box.right-gutter)return
+        direction=0
+      }else return
+      // Composited wheel/touch scrolling may change scrollTop before dispatching
+      // its input event. The last inspected/owned position is the causal start.
+      if(direction!==0 || event.type==='pointerdown')input={viewport,top:event.type==='keydown'?viewport.scrollTop:positions.get(viewport) ?? viewport.scrollTop,direction}
+    },
+    inspect(viewport,logicalEnd){
+      if(input?.viewport===viewport){
+        const moved=viewport.scrollTop-input.top
+        if(moved<-.5&&input.direction<=0){manual=true;returning=false;movement=-1}
+        if(moved>.5&&input.direction>=0){returning=true;movement=1}
+        if(Math.abs(moved)>.5)input=null
+      }
+      if(returning&&logicalEnd&&viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=4){manual=false;returning=false}
+      positions.set(viewport,viewport.scrollTop);lastViewport=viewport
+      return manual
+    },
+    positioned(){input=null;if(lastViewport)positions.set(lastViewport,lastViewport.scrollTop)},
+    clear(){manual=false;input=null;returning=false;movement=0;if(lastViewport)positions.set(lastViewport,lastViewport.scrollTop)},
+    manual:()=>manual,
+    direction:()=>input?.direction || movement,
+  }
+}
+
+export function updateLatestOverlay(viewport,logicalEnd,manualUp) {
   const host=viewport?.closest?.('.session-viewer')
   if(!host)return
   const pending=viewport.getAttribute('data-latest-pending')==='true',failed=viewport.getAttribute('data-latest-error')==='true'
   const atEnd=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=4
-  host.setAttribute('data-latest-visible',String(pending||failed||!logicalEnd||!atEnd))
+  const manual=manualUp===undefined?host.getAttribute?.('data-manual-up')==='true':manualUp
+  host.setAttribute('data-manual-up',String(manual))
+  host.setAttribute('data-latest-visible',String(manual&&!(logicalEnd&&atEnd&&!pending)))
   const bounds=host.getBoundingClientRect?.(),records=viewport.getBoundingClientRect?.()
   if(bounds&&records)host.style?.setProperty('--session-latest-bottom',Math.max(10,bounds.bottom-Math.min(bounds.bottom,records.bottom)+12)+'px')
 }
 
-export function createSealedViewer({send,fetchArchive,document,window,workerFactory=()=>new Worker(new URL('./session-archive-worker.js',import.meta.url),{type:'module'}),cleanupMs=10000,custodyFactory=acquireArchiveCustody,deleteStage=deleteArchiveStage}) {
+export function createSealedViewer({send,fetchArchive,document,window,workerFactory=()=>new Worker(new URL('./session-archive-worker.js',import.meta.url),{type:'module'}),cleanupMs=10000,custodyFactory=acquireArchiveCustody,deleteStage=deleteArchiveStage,scrollIntent=createReaderScrollIntent(),getActivePosition=()=>null}) {
   let active=null,pending=null,sequence=0,authority=0,blocked=false,stopped='',authorityFence='',blockedNotice='',domEpoch='',indexRetry=''
   const clear=owned=>{
     if(!owned || active!==owned || owned.domCleared)return
     clearPageProgress(owned)
     owned.renderPending=null
+    owned.pageAwaiting=null
     owned.latestJump=null
     owned.domCleared=true
     const candidates=[document.getElementById?.('session-records'),...(document.querySelectorAll?.('.session-inspected-event') || [])]
@@ -141,7 +241,10 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     if(current(owned)){
       const retry=owned.retryPage;owned.retryPage=null;owned.pagePending=false
       owned.readerReady=true
-      await page(owned,owned.latestJump?{last:true}:retry?.options || {},owned.latestJump?undefined:retry?.visibleKey)
+      const position=owned.config.historical?getActivePosition(owned.config.scope):null
+      if(position&&!owned.latestJump&&!retry){owned.handoff={...position,intent:owned.viewportIntent || 0};event(owned,'follow',{manualUp:true,anchor:position.key,fragmentAnchor:position.fragment})}
+      const target=owned.handoff?pieceRank(owned.handoff.key):null
+      await page(owned,owned.latestJump?{last:true}:retry?.options || (target!==null?{...(target>0n?{after:rankKey(target-1n)}:{}),continuity:'handoff'}:owned.config.historical&&owned.config.anchor?{offset:BigInt(owned.config.anchor.split(':')[0]).toString()}:{last:true}),owned.latestJump?undefined:retry?.visibleKey)
     }
   }
 
@@ -167,7 +270,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     }catch(error){failure(owned,error)}
   }
   function drainLocalIntent(owned) {
-    if(!current(owned) || owned.pagePending || owned.markdownBusy)return
+    if(!current(owned) || owned.pagePending || owned.pageAwaiting || owned.followPending || owned.markdownBusy)return
     const intent=owned.localIntent;owned.localIntent=null
     if(intent?.kind==='markdown'){
       if(intent.page){owned.localIntent={kind:'markdown',key:intent.key};void page(owned,{...intent.page,bodyKey:intent.key},intent.key)}
@@ -175,26 +278,67 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     }
     else if(intent)void page(owned,intent.options)
   }
+  const pieceRank=indexedCursorRank,rankKey=indexedCursorKey
+  function sealedSourcePoint(viewport) {
+    if(!viewport||!scrollIntent.manual())return null
+    const box=viewport.getBoundingClientRect(),y=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=4?box.bottom-1:viewport.scrollTop<=1?box.top+1:box.top+box.height/2
+    const gap=[...viewport.querySelectorAll('[data-history-gap="source"]')].find(node=>{const r=node.getBoundingClientRect();return visibleConversationNode(node,viewport)&&r.top<=y&&r.bottom>=y})
+    if(!gap)return null
+    const r=gap.getBoundingClientRect(),before=pieceRank(gap.dataset.gapBefore),after=pieceRank(gap.dataset.gapAfter),fraction=BigInt(Math.round(Math.max(0,Math.min(1,(y-r.top)/Math.max(1,r.height)))*10000))
+    return {rank:before+(after-before)*fraction/10000n,y:y-box.top}
+  }
   async function page(owned,options={},visibleKey) {
     if(!current(owned))return
-    if(owned.pagePending || owned.markdownBusy){owned.localIntent={kind:'page',options:{...options}};return}
+    if(owned.pagePending || owned.pageAwaiting || owned.followPending || owned.markdownBusy){owned.localIntent={kind:'page',options:{...options}};return}
     owned.pagePending=true
+    const windowRequest=++sequence
+    owned.pageCommand=windowRequest
     const latest=options.last?owned.latestJump:null
     owned.renderPending=null;owned.boundaryIntent=owned.viewportIntent || 0
-    const viewport=document.getElementById?.('session-records'),intent=owned.viewportIntent || 0
-    const previousTop=viewport?.scrollTop || 0
-    const bounds=viewport?.getBoundingClientRect?.()
-    const anchors=bounds?[...(viewport.querySelectorAll?.('[data-block-key]') || [])].filter(node=>node.getBoundingClientRect().bottom>bounds.top).slice(0,8).map(node=>({key:node.getAttribute('data-block-key'),top:node.getBoundingClientRect().top-bounds.top})):[]
+    let intent,previousTop,bounds,follow,sourcePoint,anchors,viewport
+    const capturePosition=()=>{
+      viewport=document.getElementById?.('session-records');intent=owned.viewportIntent || 0;previousTop=viewport?.scrollTop || 0;bounds=viewport?.getBoundingClientRect?.()
+      follow=!scrollIntent.manual()&&viewport&&viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=4;sourcePoint=sealedSourcePoint(viewport)
+      anchors=bounds?[...(viewport.querySelectorAll?.('[data-fragment-path],[data-block-key],[data-group-key]') || [])].filter(node=>{const r=node.getBoundingClientRect();return !node.querySelector?.('[data-history-gap]')&&visibleConversationNode(node,viewport)&&r.bottom>bounds.top&&r.top<bounds.bottom}).slice(0,8).map(node=>{const attribute=node.hasAttribute('data-fragment-path')?'data-fragment-path':node.hasAttribute('data-block-key')?'data-block-key':'data-group-key';return {attribute,key:node.getAttribute(attribute),top:node.getBoundingClientRect().top-bounds.top}}):[]
+      if(anchors.some(anchor=>anchor.attribute==='data-fragment-path'))sourcePoint=null
+    }
+    capturePosition()
     const operation={timer:null};owned.pageProgress=operation
     operation.timer=window.setTimeout(()=>{
       operation.timer=null
       if(current(owned) && owned.pagePending && owned.pageProgress===operation)event(owned,'progress',{phase:'navigating'})
     },100)
     try {
-      const result=await rpc(owned,'page',{page:options})
+      let result=await rpc(owned,'page',{page:options})
+      const transfer=owned.handoff
+      if(current(owned)&&transfer&&!transfer.disclosures){
+        const valid=()=>current(owned)&&owned.handoff===transfer&&transfer.intent===(owned.viewportIntent || 0)
+        const cancelled=()=>{
+          if(!current(owned))return
+          if(owned.handoff===transfer)owned.handoff=null
+          if(!owned.handoff&&!owned.localIntent&&!owned.latestJump)owned.localIntent={kind:'page',options:owned.seekStartIntent===(owned.viewportIntent || 0)?{}:{...options}}
+        }
+        if(!valid()){cancelled();return}
+        const piece=result.rows.find(piece=>piece.key===transfer.key);let changed=false
+        if(piece&&transfer.groupOpen&&piece.group&&!piece.groupOpen){await rpc(owned,'disclosure',{key:'group:'+piece.group,open:true});changed=true}
+        if(!valid()){cancelled();return}
+        if(piece&&transfer.pieceOpen&&!piece.open){await rpc(owned,'disclosure',{key:piece.key,open:true});changed=true}
+        if(!valid()){cancelled();return}
+        transfer.disclosures=true
+        if(changed)result=await rpc(owned,'page',{page:options})
+        if(!valid()){cancelled();return}
+      }
       clearPageProgress(owned,operation)
       if(current(owned) && visibleKey && !result.rows.some(row=>row.key===visibleKey))throw Error('archive_piece_missing')
       if(current(owned)){
+        // Input may keep moving the viewport while an indexed read is pending.
+        // The visible publication-time text, not the request-time position,
+        // owns both admission and the subsequent layout restore.
+        capturePosition()
+        if(!latest&&scrollIntent.manual()){
+          const fragment=anchors.find(anchor=>anchor.attribute==='data-fragment-path'),visible=[...(viewport?.querySelectorAll?.('.session-record') || [])].find(node=>{const r=node.getBoundingClientRect();return bounds&&visibleConversationNode(node,viewport)&&r.bottom>bounds.top&&r.top<bounds.bottom})
+          event(owned,'follow',{manualUp:true,anchor:sourcePoint?rankKey(sourcePoint.rank):visible?.dataset.blockKey || '',fragmentAnchor:sourcePoint?'':fragment?.key || ''})
+        }
         // Preserve proven endpoints across bounded ordinary reads. `more` is
         // directional and may conservatively include an exact-size boundary.
         const ordinary=!options.query&&options.offset===undefined
@@ -205,19 +349,64 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         owned.page=options;owned.first=result.first;owned.last=result.last;owned.searchAfter=result.searchAfter;owned.searchCursor=result.searchCursor
         owned.visibleRows=result.rows;owned.canPrevious=canPrevious;owned.canNext=canNext;owned.failedPage=null
         owned.boundaryIntent=owned.viewportIntent || 0
-        event(owned,'page',{...result,kind:undefined,fromEnd:!!options.last||!!options.before,canPrevious,canNext})
+        owned.pageAwaiting=windowRequest
+        event(owned,'page',{...result,request:windowRequest,kind:undefined,purpose:options.continuity || '',representedBefore:options.after?options.after+':1':options.offset!==undefined?String(options.offset).padStart(19,'0')+':0000000':result.first,representedAfter:options.before || (result.last?result.last+':1':''),fromEnd:!!options.last||!!options.before,canPrevious,canNext})
         if(latest && owned.latestJump===latest){latest.phase='page-ready';latest.first=result.first;latest.last=result.last;const last=result.rows.at(-1);latest.markdown=last?.kind==='text'&&last.body?.format==='markdown'&&last.body.more?last.key:null}
         const revision=owned.presentationRevision=(owned.presentationRevision || 0)+1
+        const settled=rendered=>{
+          if(owned.pageAwaiting===windowRequest)owned.pageAwaiting=null
+          drainLocalIntent(owned)
+          window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:rendered}))
+        }
         const restore=attempt=>{
-          if(latest)return
-          if(!current(owned) || revision!==owned.presentationRevision || intent!==(owned.viewportIntent || 0))return
+          if(latest&&owned.latestJump===latest)return
+          if(!current(owned) || revision!==owned.presentationRevision)return
           const rendered=document.getElementById?.('session-records')
-          if(rendered?.getAttribute?.('data-sealed-first')!==result.first || rendered.getAttribute('data-sealed-last')!==result.last){if(attempt<4)window.requestAnimationFrame?.(()=>restore(attempt+1));return}
-          if(Math.abs(rendered.scrollTop-previousTop)>4)return
-          const box=rendered.getBoundingClientRect?.(),nodes=[...(rendered.querySelectorAll?.('[data-block-key]') || [])]
-          for(const anchor of anchors){const node=nodes.find(node=>node.getAttribute('data-block-key')===anchor.key);if(node&&box){rendered.scrollTop+=node.getBoundingClientRect().top-box.top-anchor.top;return}}
-          if(options.before||options.last)rendered.scrollTop=rendered.scrollHeight
-          else if(options.after)rendered.scrollTop=0
+          if(rendered?.getAttribute?.('data-sealed-dom-owner')!==owned.config.stamp||rendered.getAttribute('data-sealed-dom-load')!==String(owned.config.load)||rendered.getAttribute('data-sealed-page-request')!==String(windowRequest)||rendered.getAttribute('data-sealed-page-first')!==result.first||rendered.getAttribute('data-sealed-page-last')!==result.last){if(attempt<8)window.requestAnimationFrame?.(()=>restore(attempt+1));else{owned.pageAwaiting=null;event(owned,'error',{code:'archive_page_dom_ack_timeout'})}return}
+          syncWindow(owned,rendered)
+          if(intent!==(owned.viewportIntent || 0)){owned.handoff=null;settled(rendered);return}
+          if(owned.handoff){
+            const handoff=owned.handoff
+            if(handoff.intent!==(owned.viewportIntent || 0)){owned.handoff=null;settled(rendered);return}
+            const leaf=[...rendered.querySelectorAll('[data-fragment-path]')].find(node=>node.dataset.fragmentPath===handoff.fragment&&!node.querySelector('[data-history-gap],[data-body-gap],[data-sealed-body-needed]'))
+            if(handoff.payload&&handoff.bodyPart!==undefined){
+              const part=[...rendered.querySelectorAll('[data-body-part-index]')].find(node=>node.dataset.bodyKey===handoff.key&&Number(node.dataset.bodyPartIndex)===handoff.bodyPart)
+              const span=[...(part?.querySelectorAll('[data-payload-start]') || [])].find(node=>Number(node.dataset.payloadStart)<=handoff.localOffset&&Number(node.dataset.payloadStart)+node.textContent.length>handoff.localOffset)
+              const range=span?payloadTextRange(span,handoff.localOffset-Number(span.dataset.payloadStart)):null,pre=span?.closest('pre')
+              if(range&&pre&&pre.scrollHeight>pre.clientHeight+1){const within=handoff.payload.innerTop ?? Math.min(120,pre.clientHeight/3);pre.scrollTop+=range.getBoundingClientRect().top-pre.getBoundingClientRect().top-within}
+              const bounds=range?.getBoundingClientRect()
+              if(bounds?.height){rendered.scrollTop+=bounds.top-rendered.getBoundingClientRect().top-handoff.top;scrollIntent.positioned();owned.handoff=null;settled(rendered);return}
+            }
+            if(leaf&&visibleConversationNode(leaf,rendered)){const pre=leaf.closest('pre');if(pre&&handoff.innerScroll!==null&&handoff.innerScroll!==undefined)pre.scrollTop=handoff.innerScroll;rendered.scrollTop+=leaf.getBoundingClientRect().top-rendered.getBoundingClientRect().top-handoff.top;scrollIntent.positioned();owned.handoff=null;settled(rendered);return}
+            const piece=owned.visibleRows.find(piece=>piece.key===handoff.key)
+            if(!handoff.hydrated&&handoff.payload&&piece?.body?.format==='json'){
+              handoff.hydrated=true
+              void hydrateBody(owned,handoff.key,0,0,handoff).then(()=>{if(current(owned)&&owned.pageAwaiting===windowRequest)window.requestAnimationFrame?.(()=>restore(0))})
+              return
+            }
+            if(!handoff.hydrated&&piece?.body?.format==='markdown'&&piece.body.more){
+              handoff.hydrated=true
+              void readMarkdown(owned,handoff.key).then(()=>{if(current(owned)&&owned.pageAwaiting===windowRequest)window.requestAnimationFrame?.(()=>restore(0))})
+              return
+            }
+            if(attempt<8){window.requestAnimationFrame?.(()=>restore(attempt+1));return}
+            owned.handoff=null;owned.pageAwaiting=null;event(owned,'error',{code:'archive_handoff_position_unavailable'});return
+          }
+          if(owned.seekStartIntent===intent){rendered.scrollTop=0;scrollIntent.positioned();if(!owned.canPrevious)owned.seekStartIntent=null;settled(rendered);return}
+          if(!ownedPositionUnchanged(rendered,previousTop)){settled(rendered);return}
+          const box=rendered.getBoundingClientRect?.()
+          if(sourcePoint&&box){
+            const gap=[...rendered.querySelectorAll('[data-history-gap="source"]')].find(node=>pieceRank(node.dataset.gapBefore)<=sourcePoint.rank&&pieceRank(node.dataset.gapAfter)>sourcePoint.rank)
+            let point
+            if(gap&&visibleConversationNode(gap,rendered)){const r=gap.getBoundingClientRect(),before=pieceRank(gap.dataset.gapBefore),after=pieceRank(gap.dataset.gapAfter);point=r.top+r.height*Number((sourcePoint.rank-before)*10000n/(after-before))/10000}
+            else {const row=[...rendered.querySelectorAll('.session-record')].findLast(node=>pieceRank(node.dataset.blockKey)<=sourcePoint.rank);if(row)point=row.getBoundingClientRect().top}
+            if(point!==undefined){rendered.scrollTop+=point-box.top-sourcePoint.y;scrollIntent.positioned();settled(rendered);return}
+          }
+          for(const anchor of anchors){const node=[...rendered.querySelectorAll(`[${anchor.attribute}]`)].find(node=>node.getAttribute(anchor.attribute)===anchor.key);if(node&&box){rendered.scrollTop+=node.getBoundingClientRect().top-box.top-anchor.top;scrollIntent.positioned();settled(rendered);return}}
+          if(options.last||follow)rendered.scrollTop=rendered.scrollHeight
+          else rendered.scrollTop=previousTop
+          scrollIntent.positioned()
+          settled(rendered)
         }
         window.requestAnimationFrame?.(()=>restore(0))
       }
@@ -306,8 +495,9 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
   async function readMarkdown(owned,key) {
     if(!current(owned))return
     owned.renderPending=null;owned.boundaryIntent=owned.viewportIntent || 0
-    if(owned.pagePending||owned.markdownBusy){owned.localIntent={kind:'markdown',key,page:{...owned.page}};return}
+    if(owned.pagePending||owned.markdownBusy){owned.localIntent={kind:'markdown',key};return}
     owned.markdownBusy=true
+    const intent=owned.viewportIntent || 0,follow=!scrollIntent.manual()
     event(owned,'markdown-start',{key})
     let bytes=0
     try {
@@ -327,7 +517,67 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         await acknowledged
         if(!body.more)break
       }
-    }catch(error){failure(owned,error)}finally{owned.markdownBusy=false;drainLocalIntent(owned)}
+    }catch(error){failure(owned,error)}finally{
+      if(follow)owned.followPending=true
+      owned.markdownBusy=false;drainLocalIntent(owned)
+      window.requestAnimationFrame?.(()=>window.requestAnimationFrame?.(()=>{
+        if(!current(owned))return
+        const viewport=document.getElementById?.('session-records')
+        if(follow&&intent===(owned.viewportIntent || 0)&&!scrollIntent.manual()&&viewport){viewport.scrollTop=viewport.scrollHeight;scrollIntent.positioned()}
+        owned.followPending=false;drainLocalIntent(owned)
+        if(viewport)inspectSealedBoundary({target:viewport})
+      }))
+    }
+  }
+  async function hydrateBody(owned,key,part=0,anchorPart=part,position=null) {
+    if(!current(owned)||owned.pagePending||owned.markdownBusy)return
+    owned.markdownBusy=true
+    let viewport,box,intent,leaf,anchor,top,follow
+    const capture=()=>{
+      viewport=document.getElementById?.('session-records');box=viewport?.getBoundingClientRect?.();intent=owned.viewportIntent || 0
+      leaf=[...(viewport?.querySelectorAll?.('[data-fragment-path]') || [])].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector?.('[data-body-gap],[data-history-gap],[data-sealed-body-needed]')&&box&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom})
+      anchor=leaf&&box?{node:leaf,top:leaf.getBoundingClientRect().top-box.top}:null;top=viewport?.scrollTop || 0;follow=!scrollIntent.manual()
+    }
+    capture()
+    let body
+    try{
+      let result=await rpc(owned,'body',{key,part}),start=0
+      if(position){
+        const valid=()=>result.key===key&&result.body?.part===part&&result.body.format==='json'&&typeof result.body.text==='string'&&new TextEncoder().encode(result.body.text).length<=65536
+        if(!valid())throw Error('archive_body_mismatch')
+        while(current(owned)&&owned.handoff===position&&position.intent===(owned.viewportIntent || 0)&&result.body.more&&position.payload.offset>=start+result.body.text.length){
+          if(!result.body.text.length||part>=100000)throw Error('archive_body_cursor_stalled')
+          start+=result.body.text.length;part++;result=await rpc(owned,'body',{key,part})
+          if(!valid())throw Error('archive_body_mismatch')
+        }
+        if(!current(owned)||owned.handoff!==position||position.intent!==(owned.viewportIntent || 0))return
+        if(position.payload.offset>start+result.body.text.length)throw Error('archive_body_position_missing')
+        position.bodyPart=part;position.localOffset=Math.max(0,Math.min(result.body.text.length-1,position.payload.offset-start));anchorPart=part
+        position.fragment=key+':body:'+part+':text:'+payloadChunkStart(result.body,position.localOffset)
+      }
+      if(!current(owned)||result.key!==key||result.body.part!==part)return
+      body=result.body
+      capture()
+      const request=++sequence,acknowledged=new Promise((resolve,reject)=>{const timer=window.setTimeout(()=>{owned.markdownWaiter=null;reject(Error('archive_body_ack_timeout'))},10000);owned.markdownWaiter={request,resolve,reject,timer}})
+      event(owned,'body',{...result,request,anchorPart,seekStart:owned.seekStartIntent===intent,fragmentAnchor:position?.fragment || (owned.seekStartIntent===intent?'':leaf?.dataset.fragmentPath || ''),kind:undefined})
+      await acknowledged
+      if(result.body.format==='markdown'&&result.body.more)owned.localIntent={kind:'markdown',key}
+    }catch(error){failure(owned,error)}finally{
+      owned.markdownBusy=false;owned.followPending=true;drainLocalIntent(owned)
+      window.requestAnimationFrame?.(()=>window.requestAnimationFrame?.(()=>{
+        if(!current(owned))return
+        const rendered=document.getElementById?.('session-records')
+        if(rendered&&!position&&intent===(owned.viewportIntent || 0)){
+          if(owned.seekStartIntent===intent)rendered.scrollTop=0
+          else if(follow&&!scrollIntent.manual())rendered.scrollTop=rendered.scrollHeight
+          else if(anchor?.node.isConnected)rendered.scrollTop+=anchor.node.getBoundingClientRect().top-rendered.getBoundingClientRect().top-anchor.top
+          else rendered.scrollTop=top
+          scrollIntent.positioned()
+        }
+        owned.followPending=false;drainLocalIntent(owned);if(rendered)inspectSealedBoundary({target:rendered})
+      }))
+    }
+    return body
   }
   function acknowledgeRender(owned) {
     const handoff=owned?.renderPending
@@ -341,9 +591,17 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         && viewport.getAttribute('data-sealed-first')===handoff.first && viewport.getAttribute('data-sealed-last')===handoff.last
         && viewport.getAttribute('data-render-request')===String(handoff.request)
         && viewport.getAttribute('data-render-part')===String(handoff.part)){
-        if((owned.viewportIntent || 0)===handoff.intent)viewport.scrollTop=handoff.direction==='previous'?viewport.scrollHeight:0
+        if((owned.viewportIntent || 0)===handoff.intent){
+          const box=viewport.getBoundingClientRect?.()
+          const moved=ownedPositionUnchanged(viewport,handoff.top)?0:viewport.scrollTop-handoff.top
+          if(handoff.head||owned.seekStartIntent===handoff.intent)viewport.scrollTop=0
+          else if(handoff.anchor?.node?.isConnected&&box)viewport.scrollTop+=handoff.anchor.node.getBoundingClientRect().top-box.top-handoff.anchor.top+moved
+          else if(moved===0)viewport.scrollTop=handoff.tail?viewport.scrollHeight:handoff.top
+          scrollIntent.positioned()
+        }
         owned.boundaryIntent=owned.viewportIntent || 0
         owned.renderPending=null
+        window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:viewport}))
       }else if(attempt<4)window.requestAnimationFrame?.(()=>inspect(attempt+1))
       else handoff.scheduled=false
     }
@@ -352,9 +610,24 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
   function refreshSealedLatest(owned) {
     const viewport=document.getElementById?.('session-records')
     if(!current(owned)||viewport?.getAttribute?.('data-sealed-dom-owner')!==owned.config.stamp)return
-    const logicalEnd=!owned.canNext&&!owned.page.query&&viewport.getAttribute('data-render-more')!=='true'&&viewport.getAttribute('data-last-prose-more')!=='true'
+    syncWindow(owned,viewport)
+    const logicalEnd=!!owned.readerReady&&!!owned.visibleRows?.length&&!owned.handoff&&!owned.canNext&&!owned.page.query&&viewport.getAttribute('data-render-more')!=='true'&&viewport.getAttribute('data-last-prose-more')!=='true'
     viewport.setAttribute?.('data-logical-latest',String(logicalEnd))
-    updateLatestOverlay(viewport,logicalEnd)
+    scrollIntent.inspect(viewport,logicalEnd)
+    viewport.setAttribute?.('data-reader-direction',String(scrollIntent.direction()))
+    updateLatestOverlay(viewport,logicalEnd,scrollIntent.manual())
+    if(owned.manualSent!==scrollIntent.manual()){
+      owned.manualSent=scrollIntent.manual()
+      const box=viewport.getBoundingClientRect?.(),visible=[...(viewport.querySelectorAll?.('.session-record') || [])].find(node=>{const r=node.getBoundingClientRect();return r.height>0&&box&&r.bottom>box.top})
+      event(owned,'follow',{manualUp:owned.manualSent,anchor:visible?.getAttribute?.('data-block-key') || ''})
+    }
+  }
+  function syncWindow(owned,viewport) {
+    if(viewport?.getAttribute?.('data-sealed-page-request')!==String(owned.pageCommand))return
+    owned.first=viewport.getAttribute('data-sealed-first') || ''
+    owned.last=viewport.getAttribute('data-sealed-last') || ''
+    owned.canPrevious=viewport.getAttribute('data-archive-can-previous')==='true'
+    owned.canNext=viewport.getAttribute('data-archive-can-next')==='true'
   }
   function acknowledgeLatest(owned) {
     const latest=owned?.latestJump
@@ -368,8 +641,9 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         &&viewport.getAttribute('data-sealed-first')===latest.first&&viewport.getAttribute('data-sealed-last')===latest.last
         &&viewport.getAttribute('data-render-more')!=='true'&&viewport.getAttribute('data-last-prose-more')!=='true'){
         owned.latestJump=null
+        owned.pageAwaiting=null
         if((owned.viewportIntent || 0)!==latest.intent)event(owned,'latest-cancelled',{latestRequest:latest.request})
-        else {viewport.scrollTop=viewport.scrollHeight;viewport.focus?.({preventScroll:true});owned.boundaryIntent=owned.viewportIntent || 0;event(owned,'latest-complete',{latestRequest:latest.request})}
+        else {viewport.scrollTop=viewport.scrollHeight;scrollIntent.clear();viewport.focus?.({preventScroll:true});owned.boundaryIntent=owned.viewportIntent || 0;event(owned,'latest-complete',{latestRequest:latest.request})}
         refreshSealedLatest(owned)
       }else if(attempt<4)window.requestAnimationFrame?.(()=>inspect(attempt+1))
       else latest.scheduled=false
@@ -383,7 +657,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     if(latest.markdown){latest.phase='hydrating';void readMarkdown(owned,latest.markdown).then(render)}else render()
   }
   function beginLatest(owned,request) {
-    owned.latestCommand=request;owned.renderPending=null
+    owned.latestCommand=request;owned.renderPending=null;owned.handoff=null
     owned.latestJump={request,intent:owned.viewportIntent || 0,phase:'page'}
     if(!owned.readerReady)return
     if(owned.failedPage){owned.failedPage={options:{last:true}};retryPage(owned)}
@@ -393,7 +667,8 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     if(!current(owned)||owned.renderPending||!Number.isSafeInteger(part)||part<0||part>100000)return
     const viewport=document.getElementById?.('session-records'),previous=Number(viewport?.getAttribute?.('data-render-part'))
     const request=++sequence,intent=owned.viewportIntent || 0
-    owned.renderPending={request,part,direction:direction || (part<previous?'previous':'next'),first:owned.first,last:owned.last,intent}
+    const box=viewport?.getBoundingClientRect?.(),leaf=[...(viewport?.querySelectorAll?.('[data-fragment-path]') || [])].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector?.('[data-history-gap],[data-body-gap],[data-sealed-body-needed]')&&box&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom})
+    owned.renderPending={request,part,direction:direction || (part<previous?'previous':'next'),first:owned.first,last:owned.last,intent,top:viewport?.scrollTop || 0,head:viewport?.scrollTop<=1||owned.seekStartIntent===intent,tail:viewport&&viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=4,anchor:leaf&&box?{node:leaf,top:leaf.getBoundingClientRect().top-box.top}:null}
     owned.boundaryIntent=intent
     event(owned,'render',{request,part})
     acknowledgeRender(owned)
@@ -422,37 +697,72 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     const button=domEvent.target?.closest?.('.session-jump-latest')
     if(button && active && button.getAttribute('data-latest-owner')===active.config.stamp)active.latestHost=button.closest('.session-viewer')
     if(active && viewport && (viewport===domEvent.target || viewport.contains?.(domEvent.target))){
+      scrollIntent.note(domEvent,viewport)
       active.viewportIntent=(active.viewportIntent || 0)+1
+      active.seekStartIntent=name==='keydown'&&domEvent.key==='Home'?active.viewportIntent:null
       const forward=['ArrowDown','PageDown','End',' '],backward=['ArrowUp','PageUp','Home']
       const gesture=name==='wheel'&&typeof domEvent.deltaY==='number'&&domEvent.deltaY!==0 || name==='touchmove' || name==='pointerdown'&&domEvent.target===viewport || name==='keydown'&&(forward.includes(domEvent.key)||backward.includes(domEvent.key))
-      if(gesture){active.boundaryGesture=active.viewportIntent;active.boundaryDirection=name==='wheel'?(domEvent.deltaY<0?'previous':'next'):name==='keydown'?(backward.includes(domEvent.key)?'previous':'next'):'';window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:viewport}))}
+      if(gesture){active.handoff=null;active.boundaryGesture=active.viewportIntent;active.boundaryDirection=name==='wheel'?(domEvent.deltaY<0?'previous':'next'):name==='keydown'?(backward.includes(domEvent.key)?'previous':'next'):'';window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:viewport}))}
     }
   },true)
   const inspectSealedBoundary=domEvent=>{
     const owned=active,viewport=domEvent.target
     if(owned)refreshSealedLatest(owned)
-    if(!owned || !current(owned) || owned.pagePending || owned.markdownBusy || owned.failedPage || owned.renderPending || (owned.boundaryGesture || 0)<=(owned.boundaryIntent || 0) || viewport?.id!=='session-records' || viewport.getAttribute?.('data-sealed-dom-owner')!==owned.config.stamp)return
+    if(!owned || !current(owned) || owned.pagePending || owned.pageAwaiting || owned.markdownBusy || owned.followPending || owned.latestJump || owned.failedPage || owned.renderPending || viewport?.id!=='session-records' || viewport.getAttribute?.('data-sealed-dom-owner')!==owned.config.stamp)return
+    syncWindow(owned,viewport)
     const part=Number(viewport.getAttribute('data-render-part')),more=viewport.getAttribute('data-render-more')==='true'
-    const above=viewport.scrollTop<=96,below=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=96
-    const direction=above&&owned.boundaryDirection!=='next'&&(part>0||owned.canPrevious)?'previous':below&&owned.boundaryDirection!=='previous'&&(more||owned.canNext)?'next':''
+    const box=viewport.getBoundingClientRect?.()
+    const wanted=scrollIntent.manual()?(scrollIntent.direction() || (owned.boundaryDirection==='previous'?-1:1)):1
+    const near=node=>{const r=node.getBoundingClientRect();return box&&visibleConversationNode(node,viewport)&&r.bottom>box.top-192&&r.top<box.bottom+192}
+    const body=[...(viewport.querySelectorAll?.('[data-sealed-body-needed]') || [])].find(near)
+    if(body){if(body.dataset.bodyFormat==='markdown')void readMarkdown(owned,body.getAttribute('data-sealed-body-needed'));else void hydrateBody(owned,body.getAttribute('data-sealed-body-needed'));return}
+    const bodyGap=[...(viewport.querySelectorAll?.('[data-body-gap]') || [])].find(node=>near(node)&&(wanted<0?Number(node.dataset.bodyPart)<Number(node.dataset.bodyAnchor):Number(node.dataset.bodyPart)>Number(node.dataset.bodyAnchor)))
+    if(bodyGap){void hydrateBody(owned,bodyGap.dataset.bodyGap,Number(bodyGap.dataset.bodyPart),Number(bodyGap.dataset.bodyAnchor));return}
+    const visibleText=[...viewport.querySelectorAll('[data-fragment-path]')].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-history-gap],[data-body-gap],[data-sealed-body-needed]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom})
+    const visibleSource=visibleText?.closest('.session-record')?.dataset.blockKey
+    const sourceGap=[...(viewport.querySelectorAll?.('[data-history-gap="source"]') || [])].find(node=>{const r=node.getBoundingClientRect(),middle=box?box.top+box.height/2:0;return near(node)&&(wanted<0?r.top<=middle:r.bottom>=middle)&&(!visibleSource||(wanted<0?pieceRank(node.dataset.gapBefore)<pieceRank(visibleSource):pieceRank(node.dataset.gapAfter)>pieceRank(visibleSource)))})
+    const fragmentGap=[...(viewport.querySelectorAll?.('[data-fragment-from]') || [])].find(node=>near(node)&&(wanted<0?Number(node.dataset.fragmentTo)<part:Number(node.dataset.fragmentTo)>part))
+    const rawBounds=sourceGap?.getBoundingClientRect(),middle=box?box.top+box.height/2:0
+    const readingRawGap=rawBounds&&rawBounds.top<=middle&&rawBounds.bottom>=middle&&!visibleText
+    if(fragmentGap&&scrollIntent.manual()&&!readingRawGap){
+      const r=fragmentGap.getBoundingClientRect(),first=Number(fragmentGap.dataset.fragmentFrom),last=Number(fragmentGap.dataset.fragmentTo),fraction=Math.max(0,Math.min(1,(middle-r.top)/Math.max(1,r.height)))
+      const target=visibleText?(last<part?Math.max(0,part-1):part+1):Math.round(first+(last-first)*fraction)
+      if(target!==part){renderPart(owned,target,target<part?'previous':'next');return}
+    }
+    if(sourceGap&&scrollIntent.manual()){
+      const leaf=[...viewport.querySelectorAll('[data-fragment-path]')].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-history-gap]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom})
+      const point=sealedSourcePoint(viewport),before=pieceRank(sourceGap.dataset.gapBefore),after=pieceRank(sourceGap.dataset.gapAfter),prefix=leaf&&sourceGap.getBoundingClientRect().top<leaf.getBoundingClientRect().top,target=leaf?(prefix?after-1n:before):point?.rank ?? before
+      const key=[owned.identity,'gap',sourceGap.dataset.gapBefore,sourceGap.dataset.gapAfter,rankKey(target)].join(':')
+      if(key===boundary)return
+      boundary=key
+      event(owned,'follow',{manualUp:scrollIntent.manual(),anchor:leaf?.closest('.session-record')?.dataset.blockKey || rankKey(target),fragmentAnchor:leaf?.dataset.fragmentPath || ''})
+      void page(owned,{...(leaf?(prefix?{before:rankKey(after)}:{after:rankKey(before-1n)}):target>0n?{after:rankKey(target-1n)}:{}),continuity:leaf?'prefetch':'gap'});return
+    }
+    const items=[...(viewport.querySelectorAll?.('.session-record,[data-group-key]') || [])].filter(node=>visibleConversationNode(node,viewport)),first=items[0]?.getBoundingClientRect(),last=items.at(-1)?.getBoundingClientRect()
+    const fill=!first||!last||last.bottom-first.top<viewport.clientHeight-4
+    const above=viewport.scrollTop<=192,below=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=192
+    const direction=(fill||scrollIntent.manual()&&above)&&owned.canPrevious?'previous':scrollIntent.manual()&&below&&owned.canNext?'next':''
     const key=[owned.identity,owned.first,owned.last,part,direction].join(':')
     if(!direction || key===boundary)return
     boundary=key;owned.boundaryIntent=owned.viewportIntent || 0
-    if(direction==='previous' && part>0)renderPart(owned,part-1,direction)
-    else if(direction==='next' && more)renderPart(owned,part+1,direction)
-    else if(direction==='previous')void page(owned,{before:owned.visibleRows?.[Math.min(19,owned.visibleRows.length-1)]?.key || owned.first})
-    else void page(owned,{after:owned.visibleRows?.[Math.max(0,owned.visibleRows.length-20)]?.key || owned.last})
+    const heights={},visible=items.find(node=>node.classList?.contains('session-record')&&near(node))
+    for(const node of viewport.querySelectorAll?.('.session-record') || [])if(Object.keys(heights).length<200)heights[node.dataset.blockKey]=Math.max(0,Math.min(1000000,node.getBoundingClientRect().height))
+    const textLeaf=[...viewport.querySelectorAll('[data-fragment-path]')].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-history-gap]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom})
+    event(owned,'follow',{manualUp:scrollIntent.manual(),anchor:visible?.dataset.blockKey || '',fragmentAnchor:textLeaf?.dataset.fragmentPath || '',heights})
+    if(direction==='previous')void page(owned,{before:fill?viewport.getAttribute('data-sealed-scan-first') || owned.first:viewport.getAttribute('data-sealed-older-boundary') || owned.first,continuity:fill?'fill':'older'})
+    else void page(owned,{after:viewport.getAttribute('data-sealed-newer-boundary') || owned.last,continuity:'newer'})
   }
   document.addEventListener('scroll',inspectSealedBoundary,true)
   document.addEventListener('toggle',domEvent=>{
     const node=domEvent.target,owned=active,key=node.getAttribute?.('data-sealed-key')
     if(!key || !owned || !current(owned) || node.getAttribute('data-sealed-owner')!==owned.config.stamp)return
     event(owned,'disclosure',{key,open:node.open})
-    void rpc(owned,'disclosure',{key,open:node.open}).then(()=>{if(node.open && !key.startsWith('group:'))return page(owned,{...owned.page,bodyKey:key})}).catch(error=>failure(owned,error))
+    void rpc(owned,'disclosure',{key,open:node.open}).then(()=>{if(node.open && !key.startsWith('group:'))return hydrateBody(owned,key,0);window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:document.getElementById?.('session-records')}))}).catch(error=>failure(owned,error))
   },true)
   window.addEventListener?.('pagehide',()=>{pending=null;clear(active);void retire(active)})
   return {
     configure(config,request,markdownAck) {
+      if(config?.active)scrollIntent.configure(config.scope || JSON.stringify([config.workspace,config.session,config.authority]))
       const bodyOwner=active
       if(bodyOwner?.markdownWaiter && current(bodyOwner) && markdownAck?.stamp===bodyOwner.config.stamp && markdownAck.load===bodyOwner.config.load && markdownAck.request===bodyOwner.markdownWaiter.request){
         const waiter=bodyOwner.markdownWaiter;bodyOwner.markdownWaiter=null;window.clearTimeout(waiter.timer);waiter.resolve()
@@ -474,6 +784,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       }
     },
     retireAuthority(){authorityFence=active?.config.stamp || '';authority++;pending=null;if(active){clear(active);event(active,'cancelled');void retire(active)}},
+    inspectViewport(viewport){if(viewport)inspectSealedBoundary({target:viewport})},
     snapshot:()=>({active:!!active,pending:!!pending,blocked})
   }
 }
@@ -524,18 +835,23 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   installEventPayload(window)
   let stamp = '', viewerStamp = '', generation = -1, framer = null, viewerIntent = 0
   let activeSave = null
+  let reportedGroups=new Map()
   const send = value => queueMicrotask(()=>app.ports.sessionBridgeEvent.send(value))
-  const sealed=createSealedViewer({send,fetchArchive,document,window,workerFactory})
+  const scrollIntent=createReaderScrollIntent()
+  let activeReadingPosition=null
+  const sealed=createSealedViewer({send,fetchArchive,document,window,workerFactory,scrollIntent,getActivePosition:scope=>activeReadingPosition?.scope===readerScopeKey(scope)&&activeReadingPosition.intent===latestIntent?activeReadingPosition:null})
   let heartbeatKey = ''
   let viewerScope = '', presentation = null
   let historyTransition = false, boundaryKey = '', restoreRevision = 0, resizeViewport=null, resizeSnapshot=null, resizeReady=false, lastFollowing=false, boundaryIntent=0
   let disclosures = new Map()
   let latestJump=null,latestIntent=0,followPosition=null
+  let activeRenderPending=null,pendingEnd=null,activePublication=0,seekStartIntent=null
   function positionAtTail(viewport) {
     viewport.scrollTop=viewport.scrollHeight
     // Its asynchronous scroll notification may arrive between finite byte
     // windows. Bind that owned position to current authority and user intent.
     followPosition={viewport,stamp:viewerStamp,generation,intent:viewerIntent,top:viewport.scrollTop}
+    scrollIntent.positioned()
     captureResize()
   }
   const pendingTail = viewport => lastFollowing && followPosition?.pending===true && followPosition.viewport===viewport && followPosition.stamp===viewerStamp && followPosition.generation===generation && followPosition.intent===viewerIntent && Math.abs(viewport.scrollTop-followPosition.top)<=4
@@ -547,14 +863,16 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   const inspectActiveLatest = () => {
     const viewport=latestJump?.host?.querySelector?.('[data-history-mode="active"]') || document.getElementById?.('session-records')
     if(!viewport || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp || viewport.getAttribute('data-history-mode')!=='active')return
-    const logicalEnd=Number(viewport.getAttribute('data-history-after'))>=Number(viewport.getAttribute('data-history-latest'))
-    updateLatestOverlay(viewport,logicalEnd)
+    const logicalEnd=Number(viewport.getAttribute('data-history-after'))>=Number(viewport.getAttribute('data-history-latest'))&&viewport.getAttribute('data-render-more')!=='true'
+    updateLatestOverlay(viewport,logicalEnd,scrollIntent.manual())
     const jump=latestJump
     if(!jump || jump.stamp!==viewerStamp || jump.generation!==generation || viewport.getAttribute('data-viewer-generation')!==String(jump.generation) || viewport.getAttribute('data-latest-request')!==String(jump.request))return
     if(jump.intent!==latestIntent){latestJump=null;send({kind:'latest-cancelled',stamp:jump.stamp,generation:jump.generation,request:jump.request});return}
     if(viewport.getAttribute('data-history-error')==='true'){latestJump=null;send({kind:'latest-error',stamp:jump.stamp,generation:jump.generation,request:jump.request});return}
     if(logicalEnd && viewport.getAttribute('data-history-loading')!=='true'){
       positionAtTail(viewport)
+      scrollIntent.clear()
+      updateLatestOverlay(viewport,true,false)
       viewport.focus?.({preventScroll:true})
       latestJump=null;send({kind:'latest-complete',stamp:jump.stamp,generation:jump.generation,request:jump.request})
     }
@@ -565,48 +883,137 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     const event=node.getAttribute?.('data-event-key')
     return event!==null && event!==undefined ? 'event:'+event : null
   }
+  const rememberActivePosition=viewport=>{
+    if(!viewport?.querySelectorAll||viewport.getAttribute?.('data-history-mode')!=='active'||viewport.getAttribute('data-viewer-owner')!==viewerStamp)return null
+    const box=viewport.getBoundingClientRect?.()
+    if(!box)return null
+    const leaf=[...viewport.querySelectorAll('[data-fragment-path]')].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-history-gap],[data-body-gap],[data-sealed-body-needed]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom&&node.closest('.session-record')})
+    const row=leaf?.closest('.session-record'),path=leaf?.dataset.fragmentPath,source=path?.match(/^(\d+:\d+):content(?:$|:)/)?.[1]
+    if(!source||path.length>4096)return null
+    const key=indexedCursorKey(indexedCursorRank(source))
+    const payload=visiblePayloadPosition(viewport,leaf)
+    const pre=leaf.closest('pre'),innerScroll=pre&&pre.scrollHeight>pre.clientHeight+1?pre.scrollTop:null
+    activeReadingPosition={scope:readerScopeKey(viewerScope),key,fragment:path,intent:latestIntent,payload,innerScroll,pieceOpen:!!leaf.closest('[data-event-key]')?.open,groupOpen:!!leaf.closest('[data-group-key]')?.open,top:Math.max(-10000000,Math.min(10000000,payload?.top ?? leaf.getBoundingClientRect().top-box.top))}
+    return {anchor:String(row.dataset.offset).padStart(20,'0'),fragmentAnchor:path}
+  }
   const rememberPresentation = event => {
     const viewport=document.getElementById?.('session-records')
     if(!viewport?.querySelectorAll || !viewerScope || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp)return
     const returning=event.type==='click' && (event.target?.closest?.('.task-session-transcript a[href]') || event.target?.closest?.('button.tab')?.textContent?.trim()==='Projects')
     if(!returning && !(event.type==='scroll' && event.target===viewport) && !(event.type==='toggle' && viewport.contains?.(event.target)))return
+    rememberActivePosition(viewport)
     presentation={scope:viewerScope,top:viewport.scrollTop,disclosures:[...viewport.querySelectorAll('details')].map(node=>[disclosureKey(node),node.open])}
   }
   // One bounded snapshot holds only position/disclosure flags, never payloads.
   // Capture before route handlers replace the task/full-session DOM.
   for(const event of ['click','scroll','toggle'])document.addEventListener(event,rememberPresentation,true)
+  document.addEventListener('toggle',event=>{
+    const viewport=document.getElementById?.('session-records'),node=event.target
+    if(viewport?.getAttribute?.('data-history-mode')!=='active'||viewport.getAttribute('data-viewer-owner')!==viewerStamp||!viewport.contains?.(node))return
+    const key=node.getAttribute?.('data-group-key') ?? node.getAttribute?.('data-event-key')
+    if(key!==null&&key!==undefined)send({kind:'viewer-disclosure',stamp:viewerStamp,generation:Number(viewport.getAttribute('data-viewer-generation') ?? generation),key,open:node.open})
+    scheduleContinuity()
+  },true)
   const noteViewerIntent = event => {
     const viewport=document.getElementById?.('session-records')
     if(viewport && (event.target===viewport || viewport.contains?.(event.target))){
+      scrollIntent.note(event,viewport)
       const continuingEnd=event.type==='keydown' && event.key==='End' && pendingTail(viewport)
       viewerIntent++;if(event.type!=='toggle')latestIntent++
+      if(event.type==='keydown'&&event.key==='Home'&&event.isTrusted!==false&&event.target===viewport)seekStartIntent=viewerIntent
+      if(pendingEnd&&pendingEnd.intent!==latestIntent)pendingEnd=null
       if(continuingEnd)followPosition.intent=viewerIntent
+      if(event.type==='keydown'&&event.key==='End'&&event.isTrusted!==false&&event.target===viewport){
+        event.preventDefault?.();activeRenderPending=null
+        const end={stamp:viewport.getAttribute?.('data-viewer-owner') || viewerStamp,intent:latestIntent,sent:-1};pendingEnd=end
+        const settle=attempt=>{
+          if(pendingEnd!==end||end.stamp!==viewerStamp||end.intent!==latestIntent)return
+          const mounted=document.getElementById?.('session-records'),revision=Number(mounted?.getAttribute?.('data-viewer-generation') ?? generation)
+          if(mounted?.getAttribute?.('data-viewer-owner')===end.stamp&&revision===generation&&end.sent!==revision){end.sent=revision;send({kind:'viewer-end',stamp:end.stamp,generation:revision})}
+          if(attempt<8)requestAnimationFrame(()=>settle(attempt+1));else if(pendingEnd===end)pendingEnd=null
+        }
+        requestAnimationFrame(()=>settle(0))
+      }
     }
   }
   // A scroll notification may lag the position change or come from browser
   // anchoring. Actual input/disclosure events own intent; the position guard
   // below also detects later programmatic scrolling in either direction.
-  for(const event of ['toggle','wheel','touchstart','pointerdown','keydown']) document.addEventListener(event,noteViewerIntent,true)
+  for(const event of ['toggle','wheel','touchstart','touchmove','pointerdown','keydown']) document.addEventListener(event,noteViewerIntent,true)
   const inspectBoundary = event => {
     const viewport=document.getElementById?.('session-records')
     if(!viewport || (event && event.target!==viewport) || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp)return
     const attr=name=>viewport.getAttribute?.('data-history-'+name)
     if(attr('mode')!=='active')return
+    const manual=scrollIntent.inspect(viewport,Number(attr('after'))>=Number(attr('latest'))&&viewport.getAttribute('data-render-more')!=='true')
+    viewport.setAttribute?.('data-reader-direction',String(scrollIntent.direction()))
     inspectActiveLatest()
     const atEnd=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=48
-    const logicalEnd=Number(attr('after'))>=Number(attr('latest'))
+    const logicalEnd=Number(attr('after'))>=Number(attr('latest'))&&viewport.getAttribute('data-render-more')!=='true'
     const ownedPosition=followPosition?.viewport===viewport && followPosition.stamp===viewerStamp && followPosition.generation===generation && followPosition.intent===viewerIntent && Math.abs(viewport.scrollTop-followPosition.top)<=4
     const continuing=lastFollowing && (attr('loading')==='true' || ownedPosition)
+    if(pendingEnd||latestJump||viewport.getAttribute('data-latest-pending')==='true')return
     // Replacing rows can grow the DOM before the owned tail RAF runs. An
     // unchanged, intent-stamped position still belongs to that handoff.
-    if(event)send({kind:'viewer-follow',stamp:viewerStamp,generation,following:(atEnd&&logicalEnd)||(continuing&&(atEnd||ownedPosition))})
+    const reading=rememberActivePosition(viewport)
+    if(event || manual===lastFollowing)send({kind:'viewer-follow',stamp:viewerStamp,generation,manualUp:manual,following:!manual,...(reading || {})})
     if(attr('loading')==='true')return
-    if(viewerIntent<=boundaryIntent)return
-    const edge=viewport.scrollTop<=96 && Number(attr('before'))>0 ? 'older' : atEnd&&!logicalEnd ? 'newer' : ''
-    const key=[viewerStamp,generation,attr('before'),attr('after'),edge].join(':')
+    if(activeRenderPending&&(activeRenderPending.stamp!==viewerStamp||activeRenderPending.generation!==generation))activeRenderPending=null
+    if(activeRenderPending)return
+    const box=viewport.getBoundingClientRect?.(),items=[...(viewport.querySelectorAll?.('.session-record,[data-group-key]') || [])].filter(node=>visibleConversationNode(node,viewport))
+    const leaf=[...(viewport.querySelectorAll?.('[data-fragment-path]') || [])].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector?.('[data-history-gap]')&&box&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom})
+    const wanted=scrollIntent.direction() || -1,currentPart=Number(viewport.getAttribute?.('data-render-part') || 0)
+    const fragmentGap=[...(viewport.querySelectorAll?.('[data-fragment-from]') || [])].find(node=>{const r=node.getBoundingClientRect();return box&&visibleConversationNode(node,viewport)&&r.bottom>box.top-192&&r.top<box.bottom+192&&(wanted<0?Number(node.dataset.fragmentTo)<currentPart:Number(node.dataset.fragmentTo)>currentPart)})
+    if(manual&&fragmentGap){
+      const r=fragmentGap.getBoundingClientRect(),first=Number(fragmentGap.dataset.fragmentFrom),last=Number(fragmentGap.dataset.fragmentTo),part=Number(viewport.dataset.renderPart),fraction=Math.max(0,Math.min(1,(box.top+box.height/2-r.top)/Math.max(1,r.height)))
+      const target=leaf?(last<part?Math.max(0,part-1):part+1):Math.round(first+(last-first)*fraction)
+      if(target!==part){
+        const pending={stamp:viewerStamp,generation,part:target,intent:viewerIntent,top:viewport.scrollTop,head:viewport.scrollTop<=1||seekStartIntent===viewerIntent,tail:atEnd,anchor:leaf?{node:leaf,top:leaf.getBoundingClientRect().top-box.top}:null};activeRenderPending=pending
+        send({kind:'viewer-render',stamp:viewerStamp,generation,part:target})
+        const restore=attempt=>{
+          if(activeRenderPending!==pending||pending.stamp!==viewerStamp||pending.generation!==generation){if(activeRenderPending===pending)activeRenderPending=null;return}
+          const rendered=document.getElementById?.('session-records')
+          if(Number(rendered?.dataset.renderPart)!==target){if(attempt<4)requestAnimationFrame(()=>restore(attempt+1));else activeRenderPending=null;return}
+          if(viewerIntent===pending.intent){const box=rendered.getBoundingClientRect(),moved=ownedPositionUnchanged(rendered,pending.top)?0:rendered.scrollTop-pending.top;if(pending.head)rendered.scrollTop=0;else if(pending.anchor?.node.isConnected)rendered.scrollTop+=pending.anchor.node.getBoundingClientRect().top-box.top-pending.anchor.top+moved;else if(moved===0)rendered.scrollTop=pending.tail?rendered.scrollHeight:pending.top;scrollIntent.positioned()}
+          activeRenderPending=null;requestAnimationFrame(()=>inspectBoundary())
+        }
+        requestAnimationFrame(()=>restore(0));return
+      }
+    }
+    const first=items[0]?.getBoundingClientRect(),last=items.at(-1)?.getBoundingClientRect()
+    const contentHeight=first&&last?last.bottom-first.top:0,fill=contentHeight<viewport.clientHeight-4
+    const firstMounted=[...(viewport.querySelectorAll?.('.session-record') || [])].find(node=>{const rect=node.getBoundingClientRect();return visibleConversationNode(node,viewport)&&box&&rect.bottom>box.top&&rect.top<box.bottom})
+    const anchor=firstMounted?.getAttribute?.('data-offset'),heights={}
+    for(const node of viewport.querySelectorAll?.('.session-record') || []){const offset=node.getAttribute('data-offset');if(offset!==null&&Object.keys(heights).length<200)heights[offset.padStart(20,'0')]=visibleConversationNode(node,viewport)?Math.max(0,Math.min(1000000,node.getBoundingClientRect().height)):0}
+    const gap=[...(viewport.querySelectorAll?.('[data-history-gap="source"]') || [])].find(node=>{const r=node.getBoundingClientRect();return visibleConversationNode(node,viewport)&&box&&r.bottom>box.top-192&&r.top<box.bottom+192})
+    const older=fill?Number(attr('scan-before'))>0:manual&&!!first&&!!box&&first.top>=box.top-192&&Number(attr('before'))>0
+    const newer=manual&&!fill&&!!last&&!!box&&last.bottom<=box.bottom+192&&!logicalEnd
+    const edge=gap?'gap':older?'older':newer?'newer':''
+    const gapBox=gap?.getBoundingClientRect(),gapBefore=gap?.getAttribute('data-gap-before'),gapAfter=gap?.getAttribute('data-gap-after')
+    const gapDirection=gapBox&&box&&(box.top+box.height/2-gapBox.top)<gapBox.height/2?'forward':'tail'
+    const gapFraction=gapBox&&box?Math.max(0,Math.min(1,((atEnd?box.bottom-1:viewport.scrollTop<=1?box.top+1:box.top+box.height/2)-gapBox.top)/Math.max(1,gapBox.height))):0
+    const key=[viewerStamp,generation,attr('before'),attr('after'),edge,gapBefore,gapAfter,gapDirection,Math.floor(gapFraction*100)].join(':')
     if(!edge || key===boundaryKey)return
-    boundaryKey=key;boundaryIntent=viewerIntent;send({kind:'viewer-boundary',stamp:viewerStamp,generation,edge})
+    const closedGroups=[...(viewport.querySelectorAll?.('[data-group-key]') || [])].filter(node=>!node.open).map(node=>node.getAttribute('data-group-key')).slice(0,200)
+    boundaryKey=key;boundaryIntent=viewerIntent;seekStartIntent=null;send({kind:'viewer-boundary',stamp:viewerStamp,generation,edge,fill,anchor:anchor?.padStart(20,'0') || '',fragmentAnchor:gap?'':leaf?.dataset.fragmentPath || '',heights,closedGroups,...(gap?{before:Number(gapBefore),after:Number(gapAfter),fraction:gapFraction,direction:gapDirection}:{})})
   }
+  let continuityQueued=false
+  const scheduleContinuity=()=>{
+    if(continuityQueued)return
+    const ownedViewport=document.getElementById?.('session-records')
+    if(!ownedViewport?.getBoundingClientRect || !ownedViewport?.querySelectorAll || typeof requestAnimationFrame!=='function')return
+    continuityQueued=true
+    requestAnimationFrame(()=>{
+      continuityQueued=false
+      const viewport=document.getElementById?.('session-records')
+      if(viewport?.getAttribute?.('data-history-mode')==='active')inspectBoundary()
+      else sealed.inspectViewport?.(viewport)
+    })
+  }
+  const continuityObserver=window.MutationObserver?new window.MutationObserver(records=>{
+    if(records.some(record=>record.target?.closest?.('.session-viewer') || [...(record.addedNodes || [])].some(node=>node.matches?.('.session-viewer') || node.querySelector?.('.session-viewer'))))scheduleContinuity()
+  }):null
+  continuityObserver?.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['data-history-loading','data-history-before','data-history-after','data-history-scan-before','data-sealed-page-request','data-render-request','data-render-part','open']})
   document.addEventListener('scroll',inspectBoundary,true)
   for(const name of ['wheel','keydown'])document.addEventListener(name,event=>{
     const viewport=document.getElementById?.('session-records')
@@ -622,7 +1029,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   const resizeObserver=window.ResizeObserver?new window.ResizeObserver(()=>{
     if(!resizeReady){resizeReady=true;captureResize();return}
     const saved=resizeSnapshot,viewport=resizeViewport
-    if(!saved || saved.stamp!==viewerStamp || saved.generation!==generation || saved.intent!==viewerIntent || viewport!==document.getElementById?.('session-records'))return
+    if(!saved || saved.stamp!==viewerStamp || saved.generation!==generation || saved.intent!==viewerIntent || viewport!==document.getElementById?.('session-records') || !ownedPositionUnchanged(viewport,saved.top))return
     if(lastFollowing&&saved.tail)positionAtTail(viewport)
     else {
       const bounds=viewport.getBoundingClientRect(),nodes=[...viewport.querySelectorAll('[data-block-key]')]
@@ -630,6 +1037,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     }
     captureResize()
     inspectActiveLatest()
+    scheduleContinuity()
     if(viewport?.getAttribute?.('data-history-mode')==='sealed')updateLatestOverlay(viewport,viewport.getAttribute('data-logical-latest')==='true')
   }):null
   async function retireSave(owned = activeSave) {
@@ -794,6 +1202,10 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   })
   queueMicrotask(()=>send({kind:'save-capability',supported:typeof window.showSaveFilePicker === 'function'}))
   app.ports.sessionBridgeCommand.subscribe(command => {
+    scrollIntent.configure(command.viewerScope || command.stamp)
+    if(activeReadingPosition?.scope!==readerScopeKey(command.viewerScope || command.stamp))activeReadingPosition=null
+    rememberActivePosition(document.getElementById?.('session-records'))
+    scheduleContinuity()
     sealed.configure(command.sealed,command.sealedRequest,command.sealedMarkdownAck)
     const downloadStamp = command.downloadStamp ?? command.stamp
     if (downloadStamp !== stamp) { stamp = downloadStamp; void retireSave() }
@@ -801,6 +1213,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const continuing=command.continueViewer===true && command.viewerScope===viewerScope
       viewerStamp = command.stamp
       latestJump=null
+      pendingEnd=null
+      seekStartIntent=null
       latestHost=null
       followPosition=null
       if(!continuing){framer=null;presentation=null;disclosures.clear();boundaryKey=''}
@@ -846,7 +1260,9 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(fingerprint!==heartbeatKey){heartbeatKey=fingerprint;send({kind:'heartbeat-status',stamp:viewerStamp,statuses,today})}
     if (command.generation < generation) return
     generation = command.generation
+    activePublication=command.publication?.pending?command.publication.request:0
     if(command.latest?.pending){
+      pendingEnd=null
       if(!latestJump||latestJump.request!==command.latest.request||latestJump.stamp!==viewerStamp)latestJump={request:command.latest.request,stamp:viewerStamp,generation,intent:latestIntent,host:latestHost}
       else latestJump.generation=generation
     }else latestJump=null
@@ -857,7 +1273,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if (command.reset !== null) {
       const anchors=(framer?.readerAnchors() || []).filter(row=>row.offset>=command.reset && row.offset<(command.windowEnd ?? Infinity))
       const predecessor=command.direction==='forward'?framer?.predecessor(command.reset):null
-      framer = createRecordFramer(command.reset,command.direction ? {direction:command.direction,aligned:command.aligned,anchors,predecessor} : {})
+      framer = createRecordFramer(command.reset,command.direction ? {direction:command.direction,aligned:command.aligned,anchors,predecessor,runAnchor:command.runAnchor,runRanges:command.runRanges,knownBefore:command.knownBefore,knownAfter:command.knownAfter} : {})
+      reportedGroups=new Map()
       historyTransition = command.historical===true
       boundaryIntent=viewerIntent
     }
@@ -870,13 +1287,22 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const viewport = document.getElementById('session-records')
       const atTail = !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48 || pendingTail(viewport)
       const previousTop = viewport?.scrollTop || 0
+      const sourcePoint=(()=>{
+        if(!viewport||command.follow)return null
+        const box=viewport.getBoundingClientRect(),y=atTail?box.bottom-1:viewport.scrollTop<=1?box.top+1:box.top+box.height/2
+        if([...viewport.querySelectorAll('[data-fragment-path]')].some(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-history-gap]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom}))return null
+        const gap=[...viewport.querySelectorAll('[data-history-gap="source"]')].find(node=>{const r=node.getBoundingClientRect();return visibleConversationNode(node,viewport)&&r.top<=y&&r.bottom>=y})
+        if(!gap)return null
+        const r=gap.getBoundingClientRect(),before=Number(gap.dataset.gapBefore),after=Number(gap.dataset.gapAfter)
+        return {offset:before+(after-before)*(y-r.top)/Math.max(1,r.height),y:y-box.top}
+      })()
       const anchors = (historyTransition || !atTail) && viewport?.getBoundingClientRect && viewport?.querySelectorAll ? (()=>{
         const bounds = viewport.getBoundingClientRect()
         const visible = selector => [...viewport.querySelectorAll(selector)].filter(node=>{
           const rect=node.getBoundingClientRect()
           return rect.height>0 && rect.bottom>bounds.top && rect.top<bounds.bottom
-        }).slice(0,8).map(node=>({attribute:node.hasAttribute('data-block-key')?'data-block-key':'data-group-key',key:node.getAttribute(node.hasAttribute('data-block-key')?'data-block-key':'data-group-key'),top:node.getBoundingClientRect().top-bounds.top}))
-        return [...visible('[data-block-key]'),...visible('[data-group-key]')]
+        }).slice(0,8).map(node=>{const attribute=node.hasAttribute('data-fragment-path')?'data-fragment-path':node.hasAttribute('data-block-key')?'data-block-key':'data-group-key';return {attribute,key:node.getAttribute(attribute),top:node.getBoundingClientRect().top-bounds.top}})
+        return [...visible('[data-fragment-path]'),...visible('[data-block-key]'),...visible('[data-group-key]')]
       })() : []
       for(const node of viewport?.querySelectorAll?.('details') || []){
         const key=disclosureKey(node)
@@ -887,28 +1313,54 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       // A finite captured end owns publication. A large initial window (or a
       // live burst) advances the bounded byte handshake without painting and
       // following every intermediate 64 KiB history fragment.
-      if ((!result.rows.length && (!command.chunk.final || result.pendingBytes>0)) || (!command.chunk.final && (!command.direction || (historyTransition && command.direction==='tail')))) { send({kind:'viewer-progress',...captured,through:result.through,notice:result.notice}); return }
+      if ((!result.rows.length && (!command.chunk.final || result.pendingBytes>0)) || (!command.chunk.final && (!command.direction || command.direction==='tail'))) { send({kind:'viewer-progress',...captured,through:result.through,pendingBytes:result.pendingBytes,notice:result.notice}); return }
       // Own the pending position before publication can grow the DOM. End
       // transfers existing follow intent; other input still retires it.
       const pendingFollow=command.follow && atTail ? {viewport,...captured,top:previousTop,pending:true} : null
       if(pendingFollow)followPosition=pendingFollow
-      send({kind:'viewer',...captured,...result})
+      const groups={}
+      for(const key of new Set([...reportedGroups.keys(),...Object.keys(result.groups || {})])){
+        const delta=(result.groups?.[key] || 0)-(reportedGroups.get(key) || 0)
+        if(delta)groups[key]=delta
+      }
+      reportedGroups=new Map(Object.entries(result.groups || {}))
       const revision=++restoreRevision
-      if(disclosures.size)requestAnimationFrame(()=>{
-        if(revision!==restoreRevision || viewerStamp!==captured.stamp || generation!==captured.generation)return
+      send({kind:'viewer',...captured,...result,groups,publication:revision})
+      const publicationCurrent=()=>revision===restoreRevision&&viewerStamp===captured.stamp&&(generation===captured.generation||activePublication===revision)
+      const afterPublication=callback=>{
+        if(!command.publication){requestAnimationFrame(callback);return}
+        const inspect=attempt=>{
+          if(!publicationCurrent())return
+          const rendered=document.getElementById?.('session-records'),published=rendered?.getAttribute?.('data-window-publication')
+          if(rendered?.getAttribute?.('data-viewer-owner')===captured.stamp&&(published===null||published===undefined||published===String(revision))){callback(rendered);return}
+          if(attempt<8)requestAnimationFrame(()=>inspect(attempt+1))
+        }
+        requestAnimationFrame(()=>inspect(0))
+      }
+      if(disclosures.size)afterPublication(()=>{
+        if(!publicationCurrent())return
         const rendered=document.getElementById?.('session-records')
         for(const node of rendered?.querySelectorAll?.('details') || []){const key=disclosureKey(node);if(disclosures.has(key))node.open=disclosures.get(key)}
       })
-      if (pendingFollow) requestAnimationFrame(() => {
-        if (!lastFollowing || followPosition!==pendingFollow || viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== pendingFollow.intent) return
+      if (pendingFollow) afterPublication(() => {
+        if (!lastFollowing || followPosition!==pendingFollow || !publicationCurrent() || viewerIntent !== pendingFollow.intent) return
         const viewport = document.getElementById('session-records')
         if (viewport && (!pendingFollow.viewport || viewport===pendingFollow.viewport) && Math.abs(viewport.scrollTop-pendingFollow.top)<=4) positionAtTail(viewport)
         else followPosition=null
       })
-      else if (anchors.length) requestAnimationFrame(()=>{
-        if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return
+      else if(sourcePoint)afterPublication(()=>{
+        if(!publicationCurrent()||viewerIntent!==captured.intent)return
+        const rendered=document.getElementById('session-records');if(!rendered||!ownedPositionUnchanged(rendered,previousTop))return
+        const box=rendered.getBoundingClientRect(),gap=[...rendered.querySelectorAll('[data-history-gap="source"]')].find(node=>Number(node.dataset.gapBefore)<=sourcePoint.offset&&Number(node.dataset.gapAfter)>sourcePoint.offset)
+        let target
+        if(gap&&visibleConversationNode(gap,rendered)){const r=gap.getBoundingClientRect();target=r.top+r.height*(sourcePoint.offset-Number(gap.dataset.gapBefore))/(Number(gap.dataset.gapAfter)-Number(gap.dataset.gapBefore))}
+        else {const rows=[...rendered.querySelectorAll('.session-record')].filter(node=>visibleConversationNode(node,rendered));const row=rows.findLast(node=>Number(node.dataset.offset)<=sourcePoint.offset)||rows[0];if(row)target=row.getBoundingClientRect().top}
+        if(target!==undefined){rendered.scrollTop+=target-box.top-sourcePoint.y;scrollIntent.positioned()}
+      })
+      else if (anchors.length) afterPublication(()=>{
+        if (!publicationCurrent() || viewerIntent !== captured.intent) return
         const viewport=document.getElementById('session-records')
-        if (!viewport || Math.abs(viewport.scrollTop-previousTop)>4) return
+        if (!viewport || !ownedPositionUnchanged(viewport,previousTop)) return
         const bounds=viewport.getBoundingClientRect()
         for(const anchor of anchors) {
           const node=[...viewport.querySelectorAll(`[${anchor.attribute}]`)].find(node=>node.getAttribute(anchor.attribute)===anchor.key)
@@ -918,15 +1370,20 @@ export function installSessionBridge(app, { document = globalThis.document, wind
           }
         }
       })
-      else if(historyTransition)requestAnimationFrame(()=>{
-        if(viewerStamp!==captured.stamp || generation!==captured.generation || viewerIntent!==captured.intent)return
+      else if(historyTransition)afterPublication(()=>{
+        if(!publicationCurrent() || viewerIntent!==captured.intent)return
         const rendered=document.getElementById?.('session-records')
-        if(rendered)rendered.scrollTop=command.direction==='tail'?rendered.scrollHeight:0
+        if(rendered){rendered.scrollTop=previousTop;scrollIntent.positioned()}
       })
       historyTransition=false
-      if(command.direction)requestAnimationFrame(()=>requestAnimationFrame(()=>{
-        if(viewerStamp===captured.stamp && generation===captured.generation){captureResize();inspectBoundary()}
-      }))
+      const acknowledge=attempt=>{
+        if(!publicationCurrent())return
+        const rendered=document.getElementById?.('session-records'),published=rendered?.getAttribute?.('data-window-publication'),matching=rendered?.getAttribute?.('data-viewer-owner')===captured.stamp&&(published===null||published===undefined||published===String(revision))
+        if(matching||attempt>=8){send({kind:'viewer-positioned',stamp:captured.stamp,generation:Number(rendered?.getAttribute?.('data-viewer-generation') ?? generation),publication:revision,failed:!matching});if(matching){captureResize();inspectBoundary()}return}
+        requestAnimationFrame(()=>acknowledge(attempt+1))
+      }
+      if(command.publication)requestAnimationFrame(()=>requestAnimationFrame(()=>acknowledge(0)))
+      else if(command.direction)requestAnimationFrame(()=>requestAnimationFrame(()=>{if(publicationCurrent()){captureResize();inspectBoundary()}}))
     } catch {
       send({ kind:'viewer-error',...captured })
     }

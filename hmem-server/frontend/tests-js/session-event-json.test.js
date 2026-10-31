@@ -5,7 +5,7 @@ import {createEventPayloadPager} from '../src/session-event-json.js'
 test('event JSON continuation preserves exact values, inert markup and surrogate boundaries',()=>{
   for(const value of [{type:'future_event',input:{html:'<img src=x onerror=alert(1)>',values:[null,false,42,'λ😀']}},'literal JSON string',[],null]){
     const pager=createEventPayloadPager(JSON.stringify(value)),parts=[]
-    for(let index=0;;index++){const body=pager.read(index);parts.push(body.text);assert.equal(body.tokens.map(token=>token.text).join(''),body.text);if(!body.more)break}
+    for(let index=0;;index++){const body=pager.read(index);assert.equal(body.start,parts.join('').length);parts.push(body.text);assert.equal(body.tokens.map(token=>token.text).join(''),body.text);if(!body.more)break}
     assert.equal(parts.join(''),JSON.stringify(value,null,2));assert.deepEqual(JSON.parse(parts.join('')),value)
   }
   const value={text:'x'.repeat(16370)+'😀λend'},pager=createEventPayloadPager(JSON.stringify(value)),first=pager.read(0),second=pager.read(1)
@@ -31,4 +31,15 @@ test('raw payload paging preserves number spellings, string escapes and duplicat
  assert.equal(pager.read(0).text,parts[0]);assert.equal(pager.read(1).text,parts[1]);assert.ok(pager.retainedParts<=2)
  const deep=createEventPayloadPager('['.repeat(10000)+'0'+']'.repeat(10000))
  for(let part=0;part<4;part++){const body=deep.read(part);assert.equal(body.text.length,16384);assert.equal(body.more,true)}
+})
+
+test('bounded raw pumping can replay an uncached distant part without doing the whole seek in one turn',()=>{
+ const source=JSON.stringify({values:Array.from({length:2000},(_,index)=>'Value '+index+' '+'x'.repeat(30))}),pager=createEventPayloadPager(source,1024),reference=createEventPayloadPager(source,1024)
+ let iterations=0,result
+ do{result=pager.readBounded(60,4);iterations++;assert.ok(pager.retainedParts<=2)}while(!result.done&&iterations<100)
+ assert.ok(iterations>1&&iterations<100);assert.equal(result.value.text,reference.read(60).text)
+ const rewind=pager.readBounded(2,1);assert.equal(rewind.done,false,'backward replay is bounded too')
+ let older=rewind;while(!older.done)older=pager.readBounded(2,1)
+ assert.equal(older.value.text,reference.read(2).text)
+ assert.equal(older.value.start,reference.read(2).start,'bounded backwards replay retains exact formatted coordinates')
 })

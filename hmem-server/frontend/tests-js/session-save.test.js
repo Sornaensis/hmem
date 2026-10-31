@@ -1,20 +1,44 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
-import { createEvidenceWriter, installSessionBridge, updateLatestOverlay } from '../src/session-save.js'
+import { createEvidenceWriter, installSessionBridge, updateLatestOverlay, createReaderScrollIntent, indexedCursorRank, indexedCursorKey } from '../src/session-save.js'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const session = bytes => ({id:'s',workspace:'w',state:'terminated',finalBytes:bytes.length,finalSha256:digest(bytes),revision:7})
 const chunk = (row,bytes,offset=0) => ({session:row,offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64')})
 
-test('latest overlay uses logical end and only mutates its own reader host',()=>{
+test('latest overlay requires manual upward intent and only mutates its own reader host',()=>{
  const attrs={},foreign={},host={setAttribute:(key,value)=>{attrs[key]=value}},other={setAttribute:(key,value)=>{foreign[key]=value}}
  const flags={},viewport={scrollTop:900,scrollHeight:1000,clientHeight:100,closest:()=>host,getAttribute:key=>flags[key]}
- updateLatestOverlay(viewport,false);assert.equal(attrs['data-latest-visible'],'true','historical DOM bottom is still earlier history')
- updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'false')
- viewport.scrollTop=200;updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'true')
- viewport.scrollTop=0;viewport.scrollHeight=80;updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'false','a complete fitting conversation needs no control')
- flags['data-latest-pending']='true';updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'true','pending acquisition remains actionable')
+ updateLatestOverlay(viewport,false,false);assert.equal(attrs['data-latest-visible'],'false','initial mounted history does not arm the control')
+ updateLatestOverlay(viewport,false,true);assert.equal(attrs['data-latest-visible'],'true')
+ updateLatestOverlay(viewport,true,true);assert.equal(attrs['data-latest-visible'],'false')
+ viewport.scrollTop=200;updateLatestOverlay(viewport,true,false);assert.equal(attrs['data-latest-visible'],'false','programmatic/layout movement is not manual intent')
+ updateLatestOverlay(viewport,true,true);assert.equal(attrs['data-latest-visible'],'true')
+ viewport.scrollTop=0;viewport.scrollHeight=80;updateLatestOverlay(viewport,true,true);assert.equal(attrs['data-latest-visible'],'false','a complete fitting conversation needs no control')
+ flags['data-latest-pending']='true';updateLatestOverlay(viewport,true,false);assert.equal(attrs['data-latest-visible'],'false','pending acquisition does not arm the control')
+ updateLatestOverlay(viewport,true,true);assert.equal(attrs['data-latest-visible'],'true','a manually historical pending request remains actionable')
  assert.deepEqual(foreign,{});assert.ok(other)
+})
+
+test('reader intent distinguishes actual pre-dispatch wheel, touch and scrollbar motion from owned positions',()=>{
+ const viewport={scrollTop:600,scrollHeight:1000,clientHeight:200,offsetWidth:1000,clientWidth:985,contains:node=>node===viewport,getBoundingClientRect:()=>({right:1000})},intent=createReaderScrollIntent()
+ intent.configure('["w","actor","session","scope",0]');assert.equal(intent.inspect(viewport,false),false)
+ viewport.scrollTop=400;intent.positioned();intent.note({type:'wheel',target:viewport,isTrusted:true,deltaY:-40},viewport);assert.equal(intent.inspect(viewport,false),false,'owned prior movement is not attributed to a later stationary wheel')
+ viewport.scrollTop=360;intent.note({type:'wheel',target:viewport,isTrusted:true,deltaY:-40},viewport);assert.equal(intent.inspect(viewport,false),true,'composited scrolling before wheel dispatch still counts as real movement')
+ viewport.scrollTop=800;intent.clear();intent.inspect(viewport,true)
+ intent.note({type:'touchstart',target:viewport,isTrusted:true,touches:[{clientY:100}]},viewport);viewport.scrollTop=750;intent.note({type:'touchmove',target:viewport,isTrusted:true,touches:[{clientY:150}]},viewport);assert.equal(intent.inspect(viewport,false),true)
+ viewport.scrollTop=800;intent.clear();intent.inspect(viewport,true);intent.note({type:'pointerdown',target:viewport,isTrusted:true,clientX:995},viewport);viewport.scrollTop=740;assert.equal(intent.inspect(viewport,false),true)
+ intent.configure('["different","actor","session","scope",0]');assert.equal(intent.inspect(viewport,false),false)
+ intent.note({type:'keydown',target:viewport,isTrusted:false,key:'ArrowUp'},viewport);viewport.scrollTop=700;assert.equal(intent.inspect(viewport,false),false,'synthetic input cannot arm history')
+ intent.note({type:'keydown',target:viewport,isTrusted:true,key:'ArrowUp'},viewport);viewport.scrollTop=660;assert.equal(intent.inspect(viewport,false),true)
+ intent.configure('["different","actor","session","scope",9]');assert.equal(intent.manual(),true,'same reader authority retirement preserves manual history intent')
+})
+
+test('composite sealed cursors retain exact blocks above Number safe packed ranks',()=>{
+ const cursor='0009007199254740991:0000250',rank=indexedCursorRank(cursor)
+ assert.ok(rank>BigInt(Number.MAX_SAFE_INTEGER));assert.equal(indexedCursorKey(rank),cursor)
+ assert.equal(indexedCursorKey(rank-1n),'0009007199254740991:0000249');assert.equal(indexedCursorKey(rank+1n),'0009007199254740991:0000251')
+ assert.ok(indexedCursorRank('0009007199254740990:9999999')<rank)
 })
 
 test('active latest waits for matching owner generation request and logical tail render',async()=>{
@@ -35,6 +59,26 @@ test('active latest waits for matching owner generation request and logical tail
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
+test('active publication waits for its exact mounted receipt and has a bounded missing-ack disposition',async()=>{
+ for(const matching of [true,false]){
+  const previous=globalThis.requestAnimationFrame,frames=[],events=[];let incoming
+  const attrs={'data-viewer-owner':'owner','data-viewer-generation':'3','data-history-mode':'active','data-window-publication':'0','data-history-loading':'true'},viewport={scrollTop:35,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key] ?? null,getBoundingClientRect:()=>({top:0,bottom:100,height:100}),querySelectorAll:()=>[]}
+  globalThis.requestAnimationFrame=callback=>frames.push(callback)
+  const paint=()=>frames.splice(0).forEach(callback=>callback())
+  try{
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(){}},window:{},now:()=>0})
+   const bytes=Buffer.from('{"text":"One accepted source occurrence"}\n')
+   incoming({stamp:'owner',generation:3,reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true},direction:'tail',follow:false,publication:{request:0,pending:false}});await flush()
+   const publication=events.find(event=>event.kind==='viewer').publication;paint();paint();await flush()
+   assert.equal(events.some(event=>event.kind==='viewer-positioned'),false,'an old DOM cannot release the new publication')
+   if(matching)attrs['data-window-publication']=String(publication)
+   for(let frame=0;frame<12;frame++)paint();await flush()
+   assert.deepEqual(events.filter(event=>event.kind==='viewer-positioned').map(event=>({publication:event.publication,generation:event.generation,failed:event.failed})),[{publication,generation:3,failed:!matching}])
+   assert.equal(viewport.scrollTop,35,'the logical acknowledgment does not invent user movement')
+  }finally{globalThis.requestAnimationFrame=previous}
+ }
+})
+
 test('owned tail positioning preserves follow through finite-window handoffs without rearming historical or stale readers',async()=>{
  const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners=new Map();let incoming,top=900
  const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-before':'0','data-history-after':'64','data-history-latest':'192','data-history-loading':'true'}
@@ -51,11 +95,11 @@ test('owned tail positioning preserves follow through finite-window handoffs wit
   attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow().following,true,'the owned position survives the finite-window scheduling gap')
   viewport.scrollHeight=1200;emit('scroll');await flush();assert.equal(latestFollow().following,true,'newly rendered rows cannot revoke follow before owned tail positioning')
   viewport.scrollHeight=1000
-  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:true});emit('scroll');await flush();assert.equal(latestFollow().following,false,'an old generation position cannot rearm a new read lifetime')
+  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:true});emit('scroll');await flush();assert.equal(latestFollow().manualUp,false,'a generation handoff cannot invent manual upward intent')
   incoming({stamp:'owner',generation:2,reset:null,chunk:{offset:bytes.length,nextOffset:bytes.length*2,dataBase64:bytes.toString('base64'),final:true},direction:'tail',follow:true});paint();await flush()
   emit('wheel',{deltaY:-300});viewport.scrollTop=500;emit('scroll');await flush();assert.equal(latestFollow().following,false,'real above-tail intent pauses follow')
-  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:false});viewport.scrollTop=900;attrs['data-history-loading']='true';emit('keydown',{key:'End'});emit('scroll');await flush();assert.equal(latestFollow().following,false,'End at a historical mounted bottom is not Jump to latest')
-  incoming({stamp:'other',generation:3,reset:null,chunk:null,direction:'tail',follow:true});attrs['data-viewer-owner']='other';attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow().following,false,'an old owner position cannot rearm a new selection')
+  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:false});viewport.scrollTop=900;attrs['data-history-loading']='true';emit('keydown',{key:'End'});emit('scroll');paint();await flush();assert.equal(latestFollow().manualUp,true,'End retains the manual latch until matching latest acknowledgment');assert.ok(events.some(event=>event.kind==='viewer-end'&&event.stamp==='owner'&&event.generation===2),'real scoped End seeks the logical document end after its publication frame')
+  incoming({stamp:'other',generation:3,reset:null,chunk:null,direction:'tail',follow:true});attrs['data-viewer-owner']='other';attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow().manualUp,false,'a new selection starts following without inherited manual intent')
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
@@ -77,12 +121,14 @@ for(const action of ['End','up','historical','generation','owner','programmatic'
   emit('keydown',{key:'End'})
   command({chunk:{offset:bytes.length,nextOffset:bytes.length*2,dataBase64:bytes.toString('base64'),final:true}})
   viewport.scrollHeight=1800
-  if(action==='up'){emit('wheel',{deltaY:-300});viewport.scrollTop=300}
+  if(action==='up'||action==='historical'){viewport.scrollTop=600;emit('scroll');emit('wheel',{deltaY:-300});viewport.scrollTop=300}
   if(action==='programmatic')viewport.scrollTop=300
   if(action==='generation')command({generation:2})
   if(action==='owner'){attrs['data-viewer-owner']='other';command({stamp:'other',generation:2})}
   emit('scroll');await flush()
-  assert.equal(events.filter(event=>event.kind==='viewer-follow').at(-1)?.following,action==='End','the pre-paint inspection preserves only the valid existing follow handoff')
+  const manual=events.filter(event=>event.kind==='viewer-follow').at(-1)?.manualUp
+  if(action==='up'||action==='historical')assert.equal(manual,true,'actual upward movement arms history')
+  else assert.notEqual(manual,true,'a pending End publication or layout handoff cannot invent manual history')
   const before=viewport.scrollTop;paint();await flush()
   assert.equal(viewport.scrollTop,action==='End'?1700:before,'retired or historical work cannot reposition the reader')
  }finally{globalThis.requestAnimationFrame=previous}
@@ -292,6 +338,30 @@ test('queued follow and anchor positioning yield to either scroll direction, dis
   viewport.scrollTop=40;nodeTop=20;send();await flush();const callback=frames.pop()
   incoming({stamp:'different owner',generation:2,reset:null,chunk:null,follow:true});nodeTop+=50;callback();assert.equal(viewport.scrollTop,40)
  }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('a render acknowledgement cannot undo continued native Home movement within the same input intent',async()=>{
+ for(const phase of ['motion','clamp','motion with geometry']){
+ const publicationClamp=phase==='clamp'
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners={};let incoming,leafTop=620
+ const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-before':'100','data-history-after':'1000','data-history-latest':'1000','data-history-loading':'false','data-render-part':'1','data-render-more':'true'}
+ const row={dataset:{offset:'200',blockKey:'200:0'},getAttribute:key=>key==='data-offset'?'200':null,getBoundingClientRect:()=>({top:600-viewport.scrollTop,bottom:1000-viewport.scrollTop,height:400})}
+ const leaf={isConnected:true,dataset:{fragmentPath:'0000000000000000200:0000000:content:0'},querySelector:()=>null,closest:()=>row,getBoundingClientRect:()=>({top:leafTop-viewport.scrollTop,bottom:leafTop+30-viewport.scrollTop,height:30})}
+ const gap={dataset:{fragmentFrom:'0',fragmentTo:'0'},getBoundingClientRect:()=>({top:10,bottom:30,height:20})}
+ const viewport={scrollTop:800,scrollHeight:1000,clientHeight:100,dataset:{get renderPart(){return attrs['data-render-part']}},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),getAttribute:key=>attrs[key] ?? null,setAttribute:(key,value)=>{attrs[key]=value},querySelectorAll:selector=>selector==='[data-fragment-from]'?[gap]:selector==='[data-fragment-path]'?[leaf]:selector==='.session-record,[data-group-key]'||selector==='.session-record'?[row]:[]}
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ const emit=type=>(listeners[type] || []).forEach(handler=>handler({type,target:viewport,key:phase==='motion'?'Home':'PageUp',isTrusted:true}))
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:event=>events.push(event)}}},{document:{getElementById:()=>viewport,addEventListener(type,handler){(listeners[type]??=[]).push(handler)}},window:{},now:()=>0})
+  incoming({stamp:'owner',viewerScope:'owner',generation:1,reset:null,chunk:null,follow:false})
+  emit('keydown');viewport.scrollTop=600;emit('scroll');await flush()
+  assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'an intermediate Home frame starts a presentation refill')
+  if(publicationClamp){viewport.scrollHeight=600;viewport.scrollTop=500;leafTop=510}else {viewport.scrollTop=0;if(phase==='motion with geometry')leafTop=820}
+  attrs['data-render-part']='0'
+  for(let turn=0;turn<5;turn++)frames.splice(0).forEach(callback=>callback())
+  assert.equal(viewport.scrollTop,publicationClamp?490:phase==='motion with geometry'?200:0,publicationClamp?'a provable publication clamp still restores the visible text displacement':phase==='motion with geometry'?'restore only prefix geometry while preserving the continued input displacement':'a genuine Home keeps its start intent through continued movement')
+ }finally{globalThis.requestAnimationFrame=previous}
+ }
 })
 
 test('task/full presentation restoration yields to newer scroll, disclosure and owner intent',async()=>{

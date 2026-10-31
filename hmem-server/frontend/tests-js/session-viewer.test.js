@@ -4,6 +4,18 @@ import { createRecordFramer, decodeBase64, MAX_VIEW_BYTES, MAX_VIEW_ROWS, MAX_OC
 import {copilotRecords,piRecords} from './support/native-session-fixtures.mjs'
 const encode = value => new TextEncoder().encode(value)
 
+test('nonadjacent reads retain only authoritative composed activity ranges and reset at real prose',()=>{
+ const activity=index=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'run_'+index,arguments:'{}'}})+'\n'
+ const first=activity(0),middle=activity(1)+activity(2),prose=JSON.stringify({text:'A real prose transition'})+'\n',later=activity(3),source=encode(first+middle+prose+later),begin=encode(first).length,finish=encode(first+middle).length
+ const initial=createRecordFramer().push(0,source,true),canonical=initial.rows[0].activityAnchors[0]
+ const read=options=>createRecordFramer(begin,{direction:'forward',aligned:true,...options}).push(begin,source.subarray(begin),true).rows
+ const retained=read({runRanges:[{before:'0',after:String(finish),group:canonical}]})
+ assert.deepEqual(retained.slice(0,2).map(row=>row.activityAnchors[0]),[canonical,canonical],'no preceding framer or raw payload cache is required')
+ assert.deepEqual(retained[2].activityAnchors,{})
+ assert.equal(retained[3].activityAnchors[0],`${encode(first+middle+prose).length}:0`,'the exact half-open range does not cross real prose')
+ assert.equal(read({})[0].activityAnchors[0],`${begin}:0`,'retired authority does not retain a former run range')
+})
+
 test('directional reader pages traverse every interleaved occurrence without reserve gaps',()=>{
  const values=Array.from({length:720},(_,i)=>i%7===0?{type:'event_msg',payload:{type:'agent_message',message:`message ${i}`}}:{type:'event_msg',payload:{type:'reader_activity',index:i}})
  const bytes=encode(values.map(value=>JSON.stringify(value)+'\r\n').join(''))

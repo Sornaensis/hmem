@@ -58,7 +58,7 @@ stay hidden. Native model fields do not replace authoritative runtime metadata.
 Meaningful unhandled Codex `event_msg` records become Activity events labelled by
 their payload type. Their original payload tokens expand as inert formatted JSON,
 preserving numeric precision, exponent spellings, duplicate keys and string escapes,
-with bounded continuation for large or deeply nested payloads. Supported messages
+with bounded scroll-driven continuation for large or deeply nested payloads. Supported messages
 and reasoning keep their existing presentation; token counts and routine Codex
 task/turn metadata stay hidden. Sealed group indexes retain the complete run's
 final time independently of the current page or search result. Derived index
@@ -66,7 +66,7 @@ version 3 invalidates old summaries; reload rebuilds them from verified evidence
 without changing transcript bytes or receipts.
 
 Unfamiliar meaningful records, content blocks and tool variants use labelled,
-expandable JSON payloads with the same bounded continuation controls. Raw source
+expandable JSON payloads with the same continuous scroll behavior. Raw source
 tokens are preserved where available; an unfamiliar tool payload does not imply
 execution. Image/file/audio attachments expose only descriptive metadata, not
 encoded bodies. Original evidence remains available through verified downloads.
@@ -157,27 +157,48 @@ header-version scalar, and archive pieces retain it for identical rehydration.
   that preserve the session epoch. Physical request occupancy remains unchanged.
   Hierarchy restoration retains signed displacement above the hierarchy origin;
   row lookups and native scrolling retain their independent nonnegative bounds.
-- Live reader pages contain a contiguous source span with at most 100
+- Live acquisition batches contain a contiguous source span with at most 100
   prose-bearing and 100 activity-only occurrences, each category bounded to
   2 MiB of original record bytes (combined 200/4 MiB), plus a 1 MiB incomplete
   record carry. Hidden metadata and paired event envelopes consume neither
   visible budget. Initial tail demand reads 64 KiB and can expand to a bounded
-  2 MiB lookback when it starts inside a large record. Earlier and newer boundary
-  demand keeps every source occurrence reachable through record-aligned pages;
-  forward framing yields before a new occurrence could be discarded. Transport
+  2 MiB lookback when it starts inside a large record. Both reader surfaces open
+  at latest and automatically backfill older records when the viewport is short
+  or the user scrolls upward. Overlapping batches compose one ordered conversation;
+  bounded refetchable gaps retain omitted source intervals and collapsed activity
+  counts without retaining the whole session. Transport
   remains in 64 KiB chunks under the shared two-request admission. Usable batches
   publish progressively; pending history and failed requests preserve the loaded
-  page. Bounded overlap and disclosure flags preserve reading anchors through
-  history loads, appends, resizing and same-authority surface transfers. Only
-  readers at the logical tail follow appends. Original evidence bytes and bounded
+  conversation. Stable occurrence and text-fragment keys preserve reading anchors
+  through history loads, appends, resizing and same-authority surface transfers.
+  Readers follow appends by default and resume following upon returning to the
+  logical tail. Original evidence bytes and bounded
   downloads are independent of this presentation retention.
 
-Each shared reader shows **↓ Jump to latest ↓** above the logical current end,
-including at the bottom of a historical page. It acquires the current active
-tail or verified final archive page and presentation part before positioning
-its own viewport. Active following then resumes. The control hides at the
-logical end, remains actionable while loading, and reports latest-navigation
-failures with an explicit retry through the same control.
+When an active reader becomes verified evidence, one same-authority reading
+snapshot preserves the exact source block, text fragment and pixel displacement.
+Coalesced native blocks keep their original indices, including hidden siblings;
+the verified reader seeks that composite cursor and restores the fragment after
+required hydration. Open activity disclosures and nested code scrolling transfer
+with the reading point. JSON uses an exact formatted-text coordinate across
+bounded verified body parts, preserving raw token spellings. New input, selection
+or authority supersedes the snapshot.
+
+Each shared reader shows **↓ Jump to latest ↓** only after scoped manual input
+actually scrolls upward. Loading, layout changes, disclosures and programmatic
+positioning do not reveal it. Activating it or pressing End in the conversation
+acquires the active tail or verified archive end, positions the matching rendered
+content and resumes following. Manual scrolling back to the logical end also
+hides it. Acquisition failures retain an ordinary inline Retry, independently of
+whether manual scrolling has made Jump visible.
+
+One rendered window bounds normal Markdown to 1 MiB of charged text/node cost;
+structured exact output uses 512 KiB. Original Markdown context and the visible
+text fragment survive automatic presentation continuation. Unknown-event JSON
+inspectors receive compact raw source through a private DOM property, preserve
+number/string spellings and duplicate keys, and mount at most 256 KiB each,
+charged to the reader window. Their keyed token parts and refetchable gaps scroll
+continuously; inner Home/End do not invoke the outer reader's latest acquisition.
 
 Session titles are distinct from transcript format labels. The list is a bounded
 preorder of matching active sessions, with at most three levels of indentation.
@@ -192,13 +213,12 @@ so a selection beyond the current option page remains visible. Errors preserve
 selection; successful authority retires only deleted, foreign-workspace or
 out-of-project selections, while valid zero-match activity scopes remain selected.
 
-The workspace completed reader omits archive search and raw-byte jumps. Its
-ordinary bounded paging controls sit in the footer, with availability derived
-from the accepted local page request and result. Runtime identity and compact
-verification feedback precede the transcript without a growing utility area.
-Embedded readers retain their existing search, offset and paging controls.
-Changing the existing reader owner resets local query/offset options; ordinary
-paging replaces them, while body/disclosure hydration preserves its origin page.
+Both conversation surfaces omit manual paging, archive search and raw-byte jumps.
+Verified index, render and body boundaries are crossed automatically while
+scrolling, with the current text anchor protected. Runtime identity and compact
+verification feedback precede the transcript; cancellation and recoverable errors
+retain their ordinary controls. Session catalogue pagination and original-evidence
+downloads remain independent of conversation scrolling.
 
 Direct links use `#tab=sessions&session=<UUID>`. Adding `task=<UUID>` keeps the
 workspace list scoped to that task through selection, close and browser history.

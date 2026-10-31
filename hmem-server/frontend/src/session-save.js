@@ -530,7 +530,14 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   let viewerScope = '', presentation = null
   let historyTransition = false, boundaryKey = '', restoreRevision = 0, resizeViewport=null, resizeSnapshot=null, resizeReady=false, lastFollowing=false, boundaryIntent=0
   let disclosures = new Map()
-  let latestJump=null,latestIntent=0
+  let latestJump=null,latestIntent=0,followPosition=null
+  function positionAtTail(viewport) {
+    viewport.scrollTop=viewport.scrollHeight
+    // Its asynchronous scroll notification may arrive between finite byte
+    // windows. Bind that owned position to current authority and user intent.
+    followPosition={viewport,stamp:viewerStamp,generation,intent:viewerIntent,top:viewport.scrollTop}
+    captureResize()
+  }
   let latestHost=null
   document.addEventListener('click',event=>{
     const button=event.target?.closest?.('.session-jump-latest')
@@ -546,7 +553,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(jump.intent!==latestIntent){latestJump=null;send({kind:'latest-cancelled',stamp:jump.stamp,generation:jump.generation,request:jump.request});return}
     if(viewport.getAttribute('data-history-error')==='true'){latestJump=null;send({kind:'latest-error',stamp:jump.stamp,generation:jump.generation,request:jump.request});return}
     if(logicalEnd && viewport.getAttribute('data-history-loading')!=='true'){
-      viewport.scrollTop=viewport.scrollHeight
+      positionAtTail(viewport)
       viewport.focus?.({preventScroll:true})
       latestJump=null;send({kind:'latest-complete',stamp:jump.stamp,generation:jump.generation,request:jump.request})
     }
@@ -583,7 +590,11 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     inspectActiveLatest()
     const atEnd=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=48
     const logicalEnd=Number(attr('after'))>=Number(attr('latest'))
-    if(event)send({kind:'viewer-follow',stamp:viewerStamp,generation,following:atEnd&&logicalEnd})
+    const ownedPosition=followPosition?.viewport===viewport && followPosition.stamp===viewerStamp && followPosition.generation===generation && followPosition.intent===viewerIntent && Math.abs(viewport.scrollTop-followPosition.top)<=4
+    const continuing=lastFollowing && (attr('loading')==='true' || ownedPosition)
+    // Replacing rows can grow the DOM before the owned tail RAF runs. An
+    // unchanged, intent-stamped position still belongs to that handoff.
+    if(event)send({kind:'viewer-follow',stamp:viewerStamp,generation,following:(atEnd&&logicalEnd)||(continuing&&(atEnd||ownedPosition))})
     if(attr('loading')==='true')return
     if(viewerIntent<=boundaryIntent)return
     const edge=viewport.scrollTop<=96 && Number(attr('before'))>0 ? 'older' : atEnd&&!logicalEnd ? 'newer' : ''
@@ -607,7 +618,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(!resizeReady){resizeReady=true;captureResize();return}
     const saved=resizeSnapshot,viewport=resizeViewport
     if(!saved || saved.stamp!==viewerStamp || saved.generation!==generation || saved.intent!==viewerIntent || viewport!==document.getElementById?.('session-records'))return
-    if(lastFollowing&&saved.tail)viewport.scrollTop=viewport.scrollHeight
+    if(lastFollowing&&saved.tail)positionAtTail(viewport)
     else {
       const bounds=viewport.getBoundingClientRect(),nodes=[...viewport.querySelectorAll('[data-block-key]')]
       for(const anchor of saved.anchors){const node=nodes.find(node=>node.getAttribute('data-block-key')===anchor.key);if(node){viewport.scrollTop+=node.getBoundingClientRect().top-bounds.top-anchor.top;break}}
@@ -786,6 +797,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       viewerStamp = command.stamp
       latestJump=null
       latestHost=null
+      followPosition=null
       if(!continuing){framer=null;presentation=null;disclosures.clear();boundaryKey=''}
       generation = -1
       if(continuing && presentation?.scope===viewerScope){
@@ -881,7 +893,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       if (command.follow && atTail) requestAnimationFrame(() => {
         if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return
         const viewport = document.getElementById('session-records')
-        if (viewport && Math.abs(viewport.scrollTop-previousTop)<=4) viewport.scrollTop = viewport.scrollHeight
+        if (viewport && Math.abs(viewport.scrollTop-previousTop)<=4) positionAtTail(viewport)
       })
       else if (anchors.length) requestAnimationFrame(()=>{
         if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return

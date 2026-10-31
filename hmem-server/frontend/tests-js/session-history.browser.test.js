@@ -5,6 +5,29 @@ import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
 const until=async fn=>{const end=Date.now()+15000;while(Date.now()<end){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,25))}throw Error('Progressive conversation did not converge')}
 const state=page=>page.locator('#session-records').evaluate(node=>({before:Number(node.dataset.historyBefore),after:Number(node.dataset.historyAfter),latest:Number(node.dataset.historyLatest),loading:node.dataset.historyLoading==='true',offsets:[...node.querySelectorAll('.session-record')].map(row=>Number(row.dataset.offset))}))
 
+test('progressive large hydration and multi-window bursts preserve follow while real historical input pauses it',{timeout:60000},async()=>{
+ const record=(size,marker)=>{const head=JSON.stringify({text:marker}).slice(0,-2);return Buffer.from(head+'x'.repeat(size-Buffer.byteLength(head)-3)+'"}\n')}
+ const prefix=Buffer.concat(Array.from({length:16},(_,i)=>record(65536,`Initial ${i} `))),burst=Buffer.concat(Array.from({length:32},(_,i)=>record(8192,`Burst ${i} `)))
+ const h=await openSessionExplorer({transcriptBytes:prefix}),{page}=h;let hold=false,releaseRead=null
+ const settled=()=>page.locator('#session-records').evaluate(node=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4)
+ try{
+  await page.route('**/sessions/**/transcript**',async route=>{if(hold){hold=false;await new Promise(resolve=>{releaseRead=resolve})}else await new Promise(resolve=>setTimeout(resolve,20));await route.fallback()})
+  await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id);await page.locator('.session-record').first().waitFor()
+  const viewport=page.locator('#session-records');assert.equal(await viewport.getAttribute('data-history-loading'),'true')
+  await viewport.press('End');await until(settled);assert.equal((await state(page)).after,prefix.length)
+  await h.appendBytes(burst);await until(settled);assert.equal((await state(page)).after,prefix.length+burst.length)
+  hold=true;await h.appendBytes(burst);await until(async()=>releaseRead!==null)
+  await viewport.hover();await page.mouse.wheel(0,-1400)
+  await until(async()=>await viewport.evaluate(node=>node.scrollHeight-node.scrollTop-node.clientHeight>48))
+  const anchor=await viewport.evaluate(node=>{const bounds=node.getBoundingClientRect(),row=[...node.querySelectorAll('[data-block-key]')].find(row=>row.getBoundingClientRect().bottom>bounds.top);return {key:row.dataset.blockKey,top:row.getBoundingClientRect().top-bounds.top}})
+  releaseRead();releaseRead=null;await until(async()=>!(await state(page)).loading)
+  const historical=await state(page);assert.ok(historical.after<historical.latest,'historical input retires further live-window demand')
+  assert.ok(await viewport.evaluate((node,anchor)=>{const row=[...node.querySelectorAll('[data-block-key]')].find(row=>row.dataset.blockKey===anchor.key);return row&&Math.abs(row.getBoundingClientRect().top-node.getBoundingClientRect().top-anchor.top)<=4},anchor))
+  await page.getByRole('button',{name:'Jump to latest',exact:true}).click();await until(settled)
+  assert.ok(h.peak()<=2);assert.ok(h.reads.filter(read=>read.path.endsWith('/transcript')).every(read=>Number(new URLSearchParams(read.query).get('limit'))<=65536));assert.deepEqual(h.errors,[])
+ }finally{releaseRead?.();await h.close()}
+})
+
 test('Jump to latest is shared by dock and workspace and reacquires the logical active tail',{timeout:60000},async()=>{
  const bytes=Buffer.from(Array.from({length:420},(_,i)=>JSON.stringify({text:`Latest occurrence ${i} `+'word '.repeat(25)})+'\n').join(''))
  const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h

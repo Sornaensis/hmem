@@ -35,6 +35,30 @@ test('active latest waits for matching owner generation request and logical tail
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
+test('owned tail positioning preserves follow through finite-window handoffs without rearming historical or stale readers',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners=new Map();let incoming,top=900
+ const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-before':'0','data-history-after':'64','data-history-latest':'192','data-history-loading':'true'}
+ const viewport={scrollHeight:1000,clientHeight:100,get scrollTop(){return top},set scrollTop(value){top=Math.max(0,Math.min(900,value))},getAttribute:key=>attrs[key] ?? null}
+ const emit=(name,extra={})=>(listeners.get(name)||[]).forEach(handler=>handler({type:name,target:viewport,...extra}))
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ const paint=()=>{for(let i=0;i<8&&frames.length;i++)frames.splice(0).forEach(callback=>callback())}
+ const latestFollow=()=>events.filter(event=>event.kind==='viewer-follow').at(-1)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(name,handler){listeners.set(name,[...(listeners.get(name)||[]),handler])}},window:{},now:()=>0})
+  const bytes=Buffer.from('{"text":"Progressive tail"}\n')
+  incoming({stamp:'owner',generation:1,reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true},direction:'tail',follow:true});paint();await flush()
+  emit('scroll');await flush();assert.equal(latestFollow().following,true,'following survives an incomplete logical tail while loading')
+  attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow().following,true,'the owned position survives the finite-window scheduling gap')
+  viewport.scrollHeight=1200;emit('scroll');await flush();assert.equal(latestFollow().following,true,'newly rendered rows cannot revoke follow before owned tail positioning')
+  viewport.scrollHeight=1000
+  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:true});emit('scroll');await flush();assert.equal(latestFollow().following,false,'an old generation position cannot rearm a new read lifetime')
+  incoming({stamp:'owner',generation:2,reset:null,chunk:{offset:bytes.length,nextOffset:bytes.length*2,dataBase64:bytes.toString('base64'),final:true},direction:'tail',follow:true});paint();await flush()
+  emit('wheel',{deltaY:-300});viewport.scrollTop=500;emit('scroll');await flush();assert.equal(latestFollow().following,false,'real above-tail intent pauses follow')
+  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:false});viewport.scrollTop=900;attrs['data-history-loading']='true';emit('keydown',{key:'End'});emit('scroll');await flush();assert.equal(latestFollow().following,false,'End at a historical mounted bottom is not Jump to latest')
+  incoming({stamp:'other',generation:3,reset:null,chunk:null,direction:'tail',follow:true});attrs['data-viewer-owner']='other';attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow().following,false,'an old owner position cannot rearm a new selection')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
 test('streams exact bytes and incremental SHA256 before committing writable',async()=>{
   const bytes=Buffer.from('"λ"\r\n[true,null]\n'+ '"'+ 'x'.repeat(200000)+'"\n'), row=session(bytes)
   const independent=createHash('sha256'); let count=0, closed=false, aborted=false

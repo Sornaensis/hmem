@@ -538,6 +538,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     followPosition={viewport,stamp:viewerStamp,generation,intent:viewerIntent,top:viewport.scrollTop}
     captureResize()
   }
+  const pendingTail = viewport => lastFollowing && followPosition?.pending===true && followPosition.viewport===viewport && followPosition.stamp===viewerStamp && followPosition.generation===generation && followPosition.intent===viewerIntent && Math.abs(viewport.scrollTop-followPosition.top)<=4
   let latestHost=null
   document.addEventListener('click',event=>{
     const button=event.target?.closest?.('.session-jump-latest')
@@ -576,7 +577,11 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   for(const event of ['click','scroll','toggle'])document.addEventListener(event,rememberPresentation,true)
   const noteViewerIntent = event => {
     const viewport=document.getElementById?.('session-records')
-    if(viewport && (event.target===viewport || viewport.contains?.(event.target))){viewerIntent++;if(event.type!=='toggle')latestIntent++}
+    if(viewport && (event.target===viewport || viewport.contains?.(event.target))){
+      const continuingEnd=event.type==='keydown' && event.key==='End' && pendingTail(viewport)
+      viewerIntent++;if(event.type!=='toggle')latestIntent++
+      if(continuingEnd)followPosition.intent=viewerIntent
+    }
   }
   // A scroll notification may lag the position change or come from browser
   // anchoring. Actual input/disclosure events own intent; the position guard
@@ -863,7 +868,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const bytes = decodeBase64(command.chunk.dataBase64)
       if (bytes.length !== command.chunk.nextOffset-command.chunk.offset) throw new Error('range_length')
       const viewport = document.getElementById('session-records')
-      const atTail = !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48
+      const atTail = !viewport || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48 || pendingTail(viewport)
       const previousTop = viewport?.scrollTop || 0
       const anchors = (historyTransition || !atTail) && viewport?.getBoundingClientRect && viewport?.querySelectorAll ? (()=>{
         const bounds = viewport.getBoundingClientRect()
@@ -883,6 +888,10 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       // live burst) advances the bounded byte handshake without painting and
       // following every intermediate 64 KiB history fragment.
       if ((!result.rows.length && (!command.chunk.final || result.pendingBytes>0)) || (!command.chunk.final && (!command.direction || (historyTransition && command.direction==='tail')))) { send({kind:'viewer-progress',...captured,through:result.through,notice:result.notice}); return }
+      // Own the pending position before publication can grow the DOM. End
+      // transfers existing follow intent; other input still retires it.
+      const pendingFollow=command.follow && atTail ? {viewport,...captured,top:previousTop,pending:true} : null
+      if(pendingFollow)followPosition=pendingFollow
       send({kind:'viewer',...captured,...result})
       const revision=++restoreRevision
       if(disclosures.size)requestAnimationFrame(()=>{
@@ -890,10 +899,11 @@ export function installSessionBridge(app, { document = globalThis.document, wind
         const rendered=document.getElementById?.('session-records')
         for(const node of rendered?.querySelectorAll?.('details') || []){const key=disclosureKey(node);if(disclosures.has(key))node.open=disclosures.get(key)}
       })
-      if (command.follow && atTail) requestAnimationFrame(() => {
-        if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return
+      if (pendingFollow) requestAnimationFrame(() => {
+        if (!lastFollowing || followPosition!==pendingFollow || viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== pendingFollow.intent) return
         const viewport = document.getElementById('session-records')
-        if (viewport && Math.abs(viewport.scrollTop-previousTop)<=4) positionAtTail(viewport)
+        if (viewport && (!pendingFollow.viewport || viewport===pendingFollow.viewport) && Math.abs(viewport.scrollTop-pendingFollow.top)<=4) positionAtTail(viewport)
+        else followPosition=null
       })
       else if (anchors.length) requestAnimationFrame(()=>{
         if (viewerStamp !== captured.stamp || generation !== captured.generation || viewerIntent !== captured.intent) return

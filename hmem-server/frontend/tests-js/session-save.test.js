@@ -59,6 +59,35 @@ test('owned tail positioning preserves follow through finite-window handoffs wit
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
+for(const action of ['End','up','historical','generation','owner','programmatic'])test(`pre-first-frame tail handoff preserves only current following End intent: ${action}`,async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners=new Map();let incoming,top=0
+ const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-before':'0','data-history-after':'64','data-history-latest':'192','data-history-loading':'true'}
+ const viewport={scrollHeight:100,clientHeight:100,get scrollTop(){return top},set scrollTop(value){top=Math.max(0,Math.min(this.scrollHeight-this.clientHeight,value))},getAttribute:key=>attrs[key] ?? null}
+ const emit=(type,extra={})=>(listeners.get(type)||[]).forEach(handler=>handler({type,target:viewport,...extra}))
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ const paint=()=>{for(let turn=0;turn<8&&frames.length;turn++)frames.splice(0).forEach(callback=>callback())}
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(type,handler){listeners.set(type,[...(listeners.get(type)||[]),handler])}},window:{},now:()=>0})
+  const bytes=Buffer.from('{"text":"First usable page"}\n'),following=action!=='historical'
+  const command=extra=>incoming({stamp:'owner',generation:1,reset:null,chunk:null,direction:'tail',follow:following,...extra})
+  command({reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true}})
+  viewport.scrollHeight=1000
+  // No positioning callback has run. End arrives before the next usable
+  // chunk grows the DOM, and its inspection also precedes the tail RAF.
+  emit('keydown',{key:'End'})
+  command({chunk:{offset:bytes.length,nextOffset:bytes.length*2,dataBase64:bytes.toString('base64'),final:true}})
+  viewport.scrollHeight=1800
+  if(action==='up'){emit('wheel',{deltaY:-300});viewport.scrollTop=300}
+  if(action==='programmatic')viewport.scrollTop=300
+  if(action==='generation')command({generation:2})
+  if(action==='owner'){attrs['data-viewer-owner']='other';command({stamp:'other',generation:2})}
+  emit('scroll');await flush()
+  assert.equal(events.filter(event=>event.kind==='viewer-follow').at(-1)?.following,action==='End','the pre-paint inspection preserves only the valid existing follow handoff')
+  const before=viewport.scrollTop;paint();await flush()
+  assert.equal(viewport.scrollTop,action==='End'?1700:before,'retired or historical work cannot reposition the reader')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
 test('streams exact bytes and incremental SHA256 before committing writable',async()=>{
   const bytes=Buffer.from('"λ"\r\n[true,null]\n'+ '"'+ 'x'.repeat(200000)+'"\n'), row=session(bytes)
   const independent=createHash('sha256'); let count=0, closed=false, aborted=false

@@ -303,7 +303,8 @@ Reading above the tail preserves a visible occurrence anchor; following and
 anchor callbacks yield to newer viewer interaction and owner/generation changes.
 Changing the session, dock owner, workspace or authorization retires presentation.
 Intermediate `viewer-progress` acknowledgements carry only the guarded cursor;
-only the finite window's final acknowledgement decodes a replacement row list.
+usable `viewer` batches can replace the bounded page before the captured end.
+Batches containing only an incomplete record keep the displayed conversation intact.
 Transport Retry keeps its failed cursor. Decode Retry keeps displayed rows while
 reframing at most the current 2 MiB finite tail, never all elapsed session bytes.
 

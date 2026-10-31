@@ -144,6 +144,9 @@ for(const [format,native,first]of[['Copilot',copilotRecords,'Inspect café λ�
   phase='open native live reader'
   await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a[href*="'+h.active.id+'"]').click();await page.getByText(first,{exact:true}).waitFor()
   phase='assert live native disclosures';await assertNativeContent(page,format)
+  phase='restore explicit live follow after disclosure inspection'
+  const latest=page.getByRole('button',{name:'Jump to latest',exact:true});await latest.waitFor({state:'visible'});await latest.click()
+  await page.waitForFunction(()=>{const node=document.getElementById('session-records');return node.dataset.latestPending==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4})
   phase='append and resync'
   const appended=format+' appended native message';await h.appendRecords(nativeMessage(format,1000,appended));await page.getByText(appended,{exact:true}).waitFor();await resync(h);await page.getByText(appended,{exact:true}).waitFor()
   phase='open task dock';await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle();await page.getByRole('button',{name:'Expand All',exact:true}).click();await h.scrollTo('task:'+h.fixture.tasks[0].id);const task=page.locator('#entity-'+h.fixture.tasks[0].id),agent=task.locator(':scope > .card-header .task-sessions-icon');await until(()=>agent.isEnabled());await agent.click();await task.getByText(appended,{exact:true}).waitFor()

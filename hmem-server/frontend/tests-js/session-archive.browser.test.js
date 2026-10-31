@@ -1835,6 +1835,16 @@ test('crashed private generations recover without deleting a second live tab own
 test('known credential switch and authorization loss synchronously retire visible local evidence',{timeout:60000},async()=>{
   const h=await openSessionExplorer();let release
   try {
+    await h.page.addInitScript(()=>{
+      const Native=Worker
+      window.holdArchivePage=false
+      window.Worker=class extends Native{postMessage(message,transfer){
+        if(window.holdArchivePage&&message.kind==='page'){
+          window.holdArchivePage=false
+          window.releaseArchivePage=discard=>{window.releaseArchivePage=null;if(!discard)super.postMessage(message,transfer)}
+        }else super.postMessage(message,transfer)
+      }}
+    })
     await h.page.route('**/hmem-runtime-config.js',route=>route.fulfill({contentType:'application/javascript',body:"window.HMEM_CONFIG={authMode:'local',apiUrl:window.location.origin,wsUrl:'ws://fixture.invalid/api/v1/ws',authTokenStorage:'local'};"}))
     const raw=h.content.get(h.saved.id),gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip);let switched=false
     const gate=new Promise(resolve=>{release=resolve})
@@ -1849,9 +1859,16 @@ test('known credential switch and authorization loss synchronously retire visibl
     await group.locator('.session-content-tool pre').first().waitFor()
     assert.equal(await h.page.locator('.session-event-inspector,.session-inspect-event,.session-ancestor-path').count(),0)
     assert.equal(await h.page.locator('#session-records').evaluate(node=>node.parentElement.tagName),'SECTION')
+    await h.page.evaluate(()=>{window.holdArchivePage=true})
+    await group.locator('.session-content-tool').first().locator(':scope > summary').click()
+    await group.locator('.session-content-tool').first().locator(':scope > summary').click()
+    await h.page.waitForFunction(()=>typeof window.releaseArchivePage==='function')
+    await h.page.getByRole('button',{name:'Cancel',exact:true}).waitFor({state:'visible'})
+    assert.ok(await h.page.locator('#session-records').evaluate(node=>node.children.length>0),'busy local navigation retains verified messages before cancellation')
     const cancelled=await h.page.evaluate(()=>{document.querySelector('[data-sealed-action="cancel"]').click();return {records:document.getElementById('session-records').children.length,inspector:document.querySelector('.session-inspected-event')?.children.length || 0}})
     assert.deepEqual(cancelled,{records:0,inspector:0})
     await h.page.getByText('Archive loading cancelled.',{exact:true}).waitFor()
+    await h.page.evaluate(()=>window.releaseArchivePage?.(true))
     await h.page.locator('.session-sealed-viewer').getByRole('button',{name:'Retry',exact:true}).click()
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     await group.locator(':scope > summary').click()
@@ -1869,10 +1886,10 @@ test('known credential switch and authorization loss synchronously retire visibl
     assert.equal(await h.page.evaluate(()=>document.querySelector('.session-inspected-event')?.children.length || 0),0)
     assert.deepEqual(h.errors,[],'clearing and reopening transcript details must not corrupt Elm virtual DOM ownership')
     assert.ok(!h.reads.some(row=>row.path.endsWith('/evidence')))
-  }finally{release?.();await h.close()}
+  }finally{release?.();await h.page.evaluate(()=>window.releaseArchivePage?.(true)).catch(()=>{});await h.close()}
 })
 
-test('actual native file-close failure blocks replacement and remains explicit after Retry',{timeout:60000},async()=>{
+test('actual native file-close failure blocks replacement and requires reload',{timeout:60000},async()=>{
   const h=await openSessionExplorer()
   try {
     await h.page.addInitScript(()=>{
@@ -1884,7 +1901,7 @@ test('actual native file-close failure blocks replacement and remains explicit a
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.getByRole('alert').filter({hasText:'Archive cleanup could not be confirmed'}).waitFor()
     assert.equal(await h.page.evaluate(()=>window.createdArchiveWorkers),1)
-    await h.page.getByRole('button',{name:'Retry',exact:true}).click()
+    assert.equal(await h.page.getByRole('button',{name:'Retry',exact:true}).count(),0,'unconfirmed cleanup has no in-place retry')
     await h.page.waitForTimeout(100)
     await h.page.getByRole('alert').filter({hasText:'Archive cleanup could not be confirmed'}).waitFor({timeout:2000})
     assert.equal(await h.page.evaluate(()=>window.createdArchiveWorkers),1)

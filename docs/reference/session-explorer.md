@@ -172,6 +172,13 @@ header-version scalar, and archive pieces retain it for identical rehydration.
   readers at the logical tail follow appends. Original evidence bytes and bounded
   downloads are independent of this presentation retention.
 
+Each shared reader shows **↓ Jump to latest ↓** above the logical current end,
+including at the bottom of a historical page. It acquires the current active
+tail or verified final archive page and presentation part before positioning
+its own viewport. Active following then resumes. The control hides at the
+logical end, remains actionable while loading, and reports latest-navigation
+failures with an explicit retry through the same control.
+
 Session titles are distinct from transcript format labels. The list is a bounded
 preorder of matching active sessions, with at most three levels of indentation.
 Missing or excluded parents appear as compact ancestor context, not inactive

@@ -22,7 +22,24 @@ for(const dock of [false,true])test(`initial ${dock?'task dock':'Sessions list a
   const prose=page.getByText('Visible latest agent response',{exact:true}),group=page.locator('.session-activity-group').last();await group.locator(':scope > summary').click();await group.evaluate(node=>window.busyGroup=node);await prose.evaluate(node=>window.busyProse=node)
   const latest=await group.locator('article').last().getAttribute('data-offset');await until(async()=>await group.locator('article').last().getAttribute('data-offset')!==latest)
   assert.equal(await page.evaluate(()=>window.busyGroup.isConnected&&window.busyGroup.open&&window.busyProse.isConnected),true)
-  assert.ok(h.reads.filter(row=>row.path.endsWith('/transcript')).length>=32);assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+  const reads=h.reads.filter(row=>row.path.endsWith('/transcript'))
+  assert.ok(reads.length>0&&reads.every(row=>Number(new URLSearchParams(row.query).get('limit'))<=65536),'progressive latest acquisition keeps each request bounded')
+  running=false;await producer
+  await until(()=>page.locator('#session-records').evaluate((node,end)=>Number(node.dataset.historyLatest)>=end,h.active.committed_bytes))
+  const jump=page.getByRole('button',{name:'Jump to latest',exact:true});if(await jump.isVisible())await jump.click()
+  await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)))
+  const expected=[];let offset=0
+  for(const line of h.content.get(h.active.id).toString().trimEnd().split('\n')){expected.push(offset);offset+=Buffer.byteLength(line+'\n')}
+  const visited=new Set(),collect=async()=>{for(const offset of await page.locator('#session-records .session-record').evaluateAll(nodes=>nodes.map(node=>Number(node.dataset.offset))))visited.add(offset)}
+  await collect()
+  for(let pages=0;await page.locator('#session-records').evaluate(node=>Number(node.dataset.historyBefore)>0);pages++){
+   assert.ok(pages<60,'earlier pages make bounded progress across the complete busy source')
+   const before=await page.locator('#session-records').getAttribute('data-history-before')
+   await page.getByRole('button',{name:'Earlier messages',exact:true}).click()
+   await until(()=>page.locator('#session-records').evaluate((node,before)=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyBefore)<Number(before),before));await collect()
+  }
+  assert.deepEqual([...visited].sort((a,b)=>a-b),expected,'every source occurrence remains reachable in order beyond the initial byte and row limits')
+  assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{running=false;await producer;await h.close()}
 })
 test('membership preserves an immutable session download while its native write acknowledgement is pending',{timeout:20000},async()=>{

@@ -1357,6 +1357,9 @@ type alias SessionsModel =
     , windowAligned : Bool
     , historyBefore : Int
     , historyAfter : Int
+    , latestRequest : Int
+    , latestPending : Bool
+    , latestError : Maybe String
     , pending : Bool
     , rows : List SessionRecord
     , notice : String
@@ -1399,7 +1402,7 @@ type alias SessionRecord =
 emptySessionsModel : SessionsModel
 emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, today = "", owned = []
-    , filters = Api.workspaceSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, pending = False, rows = [], notice = "", error = Nothing, now = 0
+    , filters = Api.workspaceSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, latestRequest = 0, latestPending = False, latestError = Nothing, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
     , sealed = emptySealedSessionView
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, taskAssociations = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
@@ -1539,6 +1542,7 @@ type Msg
     | SessionsFollow Bool
     | SessionsOlder
     | SessionsNewer
+    | SessionsJumpLatest
     | SessionsBridgeEvent Encode.Value
     | SessionActivityTick Time.Posix
     | SessionActivityVisibility Bool

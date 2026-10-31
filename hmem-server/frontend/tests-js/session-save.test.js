@@ -1,10 +1,39 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
-import { createEvidenceWriter, installSessionBridge } from '../src/session-save.js'
+import { createEvidenceWriter, installSessionBridge, updateLatestOverlay } from '../src/session-save.js'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const session = bytes => ({id:'s',workspace:'w',state:'terminated',finalBytes:bytes.length,finalSha256:digest(bytes),revision:7})
 const chunk = (row,bytes,offset=0) => ({session:row,offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64')})
+
+test('latest overlay uses logical end and only mutates its own reader host',()=>{
+ const attrs={},foreign={},host={setAttribute:(key,value)=>{attrs[key]=value}},other={setAttribute:(key,value)=>{foreign[key]=value}}
+ const flags={},viewport={scrollTop:900,scrollHeight:1000,clientHeight:100,closest:()=>host,getAttribute:key=>flags[key]}
+ updateLatestOverlay(viewport,false);assert.equal(attrs['data-latest-visible'],'true','historical DOM bottom is still earlier history')
+ updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'false')
+ viewport.scrollTop=200;updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'true')
+ viewport.scrollTop=0;viewport.scrollHeight=80;updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'false','a complete fitting conversation needs no control')
+ flags['data-latest-pending']='true';updateLatestOverlay(viewport,true);assert.equal(attrs['data-latest-visible'],'true','pending acquisition remains actionable')
+ assert.deepEqual(foreign,{});assert.ok(other)
+})
+
+test('active latest waits for matching owner generation request and logical tail render',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[];let incoming
+ const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-viewer-generation':'4','data-latest-request':'1','data-history-after':'50','data-history-latest':'100','data-history-loading':'false'}
+ const viewport={scrollTop:20,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key] ?? null}
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ const paint=()=>{for(let turn=0;turn<4&&frames.length;turn++)frames.splice(0).forEach(callback=>callback())}
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(){}},window:{},now:()=>0})
+  const command=(extra={})=>incoming({stamp:'owner',generation:5,reset:null,chunk:null,latest:{request:2,pending:true},...extra})
+  command();paint();await flush();assert.equal(viewport.scrollTop,20)
+  attrs['data-viewer-generation']='5';attrs['data-latest-request']='2';command();paint();await flush();assert.equal(viewport.scrollTop,20,'historical mounted bottom cannot complete logical latest')
+  attrs['data-history-after']='100';attrs['data-history-loading']='true';command();paint();await flush();assert.equal(viewport.scrollTop,20)
+  attrs['data-history-loading']='false';command();paint();await flush();assert.equal(viewport.scrollTop,1000)
+  assert.ok(events.some(event=>event.kind==='latest-complete'&&event.stamp==='owner'&&event.generation===5&&event.request===2))
+  viewport.scrollTop=30;command({latest:{request:3,pending:true}});command({stamp:'other',generation:6,latest:{request:0,pending:false}});paint();await flush();assert.equal(viewport.scrollTop,30,'retired jump cannot scroll another selection')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
 
 test('streams exact bytes and incremental SHA256 before committing writable',async()=>{
   const bytes=Buffer.from('"λ"\r\n[true,null]\n'+ '"'+ 'x'.repeat(200000)+'"\n'), row=session(bytes)

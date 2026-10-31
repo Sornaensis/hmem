@@ -185,6 +185,11 @@ above the end keeps your place; following resumes when you scroll to the end.
 Loading a large transcript keeps the view steady. **Open full session ↗** opens
 Sessions with the same agent selected; choose **Projects** to return to the card.
 
+While reading earlier content, **↓ Jump to latest ↓** appears inside the reader.
+Activate it to reach the current end and resume following live output. It also
+reaches the last page of a verified completed conversation. If navigation fails,
+the loaded messages remain available and the same control retries the jump.
+
 The **Sessions** tab puts the hierarchy to the right of the conversation and keeps
 selected event details in their own inspector. **Live** and **Quiet** describe recent activity. Choose an event's
 inspect control to read its existing input or result. Narrow screens place event

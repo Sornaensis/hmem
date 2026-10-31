@@ -5696,3 +5696,14 @@ textarea.observation-edit-content {
 .sessions-page .session-sealed-workspace > .session-identity { flex:0 0 auto; }
 .sessions-page .session-sealed-workspace > .session-archive-status { margin:.25rem 0 .5rem; }
 .sessions-page .session-archive-footer { display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center; gap:.35rem; padding-top:.5rem; border-top:1px solid var(--border); }
+
+.session-viewer { position:relative; }
+.session-viewer .session-records { padding-bottom:3.75rem; scroll-behavior:auto; }
+.session-latest-overlay { display:none; position:absolute; z-index:3; left:50%; bottom:var(--session-latest-bottom,1rem); transform:translateX(-50%); max-width:calc(100% - 2rem); text-align:center; }
+.session-viewer[data-latest-visible="true"] > .session-latest-overlay { display:block; }
+.session-jump-latest { display:flex; align-items:center; justify-content:center; gap:.65rem; white-space:nowrap; padding:.55rem .9rem; border:1px solid rgba(255,255,255,.4); border-radius:1.5rem; color:#fff; background:rgba(18,26,36,.9); box-shadow:0 3px 16px rgba(0,0,0,.3); backdrop-filter:blur(8px); cursor:pointer; font:inherit; font-weight:600; }
+.session-jump-latest:hover { background:rgba(18,26,36,.98); }
+.session-jump-latest:focus-visible { outline:3px solid #6ee7ff; outline-offset:3px; }
+.session-jump-latest[aria-busy="true"] { border-style:dashed; }
+.session-latest-error { display:block; width:28ch; max-width:100%; padding:.4rem; border-radius:.4rem; background:rgba(18,26,36,.96); color:#fff; font-size:.8rem; }
+@media (prefers-reduced-motion:reduce) { .session-jump-latest { transition:none; scroll-behavior:auto; } }

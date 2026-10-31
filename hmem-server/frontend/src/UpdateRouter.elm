@@ -104,6 +104,7 @@ route msg model =
         SessionsFollow _ -> Ok (Feature.Sessions.update msg model)
         SessionsOlder -> Ok (Feature.Sessions.update msg model)
         SessionsNewer -> Ok (Feature.Sessions.update msg model)
+        SessionsJumpLatest -> Ok (Feature.Sessions.update msg model)
         SessionsBridgeEvent _ -> Ok (Feature.Sessions.update msg model)
         SessionActivityTick _ -> Ok (Feature.SessionActivity.update msg model)
         SessionActivityVisibility _ -> Ok (Feature.SessionActivity.update msg model)

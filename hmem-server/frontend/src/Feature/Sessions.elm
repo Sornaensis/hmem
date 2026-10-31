@@ -202,7 +202,7 @@ reconcile ( model, command ) =
                 if continueViewer then
                     { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = False, pending = False }
                 else
-                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
+                    { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, latestPending = False, latestError = Nothing, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
             else if transportChanged then
                 -- Retire response authority, not the presentation. Preserve the
                 -- finite end so a framed but unacknowledged short tail retries
@@ -285,6 +285,7 @@ reconcile ( model, command ) =
             , ("direction",Encode.string current.windowDirection)
             , ("aligned",Encode.bool current.windowAligned)
             , ("windowEnd",Encode.int current.end)
+            , ("latest",Encode.object [("request",Encode.int current.latestRequest),("pending",Encode.bool current.latestPending)])
             , ("historical",Encode.bool (not current.following && current.resetPending))
             , ("chunk",chunk |> Maybe.map (\range -> Encode.object [("offset",Encode.int range.offset),("nextOffset",Encode.int range.nextOffset),("dataBase64",Encode.string range.dataBase64),("final",Encode.bool (range.nextOffset >= current.end))]) |> Maybe.withDefault Encode.null)
             , ("nextOperation",Encode.int current.nextOperation)
@@ -292,6 +293,7 @@ reconcile ( model, command ) =
             , ("archiveRequest",archiveRequest next)
             , ("sealed",Encode.object
                 [("active",Encode.bool (isSealed && selected /= Nothing)),("stamp",Encode.string stamp),("load",Encode.int current.generation)
+                ,("latestRequest",Encode.int (if current.latestPending then current.latestRequest else -1))
                 ,("workspace",Encode.string (Maybe.withDefault "" workspace)),("session",Encode.string (Maybe.withDefault "" selected)),("apiUrl",Encode.string model.flags.apiUrl)
                 ,("authority",Encode.string (model.sessionContext |> Maybe.map (\context -> Encode.encode 0 (Encode.list Encode.string [context.principal.actorType,context.principal.actorId,context.principal.authority,Maybe.withDefault "" context.principal.grantUserId])) |> Maybe.withDefault ""))])
             , ("sealedRequest",sealedRequest next)
@@ -386,7 +388,7 @@ update msg model =
                 end = List.take 20 state.rows |> List.filter (\row -> row.end - first <= 65536) |> List.reverse |> List.head |> Maybe.map .end |> Maybe.withDefault first
                 begin = max 0 (end - 2097152)
             in
-            ( { model | sessions = { state | following = False, loadWindow = True, windowDirection = "tail", windowAligned = False, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
+            ( { model | sessions = { state | following = False, loadWindow = True, latestPending=False,latestError=Nothing,windowDirection = "tail", windowAligned = False, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
         SessionsNewer ->
             let
                 last = List.reverse state.rows |> List.head
@@ -395,7 +397,18 @@ update msg model =
                     Delivery.Metadata session -> Just session.committedBytes
                     _ -> Nothing) |> Maybe.withDefault state.end
             in
-            ( { model | sessions = { state | following = False, loadWindow = True, windowDirection = "forward", windowAligned = True, start = Just begin, offset = begin, end = min newest (begin + 2097152), pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
+            ( { model | sessions = { state | following = False, loadWindow = True, latestPending=False,latestError=Nothing,windowDirection = "forward", windowAligned = True, start = Just begin, offset = begin, end = min newest (begin + 2097152), pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
+        SessionsJumpLatest ->
+            let
+                sealed = state.selected |> Maybe.andThen (\id -> state.workspace |> Maybe.andThen (\ws -> resource ws (Delivery.SessionMetadata id) model |> Maybe.andThen .data)) |> Maybe.map (\payload -> case payload of
+                    Delivery.Metadata session -> session.state == Api.SessionTerminated
+                    _ -> False) |> Maybe.withDefault False
+                next = {state | latestRequest=state.latestRequest+1,latestPending=True,latestError=Nothing}
+                delivery = if sealed then model.sessionDelivery else Maybe.map2 (\ws id -> Delivery.invalidateSession ws id model.sessionDelivery) state.workspace state.selected |> Maybe.withDefault model.sessionDelivery
+                restartSealed = sealed && List.isEmpty state.sealed.rows && List.member state.sealed.phase ["error","cancelled"]
+                sealedBlocked = sealed && state.sealed.phase == "error" && not state.sealed.canRetry
+            in
+            ( {model | sessions=if sealedBlocked then {next | latestPending=False,latestError=state.sealed.error} else if restartSealed then {next | generation=state.generation+1,sealed=emptySealedSessionView} else if sealed then next else {next | following=True,loadWindow=True,windowDirection="tail",windowAligned=False,start=Nothing,pending=False,generation=state.generation+1,resetPending=True,error=Nothing},sessionDelivery=delivery},Cmd.none )
         SessionsTick time ->
             let now = toFloat (Time.posixToMillis time)
                 refresh = (state.filters.freshness /= "" || state.filters.activity /= Nothing) && model.activeTab == SessionsTab && now-state.lastFilterRefresh >= 10000
@@ -454,6 +467,12 @@ receiveBridge value model =
         ( {model | sessions = {state | saveCapability = Just (field "supported" Decode.bool False)}}, Cmd.none )
     else if String.startsWith "archive-" kind then receiveArchive value model
     else if String.startsWith "save-" kind then receiveSave value model
+    else if kind == "latest-complete" && stamp == state.stamp && generation == state.generation && field "request" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | latestPending=False,latestError=Nothing,following=True,loadWindow=True}},Cmd.none)
+    else if kind == "latest-error" && stamp == state.stamp && generation == state.generation && field "request" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | latestPending=False,latestError=Just "Latest messages could not be reached. Activate Jump to latest to retry."}},Cmd.none)
+    else if kind == "latest-cancelled" && stamp == state.stamp && generation == state.generation && field "request" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | latestPending=False,following=False,loadWindow=False}},Cmd.none)
     else if kind == "viewer-boundary" && stamp == state.stamp && generation == state.generation then
         if state.pending || (state.loadWindow && state.offset < state.end) || state.error /= Nothing then (model,Cmd.none)
         else if field "edge" Decode.string "" == "older" && state.historyBefore > 0 then update SessionsOlder model
@@ -536,6 +555,14 @@ receiveSealed value model =
         in
         if part < 0 || part > 100000 || request < sealed.renderRequest then (model,Cmd.none)
         else ({model | sessions={state | sealed={sealed | renderPart=part,renderRequest=request}}},Cmd.none)
+    else if kind == "sealed-latest-render" && field "latestRequest" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | sealed={sealed | renderPart=-1,renderRequest=field "request" Decode.int sealed.renderRequest}}},Cmd.none)
+    else if kind == "sealed-latest-complete" && field "latestRequest" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | latestPending=False,latestError=Nothing}},Cmd.none)
+    else if kind == "sealed-latest-error" && field "latestRequest" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | latestPending=False,latestError=Just "Latest messages could not be reached. Activate Jump to latest to retry."}},Cmd.none)
+    else if kind == "sealed-latest-cancelled" && field "latestRequest" Decode.int -1 == state.latestRequest then
+        ({model | sessions={state | latestPending=False}},Cmd.none)
     else if kind == "sealed-disclosure" then
         let key=field "key" Decode.string ""
             open=field "open" Decode.bool False
@@ -998,6 +1025,14 @@ type ReaderContext
     | EmbeddedReader
 
 
+viewLatestControl : SessionsModel -> Html Msg
+viewLatestControl state =
+    div [class "session-latest-overlay"]
+        [button [class "session-jump-latest",onClick SessionsJumpLatest,attribute "data-latest-owner" state.stamp,attribute "aria-label" "Jump to latest",attribute "aria-busy" (if state.latestPending then "true" else "false")]
+            [span [attribute "aria-hidden" "true"] [text "↓"],span [] [text "Jump to latest"],span [attribute "aria-hidden" "true"] [text "↓"]]
+        ,state.latestError |> Maybe.map (\message -> span [class "session-latest-error",attribute "role" "alert"] [text message]) |> Maybe.withDefault (text "")]
+
+
 viewRecords : ReaderContext -> String -> Model -> String -> Html Msg
 viewRecords context workspace model id =
     let
@@ -1007,20 +1042,22 @@ viewRecords context workspace model id =
             _ -> Nothing)
         newest = session |> Maybe.map .committedBytes |> Maybe.withDefault state.offset
         rangeError = resource workspace (Delivery.SessionWindow id state.offset state.end False) model |> Maybe.andThen .error
+        metadataError = resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .error
     in
     if session |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then viewSealedRecords context model session
     else section [class "session-viewer",attribute "aria-label" "Session transcript"]
         [div [class "sessions-toolbar"]
             [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
-        ,if state.error /= Nothing || rangeError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
+        ,if state.error /= Nothing || rangeError /= Nothing || metadataError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
         ,div [class "sessions-pagination",attribute "aria-label" "Conversation history"]
             [button [class "btn btn-sm",onClick SessionsOlder,disabled (state.historyBefore <= 0 || state.pending || (state.loadWindow && state.offset < state.end))] [text "Earlier messages"]
             ,span [attribute "role" "status"] [text (if state.pending || (state.loadWindow && state.offset < state.end) then "Loading conversation…" else if state.historyBefore <= 0 then "Beginning of conversation" else "Earlier history available")]
             ,button [class "btn btn-sm",onClick SessionsNewer,disabled (state.historyAfter >= newest || state.pending || (state.loadWindow && state.offset < state.end))] [text "Newer messages"]]
-        ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-viewer-generation" (String.fromInt state.generation),attribute "data-history-mode" "active",attribute "data-history-before" (String.fromInt state.historyBefore),attribute "data-history-after" (String.fromInt state.historyAfter),attribute "data-history-latest" (String.fromInt newest),attribute "data-history-loading" (if state.pending || (state.loadWindow && state.offset < state.end) || rangeError /= Nothing || state.error /= Nothing then "true" else "false"),attribute "aria-label" "Bounded transcript records"]
+        ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-viewer-generation" (String.fromInt state.generation),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "active",attribute "data-history-before" (String.fromInt state.historyBefore),attribute "data-history-after" (String.fromInt state.historyAfter),attribute "data-history-latest" (String.fromInt newest),attribute "data-history-loading" (if state.start == Nothing || state.pending || (state.loadWindow && state.offset < state.end) || rangeError /= Nothing || state.error /= Nothing then "true" else "false"),attribute "data-history-error" (if rangeError /= Nothing || state.error /= Nothing || metadataError /= Nothing then "true" else "false"),attribute "aria-label" "Bounded transcript records"]
             (List.map (\item -> let (key,node) = viewTranscriptItem model item in (state.stamp ++ ":" ++ key,node)) (Transcript.project state.rows))
         ,if List.isEmpty state.rows && state.error == Nothing && rangeError == Nothing then p [attribute "role" "status"] [text (if state.start == Nothing then "Loading transcript metadata…" else if state.offset < state.end then "Reading transcript…" else if newest == 0 then "This session has no committed records." else "No complete messages in this window.")] else text ""
-        ,if state.notice /= "" then p [attribute "role" "status"] [text state.notice] else text "" ]
+        ,if state.notice /= "" then p [attribute "role" "status"] [text state.notice] else text ""
+        ,viewLatestControl state ]
 
 
 viewSealedRecords : ReaderContext -> Model -> Maybe Api.AgentSession -> Html Msg
@@ -1090,7 +1127,8 @@ viewSealedRecords context model session =
     let
         identity = session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")
         status = p [class (if workspaceReader then "session-archive-status card-meta" else ""),attribute "role" (if sealed.error == Nothing then "status" else "alert"),attribute "aria-live" "polite"] [text message]
-        records = div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-history-mode" "sealed",attribute "aria-label" "Verified archive records"] rendered.nodes
+        lastProseMore = List.reverse sealed.rows |> List.head |> Maybe.map (\piece -> piece.kind == "text" && (piece.body |> Maybe.map .more |> Maybe.withDefault False) && not (sealed.markdown.complete && sealed.markdown.key == piece.key)) |> Maybe.withDefault False
+        records = div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-archive-can-next" (if sealed.canNext then "true" else "false"),attribute "data-last-prose-more" (if lastProseMore then "true" else "false"),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "sealed",attribute "aria-label" "Verified archive records"] rendered.nodes
         presentation = if workspaceReader && rendered.part == 0 && not rendered.more then text "" else sealedRenderControls model rendered.part rendered.more
         budgetError = if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
         children = if workspaceReader then [identity,status,presentation,budgetError,records,footer] else
@@ -1101,7 +1139,7 @@ viewSealedRecords context model session =
             ,presentation,budgetError,records]
     in
     Keyed.node "section" [class ("session-viewer session-sealed-viewer" ++ (if workspaceReader then " session-sealed-workspace" else "")),attribute "aria-label" "Session transcript"]
-        (sealedHostNodes model children)
+        (sealedHostNodes model (children ++ [viewLatestControl state]))
 
 
 sealedHostKey : Model -> String

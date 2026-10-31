@@ -24,6 +24,25 @@ suite : Test.Test
 suite =
     describe "Sessions production wire contract"
         [ describe "workspace completed reader" completedReaderTests
+        , test "active latest starts a new bounded tail lifetime without discarding the loaded conversation" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                historical={entered | sessions={old | following=False,start=Just 0,offset=32,end=32,rows=[sampleRecord],latestRequest=7,latestError=Just "failed"}}
+                next=Sessions.update SessionsJumpLatest historical |> Tuple.first |> .sessions
+            in Expect.equal {rows=[sampleRecord],start=Nothing,following=True,pending=True,request=8,generation=old.generation+1,error=Nothing}
+                {rows=next.rows,start=next.start,following=next.following,pending=next.latestPending,request=next.latestRequest,generation=next.generation,error=next.latestError}
+        , test "a stale latest completion cannot finish a newer jump" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                jumped=Sessions.update SessionsJumpLatest entered |> Tuple.first
+                next=Sessions.update SessionsJumpLatest jumped |> Tuple.first
+                state=next.sessions
+                packet request generation=SessionsBridgeEvent (Encode.object [("kind",Encode.string "latest-complete"),("stamp",Encode.string state.stamp),("generation",Encode.int generation),("request",Encode.int request)])
+                stale=Sessions.update (packet (state.latestRequest-1) state.generation) next |> Tuple.first
+                wrong=Sessions.update (packet state.latestRequest (state.generation-1)) stale |> Tuple.first
+                complete=Sessions.update (packet state.latestRequest state.generation) wrong |> Tuple.first
+            in Expect.equal (True,True,False) (stale.sessions.latestPending,wrong.sessions.latestPending,complete.sessions.latestPending)
         , test "an incomplete forward replacement and failed next boundary preserve the admitted conversation" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -918,7 +937,21 @@ completedReaderTests =
             in {entered | sessionDelivery={delivery | resources=Dict.insert (Delivery.key workspace target) resource delivery.resources},sessions={state | taskPanel=Just "one",sealed={sealed | phase=phase,canRetry=True,canPrevious=False,canNext=True}}}
         workspaceView phase = Query.fromHtml (Sessions.view workspace (model phase))
     in
-    [ test "sealed render requests retain their acknowledgement stamp and reject older handoffs" <| \_ ->
+    [ test "sealed latest retains the verified reader lifetime while issuing a fresh jump request" <| \_ ->
+        let ready=model "ready"
+            state=ready.sessions
+            next=Sessions.update SessionsJumpLatest ready |> Tuple.first |> .sessions
+        in Expect.equal (state.generation,True,state.latestRequest+1) (next.generation,next.latestPending,next.latestRequest)
+    , test "latest retries a retired sealed reader but cannot bypass a cleanup failure" <| \_ ->
+        let
+            failed=model "error"
+            state=failed.sessions
+            sealed=state.sealed
+            retried=Sessions.update SessionsJumpLatest failed |> Tuple.first |> .sessions
+            blocked={failed | sessions={state | sealed={sealed | canRetry=False,error=Just "Reload required"}}}
+            refused=Sessions.update SessionsJumpLatest blocked |> Tuple.first |> .sessions
+        in Expect.equal ((state.generation+1,True),(state.generation,False,Just "Reload required")) ((retried.generation,retried.latestPending),(refused.generation,refused.latestPending,refused.latestError))
+    , test "sealed render requests retain their acknowledgement stamp and reject older handoffs" <| \_ ->
         let
             ready=model "ready"
             state=ready.sessions

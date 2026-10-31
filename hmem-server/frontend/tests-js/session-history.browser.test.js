@@ -5,6 +5,53 @@ import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
 const until=async fn=>{const end=Date.now()+15000;while(Date.now()<end){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,25))}throw Error('Progressive conversation did not converge')}
 const state=page=>page.locator('#session-records').evaluate(node=>({before:Number(node.dataset.historyBefore),after:Number(node.dataset.historyAfter),latest:Number(node.dataset.historyLatest),loading:node.dataset.historyLoading==='true',offsets:[...node.querySelectorAll('.session-record')].map(row=>Number(row.dataset.offset))}))
 
+test('Jump to latest is shared by dock and workspace and reacquires the logical active tail',{timeout:60000},async()=>{
+ const bytes=Buffer.from(Array.from({length:420},(_,i)=>JSON.stringify({text:`Latest occurrence ${i} `+'word '.repeat(25)})+'\n').join(''))
+ const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h
+ const latest=()=>page.getByRole('button',{name:'Jump to latest',exact:true})
+ const atEnd=()=>page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4)
+ try{
+  await h.start();await h.idle();const card=page.locator('#entity-'+h.fixture.tasks[0].id);await until(()=>card.locator('.task-sessions-icon').isEnabled());await card.locator('.task-sessions-icon').click();await page.locator('.session-record').first().waitFor()
+  for(const surface of ['dock','workspace']){
+   if(surface==='workspace'){await card.getByRole('link',{name:'Open full session ↗'}).click();await page.locator('.session-detail').waitFor()}
+   await until(async()=>!(await state(page)).loading)
+   await page.locator('#session-records').evaluate(node=>{node.scrollTop=0});await latest().waitFor({state:'visible'})
+   assert.equal(await latest().locator('[aria-hidden="true"]').count(),2);assert.equal((await latest().textContent()).replaceAll(/\s/g,''),'↓Jumptolatest↓')
+   if(surface==='workspace')for(const width of [1440,430]){
+    await page.setViewportSize({width,height:900});await h.idle();await page.locator('#session-records').evaluate(node=>{node.scrollTop=0});await latest().waitFor({state:'visible'})
+    const button=await latest().boundingBox(),records=await page.locator('#session-records').boundingBox()
+    assert.ok(Math.abs(button.x+button.width/2-records.x-records.width/2)<8);assert.ok(button.y+button.height<=records.y+records.height-8)
+   }
+   await latest().focus();await page.keyboard.press(surface==='dock'?'Enter':'Space');await until(atEnd);await latest().waitFor({state:'hidden'})
+   assert.equal(await page.locator('#session-records').evaluate(node=>document.activeElement===node),true)
+  }
+  await page.getByRole('button',{name:'Earlier messages',exact:true}).click();await until(async()=>{const value=await state(page);return !value.loading&&value.after<value.latest})
+  await page.locator('#session-records').evaluate(node=>{node.scrollTop=node.scrollHeight});await latest().waitFor({state:'visible'})
+  assert.ok(await page.locator('#session-records').evaluate(node=>node.querySelector('.session-record:last-child').getBoundingClientRect().bottom<=node.closest('.session-viewer').querySelector('.session-jump-latest').getBoundingClientRect().top+2),'reserved space keeps the control clear of the last mounted message')
+  await h.appendRecords({text:'Newest output outside the mounted history'});await latest().click();await page.getByText('Newest output outside the mounted history',{exact:true}).waitFor();await until(atEnd)
+  await h.appendRecords({text:'Following resumes after latest navigation'});await page.getByText('Following resumes after latest navigation',{exact:true}).waitFor();await until(atEnd)
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+test('a failed active latest request retains history and the same overlay retries it',{timeout:45000},async()=>{
+ const bytes=Buffer.from(Array.from({length:500},(_,i)=>JSON.stringify({text:`Retry active occurrence ${i} `+'text '.repeat(50)})+'\n').join(''))
+ const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h;let failing=false
+ try{
+  await page.route('**/sessions/**/transcript**',route=>failing?route.fulfill({status:400,json:{error:'controlled_latest_failure'}}):route.fallback())
+  await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id);await page.locator('.session-record').first().waitFor();await until(async()=>!(await state(page)).loading)
+  await page.getByRole('button',{name:'Earlier messages',exact:true}).click();await until(async()=>{const value=await state(page);return !value.loading&&value.after<value.latest})
+  const old=(await state(page)).offsets
+  await h.appendRecords({text:'Output beyond the historical page'})
+  failing=true;const jump=page.getByRole('button',{name:'Jump to latest',exact:true});await jump.click()
+  await page.getByText('Latest messages could not be reached. Activate Jump to latest to retry.',{exact:true}).waitFor()
+  assert.deepEqual((await state(page)).offsets,old);assert.equal(await jump.isEnabled(),true)
+  failing=false;await jump.click();await page.getByText('Output beyond the historical page',{exact:true}).waitFor()
+  await until(async()=>await page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&node.scrollHeight-node.scrollTop-node.clientHeight<=4))
+  await jump.waitFor({state:'hidden'});assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
 test('shared reader progressively reaches every occurrence across byte and row limits in both directions',{timeout:90000},async()=>{
  const records=Array.from({length:340},(_,i)=>({type:'event_msg',payload:{type:'agent_message',message:`Occurrence ${i} `+'x'.repeat(i%9===0?65000:30)}}))
  const lines=records.map(record=>JSON.stringify(record)+'\r\n'),bytes=Buffer.from(lines.join('')),expected=[];let cursor=0

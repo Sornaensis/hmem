@@ -928,6 +928,24 @@ test('sealed render handoffs require fresh boundary gestures and exact stamped D
  }finally{viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated));paint()}
 })
 
+test('sealed latest waits for its final rendered part and retires pending jumps with authority',async()=>{
+ const events=[],workers=[],listeners=new Map(),frames=[];let viewer,requestId=0
+ const raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'latest-sealed',load:1,workspace,session,authority:'principal',apiUrl:'',latestRequest:7}
+ const attrs={'data-sealed-dom-owner':config.stamp,'data-sealed-dom-load':'1','data-sealed-first':'end','data-sealed-last':'end','data-render-more':'false','data-last-prose-more':'false','data-latest-request':'6','data-render-request':'0'}
+ const viewport={scrollTop:20,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key] ?? null,setAttribute:(key,value)=>{attrs[key]=value},replaceChildren(){}}
+ class Worker{pages=[];postMessage(message){if(message.kind==='interrupt')return;if(message.kind==='page')this.pages.push(message);queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,request:message.request,...(message.kind==='page'?{kind:'page',rows:[{key:'end',kind:'text'}],first:'end',last:'end',more:false}:{kind:message.kind==='retire'?'cleaned':'ack'})}}))}terminate(){this.terminated=true}}
+ viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){},requestAnimationFrame:callback=>frames.push(callback)},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
+ const until=async fn=>{for(let i=0;i<100&&!fn();i++)await new Promise(resolve=>setImmediate(resolve));assert.ok(fn(),'bounded sealed latest')}
+ const paint=()=>{for(let turn=0;turn<8&&frames.length;turn++)frames.splice(0).forEach(callback=>callback())}
+ try{
+  viewer.configure(config);await until(()=>events.some(event=>event.kind==='sealed-latest-render'));const render=events.find(event=>event.kind==='sealed-latest-render')
+  assert.deepEqual(workers.at(-1).pages[0].page,{last:true});paint();assert.equal(viewport.scrollTop,20)
+  attrs['data-latest-request']='7';attrs['data-render-request']=String(render.request);attrs['data-render-more']='true';viewer.configure(config);paint();assert.equal(viewport.scrollTop,20,'an earlier mounted part is not logical latest')
+  attrs['data-render-more']='false';viewer.configure(config);paint();assert.equal(viewport.scrollTop,1000);assert.ok(events.some(event=>event.kind==='sealed-latest-complete'&&event.latestRequest===7))
+  viewport.scrollTop=35;viewer.configure({...config,latestRequest:8});await until(()=>events.some(event=>event.kind==='sealed-latest-render'&&event.latestRequest===8));viewer.retireAuthority();paint();assert.equal(viewport.scrollTop,35);assert.ok(!events.some(event=>event.kind==='sealed-latest-complete'&&event.latestRequest===8))
+ }finally{viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated));paint()}
+})
+
 test('reader retry retains custody through held release, release failure and authority retirement',async()=>{
  for(const scenario of ['retry','release-failure','retire']){
   const events=[],workers=[],listeners=new Map();let viewer,requestId=0

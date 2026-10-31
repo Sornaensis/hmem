@@ -1029,8 +1029,12 @@ viewLatestControl : SessionsModel -> Html Msg
 viewLatestControl state =
     div [class "session-latest-overlay"]
         [button [class "session-jump-latest",onClick SessionsJumpLatest,attribute "data-latest-owner" state.stamp,attribute "aria-label" "Jump to latest",attribute "aria-busy" (if state.latestPending then "true" else "false")]
-            [span [attribute "aria-hidden" "true"] [text "↓"],span [] [text "Jump to latest"],span [attribute "aria-hidden" "true"] [text "↓"]]
-        ,state.latestError |> Maybe.map (\message -> span [class "session-latest-error",attribute "role" "alert"] [text message]) |> Maybe.withDefault (text "")]
+            [span [attribute "aria-hidden" "true"] [text "↓"],span [] [text "Jump to latest"],span [attribute "aria-hidden" "true"] [text "↓"]]]
+
+
+viewLatestError : SessionsModel -> Html Msg
+viewLatestError state =
+    state.latestError |> Maybe.map (\message -> p [class "session-latest-error",attribute "role" "alert"] [text message]) |> Maybe.withDefault (text "")
 
 
 viewRecords : ReaderContext -> String -> Model -> String -> Html Msg
@@ -1049,6 +1053,7 @@ viewRecords context workspace model id =
         [div [class "sessions-toolbar"]
             [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing || metadataError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
+        ,viewLatestError state
         ,div [class "sessions-pagination",attribute "aria-label" "Conversation history"]
             [button [class "btn btn-sm",onClick SessionsOlder,disabled (state.historyBefore <= 0 || state.pending || (state.loadWindow && state.offset < state.end))] [text "Earlier messages"]
             ,span [attribute "role" "status"] [text (if state.pending || (state.loadWindow && state.offset < state.end) then "Loading conversation…" else if state.historyBefore <= 0 then "Beginning of conversation" else "Earlier history available")]
@@ -1131,8 +1136,8 @@ viewSealedRecords context model session =
         records = div [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-archive-can-next" (if sealed.canNext then "true" else "false"),attribute "data-last-prose-more" (if lastProseMore then "true" else "false"),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "sealed",attribute "aria-label" "Verified archive records"] rendered.nodes
         presentation = if workspaceReader && rendered.part == 0 && not rendered.more then text "" else sealedRenderControls model rendered.part rendered.more
         budgetError = if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
-        children = if workspaceReader then [identity,status,presentation,budgetError,records,footer] else
-            [identity,status
+        children = if workspaceReader then [identity,status,viewLatestError state,presentation,budgetError,records,footer] else
+            [identity,status,viewLatestError state
             ,div [class "sessions-toolbar"] [action "first" "First",action "previous" "Previous",action "next" "Next",action "last" "Last",action "cancel" "Cancel",if sealed.phase == "error" && sealed.canRetry && not (List.isEmpty sealed.rows) then button [attribute "data-sealed-action" "retry-page",attribute "data-sealed-owner" state.stamp] [text "Retry"] else button [onClick SessionsRetry] [text "Retry"]]
             ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-search",Html.Attributes.placeholder "Search complete archive",attribute "maxlength" "256"] [],action "search" "Search",action "search-next" "Continue search"]
             ,div [class "sessions-toolbar"] [input [Html.Attributes.id "sealed-position",Html.Attributes.placeholder "Original byte offset",attribute "inputmode" "numeric"] [],action "position" "Go to offset"]

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {gzipSync} from 'node:zlib'
 import {createHash} from 'node:crypto'
-import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
+import {openSessionExplorer,continuousScrollStep} from './support/sessions-ux-fixture.mjs'
 const until=async fn=>{const end=Date.now()+12000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,25))}throw Error('workspace sessions did not converge')}
 const toggle=(page,name)=>page.getByRole('button',{name,exact:true}).click()
 const count=(page,n)=>until(async()=>await page.locator('.session-summary').count()===n)
@@ -63,14 +63,11 @@ test('sealed controls and maximum wrapped runtime remain reachable in a short na
      assert.ok(await element.evaluate(node=>{const r=node.getBoundingClientRect(),main=document.querySelector('#main-content-scroll').getBoundingClientRect(),pane=document.querySelector('.sessions-layout').getBoundingClientRect();return r.height>0&&r.bottom>Math.max(main.top,pane.top)&&r.top<Math.min(main.bottom,pane.bottom)}),selector+' at '+zoom)
     }
    }
-   const complete=page.getByRole('button',{name:'Read complete message',exact:true})
-   if(await complete.count()){await complete.click();await page.getByText('Verified complete archive.',{exact:true}).waitFor()}
-   await page.getByRole('button',{name:'Continue presentation',exact:true}).click()
-   await until(async()=>await page.locator('.session-render-continuation').getAttribute('data-render-part')==='1')
-   await page.getByRole('button',{name:'Previous presentation',exact:true}).click()
-   await until(async()=>await page.locator('.session-render-continuation').getAttribute('data-render-part')==='0')
+   await page.locator('#session-records a').first().waitFor();await page.locator('#session-records').press('Home');await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.renderPart==='0'))
+   for(let step=0;await page.locator('#session-records').getAttribute('data-render-part')==='0';step++){assert.ok(step<30);await continuousScrollStep(page,1);await h.idle()}
+   await page.locator('#session-records').press('Home');await until(()=>page.locator('#session-records').evaluate(node=>node.scrollTop<=1&&node.querySelector('[data-fragment-part="0"]')&&node.dataset.archiveCanPrevious==='false')).catch(async error=>{throw Error(JSON.stringify({phase:'workspace-return-home',zoom,state:await page.locator('#session-records').evaluate(node=>({...node.dataset,top:node.scrollTop,height:node.clientHeight,total:node.scrollHeight})),error:error.message}))})
    assert.equal(await page.locator('#sealed-search,#sealed-position').count(),0)
-   assert.equal(await page.locator('.session-archive-footer [data-sealed-action=first]').isDisabled(),true)
+   assert.equal(await page.locator('.session-sealed-viewer').getByRole('button',{name:/^(First|Previous|Next|Last|Read complete message|Continue presentation|Previous presentation)$/}).count(),0);assert.equal(await page.locator('#session-records').getAttribute('data-archive-can-previous'),'false')
    assert.ok(await page.locator('#session-records').evaluate(n=>n.clientHeight>0))
    const sidebar=await page.evaluate(()=>Object.fromEntries(['.sessions-list','.session-hierarchy','.session-linked-tasks','.session-linked-content'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect();return [selector,{top:r.top,bottom:r.bottom,client:n.clientHeight,scroll:n.scrollHeight,overflow:getComputedStyle(n).overflowY}]})))
    assert.ok(sidebar['.session-hierarchy'].client>0,JSON.stringify({zoom,...sidebar}))
@@ -135,7 +132,7 @@ test('workspace panes fit actual chrome with wrapped filters, long transcript an
    await until(async()=>page.evaluate(()=>{
     const main=document.querySelector('#main-content-scroll').getBoundingClientRect(),layout=document.querySelector('.sessions-layout').getBoundingClientRect()
     return layout.bottom<=main.bottom+1&&layout.right<=main.right+1&&layout.height>0
-   }))
+   })).catch(async error=>{throw Error(JSON.stringify({phase:'workspace-chrome-fit',width,height,zoom,geometry:await page.evaluate(()=>Object.fromEntries(['#main-content-scroll','.sessions-page','.sessions-layout'].map(selector=>{const node=document.querySelector(selector),r=node.getBoundingClientRect();return [selector,{top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height,client:node.clientHeight,scroll:node.scrollHeight,styleHeight:node.style.height,variables:node.getAttribute('style')}]}))),error:error.message}))})
    const geometry=await page.evaluate(()=>{
     const main=document.querySelector('#main-content-scroll'),layout=document.querySelector('.sessions-layout'),records=document.querySelector('#session-records'),hierarchy=document.querySelector('.session-hierarchy'),linked=document.querySelector('.session-linked-content'),sidebar=document.querySelector('.sessions-list')
     const rect=n=>{const r=n.getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height}}

@@ -3,7 +3,7 @@ import test from 'node:test'
 import {gzipSync} from 'node:zlib'
 import {createHash} from 'node:crypto'
 import {join} from 'node:path'
-import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
+import {openSessionExplorer,continuousScrollStep,traceSessionBridge} from './support/sessions-ux-fixture.mjs'
 import {createEventPayloadPager} from '../src/session-event-json.js'
 
 const until=async fn=>{const end=Date.now()+15000;while(Date.now()<end){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,25))}throw Error('Progressive conversation did not converge')}
@@ -156,15 +156,39 @@ for(const kind of ['tool','unknown event'])test(`continuous contract preserves o
  }finally{await h.close()}
 })
 
-test('continuous contract dock and workspace preserve manual intent and follow new turns without paging',{timeout:45000},async()=>{
+test('same-authority route retains the actual reading character while an old framer publication is held',{timeout:45000},async()=>{
+ const raw=Buffer.from(Array.from({length:420},(_,i)=>JSON.stringify({text:`Pending reading anchor ${i}. `+'Readable context. '.repeat(15)})+'\n').join('')),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h,viewer=()=>page.locator('#session-records')
+ try{
+  await traceSessionBridge(h)
+  await page.addInitScript(()=>{window.sessionBridgeDispatch=(send,value)=>{if(window.holdViewerPublication&&value.kind==='viewer'){window.holdViewerPublication=false;window.heldViewerPublication={stamp:value.stamp,generation:value.generation,publication:value.publication};window.releaseViewerPublication=()=>{window.releaseViewerPublication=null;send(value)};return}send(value)}})
+  await h.start();const card=page.locator('#entity-'+h.fixture.tasks[0].id);await until(()=>card.locator('.task-sessions-icon').isEnabled());await card.locator('.task-sessions-icon').click();await until(()=>viewer().evaluate(node=>node.dataset.historyLoading==='false'))
+  await page.evaluate(()=>window.holdViewerPublication=true)
+  for(let step=0;!await page.evaluate(()=>!!window.heldViewerPublication);step++){assert.ok(step<16,'genuine upward input reaches one finite held acquisition');await continuousScrollStep(page,-1)}
+  const point=await page.evaluate(()=>window.sessionPointFacts.filter(fact=>!fact.restore).at(-1)?.point);assert.ok(point)
+  const readPoint=()=>viewer().evaluate((node,point)=>{const leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>leaf.dataset.fragmentPath===point.path);if(!leaf)return null;const walker=document.createTreeWalker(leaf,4);let text=walker.nextNode(),offset=point.offset;while(text&&offset>text.length){offset-=text.length;text=walker.nextNode()}if(!text)return null;const range=document.createRange();range.setStart(text,offset);range.setEnd(text,Math.min(text.length,offset+1));const r=range.getBoundingClientRect(),box=node.getBoundingClientRect();return {char:range.toString(),top:r.top-box.top,visible:r.height>0&&r.bottom>box.top&&r.top<box.bottom,manual:node.closest('.session-viewer').dataset.manualUp}},point)
+  const before=await readPoint();assert.equal(before?.visible,true);assert.equal(before.manual,'true');const readsBeforeRoute=h.reads.filter(read=>read.path.endsWith('/transcript')).length
+  await card.getByRole('link',{name:'Open full session ↗',exact:true}).click();await page.locator('.session-detail').waitFor();await until(()=>viewer().evaluate(node=>node.dataset.historyLoading==='false'))
+  const handoff=await page.evaluate(()=>window.sessionOwnerChanges.at(-1));assert.equal(handoff.continueViewer,false);assert.equal(handoff.preservePresentation,true);assert.notEqual(handoff.reset,null);assert.ok(h.reads.filter(read=>read.path.endsWith('/transcript')).length>readsBeforeRoute,'fresh transport replays the captured window');const after=await readPoint();assert.equal(after?.char,before.char,JSON.stringify({phase:'pending-route',before,after,point,held:await page.evaluate(()=>window.heldViewerPublication),changes:await page.evaluate(()=>window.sessionOwnerChanges)}));assert.equal(after?.visible,true);assert.equal(after.manual,'true');assert.ok(Math.abs(after.top-before.top)<=4)
+  await page.evaluate(()=>window.releaseViewerPublication?.());await h.idle();const stale=await readPoint();assert.equal(stale?.char,before.char);assert.equal(stale?.visible,true);assert.ok(Math.abs(stale.top-before.top)<=4,'old owner publication cannot overwrite the restored point');assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+ }finally{await page.evaluate(()=>window.releaseViewerPublication?.()).catch(()=>{});await h.close()}
+})
+
+for(const distance of [320,1200])test(`continuous contract dock and workspace preserve manual intent and follow new turns without paging (${distance}px upward)`,{timeout:45000},async()=>{
  const h=await openSessionExplorer({transcriptBytes:shortTailTranscript()}),{page}=h,viewport=()=>page.locator('#session-records'),jump=()=>page.getByRole('button',{name:'Jump to latest',exact:true})
  try{
+  await traceSessionBridge(h)
   await h.start();const card=page.locator('#entity-'+h.fixture.tasks[0].id);await until(()=>card.locator('.task-sessions-icon').isEnabled());await card.locator('.task-sessions-icon').click()
   await until(async()=>await viewport().evaluate(node=>node.dataset.historyLoading==='false'&&!!node.querySelector('.session-record-text')&&node.scrollHeight-node.scrollTop-node.clientHeight<=4))
   assert.equal(await conversationPaging(page).count(),0);assert.equal(await jump().isVisible(),false)
-  await viewport().hover();await page.mouse.wheel(0,-320);await until(()=>jump().isVisible())
+  await viewport().hover();await page.mouse.wheel(0,-distance);await until(()=>jump().isVisible());await h.idle()
+  const selectedPoint=await page.evaluate(()=>window.sessionPointFacts.filter(fact=>!fact.restore).at(-1)?.point);assert.ok(selectedPoint)
+  const readPoint=()=>viewport().evaluate((node,point)=>{const leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>leaf.dataset.fragmentPath===point.path);if(!leaf)throw Error('Selected source fragment is not mounted');const walker=document.createTreeWalker(leaf,4);let text=walker.nextNode(),offset=point.offset;while(text&&offset>text.length){offset-=text.length;text=walker.nextNode()}if(!text)throw Error('Selected source text offset is missing');const range=document.createRange();range.setStart(text,offset);range.setEnd(text,Math.min(text.length,offset+1));const r=range.getBoundingClientRect(),box=node.getBoundingClientRect();return {character:range.toString(),top:r.top-box.top,visible:r.height>0&&r.bottom>box.top&&r.top<box.bottom&&r.right>box.left&&r.left<box.right,scrollTop:node.scrollTop,maximum:node.scrollHeight-node.clientHeight,manual:node.closest('.session-viewer').dataset.manualUp}},selectedPoint)
+  const beforePoint=await readPoint();assert.equal(beforePoint.visible,true)
+  const oldHandoff=await viewport().evaluate(node=>{const box=node.getBoundingClientRect(),leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>{const r=leaf.getBoundingClientRect();return !leaf.querySelector('[data-fragment-path],[data-history-gap]')&&r.height&&r.bottom>box.top&&r.top<box.bottom});return {attrs:{...node.dataset},top:node.scrollTop,height:node.clientHeight,scroll:node.scrollHeight,reading:leaf?{path:leaf.dataset.fragmentPath,text:leaf.textContent.slice(0,50),top:leaf.getBoundingClientRect().top-box.top}:null}})
   await card.getByRole('link',{name:'Open full session ↗'}).click();await page.locator('.session-detail').waitFor();await h.idle()
-  assert.equal(await jump().isVisible(),true,'surface handoff preserves actual manual history intent');assert.equal(await conversationPaging(page).count(),0)
+  const afterPoint=await readPoint(),wanted=afterPoint.scrollTop+afterPoint.top-beforePoint.top,clamped=wanted>afterPoint.maximum+3&&Math.abs(afterPoint.scrollTop-afterPoint.maximum)<=3||wanted< -3&&afterPoint.scrollTop<=3
+  assert.equal(afterPoint.character,beforePoint.character);assert.equal(afterPoint.visible,true);assert.equal(afterPoint.manual,'true');assert.ok(Math.abs(afterPoint.top-beforePoint.top)<=3||clamped,JSON.stringify({beforePoint,afterPoint,clamped,selectedPoint}));if(distance===1200)assert.equal(clamped,false,'the genuinely historical witness has room to preserve its exact character pixel')
+  assert.equal(await jump().isVisible(),afterPoint.scrollTop<afterPoint.maximum-4,'only a handoff that actually still trails latest needs the overlay');assert.equal(await conversationPaging(page).count(),0)
   await viewport().press('End');await until(async()=>await viewport().evaluate(node=>node.dataset.latestPending==='false'&&node.scrollHeight-node.scrollTop-node.clientHeight<=4));await jump().waitFor({state:'hidden'})
   await h.appendRecords({text:'Newest turn after a continuous dock handoff'});await page.getByText('Newest turn after a continuous dock handoff',{exact:true}).waitFor();assert.equal(await jump().isVisible(),false);assert.deepEqual(h.errors,[])
  }finally{await h.close()}
@@ -215,6 +239,11 @@ test('continuous contract opens a newly selected verified archive at latest',{ti
   assert.ok(latest.height-latest.top-latest.client<=4)
   assert.equal(await conversationPaging(page).count(),0)
   assert.equal(await page.getByRole('button',{name:'Jump to latest',exact:true}).isVisible(),false)
+  for(const size of [{width:430,height:1100},{width:1440,height:1000}]){
+   await page.setViewportSize(size)
+   await until(async()=>await page.locator('#session-records').evaluate(node=>{const last=[...node.querySelectorAll('.session-record')].at(-1),box=node.getBoundingClientRect(),tail=last?.getBoundingClientRect();return node.dataset.following==='true'&&node.dataset.logicalLatest==='true'&&node.scrollHeight-node.scrollTop-node.clientHeight<=4&&tail?.bottom>box.top&&tail.top<box.bottom}))
+   assert.equal(await page.getByRole('button',{name:'Jump to latest',exact:true}).isVisible(),false,'sealed latest resize follows the actual tail without manufacturing manual intent')
+  }
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -276,7 +305,6 @@ test('continuous contract backfills and refetches a collapsed run beyond framer 
  const bytes=Buffer.from(prefix+tools.join('')),firstOffset=Buffer.byteLength(prefix),lastOffset=bytes.length-Buffer.byteLength(tools.at(-1))
  const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h,viewport=()=>page.locator('#session-records')
  try{
-  await page.addInitScript(()=>{window.longRunEnds=[];document.addEventListener('keydown',event=>{if(event.key==='End')window.longRunEnds.push({target:event.target.id,trusted:event.isTrusted,attrs:{...document.getElementById('session-records')?.dataset}})},true)})
   await h.start();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id)
   await until(async()=>await viewport().evaluate(node=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyScanBefore)===0))
   const collapsed=await viewport().evaluate(node=>({rows:node.querySelectorAll('.session-record').length,summary:node.querySelector('.session-activity-summary')?.textContent,gaps:node.querySelectorAll('[data-history-gap="source"]').length,prose:node.textContent.includes('Before the long activity run.'),manual:node.closest('.session-viewer').dataset.manualUp}))
@@ -300,7 +328,7 @@ test('continuous contract backfills and refetches a collapsed run beyond framer 
   assert.equal(reached,true,'real PageDown traversal reaches the genuinely omitted middle occurrence: '+JSON.stringify({trace,reads:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(-5)}))
   assert.ok(h.reads.filter(read=>read.path.endsWith('/transcript')).length>readsBefore,'entering the omitted range rehydrates its payload')
   await viewport().press('End')
-  await until(async()=>await viewport().evaluate((node,offset)=>node.dataset.historyLoading==='false'&&[...node.querySelectorAll('.session-record')].some(row=>Number(row.dataset.offset)===offset),lastOffset)).catch(async error=>{console.log(JSON.stringify({phase:'long-run-latest',lastOffset,ends:await page.evaluate(()=>window.longRunEnds),state:await viewport().evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.scrollHeight,manual:node.closest('.session-viewer').dataset.manualUp,offsets:[...node.querySelectorAll('.session-record')].map(row=>Number(row.dataset.offset)).filter((_,i,all)=>i<3||i>all.length-4),gaps:[...node.querySelectorAll('[data-history-gap="source"]')].slice(0,5).map(gap=>({...gap.dataset,top:gap.getBoundingClientRect().top,height:gap.getBoundingClientRect().height}))})),reads:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(-5)}));throw error})
+  await until(async()=>await viewport().evaluate((node,offset)=>node.dataset.historyLoading==='false'&&[...node.querySelectorAll('.session-record')].some(row=>Number(row.dataset.offset)===offset),lastOffset)).catch(async error=>{console.log(JSON.stringify({phase:'long-run-latest',lastOffset,state:await viewport().evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.scrollHeight,manual:node.closest('.session-viewer').dataset.manualUp,offsets:[...node.querySelectorAll('.session-record')].map(row=>Number(row.dataset.offset)).filter((_,i,all)=>i<3||i>all.length-4),gaps:[...node.querySelectorAll('[data-history-gap="source"]')].slice(0,5).map(gap=>({...gap.dataset,top:gap.getBoundingClientRect().top,height:gap.getBoundingClientRect().height}))})),reads:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(-5)}));throw error})
   await until(async()=>await viewport().evaluate(node=>node.scrollHeight-node.scrollTop-node.clientHeight<=4&&node.closest('.session-viewer').dataset.manualUp==='false'))
   await h.appendRecords({text:'Following after a continuous virtual End'});await page.getByText('Following after a continuous virtual End',{exact:true}).waitFor()
   assert.ok(h.reads.filter(read=>read.path.endsWith('/transcript')).length<40,'one scroll cannot create an unbounded acquisition loop')
@@ -459,14 +487,14 @@ for(const fixture of ['indivisible','tiny leaves','wide table'])test(`continuous
 test('progressive large hydration and multi-window bursts preserve follow while real historical input pauses it',{timeout:60000},async()=>{
  const record=(size,marker)=>{const head=JSON.stringify({text:marker}).slice(0,-2);return Buffer.from(head+'x'.repeat(size-Buffer.byteLength(head)-3)+'"}\n')}
  const prefix=Buffer.concat(Array.from({length:16},(_,i)=>record(65536,`Initial ${i} `))),burst=Buffer.concat(Array.from({length:32},(_,i)=>record(8192,`Burst ${i} `)))
- const h=await openSessionExplorer({transcriptBytes:prefix}),{page}=h;let hold=false,releaseRead=null
- const settled=()=>page.locator('#session-records').evaluate(node=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4)
+ const h=await openSessionExplorer({transcriptBytes:prefix}),{page}=h;let hold=true,releaseRead=null
+ const settled=()=>page.locator('#session-records').evaluate((node,end)=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyLatest)>=end&&Number(node.dataset.historyAfter)>=end&&node.scrollHeight-node.scrollTop-node.clientHeight<=4,h.active.committed_bytes)
  try{
   await page.addInitScript(()=>document.addEventListener('keydown',event=>{if(event.key!=='End'||event.target.id!=='session-records')return;const node=event.target,snapshot=()=>({attrs:{...node.dataset},top:node.scrollTop,height:node.scrollHeight,client:node.clientHeight});window.initialEndProof={before:snapshot(),trusted:event.isTrusted,scrolls:[]};node.addEventListener('scroll',()=>{window.initialEndProof.scrolls.push(snapshot());window.initialEndProof.scrolls=window.initialEndProof.scrolls.slice(-8)})},true))
   await page.route('**/sessions/**/transcript**',async route=>{if(hold){hold=false;await new Promise(resolve=>{releaseRead=resolve})}else await new Promise(resolve=>setTimeout(resolve,20));await route.fallback()})
-  await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id);await page.locator('.session-record').first().waitFor()
+  await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id);await page.locator('#session-records').waitFor();await until(async()=>releaseRead!==null)
   const viewport=page.locator('#session-records');assert.equal(await viewport.getAttribute('data-history-loading'),'true')
-  await viewport.press('End');await until(settled).catch(async error=>{console.log(JSON.stringify({phase:'initial-End',proof:await page.evaluate(()=>window.initialEndProof),after:await viewport.evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.scrollHeight,client:node.clientHeight})),reads:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(-3)}));throw error});assert.equal((await state(page)).after,prefix.length)
+  await viewport.press('End');releaseRead();releaseRead=null;await until(settled).catch(async error=>{console.log(JSON.stringify({phase:'initial-End',proof:await page.evaluate(()=>window.initialEndProof),after:await viewport.evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.scrollHeight,client:node.clientHeight})),reads:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(-3)}));throw error});assert.equal((await state(page)).after,prefix.length)
   await h.appendBytes(burst);await until(settled);assert.equal((await state(page)).after,prefix.length+burst.length)
   hold=true;await h.appendBytes(burst);await until(async()=>releaseRead!==null)
   await viewport.hover();await page.mouse.wheel(0,-1400)
@@ -632,24 +660,28 @@ test('shared reader progressively reaches every occurrence across byte and row l
  try{
   await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id);await page.locator('.session-record').first().waitFor()
   await until(async()=>!(await state(page)).loading)
-  const backward=new Set((await state(page)).offsets)
-  for(let pages=0;(await state(page)).before>0;pages++){
-   assert.ok(pages<40,'history must progress in bounded pages')
-   const previous=await state(page)
-   await page.getByRole('button',{name:'Earlier messages',exact:true}).click()
-   await until(async()=>{const current=await state(page);return !current.loading&&current.before<previous.before})
-   for(const offset of (await state(page)).offsets)backward.add(offset)
+  await page.evaluate(()=>{
+   window.historyTraversal={phase:'backward',backward:new Set(),forward:new Set(),invalid:false,peak:0}
+   const collect=()=>{const state=window.historyTraversal,offsets=[...document.querySelectorAll('#session-records .session-record')].map(row=>Number(row.dataset.offset));state.peak=Math.max(state.peak,offsets.length);if(offsets.some((value,index)=>index>0&&value<=offsets[index-1]))state.invalid=true;for(const offset of offsets)state[state.phase].add(offset)}
+   window.collectHistoryTraversal=collect;new MutationObserver(collect).observe(document.getElementById('session-records'),{childList:true,subtree:true});collect()
+  })
+  for(const direction of [-1,1]){
+   if(direction>0)await page.evaluate(()=>{window.historyTraversal.phase='forward';window.collectHistoryTraversal()})
+   let acquisitions=0,stalled=0,previous='',lastMotion=null
+   for(let step=0;step<400;step++){
+    const current=await state(page),seen=await page.evaluate(()=>window.historyTraversal[window.historyTraversal.phase].size)
+    if(seen===expected.length&&(direction<0?current.before===0:current.after===bytes.length))break
+    const fingerprint=await page.locator('#session-records').evaluate(node=>[node.dataset.historyBefore,node.dataset.historyAfter,node.dataset.renderPart,Math.round(node.scrollTop)].join(':'))
+    stalled=fingerprint===previous?stalled+1:0;assert.ok(stalled<6,JSON.stringify({phase:'continuous-traversal-stall',direction,step,seen,acquisitions,lastMotion,reads:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(-4),expectedSeam:expected.slice(50,57),state:await page.locator('#session-records').evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.clientHeight,scroll:node.scrollHeight,first:node.textContent.slice(0,90),last:node.textContent.slice(-90),gaps:[...node.querySelectorAll('[data-history-gap],[data-fragment-from]')].slice(0,5).map(gap=>({...gap.dataset,top:gap.getBoundingClientRect().top-node.getBoundingClientRect().top,bottom:gap.getBoundingClientRect().bottom-node.getBoundingClientRect().top}))}))}));previous=fingerprint
+    lastMotion=await continuousScrollStep(page,direction);await h.idle()
+    const next=await state(page);if(direction<0?next.before<current.before:next.after>current.after)acquisitions++
+    assert.ok(acquisitions<40,'source acquisition must retain the original finite traversal bound')
+    assert.ok(step<399,'continuous traversal cannot strand an occurrence')
+   }
+   const receipt=await page.evaluate(()=>({seen:[...window.historyTraversal[window.historyTraversal.phase]].sort((a,b)=>a-b),invalid:window.historyTraversal.invalid,peak:window.historyTraversal.peak}))
+   assert.deepEqual(receipt.seen,expected);assert.equal(receipt.invalid,false,'every mounted source interval is ordered without duplicate occurrences');assert.ok(receipt.peak<=200)
   }
-  assert.deepEqual([...backward].sort((a,b)=>a-b),expected)
-  const forward=new Set((await state(page)).offsets)
-  for(let pages=0;(await state(page)).after<bytes.length;pages++){
-   assert.ok(pages<40,'newer traversal must progress in bounded pages')
-   const previous=await state(page)
-   await page.getByRole('button',{name:'Newer messages',exact:true}).click()
-   await until(async()=>{const current=await state(page);return !current.loading&&current.after>previous.after})
-   for(const offset of (await state(page)).offsets)forward.add(offset)
-  }
-  assert.deepEqual([...forward].sort((a,b)=>a-b),expected)
+  assert.equal(await conversationPaging(page).count(),0)
   assert.deepEqual(h.errors,[]);assert.ok(h.peak()<=2)
  }finally{await h.close()}
 })
@@ -659,30 +691,45 @@ for(const suffix of ['', '\r\n'])test(`an initial lookback inside a large final 
  const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h
  try{
   await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id)
-  await page.getByText(/^Final large record/).waitFor()
+  await page.locator('.session-record').first().waitFor()
   await until(async()=>!(await state(page)).loading)
   assert.equal((await state(page)).after,bytes.length)
+  await page.locator('#session-records').press('Home');await page.getByText(/^Final large record/).waitFor()
   assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+test('an incomplete latest suffix settles an explicit Jump and real growth reparses its original prefix',{timeout:30000},async()=>{
+ const prefix=Buffer.from(Array.from({length:180},(_,index)=>JSON.stringify({text:'Complete prefix '+index+' '+ 'Readable context. '.repeat(20)})+'\n').join('')),partial=Buffer.from('{"type":'),h=await openSessionExplorer({transcriptBytes:Buffer.concat([prefix,partial])}),{page}=h
+ try{
+  await h.start();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id);await page.getByText('Complete prefix 179 '+ 'Readable context. '.repeat(20),{exact:true}).waitFor();await until(async()=>!(await state(page)).loading)
+  const reads=h.reads.filter(row=>row.path.endsWith('/transcript')).length;await page.waitForTimeout(250);assert.equal(h.reads.filter(row=>row.path.endsWith('/transcript')).length,reads)
+  await armLatestOverlay(page);const jump=page.getByRole('button',{name:'Jump to latest',exact:true});await jump.click();await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&node.dataset.historyLoading==='false'));await jump.waitFor({state:'hidden'})
+  await h.appendBytes(Buffer.from('"text","text":"Completed latest suffix"}\n'));await page.getByText('Completed latest suffix',{exact:true}).waitFor();await until(async()=>!(await state(page)).loading)
+  assert.equal(await page.locator('.session-record[data-offset="'+prefix.length+'"]').count(),1);assert.equal(await page.getByText('Incomplete record at this finite window boundary.',{exact:true}).count(),0);assert.deepEqual(h.errors,[]);assert.ok(h.peak()<=2)
  }finally{await h.close()}
 })
 
 test('real boundary scrolling preserves the visible anchor through history, appends and resize',{timeout:45000},async()=>{
  const bytes=Buffer.from(Array.from({length:420},(_,i)=>JSON.stringify({type:'event_msg',payload:{type:'agent_message',message:`Reading anchor ${i} `+'word '.repeat(20)}})+'\n').join(''))
- const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h
+ const h=await openSessionExplorer({transcriptBytes:bytes}),{page}=h;let hold=false,release=null
  const anchor=()=>page.locator('#session-records').evaluate(node=>{const bounds=node.getBoundingClientRect(),row=[...node.querySelectorAll('[data-block-key]')].find(row=>row.getBoundingClientRect().bottom>bounds.top);return {key:row.dataset.blockKey,top:row.getBoundingClientRect().top-bounds.top}})
  const position=key=>page.locator('#session-records').evaluate((node,key)=>{const row=[...node.querySelectorAll('[data-block-key]')].find(row=>row.dataset.blockKey===key);return row?row.getBoundingClientRect().top-node.getBoundingClientRect().top:null},key)
  try{
+  await traceSessionBridge(h)
+  await page.route('**/sessions/**/transcript**',async route=>{if(hold){hold=false;await new Promise(resolve=>{release=resolve})}await route.fallback()})
   await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id)
   await page.locator('.session-record').first().waitFor();await until(async()=>!(await state(page)).loading)
-  const viewport=page.locator('#session-records');await viewport.evaluate(node=>{node.scrollTop=0});await h.idle()
-  const before=await state(page),reading=await anchor()
-  await viewport.hover();await page.mouse.wheel(0,-400)
+  const before=await state(page);hold=true
+  for(let step=0;release===null;step++){assert.ok(step<12,'real upward scrolling reaches the older acquisition boundary');await continuousScrollStep(page,-1);await page.waitForTimeout(30)}
+  const reading=await anchor();await page.locator('#session-records [data-block-key="'+reading.key+'"]').evaluate(node=>window.heldReadingNode=node);release();release=null
   await until(async()=>{const current=await state(page);return !current.loading&&current.before<before.before})
-  await h.idle();assert.ok(Math.abs((await position(reading.key))-reading.top)<=4,'earlier page preserves the same visible occurrence')
+  await h.idle();if(await position(reading.key)===null)console.log(JSON.stringify({heldPrependTrace:await page.evaluate(()=>window.sessionBridgeFacts.filter(fact=>fact.generation>=6&&fact.direction==='event').map(({dom,...fact})=>({...fact,dom:{generation:dom.generation,part:dom.part,top:dom.top}})).slice(-16))}));assert.ok(Math.abs((await position(reading.key))-reading.top)<=4,JSON.stringify({phase:'held-prepend-reading',reading,after:await position(reading.key),state:await page.locator('#session-records').evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.clientHeight,scroll:node.scrollHeight}))}))
+  assert.equal(await page.locator('#session-records').evaluate(node=>{const saved=window.heldReadingNode,box=node.getBoundingClientRect(),r=saved.getBoundingClientRect();return saved.isConnected&&node.contains(saved)&&r.bottom>box.top&&r.top<box.bottom}),true,'the exact prepublication reading node remains connected and clipped inside the viewer')
   await h.appendRecords({text:'New live output while reading history'});await h.idle()
   assert.ok(Math.abs((await position(reading.key))-reading.top)<=4,'appends preserve a historical anchor')
   await page.setViewportSize({width:900,height:720});await h.idle()
   assert.ok(Math.abs((await position(reading.key))-reading.top)<=4,'resize preserves the same occurrence and intrarow position')
   assert.deepEqual(h.errors,[])
- }finally{await h.close()}
+ }finally{release?.();await h.close()}
 })

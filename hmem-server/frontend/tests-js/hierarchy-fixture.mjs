@@ -131,7 +131,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
     catch { response.writeHead(404); response.end() }
   })
   await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen))
-  let browser, browserServer, persistentContext, persistentLaunch, persistentClosing, persistentClosed=false, serverClosing, browserImage
+  let browser, browserServer, ordinaryContext, persistentContext, persistentLaunch, persistentClosing, persistentClosed=false, serverClosing, browserImage
   const setupOwner = persistentProfile ? { profile: persistentProfile.path, get context() { return persistentContext }, get browser() { return browser }, get server() { return server }, get pendingLaunch() { return persistentLaunch }, close: () => retire() } : null
   const held = new Set(), controls = [], requests = [], errors = [], unhandled = []
   let principalId = 'fixture-user'
@@ -158,18 +158,18 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       if(globalThis.retainedPersistentFixtureSetupOwner===setupOwner)delete globalThis.retainedPersistentFixtureSetupOwner
       return
     }
-    try {
-      try { if (browser) await bounded(browser.close(), 5000, 'Owned browser close') }
-      finally { if (browserServer) await bounded(Promise.resolve().then(() => browserServer.close()), 5000, 'Owned Chromium retirement') }
-    } finally {
-      server.closeAllConnections()
-      await bounded(new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose())), 5000, 'Owned HTTP server close')
-    }
+    const failures=[]
+    try { if(browser)await bounded((async()=>{if(ordinaryContext)await ordinaryContext.close();await browser.close()})(),5000,'Owned browser close') } catch(error){failures.push(error)}
+    try { if(browserServer)await bounded(Promise.resolve().then(()=>browserServer.close()),5000,'Owned Chromium retirement') } catch(error){failures.push(error)}
+    server.closeAllConnections()
+    try { await bounded(new Promise((resolveClose,rejectClose)=>server.close(error=>error?rejectClose(error):resolveClose())),5000,'Owned HTTP server close') } catch(error){failures.push(error)}
+    if(failures.length===1)throw failures[0]
+    if(failures.length>1)throw new AggregateError(failures,'ordinary_fixture_cleanup_failed')
   }
   try {
     let page
     if (persistentProfile) {
-      const profile = resolve(persistentProfile.path), scratch = resolve('../../.tmp/sealed-archives-e0ac6260')
+      const profile = resolve(persistentProfile.path), scratch = resolve(process.env.HMEM_ARCHIVE_PROFILE_SCRATCH || '../../.tmp/sealed-archives-e0ac6260')
       assert.ok(profile.startsWith(scratch + sep) && /^archive-profile-[a-f0-9-]{36}$/.test(profile.slice(scratch.length + 1)))
       assert.equal((await lstat(profile)).isSymbolicLink(), false)
       assert.equal(await realpath(profile), profile, 'Owned browser profile cannot traverse reparse points')
@@ -190,6 +190,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       browser = await chromium.connect(browserServer.wsEndpoint())
       browserImage = { pid: browserServer.process().pid, executable: browserServer.process().spawnfile, mode: 'nonpersistent' }
       page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', ...pageOptions })
+      ordinaryContext = page.context()
     }
     page.on('pageerror', error => errors.push(error.message))
     await page.addInitScript(socketScript)

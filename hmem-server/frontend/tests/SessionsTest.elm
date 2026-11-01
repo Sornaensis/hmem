@@ -25,6 +25,66 @@ suite : Test.Test
 suite =
     describe "Sessions production wire contract"
         [ describe "workspace completed reader" completedReaderTests
+        , test "disclosure UI acknowledgements preserve exact generation and transport authority" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                current={entered | sessions={old | rows=[sampleRecord],pending=True,offset=64,end=128,windowPublication=9,positionPending=True}}
+                packet kind stamp generation isOpen=SessionsBridgeEvent (Encode.object [("kind",Encode.string kind),("stamp",Encode.string stamp),("generation",Encode.int generation),("scope",Encode.string old.viewerScope),("namespace",Encode.string "group:owned-run"),("key",Encode.string "owned-run"),("request",Encode.int 7),("open",Encode.bool isOpen)])
+                stale=Sessions.update (packet "viewer-disclosure" old.stamp (old.generation-1) True) current |> Tuple.first
+                foreign=Sessions.update (packet "viewer-disclosure" "retired" old.generation True) current |> Tuple.first
+                opened=Sessions.update (packet "viewer-disclosure" old.stamp old.generation True) current |> Tuple.first
+                repeated=Sessions.update (packet "viewer-disclosure" old.stamp old.generation True) opened |> Tuple.first
+                closed=Sessions.update (packet "viewer-disclosure" old.stamp old.generation False) repeated |> Tuple.first
+                staleError=Sessions.update (packet "viewer-disclosure-error" old.stamp (old.generation-1) True) opened |> Tuple.first
+                failed=Sessions.update (packet "viewer-disclosure-error" old.stamp old.generation True) current |> Tuple.first
+                unrelated=Sessions.update (SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-disclosure"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("scope",Encode.string old.viewerScope),("namespace",Encode.string "group:unrelated"),("key",Encode.string "unrelated"),("request",Encode.int 8),("open",Encode.bool True)])) failed |> Tuple.first
+            in Expect.equal {stale=(False,False),values=(True,True,False),error=(Nothing,True),unrelated=(True,False,True),transport={rows=[sampleRecord],pending=True,offset=64,end=128,publication=9,position=True}}
+                {stale=(Set.member "owned-run" stale.sessions.historyOpen,Set.member "owned-run" foreign.sessions.historyOpen),values=(Set.member "owned-run" opened.sessions.historyOpen,Set.member "owned-run" repeated.sessions.historyOpen,Set.member "owned-run" closed.sessions.historyOpen),error=(staleError.sessions.error,failed.sessions.error/=Nothing),unrelated=(unrelated.sessions.error==failed.sessions.error,Set.member "owned-run" unrelated.sessions.historyOpen,Set.member "unrelated" unrelated.sessions.historyOpen),transport={rows=failed.sessions.rows,pending=failed.sessions.pending,offset=failed.sessions.offset,end=failed.sessions.end,publication=failed.sessions.windowPublication,position=failed.sessions.positionPending}}
+        , test "bounded disclosure acknowledgement reserves the requested key and its already-open ancestor" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                parent="999999:0"
+                child=parent++":0"
+                others=List.range 0 398 |> List.map (\index -> "1"++String.padLeft 4 '0' (String.fromInt index)) |> Set.fromList
+                seeded={entered | sessions={old | historyOpen=Set.insert parent others}}
+                packet key ancestor isOpen=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-disclosure"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("scope",Encode.string old.viewerScope),("namespace",Encode.string ("event:"++key)),("key",Encode.string key),("ancestor",Encode.string ancestor),("request",Encode.int 7),("open",Encode.bool isOpen)])
+                requested=Sessions.update (packet "zz-latest" "" True) seeded |> Tuple.first
+                nested=Sessions.update (packet child parent True) seeded |> Tuple.first
+                closedParent=Sessions.update (packet parent "" False) seeded |> Tuple.first
+                declined=Sessions.update (packet child parent True) closedParent |> Tuple.first
+                cancelledError=Sessions.update (SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-disclosure-error"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("scope",Encode.string old.viewerScope),("namespace",Encode.string ("event:"++child)),("key",Encode.string child),("ancestor",Encode.string parent),("request",Encode.int 7),("open",Encode.bool True)])) closedParent |> Tuple.first
+            in Expect.equal {latest=(400,True),nested=(400,True,True),newerClose=(False,False),cancelledError=Nothing}
+                {latest=(Set.size requested.sessions.historyOpen,Set.member "zz-latest" requested.sessions.historyOpen),nested=(Set.size nested.sessions.historyOpen,Set.member parent nested.sessions.historyOpen,Set.member child nested.sessions.historyOpen),newerClose=(Set.member parent declined.sessions.historyOpen,Set.member child declined.sessions.historyOpen),cancelledError=cancelledError.sessions.error}
+        , test "a backward omitted-gap read preserves its proven first record boundary" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                historical={entered | sessions={old | following=False,pending=False,positionPending=False,loadWindow=False,rows=[{sampleRecord | offset=1000,end=1100}]}}
+                packet before after fraction=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-boundary"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("edge",Encode.string "gap"),("before",Encode.int before),("after",Encode.int after),("fraction",Encode.float fraction),("direction",Encode.string "tail")])
+                exact=Sessions.update (packet 900 1000 1) historical |> Tuple.first |> .sessions
+                partial=Sessions.update (packet 900 200000 1) historical |> Tuple.first |> .sessions
+                interior=Sessions.update (packet 900 200000 0.5) historical |> Tuple.first |> .sessions
+            in Expect.equal {exact=(Just 900,1100,True),tailPartial=False,interior=False,tailDirection="tail"}
+                {exact=(exact.start,exact.end,exact.windowAligned),tailPartial=partial.windowAligned,interior=interior.windowAligned,tailDirection=exact.windowDirection}
+        , test "current publication position protects retained source and presentation before a prepend is composed" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                retained={sampleRecord | offset=60050,presentationOffset=60050,end=60238}
+                anchor=String.padLeft 20 '0' "60050"
+                fragment=anchor ++ ":0000000:content:0:0:0"
+                reading={entered | sessions={old | following=False,start=Just 0,offset=0,end=64,rows=[retained],pending=True,resetPending=False,windowPurpose="gap",historyAnchor="100",presentationAnchor="request-time"}}
+                event stamp generation=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string stamp),("generation",Encode.int generation),("through",Encode.int 64),("before",Encode.int 0),("completeThrough",Encode.int 64),("rows",Encode.list identity []),("position",Encode.object [("anchor",Encode.string anchor),("fragmentAnchor",Encode.string fragment)])])
+                current=Sessions.update (event old.stamp old.generation) reading |> Tuple.first |> .sessions
+                stale=Sessions.update (event old.stamp (old.generation-1)) reading |> Tuple.first |> .sessions
+                foreign=Sessions.update (event "retired" old.generation) reading |> Tuple.first |> .sessions
+                following={reading | sessions={old | following=True,start=Just 0,offset=0,end=64,rows=[retained],pending=True,windowPurpose="append",historyAnchor="owned-latest",presentationAnchor="owned-latest"}}
+                latest=Sessions.update (event old.stamp old.generation) following |> Tuple.first |> .sessions
+            in
+            Expect.equal {position=(anchor,fragment,[retained]),authority=(64,64),stale=("100","100"),latest=("owned-latest","owned-latest")}
+                {position=(current.historyAnchor,current.presentationAnchor,current.rows),authority=(current.offset,current.historyScanAfter),stale=(stale.historyAnchor,foreign.historyAnchor),latest=(latest.historyAnchor,latest.presentationAnchor)}
         , test "active latest starts a new bounded tail lifetime without discarding the loaded conversation" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -237,6 +297,20 @@ suite =
             in
             Expect.equal ((32,[sampleRecord],False),(0,[sampleRecord],False))
                 ((advanced.sessions.offset,advanced.sessions.rows,advanced.sessions.pending),(late.sessions.offset,late.sessions.rows,late.sessions.pending))
+        , test "a captured incomplete suffix settles without complete-record authority and growth reframes its prefix" <| \_ ->
+            let
+                entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old = entered.sessions
+                reading = {entered | sessions={old | start=Just 0,offset=0,end=8,historyAfter=0,historyScanAfter=0,pending=True,resetPending=False,rows=[]}}
+                event generation = SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-progress"),("stamp",Encode.string old.stamp),("generation",Encode.int generation),("through",Encode.int 8),("pendingBytes",Encode.int 8),("notice",Encode.string "Incomplete record at this finite window boundary.")])
+                captured = Sessions.update (event old.generation) reading |> Tuple.first
+                stale = Sessions.update (event (old.generation-1)) reading |> Tuple.first
+                -- Existing metadata has a larger committed end: only that real
+                -- growth may reopen the range, at the complete boundary zero.
+                grown = Sessions.reconcile (captured,Cmd.none) |> Tuple.first
+            in
+            Expect.equal (((8,8,0),(False,False,[])),(0,0,True),Just 0)
+                (((captured.sessions.offset,captured.sessions.historyAfter,captured.sessions.historyScanAfter),(captured.sessions.pending,captured.sessions.loadWindow,captured.sessions.rows)),(stale.sessions.offset,stale.sessions.historyAfter,stale.sessions.pending),grown.sessions.start)
         , test "malformed or unowned intermediate progress never advances the acknowledged cursor" <| \_ ->
             let
                 entered = Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -690,6 +764,35 @@ dockTests =
         in
         Expect.equal {full=[sampleRecord],returned=[sampleRecord],following=False,owner=True,retired=[]}
             {full=full.sessions.rows,returned=returned.sessions.rows,following=returned.sessions.following,owner=full.sessions.stamp/=returned.sessions.stamp,retired=retired.sessions.rows}
+    , test "pending same-authority handoff carries accepted display but replays transport after positioning" <| \_ ->
+        let
+            run reset =
+                let
+                    dock=Sessions.update (SessionsToggleDock "one") dockFixture |> Sessions.reconcile |> Tuple.first
+                    state=dock.sessions
+                    delivery=dock.sessionDelivery
+                    metadata=Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
+                    metadataTarget=Delivery.SessionMetadata sessionId
+                    resource={workspace=workspace,target=metadataTarget,dirty=0,settled=0,data=Maybe.map Delivery.Metadata metadata,ranges=[],error=Nothing,proven=True,incarnation=0,retry=Delivery.Available}
+                    reading={dock | sessionDelivery={delivery | resources=Dict.insert (Delivery.key workspace metadataTarget) resource delivery.resources},sessions={state | start=Just 0,offset=32,end=32,loadWindow=True,rows=[sampleRecord],following=False,manualUp=True,pending=not reset,resetPending=reset,historyAnchor="reading",presentationAnchor="fragment",historyOpen=Set.singleton "opened"}}
+                    full=Sessions.reconcile ({reading | activeTab=SessionsTab},Cmd.none) |> Tuple.first
+                    packet stamp generation kind=SessionsBridgeEvent (Encode.object [("kind",Encode.string kind),("stamp",Encode.string stamp),("generation",Encode.int generation),("publication",Encode.int state.windowPublication),("through",Encode.int 32),("rows",Encode.list identity [])])
+                    stale=Sessions.update (packet state.stamp state.generation "viewer") full |> Tuple.first
+                    positioned=Sessions.update (packet full.sessions.stamp full.sessions.generation "viewer-positioned") stale |> Sessions.reconcile |> Tuple.first
+                    retired=Sessions.reconcile ({reading | activeTab=SessionsTab,sessionRequestEpoch=reading.sessionRequestEpoch+1},Cmd.none) |> Tuple.first
+                    windowOwned current=List.any (\(_,target)->case target of
+                        Delivery.SessionWindow _ _ _ _ -> True
+                        _ -> False) current.sessions.owned
+                in
+                Expect.all
+                    [\_ -> Expect.equal {rows=[sampleRecord],following=False,manual=True,anchor="reading",fragment="fragment",open=Set.singleton "opened"} {rows=full.sessions.rows,following=full.sessions.following,manual=full.sessions.manualUp,anchor=full.sessions.historyAnchor,fragment=full.sessions.presentationAnchor,open=full.sessions.historyOpen}
+                    ,\_ -> Expect.equal (0,True,False) (full.sessions.offset,full.sessions.positionPending,windowOwned full)
+                    ,\_ -> Expect.equal [sampleRecord] stale.sessions.rows
+                    ,\_ -> Expect.equal True (windowOwned positioned)
+                    ,\_ -> Expect.equal [] retired.sessions.rows
+                    ,\_ -> Expect.equal Set.empty (Set.diff (Dict.keys reading.sessionDelivery.physical |> Set.fromList) (Dict.keys full.sessionDelivery.physical |> Set.fromList))
+                    ] ()
+        in Expect.all [\_ -> run False,\_ -> run True] ()
     , test "invalidated membership cannot admit a new viewer or manually select a stale card" <| \_ ->
         let
             initial = dockFixture
@@ -961,6 +1064,40 @@ completedReaderTests =
             state=ready.sessions
             next=Sessions.update SessionsJumpLatest ready |> Tuple.first |> .sessions
         in Expect.equal (state.generation,True,state.latestRequest+1) (next.generation,next.latestPending,next.latestRequest)
+    , test "a finite handoff failure reports only the current reader authority" <| \_ ->
+        let ready=model "ready"
+            state=ready.sessions
+            packet stamp generation=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-handoff-error"),("stamp",Encode.string stamp),("generation",Encode.int generation),("publication",Encode.int state.windowPublication)])
+            apply stamp generation=Sessions.update (packet stamp generation) ready |> Tuple.first |> .sessions |> .error
+        in Expect.equal [Nothing,Nothing,Just "Conversation position could not be restored. Please retry."] [apply "retired" state.generation,apply state.stamp (state.generation-1),apply state.stamp state.generation]
+    , test "canceled handoff releases only its exact logical pause without claiming restoration or releasing transport" <| \_ ->
+        let
+            ready=model "ready"
+            state=ready.sessions
+            waiting={ready | sessions={state | positionPending=True,windowPublication=88,manualUp=True,following=False,loadWindow=True,historyAnchor="newer-reading"}}
+            packet stamp generation publication kind=SessionsBridgeEvent (Encode.object [("kind",Encode.string kind),("stamp",Encode.string stamp),("generation",Encode.int generation),("publication",Encode.int publication)])
+            apply stamp generation publication kind=Sessions.update (packet stamp generation publication kind) waiting |> Tuple.first
+            final=apply state.stamp state.generation 88 "viewer-handoff-cancelled"
+            newer={waiting | sessions={state | positionPending=True,windowPublication=89}}
+            late=Sessions.update (packet state.stamp state.generation 88 "viewer-handoff-cancelled") newer |> Tuple.first
+        in Expect.all
+            [\_ -> Expect.equal [True,True,True,True] [ (apply "retired" state.generation 88 "viewer-handoff-cancelled").sessions.positionPending,(apply state.stamp (state.generation-1) 88 "viewer-handoff-cancelled").sessions.positionPending,(apply state.stamp state.generation 87 "viewer-handoff-cancelled").sessions.positionPending,late.sessions.positionPending]
+            ,\_ -> Expect.equal {position=False,manual=True,following=False,load=True,anchor="newer-reading",error=Nothing,physical=Dict.keys waiting.sessionDelivery.physical} {position=final.sessions.positionPending,manual=final.sessions.manualUp,following=final.sessions.following,load=final.sessions.loadWindow,anchor=final.sessions.historyAnchor,error=final.sessions.error,physical=Dict.keys final.sessionDelivery.physical}
+            ,\_ -> Expect.equal (True,Nothing) ((apply state.stamp state.generation 87 "viewer-handoff-error").sessions.positionPending,(apply state.stamp state.generation 87 "viewer-handoff-error").sessions.error)
+            ,\_ -> Expect.equal (False,Just "Conversation position could not be restored. Please retry.") ((apply state.stamp state.generation 88 "viewer-handoff-error").sessions.positionPending,(apply state.stamp state.generation 88 "viewer-handoff-error").sessions.error)
+            ] ()
+    , test "a current complete lazy Markdown body acquires the same AST as an initial page" <| \_ ->
+        let
+            ready=model "ready"
+            state=ready.sessions
+            sealed=state.sealed
+            key="0000000000000000000:0000000"
+            piece={key=key,offset="0",kind="thinking",label="",role="assistant",time="",ast=Err "not_loaded",group="g",count="1",endTime="",open=True,groupOpen=True,body=Nothing}
+            waiting={ready | sessions={state | sealed={sealed | rows=[piece]}}}
+            packet stamp generation wanted part more format=SessionsBridgeEvent (Encode.object [("kind",Encode.string "sealed-body"),("stamp",Encode.string stamp),("generation",Encode.int generation),("workspace",Encode.string workspace),("session",Encode.string sessionId),("key",Encode.string wanted),("body",Encode.object [("text",Encode.string "[Open](https://example.test/normal)"),("part",Encode.int part),("more",Encode.bool more),("format",Encode.string format)])])
+            apply stamp generation wanted part more format=Sessions.update (packet stamp generation wanted part more format) waiting |> Tuple.first |> .sessions |> .sealed |> .rows |> List.head |> Maybe.map (.ast >> Result.toMaybe >> (/=) Nothing)
+        in Expect.equal [Just True,Just False,Just False,Just False,Just False,Just False,Just False]
+            [apply state.stamp state.generation key 0 False "markdown",apply "retired" state.generation key 0 False "markdown",apply state.stamp (state.generation-1) key 0 False "markdown",apply state.stamp state.generation "missing" 0 False "markdown",apply state.stamp state.generation key 1 False "markdown",apply state.stamp state.generation key 0 True "markdown",apply state.stamp state.generation key 0 False "json"]
     , test "partial multilingual Markdown and acquired rows share the actual serialized UTF8 cap" <| \_ ->
         let
             ready=model "ready"

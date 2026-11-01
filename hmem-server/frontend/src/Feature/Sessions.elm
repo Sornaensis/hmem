@@ -103,7 +103,8 @@ reconcile ( model, command ) =
             else Nothing
         stamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", Maybe.withDefault "" selected, Maybe.withDefault "" taskPanel])
         viewerScope = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", Maybe.withDefault "" selected, String.fromInt model.sessionDelivery.proofRetirement])
-        continueViewer = old.viewerScope == viewerScope && selected /= Nothing && old.start /= Nothing && not old.resetPending && not old.pending && ((old.taskPanel /= Nothing && model.activeTab == SessionsTab) || (old.taskPanel == Nothing && taskPanel /= Nothing && old.returnTaskPanel == taskPanel))
+        carryPresentation = old.viewerScope == viewerScope && selected /= Nothing && old.start /= Nothing && ((old.taskPanel /= Nothing && model.activeTab == SessionsTab) || (old.taskPanel == Nothing && taskPanel /= Nothing && old.returnTaskPanel == taskPanel))
+        continueViewer = carryPresentation && not old.resetPending && not old.pending
         returnTaskPanel = if old.workspace /= workspace || old.epoch /= model.sessionRequestEpoch || old.selected /= selected then Nothing else if model.activeTab == SessionsTab && old.taskPanel /= Nothing then old.taskPanel else if model.activeTab == SessionsTab then old.returnTaskPanel else Nothing
         downloadStamp = Encode.encode 0 (Encode.list Encode.string [Maybe.withDefault "" workspace, String.fromInt model.sessionRequestEpoch, model.sessionContext |> Maybe.map (.principal >> .actorId) |> Maybe.withDefault "", String.fromInt model.sessionDelivery.retirement, if model.activeTab == SessionsTab then Maybe.withDefault "" selected else ""])
         downloadChanged = old.downloadStamp /= downloadStamp
@@ -203,6 +204,11 @@ reconcile ( model, command ) =
             if old.stamp /= stamp then
                 if continueViewer then
                     { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = False, pending = False, positionPending = False }
+                else if carryPresentation then
+                    -- Accepted display rows keep their exact source authority.
+                    -- Replay the captured window with a fresh framer only after
+                    -- its reading point has moved to the new surface.
+                    { withDownloads | stamp=stamp,generation=old.generation+1,resetPending=True,pending=False,positionPending=True,offset=Maybe.withDefault old.offset old.start }
                 else
                     { withDownloads | stamp = stamp, generation = old.generation + 1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, historyScanBefore = 0, historyScanAfter = 0, historyScanEnd = 0, historyTop = 0, historyBottom = 0, historyTopCount = 0, historyBottomCount = 0, historyTopGroup = "", historyBottomGroup = "", historyAnchor = "", historyHeights = Dict.empty, historyGaps = [], historyActivity = Dict.empty, historyClosed = Set.empty, historyOpen = Set.empty, windowPublication = 0, positionPending = False, presentationPart = -1, presentationAnchor = "", windowPurpose = "latest", manualUp = False, latestPending = False, latestError = Nothing, pending = False, rows = [], notice = "", error = Nothing, heartbeats = Dict.empty, sealed = emptySealedSessionView }
             else if transportChanged then
@@ -223,7 +229,7 @@ reconcile ( model, command ) =
                     let begin = max 0 (session.committedBytes - 65536) in
                     { retired | start = Just begin, offset = begin, end = session.committedBytes, historyBefore = begin, historyAfter = begin, windowDirection = "tail", windowAligned = False, generation = retired.generation + 1 }
                 else if retired.following && not retired.pending && not retired.positionPending && (not retired.loadWindow || retired.offset >= retired.end) && retired.historyAfter < session.committedBytes then
-                    let begin = List.drop (max 0 (List.length retired.rows-20)) retired.rows |> List.filter (\row -> retired.historyAfter-row.offset <= 65536) |> List.head |> Maybe.map .offset |> Maybe.withDefault (List.reverse retired.rows |> List.head |> Maybe.map .offset |> Maybe.withDefault retired.historyAfter) in
+                    let begin = List.drop (max 0 (List.length retired.rows-20)) retired.rows |> List.filter (\row -> retired.historyAfter-row.offset <= 65536) |> List.head |> Maybe.map .offset |> Maybe.withDefault (List.reverse retired.rows |> List.head |> Maybe.map .offset |> Maybe.withDefault (min retired.historyAfter retired.historyScanAfter)) in
                     { retired | start = Just begin, offset = begin, end = min session.committedBytes (begin + 2097152), generation = retired.generation + 1, resetPending = True, windowDirection = "forward", windowAligned = True, windowPurpose = "append", loadWindow = True }
                 else retired
             Nothing -> retired
@@ -280,11 +286,13 @@ reconcile ( model, command ) =
         bridge = Ports.sessionBridgeCommand (Encode.object
             [ ("stamp",Encode.string stamp)
             , ("continueViewer",Encode.bool (continueViewer && old.stamp /= stamp))
+            , ("preservePresentation",Encode.bool (carryPresentation && old.stamp /= stamp))
             , ("viewerScope",Encode.string viewerScope)
             , ("downloadStamp",Encode.string downloadStamp)
             , ("generation",Encode.int current.generation)
             , ("reset",viewerReset current |> Maybe.map Encode.int |> Maybe.withDefault Encode.null)
             , ("follow",Encode.bool current.following)
+            , ("viewerError",Encode.bool (current.error/=Nothing))
             , ("direction",Encode.string current.windowDirection)
             , ("purpose",Encode.string current.windowPurpose)
             , ("knownBefore",Encode.int (if current.windowPurpose == "latest" then 0 else current.historyScanBefore))
@@ -366,7 +374,8 @@ update msg model =
                     , start = if decodeRecovery then Just begin else state.start
                     , offset = if decodeRecovery then begin else state.offset
                     , generation = state.generation + 1,resetPending = decodeRecovery || state.resetPending}
-                ,sessionDelivery = state.workspace |> Maybe.map (\ws -> refresh ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery},Cmd.none )
+                ,sessionDelivery = state.workspace |> Maybe.map (\ws -> refresh ws model.sessionDelivery) |> Maybe.withDefault model.sessionDelivery}
+            ,Ports.sessionBridgeCommand (Encode.object [("stamp",Encode.string state.stamp),("viewerScope",Encode.string state.viewerScope),("generation",Encode.int (state.generation+1)),("disclosureRetry",Encode.bool True)]) )
         SessionsActivityFilter value ->
             if List.member value ["live","quiet","completed"] then
                 let
@@ -543,6 +552,14 @@ receiveBridge value model =
         generation = field "generation" Decode.int -1
         through = field "through" Decode.int -1
         kind = field "kind" Decode.string ""
+        uiRequest=field "request" Decode.int -1
+        uiKey=field "key" Decode.string ""
+        uiOpen=field "open" Decode.bool False
+        uiAncestor=field "ancestor" Decode.string ""
+        uiNamespace=field "namespace" Decode.string ""
+        uiValid=uiRequest<=0 || (field "scope" Decode.string ""==state.viewerScope && (uiNamespace=="group:"++uiKey || uiNamespace=="event:"++uiKey))
+        uiError="Activity could not be updated. Retry."
+        uiAck failed cancelled=if uiRequest>0 then Ports.sessionBridgeCommand (Encode.object [("stamp",Encode.string stamp),("generation",Encode.int generation),("disclosureAck",Encode.object [("scope",Encode.string state.viewerScope),("request",Encode.int uiRequest),("namespace",Encode.string uiNamespace),("key",Encode.string uiKey),("ancestor",Encode.string uiAncestor),("open",Encode.bool uiOpen),("error",Encode.bool failed),("cancelled",Encode.bool cancelled)])]) else Cmd.none
         row = Decode.map8 (\offset end raw delimiter recordType role time content -> {offset=offset,end=end,raw=raw,delimiter=delimiter,recordType=recordType,role=role,time=time,content=content,presentationOffset=offset,activityAnchors=Dict.empty}) (Decode.field "offset" Decode.int) (Decode.field "end" Decode.int) (Decode.field "raw" Decode.string) (Decode.field "delimiter" Decode.string) (Decode.field "type" Decode.string) (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "text" Decode.string)
             |> Decode.andThen (\record -> Decode.map (\anchor -> {record | presentationOffset=anchor}) (Decode.oneOf [Decode.field "presentationOffset" Decode.int,Decode.succeed record.offset]))
             |> Decode.andThen (\record -> Decode.map (\anchors -> {record | activityAnchors=anchors}) (Decode.oneOf [Decode.field "activityAnchors" (Decode.dict Decode.string),Decode.succeed Dict.empty]))
@@ -571,6 +588,10 @@ receiveBridge value model =
     else if kind == "latest-cancelled" && stamp == state.stamp && generation == state.generation && field "request" Decode.int -1 == state.latestRequest then
         ({model | sessions={state | latestPending=False,following=False,loadWindow=False}},Cmd.none)
     else if kind == "viewer-end" && stamp == state.stamp && generation == state.generation then update SessionsJumpLatest model
+    else if kind == "viewer-handoff-cancelled" && stamp == state.stamp && generation == state.generation && field "publication" Decode.int -1 == state.windowPublication && state.positionPending then
+        ({model | sessions={state | positionPending=False}},Cmd.none)
+    else if kind == "viewer-handoff-error" && stamp == state.stamp && generation == state.generation && field "publication" Decode.int -1 == state.windowPublication then
+        ({model | sessions={state | positionPending=False,error=Just "Conversation position could not be restored. Please retry."}},Cmd.none)
     else if kind == "viewer-positioned" && stamp == state.stamp && generation == state.generation && field "publication" Decode.int -1 == state.windowPublication && state.positionPending then
         ({model | sessions={state | positionPending=False,error=if field "failed" Decode.bool False then Just "Conversation position could not be restored. Please retry." else state.error}},Cmd.none)
     else if kind == "viewer-boundary" && stamp == state.stamp && generation == state.generation then
@@ -591,16 +612,22 @@ receiveBridge value model =
                 anchor = if prepared.historyAnchor/="" then prepared.historyAnchor else String.padLeft 20 '0' (String.fromInt (if interior then target else if backward then gapAfter else gapBefore))
             in
             if gapBefore<0 || gapAfter<=gapBefore || finish<=begin then (model,Cmd.none) else
-            ({next | sessions={prepared | start=Just begin,offset=begin,end=finish,pending=False,loadWindow=True,generation=state.generation+1,resetPending=True,windowPurpose="gap",windowDirection=if backward || interior then "tail" else "forward",windowAligned=not backward && not interior,historyAnchor=anchor,error=Nothing}},Cmd.none)
+            ({next | sessions={prepared | start=Just begin,offset=begin,end=finish,pending=False,loadWindow=True,generation=state.generation+1,resetPending=True,windowPurpose="gap",windowDirection=if backward || interior then "tail" else "forward",windowAligned=begin==gapBefore,historyAnchor=anchor,error=Nothing}},Cmd.none)
         else if field "edge" Decode.string "" == "older" && (state.historyBefore > 0 || state.historyScanBefore > 0) then update SessionsOlder next
         else if field "edge" Decode.string "" == "newer" then update SessionsNewer next
         else (next,Cmd.none)
     else if kind == "viewer-render" && stamp == state.stamp && generation == state.generation then
         ({model | sessions={state | presentationPart=clamp 0 100000 (field "part" Decode.int 0),presentationAnchor=""}},Cmd.none)
-    else if kind == "viewer-disclosure" && stamp == state.stamp && generation == state.generation then
-        let key=field "key" Decode.string ""
-            opened=if field "open" Decode.bool False then Set.insert key state.historyOpen else Set.remove key state.historyOpen
-        in ({model | sessions={state | historyOpen=opened |> Set.toList |> List.take 400 |> Set.fromList}},Cmd.none)
+    else if kind == "viewer-disclosure" && stamp == state.stamp && generation == state.generation && uiValid then
+        let ancestorOpen=not uiOpen || uiAncestor=="" || Set.member uiAncestor state.historyOpen
+            protected=Set.fromList (uiKey::(if uiOpen && uiAncestor/="" then [uiAncestor] else []))
+            retained=if not ancestorOpen then state.historyOpen else if uiOpen then Set.union protected (Set.diff state.historyOpen protected |> Set.toList |> List.take (400-Set.size protected) |> Set.fromList) else Set.remove uiKey state.historyOpen |> Set.toList |> List.take 400 |> Set.fromList
+            applied=ancestorOpen && Set.member uiKey retained==uiOpen
+        in ({model | sessions={state | historyOpen=retained}},if applied || not ancestorOpen then uiAck False (not ancestorOpen) else Cmd.none)
+    else if kind == "viewer-disclosure-error" && stamp == state.stamp && generation == state.generation && uiValid then
+        let ancestorOpen=not uiOpen || uiAncestor=="" || Set.member uiAncestor state.historyOpen
+            applied=Set.member uiKey state.historyOpen==uiOpen && ancestorOpen
+        in ({model | sessions={state | error=if applied || not ancestorOpen then state.error else Just uiError}},uiAck (not applied && ancestorOpen) (not ancestorOpen))
     else if kind == "viewer-follow" && stamp == state.stamp && generation == state.generation then
         if state.latestPending then (model,Cmd.none) else
         let manual=field "manualUp" Decode.bool state.manualUp
@@ -617,8 +644,12 @@ receiveBridge value model =
                 Delivery.Metadata session -> Just session.committedBytes
                 _ -> Nothing) |> Maybe.withDefault state.end
             grow = state.windowDirection=="forward" && through>=state.end && field "pendingBytes" Decode.int 0>0 && state.end<newest && state.end-Maybe.withDefault state.offset state.start<2097152
+            captured = through>=state.end && not grow && field "pendingBytes" Decode.int 0>0
         in
-        ( {model | sessions = {state | offset = through,pending = False,end=if grow then min newest (min (Maybe.withDefault state.offset state.start+2097152) (state.end+65536)) else state.end,notice = field "notice" Decode.string state.notice}}, Cmd.none )
+        -- A finite incomplete suffix is scanned, not authoritative complete
+        -- records. Settle its captured end without admitting/deleting rows;
+        -- subsequent growth restarts from the last complete boundary above.
+        ( {model | sessions = {state | offset = through,pending = False,end=if grow then min newest (min (Maybe.withDefault state.offset state.start+2097152) (state.end+65536)) else state.end,historyAfter=if captured then max state.historyAfter through else state.historyAfter,loadWindow=if captured then False else state.loadWindow,notice = field "notice" Decode.string state.notice}}, Cmd.none )
     else case Decode.decodeValue (Decode.field "rows" (Decode.list row)) value of
         Ok rows ->
             if List.length rows <= 200 && List.sum (List.map (.raw >> String.length) rows) <= 4194304 then
@@ -628,7 +659,9 @@ receiveBridge value model =
                     let begin = max 0 (state.end - 2097152) in
                     ( {model | sessions={state | start=Just begin,offset=begin,pending=False,generation=state.generation+1,resetPending=True}},Cmd.none )
                 else
-                    let composed=composeRecords value (field "before" Decode.int (Maybe.withDefault 0 state.start)) through (field "completeThrough" Decode.int through) rows state
+                    let position = field "position" (Decode.map2 Tuple.pair (Decode.field "anchor" Decode.string) (Decode.field "fragmentAnchor" Decode.string)) (state.historyAnchor,state.presentationAnchor)
+                        positioned = if state.following then state else {state | historyAnchor=Tuple.first position |> String.left 40,presentationAnchor=Tuple.second position |> String.left 4096}
+                        composed=composeRecords value (field "before" Decode.int (Maybe.withDefault 0 state.start)) through (field "completeThrough" Decode.int through) rows positioned
                         full=field "pageFull" Decode.bool False
                     in
                     ( {model | sessions = {composed | offset=through,pending=False,positionPending=field "publication" Decode.int 0 > 0,windowPublication=field "publication" Decode.int 0,loadWindow=through<state.end,notice=field "notice" Decode.string ""
@@ -823,7 +856,7 @@ receiveSealed value model =
                         [] -> Dict.fromList kept
                         (entryKey,values)::rest -> if total+cost values>4194304 then prune rest total kept else prune rest (total+cost values) ((entryKey,values)::kept)
                     bodies=prune ((key,parts)::(Dict.toList sealed.bodies |> List.filter (Tuple.first >> (/=) key))) 0 []
-                    attach item=if item.key==key then {item | body=Just (if content.format=="json" then {content | text="",tokens=[],part=0,more=True} else content)} else item
+                    attach item=if item.key==key then {item | body=Just (if content.format=="json" then {content | text="",tokens=[],part=0,more=True} else content),ast=if content.format=="markdown" && not content.more && content.part==0 then Markdown.Parser.parse content.text |> Result.mapError (always "parse error") else Err "not_loaded"} else item
                 in
                 if String.length content.text>65536 || not (List.any (.key >> (==) key) sealed.rows) then (model,Cmd.none)
                 else
@@ -1388,6 +1421,7 @@ viewRecords context workspace model id =
         [div [class "sessions-toolbar"]
             [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
         ,if state.error /= Nothing || rangeError /= Nothing || metadataError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
+        ,p [attribute "role" "alert",attribute "data-disclosure-error-owner" state.stamp,attribute "data-disclosure-error-scope" state.viewerScope,Html.Attributes.hidden True] [text "Activity update could not be confirmed. ",button [onClick SessionsRetry] [text "Retry"]]
         ,viewLatestError state
         ,Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-viewer-generation" (String.fromInt state.generation),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-window-publication" (String.fromInt state.windowPublication),attribute "data-position-pending" (if state.positionPending then "true" else "false"),attribute "data-history-mode" "active",attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-history-before" (String.fromInt state.historyBefore),attribute "data-history-scan-before" (String.fromInt state.historyScanBefore),attribute "data-history-after" (String.fromInt state.historyAfter),attribute "data-history-latest" (String.fromInt newest),attribute "data-history-loading" (if state.start == Nothing || state.pending || state.positionPending || (state.loadWindow && state.offset < state.end) || rangeError /= Nothing || state.error /= Nothing then "true" else "false"),attribute "data-history-error" (if rangeError /= Nothing || state.error /= Nothing || metadataError /= Nothing then "true" else "false"),attribute "aria-label" "Session conversation"]
             rendered.nodes

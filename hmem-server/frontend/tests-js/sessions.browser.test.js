@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { chromium, request } from '@playwright/test'
 import { startSessionMcp, closeSessionMcps } from './support/session-mcp.js'
-import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
+import { openSessionExplorer,continuousScrollStep } from './support/sessions-ux-fixture.mjs'
 
 const repo = resolve(import.meta.dirname, '../../..')
 const frontend = resolve(import.meta.dirname, '..')
@@ -193,7 +193,8 @@ test('production Sessions uses canonical authenticated resources and direct task
     await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor()
     assert.equal(await page.getByRole('button',{name:'Live',exact:true}).getAttribute('aria-pressed'),'true')
     assert.equal(await page.getByLabel('Status',{exact:true}).count(),0)
-    await page.getByRole('link',{name:task.title,exact:false}).waitFor()
+    await page.locator('.session-linked-tasks > summary').click()
+    await page.locator('.session-task-cards .popover-card').filter({hasText:task.title}).locator('.btn-jump').waitFor()
     await until(async()=>await page.locator('.session-summary').count()===1,'initial canonical session list')
     await until(async()=>await page.locator('.session-record').count()===1,'initial byte viewer hides unknown JSON')
     assert.equal(await page.locator('.session-record-text').first().innerText(),'Hello from a real session λ')
@@ -244,8 +245,8 @@ test('production Sessions uses canonical authenticated resources and direct task
     const savedBytes=downloadedSmall.length
     const savedHash=createHash('sha256').update(downloadedSmall)
     assert.equal(savedBytes,original.length);assert.equal(savedHash.digest('hex'),sha(original))
-    const taskLink=page.getByRole('link',{name:task.title,exact:false})
-    if(await taskLink.count()===0)await page.getByRole('button',{name:'Show All Linked Tasks',exact:true}).click()
+    const taskLink=page.locator('.session-task-cards .popover-card').filter({hasText:task.title}).locator('.btn-jump')
+    if(await taskLink.count()===0)await page.locator('.session-linked-tasks > summary').click()
     await taskLink.click()
     await until(() => page.url().includes('focus=task'), 'task navigation')
     const focusedCard=page.locator('#entity-'+task.id)
@@ -287,20 +288,28 @@ test('production Sessions uses canonical authenticated resources and direct task
     await completeDocument('small-viewer-and-save')
     await page.goto(origin+'/workspace/'+workspace.id+'#tab=sessions&session='+largeId)
     await page.getByRole('alert').getByRole('button',{name:'Retry',exact:true}).click()
-    await until(async()=>await page.locator('.session-record').filter({hasText:'boundary'}).count()===1,'bounded initial tail with large framed record',30000)
+    const boundary=page.locator('.session-record[data-offset="'+tailBoundaryOffset+'"]')
+    await until(async()=>await boundary.count()===1,'bounded initial tail contains the final large source occurrence',30000)
     assert.ok(await page.locator('.session-record').count()<=200)
     const viewport=page.locator('#session-records')
     const rows=await page.locator('.session-record').allTextContents()
     const snapshots=resyncs;invalidResume=true
     for(const socket of sockets.splice(0))await socket.close({code:1012,reason:'bounded recovery test'})
     await until(()=>ticketConflicts>0&&resyncs>snapshots,'genuine server resume rejection and canonical snapshot',30000)
-    await until(async()=>await page.locator('.session-record').filter({hasText:'boundary'}).count()===1,'one large record after canonical resync',30000)
+    await until(async()=>await boundary.count()===1,'one large source occurrence after canonical resync',30000)
     assert.deepEqual(await page.locator('.session-record').allTextContents(),rows,'canonical snapshot restores current tail rows')
     console.log(JSON.stringify({phase:'following-canonical-resync',ticketConflicts,resyncs}))
     const offsets=await page.locator('.session-record').evaluateAll(elements=>elements.map(element=>element.getAttribute('data-offset')))
     assert.equal(new Set(offsets).size,offsets.length,'overlap contains no duplicate record offsets')
-    const boundary=page.locator('.session-record').filter({hasText:'boundary'})
-    assert.equal(await boundary.locator('.session-record-text').textContent(),JSON.parse(largeRecord.toString('utf8')).text)
+    const expectedBody=JSON.parse(largeRecord.toString('utf8')).text,bodyParts=new Map()
+    for(let steps=0;;steps++){
+      for(const part of await boundary.locator('[data-fragment-path]').evaluateAll(nodes=>nodes.filter(node=>!node.querySelector('[data-fragment-path],[data-fragment-from]')).map(node=>({path:node.dataset.fragmentPath,text:node.textContent})))){if(bodyParts.has(part.path))assert.equal(bodyParts.get(part.path),part.text);bodyParts.set(part.path,part.text)}
+      const order=(a,b)=>{const left=a.split(':'),right=b.split(':');for(let i=0;i<Math.min(left.length,right.length);i++){const x=left[i],y=right[i];if(x===y)continue;return /^\d+$/.test(x)&&/^\d+$/.test(y)?BigInt(x)<BigInt(y)?-1:1:x.localeCompare(y)}return left.length-right.length}
+      const complete=[...bodyParts].sort(([a],[b])=>order(a,b)).map(([,text])=>text).join('')
+      if(complete===expectedBody)break
+      assert.ok(steps<80,'the complete near1MiB body remains reachable through bounded real input')
+      await continuousScrollStep(page,-1)
+    }
     await call(base+'/'+largeId+'/terminate','POST',{expected_offset:count,expected_revision:revision,final_bytes:count,final_sha256:largeHash})
     const largeDownloadEvent=page.waitForEvent('download')
     await page.getByRole('button',{name:/Download session/}).click()
@@ -320,36 +329,37 @@ test('production Sessions uses canonical authenticated resources and direct task
     await page.getByRole('link',{name:'Close session',exact:true}).click()
     await until(async()=>await page.locator('.session-summary').count()===50,'first bounded fifty summaries')
     assert.equal((await call(base+'?state=terminated')).items.length,2,'saved filter remains available through canonical API')
-    await page.getByRole('button',{name:'Quiet',exact:true}).click()
+    const activityOnly=async name=>{for(const caption of ['Live','Quiet','Completed']){const button=page.getByRole('button',{name:caption,exact:true});if((await button.getAttribute('aria-pressed')==='true')!==(caption===name))await button.click()}}
+    await activityOnly('Quiet')
     await page.getByText('No sessions match these filters.',{exact:true}).waitFor()
     let heldRelease,heldStarted=false
     const held=new Promise(done=>{heldRelease=done})
     await context.route('**/sessions?*',async route=>{
       const url=new URL(route.request().url())
-      if(!heldStarted&&url.searchParams.get('state')==='active'&&url.searchParams.get('freshness')==='fresh'){
+      if(!heldStarted&&url.searchParams.get('activity')==='live'){
         heldStarted=true
         const response=await route.fetch()
         await bounded(held,15000,'held canonical list response')
         await route.fulfill({response})
       }else await route.continue()
     })
-    await page.getByRole('button',{name:'Live',exact:true}).click()
+    await activityOnly('Live')
     await until(()=>heldStarted,'controlled canonical list request')
     await page.getByText('Loading sessions…',{exact:true}).waitFor()
-    await page.getByRole('button',{name:'Quiet',exact:true}).click()
+    await activityOnly('Quiet')
     await page.getByText('No sessions match these filters.',{exact:true}).waitFor()
     heldRelease()
     await pause(150)
     assert.equal(await page.locator('.session-summary').count(),0,'late old-query callback cannot replace current filtered page')
     await context.unroute('**/sessions?*')
-    await page.getByRole('button',{name:'Live',exact:true}).click()
+    await activityOnly('Live')
     await until(async()=>await page.locator('.session-summary').count()===50,'active page after stale callback')
     await page.getByRole('button',{name:'Older sessions',exact:true}).click()
     await until(async()=>await page.locator('.session-summary').count()===1,'keyset continuation final page')
     await page.locator('.session-summary a').click()
     await page.getByText('This session has no committed records.',{exact:true}).waitFor()
-    await page.locator('.session-task-card').filter({hasText:task.title}).waitFor()
-    assert.equal(await page.locator('.session-task-card').count(),1,'new empty sessions retain their required initial task')
+    await page.locator('.session-linked-tasks > summary').click();await page.locator('.session-task-cards .popover-card').filter({hasText:task.title}).waitFor()
+    assert.equal(await page.locator('.session-task-cards .popover-card').count(),1,'new empty sessions retain their required initial task')
     const empty=await call('/api/v1/workspaces','POST',{name:'Empty sessions scope',workspace_type:'repository'})
     await completeDocument('large-viewer-save-and-filter-paging')
     await page.goto(origin+'/workspace/'+empty.id+'#tab=sessions')
@@ -399,7 +409,6 @@ test('production Sessions uses canonical authenticated resources and direct task
     await archiveCard.locator('.btn-extras-toggle').click()
     await archiveCard.getByRole('button',{name:'Evidence',exact:true}).click()
     const archiveGroup=archiveCard.locator('.task-session-evidence')
-    await archiveGroup.locator('summary').click()
     await archiveGroup.getByRole('button',{name:'↓ Download all',exact:true}).waitFor()
     // REST-backed cards can render before this new PAT document's initial
     // canonical snapshot retires prior download authority. Await live scopes.
@@ -470,7 +479,6 @@ test('archive readiness waits for the current task initial canonical resync', { 
     await card.locator('.btn-extras-toggle').click()
     await card.getByRole('button',{name:'Evidence',exact:true}).click()
     const evidence=card.locator('.task-session-evidence')
-    await evidence.locator('summary').click()
     await evidence.getByRole('button',{name:'↓ Download all',exact:true}).waitFor()
     canonical=currentTaskCanonicalReady(page,workspace,task).then(()=>{ready=true})
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))

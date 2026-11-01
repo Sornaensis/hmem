@@ -7,6 +7,8 @@ import SessionTranscript as Transcript exposing (Item(..))
 import Test exposing (..)
 import Types exposing (SessionRecord)
 import Html
+import Markdown.Parser
+import Markdown.Renderer
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
 
@@ -17,6 +19,18 @@ tests =
         [ test "a supported indivisible leaf can use more than one slice of the whole budget" <| \_ ->
             let rendered=Transcript.renderWindow 100000 0 "" [Transcript.atom 45000 (\_ -> Html.text "large supported leaf")] in
             Expect.all [\_ -> Expect.equal False rendered.error,\_ -> Html.div [] rendered.nodes |> Query.fromHtml |> Query.has [Selector.text "large supported leaf"]] ()
+        , test "exact resolved qualification fixtures retain the original whole-page continuation bound" <| \_ ->
+            let
+                referenceDestination="https://example.test/" ++ String.repeat 8400 "x"
+                structuralDestination="https://example.test/" ++ String.repeat 8000 "x"
+                examples=["[r]: " ++ referenceDestination ++ "\n\n" ++ String.join "\n\n" (List.repeat 1000 "[x][r]"),"7. " ++ String.repeat 300 "[x][r]" ++ "\n8. " ++ String.repeat 300 "[x][r]" ++ "\n9. " ++ String.repeat 300 "[x][r]" ++ "\n\n[r]: " ++ structuralDestination,"| Column A | Column B | Column C |\n| --- | --- | --- |\n| a | " ++ String.repeat 500 "[x][r]" ++ " | c |\n\n[r]: " ++ structuralDestination]
+                stamp="[\"10000000-0000-4000-8000-000000000001\",\"1\",\"fixture-user\",\"20000000-0000-4000-8000-000000000002\",\"\"]"
+                sourceKey=String.repeat 19 "0" ++ ":0000000"
+                wrapper=4096+24*String.length stamp+24*String.length sourceKey+6
+                -- The list/table initial-full caller used 2 MiB; 1 MiB here is stricter.
+                legacy source=Transcript.renderPage 1048576 -1 [Transcript.container wrapper (Html.div []) [Transcript.container 128 (Html.div []) [Transcript.formattedAst Markdown.Renderer.defaultHtmlRenderer source (Markdown.Parser.parse source |> Result.mapError (always "parse error")),Transcript.atom (2048+12*String.length stamp+12*String.length sourceKey) (\_ -> Html.div [] [])]]]
+                results=List.map legacy examples
+            in Expect.all [\_ -> Expect.equal [False,False,False] (List.map .error results),\_ -> Expect.equal True (List.all (\result -> result.part<100) results)] ()
         , test "visible prose splits runs while hidden records do not" <| \_ ->
             [ record 1 [ block "thinking" "plan", block "tool" "{}" ]
             , { empty | offset = 2, recordType = "unknown" }

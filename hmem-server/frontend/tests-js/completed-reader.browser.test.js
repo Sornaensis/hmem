@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {gzipSync} from 'node:zlib'
 import {createHash} from 'node:crypto'
-import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
+import {openSessionExplorer,continuousScrollStep} from './support/sessions-ux-fixture.mjs'
 const hash=b=>createHash('sha256').update(b).digest('hex')
 const generation='33333333-3333-4333-8333-333333333333'
 const until=async fn=>{const deadline=Date.now()+10000;while(Date.now()<deadline){if(await fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('completed reader did not converge')}
@@ -20,20 +20,20 @@ async function open(h){await h.start();await h.idle();await h.page.getByRole('bu
 const message=i=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'Page message '+String(i).padStart(3,'0')}]}})
 const firstText=page=>page.locator('#session-records .session-record').first().innerText()
 
-test('completed workspace reader keeps bounded ordinary pages and truthful known endpoints',{timeout:45000},async()=>{
+test('completed workspace reader keeps continuous bounded history and truthful known endpoints',{timeout:45000},async()=>{
  const raw=Buffer.from(Array.from({length:150},(_,i)=>JSON.stringify(message(i))).join('\n')+'\n'),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
  try{
   await archive(h);await open(h);await page.getByText('Verified complete archive.',{exact:true}).waitFor()
-  const button=name=>page.locator('.session-archive-footer').getByRole('button',{name,exact:true})
-  assert.match(await firstText(page),/Page message 000/);assert.equal(await button('Previous').isDisabled(),true);assert.equal(await button('Next').isEnabled(),true)
+  await page.getByText('Page message 149',{exact:true}).waitFor();await h.idle()
+  const seen=new Set(),collect=async()=>{const values=await page.locator('.session-record-text').allTextContents();for(const text of values)for(const match of text.matchAll(/Page message (\d+)/g))seen.add(Number(match[1]));assert.ok(await page.locator('.session-record').count()<=200)}
+  await collect();for(let step=0;seen.size<150;step++){assert.ok(step<12);await continuousScrollStep(page,-1);await h.idle();await collect()}
+  assert.deepEqual([...seen].sort((a,b)=>a-b),Array.from({length:150},(_,i)=>i));assert.match(await firstText(page),/Page message 000/)
   assert.equal(await page.locator('#sealed-search,#sealed-position,[data-sealed-action=search],[data-sealed-action=search-next],[data-sealed-action=position]').count(),0)
-  await button('Next').click();await until(async()=>/Page message 064/.test(await firstText(page)));assert.equal(await button('Previous').isEnabled(),true)
-  await button('Previous').click();await until(async()=>/Page message 000/.test(await firstText(page)));assert.equal(await button('Previous').isDisabled(),true)
-  await button('Last').click();await page.getByText('Page message 149',{exact:true}).waitFor();assert.equal(await button('Next').isDisabled(),true);assert.equal(await button('Last').isDisabled(),true)
-  await button('First').click();await until(async()=>/Page message 000/.test(await firstText(page)));assert.equal(await button('First').isDisabled(),true)
+  assert.equal(await page.locator('.session-sealed-workspace').getByRole('button',{name:/^(First|Previous|Next|Last)$/}).count(),0)
   for(const [width,height,zoom]of[[1440,1000,1],[430,650,1],[960,667,1],[430,900,1.5]]){
    await page.setViewportSize({width,height});await page.evaluate(z=>{document.body.style.zoom=String(z)},zoom)
-   await button('Next').scrollIntoViewIfNeeded();await button('Next').click();await until(async()=>/Page message 064/.test(await firstText(page)));await button('Previous').click();await until(async()=>/Page message 000/.test(await firstText(page)))
+   const phase=async name=>console.log(JSON.stringify({phase:'completed-responsive-'+name,width,height,zoom,state:await page.locator('#session-records').evaluate(node=>({attrs:{...node.dataset},host:{...node.closest('.session-viewer').dataset},top:node.scrollTop,height:node.clientHeight,scroll:node.scrollHeight,first:node.querySelector('.session-record')?.textContent.slice(0,60),last:[...node.querySelectorAll('.session-record')].at(-1)?.textContent.slice(0,60)}))}))
+   await page.locator('#session-records').press('End');await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&node.scrollHeight-node.scrollTop-node.clientHeight<=4)).catch(async error=>{await phase('End');throw error});await page.locator('#session-records').press('Home');await until(async()=>/Page message 000/.test(await firstText(page))&&await page.locator('#session-records').evaluate(node=>node.dataset.archiveCanPrevious==='false'&&node.scrollTop<=4)).catch(async error=>{await phase('Home');throw error})
    const bounds=await page.evaluate(()=>{const r=s=>document.querySelector(s).getBoundingClientRect();return {identity:r('.session-sealed-workspace > .session-identity').toJSON(),status:r('.session-archive-status').toJSON(),records:r('#session-records').toJSON(),footer:r('.session-archive-footer').toJSON(),width:innerWidth,outer:document.documentElement.scrollWidth}})
    assert.ok(bounds.outer<=bounds.width);assert.ok(bounds.records.height>0);assert.ok(bounds.records.top-bounds.status.bottom<30*zoom,JSON.stringify(bounds));assert.ok(bounds.status.top-bounds.identity.bottom<15*zoom,JSON.stringify(bounds))
    assert.equal(await page.getByRole('button',{name:'Cancel',exact:true}).count(),0);assert.equal(await page.locator('.session-sealed-workspace').getByRole('button',{name:'Retry',exact:true}).count(),0)
@@ -42,17 +42,13 @@ test('completed workspace reader keeps bounded ordinary pages and truthful known
  }finally{await h.close()}
 })
 
-for(const count of[0,1,64])test('completed '+count+'-record archives preserve conservative paging without stranding the reader',{timeout:30000},async()=>{
+for(const count of[0,1,64])test('completed '+count+'-record archives preserve conservative acquisition without stranding the reader',{timeout:30000},async()=>{
  const raw=Buffer.from(Array.from({length:count},(_,i)=>JSON.stringify(message(i))).join('\n')+(count?'\n':'')),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
  try{
-  await archive(h);await open(h);await page.locator('.session-archive-status').filter({hasText:count?'Verified complete archive.':'No matching messages on this page.'}).waitFor()
-  const footer=page.locator('.session-archive-footer');assert.equal(await footer.getByRole('button',{name:'Previous',exact:true}).isDisabled(),true)
-  if(count<64)assert.equal(await footer.getByRole('button',{name:'Next',exact:true}).isDisabled(),true)
-  else{
-   // The existing worker conservatively reports more at an exact64 boundary.
-   assert.equal(await footer.getByRole('button',{name:'Next',exact:true}).isEnabled(),true)
-   await footer.getByRole('button',{name:'Last',exact:true}).click();await until(()=>footer.getByRole('button',{name:'Next',exact:true}).isDisabled());await page.getByText('Page message 063',{exact:true}).waitFor();assert.equal(await footer.getByRole('button',{name:'Previous',exact:true}).isDisabled(),true);assert.equal(await footer.getByRole('button',{name:'Next',exact:true}).isDisabled(),true)
-  }
+  await archive(h);await open(h);await page.locator('.session-archive-status').filter({hasText:count?'Verified complete archive.':'This session has no messages.'}).waitFor()
+  assert.equal(await page.locator('.session-archive-footer').getByRole('button',{name:/^(First|Previous|Next|Last)$/}).count(),0)
+  if(count){await page.getByText('Page message '+String(count-1).padStart(3,'0'),{exact:true}).waitFor();await h.idle();await page.locator('#session-records').press('Home');await page.getByText('Page message 000',{exact:true}).waitFor();await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.archiveCanPrevious==='false'));await h.idle();await page.locator('#session-records').press('End');await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&node.dataset.archiveCanNext==='false'&&node.scrollHeight-node.scrollTop-node.clientHeight<=4)).catch(async error=>{console.log(JSON.stringify({phase:'completed-exact-end',count,state:await page.locator('#session-records').evaluate(node=>({...node.dataset,top:node.scrollTop,height:node.clientHeight,scroll:node.scrollHeight}))}));throw error})}
+  else assert.equal(await page.locator('#session-records .session-record').count(),0)
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -80,9 +76,11 @@ test('completed native tool body parts remain reachable independently of ordinar
  try{
   await archive(h);await open(h);await page.getByText('Verified complete archive.',{exact:true}).waitFor()
   await page.locator('.session-activity-group > summary').click();const tool=page.locator('.session-content-tool');await tool.locator(':scope > summary').click()
-  const continuation=page.getByRole('button',{name:'Continue body',exact:true});await continuation.waitFor();await continuation.click()
-  const previous=page.getByRole('button',{name:'Previous body part',exact:true});await previous.waitFor();await previous.click();await previous.waitFor({state:'detached'})
-  assert.equal(await page.locator('.session-archive-footer').getByRole('button',{name:'Next',exact:true}).isDisabled(),true)
+  await tool.locator('pre').first().waitFor();await page.locator('#session-records').press('Home');await page.locator('[data-body-part-index="0"]').waitFor()
+  const part=()=>page.locator('#session-records').evaluate(node=>Math.max(-1,...[...node.querySelectorAll('[data-body-part-index]')].map(part=>Number(part.dataset.bodyPartIndex))))
+  for(let step=0;await part()===0;step++){assert.ok(step<40);await continuousScrollStep(page,1);await h.idle()}
+  assert.ok(await part()>0);await page.locator('#session-records').press('Home');await until(()=>page.locator('[data-body-part-index="0"]').count())
+  assert.equal(await page.getByRole('button',{name:/^(Continue body|Previous body part|First|Previous|Next|Last)$/}).count(),0);assert.ok(await page.locator('[data-body-part-index]').count()<=3)
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })

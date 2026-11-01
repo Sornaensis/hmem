@@ -3,25 +3,73 @@ import test from 'node:test'
 import { join } from 'node:path'
 import {createHash} from 'node:crypto'
 import {gzipSync} from 'node:zlib'
-import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
+import {openSessionExplorer,continuousScrollStep,traceSessionBridge} from './support/sessions-ux-fixture.mjs'
 const sleep=ms=>new Promise(r=>setTimeout(r,ms))
 const downloadedBytes=async download=>{const chunks=[];for await(const chunk of await download.createReadStream())chunks.push(chunk);return Buffer.concat(chunks)}
 const until=async fn=>{const end=Date.now()+15000;while(Date.now()<end){if(await fn())return;await sleep(25)}throw Error('Busy session did not converge')}
 const message=text=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})
-for(const dock of [false,true])test(`initial ${dock?'task dock':'Sessions list and links'} loads a latest long transcript while progress invalidates faster than responses`,{timeout:45000},async()=>{
+
+for(const proof of ['model error','unconfirmed error'])test(`disclosure recovery keeps real Retry with ${proof} and unchanged native open state`,{timeout:45000},async()=>{
+ const tool=name=>({type:'response_item',payload:{type:'function_call',name,arguments:'{}'}})
+ const h=await openSessionExplorer({transcriptBytes:Buffer.from([tool('first_activity'),message('Separate readable context.'),tool('other_activity')].map(value=>JSON.stringify(value)+'\n').join(''))}),{page}=h
+ try{
+  await traceSessionBridge(h)
+  await page.addInitScript(proof=>{
+   window.sessionBridgeDispatch=(send,value)=>{if(value.key===window.failedDisclosureKey&&(value.kind==='viewer-disclosure'||value.kind==='viewer-disclosure-error'&&proof==='unconfirmed error'))return;send(value)}
+   window.sessionCommandGate=value=>{if(value.disclosureAck?.error){window.droppedDisclosureErrorAck=value.disclosureAck;return false}return true}
+  },proof)
+  await h.start();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id)
+  await page.locator('.session-activity-group').last().waitFor();await h.idle()
+  const key=await page.locator('.session-activity-group').first().getAttribute('data-group-key'),group=page.locator('[data-group-key="'+key+'"]')
+  await page.evaluate(key=>window.failedDisclosureKey=key,key);await group.locator(':scope > summary').click()
+  const alert=proof==='model error'?page.locator('.session-viewer [role="alert"]').filter({hasText:'Activity could not be updated.'}):page.locator('[data-disclosure-error-owner]')
+  await alert.waitFor({state:'visible',timeout:12000});assert.equal(await group.evaluate(node=>node.open),true);assert.equal(await group.locator('article').count(),0)
+  assert.equal(await page.locator('#session-records').getAttribute('data-history-error'),proof==='model error'?'true':'false')
+  if(proof==='model error')assert.ok(await page.evaluate(()=>window.droppedDisclosureErrorAck?.error))
+  await page.locator('.session-activity-group').last().locator(':scope > summary').click();await page.locator('.session-activity-group').last().locator('article').waitFor();assert.equal(await alert.isVisible(),true,'unrelated activity success cannot erase the failed group recovery')
+  const retry=alert.getByRole('button',{name:'Retry',exact:true});await retry.focus();assert.equal(await retry.evaluate(node=>node===document.activeElement),true)
+  await page.evaluate(()=>{window.failedDisclosureKey=null});await retry.press('Enter')
+  await group.locator('article').waitFor();await until(async()=>await page.locator('.session-viewer').getByRole('alert').count()===0)
+  assert.equal(await group.evaluate(node=>node.open),true,'ordinary Retry reissues the unchanged native desired state')
+  assert.ok(await page.evaluate(()=>window.sessionBridgeFacts.some(value=>value.direction==='command'&&value.disclosureRetry===true)))
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+for(const dock of [false,true])test(`initial ${dock?'task dock':'Sessions list and links'} loads a latest long transcript while progress invalidates faster than responses`,{timeout:45000},async t=>{
  const records=[...Array.from({length:2200},(_,i)=>({type:'mystery',padding:'p'.repeat(1100),i})),message('Visible latest agent response'),{type:'response_item',payload:{type:'function_call',name:'busy_tool',arguments:'{"initial":true}'}}]
  const h=await openSessionExplorer({runtime:{model:'Running target',role:'Developer'},transcriptBytes:Buffer.from(records.map(r=>JSON.stringify(r)).join('\n')+'\n')}),{page}=h
  let running=true,producer
  try{
+  await traceSessionBridge(h)
+  await page.addInitScript(()=>{
+   let held=null,timer=null
+   const release=generation=>{if(!held)return;const current=held;held=null;clearTimeout(timer);window.busyHeldDisclosure.releasedGeneration=generation;current.send(current.value)}
+   window.sessionBridgeDispatch=(send,value)=>{
+    if(!window.busyHeldDisclosure&&value.kind==='viewer-disclosure'&&value.key===window.busyInitialClicked?.key&&value.open){
+     window.busyHeldDisclosure={request:value.request,key:value.key,generation:value.generation};held={send,value};timer=setTimeout(()=>release(null),1500);return
+    }
+    send(value)
+   }
+   window.sessionCommandGate=value=>{
+    if(held&&!value.disclosureAck&&value.generation>held.value.generation)queueMicrotask(()=>release(value.generation))
+    if(value.disclosureAck&&value.disclosureAck.request===window.busyHeldDisclosure?.request&&!value.disclosureAck.error&&!value.disclosureAck.cancelled)window.busyAcceptedDisclosure={generation:value.generation,...value.disclosureAck}
+    return true
+   }
+  })
   await page.route('**/api/v1/**/sessions**',async route=>{if(!new URL(route.request().url()).pathname.endsWith('/transcript'))await sleep(140);await route.fallback()})
   await h.start();let index=0
   producer=(async()=>{while(running){await h.appendRecords({type:'response_item',payload:{type:'function_call',name:'busy_tool',arguments:JSON.stringify({index:index++})}});await sleep(35)}})()
   if(dock){const icon=page.locator('#entity-'+h.fixture.tasks[0].id+' .task-sessions-icon');await until(()=>icon.isEnabled());await icon.click()}
   else{await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.locator('.session-summary a').first().click();await page.locator('.session-linked-tasks > summary').click();await until(async()=>await page.locator('.session-task-cards .popover-card').count()===2)}
   await page.getByText('Visible latest agent response',{exact:true}).waitFor();assert.ok(running,'load completed during active progress, without reselection')
-  const prose=page.getByText('Visible latest agent response',{exact:true}),group=page.locator('.session-activity-group').last();await group.locator(':scope > summary').click();await group.evaluate(node=>window.busyGroup=node);await prose.evaluate(node=>window.busyProse=node)
-  const latest=await group.locator('article').last().getAttribute('data-offset');await until(async()=>await group.locator('article').last().getAttribute('data-offset')!==latest)
-  assert.equal(await page.evaluate(()=>window.busyGroup.isConnected&&window.busyGroup.open&&window.busyProse.isConnected),true)
+  const prose=page.getByText('Visible latest agent response',{exact:true});let group=page.locator('.session-activity-group').last();const clicked=await group.evaluate(node=>({key:node.dataset.groupKey,open:node.open,attrs:{...document.getElementById('session-records').dataset},manual:document.querySelector('.session-viewer').dataset.manualUp,top:document.getElementById('session-records').scrollTop,height:document.getElementById('session-records').scrollHeight,client:document.getElementById('session-records').clientHeight}));await page.evaluate(value=>window.busyInitialClicked=value,clicked);group=page.locator('[data-group-key="'+clicked.key+'"]');await group.locator(':scope > summary').click();await group.evaluate(node=>window.busyGroup=node);await prose.evaluate(node=>window.busyProse=node)
+  const busyState=()=>page.locator('#session-records').evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.clientHeight,parts:[...new Set([...node.querySelectorAll("[data-fragment-part]")].map(leaf=>Number(leaf.dataset.fragmentPart)))],centerLeaves:[...node.querySelectorAll("[data-fragment-part]")].filter(leaf=>leaf.dataset.fragmentPart===node.dataset.renderPart).slice(0,4).map(leaf=>({path:leaf.dataset.fragmentPath,record:leaf.closest(".session-record")?.dataset.blockKey,summary:!!leaf.closest("summary"),nested:!!leaf.querySelector("[data-fragment-path]"),gap:!!leaf.querySelector("[data-fragment-from]"),top:leaf.getBoundingClientRect().top-node.getBoundingClientRect().top,bottom:leaf.getBoundingClientRect().bottom-node.getBoundingClientRect().top})),groups:[...node.querySelectorAll('.session-activity-group')].map(group=>({key:group.dataset.groupKey,open:group.open,count:group.querySelectorAll('article').length,top:group.getBoundingClientRect().top-node.getBoundingClientRect().top,height:group.getBoundingClientRect().height})),saved:{group:window.busyGroup?.isConnected,open:window.busyGroup?.open,prose:window.busyProse?.isConnected}}))
+  await until(async()=>await group.locator('article').count()>0).catch(async error=>{console.log(JSON.stringify({phase:'busy-group-publication',dock,clicked,events:await page.evaluate(()=>({disclosures:window.busyDisclosureFacts,commands:window.sessionBridgeFacts.slice(-8)})),state:await busyState(),reads:h.reads.filter(row=>row.path.endsWith('/transcript')).slice(-3)}));throw error})
+  const delivery=await page.evaluate(()=>({held:window.busyHeldDisclosure,accepted:window.busyAcceptedDisclosure}));assert.ok(delivery.held.releasedGeneration>delivery.held.generation);assert.equal(delivery.accepted.request,delivery.held.request);assert.ok(delivery.accepted.generation>delivery.held.generation,'the same current owned action is really applied after its original generation became stale')
+  await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.historyLoading==='false'))
+  await group.evaluate(node=>window.busyGroup=node);const initialOpen=await page.evaluate(()=>({clicked:window.busyInitialClicked,disclosures:window.busyDisclosureFacts,delivery:{held:window.busyHeldDisclosure,accepted:window.busyAcceptedDisclosure}}));const latest=await group.evaluate(node=>{window.busyGroup=node;return node.querySelector('article:last-child')?.dataset.offset});assert.notEqual(latest,undefined);await until(async()=>await group.locator('article').last().getAttribute('data-offset')!==latest)
+  assert.equal(await page.evaluate(()=>window.busyGroup.isConnected&&window.busyGroup.open&&window.busyProse.isConnected),true,JSON.stringify({phase:'busy-connected-witness',dock,state:await busyState()}))
   const reads=h.reads.filter(row=>row.path.endsWith('/transcript'))
   assert.ok(reads.length>0&&reads.every(row=>Number(new URLSearchParams(row.query).get('limit'))<=65536),'progressive latest acquisition keeps each request bounded')
   running=false;await producer
@@ -30,15 +78,37 @@ for(const dock of [false,true])test(`initial ${dock?'task dock':'Sessions list a
   await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)))
   const expected=[];let offset=0
   for(const line of h.content.get(h.active.id).toString().trimEnd().split('\n')){expected.push(offset);offset+=Buffer.byteLength(line+'\n')}
-  const visited=new Set(),collect=async()=>{for(const offset of await page.locator('#session-records .session-record').evaluateAll(nodes=>nodes.map(node=>Number(node.dataset.offset))))visited.add(offset)}
-  await collect()
-  for(let pages=0;await page.locator('#session-records').evaluate(node=>Number(node.dataset.historyBefore)>0);pages++){
-   assert.ok(pages<60,'earlier pages make bounded progress across the complete busy source')
-   const before=await page.locator('#session-records').getAttribute('data-history-before')
-   await page.getByRole('button',{name:'Earlier messages',exact:true}).click()
-   await until(()=>page.locator('#session-records').evaluate((node,before)=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyBefore)<Number(before),before));await collect()
+  await page.evaluate(expected=>{window.busySeen=new Set();window.busyPhases=[];window.busyInvalid=false;window.busyPeak=0;const indices=new Map(expected.map((offset,index)=>[offset,index]));window.busySourceIndex=indices;const collect=()=>{const node=document.getElementById('session-records'),offsets=[...node.querySelectorAll('.session-record')].map(row=>Number(row.dataset.offset));window.busyPeak=Math.max(window.busyPeak,offsets.length);if(offsets.some((offset,index)=>index>0&&offset<=offsets[index-1]))window.busyInvalid=true;for(const offset of offsets)window.busySeen.add(offset);const source=offsets.map(offset=>indices.get(offset));if(source.some(index=>index>=1850&&index<2200)){const runs=[];for(const index of source){const last=runs.at(-1);if(last&&last[1]+1===index)last[1]=index;else runs.push([index,index])}const phase={before:node.dataset.historyBefore,scan:node.dataset.historyScanBefore,after:node.dataset.historyAfter,part:node.dataset.renderPart,top:Math.round(node.scrollTop),runs};if(JSON.stringify(window.busyPhases.at(-1))!==JSON.stringify(phase))window.busyPhases.push(phase);if(window.busyPhases.length>32)window.busyPhases.shift()}};window.collectBusySeen=collect;new MutationObserver(collect).observe(document.getElementById('session-records'),{childList:true,subtree:true});collect()},expected)
+  const coverageReads=h.reads.filter(read=>read.path.endsWith('/transcript')).length;let acquisitions=0,inputSteps=0,expandedRuns=0
+  const visited=new Set(),forwardRecovered=new Set(),capture=async()=>{for(const offset of await page.evaluate(()=>{window.collectBusySeen();return [...window.busySeen]}))visited.add(offset)}
+  const alreadyOpenRecovered=new Set();let alreadyOpenSweeps=0
+  const move=async direction=>{t.signal.throwIfAborted();assert.ok(++inputSteps<600,'continuous busy history cannot strand an occurrence');const before=await page.locator('#session-records').evaluate(node=>[node.dataset.historyBefore,node.dataset.historyAfter].join(':'));const motion=await continuousScrollStep(page,direction);await h.idle();const after=await page.locator('#session-records').evaluate(node=>[node.dataset.historyBefore,node.dataset.historyAfter].join(':'));if(before!==after)acquisitions++;assert.ok(acquisitions<60,'source acquisition retains the original finite busy-history bound');await capture();return motion}
+  const collect=async()=>{
+   const keys=await page.locator('.session-activity-group:not([open]) > summary').evaluateAll(nodes=>nodes.reverse().filter(node=>{const r=node.getBoundingClientRect(),box=document.getElementById('session-records').getBoundingClientRect();return r.height>0&&r.bottom>box.top&&r.top<box.bottom}).map(node=>node.parentElement.dataset.groupKey));let expanded=false
+   for(const key of keys){const summary=page.locator('[data-group-key="'+key+'"] > summary');if(await summary.evaluateAll(nodes=>nodes.some(node=>{const r=node.getBoundingClientRect(),box=document.getElementById('session-records').getBoundingClientRect();return !node.parentElement.open&&r.bottom>box.top&&r.top<box.bottom}))){await summary.click();await h.idle();expanded=true;expandedRuns++}}
+   await capture()
+   const interval=await page.locator('#session-records').evaluate(node=>({range:[Math.min(...[...node.querySelectorAll('.session-record')].map(row=>Number(row.dataset.offset))),Number(node.dataset.historyAfter)],omitted:!!node.querySelector('.session-activity-group[open]')&&[...node.querySelectorAll('[data-history-gap="source"],[data-fragment-from]')].some(gap=>!gap.closest('details:not([open])')&&gap.getBoundingClientRect().height>0)})),range=interval.range,targets=expected.filter(offset=>offset>=range[0]&&offset<range[1])
+   if(expanded||interval.omitted&&targets.some(offset=>!visited.has(offset))){
+    const beforeSweep=new Set(visited);if(!expanded)alreadyOpenSweeps++
+    // Opening or composing an already-open run can expose a retained prefix
+    // while later source occurrences remain behind an omitted interval. Read
+    // this captured semantic suffix before continuing backward, even if its
+    // raw window changes while those occurrences are being rehydrated.
+    let sweepPrevious='',sweepStalled=0
+    while(targets.some(offset=>!visited.has(offset))){const position=await page.locator('#session-records').evaluate(node=>[node.dataset.historyBefore,node.dataset.historyAfter,node.dataset.renderPart,Math.round(node.scrollTop)].join(':'));sweepStalled=position===sweepPrevious?sweepStalled+1:0;assert.ok(sweepStalled<6,JSON.stringify({phase:'busy-opened-suffix',dock,range,targets:[expected.indexOf(targets[0]),expected.indexOf(targets.at(-1))],missing:targets.filter(offset=>!visited.has(offset)).slice(0,8).map(offset=>expected.indexOf(offset)),seen:visited.size,inputSteps,acquisitions,state:await busyState()}));sweepPrevious=position;await move(1)}
+    for(const offset of visited)if(!beforeSweep.has(offset)){forwardRecovered.add(expected.indexOf(offset));if(!expanded)alreadyOpenRecovered.add(expected.indexOf(offset))}
+   }
   }
-  assert.deepEqual([...visited].sort((a,b)=>a-b),expected,'every source occurrence remains reachable in order beyond the initial byte and row limits')
+  await page.locator('#session-records').press('End');await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4))
+  for(let opened=0;await page.locator('#session-records').evaluate(node=>node.scrollHeight<=node.clientHeight+1);opened++){assert.ok(opened<8,'a full busy source must provide a scrollable expanded run');const summary=page.locator('.session-activity-group:not([open]) > summary').last();await summary.click();await h.idle();await page.locator('#session-records').press('End');await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4))}
+  const beforeHistory=await busyState(),historyMotion=await continuousScrollStep(page,-1);await until(()=>page.getByRole('button',{name:'Jump to latest',exact:true}).isVisible()).catch(async error=>{console.log(JSON.stringify({phase:'busy-history-input',dock,before:beforeHistory,motion:historyMotion,after:await busyState()}));throw error});await collect()
+  let previous='',stalled=0
+  for(let steps=0;await page.locator('#session-records').evaluate(node=>Number(node.dataset.historyScanBefore)>0)||expected.some(offset=>!visited.has(offset));steps++){
+   const fingerprint=await page.locator('#session-records').evaluate(node=>[node.dataset.historyBefore,node.dataset.historyAfter,node.dataset.renderPart,Math.round(node.scrollTop)].join(':'));stalled=fingerprint===previous?stalled+1:0;assert.ok(stalled<6,JSON.stringify({phase:'busy-complete-source',dock,seen:visited.size,expected:expected.length,missing:expected.filter(offset=>!visited.has(offset)).slice(0,8).map(offset=>({offset,index:expected.indexOf(offset)})),state:await busyState(),continuum:await page.locator('#session-records').evaluate(node=>({phases:window.busyPhases.slice(-8),mounted:[...node.querySelectorAll('.session-record')].map(row=>window.busySourceIndex.get(Number(row.dataset.offset))).filter((_,index,all)=>index<3||index>=all.length-3),gaps:[...node.querySelectorAll('[data-history-gap],[data-fragment-from]')].slice(0,8).map(gap=>({...gap.dataset,top:gap.getBoundingClientRect().top-node.getBoundingClientRect().top,bottom:gap.getBoundingClientRect().bottom-node.getBoundingClientRect().top}))})),reads:h.reads.filter(read=>read.path.endsWith('/transcript')&&Number(new URLSearchParams(read.query).get('offset'))>2100000).slice(-6)}));previous=fingerprint
+   await move(-1);await collect()
+  }
+  assert.equal(await page.evaluate(()=>window.busyInvalid),false,'every mounted source interval is ordered without duplicate occurrences');assert.ok(await page.evaluate(()=>window.busyPeak)<=200);assert.deepEqual([...visited].sort((a,b)=>a-b),expected,'every source occurrence remains reachable in order beyond the initial byte and row limits')
+  console.log(JSON.stringify({busyTraversal:{dock,initialOpen,expected:expected.length,seen:visited.size,acquisitions,actualRequests:h.reads.filter(read=>read.path.endsWith('/transcript')).length-coverageReads,repeatedIntervals:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(coverageReads).map(read=>read.query).filter((query,index,all)=>all.indexOf(query)!==index).length,inputSteps,expandedRuns,alreadyOpenSweeps,alreadyOpenRecovered:[...alreadyOpenRecovered].sort((a,b)=>a-b).reduce((runs,index)=>{const last=runs.at(-1);if(last&&last[1]+1===index)last[1]=index;else runs.push([index,index]);return runs},[]),forwardRecovered:[...forwardRecovered].sort((a,b)=>a-b).filter(index=>index>=2100).slice(0,100)}}))
   assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{running=false;await producer;await h.close()}
 })

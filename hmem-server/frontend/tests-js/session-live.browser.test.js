@@ -3,7 +3,7 @@ import test from 'node:test'
 import { open } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join, resolve } from 'node:path'
-import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
+import { openSessionExplorer,continuousScrollStep } from './support/sessions-ux-fixture.mjs'
 import { createRecordFramer } from '../src/session-viewer.js'
 
 const message=text=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})
@@ -194,23 +194,32 @@ for(const dock of [false,true])test(`live ${dock?'task dock':'Sessions'} retains
   await until(async()=>/81 events$/.test(await group.locator(':scope > summary').innerText()))
   assert.equal(await group.evaluate(el=>el===window.keptLiveGroup&&el.open),true)
   assert.equal(await group.locator('.session-content-tool').first().getAttribute('open'),'')
-  const tool=group.locator('.session-content-tool').filter({hasText:/Call · inspect · "index": 20\b/});assert.equal(await tool.count(),1);await tool.locator('summary').click();await tool.evaluate(el=>window.keptLiveTool=el)
+  const tool=group.locator('.session-content-tool').filter({hasText:/Call · inspect · "index": 60\b/});assert.equal(await tool.count(),1);await tool.locator('summary').click();await tool.evaluate(el=>window.keptLiveTool=el)
+  const viewport=page.locator('#session-records'),box=await viewport.boundingBox();await viewport.hover({position:{x:box.width-5,y:box.height/2}});await page.mouse.wheel(0,-120);await page.getByRole('button',{name:'Jump to latest',exact:true}).waitFor({state:'visible'});await page.mouse.wheel(0,await tool.evaluate(node=>node.getBoundingClientRect().top-document.getElementById('session-records').getBoundingClientRect().top-80));await h.idle()
+  await viewport.evaluate(async node=>{let top=node.scrollTop,stable=0;for(let frame=0;frame<90&&stable<4;frame++){await new Promise(resolve=>requestAnimationFrame(resolve));const next=node.scrollTop;stable=Math.abs(next-top)<.25?stable+1:0;top=next}if(stable<4)throw Error('Visible disclosure input did not settle')});await tool.evaluate(node=>window.keptLiveTool=node)
+  assert.equal(await tool.evaluate(node=>{const r=node.getBoundingClientRect(),box=document.getElementById('session-records').getBoundingClientRect();return r.bottom>box.top&&r.top<box.bottom}),true,'the protected nested disclosure is actually visible')
+  const beforeTool=await viewport.evaluate(node=>{const tool=window.keptLiveTool,r=tool.getBoundingClientRect(),box=node.getBoundingClientRect();return {attrs:{...node.dataset},host:{...node.closest('.session-viewer').dataset},top:node.scrollTop,toolTop:r.top-box.top,toolBottom:r.bottom-box.top,key:tool.dataset.eventKey,fragment:tool.closest('[data-fragment-path]')?.dataset.fragmentPath}})
   await page.evaluate(()=>{window.livePresentationLost=false;new MutationObserver(()=>{if(!window.keptLiveGroup.isConnected||!window.keptLiveTool.isConnected)window.livePresentationLost=true}).observe(document.getElementById('session-records'),{childList:true,subtree:true})})
-  await resume()
-  await h.appendRecords(...Array.from({length:40},(_,i)=>call(80+i)))
-  await until(async()=>await group.locator('article').count()===100)
+  await h.appendRecords(...Array.from({length:80},(_,i)=>call(80+i)));await until(()=>viewport.evaluate((node,end)=>Number(node.dataset.historyLatest)>=end,h.active.committed_bytes))
+  await h.appendRecords(...Array.from({length:80},(_,i)=>call(160+i)))
+  await until(()=>viewport.evaluate((node,end)=>Number(node.dataset.historyLatest)>=end,h.active.committed_bytes));await h.idle()
   assert.equal(await group.getAttribute('data-group-key'),anchor,'trimming the run head retains its logical anchor')
   assert.equal(await group.evaluate(el=>el===window.keptLiveGroup&&el.open),true)
-  assert.equal(await page.evaluate(()=>window.keptLiveTool.isConnected&&window.keptLiveTool.open),true)
-  assert.equal(await page.getByText('Admitted before the noisy tool run.',{exact:true}).count(),0,'contiguous retirement removes the complete prefix before the retained activity run')
+  assert.equal(await page.evaluate(()=>window.keptLiveTool.isConnected&&window.keptLiveTool.open),true,JSON.stringify({phase:'visible-tool-growth',dock,before:beforeTool,after:await viewport.evaluate(node=>({attrs:{...node.dataset},host:{...node.closest('.session-viewer').dataset},top:node.scrollTop,saved:{connected:window.keptLiveTool.isConnected,open:window.keptLiveTool.open},tools:[...node.querySelectorAll('.session-content-tool')].filter(tool=>/"index": 60\b/.test(tool.textContent)).map(tool=>({key:tool.dataset.eventKey,open:tool.open,top:tool.getBoundingClientRect().top-node.getBoundingClientRect().top,fragment:tool.closest('[data-fragment-path]')?.dataset.fragmentPath}))})),reads:h.reads.filter(read=>read.path.endsWith('/transcript')).slice(-3)}))
   await resync(h)
   assert.equal(await page.evaluate(()=>window.keptLiveGroup.isConnected&&window.keptLiveGroup.open&&window.keptLiveTool.isConnected&&window.keptLiveTool.open&&!window.livePresentationLost),true)
-  const source=h.content.get(h.active.id),expected=[message('Admitted before the noisy tool run.'),call('first'),...Array.from({length:120},(_,i)=>call(i))].map(record=>{const match=source.indexOf(Buffer.from(JSON.stringify(record.payload)));assert.ok(match>=0);return source.lastIndexOf(10,match)+1}),visited=new Set()
+  await viewport.press('End');await until(()=>viewport.evaluate(node=>node.dataset.latestPending==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4));assert.ok(await group.locator('article').count()<=200,'offscreen presentation remains bounded after returning to the grown tail')
+  assert.equal(await page.getByText('Admitted before the noisy tool run.',{exact:true}).count(),0,'offscreen prose may retire while following the grown tail')
+  const source=h.content.get(h.active.id),expected=[message('Admitted before the noisy tool run.'),call('first'),...Array.from({length:240},(_,i)=>call(i))].map(record=>{const match=source.indexOf(Buffer.from(JSON.stringify(record.payload)));assert.ok(match>=0);return source.lastIndexOf(10,match)+1}),visited=new Set()
   const collect=async()=>{for(const offset of await page.locator('#session-records .session-record').evaluateAll(nodes=>nodes.map(node=>Number(node.dataset.offset))))visited.add(offset)}
   await collect()
-  for(let pages=0;await page.locator('#session-records').evaluate(node=>Number(node.dataset.historyBefore)>0);pages++){
-   assert.ok(pages<10);const before=await page.locator('#session-records').getAttribute('data-history-before')
-   await page.getByRole('button',{name:'Earlier messages',exact:true}).click();await until(()=>page.locator('#session-records').evaluate((node,before)=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyBefore)<Number(before),before));await collect()
+  let acquisitions=0,previous='',stalled=0
+  for(let steps=0;await page.locator('#session-records').evaluate(node=>Number(node.dataset.historyScanBefore)>0)||expected.some(offset=>!visited.has(offset));steps++){
+   const fingerprint=await viewport.evaluate(node=>[node.dataset.historyBefore,node.dataset.historyAfter,node.dataset.renderPart,Math.round(node.scrollTop)].join(':'));stalled=fingerprint===previous?stalled+1:0;assert.ok(stalled<6,JSON.stringify({phase:'live-complete-history',dock,seen:visited.size,missing:expected.filter(offset=>!visited.has(offset)).slice(0,5),attrs:await viewport.evaluate(node=>({...node.dataset,top:node.scrollTop,gaps:[...node.querySelectorAll('[data-history-gap]')].map(gap=>({...gap.dataset}))}))}));previous=fingerprint
+   assert.ok(steps<200);const before=Number(await page.locator('#session-records').getAttribute('data-history-before'))
+   await continuousScrollStep(page,-1);await h.idle();await collect()
+   if(Number(await page.locator('#session-records').getAttribute('data-history-before'))<before)acquisitions++
+   assert.ok(acquisitions<10,'automatic source backfill retains the original acquisition bound')
   }
   assert.deepEqual(expected.filter(offset=>visited.has(offset)),expected,'retired prose and every activity occurrence remain reachable across contiguous pages')
   assert.equal(await page.getByText('Admitted before the noisy tool run.',{exact:true}).count(),1)
@@ -227,7 +236,8 @@ test('finite hydration publishes usable bounded history and append/resync preser
   await enter(h);await page.getByText('Visible message 19',{exact:false}).waitFor();await until(async()=>await page.evaluate(()=>window.viewerWrites.length>0))
   assert.ok(await page.evaluate(()=>window.firstPublishedMessages>0&&window.firstPublishedMessages<23),'a usable finite batch appears before the whole conversation is mounted')
   assert.ok(h.reads.filter(read=>read.path.endsWith('/transcript')).every(read=>Number(new URLSearchParams(read.query).get('limit'))<=65536),'progressive publication retains bounded byte requests')
-  const before=await page.locator('#session-records').evaluate(el=>{el.scrollTop=el.scrollHeight/2;el.dispatchEvent(new Event('scroll'));const bounds=el.getBoundingClientRect(),row=[...el.querySelectorAll('[data-block-key]')].find(row=>row.getBoundingClientRect().bottom>bounds.top&&row.getBoundingClientRect().height>0);window.readerKey=row.getAttribute('data-block-key');return {top:el.scrollTop,relative:row.getBoundingClientRect().top-bounds.top}})
+  await page.locator('#session-records').hover();await page.mouse.wheel(0,-500);await h.idle()
+  const before=await page.locator('#session-records').evaluate(el=>{const bounds=el.getBoundingClientRect(),row=[...el.querySelectorAll('[data-block-key]')].find(row=>row.getBoundingClientRect().bottom>bounds.top&&row.getBoundingClientRect().height>0);window.readerKey=row.getAttribute('data-block-key');return {top:el.scrollTop,relative:row.getBoundingClientRect().top-bounds.top}})
   await h.appendRecords(message('A new message while reading above the tail.'));await h.idle();await resync(h)
   await page.getByRole('button',{name:'Jump to latest',exact:true}).waitFor({state:'visible'})
   const after=await page.locator('#session-records').evaluate(el=>{const row=[...el.querySelectorAll('[data-block-key]')].find(row=>row.getAttribute('data-block-key')===window.readerKey);return {top:el.scrollTop,relative:row.getBoundingClientRect().top-el.getBoundingClientRect().top}})
@@ -235,9 +245,12 @@ test('finite hydration publishes usable bounded history and append/resync preser
   await page.getByRole('button',{name:'Jump to latest',exact:true}).click();await page.getByText('A new message while reading above the tail.',{exact:true}).waitFor()
   const seen=new Set(),collect=async()=>{for(const text of await page.locator('.session-record-text').allTextContents())for(const match of text.matchAll(/Visible message (\d+)/g))seen.add(Number(match[1]))}
   await collect()
-  for(let pages=0;await page.locator('#session-records').evaluate(node=>Number(node.dataset.historyBefore)>0);pages++){
-   assert.ok(pages<10);const before=await page.locator('#session-records').getAttribute('data-history-before')
-   await page.getByRole('button',{name:'Earlier messages',exact:true}).click();await until(()=>page.locator('#session-records').evaluate((node,before)=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyBefore)<Number(before),before));await collect()
+  let acquisitions=0
+  for(let steps=0;await page.locator('#session-records').evaluate(node=>Number(node.dataset.historyScanBefore)>0)||seen.size<20;steps++){
+   assert.ok(steps<200);const before=Number(await page.locator('#session-records').getAttribute('data-history-before'))
+   await continuousScrollStep(page,-1);await h.idle();await collect()
+   if(Number(await page.locator('#session-records').getAttribute('data-history-before'))<before)acquisitions++
+   assert.ok(acquisitions<10,'automatic source backfill retains the original acquisition bound')
   }
   assert.deepEqual([...seen].sort((a,b)=>a-b),Array.from({length:20},(_,i)=>i))
   assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
@@ -251,7 +264,7 @@ test('an at-tail reader continues following when bounded prose retention evicts 
   await h.appendRecords(...Array.from({length:5},(_,i)=>message('Later '+i+'\n\n'+'Paragraph. '.repeat(35))))
   await page.getByText('Later 4',{exact:false}).waitFor();await h.idle()
   await until(async()=>await page.locator('#session-records').evaluate(el=>el.scrollHeight-el.clientHeight-el.scrollTop<=2))
-  assert.equal(await page.locator('.session-record:not(.session-record-activity)').count(),100)
+  assert.ok(await page.locator('.session-record:not(.session-record-activity)').count()<=200,'the composed mounted conversation stays bounded');assert.ok(await page.locator('#session-records').evaluate(node=>Number(node.dataset.renderPart)>0||Number(node.dataset.historyBefore)>0),'latest rendering omits older offscreen material')
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -265,7 +278,7 @@ test('an expanded activity run follows at the tail while its retained head is ev
   await h.appendRecords(...Array.from({length:5},(_,i)=>call(100+i)))
   await until(async()=>/104/.test(await group.locator('.session-content-tool summary').last().innerText()));await h.idle()
   await until(async()=>await page.locator('#session-records').evaluate(el=>el.scrollHeight-el.clientHeight-el.scrollTop<=2)).catch(async error=>{throw Error(error.message+' '+JSON.stringify(await page.locator('#session-records').evaluate(el=>({top:el.scrollTop,height:el.scrollHeight,viewport:el.clientHeight}))))})
-  assert.equal(await group.locator('article').count(),100);assert.deepEqual(h.errors,[])
+  assert.ok(await group.locator('article').count()<=200,'composed activity rendering stays bounded');assert.match(await group.locator(':scope > summary').innerText(),/105 events/);assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
 
@@ -333,10 +346,11 @@ for(const following of [true,false])test(`natural byte reserve eviction preserve
   assert.ok(await tail()<=2,'following reaches the last pre-eviction append')
   let reading
   if(!following){
+   for(let step=0;!await viewport.locator('[data-block-key]').filter({hasText:'prefix-8-'}).count();step++){assert.ok(step<60,'the historical prefix remains reachable');await continuousScrollStep(page,-1);await h.idle()}
+   await viewport.hover();await page.mouse.wheel(0,await viewport.evaluate(el=>{const row=[...el.querySelectorAll('[data-block-key]')].find(row=>row.textContent.includes('prefix-8-'));return row.getBoundingClientRect().top-el.getBoundingClientRect().top-80}));await h.idle();await paint()
    reading=await viewport.evaluate(el=>{
     const row=[...el.querySelectorAll('[data-block-key]')].find(row=>row.textContent.includes('prefix-8-'))
     if(!row)throw Error('The surviving prefix row must be admitted')
-    el.scrollTop+=row.getBoundingClientRect().top-el.getBoundingClientRect().top-80
     return {key:row.getAttribute('data-block-key')}
    })
    await paint()
@@ -355,7 +369,7 @@ for(const following of [true,false])test(`natural byte reserve eviction preserve
     return {key:row?.getAttribute('data-block-key'),relative:row?.getBoundingClientRect().top-el.getBoundingClientRect().top}
    },reading.key)
    assert.equal(after.key,reading.key,'the visible row survives head eviction')
-   assert.ok(Math.abs(after.relative-reading.relative)<=2,'explicit anchoring retains the surviving row position through byte eviction')
+   assert.ok(Math.abs(after.relative-reading.relative)<=2,'explicit anchoring retains the visible row through live growth beyond byte windows')
    assert.ok(await tail()>48,'an above-tail reader must not be pulled to the new tail')
    assert.ok(await viewport.evaluate(el=>Number(el.dataset.historyAfter)<Number(el.dataset.historyLatest)),'new committed content remains logically available beyond the historical page')
    await page.getByRole('button',{name:'Jump to latest',exact:true}).click()

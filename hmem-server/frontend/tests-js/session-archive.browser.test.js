@@ -10,9 +10,38 @@ import {Transform} from 'node:stream'
 import {pipeline} from 'node:stream/promises'
 import {once,EventEmitter} from 'node:events'
 import os from 'node:os'
-import {openSessionExplorer} from './support/sessions-ux-fixture.mjs'
+import {openSessionExplorer,continuousScrollStep} from './support/sessions-ux-fixture.mjs'
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex')
 const hashFile=async path=>{const digest=createHash('sha256');for await(const bytes of createReadStream(path,{highWaterMark:65536}))digest.update(bytes);return digest.digest('hex')}
+async function renderedLinks(h,destination,expected,kind='plain'){
+ const page=h.page,viewport=page.locator('#session-records'),seen=new Map(),counts={1:0,2:0,3:0},slices=new Set(),progress=[];let turns=0,maxBytes=0,previous='',stalled=0,middleVisible=kind!=='table'
+ await page.locator('#session-records a').first().waitFor();await h.idle()
+ await viewport.evaluate((node,{destination,expected})=>{const rows=new Map(),pending=[],parts=new Set();window.archiveLinkWitness={pending,parts,error:null};const collect=()=>{parts.add(node.dataset.renderPart);for(const link of node.querySelectorAll('a')){const leaf=link.querySelector('[data-fragment-path]')||link.closest('[data-fragment-path]'),column=link.closest('td')?.getAttribute('aria-colindex'),value={key:leaf.dataset.fragmentPath+':'+Math.max(0,[...leaf.querySelectorAll('a')].indexOf(link)),ordinal:link.closest('li')?.value,column,header:column?node.querySelector('thead th[aria-colindex="'+column+'"]')?.textContent:null};if(link.getAttribute('href')!==destination)window.archiveLinkWitness.error='resolved href changed';const serialized=JSON.stringify(value);if(rows.has(value.key)){if(rows.get(value.key)!==serialized)window.archiveLinkWitness.error='keyed link context changed'}else{rows.set(value.key,serialized);pending.push(value)}if(rows.size>expected)window.archiveLinkWitness.error='unexpected source occurrence'}};window.collectArchiveLinks=collect;window.archiveLinkObserver=new MutationObserver(collect);window.archiveLinkObserver.observe(node,{childList:true,subtree:true});collect()},{destination,expected})
+ await viewport.press('Home');await page.waitForFunction(()=>{const node=document.getElementById('session-records');return node.scrollTop<=1&&node.querySelector('[data-fragment-part="0"]')})
+ while(seen.size<expected||!middleVisible){
+  const state=await viewport.evaluate(node=>{window.collectArchiveLinks();return {bytes:new TextEncoder().encode(node.outerHTML).length,links:window.archiveLinkWitness.pending.splice(0),parts:[...window.archiveLinkWitness.parts],error:window.archiveLinkWitness.error}})
+  assert.equal(state.error,null);for(const part of state.parts)slices.add(part)
+  for(const link of state.links){if(seen.has(link.key))assert.deepEqual(seen.get(link.key),link);else{seen.set(link.key,link);if(kind==='list'){assert.ok([1,2,3].includes(link.ordinal));counts[link.ordinal]++}if(kind==='table'){assert.equal(link.column,'2');assert.equal(link.header,'Column B')}}}
+  maxBytes=Math.max(maxBytes,state.bytes);assert.ok(state.bytes<=2097152);assert.ok(state.bytes+await page.evaluate(()=>window.archiveTelemetry?.maxPageBytes||0)<=4194304)
+  if(kind==='table'&&!middleVisible){
+   middleVisible=await viewport.evaluate(node=>{const box=node.getBoundingClientRect(),link=[...node.querySelectorAll('a')].find(link=>(link.querySelector('[data-fragment-path]')||link.closest('[data-fragment-path]'))?.dataset.fragmentPath.includes(':body:0:1:250:'));if(!link)return false;const r=link.getBoundingClientRect(),cell=link.closest('td'),c=cell?.getBoundingClientRect(),visible=r.height>0&&r.bottom>Math.max(box.top,c.top)&&r.top<Math.min(box.bottom,c.bottom)&&r.right>Math.max(box.left,c.left)&&r.left<Math.min(box.right,c.right)&&cell?.getAttribute('aria-colindex')==='2'&&node.querySelector('thead th[aria-colindex="2"]')?.textContent==='Column B';if(visible)window.middleTableReading={node:link,top:r.top-box.top};return visible})
+   if(middleVisible){await h.idle();await viewport.evaluate(async node=>{for(let frame=0;frame<4;frame++)await new Promise(resolve=>requestAnimationFrame(resolve));const witness=window.middleTableReading;if(!witness.node.isConnected||Math.abs(witness.node.getBoundingClientRect().top-node.getBoundingClientRect().top-witness.top)>3)throw Error('The actual middle table link lost its settled reading position')})}
+  }
+  if(seen.size===expected&&middleVisible)break
+  const fingerprint=await viewport.evaluate(node=>[node.dataset.renderPart,Math.round(node.scrollTop)].join(':'));stalled=fingerprint===previous?stalled+1:0;assert.ok(stalled<6,JSON.stringify({phase:'continuous-render-stall',kind,seen:seen.size,expected,slices:[...slices].slice(-8),progress}));previous=fingerprint
+  const trace=await viewport.evaluate(node=>({part:node.dataset.renderPart,request:node.dataset.renderRequest,top:Math.round(node.scrollTop),height:node.clientHeight,total:node.scrollHeight,gaps:[...node.querySelectorAll('[data-fragment-from]')].map(gap=>({from:gap.dataset.fragmentFrom,to:gap.dataset.fragmentTo,top:Math.round(gap.getBoundingClientRect().top-node.getBoundingClientRect().top),bottom:Math.round(gap.getBoundingClientRect().bottom-node.getBoundingClientRect().top)}))}));slices.add(trace.part);progress.push({turns,seen:seen.size,...trace});if(progress.length>6)progress.shift()
+  // The legacy whole-budget bound is independently retained in SessionTranscriptTest.
+  // Continuous presentation has up to three overlapping slices per mounted window.
+  assert.ok(++turns<=300,JSON.stringify({phase:'continuous-slice-progress',expected,seen:seen.size,distinctSlices:slices.size,firstKeys:[...seen.keys()].slice(0,2),lastKeys:[...seen.keys()].slice(-2),progress}));await continuousScrollStep(page,1)
+ }
+ if(kind==='table'){
+  assert.equal(await page.evaluate(()=>window.middleTableReading.node.isConnected),false,'bounded forward traversal actually evicts the old middle link')
+  while(!await viewport.evaluate(node=>{const box=node.getBoundingClientRect(),link=[...node.querySelectorAll('a')].find(link=>(link.querySelector('[data-fragment-path]')||link.closest('[data-fragment-path]'))?.dataset.fragmentPath.includes(':body:0:1:250:'));if(!link)return false;const r=link.getBoundingClientRect();return link!==window.middleTableReading.node&&r.height>0&&r.bottom>box.top&&r.top<box.bottom&&r.right>box.left&&r.left<box.right})){
+   assert.ok(++turns<=300,'evicted middle table content remains reachable within the same finite input bound');await continuousScrollStep(page,-1)
+  }
+ }
+ await page.evaluate(()=>{window.archiveLinkObserver.disconnect();delete window.archiveLinkObserver;delete window.archiveLinkWitness;delete window.collectArchiveLinks;delete window.middleTableReading});assert.equal(seen.size,expected);return {turns,maxBytes,counts}
+}
 
 const phaseArchiveETag='"fixture-authority-bound-archive"'
 const phaseArchiveRoute=handler=>route=>handler(new Proxy(route,{get(target,key){
@@ -31,6 +60,7 @@ const phaseArchiveRoute=handler=>route=>handler(new Proxy(route,{get(target,key)
 const generation='33333333-3333-4333-8333-333333333333'
 const makeManifest=(h,raw,gzip)=>({workspace_id:h.fixture.workspace.id,session_id:h.saved.id,state:'ready',generation_id:generation,codec:'gzip-v1',raw_bytes:String(raw.length),raw_records:String(raw.length?raw.toString('utf8').split('\n').filter(Boolean).length:0),raw_sha256:hash(raw),compressed_bytes:String(gzip.length),compressed_sha256:hash(gzip),content_path:`/api/v1/workspaces/${h.fixture.workspace.id}/sessions/${h.saved.id}/archive/${generation}/content`})
 const workerAsset=async()=>'/assets/'+(await readdir('../static/assets')).find(name=>/^session-archive-worker-.*\.js$/.test(name))
+const profileScratch=()=>resolve(process.env.HMEM_ARCHIVE_PROFILE_SCRATCH || '../../.tmp/sealed-archives-e0ac6260')
 
 test('Jump to latest reaches a verified final archive page and its actual last formatted part',{timeout:45000},async()=>{
  const destination='https://example.test/'+'x'.repeat(12000),markdown=Array.from({length:800},(_,i)=>`[Final occurrence ${i}][late]`).join(' ')+'\n\n[late]: '+destination
@@ -41,8 +71,8 @@ test('Jump to latest reaches a verified final archive page and its actual last f
   await page.addInitScript(captureArchiveTelemetry)
   await page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>{reads.push(route.request().url());return new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})}))
   await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
-  await page.getByText('Archive occurrence 0',{exact:true}).waitFor();const viewport=page.locator('#session-records'),jump=page.getByRole('button',{name:'Jump to latest',exact:true})
-  await viewport.evaluate(node=>{node.scrollTop=node.scrollHeight});await jump.waitFor({state:'visible'})
+  await page.getByRole('link',{name:'Final occurrence 799',exact:true}).waitFor();const viewport=page.locator('#session-records'),jump=page.getByRole('button',{name:'Jump to latest',exact:true})
+  await viewport.press('Home');await jump.waitFor({state:'visible'});await page.getByText('Archive occurrence 0',{exact:true}).waitFor()
   const before=reads.length;await jump.focus();await page.keyboard.press('Enter')
   await page.waitForFunction(()=>{const node=document.getElementById('session-records');return node.dataset.latestPending==='false'&&node.dataset.archiveCanNext==='false'&&node.dataset.renderMore==='false'&&node.dataset.lastProseMore==='false'&&Number(node.dataset.renderPart)>0&&node.scrollHeight-node.scrollTop-node.clientHeight<=4})
   await jump.waitFor({state:'hidden'});await page.getByRole('link',{name:'Final occurrence 799',exact:true}).waitFor()
@@ -53,7 +83,7 @@ test('Jump to latest reaches a verified final archive page and its actual last f
  }finally{await h.close()}
 })
 
-test('sealed boundary scrolling visits consecutive render parts and positions each stamped replacement',{timeout:45000},async()=>{
+test('sealed boundary scrolling continuously admits consecutive render slices with stamped positioning',{timeout:45000},async()=>{
  const destination='https://example.test/'+'x'.repeat(12000),markdown=Array.from({length:800},(_,i)=>`[Occurrence ${i}][r]`).join(' ')+'\n\n[r]: '+destination
  const h=await openSessionExplorer({transcriptBytes:Buffer.from(JSON.stringify({text:markdown})+'\n')}),{page}=h
  const view=()=>page.locator('#session-records').evaluate(node=>({part:Number(node.dataset.renderPart),request:Number(node.dataset.renderRequest),top:node.scrollTop,bottom:node.scrollHeight-node.scrollTop-node.clientHeight,occurrences:[...node.querySelectorAll('a')].map(link=>Number(link.textContent.split(' ')[1]))}))
@@ -61,21 +91,17 @@ test('sealed boundary scrolling visits consecutive render parts and positions ea
   const raw=h.content.get(h.saved.id),gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip)
   await page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})))
   await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
-  await page.getByText('Verified complete archive.',{exact:true}).waitFor();await page.getByRole('button',{name:'Read complete message',exact:true}).click()
+  await page.getByText('Verified complete archive.',{exact:true}).waitFor()
   await page.waitForFunction(()=>document.querySelector('#session-records a')?.getAttribute('href')?.length>12000)
-  const viewport=page.locator('#session-records'),visited=(await view()).occurrences
-  for(let target=1;target<=3;target++){
-   await viewport.evaluate(node=>{node.scrollTop=node.scrollHeight;for(let i=0;i<5;i++)node.dispatchEvent(new Event('scroll'))});await h.idle()
-   const previous=await view();assert.equal(previous.part,target-1,'programmatic scrolls do not advance a presentation part')
-   await viewport.hover();await page.mouse.wheel(0,2000)
-   await page.waitForFunction(target=>{const node=document.getElementById('session-records');return Number(node.dataset.renderPart)===target&&node.scrollTop<=4},target)
-   await h.idle();const current=await view();assert.equal(current.part,target);assert.ok(current.request>previous.request)
-   visited.push(...current.occurrences)
-   await viewport.evaluate(node=>{for(let i=0;i<5;i++)node.dispatchEvent(new Event('scroll'))});await h.idle();assert.equal((await view()).part,target,'replacement scrolls cannot consume the previous gesture again')
+  const viewport=page.locator('#session-records');await viewport.press('Home');await page.waitForFunction(()=>document.getElementById('session-records').dataset.renderPart==='0')
+  const visited=new Set((await view()).occurrences),parts=new Set([0]);let previous=await view()
+  for(let steps=0;previous.part<3;steps++){
+   assert.ok(steps<30);await continuousScrollStep(page,1);await h.idle();const current=await view();assert.ok(current.part<=previous.part+2,'overlapping windows admit every intervening slice');if(current.part!==previous.part)assert.ok(current.request>previous.request)
+   parts.add(current.part);for(const occurrence of current.occurrences)visited.add(occurrence);previous=current
   }
-  assert.deepEqual(visited,Array.from({length:visited.length},(_,i)=>i),'consecutive mounted parts contain every expected occurrence once and in order')
-  await viewport.hover();await page.mouse.wheel(0,-2000)
-  await page.waitForFunction(()=>{const node=document.getElementById('session-records');return node.dataset.renderPart==='2'&&node.scrollHeight-node.scrollTop-node.clientHeight<=4})
+  assert.ok(parts.size>=3);assert.deepEqual([...visited].sort((a,b)=>a-b),Array.from({length:visited.size},(_,i)=>i),'overlapping mounted slices contain every expected occurrence without holes')
+  await viewport.press('Home');await page.waitForFunction(()=>{const node=document.getElementById('session-records');return node.scrollTop<=1&&node.querySelector('[data-fragment-part="0"]')})
+  assert.equal(await page.getByRole('button',{name:/^(Earlier messages|Newer messages|First|Previous|Next|Last|Continue presentation|Previous presentation)$/}).count(),0)
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -101,15 +127,17 @@ for(const jumpLatest of [false,true])test('failed native reader page retries thr
    }else await route.fulfill({json:manifest})
   }))
   await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
-  await h.page.getByText('Retry occurrence 0',{exact:true}).waitFor()
-  const admitted=await h.page.locator('.session-record').evaluateAll(nodes=>nodes.map(node=>node.dataset.blockKey))
-  await h.page.getByRole('button',{name:jumpLatest?'Jump to latest':'Next',exact:true}).click()
+  await h.page.getByText('Retry occurrence 179',{exact:true}).waitFor();await h.idle()
+  const admitted=await h.page.locator('#session-records').evaluate(node=>[node.dataset.sealedFirst,node.dataset.sealedLast])
+  await h.page.locator('#session-records').press('Home')
   await h.page.getByText('controlled_reader_page_failure',{exact:true}).waitFor()
-  assert.deepEqual(await h.page.locator('.session-record').evaluateAll(nodes=>nodes.map(node=>node.dataset.blockKey)),admitted)
+  assert.deepEqual(await h.page.locator('#session-records').evaluate(node=>[node.dataset.sealedFirst,node.dataset.sealedLast]),admitted,'failed acquisition preserves the admitted source interval even when real Home changes its mounted slice')
+  assert.ok(await h.page.locator('.session-record').evaluateAll((nodes,[first,last])=>nodes.every(node=>node.dataset.blockKey>=first&&node.dataset.blockKey<=last),admitted))
   await h.page.getByRole('button',{name:jumpLatest?'Jump to latest':'Retry',exact:true}).click()
-  await h.page.getByText('Retry occurrence '+(jumpLatest?116:64),{exact:true}).waitFor()
+  if(jumpLatest)await h.page.getByText('Retry occurrence 179',{exact:true}).waitFor()
+  else await h.page.waitForFunction(first=>document.getElementById('session-records').dataset.sealedFirst<first,admitted[0])
   assert.equal(readerIncarnations,2);assert.deepEqual(conditional,[phaseArchiveETag,phaseArchiveETag])
-  assert.equal(await h.page.getByText('Retry occurrence 0',{exact:true}).count(),0)
+  assert.ok(await h.page.locator('.session-record').count()<=200)
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -654,10 +682,31 @@ test('paired native memory dump modes retain process coverage',{skip:process.env
   if(primary)throw primary
 })
 
+test('ordinary fixture retirement joins its owned context before disconnect and propagates rejection',{timeout:20000},async()=>{
+  for(const rejected of [false,true]){
+    const h=await openSessionExplorer(),context=h.page.context(),browser=context.browser(),nativeClose=context.close.bind(context),injected=Error('owned_context_close_failure')
+    let release,entered,settled=false,primary
+    const gate=new Promise(resolve=>{release=resolve}),entry=new Promise(resolve=>{entered=resolve})
+    context.close=async(...args)=>{entered();await gate;if(rejected)throw injected;return nativeClose(...args)}
+    const closing=h.close().finally(()=>{settled=true});closing.catch(()=>{})
+    try{
+      assert.equal(await Promise.race([entry.then(()=>true),closing.then(()=>false,()=>false)]),true,'ordinary retirement must join the exact owned native context before disconnect')
+      assert.equal(browser.isConnected(),true);assert.equal(settled,false,'retirement waits for held context completion')
+      release()
+      if(rejected)await assert.rejects(closing,error=>error===injected,'the primary context cleanup failure is retained')
+      else await closing
+      assert.equal(browser.isConnected(),false)
+      assert.throws(()=>process.kill(h.browserImage.pid,0),error=>error.code==='ESRCH','the owned Chromium process has actually retired')
+    }catch(error){primary=error}
+    finally{release();try{await closing}catch(error){if(error!==injected)primary=primary?new AggregateError([primary,error],'ordinary_fixture_causal_cleanup_failed'):error}}
+    if(primary)throw primary
+  }
+})
+
 for(const mode of ['setup-cleanup-failure','late-launch'])test('persistent fixture owner retains '+mode,{timeout:30000},async()=>{
   const probe=await openSessionExplorer(),executable=probe.browserImage.executable
   await probe.close()
-  const scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
+  const scratch=profileScratch(),profile=resolve(scratch,'archive-profile-'+randomUUID())
   await mkdir(profile)
   let owner,release,primary,context
   try {
@@ -925,10 +974,11 @@ test('navigation diagnostic helpers retire observers and timers on success, time
 })
 
 test('navigation diagnostic helpers retain one timed-out negative RPC and discard page bodies',async()=>{
-  const names=['window','Worker','setTimeout','clearTimeout'],original=Object.fromEntries(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]))
+  const names=['window','Worker','location','setTimeout','clearTimeout'],original=Object.fromEntries(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]))
   let nextTimer=0;const timers=new Map()
   try{
     globalThis.window={}
+    globalThis.location={href:'http://fixture.invalid/'}
     globalThis.setTimeout=(callback,ms)=>{const id=++nextTimer;timers.set(id,{callback,ms});return id};globalThis.clearTimeout=id=>timers.delete(id)
     globalThis.Worker=class extends EventTarget {postMessage(message){this.lastMessage=message}}
     captureArchiveTelemetry(true)
@@ -950,11 +1000,12 @@ test('navigation diagnostic helpers retain one timed-out negative RPC and discar
 })
 
 test('navigation diagnostic helpers use the actual block helper for20operations and ten distinct DOM moves',async()=>{
-  const names=['window','Worker','document','MutationObserver','setTimeout','clearTimeout'],original=Object.fromEntries(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]))
+  const names=['window','Worker','location','document','MutationObserver','setTimeout','clearTimeout'],original=Object.fromEntries(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]))
   let offset='first',observer,nextTimer=0,workerOperations=0
   const timers=new Map(),actions=[],navigation=[]
   try{
     globalThis.window={}
+    globalThis.location={href:'http://fixture.invalid/'}
     globalThis.setTimeout=(callback,ms)=>{const id=++nextTimer;timers.set(id,{callback,ms});return id};globalThis.clearTimeout=id=>timers.delete(id)
     globalThis.MutationObserver=class {constructor(callback){this.callback=callback;observer=this}observe(){}disconnect(){}}
     const viewport={get outerHTML(){return '<records page="'+offset+'"></records>'},querySelector:()=>({getAttribute:()=>offset})}
@@ -1663,7 +1714,7 @@ for(const delivery of ['fast','slow'])test('production local navigation status c
     await h.page.addInitScript(()=>{
       const Native=Worker;window.navigationPageReplies=0
       window.Worker=class extends Native{
-        constructor(url,options){super(url,options);this.addEventListener('message',({data})=>{if(data.kind==='page')window.navigationPageReplies++})}
+        constructor(url,options){super(url,options);this.addEventListener('message',({data})=>{if(data.kind==='page'){window.navigationPageReplies++;window.navigationLastPageRows=data.rows.length}})}
         postMessage(message,transfer){if(message.kind==='page'&&window.holdNavigationPage){window.holdNavigationPage=false;window.releaseNavigationPage=()=>{window.releaseNavigationPage=null;Native.prototype.postMessage.call(this,message,transfer)};return}return super.postMessage(message,transfer)}
       }
     })
@@ -1673,34 +1724,34 @@ for(const delivery of ['fast','slow'])test('production local navigation status c
     const previous=await h.page.evaluate(delivery=>{
       const status=document.querySelector('.session-sealed-viewer [role="status"]');window.navigationStatuses=[]
       window.navigationStatusObserver=new MutationObserver(()=>{const value=status.textContent;if(window.navigationStatuses.at(-1)!==value)window.navigationStatuses.push(value)})
-      window.navigationStatusObserver.observe(status,{childList:true,subtree:true,characterData:true});window.holdNavigationPage=delivery==='slow'
-      const replies=window.navigationPageReplies;document.querySelector('[data-sealed-action="last"]').click();return replies
+      window.navigationStatusObserver.observe(status,{childList:true,subtree:true,characterData:true});window.holdNavigationPage=true
+      return window.navigationPageReplies
     },delivery)
+    for(let step=0;!await h.page.evaluate(()=>typeof window.releaseNavigationPage==='function');step++){assert.ok(step<8,'actual upward input reaches one indexed continuation');await continuousScrollStep(h.page,-1);await h.page.waitForTimeout(25)}
     if(delivery==='slow'){
       await h.page.waitForFunction(()=>typeof window.releaseNavigationPage==='function',null,{timeout:2000})
       await h.page.getByText('Reading local index…',{exact:true}).waitFor({timeout:2000})
       assert.equal(await h.page.evaluate(()=>window.navigationStatuses.filter(value=>value==='Reading local index…').length),1)
-      await h.page.evaluate(()=>window.releaseNavigationPage())
     }
+    await h.page.evaluate(()=>window.releaseNavigationPage())
     await h.page.waitForFunction(previous=>window.navigationPageReplies===previous+1,previous,{timeout:2000})
-    await h.page.waitForFunction(()=>document.querySelector('#session-records [data-offset]')?.textContent.includes('local navigation row 96'),null,{timeout:2000})
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:2000});await h.page.waitForTimeout(150)
-    const state=await h.page.evaluate(()=>{window.navigationStatusObserver.disconnect();return {statuses:window.navigationStatuses,status:document.querySelector('.session-sealed-viewer [role="status"]').textContent,rows:document.querySelectorAll('#session-records [data-offset]').length}})
-    assert.equal(state.status,'Verified complete archive.');assert.equal(state.rows,64);assert.equal(state.statuses.filter(value=>value==='Reading local index…').length,delivery==='slow'?1:0)
+    const state=await h.page.evaluate(()=>{window.navigationStatusObserver.disconnect();return {statuses:window.navigationStatuses,status:document.querySelector('.session-sealed-viewer [role="status"]').textContent,rows:document.querySelectorAll('#session-records [data-offset]').length,acquiredRows:window.navigationLastPageRows}})
+    assert.equal(state.status,'Verified complete archive.');assert.ok(state.rows>0&&state.rows<=200);assert.equal(state.acquiredRows,64);assert.equal(state.statuses.filter(value=>value==='Reading local index…').length,delivery==='slow'?1:0)
     assert.deepEqual(h.errors,[]);console.log(JSON.stringify({localNavigationStatus:{delivery,...state}}))
   }finally{await h.close()}
 })
 
 
 test('tiny production handoff retains generation custody and reopens the compiled tagged reader',{timeout:60000},async()=>{
-  const evidence=await readQualificationEvidence(),image=evidence.browserImage,scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
+  const evidence=await readQualificationEvidence(),image=evidence.browserImage,scratch=profileScratch(),profile=resolve(scratch,'archive-profile-'+randomUUID())
   assert.equal(await hashFile(image.path),image.sha256);await mkdir(profile)
-  let launch,h,isolate,primary,releaseConditional,releaseContent,deadlineFailure,deadlineReject
+  let launch,h,isolate,primary,releaseConditional,releaseContent,deadlineFailure,deadlineReject,phase='launch'
   const nativeSamples=[]
   const deadline=new Promise((_,reject)=>{deadlineReject=reject});deadline.catch(()=>{})
   const timer=setTimeout(()=>{deadlineFailure=Error('tiny_phase_owned_deadline');deadlineReject(deadlineFailure);launch?.close().catch(()=>{})},30000)
   try{
-    launch=ownedPersistentFixture({path:profile,executable:image.path});h=await Promise.race([launch.get(),deadline])
+    launch=ownedPersistentFixture({path:profile,executable:image.path});h=await Promise.race([launch.get(),deadline]);phase='fixture-ready'
     const raw=h.content.get(h.saved.id),gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip),etag='"tiny-current-authority"',conditional=new Promise(resolve=>{releaseConditional=resolve}),contentReady=new Promise(resolve=>{releaseContent=resolve})
     await h.page.addInitScript(captureArchiveTelemetry)
     await h.page.addInitScript(()=>{
@@ -1718,12 +1769,12 @@ test('tiny production handoff retains generation custody and reopens the compile
       await contentReady
       return route.fulfill({headers:{ETag:etag,'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip})
     })
-    await h.start();await h.idle();await h.page.evaluate(id=>{location.hash='tab=sessions&session='+id},h.active.id);await h.page.locator('#session-records .session-record').first().waitFor();await h.idle()
+    phase='active-reader';await h.start();await h.idle();await h.page.evaluate(id=>{location.hash='tab=sessions&session='+id},h.active.id);await h.page.locator('#session-records .session-record').first().waitFor();await h.idle();phase='isolate-baseline'
     isolate=await openIsolateDiagnostic(h)
     const capture=async phase=>{const native=await boundedMemorySnapshot(h,{levelOfDetail:'background'}),aux=await isolate.snapshot({requireWorker:phase!=='baseline'});nativeSamples.push({phase,privateBytes:native.totalPrivateBytes,processes:native.processes.map(value=>({pid:value.pid,type:value.type,bytes:parseInt(value.totals.private_footprint_bytes,16)})),attribution:native.attribution,trace:native.trace,traceLoss:native.traceLoss,aux});return aux}
-    await capture('baseline');await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
+    await capture('baseline');phase='archive-downloading';await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.waitForFunction(()=>window.archivePhaseProof[0]?.last.some(message=>message.kind==='progress'&&message.phase==='downloading'),null,{timeout:10000})
-    const processorAux=await capture('processor');assert.equal(processorAux.worker.phase,'processor');releaseContent()
+    phase='processor-snapshot';const processorAux=await capture('processor');assert.equal(processorAux.worker.phase,'processor');releaseContent();phase='processor-detach'
     await h.page.waitForFunction(()=>window.archivePhaseProof.length===1&&window.archivePhaseProof[0].detached&&window.archivePhaseProof[0].terminated,null,{timeout:10000})
     const gap=await h.page.evaluate(async()=>{
       const phase=window.archivePhaseProof[0],lock=await navigator.locks.request('hmem-session-archive-v1-'+phase.name,{ifAvailable:true},value=>!!value)
@@ -1731,13 +1782,13 @@ test('tiny production handoff retains generation custody and reopens the compile
       return {lockAvailable:lock,phases:window.archivePhaseProof}
     });assert.equal(gap.lockAvailable,false);assert.equal(gap.phases.length,1)
     const gapAux=await capture('detached-gap');assert.equal(gapAux.worker,null);assert.equal(gapAux.workerTransition.phase,'processor-detached-awaiting-reader')
-    releaseConditional();await h.page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:10000})
+    releaseConditional();phase='reader-adoption';await h.page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:10000})
     const readerAux=await capture('reader');assert.equal(readerAux.worker.phase,'reader');assert.notEqual(readerAux.worker.isolateId,processorAux.worker.isolateId);assert.equal(readerAux.observedWorkerEpochs.length,2)
     for(const sample of nativeSamples){assert.equal(sample.traceLoss,false);assert.deepEqual(sample.processes.map(value=>value.pid).sort((a,b)=>a-b),nativeSamples[0].processes.map(value=>value.pid).sort((a,b)=>a-b))}
     const phases=await h.page.evaluate(()=>window.archivePhaseProof);assert.deepEqual(phases.map(value=>value.mode),['processor','reader']);assert.deepEqual(phases.map(value=>value.messageKind),['start','adopt']);assert.notEqual(phases[0].incarnation,phases[1].incarnation);assert.equal(phases[0].name,phases[1].name)
     for(const phase of phases){const url=new URL(phase.url);assert.match(url.pathname,/\/assets\/session-archive-worker-[^/]+\.js$/);assert.match(phase.incarnation,/^[a-f0-9-]{36}$/)}
     const group=h.page.locator('.session-activity-group').first();await group.locator(':scope > summary').click();const tool=group.locator('.session-content-tool').first();await tool.locator('summary').click();await tool.locator('pre').waitFor();assert.ok((await tool.locator('pre').innerText()).includes('src/Feature/Sessions.elm'))
-    await h.page.locator('[data-sealed-action="cancel"]').click();await h.page.getByText('Archive loading cancelled.',{exact:true}).waitFor()
+    await h.page.getByRole('link',{name:'Close session',exact:true}).click();await h.page.locator('#session-records').waitFor({state:'detached'});await h.page.waitForFunction(()=>window.archivePhaseProof[1]?.cleaned&&window.archivePhaseProof[1]?.terminated)
     await h.page.waitForFunction(async()=>{const phase=window.archivePhaseProof[0],root=await(await navigator.storage.getDirectory()).getDirectoryHandle('hmem-session-archives-v1');let count=0;for await(const entry of root.entries())count++;if(count)return false;return navigator.locks.request('hmem-session-archive-v1-'+phase.name,{ifAvailable:true},value=>!!value)},null,{timeout:10000})
     assert.deepEqual(h.errors,[]);console.log(JSON.stringify({tinyPhaseHandoff:{gapCustodyHeld:true,phases,nativeSamples,compiledImportsWorked:true,toolBodyExact:true,deletedAndLockReleased:true,publicTerminateReceipt:'invoked only; no physical-thread or RSS acknowledgement'}}))
   }catch(error){isolate ||= error.isolateOwner;primary=error;if(h)try{console.log(JSON.stringify({tinyPhaseFailure:await h.bounded(h.page.evaluate(()=>({status:(document.querySelector('.session-sealed-viewer [role="status"],.session-sealed-viewer [role="alert"]')?.textContent||'').slice(0,500),phases:window.archivePhaseProof?.slice(0,2)})),2000,'Tiny phase failure facts'),pageErrors:h.errors.slice(0,4)}))}catch(captureError){error.captureFailure=captureError.message}}
@@ -1746,7 +1797,7 @@ test('tiny production handoff retains generation custody and reopens the compile
     releaseContent?.();releaseConditional?.()
     try{await closeIsolateAndFixture(isolate,{h,profileLaunch:launch,profile,removeProfile:async()=>{if(!launch?.closed)throw Error('profile_closure_unconfirmed');assert.equal(await realpath(profile),profile);assert.equal((await lstat(profile)).isSymbolicLink(),false);assert.ok(profile.startsWith(await realpath(scratch)+sep));await rm(profile,{recursive:true,maxRetries:0})}},primary)}catch(error){primary=primary?new AggregateError([primary,error],'tiny_phase_cleanup_failed'):error}
   }
-  if(primary)throw primary
+  if(primary){console.log(JSON.stringify({tinyFailurePhase:phase,errors:[primary,...(primary.errors||[])].slice(0,5).map(error=>error.message)}));throw primary}
 })
 
 test('production sealed view uses complete gzip only and preserves lazy tool disclosure',{timeout:60000},async()=>{
@@ -1771,7 +1822,7 @@ test('production sealed view uses complete gzip only and preserves lazy tool dis
     await tool.locator('summary').click();await tool.locator('pre').waitFor();assert.ok((await tool.locator('pre').innerText()).includes('src/Feature/Sessions.elm'))
     const size=await h.page.locator('#session-records').evaluate(node=>new TextEncoder().encode(node.outerHTML).length)
     assert.ok(size<4194304);assert.ok(await h.page.locator('.session-record').count()<=64)
-    assert.equal(await h.page.getByRole('button',{name:'Last',exact:true}).isDisabled(),true,'a complete single-page archive has no later page')
+    assert.equal(await h.page.getByRole('button',{name:/^(First|Previous|Next|Last)$/}).count(),0);assert.equal(await h.page.locator('#session-records').getAttribute('data-archive-can-next'),'false','the verified end has no later source interval')
     assert.equal(reads.length,3,'ordinary local navigation performs no HTTP')
     const loaded=await boundedMemorySnapshot(h)
     console.log(JSON.stringify({memoryCapability:{browserImage,baseline,loaded}}))
@@ -1833,7 +1884,7 @@ test('crashed private generations recover without deleting a second live tab own
 })
 
 test('known credential switch and authorization loss synchronously retire visible local evidence',{timeout:60000},async()=>{
-  const h=await openSessionExplorer();let release
+  const h=await openSessionExplorer({extraRecords:Array.from({length:300},(_,i)=>({text:'Authorization history '+i+' keeps indexed scrolling available.'}))});let release
   try {
     await h.page.addInitScript(()=>{
       const Native=Worker
@@ -1854,14 +1905,15 @@ test('known credential switch and authorization loss synchronously retire visibl
     }))
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
+    await h.page.locator('#session-records').press('Home');await h.page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
     const group=h.page.locator('.session-activity-group').first();await group.locator(':scope > summary').click()
     await group.locator('.session-content-tool').first().locator(':scope > summary').click()
     await group.locator('.session-content-tool pre').first().waitFor()
     assert.equal(await h.page.locator('.session-event-inspector,.session-inspect-event,.session-ancestor-path').count(),0)
     assert.equal(await h.page.locator('#session-records').evaluate(node=>node.parentElement.tagName),'SECTION')
+    await h.page.locator('#session-records').press('End');await h.page.waitForFunction(()=>{const node=document.getElementById('session-records');return node.dataset.latestPending==='false'&&node.dataset.archiveCanNext==='false'})
     await h.page.evaluate(()=>{window.holdArchivePage=true})
-    await group.locator('.session-content-tool').first().locator(':scope > summary').click()
-    await group.locator('.session-content-tool').first().locator(':scope > summary').click()
+    await h.page.locator('#session-records').press('Home')
     await h.page.waitForFunction(()=>typeof window.releaseArchivePage==='function')
     await h.page.getByRole('button',{name:'Cancel',exact:true}).waitFor({state:'visible'})
     assert.ok(await h.page.locator('#session-records').evaluate(node=>node.children.length>0),'busy local navigation retains verified messages before cancellation')
@@ -1871,6 +1923,7 @@ test('known credential switch and authorization loss synchronously retire visibl
     await h.page.evaluate(()=>window.releaseArchivePage?.(true))
     await h.page.locator('.session-sealed-viewer').getByRole('button',{name:'Retry',exact:true}).click()
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
+    await h.page.locator('#session-records').press('Home');await h.page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
     await group.locator(':scope > summary').click()
     await group.locator('.session-content-tool').first().locator(':scope > summary').click()
     await group.locator('.session-content-tool pre').first().waitFor()
@@ -1968,7 +2021,7 @@ test('production compressed download shows accepted bytes before completion and 
 })
 
 test('production Cancel retires a held content request before it can publish',{timeout:60000},async()=>{
-  const h=await openSessionExplorer();let release
+  const h=await openSessionExplorer({extraRecords:Array.from({length:100},(_,i)=>({text:'Authorization history '+i+' keeps indexed scrolling available.'}))});let release
   try {
     const raw=h.content.get(h.saved.id),gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip),gate=new Promise(resolve=>{release=resolve})
     await h.page.route('**/sessions/**/archive**',phaseArchiveRoute(async route=>{
@@ -2012,22 +2065,8 @@ test('resolved Markdown reference expansion is paged before mounting every exact
     await h.page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})))
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
-    await h.page.getByRole('button',{name:'Read complete message',exact:true}).click()
-    await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     await h.page.locator('#session-records a').first().waitFor()
-    await h.page.waitForFunction(destination=>document.querySelector('#session-records a')?.getAttribute('href')===destination && document.querySelector('.session-render-continuation')?.getAttribute('data-render-part')==='0',destination)
-    let total=0,turns=0,maxBytes=0
-    while(true){
-      const state=await h.page.locator('#session-records').evaluate((node,destination)=>({links:node.querySelectorAll('a').length,exact:[...node.querySelectorAll('a')].every(link=>link.getAttribute('href')===destination),bytes:new TextEncoder().encode(node.outerHTML).length}),destination)
-      assert.equal(state.exact,true);total+=state.links;maxBytes=Math.max(maxBytes,state.bytes)
-      const wire=await h.page.evaluate(()=>window.archiveTelemetry.maxPageBytes);assert.ok(state.bytes+wire<=4194304)
-      const next=h.page.locator('.session-render-continuation').getByRole('button',{name:'Continue presentation',exact:true})
-      if(!await next.count())break
-      const target=Number(await next.getAttribute('data-sealed-part'));await next.click()
-      await h.page.waitForFunction(target=>document.querySelector('.session-render-continuation')?.getAttribute('data-render-part')===String(target),target)
-      assert.ok(++turns<100)
-    }
-    assert.equal(total,1000);assert.ok(turns>0);assert.ok(maxBytes<4194304);assert.deepEqual(h.errors,[])
+    const {turns,maxBytes}=await renderedLinks(h,destination,1000);assert.ok(turns>0);assert.ok(maxBytes<4194304);assert.deepEqual(h.errors,[])
   }finally{await h.close()}
 })
 
@@ -2040,7 +2079,6 @@ test('complete source-block hydration preserves fences and late reference defini
     await h.page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})))
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
-    await h.page.getByRole('button',{name:'Read complete message',exact:true}).click()
     const link=h.page.locator('#session-records a[href="https://example.test/full-source"]');await link.waitFor({timeout:10000})
     assert.equal(await link.innerText(),'Late reference')
     const code=await h.page.locator('#session-records pre code.language-text').allTextContents();assert.equal(code.join(''),'fenced line\n'.repeat(2200))
@@ -2084,19 +2122,7 @@ test('ordered-list ordinals and table column/header context survive rendered con
       await h.page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})))
       await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
       try{await h.page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:3000})}catch(error){throw Error('structural '+example.kind+': '+JSON.stringify({errors:h.errors.slice(0,2),status:await h.page.locator('.session-sealed-viewer [role="status"]').allTextContents()}))}
-      let links=0,turns=0,counts={1:0,2:0,3:0}
-      while(true){
-        const current=await h.page.locator('#session-records').evaluate((node,{kind,destination})=>({links:node.querySelectorAll('a').length,exactLinks:[...node.querySelectorAll('a')].every(link=>link.getAttribute('href')===destination),bytes:new TextEncoder().encode(node.outerHTML).length,
-          items:kind==='list'?[...node.querySelectorAll('li')].map(item=>({ordinal:item.value,links:item.querySelectorAll('a').length})):[],
-          columns:kind==='table'?[...node.querySelectorAll('tbody td')].filter(cell=>cell.querySelector('a')).map(cell=>({column:cell.getAttribute('aria-colindex'),header:node.querySelector('thead th[aria-colindex="'+cell.getAttribute('aria-colindex')+'"]')?.textContent})):[]}),{kind:example.kind,destination})
-        links+=current.links;assert.ok(current.exactLinks);assert.ok(current.bytes<=2097152)
-        for(const item of current.items){assert.ok([1,2,3].includes(item.ordinal));counts[item.ordinal]+=item.links}
-        for(const cell of current.columns){assert.equal(cell.column,'2');assert.equal(cell.header,'Column B')}
-        const next=h.page.locator('.session-render-continuation').getByRole('button',{name:'Continue presentation',exact:true})
-        if(!await next.count())break
-        const target=Number(await next.getAttribute('data-sealed-part'));await next.click();await h.page.waitForFunction(target=>document.querySelector('.session-render-continuation')?.getAttribute('data-render-part')===String(target),target);assert.ok(++turns<100)
-      }
-      assert.equal(links,example.links);if(example.kind==='list')assert.deepEqual(counts,{1:300,2:300,3:300});assert.deepEqual(h.errors,[])
+      const {counts}=await renderedLinks(h,destination,example.links,example.kind);if(example.kind==='list')assert.deepEqual(counts,{1:300,2:300,3:300});assert.deepEqual(h.errors,[])
     }finally{await h.close()}
   }
 })
@@ -2110,9 +2136,10 @@ test('only approved oversized structured reasoning displays exact JSON with lite
     await h.page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})))
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id);await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     await h.page.locator('.session-activity-group').first().locator(':scope > summary').click()
-    const reasoning=h.page.locator('.session-content-thinking');await reasoning.first().locator('summary').click();await h.page.locator('a[href="https://example.test/normal"]').waitFor()
-    await reasoning.nth(1).locator('summary').click();await reasoning.nth(1).locator('pre').waitFor()
-    assert.ok((await reasoning.nth(1).locator('pre').innerText()).includes('[Open](https://example.test/large)'));assert.equal(await h.page.locator('a[href="https://example.test/large"]').count(),0)
+    const reasoning=h.page.locator('.session-content-thinking');await reasoning.first().locator('summary').click();await h.page.locator('a[href="https://example.test/normal"]').waitFor({timeout:5000}).catch(async error=>{console.log(JSON.stringify({phase:'normal-structured-reasoning',details:await reasoning.evaluateAll(nodes=>nodes.map(node=>({key:node.dataset.eventKey,open:node.open,html:node.innerHTML.slice(0,1200)}))),reader:await h.page.locator('#session-records').evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,height:node.scrollHeight,needed:[...node.querySelectorAll('[data-sealed-body-needed]')].map(node=>({...node.dataset}))}))}));throw error})
+    await reasoning.nth(1).locator('summary').click();await reasoning.nth(1).locator('pre').first().waitFor()
+    const parts=new Map();for(let sample=0;sample<2;sample++){for(const part of await reasoning.nth(1).locator('[data-body-part-index]').evaluateAll(nodes=>nodes.map(node=>({part:Number(node.dataset.bodyPartIndex),text:node.textContent})))){if(parts.has(part.part))assert.equal(parts.get(part.part),part.text);parts.set(part.part,part.text)}await h.idle()}
+    assert.ok([...parts].sort((a,b)=>a[0]-b[0]).map(([,text])=>text).join('').includes('[Open](https://example.test/large)'));assert.equal(await h.page.locator('a[href="https://example.test/large"]').count(),0)
     await h.page.getByText('Large structured reasoning · exact JSON',{exact:true}).waitFor()
     assert.deepEqual(h.errors,[])
   }finally{await h.close()}
@@ -2140,15 +2167,13 @@ test('bounded tool JSON DOM text remains exact across incomplete highlighted bod
     await h.page.locator('.session-activity-group > summary').click()
     await h.page.locator('details.session-content-tool > summary').click()
     const pre=h.page.locator('#session-records pre.session-tool-content');await pre.waitFor()
-    const parts=[]
+    const parts=new Map()
     for(let turn=0;turn<10;turn++){
-      parts.push(await pre.textContent())
-      const next=h.page.locator('.session-sealed-viewer').getByRole('button',{name:'Continue body',exact:true})
-      if(!await next.count())break
-      const target=Number(await next.getAttribute('data-sealed-part'));await next.click()
-      await h.page.waitForFunction(target=>{const next=[...document.querySelectorAll('.session-sealed-viewer [data-sealed-action="body"]')].find(node=>node.textContent==='Continue body');return !next||Number(next.getAttribute('data-sealed-part'))===target+1},target)
+      for(const part of await h.page.locator('[data-body-part-index]').evaluateAll(nodes=>nodes.map(node=>({part:Number(node.dataset.bodyPartIndex),text:node.textContent})))){if(parts.has(part.part))assert.equal(parts.get(part.part),part.text);parts.set(part.part,part.text)}
+      if([...parts.values()].join('').length===expected.length)break
+      await continuousScrollStep(h.page,1);await h.idle()
     }
-    assert.ok(parts.length>=3&&parts.length<10);assert.equal(parts.join(''),expected,'actual displayed token spans reconstruct complete exact pretty JSON')
+    assert.ok(parts.size>=3&&parts.size<10);assert.deepEqual([...parts.keys()].sort((a,b)=>a-b),Array.from({length:parts.size},(_,i)=>i));assert.equal([...parts].sort((a,b)=>a[0]-b[0]).map(([,text])=>text).join(''),expected,'actual displayed token spans reconstruct complete exact pretty JSON')
     const telemetry=await h.page.evaluate(()=>window.archiveTelemetry),domBytes=await h.page.locator('#session-records').evaluate(node=>new TextEncoder().encode(node.outerHTML).length)
     assert.ok(telemetry.maxBodyBytes<=65536);assert.ok(telemetry.maxPageBytes+domBytes<=4194304);assert.deepEqual(h.errors,[])
   }finally{await h.close()}

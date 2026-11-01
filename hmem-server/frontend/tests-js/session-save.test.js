@@ -20,6 +20,112 @@ test('latest overlay requires manual upward intent and only mutates its own read
  assert.deepEqual(foreign,{});assert.ok(other)
 })
 
+test('sealed resize follows only the matching latest tail and preserves historical or superseded positions',async()=>{
+ for(const variant of ['latest','historical','manual','input','owner','load','page','render-request','render-part','lagging-dom','not-following','not-latest','stale-active-follow','stale-active-manual','stale-active-load']){
+  const previous=globalThis.requestAnimationFrame,frames=[],listeners={},events=[];let incoming,resize
+  const attrs={'data-viewer-owner':'owner','data-history-mode':'sealed','data-sealed-dom-owner':'owner','data-sealed-dom-load':'4','data-sealed-page-request':'10','data-render-request':'0','data-render-part':'6','data-following':'true','data-logical-latest':'true','data-history-after':'100','data-history-latest':'100','data-history-loading':'true'}
+  const viewport={scrollTop:900,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key]??null,setAttribute:(key,value)=>{attrs[key]=value},querySelectorAll:()=>[],getBoundingClientRect:()=>({top:0,bottom:100,height:100}),contains:node=>node===viewport}
+  const emit=(type,extra={})=>(listeners[type]||[]).forEach(fn=>fn({type,target:viewport,isTrusted:true,...extra}))
+  globalThis.requestAnimationFrame=callback=>frames.push(callback)
+  try{
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:event=>events.push(event)}}},{document:{getElementById:()=>viewport,addEventListener(type,fn){(listeners[type]||=[]).push(fn)}},window:{ResizeObserver:class{constructor(fn){resize=fn}observe(){}disconnect(){}}}})
+   if(variant.startsWith('stale-active'))attrs['data-history-mode']='active'
+   incoming({stamp:'owner',viewerScope:'same-reader',generation:4,reset:null,chunk:null,follow:variant.startsWith('stale-active')})
+   attrs['data-history-mode']='sealed'
+   if(variant==='manual'||variant==='stale-active-manual'){
+    attrs['data-history-mode']='active';emit('wheel',{deltaY:-100});viewport.scrollTop=800;emit('scroll');attrs['data-history-mode']='sealed';viewport.scrollTop=900
+   }
+   if(variant==='historical')viewport.scrollTop=400
+   if(variant==='lagging-dom'||variant==='stale-active-load')attrs['data-sealed-dom-load']='3'
+   if(variant==='not-following'||variant==='stale-active-follow')attrs['data-following']='false'
+   if(variant==='not-latest')attrs['data-logical-latest']='false'
+   resize() // Initial delivery captures the settled pre-resize reading state.
+   const top=viewport.scrollTop
+   if(variant==='input')emit('keydown',{key:'Shift'})
+   if(variant==='owner')attrs['data-sealed-dom-owner']='retired'
+   if(variant==='load')attrs['data-sealed-dom-load']='5'
+   if(variant==='page')attrs['data-sealed-page-request']='11'
+   if(variant==='render-request')attrs['data-render-request']='1'
+   if(variant==='render-part')attrs['data-render-part']='7'
+   viewport.scrollHeight=2000;resize();await flush()
+   if(variant==='manual'||variant==='stale-active-manual')assert.ok(events.some(event=>event.kind==='viewer-follow'&&event.manualUp===true),'negative really starts in manual history')
+   assert.equal(viewport.scrollTop,variant==='latest'?2000:top,variant)
+  }finally{globalThis.requestAnimationFrame=previous}
+ }
+})
+
+test('current disclosure actions replay ahead of publication and exact acknowledgements retire only their action',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners={},timers=new Map();let incoming,timerId=0,clock=0
+ const attrs={'data-viewer-owner':'owner','data-viewer-generation':'3','data-history-mode':'active','data-history-loading':'true'},node={open:true,isConnected:true,getAttribute:key=>key==='data-group-key'?'kept-run':null}
+ const viewport={scrollTop:20,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key]??null,contains:value=>value===node,querySelectorAll:selector=>selector==='details'?[node]:[],getBoundingClientRect:()=>({top:0,bottom:100,height:100})}
+ globalThis.requestAnimationFrame=fn=>frames.push(fn)
+ const emit=()=>{for(const fn of listeners.toggle||[])fn({type:'toggle',target:node})},actions=()=>events.filter(value=>value.kind==='viewer-disclosure')
+ const command=(generation,extra={})=>incoming({stamp:'owner',viewerScope:'scope',generation,reset:null,chunk:null,...extra})
+ const ack=(action,generation=action.generation,stamp=action.stamp)=>incoming({stamp,generation,disclosureAck:{scope:action.scope,request:action.request,namespace:action.namespace,key:action.key,ancestor:action.ancestor,open:action.open}})
+ try{
+  const bridge=installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(type,fn){(listeners[type]||=[]).push(fn)}},window:{setTimeout(fn){timers.set(++timerId,fn);return timerId},clearTimeout(id){timers.delete(id)}},now:()=>clock})
+  command(3);emit();await flush();const first=actions().at(-1);assert.equal(first.generation,3);assert.equal(timers.size,1)
+  emit();await flush();assert.equal(actions().length,1,'duplicate native notification keeps its existing bounded action')
+  const bytes=Buffer.from('{"text":"Accepted publication"}\n')
+  command(4,{reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true}});await flush()
+  const replay=actions().at(-1);assert.equal(replay.request,first.request);assert.equal(replay.generation,4)
+  assert.ok(events.indexOf(replay)<events.findIndex(value=>value.kind==='viewer'&&value.generation===4),'current UI replay is queued before the next chunk publication')
+  ack(first,3);command(5);await flush();assert.equal(actions().length,2,'an older accepted generation ACK retires the same action after its replay');assert.equal(timers.size,0)
+  emit();await flush();const opened=actions().at(-1);node.open=false;emit();await flush();const closed=actions().at(-1);assert.notEqual(closed.request,opened.request)
+  ack(opened);ack(closed,closed.generation,'retired');incoming({stamp:'owner',generation:5,disclosureAck:{...closed,scope:'retired-scope'}});command(6);await flush();assert.equal(actions().at(-1).request,closed.request,'old/opposite, foreign and different-scope ACKs cannot clear the latest close')
+  ack(closed,5);command(7);await flush();assert.equal(actions().length,5);assert.equal(timers.size,0)
+  emit();await flush();const current=actions().at(-1);ack(current,1000);command(8);await flush();assert.equal(actions().length,6,'ACK-only envelope cannot configure the reader or advance its generation')
+  node.open=true;emit();await flush();node.isConnected=false;command(9);await flush();assert.equal(timers.size,0,'true node eviction cancels pending UI delivery')
+  node.isConnected=true;emit();await flush();bridge.retireAuthority();command(10);await flush();assert.equal(timers.size,0,'authority retirement releases its timer and node references')
+  const retiredCount=actions().length;emit();await flush();assert.equal(actions().length,retiredCount,'a still-connected retired authority cannot create another pending action')
+  emit();command(11,{stamp:'replacement'});await flush();assert.equal(actions().at(-1).generation,9,'a queued old-owner action cannot publish after replacement')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('unacknowledged disclosure delivery has finite attempt and time limits with one owned timer',async()=>{
+ for(const limit of ['attempt','time','capacity']){
+  const previous=globalThis.requestAnimationFrame,events=[],listeners={},timers=new Map();let incoming,timerId=0,clock=0
+  const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-loading':'true'},nodes=[]
+  const viewport={scrollTop:20,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key]??null,contains:node=>nodes.includes(node),querySelectorAll:()=>[],getBoundingClientRect:()=>({top:0,bottom:100,height:100})}
+  globalThis.requestAnimationFrame=()=>{}
+  try{
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(type,fn){(listeners[type]||=[]).push(fn)}},window:{setTimeout(fn){timers.set(++timerId,fn);return timerId},clearTimeout(id){timers.delete(id)}},now:()=>clock})
+   const command=generation=>incoming({stamp:'owner',viewerScope:'scope',generation,reset:null,chunk:null});command(1)
+   const toggle=index=>{const node={open:true,isConnected:true,getAttribute:key=>key==='data-group-key'?'run-'+index:null};nodes.push(node);for(const fn of listeners.toggle||[])fn({type:'toggle',target:node})}
+   toggle(0);await flush();assert.equal(timers.size,1)
+   if(limit==='attempt'){for(let generation=2;generation<=9;generation++){command(generation);await flush()}assert.equal(events.filter(value=>value.kind==='viewer-disclosure').length,8)}
+   else if(limit==='time'){clock=5000;[...timers.values()][0]();await flush()}
+   else {for(let index=1;index<=400;index++)toggle(index);await flush();assert.ok(timers.size<=1)}
+   if(limit==='capacity'){command(2);await flush();assert.equal(events.filter(value=>value.kind==='viewer-disclosure'&&value.generation===2).length,400,'only the bounded latest400 owned keys can replay')}
+   else assert.equal(events.filter(value=>value.kind==='viewer-disclosure-error').length,1,'the bounded control phase begins after delivery exhausts')
+  }finally{globalThis.requestAnimationFrame=previous}
+ }
+})
+
+test('finite disclosure control failure exposes owned Retry and only explicit Retry rearms unchanged native state',async()=>{
+ for(const proof of ['none','model-error','error-ack']){
+  const previous=globalThis.requestAnimationFrame,events=[],listeners={},timers=new Map();let incoming,timerId=0,clock=0
+  const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-loading':'true'},node={open:true,isConnected:true,getAttribute:key=>key==='data-group-key'?'kept-run':null},fallback={hidden:true,getAttribute:key=>key==='data-disclosure-error-owner'?'owner':key==='data-disclosure-error-scope'?'scope':null},host={querySelector:()=>fallback}
+  const viewport={scrollTop:20,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key]??null,contains:value=>value===node,querySelectorAll:selector=>selector==='details'?[node]:[],getBoundingClientRect:()=>({top:0,bottom:100,height:100}),closest:()=>host}
+  const command=(generation,extra={})=>incoming({stamp:'owner',viewerScope:'scope',generation,reset:null,chunk:null,...extra}),actions=()=>events.filter(value=>value.kind==='viewer-disclosure')
+  globalThis.requestAnimationFrame=()=>{}
+  try{
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(type,fn){(listeners[type]||=[]).push(fn)}},window:{setTimeout(fn){timers.set(++timerId,fn);return timerId},clearTimeout(id){timers.delete(id)}},now:()=>clock})
+   command(3);for(const fn of listeners.toggle||[])fn({type:'toggle',target:node});await flush();const first=actions()[0]
+   clock=5000;[...timers.values()][0]();await flush();const error=events.find(value=>value.kind==='viewer-disclosure-error');assert.equal(error.request,first.request)
+   if(proof==='model-error')command(3,{viewerError:true})
+   if(proof==='error-ack')incoming({stamp:'owner',generation:3,disclosureAck:{scope:'scope',request:error.request,namespace:error.namespace,key:error.key,ancestor:error.ancestor,open:error.open,error:true}})
+   if(timers.size){clock=10000;[...timers.values()][0]()};await flush();assert.equal(timers.size,0,'error delivery cannot spin after its finite control deadline')
+   assert.equal(fallback.hidden,proof!=='none','without an authoritative model error/ACK, the ordinary owned fallback is visible')
+   const before=actions().length;command(3,{viewerError:false});await flush();assert.equal(actions().length,before,'an unrelated clear is not user Retry');assert.equal(fallback.hidden,false,'unrelated error clearing cannot strand the still-failed desired action')
+   incoming({stamp:'retired',viewerScope:'scope',generation:4,disclosureRetry:true});incoming({stamp:'owner',viewerScope:'retired',generation:4,disclosureRetry:true});await flush();assert.equal(actions().length,before)
+   incoming({stamp:'owner',viewerScope:'scope',generation:4,disclosureRetry:true});await flush();assert.equal(actions().length,before,'control cannot advance data generation')
+   command(4);await flush();assert.equal(node.open,true);assert.equal(fallback.hidden,true);assert.equal(actions().length,before+1);assert.ok(actions().at(-1).request>first.request,'explicit Retry creates a fresh delivery of the unchanged desired state')
+   incoming({stamp:'owner',viewerScope:'scope',generation:4,disclosureRetry:true});command(4);await flush();assert.equal(actions().length,before+1,'duplicate control is consumed once')
+  }finally{globalThis.requestAnimationFrame=previous}
+ }
+})
+
 test('reader intent distinguishes actual pre-dispatch wheel, touch and scrollbar motion from owned positions',()=>{
  const viewport={scrollTop:600,scrollHeight:1000,clientHeight:200,offsetWidth:1000,clientWidth:985,contains:node=>node===viewport,getBoundingClientRect:()=>({right:1000})},intent=createReaderScrollIntent()
  intent.configure('["w","actor","session","scope",0]');assert.equal(intent.inspect(viewport,false),false)
@@ -32,6 +138,22 @@ test('reader intent distinguishes actual pre-dispatch wheel, touch and scrollbar
  intent.note({type:'keydown',target:viewport,isTrusted:false,key:'ArrowUp'},viewport);viewport.scrollTop=700;assert.equal(intent.inspect(viewport,false),false,'synthetic input cannot arm history')
  intent.note({type:'keydown',target:viewport,isTrusted:true,key:'ArrowUp'},viewport);viewport.scrollTop=660;assert.equal(intent.inspect(viewport,false),true)
  intent.configure('["different","actor","session","scope",9]');assert.equal(intent.manual(),true,'same reader authority retirement preserves manual history intent')
+ intent.clear();viewport.scrollTop=600;intent.inspect(viewport,false);intent.note({type:'keydown',target:viewport,isTrusted:true,key:'Home'},viewport);viewport.scrollTop=0;intent.note({type:'toggle',target:viewport,isTrusted:true},viewport);assert.equal(intent.inspect(viewport,false),true,'a delayed native layout toggle cannot erase actual Home movement')
+ intent.clear();intent.note({type:'toggle',target:viewport,isTrusted:true},viewport);assert.equal(intent.inspect(viewport,false),false,'toggle alone cannot arm manual history')
+})
+
+test('an armed virtual edge consumes only one fresh scoped directional action',async()=>{
+ let clock=0;const attrs={'data-viewer-owner':'owner','data-render-part':'2'},viewport={scrollTop:600,scrollHeight:1000,clientHeight:200,contains:()=>true,getAttribute:name=>attrs[name]??null},intent=createReaderScrollIntent({now:()=>clock}),wheel=extra=>({type:'wheel',target:viewport,isTrusted:true,deltaY:-100,...extra})
+ intent.configure('reader');intent.note(wheel(),viewport);viewport.scrollTop=0;assert.equal(intent.consumeEdge(viewport,-1),false,'an edge action cannot arm manual mode');intent.inspect(viewport,false);assert.equal(intent.manual(),true);intent.positioned()
+ intent.note(wheel(),viewport);assert.equal(intent.consumeEdge(viewport,-1),false,'capture cannot grant credit before dispatch completes');await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),true);assert.equal(intent.consumeEdge(viewport,-1),false,'owned acknowledgments cannot replay the action')
+ const prevented=wheel();intent.note(prevented,viewport);prevented.defaultPrevented=true;await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'check final cancellation after dispatch')
+ const inner={closest:selector=>selector.includes('pre,')?inner:null};intent.note(wheel({target:inner}),viewport);await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'inner pre owns its boundary input')
+ for(const extra of [{ctrlKey:true},{metaKey:true},{shiftKey:true},{deltaX:200}]){intent.note(wheel(extra),viewport);await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'zoom or horizontal intent cannot move the outer document')}
+ intent.note({type:'touchstart',target:viewport,isTrusted:true,touches:[{clientY:100}]},viewport);intent.note({type:'touchmove',target:viewport,isTrusted:true,touches:[{clientY:150},{clientY:200}]},viewport);await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'pinch does not mint outer navigation credit')
+ intent.note(wheel(),viewport);intent.note({type:'keydown',target:viewport,isTrusted:true,key:'Shift'},viewport);await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'new nondirectional intent retires old credit')
+ intent.note(wheel(),viewport);attrs['data-render-part']='1';await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'a prior window cannot consume the action')
+ intent.note(wheel(),viewport);clock=501;await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'edge credit has a finite lifetime')
+ intent.note(wheel(),viewport);intent.configure('different');await Promise.resolve();assert.equal(intent.consumeEdge(viewport,-1),false,'authority retirement clears credit')
 })
 
 test('composite sealed cursors retain exact blocks above Number safe packed ranks',()=>{
@@ -315,6 +437,34 @@ test('explicit decode recovery retains displayed rows until its bounded finite r
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
+test('queued disclosure restoration yields to newer summary intent and retired publication authority',async()=>{
+ const previous=globalThis.requestAnimationFrame
+ try{
+  for(const action of ['pointer','pending-toggle','keyboard','toggle','handoff','lagging-dom','owner','generation','owned-restore']){
+   const frames=[],listeners={},events=[];let incoming
+   globalThis.requestAnimationFrame=callback=>frames.push(callback)
+   const attrs={'data-viewer-owner':'owner','data-viewer-generation':'3','data-history-mode':'active','data-window-publication':'0','data-history-loading':'true'}
+   const detail={open:false,getAttribute:name=>name==='data-group-key'?'kept-run':null,getBoundingClientRect:()=>({top:20,bottom:40,height:20})},summary={closest:selector=>selector.includes('summary')?summary:null}
+   const viewport={scrollTop:35,scrollHeight:1000,clientHeight:100,getAttribute:name=>attrs[name]??null,getBoundingClientRect:()=>({top:0,bottom:100,right:800,height:100}),querySelectorAll:selector=>selector==='details'?[detail]:[],contains:node=>node===detail||node===summary}
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(name,fn){(listeners[name]??=[]).push(fn)}},window:{},now:()=>0})
+   const bytes=Buffer.from('{"text":"One accepted publication"}\n')
+   incoming({stamp:'owner',viewerScope:'source',generation:3,reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true},direction:'tail',follow:false,publication:{request:0,pending:false}});await flush()
+   const publication=events.find(event=>event.kind==='viewer').publication;attrs['data-window-publication']=String(publication)
+   if(action==='lagging-dom')incoming({stamp:'owner',viewerScope:'source',generation:4,reset:null,chunk:null,follow:false,publication:{request:publication,pending:true}})
+   if(['pointer','pending-toggle','handoff'].includes(action))for(const listener of listeners.pointerdown)listener({type:'pointerdown',target:summary,isTrusted:true,clientX:100})
+   if(action==='keyboard')for(const listener of listeners.keydown)listener({type:'keydown',target:summary,isTrusted:true,key:'Enter'})
+   detail.open=true
+   if(['pointer','keyboard','toggle','handoff','lagging-dom'].includes(action))for(const listener of listeners.toggle)listener({type:'toggle',target:detail,isTrusted:true})
+   if(['handoff','owner','generation'].includes(action)){attrs['data-viewer-generation']='4';if(action==='owner')attrs['data-viewer-owner']='other';incoming({stamp:action==='owner'?'other':'owner',viewerScope:'source',generation:4,reset:null,chunk:null,follow:false,publication:{request:publication,pending:action==='handoff'}})}
+   for(let turn=0;turn<12;turn++)frames.splice(0).forEach(callback=>callback());await flush()
+   assert.equal(detail.open,action!=='owned-restore',action+' must preserve only the current disclosure owner and intent')
+   if(action==='pending-toggle')for(const listener of listeners.toggle)listener({type:'toggle',target:detail,isTrusted:true})
+   if(['pointer','keyboard','toggle','handoff'].includes(action))assert.ok(events.some(event=>event.kind==='viewer-disclosure'&&event.key==='kept-run'&&event.open))
+   if(action==='lagging-dom')assert.ok(events.some(event=>event.kind==='viewer-disclosure'&&event.key==='kept-run'&&event.open&&event.generation===4),'current same-owner input uses accepted generation while its DOM is still publishing')
+  }
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
 test('queued follow and anchor positioning yield to either scroll direction, disclosure intent and owner changes',async()=>{
  const previous=globalThis.requestAnimationFrame
  globalThis.requestAnimationFrame=callback=>frames.push(callback)
@@ -340,15 +490,66 @@ test('queued follow and anchor positioning yield to either scroll direction, dis
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
+test('a tall side-cell marker cannot skip intervening cached presentation slices in either direction',async()=>{
+ for(const direction of [-1,1,'Home','Home late toggle','cancelled Home','cancelled Home late toggle'])for(const admittedParts of [[],[39,40,41],[40]]){
+  const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners={};let incoming
+  const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-before':'0','data-history-after':'1000','data-history-latest':'1000','data-history-loading':'true','data-render-part':'40','data-render-more':'true'}
+  const backward=direction<0||typeof direction==='string',gap={dataset:{fragmentFrom:backward?'0':'99',fragmentTo:backward?'0':'99'},getBoundingClientRect:()=>({top:-300000,bottom:300000,height:600000})}
+  const viewport={scrollTop:800,scrollHeight:1000,clientHeight:100,dataset:{get renderPart(){return attrs['data-render-part']}},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),getAttribute:key=>attrs[key]??null,setAttribute:(key,value)=>{attrs[key]=value},querySelectorAll:selector=>selector==='[data-fragment-from]'?[gap]:selector==='[data-fragment-part]'?admittedParts.map(part=>({dataset:{fragmentPart:String(part)},querySelector:()=>null})):[]}
+  globalThis.requestAnimationFrame=callback=>frames.push(callback)
+  const emit=(type,deltaY,key)=>(listeners[type]||[]).forEach(handler=>handler({type,target:viewport,deltaY,key,isTrusted:true}))
+  try{
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:event=>events.push(event)}}},{document:{getElementById:()=>viewport,addEventListener(type,handler){(listeners[type]??=[]).push(handler)}},window:{},now:()=>0})
+   incoming({stamp:'owner',generation:1,reset:null,chunk:null,follow:false});emit('wheel',-100);viewport.scrollTop=700;emit('scroll');await flush()
+   if(typeof direction==='string')emit('keydown',0,'Home')
+   if(typeof direction==='string'&&direction.startsWith('cancelled Home'))emit('keydown',0,'PageUp')
+   if(typeof direction==='string'&&direction.endsWith('late toggle'))emit('toggle')
+   attrs['data-history-loading']='false';if(typeof direction==='number')emit('wheel',100*direction);viewport.scrollTop+=backward?-10:10;emit('scroll');await flush()
+   const explicitHome=typeof direction==='string'&&direction.startsWith('Home')
+   if(!explicitHome){
+    assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'a near side column cannot admit an unrelated unmounted frontier')
+    if(backward)gap.dataset.fragmentTo=String(Math.min(40,...admittedParts)-1)
+    else gap.dataset.fragmentFrom=String(Math.max(40,...admittedParts)+1)
+    emit('scroll');await flush()
+   }
+   assert.deepEqual(events.filter(event=>event.kind==='viewer-render').map(event=>event.part),[explicitHome?0:backward?39:41],'only a matching explicit Home seeks directly; ordinary/stale Home admits the adjacent slice')
+   attrs['data-viewer-owner']='retired';emit('wheel',-100);emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'retired DOM cannot advance presentation')
+  }finally{globalThis.requestAnimationFrame=previous}
+ }
+})
+
+test('a visible center leaf survives neighbor trimming and owned positioning cannot drive another presentation',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners={};let incoming,shift=0,admitted=[39,40,41]
+ const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-before':'0','data-history-after':'1000','data-history-latest':'1000','data-history-loading':'true','data-render-part':'40','data-render-more':'true'}
+ let selection=null;const selectedToken={}
+ const leaves=[39,40,41].map(part=>({isConnected:true,dataset:{fragmentPart:String(part),fragmentPath:'same-row:'+part},contains:node=>part===39&&node===selectedToken,querySelector:()=>null,closest:()=>null,getBoundingClientRect:()=>({top:720+shift-viewport.scrollTop,bottom:740+shift-viewport.scrollTop,height:20})}))
+ const gap={dataset:{fragmentFrom:'42',fragmentTo:'99'},getBoundingClientRect:()=>({top:20,bottom:600000,height:599980})}
+ const viewport={ownerDocument:{getSelection:()=>selection},scrollTop:800,scrollHeight:2000,clientHeight:100,dataset:{get renderPart(){return attrs['data-render-part']}},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),getAttribute:key=>attrs[key]??null,setAttribute:(key,value)=>{attrs[key]=value},querySelectorAll:selector=>selector==='[data-fragment-from]'?[gap]:selector==='[data-fragment-path]'?leaves.filter(leaf=>leaf.isConnected):selector==='[data-fragment-part]'?admitted.map(part=>({dataset:{fragmentPart:String(part)},querySelector:()=>null})):[]}
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ const emit=(type,deltaY)=>(listeners[type]||[]).forEach(handler=>handler({type,target:viewport,deltaY,isTrusted:true}))
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:event=>events.push(event)}}},{document:{getElementById:()=>viewport,addEventListener(type,handler){(listeners[type]??=[]).push(handler)}},window:{},now:()=>0})
+  incoming({stamp:'owner',generation:1,reset:null,chunk:null,follow:false});emit('wheel',-100);viewport.scrollTop=700;emit('scroll');await flush();attrs['data-history-loading']='false';selection={isCollapsed:false,anchorNode:selectedToken};emit('wheel',100);viewport.scrollTop=710;emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'prefetch cannot replace the selected visible neighbor with another occurrence');selection=null;admitted=[40];gap.dataset.fragmentFrom='41';emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'an adaptive single-part window keeps its visible reading center');admitted=[39,40,41];gap.dataset.fragmentFrom='42';emit('scroll');await flush()
+  assert.equal(events.filter(event=>event.kind==='viewer-render').at(-1).part,41)
+  leaves[0].isConnected=false;shift=80;admitted=[40,41,42];gap.dataset.fragmentFrom='43';attrs['data-render-part']='41'
+  for(let frame=0;frame<5;frame++)frames.splice(0).forEach(callback=>callback());await flush()
+  assert.equal(viewport.scrollTop,790,'restore the same prepublication center leaf, not the removed oldest neighbor')
+  assert.equal(leaves[1].getBoundingClientRect().top,10)
+  assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'the owned restore cannot create a feedback chain')
+  viewport.scrollHeight=800;viewport.scrollTop=700;emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'a provable layout clamp is not continued movement')
+  viewport.scrollHeight=2000;viewport.scrollTop=720;emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').at(-1).part,42,'continued native displacement in the same gesture remains admitted')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
 test('a render acknowledgement cannot undo continued native Home movement within the same input intent',async()=>{
  for(const phase of ['motion','clamp','motion with geometry']){
  const publicationClamp=phase==='clamp'
  const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners={};let incoming,leafTop=620
  const attrs={'data-viewer-owner':'owner','data-history-mode':'active','data-history-before':'100','data-history-after':'1000','data-history-latest':'1000','data-history-loading':'false','data-render-part':'1','data-render-more':'true'}
  const row={dataset:{offset:'200',blockKey:'200:0'},getAttribute:key=>key==='data-offset'?'200':null,getBoundingClientRect:()=>({top:600-viewport.scrollTop,bottom:1000-viewport.scrollTop,height:400})}
- const leaf={isConnected:true,dataset:{fragmentPath:'0000000000000000200:0000000:content:0'},querySelector:()=>null,closest:()=>row,getBoundingClientRect:()=>({top:leafTop-viewport.scrollTop,bottom:leafTop+30-viewport.scrollTop,height:30})}
+ const leaf={isConnected:true,dataset:{fragmentPath:'0000000000000000200:0000000:content:0',fragmentPart:'1'},querySelector:()=>null,closest:()=>row,getBoundingClientRect:()=>({top:leafTop-viewport.scrollTop,bottom:leafTop+30-viewport.scrollTop,height:30})}
  const gap={dataset:{fragmentFrom:'0',fragmentTo:'0'},getBoundingClientRect:()=>({top:10,bottom:30,height:20})}
- const viewport={scrollTop:800,scrollHeight:1000,clientHeight:100,dataset:{get renderPart(){return attrs['data-render-part']}},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),getAttribute:key=>attrs[key] ?? null,setAttribute:(key,value)=>{attrs[key]=value},querySelectorAll:selector=>selector==='[data-fragment-from]'?[gap]:selector==='[data-fragment-path]'?[leaf]:selector==='.session-record,[data-group-key]'||selector==='.session-record'?[row]:[]}
+ const viewport={scrollTop:800,scrollHeight:1000,clientHeight:100,dataset:{get renderPart(){return attrs['data-render-part']}},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),getAttribute:key=>attrs[key] ?? null,setAttribute:(key,value)=>{attrs[key]=value},querySelectorAll:selector=>selector==='[data-fragment-from]'?[gap]:selector==='[data-fragment-path]'?[leaf]:selector==='[data-fragment-part]'?[{dataset:{fragmentPart:'0'}},{dataset:{fragmentPart:'1'}}]:selector==='.session-record,[data-group-key]'||selector==='.session-record'?[row]:[]}
  globalThis.requestAnimationFrame=callback=>frames.push(callback)
  const emit=type=>(listeners[type] || []).forEach(handler=>handler({type,target:viewport,key:phase==='motion'?'Home':'PageUp',isTrusted:true}))
  try{
@@ -367,27 +568,68 @@ test('a render acknowledgement cannot undo continued native Home movement within
 test('task/full presentation restoration yields to newer scroll, disclosure and owner intent',async()=>{
  const previous=globalThis.requestAnimationFrame
  try{
-  for(const change of ['none','up','down','toggle','owner']){
-   const frames=[],listeners={};let incoming,viewport
+  for(const continuing of [true,false])for(const change of ['none','programmatic','programmatic-changed','up','down','toggle','click','owner']){
+   const frames=[],listeners={},events=[];let incoming,viewport
    globalThis.requestAnimationFrame=callback=>frames.push(callback)
-   const node=()=>({open:false,getAttribute:key=>key==='data-group-key'?'kept':null})
-   const view=(owner,top=0)=>({scrollTop:top,querySelectorAll:()=>[disclosure],getAttribute:key=>key==='data-viewer-owner'?owner:null,contains:target=>target===disclosure})
+   const node=()=>({open:false,getAttribute:key=>key==='data-group-key'?'kept':null,closest(selector){return selector==='summary'?this:null}})
+   const view=(owner,top=0)=>({scrollTop:top,querySelectorAll:()=>[disclosure],getAttribute:key=>key==='data-viewer-owner'?owner:key==='data-window-publication'?'8':null,contains:target=>target===disclosure})
    let disclosure=node();viewport=view('dock',40);disclosure.open=true
    const document={addEventListener(name,fn){(listeners[name]??=[]).push(fn)},getElementById:()=>viewport}
-   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(){}}}},{document,window:{},now:()=>0})
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document,window:{},now:()=>0})
    incoming({stamp:'dock',viewerScope:'authorized-source',generation:1,reset:0,chunk:null})
    for(const listener of listeners.scroll)listener({type:'scroll',target:viewport})
    disclosure=node();viewport=view('full')
-   incoming({stamp:'full',viewerScope:'authorized-source',continueViewer:true,generation:2,reset:null,chunk:null})
+   incoming({stamp:'full',viewerScope:'authorized-source',preservePresentation:true,continueViewer:continuing,generation:2,reset:continuing?null:0,chunk:null,publication:{request:8,pending:!continuing}})
    assert.equal(frames.length,1)
    if(change==='up')viewport.scrollTop=-20
    if(change==='down')viewport.scrollTop=20
-   if(change==='toggle'){disclosure.open=true;for(const listener of listeners.toggle)listener({target:disclosure})}
+   if(change==='toggle')for(const listener of listeners.pointerdown)listener({type:'pointerdown',target:disclosure,isTrusted:true})
+   if(change==='click')for(const listener of listeners.click)listener({type:'click',target:disclosure,isTrusted:true})
+   if(['toggle','click','programmatic','programmatic-changed'].includes(change)){disclosure.open=change!=='programmatic-changed';for(const listener of listeners.toggle)listener({type:'toggle',target:disclosure})}
    if(change==='owner')incoming({stamp:'retired',viewerScope:'new-authority',generation:3,reset:null,chunk:null})
    frames.shift()()
-   assert.equal(viewport.scrollTop,change==='none'?40:change==='up'?-20:change==='down'?20:0)
-   assert.equal(disclosure.open,change==='none'||change==='toggle')
+   await flush()
+   assert.equal(viewport.scrollTop,['none','programmatic'].includes(change)?40:change==='up'?-20:change==='down'?20:0)
+   assert.equal(disclosure.open,['none','programmatic','toggle','click'].includes(change))
+   const settlements=events.filter(value=>['viewer-positioned','viewer-handoff-cancelled'].includes(value.kind))
+   if(continuing||change==='owner')assert.equal(settlements.length,0)
+   else assert.deepEqual(settlements.map(({kind,stamp,generation,publication})=>({kind,stamp,generation,publication})),[{kind:['none','programmatic'].includes(change)?'viewer-positioned':'viewer-handoff-cancelled',stamp:'full',generation:2,publication:8}],'pending transport must get an exact truthful success/cancellation disposition')
   }
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('handoff positioning fences the earlier continuity frame and has a finite missing-owner disposition',async()=>{
+ const previous=globalThis.requestAnimationFrame
+ try{for(const missing of [false,true,'input','movement']){
+  const frames=[],listeners={},events=[];let incoming
+  globalThis.requestAnimationFrame=callback=>frames.push(callback)
+  const attrs={'data-viewer-owner':'dock','data-viewer-generation':'1','data-history-mode':'active','data-history-before':'100','data-history-after':'1000','data-history-latest':'1000','data-history-loading':'true','data-render-part':'0','data-render-more':'false','data-window-publication':'8'}
+  const detail={open:true,getAttribute:name=>name==='data-group-key'?'kept':null}
+  let viewport={scrollTop:40,scrollHeight:1000,clientHeight:200,getAttribute:name=>attrs[name]??null,setAttribute(){},getBoundingClientRect:()=>({top:0,bottom:200,left:0,right:800,height:200}),querySelectorAll:selector=>selector==='details'?[detail]:[],contains:node=>node===detail}
+  const document={getElementById:()=>viewport,addEventListener(name,callback){(listeners[name]??=[]).push(callback)}}
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(callback){incoming=callback}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document,window:{}})
+  incoming({stamp:'dock',viewerScope:'same',generation:1,chunk:null,reset:0,follow:false})
+  for(const callback of listeners.scroll)callback({type:'scroll',target:viewport})
+  viewport={...viewport,scrollTop:0};attrs['data-viewer-owner']=missing===true?'not-mounted':'full';attrs['data-viewer-generation']='2';attrs['data-history-loading']='false'
+  incoming({stamp:'full',viewerScope:'same',preservePresentation:true,continueViewer:false,generation:2,chunk:null,reset:0,follow:false,publication:{request:8,pending:true}})
+  if(missing==='input')for(const callback of listeners.keydown)callback({type:'keydown',target:viewport,key:'Shift',isTrusted:true})
+  if(missing==='movement')viewport.scrollTop=20
+  if(typeof missing==='string')for(const callback of listeners.scroll)callback({type:'scroll',target:viewport})
+  frames.shift()();await flush()
+  if(typeof missing!=='string')assert.ok(!events.some(value=>['viewer-render','viewer-boundary'].includes(value.kind)),'the already-queued continuity frame cannot acquire before positioning')
+  for(let step=0;frames.length&&step<20;step++){frames.shift()();await flush()}
+  if(missing===true){assert.equal(events.filter(value=>value.kind==='viewer-handoff-error').length,1);assert.equal(frames.length,0)}else if(typeof missing==='string'){assert.deepEqual(events.filter(value=>value.kind==='viewer-handoff-cancelled').map(({stamp,generation,publication})=>({stamp,generation,publication})),[{stamp:'full',generation:2,publication:8}]);assert.equal(events.filter(value=>value.kind==='viewer-positioned').length,0);assert.equal(viewport.scrollTop,missing==='movement'?20:0)}else assert.equal(viewport.scrollTop,40)
+ }}finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('pending presentation without a mounted snapshot fails with an exact finite logical disposition',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[];let incoming
+ globalThis.requestAnimationFrame=callback=>frames.push(callback)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(callback){incoming=callback}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>null,addEventListener(){}},window:{}})
+  incoming({stamp:'dock',viewerScope:'same',generation:1,chunk:null,reset:0})
+  incoming({stamp:'full',viewerScope:'same',generation:2,preservePresentation:true,continueViewer:false,chunk:null,reset:0,publication:{request:8,pending:true}})
+  await flush();assert.deepEqual(events.filter(value=>value.kind==='viewer-handoff-error').map(({stamp,generation,publication})=>({stamp,generation,publication})),[{stamp:'full',generation:2,publication:8}]);assert.equal(events.some(value=>value.kind==='viewer-positioned'),false);assert.equal(frames.length,0)
  }finally{globalThis.requestAnimationFrame=previous}
 })
 

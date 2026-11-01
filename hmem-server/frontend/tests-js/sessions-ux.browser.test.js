@@ -3,7 +3,8 @@ import test from 'node:test'
 import { readFile, mkdtemp, rm, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
+import { openSessionExplorer,continuousScrollStep,traceSessionBridge } from './support/sessions-ux-fixture.mjs'
+const openGroups=async(page)=>{for(const group of await page.locator('.session-activity-group').all())if(await group.getAttribute('open')===null){await group.locator(':scope > summary').click();await until(async()=>await group.locator('article').count()>0)}}
 const until=async(fn)=>{const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,25))}throw new Error('Explorer did not converge')}
 
 test('embedded and workspace readers omit lineage and inspector while native transcript details remain usable',{timeout:60000},async()=>{
@@ -20,7 +21,7 @@ test('embedded and workspace readers omit lineage and inspector while native tra
    const group=page.locator('.session-activity-group').first();if(await group.getAttribute('open')===null)await group.locator(':scope > summary').click()
    const tool=group.locator('.session-content-tool').first();if(await tool.getAttribute('open')===null)await tool.locator(':scope > summary').click()
    assert.deepEqual(JSON.parse(await tool.locator('pre').textContent()),{path:'src/Feature/Sessions.elm'})
-   const thinking=group.locator('.session-content-thinking').first();if(await thinking.getAttribute('open')===null)await thinking.locator(':scope > summary').click();assert.equal(await thinking.getAttribute('open'),'');assert.match(await thinking.innerText(),/Private reasoning stays collapsed/);assert.ok(await thinking.locator('.markdown-content').isVisible())
+   const thinking=group.locator('.session-content-thinking').first();if(await thinking.getAttribute('open')===null)await thinking.locator(':scope > summary').click();assert.equal(await thinking.getAttribute('open'),'');await thinking.getByText('Private reasoning stays collapsed.',{exact:true}).waitFor();assert.match(await thinking.innerText(),/Private reasoning stays collapsed/);assert.ok(await thinking.locator('.markdown-content').isVisible())
    await page.evaluate(()=>{window.nativeToolPayload=document.querySelector('.session-content-tool pre')})
    const latest=page.getByRole('button',{name:'Jump to latest',exact:true})
    if(await latest.isVisible()){await latest.click();await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.latestPending==='false'&&Number(node.dataset.historyAfter)>=Number(node.dataset.historyLatest)&&node.scrollHeight-node.scrollTop-node.clientHeight<=4))}
@@ -39,30 +40,31 @@ test('embedded and workspace readers omit lineage and inspector while native tra
 test('authorized task and full-session navigation retains one viewer and valid reading disclosures',{timeout:60000},async()=>{
  const h=await openSessionExplorer({extraRecords:[{text:Array.from({length:70},(_,i)=>'Reading paragraph '+i+' remains available across session surfaces.').join('\n\n')},{type:'assistant',message:{role:'assistant',content:Array.from({length:410},(_,i)=>({type:'tool_use',id:'call-'+i,name:'Read '+i,input:{path:'source-'+i}}))}}]}),{page}=h
  try{
-  await h.start();await h.idle()
+  await traceSessionBridge(h);await h.start();await h.idle()
   const card=page.locator('#entity-'+h.fixture.tasks[0].id)
   await until(async()=>await card.locator('.has-active-sessions').count()===1)
   await card.locator(':scope > .card-header .task-sessions-icon').click();await page.locator('.session-record').first().waitFor()
-  await page.locator('.session-activity-group').first().locator(':scope > summary').click()
-  await page.locator('.session-content-tool').first().locator('summary').click()
-  await page.locator('.session-activity-group').last().locator(':scope > summary').click()
-  await page.locator('.session-content-tool').last().locator('summary').click()
-  assert.ok(await page.locator('#session-records details').count()>400,'valid admitted source can contain more than 400 disclosures')
-  await page.locator('#session-records').evaluate(node=>{node.scrollTop=40})
-  await card.getByRole('link',{name:'Open full session ↗',exact:true}).click()
-  await page.locator('.session-detail').waitFor();await page.locator('.session-record').first().waitFor()
-  await until(async()=>await page.locator('.session-activity-group').first().getAttribute('open')==='')
-  assert.equal(await page.locator('#session-records').count(),1)
-  assert.equal(await page.locator('.session-activity-group').first().getAttribute('open'),'')
-  assert.equal(await page.locator('.session-content-tool').first().getAttribute('open'),'')
-  assert.equal(await page.locator('.session-content-tool').last().getAttribute('open'),'')
-  assert.ok(await page.locator('#session-records').evaluate(node=>Math.abs(node.scrollTop-40)<=4))
-  await page.getByRole('button',{name:'Projects',exact:true}).click();await card.locator('.task-session-dock').waitFor()
-  await until(async()=>await page.locator('.session-content-tool').first().getAttribute('open')==='')
-  assert.equal(await page.locator('#session-records').count(),1)
-  assert.equal(await page.locator('.session-content-tool').first().getAttribute('open'),'')
-  assert.equal(await page.locator('.session-content-tool').last().getAttribute('open'),'')
-  assert.ok(await page.locator('#session-records').evaluate(node=>Math.abs(node.scrollTop-40)<=4))
+  const viewer=page.locator('#session-records'),seen=new Set(),capture=async()=>{for(const name of await page.locator('.session-content-tool > summary').allTextContents()){const match=name.match(/Call · Read (\d+) ·/);if(match)seen.add(Number(match[1]))}assert.ok(await page.locator('.session-record').count()<=200)}
+  await viewer.press('Home');await h.idle()
+  let previous='',stalled=0
+  for(let step=0;seen.size<410;step++){
+   const position=await viewer.evaluate(node=>{const names=[...node.querySelectorAll('.session-content-tool > summary')].map(node=>node.textContent);return JSON.stringify({attrs:{...node.dataset},top:Math.round(node.scrollTop),names:[names[0],names.at(-1)],gaps:[...node.querySelectorAll('[data-fragment-from]')].slice(0,4).map(node=>({...node.dataset,top:node.getBoundingClientRect().top,bottom:node.getBoundingClientRect().bottom}))})});stalled=position===previous?stalled+1:0;assert.ok(step<160&&stalled<6,JSON.stringify({phase:'all410continuous',seen:seen.size,missing:Array.from({length:410},(_,i)=>i).filter(i=>!seen.has(i)).slice(0,8),position}));previous=position
+   for(const group of await page.locator('.session-activity-group:not([open])').all()){if(await group.isVisible()){await group.locator(':scope > summary').click();await h.idle()}}
+   await capture()
+   const first=page.locator('.session-content-tool').filter({has:page.locator('summary').filter({hasText:/Call · Read 0 ·/})});if(await first.count()&&await first.getAttribute('open')===null){await first.locator(':scope > summary').click();await h.idle()}
+   if(seen.size<410){await continuousScrollStep(page,1);await h.idle()}
+  }
+  assert.deepEqual([...seen].sort((a,b)=>a-b),Array.from({length:410},(_,i)=>i))
+  const last=page.locator('.session-content-tool').filter({has:page.locator('summary').filter({hasText:/Call · Read 409 ·/})});await last.locator(':scope > summary').click();await last.locator('pre').waitFor();await h.idle()
+  await continuousScrollStep(page,-1);await h.idle();await until(()=>viewer.evaluate(node=>node.dataset.historyLoading==='false'))
+  const point=await viewer.evaluate(node=>{const box=node.getBoundingClientRect();for(const leaf of node.querySelectorAll('[data-fragment-path]')){if(leaf.querySelector('[data-fragment-path],[data-history-gap],[data-body-gap]'))continue;let top=box.top,bottom=box.bottom,left=box.left,right=box.right;for(let parent=leaf.parentElement;parent&&parent!==node;parent=parent.parentElement){const style=getComputedStyle(parent);if(/auto|scroll|hidden|clip/.test(style.overflowX+' '+style.overflowY)){const clip=parent.getBoundingClientRect();top=Math.max(top,clip.top);bottom=Math.min(bottom,clip.bottom);left=Math.max(left,clip.left);right=Math.min(right,clip.right)}}const walker=document.createTreeWalker(leaf,4);let text,offset=0;while(text=walker.nextNode()){for(let i=0;i<text.length;i++){const range=document.createRange();range.setStart(text,i);range.setEnd(text,i+1);const r=range.getBoundingClientRect();if(r.height&&r.bottom>top&&r.top<bottom&&r.right>left&&r.left<right)return {path:leaf.dataset.fragmentPath,offset:offset+i}}offset+=text.length}}return null});assert.ok(point,'a clipped semantic character is captured for navigation')
+  const readPoint=()=>viewer.evaluate((node,point)=>{const leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>leaf.dataset.fragmentPath===point.path);if(!leaf)return null;const walker=document.createTreeWalker(leaf,4);let text=walker.nextNode(),offset=point.offset;while(text&&offset>text.length){offset-=text.length;text=walker.nextNode()}if(!text)return null;const range=document.createRange();range.setStart(text,offset);range.setEnd(text,Math.min(text.length,offset+1));const r=range.getBoundingClientRect(),box=node.getBoundingClientRect();return {char:range.toString(),top:r.top-box.top,visible:r.height>0&&r.bottom>box.top&&r.top<box.bottom}},point)
+  const before=await readPoint();assert.equal(before.visible,true);const beforeOwner=await viewer.evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,points:window.sessionPointFacts.slice(-3),commands:window.sessionBridgeFacts.filter(fact=>fact.direction==='command').slice(-3)}))
+  await card.getByRole('link',{name:'Open full session ↗',exact:true}).click();await page.locator('.session-detail').waitFor();await h.idle();await until(()=>viewer.evaluate(node=>node.dataset.historyLoading==='false'))
+  assert.equal(await viewer.count(),1);const after=await readPoint();assert.equal(after?.char,before.char);assert.equal(after?.visible,true,JSON.stringify({point,before,after,beforeOwner,state:await viewer.evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,max:node.scrollHeight-node.clientHeight,points:window.sessionPointFacts.slice(-4),ownerChanges:window.sessionOwnerChanges,commands:window.sessionBridgeFacts.filter(fact=>fact.direction==='command').slice(-4)}))}));assert.ok(Math.abs(after.top-before.top)<=4)
+  const verifyFlags=async()=>{await viewer.press('End');await h.idle();assert.equal(await page.locator('.session-content-tool').filter({has:page.locator('summary').filter({hasText:/Call · Read 409 ·/})}).getAttribute('open'),'');await viewer.press('Home');await h.idle();const first=page.locator('.session-content-tool').filter({has:page.locator('summary').filter({hasText:/Call · Read 0 ·/})});await first.waitFor();assert.equal(await first.getAttribute('open'),'')}
+  await verifyFlags()
+  await page.getByRole('button',{name:'Projects',exact:true}).click();await card.locator('.task-session-dock').waitFor();await h.idle();assert.equal(await viewer.count(),1);await verifyFlags()
   assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -84,7 +86,7 @@ test('active filters, linked task focus, encrypted thinking and local-day timest
   await page.locator('.session-linked-tasks > summary').click()
   assert.equal(await page.locator('.session-task-cards .popover-card').count(),3)
   assert.equal(await page.getByTitle('Remove dependency').count(),0)
-  assert.equal(await page.locator('.session-thinking').count(),2)
+  await openGroups(page);assert.equal(await page.locator('.session-thinking').count(),2)
   assert.equal(await page.locator('#session-records').getByText(/ciphertext|Unrecognized record|Window begins|Following|Original JSON/).count(),0)
   for(const name of ['Pause','Older messages','Refresh'])assert.equal(await page.getByRole('button',{name,exact:true}).count(),0)
   await until(async()=>await page.locator('.session-event-time').first().innerText()==='00:01')
@@ -96,8 +98,8 @@ test('active filters, linked task focus, encrypted thinking and local-day timest
   const latest=page.locator('.session-latest-activity time')
   assert.ok((await latest.evaluateAll(nodes=>nodes.map(node=>node.getAttribute('datetime')))).every(value=>value===h.active.last_activity_at))
   assert.notEqual(h.active.created_at,h.active.last_seen_at)
-  const result=page.locator('.session-content-result').first();await result.locator('xpath=ancestor::details[contains(@class,"session-activity-group")]').locator(':scope > summary').click();await result.locator('summary').click()
-  assert.ok(await result.locator('.json-key').isVisible())
+  const result=page.locator('.session-content-result').first();await result.locator('summary').click()
+  await result.locator('.json-key').waitFor();assert.ok(await result.locator('.json-key').isVisible())
   assert.deepEqual(JSON.parse(await result.locator('pre').textContent()),{output:'module Feature.Sessions exposing (view)'})
   const assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
   assert.ok(await assistant.evaluate(el=>el.getBoundingClientRect().width>el.closest('.session-conversation').clientWidth*.85),'transcript uses its conversation panel width')
@@ -115,12 +117,12 @@ test('appended live transcript chunks preserve readers above the tail and follow
   const viewport=page.locator('#session-records')
   await until(async()=>await viewport.evaluate(el=>el.scrollHeight>el.clientHeight+300))
   await until(async()=>await viewport.evaluate(el=>el.scrollHeight-el.clientHeight-el.scrollTop<=48))
-  await viewport.evaluate(el=>{el.scrollTop=40})
+  await continuousScrollStep(page,-1)
   await h.idle()
   const anchor=await viewport.evaluate(node=>{const bounds=node.getBoundingClientRect(),row=[...node.querySelectorAll('[data-block-key]')].find(row=>row.getBoundingClientRect().bottom>bounds.top);return {key:row.dataset.blockKey,top:row.getBoundingClientRect().top-bounds.top}})
   await h.appendRecords({text:'Arrived while reading older messages.'})
   await until(()=>viewport.evaluate((node,end)=>Number(node.dataset.historyLatest)>=end&&Number(node.dataset.historyAfter)<end,h.active.committed_bytes))
-  assert.ok(await viewport.evaluate(el=>el.scrollTop<=44),'a reader above the tail keeps the current position')
+  assert.equal(await page.getByRole('button',{name:'Jump to latest',exact:true}).isVisible(),true,'actual upward history reading remains manual')
   assert.ok(await viewport.evaluate((node,anchor)=>{const row=[...node.querySelectorAll('[data-block-key]')].find(row=>row.dataset.blockKey===anchor.key);return row&&Math.abs(row.getBoundingClientRect().top-node.getBoundingClientRect().top-anchor.top)<=4},anchor),'the same historical occurrence retains its reading anchor')
   const latest=page.getByRole('button',{name:'Jump to latest',exact:true});await latest.focus();await page.keyboard.press('Enter')
   await page.getByText('Arrived while reading older messages.',{exact:true}).waitFor({state:'attached'})
@@ -142,15 +144,14 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   assert.match(page.url(),/tab=sessions/)
   await page.locator('.session-summary a').filter({hasText:'Codex'}).click()
   await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
-  assert.equal(await page.locator('.session-record').count(),8,'duplicate Codex envelope and unknown record omitted')
+  await openGroups(page);assert.equal(await page.locator('.session-record').count(),8,'the eight mounted canonical occurrences contain no duplicates');assert.equal(new Set(await page.locator('.session-record').evaluateAll(nodes=>nodes.map(node=>node.dataset.blockKey))).size,8,'all eight canonical occurrences remain reachable without envelope duplication')
   assert.equal(await page.getByText('Private reasoning stays collapsed.',{exact:true}).isVisible(),false)
   assert.equal(await page.getByText('Claude thinking is hidden too.',{exact:true}).isVisible(),false)
   assert.equal(await page.locator('.session-content-tool').first().getAttribute('open'),null)
-  await page.locator('.session-activity-group').first().locator(':scope > summary').click()
   await page.locator('.session-content-tool').first().locator('summary').click()
   assert.deepEqual(JSON.parse(await page.locator('.session-content-tool pre').first().textContent()),{path:'src/Feature/Sessions.elm'})
   assert.equal(await page.locator('.session-content-tool .json-key').first().isVisible(),true)
-  assert.equal(await page.locator('.session-task-cards .popover-card').count(),2)
+  await page.locator('.session-linked-tasks > summary').click();assert.equal(await page.locator('.session-task-cards .popover-card').count(),2)
   assert.equal(await page.locator('.session-record a[href^="javascript:"]').count(),0)
   assert.equal(await page.locator('.session-original,.session-raw-details').count(),0)
   if(process.env.SESSIONS_UX_SCREENSHOTS){await page.screenshot({path:process.env.SESSIONS_UX_SCREENSHOTS+'/after-sessions.png',fullPage:true});await page.setViewportSize({width:430,height:900});await page.locator('.session-detail').scrollIntoViewIfNeeded();await page.screenshot({path:process.env.SESSIONS_UX_SCREENSHOTS+'/after-sessions-narrow.png',fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await page.setViewportSize({width:1440,height:1000})}
@@ -262,7 +263,7 @@ test('conversation flow preserves declared identity and wraps long model names w
    assert.equal(await assistant.evaluate(el=>getComputedStyle(el).borderTopWidth),'0px')
    assert.equal(await assistant.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)')
    assert.ok(await assistant.locator('.session-record-text').evaluate(el=>parseFloat(getComputedStyle(el).lineHeight)>=20))
-   const tool=page.locator('.session-content-tool').first();assert.equal(await tool.getAttribute('open'),null);await page.locator('.session-activity-group').first().locator(':scope > summary').click();await tool.locator('summary').focus();await page.keyboard.press('Enter');assert.notEqual(await tool.getAttribute('open'),null)
+   await openGroups(page);const tool=page.locator('.session-content-tool').first();assert.equal(await tool.getAttribute('open'),null);await tool.locator('summary').focus();await page.keyboard.press('Enter');assert.notEqual(await tool.getAttribute('open'),null)
    assert.equal(await page.getByText('Private reasoning stays collapsed.',{exact:true}).isVisible(),false)
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth))
    if(scenario.creator&&scenario.width===1440){
@@ -283,7 +284,7 @@ test('housekeeping and unrecognized records stay hidden without original JSON UI
  try{
   await h.start();await h.idle();await page.getByRole('button',{name:'Sessions',exact:true}).click()
   await page.locator('.session-summary a').filter({hasText:'Codex'}).click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
-  assert.equal(await page.locator('.session-record').count(),8)
+  await openGroups(page);assert.equal(await page.locator('.session-record').count(),8,'the eight mounted canonical occurrences contain no duplicates');assert.equal(new Set(await page.locator('.session-record').evaluateAll(nodes=>nodes.map(node=>node.dataset.blockKey))).size,8)
   assert.equal(await page.locator('.session-original').count(),0)
   assert.equal(await page.locator('#session-records').getByText(/housekeeping-session|synthetic-workspace|total_tokens/).count(),0)
   assert.equal(await page.locator('.session-raw-details').count(),0)

@@ -1,5 +1,36 @@
 import { hierarchyFixture, openHierarchy } from '../hierarchy-fixture.mjs'
 import { createHash } from 'node:crypto'
+export async function traceSessionBridge(h){
+  await h.page.addInitScript(()=>{window.sessionBridgeFacts=[];window.captureSessionBridge=(direction,value)=>{if(direction==='event'&&!['viewer','viewer-follow','viewer-boundary','viewer-progress','viewer-positioned','viewer-disclosure','sealed-body','sealed-error','sealed-page'].includes(value.kind))return;const node=document.getElementById('session-records'),fact=direction==='event'?{kind:value.kind,generation:value.generation,publication:value.publication,through:value.through,anchor:value.anchor,fragmentAnchor:value.fragmentAnchor,request:value.request,key:value.key,open:value.open,part:value.body?.part,rows:value.rows?.length}:{stamp:value.stamp,scope:value.viewerScope,chunk:!!value.chunk,generation:value.generation,continueViewer:value.continueViewer,preservePresentation:value.preservePresentation,follow:value.follow,reset:value.reset,publication:value.publication,markdownAck:value.sealedMarkdownAck,sealedLoad:value.sealed?.load,sealedLatest:value.sealed?.latestRequest,disclosureAck:value.disclosureAck,disclosureRetry:value.disclosureRetry,viewerError:value.viewerError};if(direction==='command'&&value.stamp!==window.lastSessionCommandStamp){window.sessionOwnerChanges ||= [];window.sessionOwnerChanges.push(fact);window.sessionOwnerChanges=window.sessionOwnerChanges.slice(-8);window.lastSessionCommandStamp=value.stamp}if(direction==='event'&&value.kind==='viewer-disclosure'&&window.busyInitialClicked){window.busyDisclosureFacts ||= [];window.busyDisclosureFacts.push({...fact,domKey:[...document.querySelectorAll('[data-group-key]')].map(node=>({key:node.dataset.groupKey,open:node.open,children:node.querySelectorAll('article').length})),domGeneration:node?.dataset.viewerGeneration});window.busyDisclosureFacts=window.busyDisclosureFacts.slice(-8)}window.sessionBridgeFacts.push({direction,...fact,dom:node?{owner:node.dataset.viewerOwner,generation:node.dataset.viewerGeneration,publication:node.dataset.windowPublication,part:node.dataset.renderPart,anchor:node.dataset.presentationAnchor,top:Math.round(node.scrollTop)}:null});if(window.sessionBridgeFacts.length>48)window.sessionBridgeFacts.shift()}})
+  await h.page.addInitScript(()=>{window.sessionPointFacts=[];window.captureSessionPoint=(point,restore=false)=>{window.sessionPointFacts.push({restore,point:restore?point?.point??null:point});if(window.sessionPointFacts.length>8)window.sessionPointFacts.shift();return point}})
+  await h.page.route('**/assets/index-*.js',async route=>{const response=await route.fetch();let source=await response.text(),events=0,commands=0;source=source.replace(/(\w+)\.ports\.sessionBridgeEvent\.send\((\w+)\)/g,(match,app,value)=>{events++;return '(window.captureSessionBridge("event",'+value+'),window.sessionBridgeDispatch?window.sessionBridgeDispatch(value=>'+app+'.ports.sessionBridgeEvent.send(value),'+value+'):'+match+')'}).replace(/sessionBridgeCommand\.subscribe\((\w+)=>\{/g,(match,value)=>{commands++;return match+'window.captureSessionBridge("command",'+value+');if(window.sessionCommandGate?.('+value+')===false)return;'}).replace(/point:(\w+)\?([\w$]+)\((\w+),\1\):null/g,(match)=>'point:window.captureSessionPoint('+match.slice(6)+')').replace(/if\((\w+)\.point\)\{/g,(match,saved)=>'if((window.captureSessionPoint('+saved+',true),'+saved+'.point)){');if(events!==1||commands!==1)throw Error('session_bridge_trace_binding_mismatch');await route.fulfill({response,body:source})})
+}
+export async function continuousScrollStep(page,direction,selector='#session-records') {
+  const viewport=page.locator(selector)
+  const motion=await viewport.evaluate((node,direction)=>{
+    const box=node.getBoundingClientRect(),leaves=[...node.querySelectorAll('[data-fragment-path],[data-payload-start]')].filter(leaf=>!leaf.querySelector('[data-fragment-path],[data-history-gap],[data-body-gap]')&&leaf.getBoundingClientRect().height>0)
+    const boxes=leaves.map(leaf=>leaf.getBoundingClientRect()),edge=boxes.length?{top:Math.min(...boxes.map(box=>box.top)),bottom:Math.max(...boxes.map(box=>box.bottom))}:null,gaps=[...node.querySelectorAll('[data-history-gap],[data-body-gap],[data-fragment-from],.session-activity-group:not([open]) > summary')].filter(gap=>{
+      // A presentation publication can enlarge the spacer behind the reading
+      // direction. Cross that already traversed side toward admitted text;
+      // source/body gaps still stop input at their acquisition edge.
+      if(!gap.hasAttribute('data-fragment-from')||!leaves.length)return true
+      const center=Number(node.dataset.renderPart)
+      const admitted=leaves.filter(leaf=>leaf.hasAttribute('data-fragment-part')).map(leaf=>Number(leaf.dataset.fragmentPart)),adjacent=direction<0?Math.max(0,Math.min(center,...admitted)-1):Math.max(center,...admitted)+1
+      return Number(gap.dataset.fragmentFrom)<=adjacent&&Number(gap.dataset.fragmentTo)>=adjacent
+    }).map(gap=>gap.getBoundingClientRect()).filter(gap=>gap.height>0&&(direction<0?gap.top<=box.top+32:gap.bottom>=box.bottom-32))
+    const endpoint=direction<0?Math.max(edge?.top ?? box.top,...gaps.map(gap=>gap.bottom)):Math.min(edge?.bottom ?? box.bottom,...gaps.map(gap=>gap.top))
+    const distance=direction<0?Math.min(-80,endpoint-box.top-32):Math.max(80,endpoint-box.bottom+32)
+    return {delta:Math.max(-1000000,Math.min(1000000,distance)),width:box.width,height:box.height}
+  },direction)
+  await viewport.hover({position:{x:Math.max(1,motion.width-5),y:Math.max(1,Math.min(motion.height-5,motion.height/2))}})
+  await page.mouse.wheel(0,motion.delta)
+  await viewport.evaluate(async node=>{
+    let top=node.scrollTop,stable=0
+    for(let frame=0;frame<90&&stable<4;frame++){await new Promise(resolve=>requestAnimationFrame(resolve));const next=node.scrollTop;stable=Math.abs(next-top)<.25?stable+1:0;top=next}
+    if(stable<4)throw Error('Continuous scroll input did not settle')
+  })
+  return motion
+}
 export async function openSessionExplorer({many=false,empty=false,creator=null,runtime=null,housekeeping=false,activeCount=1,savedCount=1,linkedCount=2,encrypted=false,timezoneId='UTC',stamp=new Date().toISOString(),lastActivityAt,eventTimes=[],launchOptions={},persistentProfile=null,extraRecords=[],transcriptBytes=null}={}) {
   const f=hierarchyFixture();f.projects=[{...f.projects[0],id:"50000000-0000-4000-8000-000000000001"}]
   f.tasks=Array.from({length:many?22:Math.max(2,linkedCount)},(_,i)=>({...f.tasks[0],id:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,title:i===0?'Build session explorer':i===1?'Review captured conversations':'Task '+(i+1),description:'Keep conversations easy to explore.',parent_id:null,project_id:f.projects[0].id}))

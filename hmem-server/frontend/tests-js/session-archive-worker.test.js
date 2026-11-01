@@ -944,6 +944,27 @@ test('sequential processor reader handoff keeps custody, current authorization a
 })
 
 
+test('ordinary disclosure hydration waits for the accepted page and cancels an evicted native toggle',async()=>{
+ const events=[],listeners=new Map(),workers=[],frames=[];let viewer,requestId=0,currentNode
+ const oldKey='0000000000000000050:0000000',newKey='0000000000000000150:0000000',raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'toggle-publication',load:1,workspace,session,authority:'principal',apiUrl:''},attrs={'data-render-part':'0','data-render-request':'0','data-render-more':'false','data-last-prose-more':'false','data-latest-request':'1'}
+ const node=key=>({isConnected:true,open:true,getAttribute:name=>name==='data-sealed-key'?key:name==='data-sealed-owner'?config.stamp:null})
+ const old=node(oldKey),fresh=node(newKey);currentNode=old
+ const viewport={id:'session-records',scrollTop:0,scrollHeight:1000,clientHeight:100,replaceChildren(){},contains:node=>node===currentNode&&node.isConnected,getAttribute:name=>attrs[name]??null,setAttribute:(name,value)=>{attrs[name]=value},querySelectorAll:()=>[],getBoundingClientRect:()=>({top:0,bottom:100,height:100})}
+ class Worker{messages=[];pages=[];bodies=[];reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}postMessage(message){this.messages.push(message);if(message.kind==='interrupt')return;if(message.kind==='page'){this.pages.push(message);return}if(message.kind==='body'){this.bodies.push(message);return}queueMicrotask(()=>this.reply(message,{kind:message.kind==='retire'?'cleaned':'ack'}))}terminate(){this.terminated=true}}
+ const toggle=target=>listeners.get('toggle')({target}),paint=()=>{for(let turn=0;turn<12&&frames.length;turn++)frames.splice(0).forEach(callback=>callback())},until=async predicate=>{for(let turn=0;turn<100&&!predicate();turn++)await new Promise(resolve=>setImmediate(resolve));assert.ok(predicate(),'bounded disclosure publication')}
+ viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){},requestAnimationFrame:callback=>frames.push(callback)},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}));if(event.kind==='sealed-page'&&event.first===newKey)toggle(old);if(event.kind==='sealed-latest-render'){attrs['data-render-request']=String(event.request);queueMicrotask(()=>viewer.configure(config))}if(event.kind==='sealed-body')queueMicrotask(()=>viewer.configure(config,null,{stamp:config.stamp,load:config.load,request:event.request}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
+ try{
+  viewer.configure(config);await until(()=>workers.at(-1)?.pages.length===1);const worker=workers.at(-1),replyPage=(request,key)=>worker.reply(request,{kind:'page',rows:[{key,kind:'tool',open:true}],first:key,last:key,more:false})
+  replyPage(worker.pages[0],oldKey);await until(()=>events.some(event=>event.kind==='sealed-page'));paint()
+  config.latestRequest=1;viewer.configure(config);await until(()=>worker.pages.length===2);replyPage(worker.pages[1],newKey);await until(()=>events.filter(event=>event.kind==='sealed-page').length===2);await new Promise(resolve=>setImmediate(resolve))
+  assert.equal(worker.bodies.length,0,'the old connected DOM cannot start a body against a newer accepted page')
+  old.isConnected=false;currentNode=fresh;paint();await until(()=>events.some(event=>event.kind==='sealed-latest-complete'))
+  toggle(old);toggle({isConnected:true,open:true,getAttribute:()=> 'retired-owner'});await new Promise(resolve=>setImmediate(resolve));assert.equal(worker.bodies.length,0,'retired nodes and owners cannot hydrate')
+  toggle(fresh);await until(()=>worker.bodies.length===1);assert.equal(worker.bodies[0].key,newKey,'a still-admitted open node hydrates after the matching page and latest publication')
+  worker.reply(worker.bodies[0],{kind:'body',key:newKey,body:{part:0,text:'{}',tokens:[],format:'json',more:false}});await until(()=>events.some(event=>event.kind==='sealed-body'));paint();assert.ok(!events.some(event=>event.kind==='sealed-error'))
+ }finally{viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated));paint()}
+})
+
 test('sealed continuous render admission retains manual intent and exact stamped DOM acknowledgement',async()=>{
  const events=[],workers=[],listeners=new Map(),frames=[];let viewer,requestId=0
  const raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'render-handoff',load:1,workspace,session,authority:'principal',apiUrl:''}
@@ -967,9 +988,10 @@ test('sealed continuous render admission retains manual intent and exact stamped
   assert.equal(viewport.scrollTop,800,'a stale render stamp cannot reposition the continuous window')
   scroll();assert.equal(renderEvents().length,1,'no second part can run before the first handoff is acknowledged')
   attrs['data-render-request']=String(first.request);viewer.configure(config);paint();assert.equal(viewport.scrollTop,800)
-  assert.equal(renderEvents().length,2,'settled overscan automatically admits the adjacent continuation without another gesture')
+  assert.equal(renderEvents().length,1,'an unchanged owned acknowledgment cannot drive another presentation')
+  viewport.scrollTop=820;scroll();assert.equal(renderEvents().length,2,'continued displacement in the same gesture automatically admits the next continuation')
   const second=renderEvents().at(-1);assert.equal(second.part,3)
-  attrs['data-render-part']='3';attrs['data-render-request']=String(second.request);attrs['data-render-more']='false';viewport.querySelectorAll=()=>[];paint();assert.equal(viewport.scrollTop,800)
+  attrs['data-render-part']='3';attrs['data-render-request']=String(second.request);attrs['data-render-more']='false';viewport.querySelectorAll=()=>[];paint();assert.equal(viewport.scrollTop,820)
   assert.deepEqual(renderEvents().map(event=>event.part),[2,3])
  }finally{viewer.configure(null);await until(()=>workers.every(worker=>worker.terminated));paint()}
 })

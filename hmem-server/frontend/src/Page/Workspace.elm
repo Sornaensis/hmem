@@ -149,7 +149,7 @@ viewReadableWorkspaceContext model ws =
         , if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab || model.activeTab == SessionsTab then
             text ""
           else
-            Feature.Search.viewSearchBar model
+            if model.activeTab == ProjectsTab then text "" else Feature.Search.viewSearchBar model
         , Feature.Search.viewWorkspaceSearchBar model
           ]
 

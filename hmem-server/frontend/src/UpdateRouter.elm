@@ -461,6 +461,9 @@ route msg model =
         AutoDismissToast _ ->
             Ok (Toast.update msg model)
 
+        ToggleSearchSection ->
+            Ok (Feature.Search.update msg model)
+
         SearchInput _ ->
             Ok (Feature.Search.update msg model)
 

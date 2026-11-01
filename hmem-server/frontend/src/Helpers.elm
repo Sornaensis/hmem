@@ -547,6 +547,7 @@ encodeFilterState original =
           )
         , ( "timelineWindow", Encode.string model.timeline.histogramWindow )
         , ( "timelineBucket", Encode.string model.timeline.histogramBucket )
+        , ( "searchSectionExpanded", Encode.bool model.search.searchSectionExpanded )
         , ( "searchQuery", Encode.string model.search.query )
         , ( "filterShowOnly"
           , Encode.string
@@ -661,7 +662,8 @@ applyStoredFilters json model =
 
         updatedSearch =
             { currentSearch
-                | query = Decode.decodeValue (Decode.field "searchQuery" Decode.string) json |> Result.withDefault currentSearch.query
+                | searchSectionExpanded = Decode.decodeValue (Decode.field "searchSectionExpanded" Decode.bool) json |> Result.withDefault True
+                , query = Decode.decodeValue (Decode.field "searchQuery" Decode.string) json |> Result.withDefault currentSearch.query
                 , filterShowOnly = Decode.decodeValue (Decode.field "filterShowOnly" decodeShowOnly) json |> Result.withDefault currentSearch.filterShowOnly
                 , filterHasActiveSession = Decode.decodeValue (Decode.field "filterHasActiveSession" Decode.bool) json |> Result.withDefault currentSearch.filterHasActiveSession
                 , filterShowEmptyProjects = Decode.decodeValue (Decode.field "filterShowEmptyProjects" Decode.bool) json |> Result.withDefault currentSearch.filterShowEmptyProjects

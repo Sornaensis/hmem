@@ -1052,7 +1052,6 @@ viewGlobalNavigation model =
     in
     header [ class "global-context", attribute "aria-label" "Application navigation" ]
         [ a [ class "global-logo", href "/" ] [ img [ src "/hmem-logo.svg", alt "hmem", width 183, height 48 ] [] ]
-        , a [ class "global-home", href "/" ] [ text "Workspaces" ]
         , case (if contextVisible then model.page else NotFound) of
             WorkspacePage wsId ->
                 case Dict.get wsId model.workspaces of

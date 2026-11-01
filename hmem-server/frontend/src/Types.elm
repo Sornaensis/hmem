@@ -448,6 +448,7 @@ type alias SearchModel =
     , activeRequestQuery : Maybe String
     , activeRequest : Maybe SearchRequest
     , nextRequestToken : Int
+    , searchSectionExpanded : Bool
     , filterShowOnly : FilterShowOnly
     , filterShowEmptyProjects : Bool
     , filterHasActiveSession : Bool
@@ -1670,6 +1671,7 @@ type Msg
     | SwitchTab WorkspaceTab
     | DismissToast Int
     | AutoDismissToast Int
+    | ToggleSearchSection
     | SearchInput String
     | WorkspaceSearch Msg
     | GlobalSearchInput String

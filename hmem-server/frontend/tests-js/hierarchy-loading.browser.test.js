@@ -61,10 +61,10 @@ for (const kind of ['task', 'project']) test('focused filters replace the saved 
     const workspace = h.page.locator('.workspace-search-filter-bar')
     const query = workspace.getByPlaceholder('Filter project hierarchy...')
     await workspace.locator('.filter-select').first().selectOption('exact'); await h.idle()
-    await workspace.getByLabel('Show empty projects').uncheck(); await h.idle()
+    await workspace.getByRole('button', { name: 'Show empty projects', exact: true }).click(); await h.idle()
     await query.fill('workspace query'); await h.idle()
     const workspaceState = async () => ({ query: await query.inputValue(), priority: await workspace.locator('.filter-select').first().inputValue(),
-      priorityValue: await workspace.locator('.filter-priority-input').inputValue(), empty: await workspace.getByLabel('Show empty projects').isChecked(),
+      priorityValue: await workspace.locator('.filter-priority-input').inputValue(), empty: await workspace.getByRole('button', { name: 'Show empty projects', exact: true }).getAttribute('aria-pressed').then(v => v === 'true'),
       active: await workspace.locator('.filter-pill-active').allTextContents() })
     const original = await workspaceState()
     const saved = await h.page.evaluate(id => localStorage.getItem('hmem-ws-' + id), fixture.workspace.id)
@@ -78,13 +78,13 @@ for (const kind of ['task', 'project']) test('focused filters replace the saved 
     assert.equal(await focused.evaluate(element => !!element.closest('.workspace-context-persistent')), true)
     assert.equal(await focusedQuery.inputValue(), original.query)
     assert.equal(await focused.locator('.filter-select').first().inputValue(), original.priority)
-    assert.equal(await focused.getByLabel('Show empty projects').isChecked(), original.empty)
+    assert.equal(await focused.getByRole('button', { name: 'Show empty projects', exact: true }).getAttribute('aria-pressed').then(v => v === 'true'), original.empty)
     assert.deepEqual(await focused.locator('.filter-pill-active').allTextContents(), original.active)
     await focusedQuery.fill('focused query'); await h.idle()
     await focused.locator('.filter-select').first().selectOption('above'); await h.idle()
     await focused.getByRole('button', { name: 'Todo', exact: true }).click(); await h.idle()
     const focusedState = async () => ({ query: await focusedQuery.inputValue(), priority: await focused.locator('.filter-select').first().inputValue(),
-      priorityValue: await focused.locator('.filter-priority-input').inputValue(), empty: await focused.getByLabel('Show empty projects').isChecked(),
+      priorityValue: await focused.locator('.filter-priority-input').inputValue(), empty: await focused.getByRole('button', { name: 'Show empty projects', exact: true }).getAttribute('aria-pressed').then(v => v === 'true'),
       active: await focused.locator('.filter-pill-active').allTextContents() })
     const focusedSelections = await focusedState()
     assert.equal(await query.count(), 0)
@@ -153,7 +153,7 @@ for (const kind of ['task', 'project']) test('cold focused ' + kind + ' URL inhe
     const focused = h.page.locator('.focused-search-filter-bar')
     assert.equal(await focused.getByPlaceholder('Filter focused view...').inputValue(), 'needle')
     assert.equal(await focused.locator('.filter-select').first().inputValue(), 'above')
-    assert.equal(await focused.getByLabel('Show empty projects').isChecked(), false)
+    assert.equal(await focused.getByRole('button', { name: 'Show empty projects', exact: true }).getAttribute('aria-pressed').then(v => v === 'true'), false)
     await h.page.locator('#entity-' + child.id).waitFor({ state: 'visible', timeout: 10000 })
     const branch = h.requests.findLast(r => r.kind === kind && r.parent === target.id)
     assert.equal(branch.viewport.paintFilter, 'tasks|any-session|nonempty|above:5|paused|todo|needle')
@@ -186,14 +186,14 @@ for (const kind of ['task', 'project']) test('Timeline excluded ' + kind + ' sta
     await h.page.locator('.filter-bar').getByRole('button', { name: 'Tasks', exact: true }).click(); await h.idle()
     await h.page.locator('.filter-select').first().selectOption('above'); await h.idle()
     await h.page.locator('.filter-priority-input').fill('5'); await h.idle()
-    await h.page.getByLabel('Show empty projects').uncheck(); await h.idle()
+    await h.page.getByRole('button', { name: 'Show empty projects', exact: true }).click(); await h.idle()
     await h.page.getByPlaceholder('Filter project hierarchy...').fill('needle'); await h.idle()
     await h.page.getByRole('button', { name: 'Timeline', exact: true }).click()
     await h.page.locator('#timeline-event-filtered-focus').click(); await h.idle()
     assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 0)
     assert.equal(await h.page.getByPlaceholder('Filter focused view...').inputValue(), 'needle')
     assert.equal(await h.page.locator('.focused-search-filter-bar .filter-select').first().inputValue(), 'above')
-    assert.equal(await h.page.locator('.focused-search-filter-bar').getByLabel('Show empty projects').isChecked(), false)
+    assert.equal(await h.page.locator('.focused-search-filter-bar').getByRole('button', { name: 'Show empty projects', exact: true }).getAttribute('aria-pressed').then(v => v === 'true'), false)
     await h.page.locator('#entity-' + target.id).waitFor({ state: 'visible', timeout: 10000 })
     await h.page.locator('#entity-' + children[0].id).waitFor({ state: 'visible', timeout: 10000 })
     for (const child of children.slice(1)) assert.equal(await h.page.locator('#entity-' + child.id).count(), 0)
@@ -209,7 +209,7 @@ for (const kind of ['task', 'project']) test('Timeline excluded ' + kind + ' sta
     await h.page.locator('.focus-clear-btn').click(); await h.idle()
     assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').inputValue(), 'needle')
     assert.equal(await h.page.locator('.filter-select').first().inputValue(), 'above')
-    assert.equal(await h.page.getByLabel('Show empty projects').isChecked(), false)
+    assert.equal(await h.page.getByRole('button', { name: 'Show empty projects', exact: true }).getAttribute('aria-pressed').then(v => v === 'true'), false)
     for (const child of children) assert.equal(await h.page.locator('#entity-' + child.id).count(), 0)
     assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
   } finally { await h.close() }

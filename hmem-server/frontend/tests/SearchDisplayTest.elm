@@ -5,6 +5,7 @@ import AppShell
 import Dict
 import Helpers
 import Http
+import Json.Decode as Decode
 import Json.Encode as Encode
 import Types exposing (..)
 import Url
@@ -18,6 +19,22 @@ suite =
     describe "observation unified-search presentation"
         [ jumpSuite
         , liveSuite
+        , test "search disclosure restores only its workspace and defaults old preferences to expanded" <| \_ ->
+            let
+                closed = step ToggleSearchSection liveModel
+                saved = Helpers.encodeFilterState closed
+                restored = Helpers.applyStoredFiltersIfCurrentWorkspace saved liveModel
+                foreign = Helpers.applyStoredFiltersIfCurrentWorkspace saved { liveModel | selectedWorkspaceId = Just "workspace-2" }
+                legacy = Helpers.applyStoredFilters (Encode.object []) closed
+            in
+            Expect.equal [ True, False, False, True, True, True ]
+                [ liveModel.search.searchSectionExpanded
+                , closed.search.searchSectionExpanded
+                , restored.search.searchSectionExpanded
+                , foreign.search.searchSectionExpanded
+                , legacy.search.searchSectionExpanded
+                , closed.dataLoading.navigationGeneration == liveModel.dataLoading.navigationGeneration
+                ]
         , test "server-shaped observation, project, and task results are presented" <|
             \_ ->
                 let

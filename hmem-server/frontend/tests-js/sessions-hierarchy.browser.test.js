@@ -65,8 +65,8 @@ test('titled deep session trees keep inactive ancestor context and bounded inden
 test('Has Active Session filters retain ancestor paths and ordinary heartbeat updates do not restart branch membership',{timeout:60000},async()=>{
  const h=await openSessionExplorer({many:true});const {page}=h
  try{
-  await h.start();await h.idle();const box=page.getByRole('checkbox',{name:'Has Active Session',exact:true});await box.check();await h.idle()
-  assert.ok(await box.isChecked())
+  await h.start();await h.idle();const box=page.getByRole('button',{name:'Has Active Session',exact:true});await box.click();await h.idle()
+  assert.ok(await box.getAttribute('aria-pressed').then(v => v === 'true'))
   const keys=await h.logicalKeys();assert.ok(keys.has('project:'+h.fixture.projects[0].id));assert.ok(keys.has('task:'+h.fixture.tasks.at(-1).id));assert.ok(!keys.has('task:'+h.fixture.tasks[0].id))
   const before=h.requests.filter(request=>request.path?.endsWith('/navigation')&&!request.logical).length
   for(let i=0;i<4;i++)await change(h,'agent_session',h.active.id)
@@ -86,7 +86,7 @@ test('ordinary output cannot starve a held multi-page Has Active Session members
   h.sessionLinks.set(h.active.id,new Set(h.fixture.tasks.map(task=>task.id)))
   await h.start();await h.idle()
   const gate=h.gate(request=>request.parent===h.fixture.projects[0].id&&request.includeTasks&&request.taskOffset===50,{hold:true})
-  await page.getByRole('checkbox',{name:'Has Active Session',exact:true}).check()
+  await page.getByRole('button',{name:'Has Active Session',exact:true}).click()
   await gate.arrived
   const roots=h.requests.filter(request=>request.kind==='workspace_root'&&request.path?.endsWith('/navigation')).length
   for(let index=0;index<4;index++){await change(h,'agent_session',h.active.id);await page.waitForTimeout(350)}

@@ -126,15 +126,15 @@ test('compact UUID controls retain keyboard copying and activity accent is indep
     assert.deepEqual(await h.page.evaluate(() => window.fixtureCopies), ['root-project', 'root-project'])
     await h.page.locator('.filter-bar').getByRole('button', { name: 'In Progress', exact: true }).click(); await h.idle()
     assert.equal(await root.locator('.card-project-in-progress').count(), 1)
-    const checkbox = h.page.getByRole('checkbox', { name: 'Show empty projects' })
-    assert.equal(await checkbox.isChecked(), true)
-    await checkbox.uncheck(); await h.idle()
+    const checkbox = h.page.getByRole('button', { name: 'Show empty projects' })
+    assert.equal(await checkbox.getAttribute('aria-pressed').then(v => v === 'true'), true)
+    await checkbox.click(); await h.idle()
     assert.equal(await h.page.locator('.card-project').count(), 0)
     await h.page.locator('.filter-bar').getByRole('button', { name: 'In Progress', exact: true }).click(); await h.idle()
     assert.equal(await h.page.locator('#entity-root-project .card-project-in-progress').count(), 1)
     assert.equal(await h.page.locator('#entity-empty-project').count(), 0)
     await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle()
-    assert.equal(await checkbox.isChecked(), false)
+    assert.equal(await checkbox.getAttribute('aria-pressed').then(v => v === 'true'), false)
     if (process.env.HMEM_UI_QA_SCREENSHOT) await h.page.screenshot({ path: process.env.HMEM_UI_QA_SCREENSHOT, fullPage: true })
   } finally { await h.close() }
 })
@@ -424,4 +424,67 @@ test('global authorization refresh uses route epoch and retires stale route repl
     assert.ok(h.page.url().includes('/workspace/' + h.first.workspace.id))
     assert.equal(await h.page.getByRole('button', { name: 'Delete workspace', exact: true }).count(), 1)
   } finally { release?.(); await h.close() }
+})
+
+
+test('search disclosure persists per workspace and keeps keyboard and filter controls available', { timeout: 60000 }, async () => {
+  const h = await workspaceFixture(), page = h.page
+  try {
+    await h.start(); await h.idle(); await page.getByRole('link', { name: /Workspace B/ }).waitFor()
+    const disclosure = page.getByRole('button', { name: 'Search', exact: true })
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
+    await disclosure.focus(); await page.keyboard.press('Enter'); await page.waitForFunction(() => document.querySelector('.search-section-toggle')?.getAttribute('aria-expanded') === 'false')
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
+    assert.equal(await page.getByPlaceholder('Search all entities...').isVisible(), false)
+    assert.equal(await page.getByRole('button', { name: 'Show empty projects', exact: true }).isVisible(), true)
+    await page.getByRole('link', { name: /Workspace B/ }).click(); await page.locator('.workspace-header-title').filter({ hasText: 'Workspace B' }).waitFor(); await h.idle()
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
+    await page.getByRole('link', { name: /Workspace A/ }).click(); await page.locator('.workspace-header-title').filter({ hasText: 'Workspace A' }).waitFor(); await h.idle()
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
+    await page.reload(); await h.idle(); await disclosure.waitFor()
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
+    await disclosure.focus(); await page.keyboard.press('Space'); await page.waitForFunction(() => document.querySelector('.search-section-toggle')?.getAttribute('aria-expanded') === 'true')
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
+    await page.getByPlaceholder('Search all entities...').fill('working')
+    await page.getByRole('button', { name: 'Clear all entities search' }).click(); await page.getByPlaceholder('Filter project hierarchy...').waitFor()
+    assert.equal(await page.getByPlaceholder('Filter project hierarchy...').isVisible(), true)
+    assert.equal(await page.locator('.sidebar-workspaces-header').innerText(), 'Workspaces')
+    assert.equal(await page.locator('.sidebar-section-title').filter({ hasText: 'Unassigned' }).count(), 1)
+    assert.deepEqual(h.errors, [])
+  } finally { await h.close() }
+})
+
+
+test('nested project and task guides paint ancestor lanes and narrow chrome remains reachable', { timeout: 60000 }, async t => {
+  const h = await workspaceFixture(), page = h.page, f = h.fixture
+  const project = f.projects[0], task = f.tasks[0]
+  f.projects = [project, ...Array.from({length:3}, (_,i) => ({...project, id:'guide-project-'+i, name:'Hierarchy level '+(i+1), parent_id:i ? 'guide-project-'+(i-1) : project.id, description:''}))]
+  f.tasks = [{...task, id:'guide-task', title:'Workspace navigation task', project_id:'guide-project-2', description:''}, {...task, id:'guide-child', title:'Nested task sibling A', project_id:'guide-project-2', parent_id:'guide-task', description:''}, {...task, id:'guide-sibling', title:'Nested task sibling B', project_id:'guide-project-2', parent_id:'guide-task', description:''}]
+  await page.addInitScript(id => localStorage.setItem('hmem-ws-'+id, JSON.stringify({workspaceId:id,nodesCollapsedByDefault:false})), f.workspace.id)
+  try {
+    await h.start(); await h.idle(); await page.getByRole('link',{name:/Workspace B/}).waitFor()
+    await page.setViewportSize({width:1782,height:1400}); await h.scrollTo('task:guide-child')
+    for(const name of [/Workspace A/,/Workspace B/]) {
+      const link = page.getByRole('link',{name})
+      assert.equal(await link.evaluate(n=>{const b=n.getBoundingClientRect(),rail=n.closest('.sidebar').getBoundingClientRect(); return b.top>=rail.top && b.bottom<=rail.bottom && document.elementFromPoint(b.x+b.width/2,b.y+b.height/2)===n}),true)
+    }
+    assert.equal(await page.locator('.sidebar-group-title').filter({hasText:'Workspace group'}).count(),1)
+    assert.equal(await page.locator('.sidebar-section-title').filter({hasText:'Unassigned'}).count(),1)
+    const lanes = await page.locator('[data-hierarchy-key="task:guide-child"] > .hierarchy-guides').evaluate(n => { const s=getComputedStyle(n),b=n.getBoundingClientRect(),r=n.parentElement.getBoundingClientRect(); return {width:b.width,height:b.height,left:b.left,rowLeft:r.left,background:s.backgroundImage,position:s.position,hidden:n.getAttribute('aria-hidden')} })
+    assert.equal(lanes.width,70); assert.ok(lanes.height>0); assert.ok(lanes.left<lanes.rowLeft); assert.equal(lanes.position,'absolute'); assert.equal(lanes.hidden,'true'); assert.match(lanes.background,/repeating-linear-gradient/)
+    assert.ok(await page.locator('[data-hierarchy-key]').count()<=25)
+    if(process.env.HMEM_UX_PREVIEW) await page.screenshot({path:process.env.HMEM_UX_PREVIEW})
+    for(const width of [430,320]) {
+      await page.setViewportSize({width,height:1200})
+      for(const control of [page.getByPlaceholder('Search all entities...'),page.getByPlaceholder('Filter project hierarchy...'),page.getByRole('button',{name:'Show empty projects',exact:true}),page.getByRole('button',{name:'Has Active Session',exact:true})]) {
+        await control.scrollIntoViewIfNeeded()
+        assert.equal(await control.evaluate(n => {const b=n.getBoundingClientRect();return document.elementFromPoint(b.x+b.width/2,b.y+b.height/2)===n}),true)
+      }
+      await page.getByRole('button',{name:'Search',exact:true}).click(); await page.waitForFunction(()=>document.querySelector('.search-section-toggle').getAttribute('aria-expanded')==='false')
+      assert.equal(await page.getByPlaceholder('Search all entities...').isVisible(),false)
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false)
+      await page.getByRole('button',{name:'Search',exact:true}).click(); await page.getByPlaceholder('Search all entities...').waitFor()
+    }
+    assert.deepEqual(h.errors,[]); assert.deepEqual(h.unhandled,[]); t.diagnostic(JSON.stringify({lanes,narrowReachable:[430,320],virtualizedCap:25}))
+  } finally {await h.close()}
 })

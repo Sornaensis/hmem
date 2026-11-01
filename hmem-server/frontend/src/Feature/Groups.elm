@@ -271,9 +271,10 @@ viewWorkspaceRail model =
             model.groups.workspaceGroups |> Dict.values |> List.sortBy .name
     in
     nav [ class "sidebar" ]
-        [ if model.dataLoading.loadingWorkspaces then
+        [ a [ class "sidebar-workspaces-header", href "/" ] [ text "Workspaces" ]
+        , if model.dataLoading.loadingWorkspaces then
             div [ class "sidebar-section" ]
-                [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
+                [ div [ class "sidebar-section-title" ] [ text "Unassigned" ]
                 , div [ class "sidebar-loading" ] [ text "Loading..." ]
                 ]
 
@@ -288,14 +289,14 @@ viewWorkspaceRail model =
 
           else if not (List.isEmpty ungroupedWs) then
             div [ class "sidebar-section" ]
-                [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
+                [ div [ class "sidebar-section-title" ] [ text "Unassigned" ]
                 , ul [ class "sidebar-nav" ]
                     (ungroupedWs |> List.map (viewSidebarWorkspace model))
                 ]
 
           else if List.isEmpty groups then
             div [ class "sidebar-section" ]
-                [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
+                [ div [ class "sidebar-section-title" ] [ text "Unassigned" ]
                 , div [ class "sidebar-empty" ]
                     [ text
                         (if Permissions.isSuperadmin model then
@@ -485,7 +486,7 @@ viewHomePage model =
                         ++ [ if not (List.isEmpty ungroupedWs) then
                                 div []
                                     [ if not (List.isEmpty groups) then
-                                        h3 [ class "home-ungrouped-heading" ] [ text "Ungrouped" ]
+                                        h3 [ class "home-ungrouped-heading" ] [ text "Unassigned" ]
 
                                       else
                                         text ""

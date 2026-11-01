@@ -66,6 +66,7 @@ init =
     , activeRequestQuery = Nothing
     , activeRequest = Nothing
     , nextRequestToken = 1
+    , searchSectionExpanded = True
     , filterShowOnly = ShowAll
     , filterShowEmptyProjects = True
     , filterHasActiveSession = False
@@ -155,6 +156,13 @@ hierarchySearchChange msg search =
 updateOther : Msg -> Model -> ( Model, Cmd Msg )
 updateOther msg model =
     case msg of
+        ToggleSearchSection ->
+            let
+                search = model.search
+                updated = { model | search = { search | searchSectionExpanded = not search.searchSectionExpanded } }
+            in
+            ( updated, saveFiltersCmd updated )
+
         WorkspaceSearch action ->
             if model.focusedFilters == Nothing then
                 update action model
@@ -572,14 +580,32 @@ viewSearchBar model =
 
 viewWorkspaceSearchBar : Model -> Html Msg
 viewWorkspaceSearchBar model =
-    let normal = { model | search = Feature.FocusedFilters.normalSearch model } in
-    div [ class "workspace-search-filter-bar" ]
-        [ if model.activeTab == ProjectsTab && String.isEmpty (String.trim model.search.globalQuery) then
-            if model.focusedFilters /= Nothing then
-                viewFocusedSearchBar model
-            else
-                viewSearchControls "Filter project hierarchy..." normal |> Html.map WorkspaceSearch
-          else text "" ]
+    let
+        normal = { model | search = Feature.FocusedFilters.normalSearch model }
+        hierarchyView view =
+            if model.focusedFilters /= Nothing then view model else view normal |> Html.map WorkspaceSearch
+        hasGlobalQuery = not (String.isEmpty (String.trim model.search.globalQuery))
+    in
+    if model.activeTab /= ProjectsTab then text "" else
+    div [ class ("workspace-search-filter-bar project-filter-panel" ++ (if model.focusedFilters /= Nothing then " focused-search-filter-bar" else "")) ]
+        [ if hasGlobalQuery then text "" else
+            hierarchyView (\current ->
+                div [ class "hierarchy-filter-controls" ]
+                    [ if current.focusedFilters /= Nothing then div [ class "filter-label" ] [ text "Focused view filters" ] else text ""
+                    , viewFilterBar current ])
+        , div [ class "project-search-section" ]
+            [ button [ class "search-section-toggle", type_ "button", onClick ToggleSearchSection
+                , attribute "aria-expanded" (if model.search.searchSectionExpanded then "true" else "false")
+                , attribute "aria-controls" "workspace-search-fields" ]
+                [ span [ attribute "aria-hidden" "true" ] [ text (if model.search.searchSectionExpanded then "▾" else "▸") ]
+                , text "Search"
+                , if hasGlobalQuery || not (String.isEmpty model.search.query) then span [ class "search-active-indicator" ] [ text "Active" ] else text "" ]
+            , div [ id "workspace-search-fields", class "workspace-search-fields", hidden (not model.search.searchSectionExpanded) ]
+                [ viewSearchBar model
+                , if hasGlobalQuery then text "" else
+                    hierarchyView (viewHierarchySearch (if model.focusedFilters /= Nothing then "Filter focused view..." else "Filter project hierarchy...")) ]
+            ]
+        ]
 
 
 viewEntityTypeFilters : Model -> Html Msg
@@ -605,12 +631,17 @@ viewFocusedSearchBar model =
 viewSearchControls : String -> Model -> Html Msg
 viewSearchControls searchPlaceholder model =
     div [ class "search-filter-bar" ]
-        [ div [ class "search-bar" ]
+        [ viewHierarchySearch searchPlaceholder model
+        , viewFilterBar model ]
+
+
+viewHierarchySearch : String -> Model -> Html Msg
+viewHierarchySearch searchPlaceholder model =
+    div [ class "search-bar" ]
             [ input [ class "hierarchy-search-input", type_ "text", placeholder searchPlaceholder, attribute "aria-label" searchPlaceholder, value model.search.query, onInput SearchInput ] []
             , if not (String.isEmpty model.search.query) then
                 button [ class "search-clear", onClick (SearchInput ""), type_ "button", attribute "aria-label" "Clear hierarchy filter" ] [ text "✕" ]
               else text "" ]
-        , viewFilterBar model ]
 
 
 viewFilterBar : Model -> Html Msg
@@ -622,10 +653,8 @@ viewFilterBar model =
             , viewFilterPill "Projects" (model.search.filterShowOnly == ShowProjectsOnly) (SetFilterShowOnly ShowProjectsOnly)
             , viewFilterPill "Tasks" (model.search.filterShowOnly == ShowTasksOnly) (SetFilterShowOnly ShowTasksOnly)
             ]
-        , label [ class "filter-group filter-checkbox" ]
-            [ input [ type_ "checkbox", checked model.search.filterShowEmptyProjects, onCheck SetFilterShowEmptyProjects ] []
-            , text "Show empty projects"
-            ]
+        , div [ class "filter-group" ]
+            [ viewFilterPill "Show empty projects" model.search.filterShowEmptyProjects (SetFilterShowEmptyProjects (not model.search.filterShowEmptyProjects)) ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Project:" ]
             , viewFilterPill "Active" (List.isEmpty model.search.filterProjectStatuses || List.member "active" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "active")
@@ -739,9 +768,8 @@ viewFilterBar model =
                         ]
                         []
             ]
-        , label [ class "filter-group filter-checkbox filter-active-session" ]
-            [ input [ type_ "checkbox", checked model.search.filterHasActiveSession, onCheck SetFilterHasActiveSession ] []
-            , text "Has Active Session" ]
+        , div [ class "filter-group filter-active-session" ]
+            [ viewFilterPill "Has Active Session" model.search.filterHasActiveSession (SetFilterHasActiveSession (not model.search.filterHasActiveSession)) ]
         ]
 
 
@@ -882,6 +910,8 @@ viewFilterPill label isActive msg =
              else
                 "filter-pill"
             )
+        , type_ "button"
+        , attribute "aria-pressed" (if isActive then "true" else "false")
         , onClick msg
         ]
         [ text label ]

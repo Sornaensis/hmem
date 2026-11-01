@@ -3818,12 +3818,14 @@ viewHierarchyViewport ws incoming =
                     ( key, div [ class "hierarchy-row", attribute "data-hierarchy-key" key, attribute "data-hierarchy-index" (String.fromInt position)
                         , attribute "data-hierarchy-next" (neighborEntity 1 position)
                         , attribute "data-hierarchy-previous" (neighborEntity -1 position)
-                        , style "--hierarchy-guide-offset" (String.fromInt (baseDepth * 14) ++ "px")
-                        , style "--hierarchy-guide-width" ("min(18cqw, " ++ String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> depth * 14)) ++ "px)")
                         , attribute "data-hierarchy-depth" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0))
                         , attribute "aria-description" ("Hierarchy level " ++ String.fromInt ((row |> Maybe.map .depth |> Maybe.withDefault 0) + 1))
                         , style "padding-left" ("min(18%, " ++ String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> Basics.max 0 (depth - baseDepth) * 14)) ++ "px)")
-                        ] [ row |> Maybe.map content |> Maybe.withDefault (text "") ] )
+                        ] [ span [ class "hierarchy-guides", attribute "aria-hidden" "true"
+                            , style "left" ("calc(0px - min(18cqw, " ++ String.fromInt (baseDepth * 14) ++ "px))")
+                            , style "width" ("min(18cqw, " ++ String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> depth * 14)) ++ "px)")
+                            ] []
+                          , row |> Maybe.map content |> Maybe.withDefault (text "") ] )
         pieces = Viewport.window viewport.top viewport.height 300 25 (viewportPins model) viewport.index
         protectedInput =
             case editTarget model of

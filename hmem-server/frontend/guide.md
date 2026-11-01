@@ -69,7 +69,9 @@ bar selects Projects, Tasks and, in repositories, Observations. Choices are save
 for the signed-in actor and workspace, separately from hierarchy filters. Selecting
 no types pauses searching. Clearing the query hides the options and returns to
 your previous view; your choices apply to the next query. The project hierarchy
-filter and Search all entities remain separate controls in the workspace header.
+filter and Search all entities are in the **Search** section below the project filter
+buttons. Collapse or expand this section as needed; each workspace remembers your
+choice. **Show empty projects** and **Has Active Session** are toggle buttons.
 While updating or after a failure, the last completed
 results remain labelled with their query; use **Retry search** to try again.
 

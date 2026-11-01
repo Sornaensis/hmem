@@ -408,6 +408,7 @@ handleUrlChangeWithoutProtectedExit url model =
                             , searchError = Nothing
                             , activeRequestQuery = Nothing
                             , activeRequest = Nothing
+                            , searchSectionExpanded = True
                             , filterShowOnly = ShowAll
                             , filterPriority = AnyPriority
                             , filterProjectStatuses = [ "active", "paused" ]

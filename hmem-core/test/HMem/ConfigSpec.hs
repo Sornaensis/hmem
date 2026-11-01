@@ -131,10 +131,22 @@ spec = do
   describe "validateConfig" $ do
     it "defaults change-stream retention and hand-off lifetimes" $ do
       defaultConfig.changeStream `shouldBe` ChangeStreamConfig
-        { retentionSeconds = 604800
-        , resumeTokenTtlSeconds = 86400
+        { retentionSeconds = 86400
+        , resumeTokenTtlSeconds = 82800
         , snapshotSessionTtlSeconds = 300
         }
+
+    it "uses one-day defaults for missing YAML blocks and partial fields and round-trips them" $ do
+      mapM_ (\yaml -> case Yaml.decodeEither' yaml of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> cfg.changeStream `shouldBe` defaultConfig.changeStream)
+        ["{}", "change_stream: {}", "change_stream: {snapshot_session_ttl_seconds: 300}"]
+      Aeson.eitherDecode (Aeson.encode defaultConfig.changeStream)
+        `shouldBe` Right defaultConfig.changeStream
+
+    it "clamps an older one-day resume override below the new retention boundary" $ do
+      let (_, cfg) = validateConfig (applyChangeStreamEnvOverrides Nothing (Just "86400") Nothing defaultConfig)
+      cfg.changeStream `shouldBe` ChangeStreamConfig 86400 86099 300
 
     it "keeps the change-stream TTL budget below retention" $ do
       let cfg = defaultConfig

@@ -887,7 +887,7 @@ resumeText :: ResumeToken -> Text
 resumeText (ResumeToken value) = value
 
 canonicalResumeTtlDefault :: NominalDiffTime
-canonicalResumeTtlDefault = 86400
+canonicalResumeTtlDefault = 82800
 
 canonicalReplayPageSize :: Int
 canonicalReplayPageSize = 500

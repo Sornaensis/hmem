@@ -2,14 +2,16 @@ module HMem.Server.ChangeStreamSpec (spec) where
 
 import Control.Concurrent (Chan, MVar, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryTakeMVar, writeChan)
 import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
-import Control.Exception (AsyncException(..), MaskingState(..), SomeException, bracket, catch, fromException, getMaskingState, mask, throwIO, try)
-import Control.Monad (forM_, replicateM_, replicateM, forever, void)
+import Control.Exception (AsyncException(..), MaskingState(..), SomeException, bracket, catch, finally, fromException, getMaskingState, mask, throwIO, try)
+import Control.Monad (forM, forM_, replicateM_, replicateM, forever, void)
 import Data.Aeson (FromJSON, Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (isJust)
+import Data.List (sort)
+import Data.Pool (destroyAllResources)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Text (Text)
@@ -46,17 +48,84 @@ import HMem.DB.Pool qualified as DBPool
 import HMem.DB.Project qualified as Project
 import HMem.DB.Workspace qualified as WorkspaceDB
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withRequestContext, emptyRequestContext)
-import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
+import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppContext)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
-import HMem.Server.ChangeStream (ChangeStreamWorker, startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker)
+import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
 import HMem.Server.WebSocket (newWSState, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
 spec :: Spec
 spec = describe "canonical change-stream loopback" $ do
+  it "rotates retention across scope identities and uses elapsed time despite wall-clock-independent tick counts" $ do
+    ids <- sort <$> replicateM 5 UUIDV4.nextRandom
+    let scopes = map WorkspaceScope ids <> [GlobalScope]
+        first = retentionScopeTurn Nothing scopes
+        second = retentionScopeTurn (Just (last first)) scopes
+    first `shouldBe` take 4 scopes
+    second `shouldBe` drop 4 scopes <> take 2 scopes
+    retentionDue 0 Nothing `shouldBe` True
+    retentionDue 59999999999 (Just 0) `shouldBe` False
+    retentionDue 60000000000 (Just 0) `shouldBe` True
+    retentionDue 1 (Just 2) `shouldBe` False
+
+  it "automatically prunes one-day backlog on startup and publishes a truthful maintenance result" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.localEnv "retention-worker-startup"
+      void $ Project.createProject ctx.localEnv.pool (CreateProject workspace.id Nothing "expired" Nothing Nothing Nothing)
+      runSession ctx.localEnv.pool $ Session.sql ("UPDATE change_stream_outbox SET occurred_at=clock_timestamp()-interval '2 days' WHERE scope='workspace' AND workspace_id='" <> Text.encodeUtf8 (UUID.toText workspace.id) <> "'")
+      bracket (startChangeStreamWorker ctx.localEnv.pool Config.defaultConfig.changeStream ctx.localWSState)
+        stopChangeStreamWorker $ \worker -> do
+          let await = do
+                status <- readChangeStreamMaintenance worker
+                if status.lastSuccessAt /= Nothing && status.backlog == Just (OutboxBacklog 0 Nothing)
+                  then pure status else threadDelay 10000 >> await
+          status <- timeout 10000000 await >>= maybe (fail "startup retention did not finish") pure
+          status.lastError `shouldBe` Nothing
+          status.failureCount `shouldBe` 0
+          listOutboxAfter ctx.localEnv.pool (WorkspaceScope workspace.id) 0 10 `shouldReturn` []
+
+  it "advances retention past a contended scope and reports failure before a successful retry" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspaces <- forM [1..6 :: Int] $ \index -> do
+        workspace <- createTestWorkspace ctx.localEnv ("retention-fair-" <> T.pack (show index))
+        void $ Project.createProject ctx.localEnv.pool (CreateProject workspace.id Nothing "expired" Nothing Nothing Nothing)
+        runSession ctx.localEnv.pool $ Session.sql ("UPDATE change_stream_outbox SET occurred_at=clock_timestamp()-interval '2 days' WHERE scope='workspace' AND workspace_id='" <> Text.encodeUtf8 (UUID.toText workspace.id) <> "'")
+        pure workspace.id
+      let identities = sort workspaces
+          blocked = head identities
+          late = last identities
+      entered <- newEmptyMVar; release <- newEmptyMVar
+      let hold holderPool = DBPool.withConn holderPool $ \connection ->
+            (do
+              locked <- Session.run (Session.sql ("BEGIN; SELECT hmem_change_stream_lock('workspace','" <> Text.encodeUtf8 (UUID.toText blocked) <> "')")) connection
+              either (fail . show) pure locked
+              putMVar entered ()
+              takeMVar release)
+            `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+      bracket (DBPool.createPool ctx.localEnv.testDb.testDbConnStr 1 5.0 30000) destroyAllResources $ \holderPool ->
+       withAsync (hold holderPool) $ \holder -> do
+        takeMVar entered
+        bracket (startChangeStreamWorker ctx.localEnv.pool Config.defaultConfig.changeStream ctx.localWSState)
+          stopChangeStreamWorker $ \worker -> do
+            let awaitLate = do
+                  status <- readChangeStreamMaintenance worker
+                  records <- listOutboxAfter ctx.localEnv.pool (WorkspaceScope late) 0 10
+                  if null records && status.failureCount > 0 then pure status else threadDelay 10000 >> awaitLate
+            status <- timeout 10000000 awaitLate >>= maybe (fail "contended scope starved a later scope") pure
+            status.failureCount `shouldSatisfy` (> 0)
+            -- The held scope still has its original record: a failed turn did
+            -- not advance its floor, while later scopes made progress.
+            length <$> listOutboxAfter ctx.localEnv.pool (WorkspaceScope blocked) 0 10 `shouldReturn` 1
+            putMVar release (); wait holder
+            let awaitRetry = do
+                  value <- readChangeStreamMaintenance worker
+                  records <- listOutboxAfter ctx.localEnv.pool (WorkspaceScope blocked) 0 10
+                  if null records && value.lastError == Nothing then pure () else threadDelay 10000 >> awaitRetry
+            timeout 10000000 awaitRetry `shouldReturn` Just ()
+
   it "bounds activity ticket retention globally and prunes expired capabilities" $ do
     state <- newWSState
     first <- grantPrincipal <$> UUIDV4.nextRandom

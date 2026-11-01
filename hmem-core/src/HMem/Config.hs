@@ -471,8 +471,8 @@ instance ToJSON RateLimitConfig where
 
 instance FromJSON ChangeStreamConfig where
   parseJSON = Aeson.withObject "ChangeStreamConfig" $ \o -> ChangeStreamConfig
-    <$> o .:? "retention_seconds" .!= 604800
-    <*> o .:? "resume_token_ttl_seconds" .!= 86400
+    <$> o .:? "retention_seconds" .!= 86400
+    <*> o .:? "resume_token_ttl_seconds" .!= 82800
     <*> o .:? "snapshot_session_ttl_seconds" .!= 300
 
 instance ToJSON ChangeStreamConfig where
@@ -640,8 +640,8 @@ defRateLimit = RateLimitConfig
 
 defChangeStream :: ChangeStreamConfig
 defChangeStream = ChangeStreamConfig
-  { retentionSeconds = 604800
-  , resumeTokenTtlSeconds = 86400
+  { retentionSeconds = 86400
+  , resumeTokenTtlSeconds = 82800
   , snapshotSessionTtlSeconds = 300
   }
 

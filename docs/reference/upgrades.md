@@ -1,5 +1,25 @@
 # Upgrade reference
 
+## Bounded replay retention (V055)
+
+Apply V055 before starting the matching server. The migration adds a bounded
+single-scope prefix pruner and caps its compatibility helper at 1,000 deleted
+rows; it does not delete an initial backlog itself. Worker startup is the first
+eligibility check, followed by elapsed-time checks and bounded backlog turns.
+
+Missing settings now mean one-day retention and a 23-hour resume lifetime.
+Existing explicit YAML/environment settings remain effective. To stage the
+rollout with the former policy, keep `retention_seconds: 604800`,
+`resume_token_ttl_seconds: 86400` and `snapshot_session_ttl_seconds: 300`
+explicitly, then change the first two to `86400` and `82800` when ready.
+Check the `change_stream_retention` stderr status for backlog age and failures.
+
+Increasing retention or rolling back the application cannot recover pruned
+events. Preserve a verified backup if those events are required. Pruned or
+expired clients use an authorized canonical snapshot; audit history and session
+evidence retention remain independent. See the
+[retention reference](change-stream-retention.md) for budgets and status fields.
+
 ## Runtime harness declaration (V053)
 
 Apply V053 before sending the optional runtime `harness` field. It extends the

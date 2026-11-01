@@ -5,7 +5,8 @@ module HMem.DB.ChangeStream
   ( ChangeScope(..), ChangeAudience(..), SnapshotToken(..), ResumeToken(..)
   , ChangeStreamError(..), OutboxRecord(..), SnapshotBegin(..), SnapshotPage(..), ReplayPage(..)
   , beginResync, beginResyncWithStartKey, beginResyncWithStartKeyAndProfile, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, readSnapshotPageWithStoredTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
-  , listOutboxAfter, listOutboxScopes, pruneOutboxBefore, cleanupChangeStream
+  , listOutboxAfter, listOutboxScopes, pruneOutboxBefore, pruneOutboxScopeBefore
+  , OutboxBacklog(..), outboxBacklog, listRetentionScopes, cleanupChangeStream
   ) where
 
 import Control.Monad (forM_)
@@ -389,9 +390,43 @@ listOutboxAfter pool scope watermark requestedLimit =
 listOutboxScopes :: Pool Hasql.Connection -> IO [ChangeScope]
 listOutboxScopes pool = runSession pool $ Session.statement () listOutboxScopesStatement
 pruneOutboxBefore :: Pool Hasql.Connection -> UTCTime -> IO Int64
-pruneOutboxBefore pool cutoff = runTransaction pool $ Session.statement cutoff pruneOutboxBeforeStatement
+pruneOutboxBefore pool cutoff = runTransaction pool $ do
+  retentionBudgets
+  Session.statement cutoff pruneOutboxBeforeStatement
+
+-- | At most 1000 rows and 500ms of statement execution, including scope-lock
+-- acquisition (100ms). Failure rolls back both deletes and the replay floor.
+pruneOutboxScopeBefore :: Pool Hasql.Connection -> ChangeScope -> UTCTime -> Int -> IO Int64
+pruneOutboxScopeBefore pool scope cutoff requested = runTransaction pool $ do
+  retentionBudgets
+  Session.statement (scopeName scope, scopeWorkspace scope, cutoff, fromIntegral (max 1 (min 1000 requested))) pruneOutboxScopeStatement
+
+data OutboxBacklog = OutboxBacklog
+  { expiredRowsLowerBound :: !Int64
+  , oldestExpiredAt :: !(Maybe UTCTime)
+  } deriving stock (Show, Eq)
+
+-- | A capped lower bound, not an unbounded COUNT over the seven-day backlog.
+outboxBacklog :: Pool Hasql.Connection -> UTCTime -> IO OutboxBacklog
+outboxBacklog pool cutoff = runTransaction pool $ do
+  retentionBudgets
+  Session.statement cutoff outboxBacklogStatement
+
+retentionBudgets :: Session.Session ()
+retentionBudgets = Session.sql "SET LOCAL lock_timeout = '100ms'; SET LOCAL statement_timeout = '500ms'"
+
+-- | Four scope identities after a stable cursor, wrapping once. Enumerate
+-- counters rather than DISTINCT over the backlog; bound the query itself as
+-- well as its output. Empty scopes are harmless and preserve a stable turn.
+listRetentionScopes :: Pool Hasql.Connection -> Maybe ChangeScope -> IO [ChangeScope]
+listRetentionScopes pool previous = runTransaction pool $ do
+  retentionBudgets
+  case previous of
+    Just (WorkspaceScope workspace) -> Session.statement workspace listRetentionScopesAfterStatement
+    _ -> Session.statement () listRetentionScopesFirstStatement
 cleanupChangeStream :: Pool Hasql.Connection -> UTCTime -> IO (Int64, Int64)
 cleanupChangeStream pool now = runTransaction pool $ do
+  retentionBudgets
   tokens <- Session.statement now cleanupTokensStatement
   sessions <- Session.statement now cleanupSessionsStatement
   pure (tokens, sessions)
@@ -585,6 +620,28 @@ listOutboxRangeStatement = Statement.Statement "SELECT event_id, cursor, occurre
 pruneOutboxBeforeStatement :: Statement.Statement UTCTime Int64
 pruneOutboxBeforeStatement = Statement.Statement "SELECT hmem_change_stream_prune_outbox($1)"
   (Enc.param (Enc.nonNullable Enc.timestamptz)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
+pruneOutboxScopeStatement :: Statement.Statement (Text, Maybe UUID, UTCTime, Int32) Int64
+pruneOutboxScopeStatement = Statement.Statement "SELECT hmem_change_stream_prune_scope($1,$2,$3,$4)"
+  (contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.timestamptz)) <> contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.int4)))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
+outboxBacklogStatement :: Statement.Statement UTCTime OutboxBacklog
+outboxBacklogStatement = Statement.Statement
+  "SELECT count(*)::bigint, min(occurred_at) FROM (SELECT occurred_at FROM change_stream_outbox WHERE occurred_at < $1 ORDER BY occurred_at LIMIT 1001) backlog"
+  (Enc.param (Enc.nonNullable Enc.timestamptz))
+  (Dec.singleRow (OutboxBacklog <$> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nullable Dec.timestamptz))) True
+-- Each branch uses the existing unique (scope, coalesce(workspace_id,zero))
+-- index as an ordered range seek. Only the <=9 branch results are sorted;
+-- LIMIT outside a cursor-dependent sort over all counters would not suffice.
+listRetentionScopesFirstStatement :: Statement.Statement () [ChangeScope]
+listRetentionScopesFirstStatement = Statement.Statement
+  "SELECT scope,workspace_id FROM ((SELECT scope,workspace_id,0 AS phase FROM change_stream_scope_counters WHERE scope='workspace' ORDER BY coalesce(workspace_id,'00000000-0000-0000-0000-000000000000'::uuid) LIMIT 4) UNION ALL (SELECT scope,workspace_id,1 AS phase FROM change_stream_scope_counters WHERE scope='global' AND coalesce(workspace_id,'00000000-0000-0000-0000-000000000000'::uuid)='00000000-0000-0000-0000-000000000000'::uuid LIMIT 1)) candidates ORDER BY phase,workspace_id LIMIT 4"
+  Enc.noParams
+  (Dec.rowList (decodeScope <$> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid))) True
+listRetentionScopesAfterStatement :: Statement.Statement UUID [ChangeScope]
+listRetentionScopesAfterStatement = Statement.Statement
+  "SELECT scope,workspace_id FROM ((SELECT scope,workspace_id,0 AS phase FROM change_stream_scope_counters WHERE scope='workspace' AND coalesce(workspace_id,'00000000-0000-0000-0000-000000000000'::uuid)>$1 ORDER BY coalesce(workspace_id,'00000000-0000-0000-0000-000000000000'::uuid) LIMIT 4) UNION ALL (SELECT scope,workspace_id,1 AS phase FROM change_stream_scope_counters WHERE scope='global' AND coalesce(workspace_id,'00000000-0000-0000-0000-000000000000'::uuid)='00000000-0000-0000-0000-000000000000'::uuid LIMIT 1) UNION ALL (SELECT scope,workspace_id,2 AS phase FROM change_stream_scope_counters WHERE scope='workspace' AND coalesce(workspace_id,'00000000-0000-0000-0000-000000000000'::uuid)<=$1 ORDER BY coalesce(workspace_id,'00000000-0000-0000-0000-000000000000'::uuid) LIMIT 4)) candidates ORDER BY phase,workspace_id LIMIT 4"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.rowList (decodeScope <$> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid))) True
 cleanupTokensStatement :: Statement.Statement UTCTime Int64
 cleanupTokensStatement = Statement.Statement "WITH deleted AS (DELETE FROM change_stream_resume_tokens WHERE expires_at <= $1 OR superseded_at IS NOT NULL RETURNING 1) SELECT count(*)::bigint FROM deleted"
   (Enc.param (Enc.nonNullable Enc.timestamptz)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True

@@ -72,6 +72,7 @@ data-files:
     migrations/V052__session_lifecycle_audit.sql
     migrations/V053__session_runtime_harness.sql
     migrations/V054__session_occurrences.sql
+    migrations/V055__bounded_outbox_retention.sql
 
 library
   exposed-modules:

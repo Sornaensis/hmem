@@ -564,3 +564,9 @@ verified raw chunks while retaining the sealed receipt, archive and ledger;
 ordinary evidence mutation stays forbidden. Historical discovery and raw
 reclamation default off. See the [archive reference](docs/reference/sealed-session-archives.md)
 and [ordered upgrade procedure](docs/reference/upgrades.md#sealed-archive-maintenance-v050-and-v051).
+
+V055 adds a bounded single-scope outbox cursor-prefix pruning function and caps
+the compatibility helper at 1,000 deleted rows. Table columns and relationships
+are unchanged. Deletes and replay floors commit atomically; audit and session
+evidence retention are unaffected. See the
+[replay retention reference](docs/reference/change-stream-retention.md).

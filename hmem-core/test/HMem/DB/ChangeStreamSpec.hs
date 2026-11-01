@@ -9,14 +9,14 @@ import Data.ByteString (ByteString)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
 import Control.Concurrent.Async (async, concurrently, link, wait, withAsync)
 import Control.Exception (SomeException, bracket, bracket_, finally, try)
-import Control.Monad (void, forM_, replicateM)
+import Control.Monad (void, forM, forM_, replicateM)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Either (isLeft, isRight)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Pool (destroyAllResources)
-import Data.List (find)
+import Data.List (find, sort)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (UTCTime, addUTCTime, getCurrentTime)
@@ -52,6 +52,76 @@ import HMem.Types
 -- ephemeral PostgreSQL sandbox is still discarded by SpecHook after the run.
 spec :: Spec
 spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
+  it "seeks bounded retention scope pages through global and wraps without starving later workspaces" $ \_ -> withTestEnv $ \env -> do
+    workspaces <- forM [1..6 :: Int] $ \index -> do
+      workspace <- createTestWorkspace env ("retention-page-" <> T.pack (show index))
+      void $ createProject env.pool (CreateProject workspace.id Nothing "scope-counter" Nothing Nothing Nothing)
+      pure workspace.id
+    let scopes = map WorkspaceScope (sort workspaces) <> [GlobalScope]
+    first <- listRetentionScopes env.pool Nothing
+    first `shouldBe` take 4 scopes
+    listRetentionScopes env.pool (Just (last first)) `shouldReturn` drop 4 scopes <> take 1 scopes
+    listRetentionScopes env.pool (Just GlobalScope) `shouldReturn` take 4 scopes
+    listRetentionScopes env.pool (Just (scopes !! 5)) `shouldReturn` [GlobalScope] <> take 3 scopes
+
+  it "caps a large backlog drain and measures only a bounded lower bound" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "bounded-retention-large"
+    let scope = WorkspaceScope workspace.id
+        identifier = TE.encodeUtf8 (UUID.toText workspace.id)
+    runSession env.pool $ Session.sql ("INSERT INTO projects(workspace_id,name) SELECT '" <> identifier <> "'::uuid, 'backlog-' || n FROM generate_series(1,1005) n")
+    cutoff <- addUTCTime 1 <$> getCurrentTime
+    measured <- outboxBacklog env.pool cutoff
+    measured.expiredRowsLowerBound `shouldBe` 1001
+    refused <- try @DBException $ runSession env.pool $ Session.sql
+      ("SELECT hmem_change_stream_prune_scope('workspace','" <> identifier <> "',clock_timestamp()+interval '1 day',NULL)")
+    refused `shouldSatisfy` isLeft
+    outboxBacklog env.pool cutoff `shouldReturn` measured
+    pruneOutboxScopeBefore env.pool scope cutoff 100000 `shouldReturn` 1000
+    length <$> listOutboxAfter env.pool scope 0 1000 `shouldReturn` 5
+    pruneOutboxScopeBefore env.pool scope cutoff 1000 `shouldReturn` 5
+
+  it "prunes bounded prefixes, preserves the exact cutoff and retries without skipping retained cursors" $ \env -> do
+    workspace <- createTestWorkspace env "bounded-retention-prefix"
+    let scope = WorkspaceScope workspace.id
+        sqlPrefix = "UPDATE change_stream_outbox SET occurred_at = CASE WHEN cursor=4 THEN '2026-01-02 00:00:00+00'::timestamptz ELSE '2026-01-01 00:00:00+00'::timestamptz END WHERE scope='workspace' AND workspace_id='" <> TE.encodeUtf8 (UUID.toText workspace.id) <> "'"
+        cutoff = read "2026-01-02 00:00:00 UTC"
+    forM_ [1..5 :: Int] $ \index -> void $ createProject env.pool
+      (CreateProject workspace.id Nothing ("prefix-" <> T.pack (show index)) Nothing Nothing Nothing)
+    runSession env.pool (Session.sql sqlPrefix)
+    pruneOutboxScopeBefore env.pool scope cutoff 2 `shouldReturn` 2
+    map (.outboxCursor) <$> listOutboxAfter env.pool scope 0 10 `shouldReturn` [3,4,5]
+    pruneOutboxScopeBefore env.pool scope cutoff 2 `shouldReturn` 1
+    pruneOutboxScopeBefore env.pool scope cutoff 2 `shouldReturn` 0
+    map (.outboxCursor) <$> listOutboxAfter env.pool scope 0 10 `shouldReturn` [4,5]
+    pruneOutboxScopeBefore env.pool scope (addUTCTime 1 cutoff) 2 `shouldReturn` 2
+    pruneOutboxScopeBefore env.pool scope (addUTCTime 1 cutoff) 2 `shouldReturn` 0
+
+  it "rolls back a timed-out retention turn and preserves replay until the retry commits" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "bounded-retention-timeout"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "old-seven-day-token"
+    Right begin <- beginResync env.pool 300 scope audience (pure [])
+    Right terminal <- readSnapshotPageWithTtls env.pool 300 604800 scope audience begin.snapshotToken 1
+    token <- maybe (fail "missing terminal resume") pure terminal.snapshotResumeToken
+    void $ createProject env.pool (CreateProject workspace.id Nothing "retention-lock" Nothing Nothing Nothing)
+    cutoff <- addUTCTime 1 <$> getCurrentTime
+    acquired <- newEmptyMVar; release <- newEmptyMVar
+    -- A separate pool avoids capability-selected stripe admission being
+    -- mistaken for the PostgreSQL lock wait this case is meant to prove.
+    bracket (createPool env.testDb.testDbConnStr 1 5.0 30000) destroyAllResources $ \holderPool ->
+      withAsync (holdScopeLock holderPool workspace.id acquired release) $ \holder -> do
+        takeMVar acquired
+        result <- timeout 2000000 (try @DBException (pruneOutboxScopeBefore env.pool scope cutoff 1000))
+          `finally` putMVar release ()
+        result `shouldSatisfy` \case Just (Left _) -> True; _ -> False
+        wait holder
+    retained <- replayUnacknowledgedResumeToken env.pool scope audience token 10
+    retained `shouldSatisfy` isRight
+    pruneOutboxScopeBefore env.pool scope cutoff 1000 `shouldReturn` 1
+    replayUnacknowledgedResumeToken env.pool scope audience token 10 `shouldReturn` Left ReplayRetentionPruned
+    Right replacement <- beginResync env.pool 300 scope audience (pure [])
+    readSnapshotPageWithTtls env.pool 300 82800 scope audience replacement.snapshotToken 1 >>= (`shouldSatisfy` isRight)
+
   it "agent session metadata emits compact attributed effects once, independent of transcript bytes and link count" $ \env -> do
     workspace <- createTestWorkspace env "session-change-values"
     initial <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "initial session task" Nothing Nothing Nothing)
@@ -67,9 +137,12 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
         records = filter (\row -> envelopeEntityField "type" row `elem` [Just (String "agent_session"),Just (String "task_session")])
     row <- attributed $ AgentDB.createSession env.pool input
     attributed (AgentDB.createSession env.pool input) `shouldReturn` row
+    creationAudits <- getAuditLogRows env.pool "agent_session" (T.pack (show identifier))
+    map (.action) creationAudits `shouldBe` ["create"]
     first <- attributed $ AgentDB.appendSession env.pool workspace.id identifier (Agent.AppendSession 0 0 body False)
     replay <- attributed $ AgentDB.appendSession env.pool workspace.id identifier (Agent.AppendSession 0 0 body False)
     replay.replayed `shouldBe` True
+    getAuditLogRows env.pool "agent_session" (T.pack (show identifier)) `shouldReturn` creationAudits
     before <- records <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 1000
     length before `shouldBe` 3
     tasks <- replicateM 20 $ Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "associated" Nothing Nothing Nothing)
@@ -77,6 +150,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
       runSession env.pool $ Session.sql ("UPDATE tasks SET status='in_progress' WHERE id='" <> TE.encodeUtf8 (T.pack (show task.id)) <> "'")
       attributed $ AgentDB.associateSessionTask env.pool workspace.id identifier task.id
     beat <- attributed $ AgentDB.heartbeatSession env.pool workspace.id identifier
+    getAuditLogRows env.pool "agent_session" (T.pack (show identifier)) `shouldReturn` creationAudits
     let receipt = Agent.TerminateSession beat.committedBytes beat.revision beat.committedBytes (Agent.sessionSha256 body)
     sealed <- attributed $ AgentDB.terminateSession env.pool workspace.id identifier receipt
     attributed (AgentDB.terminateSession env.pool workspace.id identifier receipt) `shouldReturn` sealed
@@ -104,9 +178,12 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     let lastLink = T.pack (show identifier) <> ":" <> T.pack (show later.id)
     map (envelopeEntityField "id") links `shouldSatisfy` elem (Just (String lastLink))
     audits <- getAuditLogRows env.pool "agent_session" (T.pack (show identifier))
-    length audits `shouldBe` 4
-    map (.actorId) audits `shouldBe` replicate 4 (Just "session-live-bot")
-    map (.requestId) audits `shouldBe` replicate 4 (Just "session-live-request")
+    let stateOf snapshot = snapshot >>= \case Object fields -> KeyMap.lookup "state" fields; _ -> Nothing
+    map (.action) audits `shouldBe` ["create", "update"]
+    map (stateOf . (.oldValues)) audits `shouldBe` [Nothing, Just (String "active")]
+    map (stateOf . (.newValues)) audits `shouldBe` [Just (String "active"), Just (String "terminated")]
+    map (.actorId) audits `shouldBe` replicate 2 (Just "session-live-bot")
+    map (.requestId) audits `shouldBe` replicate 2 (Just "session-live-request")
     any (T.isInfixOf sentinel . T.pack . show) audits `shouldBe` False
     any (T.isInfixOf sentinel . T.pack . show . (.outboxEnvelope)) effects `shouldBe` False
     first.session.committedBytes `shouldBe` fromIntegral (BS.length body)

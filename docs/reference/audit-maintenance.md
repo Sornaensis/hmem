@@ -20,8 +20,24 @@ reports `application_target_override_unresolved` before opening any configured
 database connection. Ordinary service continues on the override target. Configure
 the shared target through YAML/environment instead to enable maintenance.
 
+`HMEM_CONFIG_DIR` selects a process-local directory containing `config.yaml` and
+logs. Supply a valid, non-root native absolute directory path, including spaces
+when needed. A missing directory/file keeps ordinary defaults until explicitly
+saved; an empty, relative, invalid or existing-file value fails without falling
+back to the user's configuration. No shell or environment expansion is applied.
+Unset it to retain the normal home-directory `.hmem` location. Native Windows
+variable names are case-insensitive, including present-empty entries.
+
+This selects configuration; it does not isolate globally named services.
+`hmem-ctl` refuses default setup, `init`, `install`, `start`, `stop`, `status`,
+`uninstall` and `reinstall` while the variable is present. Audit-maintenance
+commands remain available for the configured target. Own isolated server and
+database processes through their actual launcher handles instead of using the
+global lifecycle commands. Verify a rollback artifact's configuration-root
+support separately; an older rollback adapter does not inherit this contract.
+
 The local timezone is accepted only when the dedicated connection still uses a
-server default, configuration-file or command-line timezone. A database, role,
+server default, configuration-file, command-line or server-environment timezone. A database, role,
 client or session override returns `unproven_server_local_timezone`; remove that
 override or set an explicit supported timezone name in YAML. Gap boundaries move
 to the first valid local minute, repeated boundaries use their earliest instant,
@@ -160,3 +176,78 @@ audit, session, planning or replay history. Disable or pause the worker to roll
 back eligibility; this does not undo completed physical rewrites or restore already
 pruned outbox events. Keep the independent
 [one-day replay recovery policy](change-stream-retention.md).
+
+## Qualified native envelope
+
+The 2026-11-01 executable qualification used product revision `0b636dcf`, native
+Windows/PostgreSQL and libpq 18.2, local NTFS, and the same Windows SID/logon.
+The maintained login had only audit-table MAINTAIN and fixed helper grants.
+Two disposable clusters ran sequentially through the actual server Main, without
+`--dev` or `--db`. The heap trial omitted the audit YAML block; the index trial
+overrode only `heap_compaction_enabled: false`. Real server-local time was
+2026-11-02 03:03 in configuration-file timezone `Asia/Calcutta` (2026-11-01
+21:33 UTC); the OS clock was unchanged.
+
+Measured Win32 FileStandardInfo.AllocationSize, in bytes, counted each
+relation/fork once:
+
+| Relation group | Default heap before | After | Index trial before | After |
+| --- | ---: | ---: | ---: | ---: |
+| Audit heap | 1,294,336 | 344,064 | 1,294,336 | 1,294,336 |
+| TOAST heap | 109,338,624 | 57,344 | 109,338,624 | 109,338,624 |
+| TOAST index | 1,359,872 | 16,384 | 1,359,872 | 1,359,872 |
+| Direct audit indexes | 95,911,936 | 245,760 | 95,920,128 | 753,664 |
+| Total | 207,904,768 | 663,552 | 207,912,960 | 112,746,496 |
+
+Runtime sampling started after seeding and verified backup/restore cleanup.
+These are observed maxima of non-atomic sums of per-file AllocationSize for
+regular files. Data excludes `pg_wal`; root adds disjoint other files, including
+controller files and logs. Directory/filesystem metadata is excluded.
+
+| Observed native allocation | Heap trial | Index trial |
+| --- | ---: | ---: |
+| Data peak bytes | 238,733,728 | 238,741,920 |
+| WAL peak bytes | 67,108,864 | 67,108,864 |
+| Owned-root peak bytes | 372,145,184 | 372,153,432 |
+| Samples | 8 | 9 |
+| Largest sample gap, microseconds | 390,384 | 289,495 |
+
+These are not exact whole-volume or all-phase transient peaks. The sampler
+slept 25 ms between walks and enforced one-second freshness. Admission/monitor
+checks enforced 256 MiB data, 512 MiB WAL, 1 GiB aggregate root and 2 MiB logs,
+with at least 3 GiB effective free capacity before initialization. Only the log
+cap uses logical file length. The actual
+backup dump used 561,152 bytes and its restored database 13,935,128 bytes, below
+the separate 128 MiB temporary backup/restore allowance.
+
+Both trials removed 602 expired outbox records from a seven-day fixture and
+retained 100 records aged 23 hours. A previously valid opaque bearer crossed the
+floor, failed typed replay specifically for retention, and received the actual
+WebSocket `resync_required` frame. A fresh authorized 702-item HTTP snapshot
+restored the complete current task and issued a 23-hour resume bearer. Exact
+audit values/attribution, live 16 KiB history values, planning revert and unchanged
+scheduled date/operation on same-date server restart passed.
+
+The five HTTP readbacks after each physical completion took 4.462–11.709 ms;
+preparation/revert readbacks stayed below 47.085 ms. These timings do not measure
+concurrent interference. Matching native component tests separately cover the
+held rewrite/index phases, audited writes/readbacks, a 500 ms foreground bound,
+200 ms index-backed history reads, lock pressure, cancellation, timeout,
+connection loss, restart, partial indexes, ownership and uncertain recovery.
+Configuration/schedule tests cover disabled/custom policies, cadence, DST,
+privilege denial, unknown capacity and unsupported contexts.
+
+Created server groups joined after the controlled interrupt with exit 252 and
+no forced termination; shutdown-entry, settled audit state and absence of their
+maintenance backends were checked separately. Postmasters exited normally with
+PID files absent before fixture deletion. This does not qualify deferred global
+live-delivery or test-supervisor guarantees. The fixture uses local trust auth,
+plain loopback HTTP and a sparse synthetic workload; it is not a production-load
+or TLS benchmark.
+
+Run the contained qualifier from the verified native checkout with
+`stack exec powershell -- -NoProfile -ExecutionPolicy Bypass -File scripts/validation/audit-space.ps1 -Mode qualify`.
+The hmem maintainers own this versioned measurement record until a newer
+qualification supersedes it. Disposable data, helpers and raw logs are removed
+after their actual owners join; this technical record retains the required
+compact evidence.

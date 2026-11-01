@@ -51,6 +51,10 @@ allocated-file reclamation. The existing delivery loop may delay later turns.
 Tokens issued under a former, longer lifetime do not extend replay retention.
 Expired or pruned replay requires a new authorized canonical snapshot; valid
 retained replay continues to recheck scope, audience and authorization epoch.
+Ticket exchange can still accept a nonexpired bearer whose watermark has since
+fallen behind the retention floor. Replay performs the retention check and
+returns `resync_required`; ticket acceptance is not proof that its history is
+still replayable. Recover through the authorized canonical snapshot flow.
 Raising retention later cannot restore events already pruned. Restore a prior
 database backup into a separate recovery environment if historical events are
 required; changing this setting alone is insufficient.

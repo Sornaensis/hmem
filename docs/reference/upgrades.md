@@ -1,5 +1,42 @@
 # Upgrade reference
 
+## Scoped audit space maintenance (V056 and V057)
+
+Choose matching server/CLI artifacts and apply the ordered migrations with the
+existing migration administrator. These migrations install controls and bounded
+operation metadata; they neither install `pgstattuple` nor grant maintenance to
+the application login. Ordinary unsupported installations continue serving and
+report a deferred maintenance capability.
+
+Stage eligibility explicitly before providing maintenance credentials. Use
+`audit_maintenance.enabled: false`, or have the control owner persist a pause
+before starting the matching server. An omitted block defaults to enabled daily
+03:00–04:00 server-local eligibility. A separate narrow login, verified host
+capacity and permitted diagnostics are still required; heap work additionally
+requires a fresh administrator-attested backup that has actually been restored
+and checked. Follow the [identity and backup setup](audit-maintenance.md#narrow-database-setup).
+
+Inspect `hmem-ctl audit-maintenance status --json` for effective bounds, timezone,
+next eligibility and any unresolved physical attempt. Configure explicit window,
+timezone, cadence, thresholds or disablement through the optional
+[`audit_maintenance` example](../../config/audit-maintenance.yaml.example).
+Keep application and maintenance connections on the same configured target;
+the server's raw `--db` override defers maintenance. Enable or resume only as an
+operator-approved rollout step, then observe the scheduled date, outcome,
+foreground waits and actual data/WAL headroom. Project qualification does not
+deploy or enable a production installation.
+
+For rollback, pause or disable new work and confirm active work has cancelled,
+joined and settled before retiring its owner. Cleanup-pending or uncertain work
+requires continued ownership and reconciliation; a successful cancel signal
+alone is insufficient. Disabling does not undo a completed heap rewrite or index
+rebuild. Retain migrations/control evidence, and resolve invalid index artifacts
+through explicit administrator review rather than suffix-based deletion.
+Restoring a backup discards later writes unless separately recovered. Rolling
+back retention cannot recover already pruned replay events. If using
+`HMEM_CONFIG_DIR`, verify the rollback artifact supports that configuration-root
+contract; current global lifecycle commands deliberately refuse the override.
+
 ## Bounded replay retention (V055)
 
 Apply V055 before starting the matching server. The migration adds a bounded

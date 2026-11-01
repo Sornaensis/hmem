@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M6CHCT8BPF9YX5BF7YPK5G6Z"
+relation = "amends"
+from_record = "R01M6CHCT8BVF3XGCTZB5P3TH5A"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M5WEZCMGT4BTY45S7JW1KJRV"]
++++
+
+Record bounded one-day replay cleanup and canonical snapshot recovery independently of deferred delivery guarantees
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjVjMWVjNTA2OWE1M2RiMmQ4ZjBhZjg1MjZlMDc3ZmFlZDA5OWU0YWYiLCJpIjoic2hhMjU2OnctNWpILWhJNkNvbnN0dWRpeURTZEpVR2hpQnhmalJLb2dndkVNR3lNYVkiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTZDSENUOEJQRjlZWDVCRjdZUEs1RzZaIiwib3AiOiJPMDFNNkNIQ1Q4QlZGM1hHQ1RaQjVQM1RINUEiLCJwIjpbIlIwMU01V0VaQ01HVDRCVFk0NVM3SlcxS0pSViJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpwVndUaU1XTVVwMHlDakRrdEg0THE5ZHZuTzhIdU5Rd25zVVhVeWZpcmVJIiwidCI6MTc5MzU2OTc0NTE2MywidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

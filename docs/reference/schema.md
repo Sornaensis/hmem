@@ -348,3 +348,19 @@ Trigger replacement, cleanup and the version-52 ledger entry share one
 transaction. Failure restores the prior trigger and audit rows; an applied
 version is skipped. No transcript, session, connection or canonical change-stream
 history changes. Deleted audit rows can be recovered only from a prior backup.
+
+## Audit maintenance controls (V056)
+
+`audit_maintenance_control` has one true `singleton` Boolean primary key and a
+non-null `paused` Boolean defaulting false. Nullable schedule date/zone/claim
+timestamp fields survive restart; nullable heap/index timestamps record future
+operation cooldowns. Nullable JSONB assessment and cycle receipts are each
+limited to 32 KiB, and a nullable backup receipt to 4 KiB. The zone is limited to
+128 bytes. The table has no foreign keys and no audit/outbox trigger.
+
+Fixed definer functions expose private status, pause, scheduling, audit-only
+identity/diagnostics and bounded outcome recording. PUBLIC receives neither
+table access nor function execution. V056 and its ledger entry commit together;
+it installs no optional extension and deletes no existing data. See
+[audit maintenance controls](audit-maintenance.md) for the separate login,
+native host proof, scheduling and fail-closed diagnostic policy.

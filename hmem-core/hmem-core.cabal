@@ -15,6 +15,7 @@ license:        MPL-2.0
 build-type:     Simple
 extra-source-files:
     test/fixtures/session-occurrence-parity.json
+    cbits/audit_host.h
 
 library
   exposed-modules:
@@ -25,6 +26,8 @@ library
       HMem.Config
       HMem.DB.AgentSession
       HMem.DB.Audit
+      HMem.DB.AuditMaintenance
+      HMem.DB.AuditMaintenance.Host
       HMem.DB.Auth
       HMem.DB.ChangeStream
       HMem.DB.Embedding
@@ -73,6 +76,7 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints
   c-sources:
       cbits/session_archive.c
+      cbits/audit_host.c
   extra-libraries:
       z
   build-depends:
@@ -98,6 +102,11 @@ library
     , uuid
     , yaml >=0.11
   default-language: Haskell2010
+  if os(windows)
+    extra-libraries:
+        iphlpapi
+        ws2_32
+        advapi32
 
 test-suite hmem-core-test
   type: exitcode-stdio-1.0

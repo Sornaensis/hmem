@@ -1,6 +1,18 @@
 ```mermaid
 classDiagram
   direction TB
+    class audit_maintenance_control {
+      BOOLEAN singleton PK
+      BOOLEAN paused
+      DATE? last_scheduled_date
+      TEXT? last_scheduled_zone
+      TIMESTAMPTZ? last_claimed_at
+      TIMESTAMPTZ? last_heap_at
+      TIMESTAMPTZ? last_index_at
+      JSONB? last_assessment
+      JSONB? last_cycle
+      JSONB? backup_receipt
+    }
   %% Planning
     class workspaces {
       UUID id PK
@@ -570,3 +582,9 @@ the compatibility helper at 1,000 deleted rows. Table columns and relationships
 are unchanged. Deletes and replay floors commit atomically; audit and session
 evidence retention are unaffected. See the
 [replay retention reference](docs/reference/change-stream-retention.md).
+
+V056 adds one private audit-maintenance control row, persisted scheduled-date
+identity and bounded last-assessment/cycle/backup receipts. Fixed privileged
+diagnostics and control functions have no PUBLIC execution grant. The migration
+installs no extension and changes no audit rows. See the
+[audit maintenance reference](docs/reference/audit-maintenance.md).

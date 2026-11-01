@@ -8,6 +8,7 @@ category:            Database
 
 extra-source-files:
   - test/fixtures/session-occurrence-parity.json
+  - cbits/audit_host.h
 
 dependencies:
   - base >= 4.7 && < 5
@@ -42,8 +43,13 @@ ghc-options:
 
 library:
   source-dirs: src
-  c-sources: cbits/session_archive.c
+  c-sources:
+    - cbits/session_archive.c
+    - cbits/audit_host.c
   extra-libraries: z
+  when:
+    - condition: os(windows)
+      extra-libraries: [iphlpapi, ws2_32, advapi32]
 
 tests:
   hmem-core-test:

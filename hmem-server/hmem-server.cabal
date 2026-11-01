@@ -73,6 +73,7 @@ data-files:
     migrations/V053__session_runtime_harness.sql
     migrations/V054__session_occurrences.sql
     migrations/V055__bounded_outbox_retention.sql
+    migrations/V056__audit_maintenance_controls.sql
 
 library
   exposed-modules:
@@ -82,6 +83,7 @@ library
       HMem.Server.Archive.HTTP
       HMem.Server.Archive.Maintenance
       HMem.Server.Archive.Worker
+      HMem.Server.AuditMaintenance
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
@@ -89,6 +91,8 @@ library
       HMem.Server.ChangeStream
       HMem.Server.CtlArchives
       HMem.Server.CtlArchivesCli
+      HMem.Server.CtlAuditMaintenance
+      HMem.Server.CtlAuditMaintenanceCli
       HMem.Server.CtlEmbeddings
       HMem.Server.CtlEmbeddingsCli
       HMem.Server.CtlMigrate
@@ -498,6 +502,7 @@ test-suite hmem-server-test
       HMem.Server.Archive.MaintenanceSpec
       HMem.Server.Archive.WorkerSpec
       HMem.Server.ArchiveHTTPSpec
+      HMem.Server.AuditMaintenanceSpec
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec

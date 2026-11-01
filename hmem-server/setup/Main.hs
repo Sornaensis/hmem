@@ -69,6 +69,7 @@ import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AuthUsers qualified as AuthUsers
 import HMem.Server.CtlMigrate qualified as CtlMigrate
 import HMem.Server.CtlArchivesCli qualified as CtlArchivesCli
+import HMem.Server.CtlAuditMaintenanceCli qualified as CtlAuditMaintenanceCli
 import HMem.Server.CtlEmbeddingsCli qualified as CtlEmbeddingsCli
 import HMem.Server.CtlPgvectorCli qualified as CtlPgvectorCli
 import HMem.Server.CtlPaths
@@ -96,6 +97,7 @@ data Command
   | CmdPgvector CtlPgvectorCli.PgvectorCliCommand
   | CmdEmbeddings CtlEmbeddingsCli.EmbeddingsCliCommand
   | CmdArchives CtlArchivesCli.ArchivesCommand
+  | CmdAuditMaintenance CtlAuditMaintenanceCli.AuditMaintenanceCommand
 
 data AuthCommand
   = CmdBootstrapSuperadmin BootstrapSuperadminOpts
@@ -189,6 +191,7 @@ commandParser = subparser
   <> command "pgvector" (CtlPgvectorCli.pgvectorCommandInfo CmdPgvector)
   <> command "embeddings" (CtlEmbeddingsCli.embeddingsCommandInfo CmdEmbeddings)
   <> command "archives" (CtlArchivesCli.archivesCommandInfo CmdArchives)
+  <> command "audit-maintenance" (CtlAuditMaintenanceCli.auditMaintenanceCommandInfo CmdAuditMaintenance)
   )
   <|> pure CmdSetup
 
@@ -376,6 +379,7 @@ main = do
     CmdPgvector pgvectorCmd -> doPgvector pgvectorCmd
     CmdEmbeddings embeddingsCmd -> doEmbeddings embeddingsCmd
     CmdArchives archivesCmd -> CtlArchivesCli.runArchivesCommand archivesCmd >>= exitWith
+    CmdAuditMaintenance auditCmd -> CtlAuditMaintenanceCli.runAuditMaintenanceCommand auditCmd >>= exitWith
 
 ------------------------------------------------------------------------
 -- Pgvector commands for any configured PostgreSQL database

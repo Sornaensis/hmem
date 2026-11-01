@@ -37,6 +37,7 @@ import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscove
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
 import HMem.Server.Archive.Worker (startArchiveWorker, stopArchiveWorker)
+import HMem.Server.AuditMaintenance (startAuditWorkerForApplication,stopAuditWorker)
 import HMem.Server.Embedding.ManagedTei
   ( defaultManagedTeiConfig, defaultManagedTeiDeps, managedTeiEventText
   , ManagedTeiActive(..), ManagedTeiActivationFailure(..), ManagedTeiHooks(..), startManagedTeiWith
@@ -428,7 +429,8 @@ runNormalMode opts = do
               (Nothing, Nothing) -> logInfo logger "TLS disabled (no cert/key configured)" >> runSettings settings app
         runServer
   bracket (startArchiveWorker pool)
-    (\archiveWorker -> stopArchiveWorker archiveWorker >> shutdownDatabase) $ \_archiveWorker -> mask $ \restore -> do
+    (\archiveWorker -> stopArchiveWorker archiveWorker >> shutdownDatabase) $ \_archiveWorker ->
+    bracket (startAuditWorkerForApplication cfg (T.pack <$> opts.optDbConn)) stopAuditWorker $ \_auditWorker -> mask $ \restore -> do
     managed <- if pgvec && cfg.embeddingProvider.mode == Config.EmbeddingProviderManagedTei
       then do
         let deps = withManagedTeiEmitter

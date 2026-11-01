@@ -14,6 +14,9 @@ module HMem.Config
   , TokenLookupMode(..)
   , RateLimitConfig(..)
   , ChangeStreamConfig(..)
+  , AuditMaintenanceConfig(..)
+  , defaultAuditMaintenanceConfig
+  , validateAuditMaintenanceConfig
   , EmbeddingProviderMode(..)
   , EmbeddingProviderConfig(..)
   , EmbeddingEndpointAuthority(..)
@@ -68,6 +71,7 @@ import Data.ByteString qualified as BS
 import Data.Bits (xor, (.|.))
 import Data.Char (isAlphaNum, isDigit, isHexDigit, isSpace)
 import Data.Maybe (fromMaybe, isJust)
+import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -180,6 +184,92 @@ data ChangeStreamConfig = ChangeStreamConfig
   , snapshotSessionTtlSeconds :: !Int
   } deriving stock (Show, Eq)
 
+data AuditMaintenanceConfig = AuditMaintenanceConfig
+  { enabled :: !Bool, heapCompactionEnabled :: !Bool
+  , intervalDays :: !Int, windowStart :: !Text, windowEnd :: !Text, timezone :: !Text
+  , assessmentIntervalSeconds :: !Int, cooldownSeconds :: !Int
+  , minimumReclaimBytes :: !Int64, minimumReclaimFraction :: !Double
+  , lockTimeoutMs :: !Int, maximumOperationSeconds :: !Int, assessmentTimeoutMs :: !Int
+  , minimumFreeBytes :: !Int64, maximumWalBytes :: !Int64
+  , maximumSlotRetentionBytes :: !Int64, maximumArchiveBacklogBytes :: !Int64
+  , backupMaximumAgeSeconds :: !Int
+  , maintenanceUser :: !(Maybe Text), maintenancePassword :: !(Maybe Text)
+  } deriving stock (Eq)
+
+instance Show AuditMaintenanceConfig where
+  show c = "AuditMaintenanceConfig {enabled=" <> show c.enabled
+    <> ", heapCompactionEnabled=" <> show c.heapCompactionEnabled
+    <> ", intervalDays=" <> show c.intervalDays <> ", window=" <> show (c.windowStart,c.windowEnd)
+    <> ", timezone=" <> show c.timezone <> ", maintenanceCredentials=<redacted>}"
+
+defaultAuditMaintenanceConfig :: AuditMaintenanceConfig
+defaultAuditMaintenanceConfig = AuditMaintenanceConfig True True 1 "03:00" "04:00" "local"
+  300 86400 16777216 0.25 100 300 2000 1073741824 4294967296 1073741824 268435456 86400 Nothing Nothing
+
+instance FromJSON AuditMaintenanceConfig where
+  parseJSON = Aeson.withObject "AuditMaintenanceConfig" $ \o ->
+    if any (\key -> key `notElem` allowed || (key `notElem` ["maintenance_user","maintenance_password"] && KeyMap.lookup key o==Just Aeson.Null)) (KeyMap.keys o)
+      then fail "audit_maintenance contains an unknown field or null non-optional setting"
+      else AuditMaintenanceConfig
+    <$> o .:? "enabled" .!= True <*> o .:? "heap_compaction_enabled" .!= True
+    <*> o .:? "interval_days" .!= 1 <*> o .:? "window_start" .!= "03:00"
+    <*> o .:? "window_end" .!= "04:00" <*> o .:? "timezone" .!= "local"
+    <*> o .:? "assessment_interval_seconds" .!= 300 <*> o .:? "cooldown_seconds" .!= 86400
+    <*> o .:? "minimum_reclaim_bytes" .!= 16777216 <*> o .:? "minimum_reclaim_fraction" .!= 0.25
+    <*> o .:? "lock_timeout_ms" .!= 100 <*> o .:? "maximum_operation_seconds" .!= 300
+    <*> o .:? "assessment_timeout_ms" .!= 2000 <*> o .:? "minimum_free_bytes" .!= 1073741824
+    <*> o .:? "maximum_wal_bytes" .!= 4294967296 <*> o .:? "maximum_slot_retention_bytes" .!= 1073741824
+    <*> o .:? "maximum_archive_backlog_bytes" .!= 268435456 <*> o .:? "backup_maximum_age_seconds" .!= 86400
+    <*> o .:? "maintenance_user" <*> o .:? "maintenance_password"
+    where allowed=["enabled","heap_compaction_enabled","interval_days","window_start","window_end","timezone"
+            ,"assessment_interval_seconds","cooldown_seconds","minimum_reclaim_bytes","minimum_reclaim_fraction"
+            ,"lock_timeout_ms","maximum_operation_seconds","assessment_timeout_ms","minimum_free_bytes","maximum_wal_bytes"
+            ,"maximum_slot_retention_bytes","maximum_archive_backlog_bytes","backup_maximum_age_seconds"
+            ,"maintenance_user","maintenance_password"]
+
+instance ToJSON AuditMaintenanceConfig where
+  toJSON c = Aeson.object
+    [ "enabled" .= c.enabled, "heap_compaction_enabled" .= c.heapCompactionEnabled
+    , "interval_days" .= c.intervalDays, "window_start" .= c.windowStart, "window_end" .= c.windowEnd
+    , "timezone" .= c.timezone, "assessment_interval_seconds" .= c.assessmentIntervalSeconds
+    , "cooldown_seconds" .= c.cooldownSeconds, "minimum_reclaim_bytes" .= c.minimumReclaimBytes
+    , "minimum_reclaim_fraction" .= c.minimumReclaimFraction, "lock_timeout_ms" .= c.lockTimeoutMs
+    , "maximum_operation_seconds" .= c.maximumOperationSeconds, "assessment_timeout_ms" .= c.assessmentTimeoutMs
+    , "minimum_free_bytes" .= c.minimumFreeBytes, "maximum_wal_bytes" .= c.maximumWalBytes
+    , "maximum_slot_retention_bytes" .= c.maximumSlotRetentionBytes
+    , "maximum_archive_backlog_bytes" .= c.maximumArchiveBacklogBytes
+    , "backup_maximum_age_seconds" .= c.backupMaximumAgeSeconds
+    , "maintenance_user" .= c.maintenanceUser, "maintenance_password" .= c.maintenancePassword ]
+
+validateAuditMaintenanceConfig :: AuditMaintenanceConfig -> ([String],AuditMaintenanceConfig)
+validateAuditMaintenanceConfig c = (warnings, corrected)
+  where
+    limit lo hi = max lo . min hi
+    clock value = case T.splitOn ":" value of
+      [h,m] -> T.length h == 2 && T.length m == 2 && T.all asciiDigit h && T.all asciiDigit m
+        && (readMaybe (T.unpack h) :: Maybe Int) < Just 24 && (readMaybe (T.unpack m) :: Maybe Int) < Just 60
+      _ -> False
+    asciiDigit digit = digit>='0' && digit<='9'
+    goodWindow = clock c.windowStart && clock c.windowEnd && c.windowStart /= c.windowEnd
+    fraction = if isNaN c.minimumReclaimFraction || isInfinite c.minimumReclaimFraction then 0.25
+      else limit 0.01 0.95 c.minimumReclaimFraction
+    corrected = c { intervalDays=limit 1 3650 c.intervalDays
+      , windowStart=if goodWindow then c.windowStart else "03:00"
+      , windowEnd=if goodWindow then c.windowEnd else "04:00"
+      , timezone=if T.null c.timezone || T.length c.timezone>128 then "local" else c.timezone
+      , assessmentIntervalSeconds=limit 1 86400 c.assessmentIntervalSeconds
+      , cooldownSeconds=limit 0 31536000 c.cooldownSeconds
+      , minimumReclaimBytes=limit 0 1099511627776 c.minimumReclaimBytes
+      , minimumReclaimFraction=fraction, lockTimeoutMs=limit 1 5000 c.lockTimeoutMs
+      , maximumOperationSeconds=limit 1 3600 c.maximumOperationSeconds
+      , assessmentTimeoutMs=limit 100 30000 c.assessmentTimeoutMs
+      , minimumFreeBytes=limit 1048576 1125899906842624 c.minimumFreeBytes
+      , maximumWalBytes=limit 1048576 1125899906842624 c.maximumWalBytes
+      , maximumSlotRetentionBytes=limit 0 1125899906842624 c.maximumSlotRetentionBytes
+      , maximumArchiveBacklogBytes=limit 0 1125899906842624 c.maximumArchiveBacklogBytes
+      , backupMaximumAgeSeconds=limit 1 604800 c.backupMaximumAgeSeconds }
+    warnings = ["audit_maintenance: invalid bounds/window corrected; inspect effective settings" | corrected /= c]
+
 -- | A deliberately closed set of embedding providers.  The managed profile
 -- is pinned by @config/managed-embedding-provenance.yaml@; HTTP exists only
 -- for an operator-managed compatible TEI endpoint in that same vector space.
@@ -272,6 +362,7 @@ data HMemConfig = HMemConfig
   , auth     :: !AuthConfig
   , rateLimit :: !RateLimitConfig
   , changeStream :: !ChangeStreamConfig
+  , auditMaintenance :: !AuditMaintenanceConfig
   , embeddingProvider :: !EmbeddingProviderConfig
   , tls      :: !TlsConfig
   , web      :: !WebConfig
@@ -549,6 +640,9 @@ instance FromJSON HMemConfig where
     <*> o .:? "auth"     .!= defAuth
     <*> o .:? "rate_limit" .!= defRateLimit
     <*> o .:? "change_stream" .!= defChangeStream
+    <*> (case KeyMap.lookup "audit_maintenance" o of
+      Nothing -> pure defaultAuditMaintenanceConfig
+      Just value -> parseJSON value)
     <*> o .:? "embedding" .!= defEmbeddingProvider
     <*> o .:? "tls"      .!= defTls
     <*> o .:? "web"      .!= defWeb
@@ -563,6 +657,7 @@ instance ToJSON HMemConfig where
     , "auth"     .= cfg.auth
     , "rate_limit" .= cfg.rateLimit
     , "change_stream" .= cfg.changeStream
+    , "audit_maintenance" .= cfg.auditMaintenance
     , "embedding" .= cfg.embeddingProvider
     , "tls"      .= cfg.tls
     , "web"      .= cfg.web
@@ -672,6 +767,7 @@ defaultConfig = HMemConfig
   , auth     = defAuth
   , rateLimit = defRateLimit
   , changeStream = defChangeStream
+  , auditMaintenance = defaultAuditMaintenanceConfig
   , embeddingProvider = defEmbeddingProvider
   , tls      = defTls
   , web      = defWeb
@@ -723,8 +819,8 @@ loadConfigFile path = do
             _ -> do
               hPutStrLn stderr $
                 "Warning: failed to parse " <> path <> ": " <> show err
-              hPutStrLn stderr "Using default configuration."
-              pure defaultConfig
+              hPutStrLn stderr "Using default configuration; audit maintenance disabled because the file could not be validated."
+              pure defaultConfig {auditMaintenance=defaultAuditMaintenanceConfig {enabled=False,heapCompactionEnabled=False}}
         Right c -> pure c
     else pure defaultConfig
   envPassword <- fmap T.pack <$> lookupEnv "HMEM_DB_PASSWORD"
@@ -734,11 +830,16 @@ loadConfigFile path = do
   envRetention <- lookupEnv "HMEM_CHANGE_STREAM_OUTBOX_RETENTION_SECONDS"
   envResumeTtl <- lookupEnv "HMEM_CHANGE_STREAM_RESUME_TOKEN_TTL_SECONDS"
   envSessionTtl <- lookupEnv "HMEM_CHANGE_STREAM_SNAPSHOT_SESSION_TTL_SECONDS"
+  envAuditUser <- fmap T.pack <$> lookupEnv "HMEM_AUDIT_MAINTENANCE_DB_USER"
+  envAuditPassword <- fmap T.pack <$> lookupEnv "HMEM_AUDIT_MAINTENANCE_DB_PASSWORD"
   envEmbeddingMode <- fmap T.pack <$> lookupEnv "HMEM_EMBEDDING_PROVIDER"
   envEmbeddingEndpoint <- fmap T.pack <$> lookupEnv "HMEM_EMBEDDING_ENDPOINT"
   let cfg' = applyChangeStreamEnvOverrides envRetention envResumeTtl envSessionTtl
            $ applyEnvOverrides envPassword envApiKey envSslMode cfg
-      cfg'' = applyMcpProvenanceEnvOverride envMcpProvenanceToken cfg'
+      cfg'' = (applyMcpProvenanceEnvOverride envMcpProvenanceToken cfg')
+        { auditMaintenance = cfg'.auditMaintenance
+            { maintenanceUser=envAuditUser <|> cfg'.auditMaintenance.maintenanceUser
+            , maintenancePassword=envAuditPassword <|> cfg'.auditMaintenance.maintenancePassword } }
   cfgWithUser <- applyLocalUserTokenEnv cfg''
   cfg''' <- case applyEmbeddingProviderEnvOverrides envEmbeddingMode envEmbeddingEndpoint cfgWithUser of
     Left err -> hPutStrLn stderr ("Config warning: " <> err <> "; retaining file configuration") >> pure cfgWithUser
@@ -1045,8 +1146,9 @@ validateConfig cfg = (warnings, corrected)
     (auWarns,  au)  = validateAuth srv cfg.auth
     (rlWarns,  rl)  = validateRateLimit cfg.rateLimit
     (csWarns, cs) = validateChangeStream cfg.changeStream
-    warnings  = srvWarns <> dbWarns <> plWarns <> lgWarns <> auWarns <> rlWarns <> csWarns
-    corrected = cfg { server = srv, database = db, pool = pl, logging = lg, auth = au, rateLimit = rl, changeStream = cs }
+    (amWarns, am) = validateAuditMaintenanceConfig cfg.auditMaintenance
+    warnings  = srvWarns <> dbWarns <> plWarns <> lgWarns <> auWarns <> rlWarns <> csWarns <> amWarns
+    corrected = cfg { server = srv, database = db, pool = pl, logging = lg, auth = au, rateLimit = rl, changeStream = cs, auditMaintenance=am }
 
     validateServer s =
       let (ws, p) = clampField "server.port" 1 65535 s.port

@@ -16,6 +16,56 @@ import HMem.Config
 
 spec :: Spec
 spec = do
+  describe "audit maintenance defaults" $ do
+    it "defaults missing blocks and fields to enabled daily server-local 03:00 to 04:00" $ do
+      let parse yaml=Yaml.decodeEither' yaml :: Either Yaml.ParseException HMemConfig
+      mapM_ (\yaml -> case parse yaml of
+        Left failure -> expectationFailure (show failure)
+        Right cfg -> cfg.auditMaintenance `shouldBe` defaultAuditMaintenanceConfig)
+        ["{}","audit_maintenance: {}"]
+      defaultConfig.auditMaintenance.enabled `shouldBe` True
+      defaultConfig.auditMaintenance.heapCompactionEnabled `shouldBe` True
+      defaultConfig.auditMaintenance.intervalDays `shouldBe` 1
+      (defaultConfig.auditMaintenance.windowStart,defaultConfig.auditMaintenance.windowEnd,defaultConfig.auditMaintenance.timezone)
+        `shouldBe` ("03:00","04:00","local")
+    it "preserves explicit disable, partial YAML, custom cadence/window and timezone" $ do
+      let parsed=Yaml.decodeEither' "audit_maintenance:\n  enabled: false\n  heap_compaction_enabled: false\n  interval_days: 7\n  window_start: '23:00'\n  window_end: '01:00'\n  timezone: Europe/Copenhagen\n" :: Either Yaml.ParseException HMemConfig
+      case parsed of
+        Left failure -> expectationFailure (show failure)
+        Right cfg -> do
+          cfg.auditMaintenance.enabled `shouldBe` False
+          cfg.auditMaintenance.heapCompactionEnabled `shouldBe` False
+          cfg.auditMaintenance.intervalDays `shouldBe` 7
+          cfg.auditMaintenance.assessmentIntervalSeconds `shouldBe` 300
+          case Yaml.decodeEither' (Yaml.encode cfg) of
+            Left failure -> expectationFailure (show failure)
+            Right decoded -> decoded `shouldBe` cfg
+    it "clamps operation/assessment/headroom bounds and rejects malformed or collapsed clock settings" $ do
+      let raw=defaultAuditMaintenanceConfig {intervalDays=0,windowStart="25:99",windowEnd="25:99",minimumFreeBytes=0
+            ,maximumOperationSeconds=99999,assessmentTimeoutMs=0,minimumReclaimFraction=0/0}
+          (warnings,cfg)=validateAuditMaintenanceConfig raw
+      warnings `shouldSatisfy` (not . null)
+      (cfg.windowStart,cfg.windowEnd,cfg.intervalDays) `shouldBe` ("03:00","04:00",1)
+      cfg.minimumFreeBytes `shouldBe` 1048576
+      cfg.maximumOperationSeconds `shouldBe` 3600
+      cfg.assessmentTimeoutMs `shouldBe` 100
+      cfg.minimumReclaimFraction `shouldBe` 0.25
+    it "redacts both separate maintenance credentials from Show" $ do
+      let cfg=defaultAuditMaintenanceConfig {maintenanceUser=Just "private-maintainer",maintenancePassword=Just "private-password"}
+      show cfg `shouldSatisfy` (not . isInfixOf "private-maintainer")
+      show cfg `shouldSatisfy` (not . isInfixOf "private-password")
+    it "never enables maintenance through a typed-file fallback, including a valid disable beside unrelated errors" $
+      withSystemTempDirectory "audit-malformed-config" $ \dir -> do
+        let path=dir</>"config.yaml"
+        mapM_ (\contents -> do
+          BS8.writeFile path contents
+          cfg<-withEnvVar "HMEM_AUDIT_MAINTENANCE_DB_USER" (Just "configured-maintainer")
+            $ withEnvVar "HMEM_AUDIT_MAINTENANCE_DB_PASSWORD" (Just "private-password") $ loadConfigFile path
+          cfg.auditMaintenance.enabled `shouldBe` False
+          cfg.auditMaintenance.heapCompactionEnabled `shouldBe` False)
+          ["audit_maintenance:\n  enabled: false\nserver:\n  port: wrong-type\n"
+          ,"audit_maintenance: invalid-block\n","audit_maintenance: null\n"
+          ,"audit_maintenance: {enabled: null}\n","audit_maintenance: {enable: false}\n"]
   describe "local human bearer configuration" $ do
     it "is absent by default and only active in enabled local auth" $ do
       defaultConfig.auth.local.userToken `shouldBe` Nothing

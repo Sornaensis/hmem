@@ -1,0 +1,22 @@
+# Optional block for config.yaml. Omitting it keeps daily 03:00–04:00
+# server-local eligibility enabled. Provision separate credentials first.
+audit_maintenance:
+  enabled: true
+  heap_compaction_enabled: true
+  interval_days: 1
+  window_start: '03:00'
+  window_end: '04:00'
+  timezone: local
+  assessment_interval_seconds: 300
+  cooldown_seconds: 86400
+  minimum_reclaim_bytes: 16777216
+  minimum_reclaim_fraction: 0.25
+  lock_timeout_ms: 100
+  maximum_operation_seconds: 300
+  assessment_timeout_ms: 2000
+  minimum_free_bytes: 1073741824
+  maximum_wal_bytes: 4294967296
+  maximum_slot_retention_bytes: 1073741824
+  maximum_archive_backlog_bytes: 268435456
+  backup_maximum_age_seconds: 86400
+# Prefer HMEM_AUDIT_MAINTENANCE_DB_USER / _PASSWORD over saving credentials here.

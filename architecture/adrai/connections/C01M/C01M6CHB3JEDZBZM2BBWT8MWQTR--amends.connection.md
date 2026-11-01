@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M6CHB3JEDZBZM2BBWT8MWQTR"
+relation = "amends"
+from_record = "R01M6CHB3JEFW4G65W7X1HEJMRQ"
+subject_adr = "A01M39RCB0NC51143VRNQDG4R5Y"
+to_records = ["R01M649D22S2YMTJDV3HJF4ZF9A"]
++++
+
+Preserve canonical audit history while reclaiming allocated storage through scoped guarded maintenance
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6IjBiNjM2ZGNmYjNkN2EzODQwODFmNGY5ZDdlOTkzM2U2MjA5N2MxYTMiLCJpIjoic2hhMjU2OjhMUXlEZlFuYUhuVzhRaHdtNllFcEMyNnJ6VmRZYUU5TkNzc1NSSGdzRTQiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTZDSEIzSkVEWkJaTTJCQldUOE1XUVRSIiwib3AiOiJPMDFNNkNIQjNKRUZXNEc2NVc3WDFIRUpNUlEiLCJwIjpbIlIwMU02NDlEMjJTMllNVEpEVjNISkY0WkY5QSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjotYk1zbU43NmxsZnVSUVhieW95WUV0TVFQYnNKSHEwZXhWS0FuSzlhYjRjIiwidCI6MTc5MzU2OTY4OTE2NiwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

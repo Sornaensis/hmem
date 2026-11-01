@@ -2,6 +2,10 @@
 
 The six accepted directions define the shared visual system. The current follow-up layout explicitly supersedes the earlier Projects inspector, metadata disclosures and session-pane order. Original HTML, reopened review and prior release captures remain immutable historical inputs; simplified controls and example records do not replace production capabilities.
 
+## Navigation refinement under review — 1 November 2026
+
+The [UX navigation refinement proposal](../../docs/reference/ux-navigation-refinement.md) adds a proposed shared **Location** breadcrumb and separate chronological **Return** trail across focus-link families. Its [interactive wireframes](design/ux-navigation-wireframes.html) compare Context strip and Journey disclosure while retaining the current dark shell, content, pane order and metadata contracts. These are design-review inputs, not implemented behavior or replacement fidelity evidence. The proposed validated return-to-source anchor restoration is explicitly scoped against the existing Search/Timeline rule below; that baseline remains authoritative until production implementation is accepted. Existing six selected stages and historical evidence remain unchanged.
+
 ## Inputs and selected stages
 
 Original SHA-256: `e4fb5d4475170c64af5a0680086d41a229acd5d0896cf946043e153bad40f2d9`.

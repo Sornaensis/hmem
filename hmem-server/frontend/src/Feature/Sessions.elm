@@ -1051,8 +1051,9 @@ viewSessionIdentity session =
         provider = session.runtimeIdentity |> Maybe.andThen .provider |> identityValue |> Maybe.map (\value -> " · Provider: " ++ value) |> Maybe.withDefault ""
     in
     span [class "session-identity"]
-        [span [class "session-runtime actor-attribution-kind",attribute "aria-label" (label ++ ": " ++ visible),Html.Attributes.title (label ++ ": " ++ visible ++ provider)]
-            [span [class "session-runtime-value"] [text visible]]]
+        [span [class "session-role actor-attribution-kind",attribute "aria-label" (label ++ " role: " ++ role),Html.Attributes.title (label ++ " role: " ++ role)] [text role]
+        ,span [class "session-runtime actor-attribution-kind",attribute "aria-label" (label ++ " model: " ++ runtime),Html.Attributes.title (label ++ ": " ++ visible ++ provider)]
+            [span [class "session-runtime-value"] [text runtime]]]
 
 
 viewDetail : String -> Model -> String -> Html Msg
@@ -1261,7 +1262,7 @@ viewTaskActiveWithChoices includeChoices workspace model task =
         [div [class "task-session-context-grid"]
             [model.sessions.selected |> Maybe.map (\id -> div [class "task-session-transcript"]
                 [resource workspace (Delivery.SessionMetadata id) model |> Maybe.andThen .data |> Maybe.map (\payload -> case payload of
-                    Delivery.Metadata session -> div [class "task-session-selected-context"] [h4 [] [text (sessionTitle session)]]
+                    Delivery.Metadata session -> div [class "task-session-selected-context"] [h4 [] [text (sessionTitle session)],viewSessionIdentity session]
                     _ -> text "") |> Maybe.withDefault (text "")
                 ,viewRecords EmbeddedReader workspace model id
                 ,div [class "task-session-footer"]
@@ -1419,7 +1420,7 @@ viewRecords context workspace model id =
     if session |> Maybe.map (.state >> (==) Api.SessionTerminated) |> Maybe.withDefault False then viewSealedRecords context model session
     else section [class "session-viewer",attribute "aria-label" "Session transcript"]
         [div [class "sessions-toolbar"]
-            [session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")]
+            [if context == WorkspaceReader then session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "") else text ""]
         ,if state.error /= Nothing || rangeError /= Nothing || metadataError /= Nothing then p [attribute "role" "alert"] [text (Maybe.withDefault "Transcript request failed." state.error),button [onClick SessionsRetry] [text "Retry"]] else text ""
         ,p [attribute "role" "alert",attribute "data-disclosure-error-owner" state.stamp,attribute "data-disclosure-error-scope" state.viewerScope,Html.Attributes.hidden True] [text "Activity update could not be confirmed. ",button [onClick SessionsRetry] [text "Retry"]]
         ,viewLatestError state
@@ -1506,7 +1507,7 @@ viewSealedRecords context model session =
             _ -> "Preparing complete archive…"
     in
     let
-        identity = session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "")
+        identity = if workspaceReader then session |> Maybe.map viewSessionIdentity |> Maybe.withDefault (text "") else text ""
         status = p [class (if workspaceReader then "session-archive-status card-meta" else ""),attribute "role" (if sealed.error == Nothing then "status" else "alert"),attribute "aria-live" "polite"] [text message]
         lastProseMore = List.reverse sealed.rows |> List.head |> Maybe.map (\piece -> piece.kind == "text" && (piece.body |> Maybe.map .more |> Maybe.withDefault False) && not (sealed.markdown.complete && sealed.markdown.key == piece.key)) |> Maybe.withDefault False
         records = Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-sealed-page-request" (String.fromInt sealed.pageRequest),attribute "data-sealed-page-first" sealed.pageFirst,attribute "data-sealed-page-last" sealed.pageLast,attribute "data-sealed-scan-first" sealed.scanFirst,attribute "data-sealed-scan-last" sealed.scanLast,attribute "data-sealed-at-beginning" (if sealed.atBeginning then "true" else "false"),attribute "data-sealed-older-boundary" (List.take 20 sealed.rows |> List.reverse |> List.head |> Maybe.map .key |> Maybe.withDefault sealed.first),attribute "data-sealed-newer-boundary" (List.drop (max 0 (List.length sealed.rows-20)) sealed.rows |> List.head |> Maybe.map .key |> Maybe.withDefault sealed.last),attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-archive-can-previous" (if sealed.canPrevious then "true" else "false"),attribute "data-archive-can-next" (if sealed.canNext then "true" else "false"),attribute "data-last-prose-more" (if lastProseMore then "true" else "false"),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "sealed",attribute "data-presentation-anchor" state.presentationAnchor,attribute "data-following" (if state.following then "true" else "false"),attribute "aria-label" "Verified archive records"] (List.map2 (\key node -> (state.stamp ++ ":" ++ (String.toInt key |> Maybe.andThen (\index -> List.drop index renderEntries |> List.head |> Maybe.map Tuple.first) |> Maybe.withDefault key),node)) rendered.keys rendered.nodes)

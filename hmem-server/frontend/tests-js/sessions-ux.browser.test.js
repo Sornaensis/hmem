@@ -16,7 +16,7 @@ test('embedded and workspace readers omit lineage and inspector while native tra
   const card=page.locator('#entity-'+h.fixture.tasks[0].id);await until(()=>card.locator('.task-sessions-icon').isEnabled());await card.locator('.task-sessions-icon').click()
   await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
   for(const embedded of [true,false]){
-   if(!embedded){await card.getByRole('link',{name:'Open full session \u2197'}).click();await page.locator('.session-detail').waitFor();await page.locator('.session-record').first().waitFor();await h.idle();await until(async()=>await page.locator('.session-activity-group').first().getAttribute('open')==='')}
+   if(!embedded){await card.getByRole('link',{name:'Jump To Session \u2197'}).click();await page.locator('.session-detail').waitFor();await page.locator('.session-record').first().waitFor();await h.idle();await until(async()=>await page.locator('.session-activity-group').first().getAttribute('open')==='')}
    assert.equal(await page.locator('.session-ancestor-path,.session-event-inspector,.session-inspect-event').count(),0)
    const group=page.locator('.session-activity-group').first();if(await group.getAttribute('open')===null)await group.locator(':scope > summary').click()
    const tool=group.locator('.session-content-tool').first();if(await tool.getAttribute('open')===null)await tool.locator(':scope > summary').click()
@@ -60,7 +60,7 @@ test('authorized task and full-session navigation retains one viewer and valid r
   const point=await viewer.evaluate(node=>{const box=node.getBoundingClientRect();for(const leaf of node.querySelectorAll('[data-fragment-path]')){if(leaf.querySelector('[data-fragment-path],[data-history-gap],[data-body-gap]'))continue;let top=box.top,bottom=box.bottom,left=box.left,right=box.right;for(let parent=leaf.parentElement;parent&&parent!==node;parent=parent.parentElement){const style=getComputedStyle(parent);if(/auto|scroll|hidden|clip/.test(style.overflowX+' '+style.overflowY)){const clip=parent.getBoundingClientRect();top=Math.max(top,clip.top);bottom=Math.min(bottom,clip.bottom);left=Math.max(left,clip.left);right=Math.min(right,clip.right)}}const walker=document.createTreeWalker(leaf,4);let text,offset=0;while(text=walker.nextNode()){for(let i=0;i<text.length;i++){const range=document.createRange();range.setStart(text,i);range.setEnd(text,i+1);const r=range.getBoundingClientRect();if(r.height&&r.bottom>top&&r.top<bottom&&r.right>left&&r.left<right)return {path:leaf.dataset.fragmentPath,offset:offset+i}}offset+=text.length}}return null});assert.ok(point,'a clipped semantic character is captured for navigation')
   const readPoint=()=>viewer.evaluate((node,point)=>{const leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>leaf.dataset.fragmentPath===point.path);if(!leaf)return null;const walker=document.createTreeWalker(leaf,4);let text=walker.nextNode(),offset=point.offset;while(text&&offset>text.length){offset-=text.length;text=walker.nextNode()}if(!text)return null;const range=document.createRange();range.setStart(text,offset);range.setEnd(text,Math.min(text.length,offset+1));const r=range.getBoundingClientRect(),box=node.getBoundingClientRect();return {char:range.toString(),top:r.top-box.top,visible:r.height>0&&r.bottom>box.top&&r.top<box.bottom}},point)
   const before=await readPoint();assert.equal(before.visible,true);const beforeOwner=await viewer.evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,points:window.sessionPointFacts.slice(-3),commands:window.sessionBridgeFacts.filter(fact=>fact.direction==='command').slice(-3)}))
-  await card.getByRole('link',{name:'Open full session ↗',exact:true}).click();await page.locator('.session-detail').waitFor();await h.idle();await until(()=>viewer.evaluate(node=>node.dataset.historyLoading==='false'))
+  await card.getByRole('link',{name:'Jump To Session ↗',exact:true}).click();await page.locator('.session-detail').waitFor();await h.idle();await until(()=>viewer.evaluate(node=>node.dataset.historyLoading==='false'))
   assert.equal(await viewer.count(),1);const after=await readPoint();assert.equal(after?.char,before.char);assert.equal(after?.visible,true,JSON.stringify({point,before,after,beforeOwner,state:await viewer.evaluate(node=>({attrs:{...node.dataset},top:node.scrollTop,max:node.scrollHeight-node.clientHeight,points:window.sessionPointFacts.slice(-4),ownerChanges:window.sessionOwnerChanges,commands:window.sessionBridgeFacts.filter(fact=>fact.direction==='command').slice(-4)}))}));assert.ok(Math.abs(after.top-before.top)<=4)
   const verifyFlags=async()=>{await viewer.press('End');await h.idle();assert.equal(await page.locator('.session-content-tool').filter({has:page.locator('summary').filter({hasText:/Call · Read 409 ·/})}).getAttribute('open'),'');await viewer.press('Home');await h.idle();const first=page.locator('.session-content-tool').filter({has:page.locator('summary').filter({hasText:/Call · Read 0 ·/})});await first.waitFor();assert.equal(await first.getAttribute('open'),'')}
   await verifyFlags()
@@ -93,7 +93,7 @@ test('active filters, linked task focus, encrypted thinking and local-day timest
   await until(async()=>await page.locator('.session-record-activity .session-event-time').first().textContent()==='2026-10-24 23:59')
   const finalSourceTime=JSON.parse(h.bytes.toString('utf8').trim().split('\n')[4]).timestamp
   assert.equal(await page.locator('.session-activity-group > summary time').first().getAttribute('datetime'),finalSourceTime,'the complete group uses its final entry rather than the earlier thinking time')
-  const identityText=await page.locator('.session-viewer .session-identity').innerText()
+  const identityText=await page.locator(':is(.session-viewer,.task-session-selected-context) .session-identity').innerText()
   assert.ok(identityText.includes('Developer'),identityText)
   const latest=page.locator('.session-latest-activity time')
   assert.ok((await latest.evaluateAll(nodes=>nodes.map(node=>node.getAttribute('datetime')))).every(value=>value===h.active.last_activity_at))
@@ -171,7 +171,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   const fallbackEvent=page.waitForEvent('download');await evidence.getByRole('button',{name:/Download session/}).click()
   const fallback=await fallbackEvent;const fallbackPath=join(scratch,'fallback.jsonl');await fallback.saveAs(fallbackPath);assert.deepEqual(await readFile(fallbackPath),h.bytes)
   if(process.env.SESSIONS_UX_SCREENSHOTS)await page.screenshot({path:process.env.SESSIONS_UX_SCREENSHOTS+'/after-task.png',fullPage:true})
-  await active.getByRole('link',{name:'Open full session ↗',exact:true}).click();await page.locator('.sessions-task-filter').waitFor()
+  await active.getByRole('link',{name:'Jump To Session ↗',exact:true}).click();await page.locator('.sessions-task-filter').waitFor()
   assert.match(page.url(),new RegExp('task='+h.fixture.tasks[0].id))
   await page.locator('.session-summary a').filter({hasText:'Codex'}).click();await page.locator('.session-record').first().waitFor()
   assert.match(page.url(),new RegExp('task='+h.fixture.tasks[0].id))
@@ -180,7 +180,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   assert.ok(h.peak()<=2,'session HTTP admission stays at two')
   await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects');await h.idle()
   const second=page.locator('#entity-'+h.fixture.tasks[1].id)
-  await second.locator(':scope > .card-header .task-sessions-icon').click();await second.locator('.task-session-dock').waitFor();assert.ok(page.url().includes('tab=projects'));await second.getByRole('link',{name:'Open full session ↗',exact:true}).click();await until(()=>page.url().includes('task='+h.fixture.tasks[1].id));await page.locator('.sessions-task-filter').waitFor()
+  await second.locator(':scope > .card-header .task-sessions-icon').click();await second.locator('.task-session-dock').waitFor();assert.ok(page.url().includes('tab=projects'));await second.getByRole('link',{name:'Jump To Session ↗',exact:true}).click();await until(()=>page.url().includes('task='+h.fixture.tasks[1].id));await page.locator('.sessions-task-filter').waitFor()
   assert.ok(h.reads.some(read=>read.path.includes('/tasks/'+h.fixture.tasks[1].id+'/sessions')))
   assert.deepEqual(h.errors,[])
  }finally{await h.close();await rm(scratch,{recursive:true,force:true})}
@@ -253,11 +253,11 @@ test('conversation flow preserves declared identity and wraps long model names w
    await page.getByRole('button',{name:'Sessions',exact:true}).click();await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor()
    const selected=page.locator('.session-summary a').filter({hasText:'Codex'})
    if(scenario.creator){assert.match(await selected.locator('.session-identity').innerText(),new RegExp(scenario.creator.creator_bot_identity.role));assert.equal(await selected.locator('.session-runtime-value').evaluate(el=>getComputedStyle(el).whiteSpace),'normal','Complete runtime labels can wrap')}
-   else assert.match(await selected.locator('.session-runtime-value').innerText(),/\[unknown\] unknown:unknown:unknown/)
+   else assert.match(await selected.locator('.session-runtime-value').innerText(),/unknown:unknown:unknown/)
    await selected.click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
-   const identity=page.locator('.session-viewer .session-identity')
+   const identity=page.locator(':is(.session-viewer,.task-session-selected-context) .session-identity')
    if(scenario.creator){const declared=scenario.creator.creator_bot_identity;assert.ok((await identity.locator('.session-runtime').getAttribute('title')).includes(declared['model-id']));assert.ok((await identity.innerText()).includes(declared.role));assert.equal(await identity.evaluate(el=>getComputedStyle(el).userSelect),'text')}
-   else assert.match(await identity.locator('.session-runtime-value').innerText(),/\[unknown\] unknown:unknown:unknown/)
+   else assert.match(await identity.locator('.session-runtime-value').innerText(),/unknown:unknown:unknown/)
    const user=page.locator('.session-role-user:not(.session-record-activity)').first(),assistant=page.locator('.session-role-assistant:not(.session-record-activity)').first()
    assert.notEqual(await user.evaluate(el=>getComputedStyle(el).borderRadius),'0px')
    assert.equal(await assistant.evaluate(el=>getComputedStyle(el).borderTopWidth),'0px')
@@ -269,9 +269,9 @@ test('conversation flow preserves declared identity and wraps long model names w
    if(scenario.creator&&scenario.width===1440){
     await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle()
     const taskCard=page.locator('#entity-'+h.fixture.tasks[0].id);await taskCard.locator('.btn-extras-toggle').click();await h.idle()
-    await taskCard.locator(':scope > .card-header .task-sessions-icon').click();await taskCard.getByRole('button',{name:'Evidence',exact:true}).click();await taskCard.locator('.task-session-evidence').waitFor();await taskCard.locator('.session-viewer .session-identity').waitFor()
-    assert.equal(await taskCard.locator('.task-session-card .session-identity,.task-session-dock .session-viewer .session-identity').count(),2)
-    for(const label of await taskCard.locator('.task-session-card .session-runtime,.task-session-dock .session-viewer .session-runtime').evaluateAll(nodes=>nodes.map(node=>node.title)))assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
+    await taskCard.locator(':scope > .card-header .task-sessions-icon').click();await taskCard.getByRole('button',{name:'Evidence',exact:true}).click();await taskCard.locator('.task-session-evidence').waitFor();await taskCard.locator(':is(.session-viewer,.task-session-selected-context) .session-identity').waitFor()
+    assert.equal(await taskCard.locator('.task-session-card .session-identity,.task-session-dock :is(.session-viewer,.task-session-selected-context) .session-identity').count(),2)
+    for(const label of await taskCard.locator('.task-session-card .session-runtime,.task-session-dock :is(.session-viewer,.task-session-selected-context) .session-runtime').evaluateAll(nodes=>nodes.map(node=>node.title)))assert.ok(label.includes(scenario.creator.creator_bot_identity['model-id']))
    }
    assert.deepEqual(h.errors,[])
   }finally{await h.close()}

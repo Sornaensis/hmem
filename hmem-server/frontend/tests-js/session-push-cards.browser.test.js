@@ -135,7 +135,7 @@ test('shared compact cards retain parent tree inside a forty-percent wider dock 
   assert.ok(after.width/before.width>=1.35&&after.width/before.width<=1.45,JSON.stringify({before,after,ratio:after.width/before.width}))
   assert.equal(await card.locator('.task-session-work-context .session-tree-children .session-card').count(),2);assert.equal(await card.locator('#session-records').count(),1)
   assert.equal(await card.locator('.task-session-work-context .session-card .session-connection').count(),0)
-  assert.equal(await card.locator('.task-session-work-context .session-card .session-runtime-value').first().innerText(),'[Developer] unknown:Actual running model:unknown')
+  assert.equal(await card.locator('.task-session-work-context .session-card .session-runtime-value').first().innerText(),'unknown:Actual running model:unknown')
   assert.ok(await card.locator('.session-summary-heading').first().evaluate(node=>node.firstElementChild.classList.contains('session-state-dot')))
   if(process.env.SESSION_PUSH_CARDS_SCREENSHOTS)await page.screenshot({path:join(process.env.SESSION_PUSH_CARDS_SCREENSHOTS,'session-dock-wide.png'),fullPage:true})
   await page.setViewportSize({width:430,height:1600});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));const layout=await card.evaluate(node=>{const body=node.querySelector(':scope > .task-card-work > .card-body').getBoundingClientRect(),dock=node.querySelector('.task-session-dock').getBoundingClientRect();return {bodyBottom:body.bottom,dockTop:dock.top}});assert.ok(layout.dockTop>=layout.bodyBottom)

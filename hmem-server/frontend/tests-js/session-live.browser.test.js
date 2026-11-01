@@ -51,12 +51,12 @@ for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sess
   await page.evaluate(async()=>{await document.fonts.ready;for(let index=0;index<8;index++)await new Promise(resolve=>requestAnimationFrame(resolve))})
   await page.evaluate(()=>{
    const root=document.getElementById('session-records')
-   window.chromeNodes=[root,root.querySelector('[data-block-key]'),root.querySelector('.session-activity-group'),root.querySelector('.session-content-tool'),document.querySelector('.session-viewer .session-runtime-value'),...document.querySelectorAll('.session-summary,.session-detail-title,.session-task-card')]
+   window.chromeNodes=[root,root.querySelector('[data-block-key]'),root.querySelector('.session-activity-group'),root.querySelector('.session-content-tool'),document.querySelector(':is(.session-viewer,.task-session-selected-context) .session-runtime-value'),...document.querySelectorAll('.session-summary,.session-detail-title,.session-task-card')]
    window.chromeLost=false
    window.chromeObserver=new MutationObserver(()=>{if(window.chromeNodes.some(node=>!node.isConnected)||!window.chromeNodes[2].open||!window.chromeNodes[3].open)window.chromeLost=true})
    window.chromeObserver.observe(document,{childList:true,subtree:true})
   })
-  const snapshot=async()=>({titles:await page.locator('.session-detail-title').allTextContents(),summaries:await page.locator('.session-summary').allTextContents(),links:await page.locator('.session-task-card').allTextContents(),runtime:await page.locator('.session-viewer .session-runtime-value').innerText(),owner:dock?await page.locator('.task-session-dock').boundingBox():{y:0},card:dock?await page.locator('#entity-'+h.fixture.tasks[0].id).boundingBox():null,ancestor:dock?await page.locator('#entity-'+h.fixture.projects[0].id).boundingBox():null,scroll:await page.locator('#main-content-scroll').evaluate(node=>node.scrollTop),viewer:await page.locator('#session-records').boundingBox(),prose:await page.locator('.session-record-text').first().boundingBox()})
+  const snapshot=async()=>({titles:await page.locator('.session-detail-title').allTextContents(),summaries:await page.locator('.session-summary').allTextContents(),links:await page.locator('.session-task-card').allTextContents(),runtime:await page.locator(':is(.session-viewer,.task-session-selected-context) .session-runtime-value').innerText(),owner:dock?await page.locator('.task-session-dock').boundingBox():{y:0},card:dock?await page.locator('#entity-'+h.fixture.tasks[0].id).boundingBox():null,ancestor:dock?await page.locator('#entity-'+h.fixture.projects[0].id).boundingBox():null,scroll:await page.locator('#main-content-scroll').evaluate(node=>node.scrollTop),viewer:await page.locator('#session-records').boundingBox(),prose:await page.locator('.session-record-text').first().boundingBox()})
   const before=await snapshot()
   await page.waitForTimeout(350)
   assert.deepEqual(await snapshot(),before,'No-refresh control must settle before measuring canonical refresh')
@@ -150,12 +150,12 @@ test('successful canonical empty membership and runtime clearing replace retaine
  try{
   await enter(h);await h.idle()
   h.active.runtime_identity=null;h.active.runtime_revision++
-  await resync(h);await until(async()=>await page.locator('.session-viewer .session-runtime-value').innerText()==='[unknown] unknown:unknown:unknown')
+  await resync(h);await until(async()=>await page.locator(':is(.session-viewer,.task-session-selected-context) .session-runtime-value').innerText()==='unknown:unknown:unknown')
   h.sessionLinks.get(h.active.id).clear();await resync(h)
   const linked=page.locator('.session-linked-tasks');if(await linked.getAttribute('open')===null)await linked.locator(':scope > summary').click()
   assert.equal(await linked.locator('.popover-card').count(),0);await linked.getByText('No linked tasks.',{exact:true}).waitFor()
   h.active.state='terminated';h.active.terminated_at=new Date().toISOString();h.active.final_bytes=h.active.committed_bytes;h.active.final_sha256=createHash('sha256').update(h.content.get(h.active.id)).digest('hex')
-  await resync(h);assert.equal(await page.locator('.session-summary').count(),0);assert.equal(await page.getByText('Saved session',{exact:true}).textContent(),'Saved session');assert.ok((await page.locator('.session-viewer .session-runtime').getAttribute('title')).includes('Session agent'))
+  await resync(h);assert.equal(await page.locator('.session-summary').count(),0);assert.equal(await page.getByText('Saved session',{exact:true}).textContent(),'Saved session');assert.ok((await page.locator(':is(.session-viewer,.task-session-selected-context) .session-runtime').getAttribute('title')).includes('Session agent'))
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })
@@ -173,7 +173,7 @@ test('current metadata errors clear stale chrome and workspace refusal retires a
   await enter(h);await h.idle();await page.locator('#session-records').evaluate(node=>window.privateRoot=node)
   refusal=404;await resync(h)
   await page.getByRole('alert').filter({hasText:'Session could not be loaded.'}).waitFor()
-  assert.equal(await page.locator('.session-detail-title,.session-viewer .session-runtime-value').count(),0)
+  assert.equal(await page.locator('.session-detail-title,:is(.session-viewer,.task-session-selected-context) .session-runtime-value').count(),0)
   refusal=403;await page.getByRole('alert').filter({hasText:'Session could not be loaded.'}).getByRole('button',{name:'Retry',exact:true}).click()
   await until(async()=>await page.locator('#session-records').count()===0)
   assert.equal(await page.evaluate(()=>window.privateRoot.isConnected),false)

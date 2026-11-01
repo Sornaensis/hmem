@@ -5751,3 +5751,30 @@ textarea.observation-edit-content {
 @media (prefers-reduced-motion: reduce) {
   .workspace-tree-content .tree-card { --card-control-duration: 0s; }
 }
+
+/* Card reading space and the task-owned summary/conversation split. */
+.workspace-tree-content .card-desc-row > .editable-textarea { padding: 14px 16px; }
+.session-identity { flex-direction: row; flex-wrap: nowrap; gap: 4px; align-items: flex-start; }
+.session-identity > .session-runtime { flex-shrink: 1; }
+.session-role.actor-attribution-kind { flex: 0 0 auto; min-width: 0; max-width: 45%; white-space: normal; overflow-wrap: anywhere; }
+.task-session-selected-context { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; padding-bottom: 10px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.task-session-selected-context h4 { flex: 1 1 160px; min-width: 0; margin: 0; }
+.task-session-selected-context > .session-identity { flex: 0 1 auto; max-width: 100%; margin-left: auto; justify-content: flex-end; flex-wrap: nowrap; text-align: right; }
+.task-session-transcript > .session-viewer > .sessions-toolbar { display: none; }
+.task-card-with-dock > .task-session-dock { padding-top: 6px; }
+.task-card > .card-extras { border-top: 1px solid var(--border); padding: 14px; margin: 0; min-width: 0; }
+.task-card-with-dock > .card-extras { grid-column: 1 / -1; grid-row: 3; }
+.task-summary-separator { display: none; }
+@container task-work (min-width: 951px) {
+  .task-card-with-dock { grid-template-columns: minmax(0, var(--task-summary-share, 34%)) 8px minmax(0, 1fr) minmax(180px, 24%); }
+  .task-card-with-dock > .task-summary-separator { display: block; grid-column: 2; grid-row: 2; align-self: stretch; cursor: col-resize; touch-action: none; background: linear-gradient(to right, transparent 3px, var(--border) 3px, var(--border) 4px, transparent 4px); }
+  .task-card-with-dock > .task-summary-separator:is(:hover, :focus-visible) { background-color: var(--bg-elevated, var(--bg-surface)); outline: 1px solid var(--accent); outline-offset: -1px; }
+  .task-card-with-dock > .task-session-dock { grid-column: 3; border-left: 0; }
+  .task-card-with-dock > .task-session-context-choices { grid-column: 4; }
+}
+@container task-work (max-width: 950px) {
+  .task-card-with-dock > .card-extras { grid-row: 5; }
+}
+/* Ancestor lanes use the existing virtual row depth without mounting parents. */
+.hierarchy-row { position: relative; }
+.hierarchy-row::after { content: ''; position: absolute; pointer-events: none; top: 0; bottom: 0; left: calc(0px - var(--hierarchy-guide-offset, 0px)); width: var(--hierarchy-guide-width, 0px); background: repeating-linear-gradient(to right, transparent 0 6px, var(--border) 6px 7px, transparent 7px 14px); }

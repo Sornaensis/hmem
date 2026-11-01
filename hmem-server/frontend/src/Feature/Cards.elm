@@ -2440,6 +2440,31 @@ viewTaskCardBody descendants projection showProject model task =
 
           else
             text ""
+        , div [ class "card-body card-expanded" ]
+            [ div [ class "card-desc-row" ]
+                [ viewCardDescription model "task" task.id task.description ]
+            ]
+        , div [ class "card-inline-actions" ]
+            [ if isExpanded model task.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
+            , if Permissions.canEditCurrentWorkspace model then
+                button
+                    [ class "btn-inline-create"
+                    , disabled (not taskAllowsOpenChildren)
+                    , title (if taskAllowsOpenChildren then "Add subtask" else taskCreateChildReason)
+                    , onClick (ShowInlineCreate (InlineCreateTask { projectId = task.projectId, parentId = Just task.id, title = "" }))
+                    ]
+                    [ text "+ Subtask" ]
+
+              else
+                text ""
+            ]
+        , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
+          ]
+        , if model.sessions.taskPanel == Just task.id then
+            div [ class "task-summary-separator", stopPropagationOn "click" (Decode.succeed (NoOp, True)), stopPropagationOn "dblclick" (Decode.succeed (NoOp, True)), attribute "role" "separator", attribute "aria-label" "Resize task summary and session", attribute "aria-orientation" "vertical", attribute "aria-valuemin" "20", attribute "aria-valuemax" "60", attribute "aria-valuenow" "34", attribute "tabindex" "0" ] []
+          else text ""
+        , Feature.Sessions.viewTaskActiveConversation task.workspaceId model task.id
+        , Feature.Sessions.viewTaskActiveChoices task.workspaceId model task.id
         , let
             deps =
                 if isExpanded model task.id then taskDependencySummariesForTask model task.id else []
@@ -2449,10 +2474,7 @@ viewTaskCardBody descendants projection showProject model task =
             currentSection = Dict.get task.id model.cards.taskSections |> Maybe.withDefault "work"
             panel = CardSections.panel "task" task.id currentSection
           in
-          div [ class "card-body card-expanded" ]
-            [ div [ class "card-desc-row" ]
-                [ viewCardDescription model "task" task.id task.description ]
-            , if extrasExpanded then
+          if extrasExpanded then
                 div [ class "card-extras", id (CardSections.detailsId "task" task.id) ]
                     [ div [ class "card-details-toolbar" ]
                         [ CardSections.cardDisclosure True (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
@@ -2490,25 +2512,6 @@ viewTaskCardBody descendants projection showProject model task =
               else
                 div [ id (CardSections.detailsId "task" task.id), hidden True ] []
 
-            ]
-        , div [ class "card-inline-actions" ]
-            [ if isExpanded model task.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
-            , if Permissions.canEditCurrentWorkspace model then
-                button
-                    [ class "btn-inline-create"
-                    , disabled (not taskAllowsOpenChildren)
-                    , title (if taskAllowsOpenChildren then "Add subtask" else taskCreateChildReason)
-                    , onClick (ShowInlineCreate (InlineCreateTask { projectId = task.projectId, parentId = Just task.id, title = "" }))
-                    ]
-                    [ text "+ Subtask" ]
-
-              else
-                text ""
-            ]
-        , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
-          ]
-        , Feature.Sessions.viewTaskActiveConversation task.workspaceId model task.id
-        , Feature.Sessions.viewTaskActiveChoices task.workspaceId model task.id
         , CardSections.metadata
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta" ] [ text ("Created: " ++ TimestampDisplay.lookup model.timestamps task.createdAt) ]
@@ -3815,6 +3818,8 @@ viewHierarchyViewport ws incoming =
                     ( key, div [ class "hierarchy-row", attribute "data-hierarchy-key" key, attribute "data-hierarchy-index" (String.fromInt position)
                         , attribute "data-hierarchy-next" (neighborEntity 1 position)
                         , attribute "data-hierarchy-previous" (neighborEntity -1 position)
+                        , style "--hierarchy-guide-offset" (String.fromInt (baseDepth * 14) ++ "px")
+                        , style "--hierarchy-guide-width" ("min(18cqw, " ++ String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> depth * 14)) ++ "px)")
                         , attribute "data-hierarchy-depth" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0))
                         , attribute "aria-description" ("Hierarchy level " ++ String.fromInt ((row |> Maybe.map .depth |> Maybe.withDefault 0) + 1))
                         , style "padding-left" ("min(18%, " ++ String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> Basics.max 0 (depth - baseDepth) * 14)) ++ "px)")

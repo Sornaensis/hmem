@@ -45,7 +45,7 @@ test('card controls align, share motion, and nested Focus/Move content preserves
  }finally{await h.close()}
 })
 
-test('embedded summary fills the reader, compact identity follows title, and populated tray tracks dock width',{timeout:60000},async t=>{
+test('embedded summary fills the reader, resizable columns and full-width details keep the title and badges aligned, and populated tray tracks dock width',{timeout:60000},async t=>{
  const h=await openSessionExplorer({runtime:{harness:'codex',model:'card-layout-model',role:'developer',reasoning:'high'}}),{page,fixture:f}=h
  const owner=f.tasks[0],child={...f.tasks[1],id:'10000000-0000-4000-8000-000000000003',title:'Child task',parent_id:owner.id}
  f.tasks.push(child);owner.description='Summary context. '.repeat(250)
@@ -56,7 +56,7 @@ test('embedded summary fills the reader, compact identity follows title, and pop
   const geometry=await card.evaluate(n=>{
    const box=s=>n.querySelector(s).getBoundingClientRect().toJSON()
    const description=n.querySelector('.card-desc-row'),copy=description.querySelector('.editable-textarea')
-   return {work:box(':scope > .task-card-work'),dock:box(':scope > .task-session-dock'),description:box('.card-desc-row'),descriptionScroll:{height:description.clientHeight,content:description.scrollHeight,copyHeight:copy.clientHeight,copyContent:copy.scrollHeight},actions:box('.task-card-work > .card-inline-actions'),title:box('.task-session-selected-context h4'),identity:box('.session-viewer .session-identity'),footer:box(':scope > .card-footer'),linkSize:getComputedStyle(n.querySelector('.task-session-open-full')).fontSize}
+   return {work:box(':scope > .task-card-work'),dock:box(':scope > .task-session-dock'),description:box('.card-desc-row'),descriptionScroll:{height:description.clientHeight,content:description.scrollHeight,copyHeight:copy.clientHeight,copyContent:copy.scrollHeight},actions:box('.task-card-work > .card-inline-actions'),title:box('.task-session-selected-context h4'),identity:box(':is(.session-viewer,.task-session-selected-context) .session-identity'),footer:box(':scope > .card-footer'),linkSize:getComputedStyle(n.querySelector('.task-session-open-full')).fontSize}
   })
   assert.ok(Math.abs(geometry.work.height-geometry.dock.height)<1);assert.ok(geometry.description.height>350,JSON.stringify(geometry))
   assert.ok(geometry.identity.top-geometry.title.bottom<=8);assert.ok(geometry.title.height<24);assert.ok(geometry.footer.height<=38);assert.equal(geometry.linkSize,'11px')
@@ -66,12 +66,34 @@ test('embedded summary fills the reader, compact identity follows title, and pop
   assert.deepEqual(actions.slice(0,3),['Hide Agents','Focus task','Move task'])
   const jump=card.getByRole('link',{name:'Jump To Session ↗'});assert.ok((await jump.getAttribute('href')).includes('&task='+owner.id))
   t.diagnostic(JSON.stringify({desktop:geometry,trayWidth:tray.width,cardWidth:face.width}))
+  const handle=card.getByRole('separator',{name:'Resize task summary and session'})
+  const work=card.locator(':scope > .task-card-work'),before=(await work.boundingBox()).width
+  await handle.focus();await page.keyboard.press('ArrowRight');await h.idle();assert.ok((await work.boundingBox()).width>before)
+  assert.equal(await handle.getAttribute('aria-valuenow'),'36')
+  await page.keyboard.press('Home');assert.equal(await handle.getAttribute('aria-valuenow'),'20')
+  await page.keyboard.press('End');assert.equal(await handle.getAttribute('aria-valuenow'),'60')
+  await agents.click();await agents.click();await card.locator('#session-records .session-record').first().waitFor();await h.idle()
+  assert.equal(await handle.getAttribute('aria-valuenow'),'34','reopened handle and rendered default width agree')
+  assert.ok(Math.abs((await work.boundingBox()).width-before)<1)
+  await handle.focus();await page.keyboard.press('ArrowRight');assert.equal(await handle.getAttribute('aria-valuenow'),'36')
+  await page.keyboard.press('End')
+  const grip=await handle.boundingBox();await page.mouse.move(grip.x+grip.width/2,grip.y+30);await page.mouse.down();await page.mouse.move(grip.x-150,grip.y+30,{steps:8});await page.mouse.up()
+  assert.ok(Number(await handle.getAttribute('aria-valuenow'))<60,'pointer changes the summary share')
+  assert.equal(await card.getAttribute('draggable'),'false');assert.equal(await page.locator('#session-records').count(),1)
+  await card.locator('.btn-extras-toggle').click();await h.idle()
+  const expanded=await card.evaluate(n=>{const box=s=>n.querySelector(s).getBoundingClientRect().toJSON(),header=n.querySelector('.task-session-selected-context');return{card:n.getBoundingClientRect().toJSON(),details:box(':scope > .card-extras'),dock:box(':scope > .task-session-dock'),agents:box(':scope > .task-session-context-choices'),header:box('.task-session-selected-context'),identity:box('.task-session-selected-context .session-identity'),rule:getComputedStyle(header).borderBottomWidth,padding:getComputedStyle(n.querySelector('.card-desc-row > .editable-textarea')).paddingLeft,roleBounds:box('.task-session-selected-context .session-role'),modelBounds:box('.task-session-selected-context .session-runtime'),role:header.querySelector('.session-role').textContent,model:header.querySelector('.session-runtime').textContent}})
+  assert.ok(expanded.details.top>=Math.max(expanded.dock.bottom,expanded.agents.bottom)-1)
+  assert.ok(Math.abs(expanded.details.width-(expanded.card.width-2))<4)
+  assert.ok(Math.abs(expanded.header.right-expanded.identity.right)<1);assert.equal(expanded.rule,'1px');assert.ok(parseFloat(expanded.padding)>=16)
+  assert.ok(expanded.modelBounds.left>=expanded.roleBounds.right-1);assert.ok(Math.abs(expanded.modelBounds.top-expanded.roleBounds.top)<1);assert.equal(expanded.role,'developer');assert.equal(expanded.model,'codex:card-layout-model:high')
+  const guides=await card.evaluate(n=>getComputedStyle(n.closest('[data-hierarchy-depth]'),'::after').backgroundImage)
+  assert.ok(guides.includes('repeating-linear-gradient'));assert.ok(await page.locator('[data-hierarchy-key]').count()<=25)
   if(process.env.HMEM_DOCK_SCREENSHOTS)await card.screenshot({path:process.env.HMEM_DOCK_SCREENSHOTS+'/card-refinements-desktop.png'})
   for(const width of [736,430,320]){await page.setViewportSize({width,height:1800});await h.idle();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.equal(await card.getByText(owner.description,{exact:true}).isVisible(),true)}
   const stacked=await card.evaluate(n=>{const box=s=>n.querySelector(s).getBoundingClientRect().toJSON();return{work:box(':scope > .task-card-work'),dock:box(':scope > .task-session-dock'),agents:box(':scope > .task-session-context-choices')}})
-  assert.ok(stacked.dock.top>=stacked.work.bottom);assert.ok(stacked.agents.top>=stacked.dock.bottom)
+  assert.ok(stacked.dock.top>=stacked.work.bottom);assert.ok(stacked.agents.top>=stacked.dock.bottom);assert.equal(await handle.isVisible(),false);const details=await card.locator(':scope > .card-extras').boundingBox();assert.ok(details.y>=stacked.agents.bottom-1)
   t.diagnostic(JSON.stringify({narrow:stacked}))
-  if(process.env.HMEM_DOCK_SCREENSHOTS)await card.screenshot({path:process.env.HMEM_DOCK_SCREENSHOTS+'/card-refinements-narrow.png'})
+  if(process.env.HMEM_DOCK_SCREENSHOTS){await page.setViewportSize({width:320,height:6000});await h.idle();await card.screenshot({path:process.env.HMEM_DOCK_SCREENSHOTS+'/card-refinements-narrow.png'});await page.setViewportSize({width:1920,height:6000});await h.idle();await page.locator('.hierarchy-viewport').screenshot({path:process.env.HMEM_DOCK_SCREENSHOTS+'/card-hierarchy-desktop.png'})}
   assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[]);assert.ok(h.peak()<=2)
  }finally{await h.close()}
 })
@@ -105,3 +127,4 @@ test('all split family trays retain the open dock width during inline creation a
   assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
  }finally{await h.close()}
 })
+

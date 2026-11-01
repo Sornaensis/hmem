@@ -10,6 +10,7 @@ import { installTimestampDisplay } from './timestamp-display.js'
 import { installAuditViewport } from './audit-navigation.js'
 import { installAuditLayout } from './audit-layout.js'
 import { installSessionsLayout } from './sessions-layout.js'
+import { installTaskCardLayout } from './task-card-layout.js'
 import { installSessionBridge } from './session-save.js'
 import { createSessionActivityStream } from './session-activity-stream.js'
 import { Elm } from './Main.elm'
@@ -750,6 +751,8 @@ installTimestampDisplay(app)
 installAuditViewport(app)
 const disposeAuditLayout = installAuditLayout()
 const disposeSessionsLayout = installSessionsLayout()
+const disposeTaskCardLayout = installTaskCardLayout()
+if (import.meta.hot) import.meta.hot.dispose(disposeTaskCardLayout)
 if (import.meta.hot) import.meta.hot.dispose(disposeSessionsLayout)
 if (import.meta.hot) import.meta.hot.dispose(disposeAuditLayout)
 sessionBridge = installSessionBridge(app, { workerFactory:({incarnation,mode})=>new Worker(archiveResourceWorkerUrl+'?'+new URLSearchParams({incarnation,phase:mode}),{type:'module'}), async fetchArchive(url, {signal,headers}) {

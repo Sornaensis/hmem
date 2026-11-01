@@ -58,7 +58,7 @@ test('task-owned Active Agent dock retains task context, grouped transcript, evi
   assert.equal(await card(h,0).locator('.task-session-dock').count(),1);assert.equal(await card(h,0).getAttribute('draggable'),'false');assert.equal(await page.locator('#session-records').count(),1)
   assert.equal(await card(h,0).locator('.card-extras').count(),0,'dock is independent of extras')
   assert.equal(await card(h,0).locator('.task-session-choice').count(),2,'quiet active sessions remain available')
-  assert.ok((await page.locator('.session-viewer .session-runtime').getAttribute('title')).includes('Dock runtime'))
+  assert.ok((await page.locator(':is(.session-viewer,.task-session-selected-context) .session-runtime').getAttribute('title')).includes('Dock runtime'))
   const group=page.locator('.session-activity-group').first();assert.equal(await group.getAttribute('open'),null);await group.locator(':scope > summary').click();assert.equal(await group.getAttribute('open'),'')
   await card(h,0).locator('.task-session-choice').nth(1).locator('span').last().click();await page.getByText('The second agent transcript.',{exact:true}).waitFor()
   assert.equal(await page.getByRole('heading',{name:'A calmer session explorer'}).count(),0)

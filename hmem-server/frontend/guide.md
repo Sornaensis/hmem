@@ -164,9 +164,11 @@ The focus icon in each card header reveals **Focus** and opens that project or
 task. The move arrow reveals **Move To** and opens the destination chooser.
 
 On task and subtask cards, **View Agents ->** opens active agents beside the work.
-The task title spans the full card, with description and work on the left,
-conversation beside it and agent hierarchy on the right. Narrow panes stack work,
-conversation and hierarchy. Choose **<- Hide Agents** in the card header to close
+The task title spans the full card, with the description on the left,
+conversation beside it and agent hierarchy on the right. Drag the divider between
+the description and conversation to resize them, or focus it and use the arrow
+keys, Home or End. Details span the card below all three columns. Narrow panes
+stack the description, conversation, hierarchy and details. Choose **<- Hide Agents** in the card header to close
 the view; it also works with task extras collapsed. A task with no associated
 sessions has no Agents toggle or grey light. Associated sessions with none active
 keep the toggle and grey light; checking or unavailable activity stays explicit.

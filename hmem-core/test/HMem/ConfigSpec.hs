@@ -8,7 +8,8 @@ import Data.List (isInfixOf)
 import Data.Text qualified as T
 import Data.Yaml qualified as Yaml
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDrive, addTrailingPathSeparator)
+import System.Directory (getHomeDirectory, doesFileExist)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
@@ -16,6 +17,48 @@ import HMem.Config
 
 spec :: Spec
 spec = do
+  describe "process configuration directory" $ do
+    it "preserves the legacy home path when HMEM_CONFIG_DIR is absent" $
+      withEnvVar "HMEM_CONFIG_DIR" Nothing $ do
+        hasConfigDirOverride `shouldReturn` False
+        home <- getHomeDirectory
+        configDir `shouldReturn` (home </> ".hmem")
+        configFilePath `shouldReturn` (home </> ".hmem" </> "config.yaml")
+    it "uses an absolute path with spaces for missing-directory defaults and save/load" $
+      withSystemTempDirectory "config-directory" $ \root -> do
+        let path = root </> "private config with spaces"
+            customized = defaultConfig { server = defaultConfig.server { port = 19283 } }
+        withEnvVar "HMEM_CONFIG_DIR" (Just path) $ do
+          hasConfigDirOverride `shouldReturn` True
+          configDir `shouldReturn` path
+          configFilePath `shouldReturn` (path </> "config.yaml")
+          loaded <- loadConfig
+          loaded.auditMaintenance `shouldBe` defaultAuditMaintenanceConfig
+          doesFileExist (path </> "config.yaml") `shouldReturn` False
+          saveConfig customized
+          doesFileExist (path </> "config.yaml") `shouldReturn` True
+          (\cfg -> cfg.server.port) <$> loadConfig `shouldReturn` 19283
+    it "rejects relative, invalid, root and existing-file overrides without echo or fallback" $
+      withSystemTempDirectory "config-directory-errors" $ \root -> do
+        let file = root </> "existing-file"
+            driveRoot = addTrailingPathSeparator (takeDrive root)
+        BS8.writeFile file "sentinel"
+        mapM_ (\path -> withEnvVar "HMEM_CONFIG_DIR" (Just path) $ do
+          failure <- try configDir :: IO (Either IOException FilePath)
+          case failure of
+            Left err -> do
+              show err `shouldSatisfy` isInfixOf "HMEM_CONFIG_DIR"
+              show err `shouldSatisfy` (not . isInfixOf "existing-file")
+            Right _ -> expectationFailure "invalid override fell back or was accepted")
+          ["relative-private", ".", "   ", driveRoot, file, "invalid-private|path", root </> ".."]
+        BS8.readFile file `shouldReturn` "sentinel"
+    it "keeps an explicit loadConfigFile independent of the directory override" $
+      withSystemTempDirectory "explicit-config-file" $ \root -> do
+        let file = root </> "explicit.yaml"
+        BS8.writeFile file "server:\n  port: 19284\n"
+        withEnvVar "HMEM_CONFIG_DIR" (Just "relative-invalid") $ do
+          cfg <- loadConfigFile file
+          cfg.server.port `shouldBe` 19284
   describe "audit maintenance defaults" $ do
     it "defaults missing blocks and fields to enabled daily server-local 03:00 to 04:00" $ do
       let parse yaml=Yaml.decodeEither' yaml :: Either Yaml.ParseException HMemConfig

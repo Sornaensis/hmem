@@ -38,6 +38,7 @@ module HMem.Config
   , validateConfig
     -- * Paths
   , configDir
+  , hasConfigDirOverride
   , configFilePath
     -- * Overrides
   , applyEnvOverrides
@@ -69,17 +70,18 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.Bits (xor, (.|.))
-import Data.Char (isAlphaNum, isDigit, isHexDigit, isSpace)
+import Data.Char (isAlphaNum, isDigit, isHexDigit, isSpace, toUpper)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Yaml qualified as Yaml
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, getEnvironment)
 import System.Directory (getHomeDirectory, doesFileExist, createDirectoryIfMissing)
-import System.FilePath ((</>))
+import System.FilePath ((</>), isAbsolute, isValid, isDrive, normalise, dropTrailingPathSeparator, splitDirectories, dropDrive, isPathSeparator)
 import System.IO (hPutStrLn, stderr)
+import System.Info (os)
 import Text.Read (readMaybe)
 
 ------------------------------------------------------------------------
@@ -779,9 +781,31 @@ defaultConfig = HMemConfig
 
 -- | The hmem config directory: @~\/.hmem\/@
 configDir :: IO FilePath
-configDir = do
-  home <- getHomeDirectory
-  pure (home </> ".hmem")
+configDir = configDirOverride >>= \case
+  Nothing -> (</> ".hmem") <$> getHomeDirectory
+  Just path -> do
+    let invalid = ioError (userError "HMEM_CONFIG_DIR must name a non-root, fully qualified native directory path; remove it to use the default")
+        normalized = dropTrailingPathSeparator (normalise path)
+        components = splitDirectories (dropDrive normalized)
+        unc = case path of a:b:_ -> isPathSeparator a && isPathSeparator b; _ -> False
+        traversal = any ((`elem` [".", ".."]) . dropTrailingPathSeparator) components
+        uncRoot = unc && length components <= 1
+    if null path || not (isValid path && isAbsolute path) || isDrive normalized || traversal || uncRoot
+      then invalid
+      else do
+        file <- doesFileExist path
+        if file then invalid else pure path
+
+-- Native Windows lookupEnv treats a present-empty entry as absent. Inspect
+-- the environment block so an invalid explicit override cannot select defaults.
+configDirOverride :: IO (Maybe FilePath)
+configDirOverride = do
+  environment <- getEnvironment
+  let key name = if os == "mingw32" then map toUpper name else name
+  pure (lookup "HMEM_CONFIG_DIR" [(key name, value) | (name, value) <- environment])
+
+hasConfigDirOverride :: IO Bool
+hasConfigDirOverride = isJust <$> configDirOverride
 
 -- | Path to the config file: @~\/.hmem\/config.yaml@
 configFilePath :: IO FilePath

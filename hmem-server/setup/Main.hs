@@ -362,6 +362,10 @@ main = do
    <> progDesc "hmem-ctl - Initialize and manage the hmem environment"
    <> header "hmem-ctl"
     )
+  override <- hasConfigDirOverride
+  when (override && managesGlobalLifecycle cmd) $ do
+    hPutStrLn stderr "HMEM_CONFIG_DIR is process-scoped; unset it before global setup or service lifecycle commands"
+    exitFailure
   case cmd of
     CmdSetup     -> doInit >> doInstall
     CmdInit      -> doInit
@@ -385,6 +389,19 @@ main = do
 -- Pgvector commands for any configured PostgreSQL database
 ------------------------------------------------------------------------
 
+-- These commands manage globally named services/processes or remove the whole
+-- installation. A process-local config root does not grant isolated ownership.
+managesGlobalLifecycle :: Command -> Bool
+managesGlobalLifecycle = \case
+  CmdSetup -> True
+  CmdInit -> True
+  CmdInstall -> True
+  CmdStart -> True
+  CmdStop -> True
+  CmdStatus -> True
+  CmdUninstall -> True
+  CmdReinstall -> True
+  _ -> False
 doPgvector :: CtlPgvectorCli.PgvectorCliCommand -> IO ()
 doPgvector commandValue = do
   result <- CtlPgvectorCli.runPgvectorCommand commandValue

@@ -155,11 +155,13 @@ Uncheck **Show empty projects** to require a matching task in the subtree;
 ancestors stay visible.
 Workspace group disclosure is saved globally.
 
-Expand task details to switch between **Work**, **Agents**, **Evidence** and
-**History**. Status, priority and description stay above these local sections;
-creation actions remain available below them. Project, task and subtask footers
-always show **UUID**, **Created** and **Updated**, including unavailable values.
-UUID controls copy the complete value even when it wraps on a narrow screen.
+Expand task details to switch between **Work**, **Evidence** and **History**.
+The vertical double chevrons on the left reveal **Details** on hover or keyboard
+focus; creation actions sit on the right. Project, task and subtask footers show
+copyable identifiers, **Created** and **Updated**, including unavailable values.
+Identifiers copy the complete value even when they wrap on a narrow screen.
+The focus icon in each card header reveals **Focus** and opens that project or
+task. The move arrow reveals **Move To** and opens the destination chooser.
 
 On task and subtask cards, **View Agents ->** opens active agents beside the work.
 The task title spans the full card, with description and work on the left,
@@ -182,7 +184,7 @@ large downloads and follow any local-storage guidance shown with an error.
 Live transcripts keep recent agent messages visible while tool activity arrives.
 Expanded activity and tool details stay open during synchronization. Reading
 above the end keeps your place; following resumes when you scroll to the end.
-Loading a large transcript keeps the view steady. **Open full session ↗** opens
+Loading a large transcript keeps the view steady. **Jump To Session ↗** opens
 Sessions with the same agent selected; choose **Projects** to return to the card.
 
 While reading earlier content, **↓ Jump to latest ↓** appears inside the reader.

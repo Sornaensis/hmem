@@ -1265,7 +1265,7 @@ viewTaskActiveWithChoices includeChoices workspace model task =
                     _ -> text "") |> Maybe.withDefault (text "")
                 ,viewRecords EmbeddedReader workspace model id
                 ,div [class "task-session-footer"]
-                    [a [class "btn btn-sm task-session-open-full",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Open full session ↗"]]]) |> Maybe.withDefault (div [class "empty-state"] [text "Select an active session to read its recent conversation."])
+                    [a [class "btn btn-sm task-session-open-full",href (sessionUrl workspace id ++ "&task=" ++ Url.percentEncode task)] [text "Jump To Session ↗"]]]) |> Maybe.withDefault (div [class "empty-state"] [text "Select an active session to read its recent conversation."])
             ,if includeChoices then viewTaskActiveChoices workspace model task else text ""
             ]]
 

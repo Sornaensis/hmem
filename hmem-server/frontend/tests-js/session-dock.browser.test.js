@@ -15,7 +15,7 @@ test('dock keeps long task descriptions beside the reader and stretches a vertic
  h.activeSessions[2].parent_session_id=h.activeSessions[1].id
  try{
   await h.start();await until(()=>agent(h,0).isEnabled());await agent(h,0).click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
-  const owner=card(h,0),choices=owner.locator(':scope > .task-session-context-choices'),picker=choices.locator('.task-session-picker'),reader=owner.locator('.task-session-transcript'),footer=reader.locator(':scope > .task-session-footer'),full=footer.getByRole('link',{name:'Open full session ↗'})
+  const owner=card(h,0),choices=owner.locator(':scope > .task-session-context-choices'),picker=choices.locator('.task-session-picker'),reader=owner.locator('.task-session-transcript'),footer=reader.locator(':scope > .task-session-footer'),full=footer.getByRole('link',{name:'Jump To Session ↗'})
   assert.equal(await owner.getByText(description,{exact:true}).isVisible(),true)
   const extras=owner.locator('.btn-extras-toggle');await extras.click();assert.equal(await owner.getByText(description,{exact:true}).isVisible(),true);await extras.click();assert.equal(await owner.getByText(description,{exact:true}).isVisible(),true)
   assert.equal(await choices.locator('.session-tree-children .session-tree-children .task-session-choice').count(),1,'child hierarchy remains nested')

@@ -60,7 +60,7 @@ test('session icon is omitted only for current complete absence while active and
 test('touch Details has a visible label and native target and moves beside tabs after expansion',{timeout:30000},async()=>{
  const f=hierarchyFixture(),h=await openHierarchy(f,[],null,{hasTouch:true,isMobile:true,viewport:{width:430,height:1000}}),{page}=h
  try{
-  await h.start();await h.idle();const row=await h.scrollTo('task:'+f.tasks[0].id),control=row.locator('.card-details-control').first()
+  await h.start();await h.idle();await page.getByRole('button',{name:'Expand All',exact:true}).click();await h.idle();const row=await h.scrollTo('task:'+f.tasks[0].id),control=row.locator('.card-details-control').first()
   assert.equal(await page.evaluate(()=>matchMedia('(pointer: coarse)').matches),true);assert.equal(await control.locator('.card-details-label').isVisible(),true);assert.ok((await control.boundingBox()).height>=44)
   await control.tap();await until(async()=>await control.getAttribute('aria-expanded')==='true');assert.equal(await control.innerText(),'Hide Details');assert.ok(await control.evaluate(node=>node.parentElement.classList.contains('card-details-toolbar')))
   assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])

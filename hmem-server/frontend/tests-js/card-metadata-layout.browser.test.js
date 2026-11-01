@@ -7,7 +7,7 @@ test('copy-only identifiers retain exact native copy feedback and card footers h
  const f=hierarchyFixture(),h=await openHierarchy(f),{page}=h
  try{
   await page.addInitScript(()=>{window.metadataCopies=[];window.metadataCopyFailure=false;Object.defineProperty(navigator.clipboard,'writeText',{value:async value=>{if(window.metadataCopyFailure)throw Error('controlled clipboard failure');window.metadataCopies.push(value)}})})
-  await h.start();await h.idle()
+  await h.start();await h.idle();await page.getByRole('button',{name:'Expand All',exact:true}).click();await h.idle()
   const copies=[['workspace',f.workspace.id],['project',f.projects[0].id],['task',f.tasks[0].id]]
   for(const [index,[kind,id]] of copies.entries()){
    if(kind!=='workspace')await h.scrollTo(kind+':'+id)

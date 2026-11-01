@@ -1,4 +1,4 @@
-module CardSections exposing (cardDisclosure, detailsId, disclosure, disclosureIcon, fact, facts, horizontalDisclosureIcon, metadata, panel, section, tabs, tabsWithEvidence)
+module CardSections exposing (cardDisclosure, detailsId, disclosure, disclosureIcon, fact, facts, focusIcon, horizontalDisclosureIcon, metadata, panel, section, tabs, tabsWithEvidence)
 
 import Html exposing (Html, div, footer, h4, label, span, text)
 import Html.Attributes exposing (attribute, class)
@@ -62,7 +62,7 @@ cardDisclosure expanded regionId name message =
         , attribute "aria-controls" regionId
         , onClick message
         ]
-        [ horizontalDisclosureIcon expanded
+        [ disclosureIcon expanded
         , span [ class "card-details-label" ] [ text (if expanded then "Hide Details" else "Details") ]
         ]
 
@@ -92,6 +92,11 @@ disclosureIcon expanded =
 horizontalDisclosureIcon : Bool -> Html msg
 horizontalDisclosureIcon expanded =
     chevronIcon (if expanded then "M7 4 L3 8 L7 12 M12 4 L8 8 L12 12" else "M4 4 L8 8 L4 12 M9 4 L13 8 L9 12")
+
+
+focusIcon : Html msg
+focusIcon =
+    chevronIcon "M6 2 H2 V6 M10 2 H14 V6 M2 10 V14 H6 M14 10 V14 H10 M6 8 H10 M8 6 V10"
 
 
 chevronIcon : String -> Html msg

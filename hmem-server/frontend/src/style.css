@@ -5266,8 +5266,7 @@ textarea.observation-edit-content {
 .workspace-tree-content .tree-card :is(.btn-inline-create, .card-session-icon, .btn-icon, .card-agents-open) { min-height: 32px; }
 .workspace-tree-content .tree-card .btn-extras-toggle { width: 24px; height: 24px; min-height: 24px; }
 .workspace-tree-content .tree-card .card-details-control { width: auto; height: auto; min-width: 32px; min-height: 32px; margin: 0; padding: 4px 7px; gap: 5px; }
-.card-details-label { display: none; font-weight: 500; white-space: nowrap; }
-.card-details-control:is(:hover, :focus-visible, .is-expanded) .card-details-label { display: inline; }
+.card-details-label { display: inline-block; font-weight: 500; white-space: nowrap; }
 .card-details-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--border); }
 .workspace-tree-content .card-details-toolbar > .card-local-sections { flex: 1; padding: 0; border: 0; }
 .card-section-button:disabled { color: var(--text-muted); opacity: .45; cursor: default; }
@@ -5711,3 +5710,44 @@ textarea.observation-edit-content {
 .sessions-page .sessions-layout:has(.session-latest-overlay) > .sessions-list { contain:size; }
 @media (max-width:650px) { .sessions-page .sessions-layout:has(.session-latest-error, .session-render-continuation, .session-latest-overlay) { min-height:min-content; grid-template-rows:auto minmax(0,1fr); } }
 @media (prefers-reduced-motion:reduce) { .session-jump-latest { transition:none; scroll-behavior:auto; } }
+
+/* Card controls share a deliberate reveal speed and retain named touch targets. */
+.workspace-tree-content .tree-card { --card-control-duration: 300ms; }
+.workspace-tree-content .tree-card :is(button, a) { transition: background var(--card-control-duration), color var(--card-control-duration), border-color var(--card-control-duration), box-shadow var(--card-control-duration); }
+.workspace-tree-content .tree-card :is(.card-details-control, .card-action-control) { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 32px; gap: 0; padding: 4px 7px; transition: gap var(--card-control-duration), background var(--card-control-duration), color var(--card-control-duration), border-color var(--card-control-duration); }
+.workspace-tree-content .tree-card :is(.card-details-label, .card-action-label) { display: inline-block; max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap; transition: max-width var(--card-control-duration), opacity var(--card-control-duration); }
+.workspace-tree-content .tree-card :is(.card-details-control, .card-action-control):is(:hover, :focus-visible, .is-expanded) { gap: 5px; }
+.workspace-tree-content .tree-card :is(.card-details-control, .card-action-control):is(:hover, :focus-visible, .is-expanded) :is(.card-details-label, .card-action-label) { max-width: 8rem; opacity: 1; }
+.card-action-control > svg, .card-action-icon { flex-shrink: 0; }
+.workspace-tree-content .card-inline-actions { justify-content: flex-end; }
+.workspace-tree-content .card-inline-actions > .card-details-control { margin-right: auto; }
+.workspace-tree-content .card-footer { padding: 6px 14px; }
+.workspace-tree-content .card-footer > .card-meta-group { padding: 0; margin: 0; gap: 3px; }
+.workspace-tree-content .card-footer .card-meta-row:empty { display: none; }
+.workspace-tree-content .tree-card .card-footer button.copyable-value { min-height: 24px; }
+
+/* Keep viewport row geometry while painting only real task families. */
+.workspace-tree-content .hierarchy-task-family-empty { background: transparent; box-shadow: none; }
+.workspace-tree-content .hierarchy-task-family-with-dock { --task-family-extension: calc(min(109.2rem, 100cqw) - min(78rem, 100cqw)); margin-right: calc(0px - var(--task-family-extension)); }
+.workspace-tree-content .hierarchy-task-family-with-dock > .hierarchy-row { width: calc(100% - var(--task-family-extension)); }
+
+.task-session-selected-context h4 { margin: 0 0 3px; font-size: 12px; line-height: 1.4; }
+.task-session-transcript > .session-viewer { margin: 0; padding-top: 0; border-top: 0; }
+.task-session-transcript > .session-viewer > .sessions-toolbar { margin: 0 0 8px; }
+.task-session-transcript .task-session-open-full { min-height: 24px; padding: 2px 4px; font-size: 11px; }
+@container task-work (min-width: 951px) {
+  .task-card-with-dock > .task-card-work { display: flex; flex-direction: column; min-height: 0; }
+  .workspace-tree-content .task-card-with-dock > .task-card-work > .card-body { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; }
+  .task-card-with-dock > .task-card-work > .card-body > .card-desc-row { flex: 1 1 0; min-height: 100px; align-items: stretch; overflow: auto; }
+  .task-card-with-dock > .task-card-work .card-desc-row > .editable-textarea { max-height: none; }
+  .task-card-with-dock > .task-card-work > .card-inline-actions { flex-shrink: 0; }
+}
+@media (pointer: coarse) {
+  .workspace-tree-content .tree-card :is(.card-details-control, .card-action-control) { min-height: 44px; gap: 5px; }
+  .workspace-tree-content .tree-card :is(.card-details-label, .card-action-label) { max-width: 8rem; opacity: 1; }
+  .task-session-transcript .task-session-open-full { min-height: 44px; }
+  .workspace-tree-content .tree-card .card-footer button.copyable-value { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-tree-content .tree-card { --card-control-duration: 0s; }
+}

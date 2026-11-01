@@ -737,7 +737,8 @@ confirm dialog model =
 viewAction : Model -> String -> String -> Html Msg
 viewAction model kind id =
     if Permissions.canEditCurrentWorkspace model then
-        button [ class "btn-icon btn-move", Html.Attributes.id ("move-origin-" ++ kind ++ "-" ++ id), title "Move to another project", attribute "aria-label" ("Move " ++ kind), onClick (OpenMove kind id) ] [ text "↗" ]
+        button [ class "btn-icon btn-move card-action-control", Html.Attributes.id ("move-origin-" ++ kind ++ "-" ++ id), title "Move to another project", attribute "aria-label" ("Move " ++ kind), stopPropagationOn "click" (Decode.succeed (OpenMove kind id, True)), stopPropagationOn "dblclick" (Decode.succeed (NoOp, True)) ]
+            [ span [class "card-action-label"] [text "Move To"], span [class "card-action-icon", attribute "aria-hidden" "true"] [text "↗"] ]
     else text ""
 
 

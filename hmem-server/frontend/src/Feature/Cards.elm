@@ -1010,6 +1010,19 @@ directOpenDependencyCounts tasksById links =
             Dict.empty
 
 
+viewFocusAction : String -> String -> Html Msg
+viewFocusAction kind entityId =
+    button
+        [ class "btn-icon btn-focus card-action-control"
+        , type_ "button"
+        , title ("Focus " ++ kind)
+        , attribute "aria-label" ("Focus " ++ kind)
+        , stopPropagationOn "click" (Decode.succeed (FocusEntity kind entityId, True))
+        , stopPropagationOn "dblclick" (Decode.succeed (NoOp, True))
+        ]
+        [ CardSections.focusIcon, span [class "card-action-label"] [text "Focus"] ]
+
+
 onFocusClick : String -> String -> Attribute Msg
 onFocusClick entityType entityId =
     on "click" (focusClickDecoder entityType entityId)
@@ -1756,7 +1769,8 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     , Feature.Editing.viewEditableText model "project" project.id "name" project.name
                 ]
             , div [ class "card-actions" ]
-                [ Feature.Move.viewAction model "project" project.id
+                [ viewFocusAction "project" project.id
+                , Feature.Move.viewAction model "project" project.id
                 , Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
                 , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
                 , if Permissions.canEditCurrentWorkspace model then
@@ -1847,7 +1861,8 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     div [ id (CardSections.detailsId "project" project.id), hidden True ] []
                 ]
             , div [ class "card-inline-actions" ]
-                [ if Permissions.canEditCurrentWorkspace model then
+                [ if isExpanded model project.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "project" project.id) ("project: " ++ project.name) (ToggleCardExpand project.id)
+                , if Permissions.canEditCurrentWorkspace model then
                     button
                         [ class "btn-inline-create"
                         , disabled (not projectAllowsOpenChildren)
@@ -1869,7 +1884,6 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
 
                   else
                     text ""
-                , if isExpanded model project.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "project" project.id) ("project: " ++ project.name) (ToggleCardExpand project.id)
                 ]
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "project"
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "task"
@@ -2363,6 +2377,7 @@ viewTaskCardBody descendants projection showProject model task =
                 ]
             , div [ class "card-actions" ]
                 [ Feature.Sessions.viewTaskIcon task.workspaceId model task.id
+                , viewFocusAction "task" task.id
                 , Feature.Move.viewAction model "task" task.id
                 , Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
@@ -2477,7 +2492,8 @@ viewTaskCardBody descendants projection showProject model task =
 
             ]
         , div [ class "card-inline-actions" ]
-            [ if Permissions.canEditCurrentWorkspace model then
+            [ if isExpanded model task.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
+            , if Permissions.canEditCurrentWorkspace model then
                 button
                     [ class "btn-inline-create"
                     , disabled (not taskAllowsOpenChildren)
@@ -2488,7 +2504,6 @@ viewTaskCardBody descendants projection showProject model task =
 
               else
                 text ""
-            , if isExpanded model task.id then text "" else CardSections.cardDisclosure False (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
             ]
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
           ]
@@ -3757,6 +3772,10 @@ viewHierarchyViewport ws incoming =
                         row.parentId |> Maybe.andThen (\parent -> taskFamily (Set.insert key seen) ("task:" ++ parent))
                     else Nothing
                 Nothing -> Nothing
+        familyWithDock =
+            model.sessions.taskPanel
+                |> Maybe.andThen (\taskId -> taskFamily Set.empty ("task:" ++ taskId))
+                |> Maybe.map Tuple.first
         familyAt position = Array.get position viewport.index.keys |> Maybe.andThen (taskFamily Set.empty)
         familyStatus family =
             let
@@ -3765,6 +3784,10 @@ viewHierarchyViewport ws incoming =
             case Dict.get taskId model.tasks of
                 Just task -> taskCardAppearanceClass task.status (taskRollupForProjection projection model taskId)
                 Nothing -> Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map (\summary -> taskCardAppearanceClass summary.status (taskRollupForProjection projection model taskId)) |> Maybe.withDefault ""
+        familyIsEmpty family =
+            let taskId = String.dropLeft 5 family in
+            (Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map (not << .hasChildren) |> Maybe.withDefault False)
+                && List.isEmpty (Dict.get taskId projection.taskChildren |> Maybe.withDefault [])
         pieceFamily piece =
             case piece of
                 Viewport.Row position _ _ -> familyAt position
@@ -3824,7 +3847,7 @@ viewHierarchyViewport ws incoming =
                                 ( members, following ) = collect [ first ] rest
                             in
                             ( family, Keyed.node "div"
-                                [ class ("hierarchy-task-family" ++ familyStatus family), attribute "data-task-family" (String.dropLeft 5 family)
+                                [ class ("hierarchy-task-family" ++ familyStatus family ++ (if familyIsEmpty family then " hierarchy-task-family-empty" else "") ++ (if familyWithDock == Just family then " hierarchy-task-family-with-dock" else "")), attribute "data-task-family" (String.dropLeft 5 family)
                                 , style "margin-left" ("min(18%, " ++ String.fromInt (depth * 14) ++ "px)")
                                 ] (List.map (pieceView depth) members)
                             ) :: groupedPieces following

@@ -41,6 +41,10 @@ int hmem_audit_host_open(
 /* Revalidate the retained process/connection/path identities, then refresh
  * quota-sensitive free space. Any failure invalidates all cached readings. */
 int hmem_audit_host_refresh(hmem_audit_host *owner);
+/* Non-signaling zero-time poll of the original retained backend handle. Valid
+ * even after connection retirement invalidates capacity evidence; never opens a
+ * PID or treats client close as a backend join. */
+int hmem_audit_host_backend_exited(const hmem_audit_host *owner, int *exited);
 uint32_t hmem_audit_host_directory_count(const hmem_audit_host *owner);
 uint32_t hmem_audit_host_volume_count(const hmem_audit_host *owner);
 int hmem_audit_host_directory_volume(const hmem_audit_host *owner, uint32_t directory);

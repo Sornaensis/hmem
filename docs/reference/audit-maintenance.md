@@ -1,11 +1,12 @@
 # Audit maintenance controls
 
-The server owns one audit assessment worker. `hmem-ctl audit-maintenance status
---json` shows effective non-secret settings and the last bounded assessment.
-`pause` persists a pause across restart, `resume` clears it, and `run-once`
-performs one guarded assessment. These controls currently report candidates;
-they do not execute index rebuilds or heap rewrites. Assessment receipts state
-`operation: assessment` and `executed: false`.
+The server owns one audit maintenance worker. `hmem-ctl audit-maintenance status
+--json` shows effective non-secret settings, the last assessment and any physical
+attempt. `pause` persists a pause and requests cancellation/drain of active work;
+`resume` clears it. `run-once` uses the same safety and window gates as the worker.
+Eligible heap compaction takes priority over individual concurrent index rebuilds.
+An assessment that executes no physical command states `operation: assessment`
+and `executed: false`.
 
 An absent `audit_maintenance` block enables daily eligibility during 03:00–04:00
 in the database server's configured local timezone. Missing fields keep their
@@ -35,7 +36,7 @@ local dates and reports unknown when no valid candidate exists in that range.
 
 ## Narrow database setup
 
-Apply V056 through the existing migration procedure. It installs no extension
+Apply V056 and V057 through the existing migration procedure. They install no extension
 and grants no maintenance capability to the application role. An administrator
 may install the native PostgreSQL 18 `pgstattuple` extension explicitly. Missing
 diagnostics defer with `diagnostic_missing` while ordinary service remains
@@ -53,7 +54,13 @@ GRANT EXECUTE ON FUNCTION public.hmem_audit_runtime_safe(),
   public.hmem_audit_status(), public.hmem_audit_pause(boolean),
   public.hmem_audit_schedule(timestamptz,text,text,text,int,boolean),
   public.hmem_audit_identity(), public.hmem_audit_assess(),
-  public.hmem_audit_record(jsonb,boolean) TO hmem_audit_maint;
+  public.hmem_audit_record(jsonb,boolean),
+  public.hmem_audit_operation_catalog(),
+  public.hmem_audit_operation_begin(uuid,text,oid,boolean),
+  public.hmem_audit_operation_running(uuid),
+  public.hmem_audit_operation_monitor(uuid),
+  public.hmem_audit_operation_uncertain(uuid),
+  public.hmem_audit_operation_finish(uuid,text,jsonb,jsonb) TO hmem_audit_maint;
 ```
 
 Set `HMEM_AUDIT_MAINTENANCE_DB_USER` and
@@ -101,15 +108,55 @@ clean drain.
 
 Before heap admission, a trusted administrator must provide a fresh verified
 backup/restore receipt bound to the cluster system identifier and database OID.
-The receipt records `verified_at`, `backup_sha256`,
-`restore_evidence_sha256` and `restore_verified: true`. Unknown, stale, future or
+The receipt records `verified_at`, `backup_sha256`, `recovery_point` (a PostgreSQL
+WAL LSN), `restore_evidence_sha256` and `restore_verified: true`. Unknown, stale, future or
 mismatched receipts fail readiness. This metadata is an explicit administrator
-attestation; creating controls does not take a backup or authorize production
-maintenance.
+attestation. After independently taking and restoring a backup, the control owner
+calls `public.hmem_audit_backup_attest(receipt_jsonb)` with these fields plus
+`system_identifier` and `database_oid`. The runtime login must receive no EXECUTE
+grant on this function and cannot attest even if accidentally granted EXECUTE.
+Creating controls does not take a backup.
 
-V056 retains one control row, a last assessment and a last scheduled-cycle
+## Physical operations and recovery
+
+Heap work executes top-level `VACUUM (FULL, ANALYZE) ONLY public.audit_log`;
+inheritance children are outside its authority. Index work executes top-level
+`REINDEX INDEX CONCURRENTLY` for one validated, valid index directly bound to the
+audit table. Reclaim thresholds apply to each index, with bounded per-index
+cooldowns. A heap rewrite cools all current audit indexes to avoid immediately
+rebuilding them again. Both kinds require the configured window to remain open,
+actual data/WAL headroom, and bounded lock/operation budgets.
+
+`VACUUM FULL` holds `ACCESS EXCLUSIVE`, so all audit readers and application
+writes that append audit history can wait during the rewrite. The short lock
+budget bounds acquisition; the worker observes foreground waiters and requests
+cancellation when they appear. Cancellation, joining and recovery can also take
+time, so callers may see a wait. Unjoined work retains its owner and is reported
+as cleanup pending rather than a completed drain.
+
+Physical cancellation currently requires the qualified native Windows libpq 17+
+modern cancellation API. Older clients and other platforms defer physical work;
+ordinary service can still start. The bridge resolves optional symbols from the
+actual linked libpq module. It retains one separate cancel object per operation.
+A cancellation signal is not completion: query and cancel transport must join.
+After any attempted cancel, the original client is retired and its retained
+native backend handle must report exit before a new connection can reconcile.
+The worker keeps its singleton/native owner while samples or commands remain
+unjoined. A CLI caller enters a cleanup-pending wait on that same owner and does
+not admit a retry or report a clean drain.
+
+V057 retains one bounded operation UUID/state with original backend identity,
+target and before/after catalog evidence. Unacknowledged completion is reconciled
+against actual filenodes, index validity, definitions and constraints under the
+singleton. Cancellation may leave a committed heap rewrite or partial concurrent
+index phases; SQLSTATE 57014 is not proof of rollback. Unknown/invalid index
+artifacts require administrator remediation. The worker never drops an index
+because its name ends in `_ccnew` or `_ccold`. A failure after admission remains
+physical and uncertain; it is never relabeled as an unexecuted assessment.
+
+The migrations retain one control row, a last assessment and a last scheduled-cycle
 receipt (each at most 32 KiB), and a backup receipt of at most 4 KiB. It deletes no
 audit, session, planning or replay history. Disable or pause the worker to roll
-back eligibility; this does not undo future physical rewrites or restore already
+back eligibility; this does not undo completed physical rewrites or restore already
 pruned outbox events. Keep the independent
 [one-day replay recovery policy](change-stream-retention.md).

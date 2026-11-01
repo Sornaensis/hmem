@@ -1,7 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 module HMem.DB.AuditMaintenance.Host
   ( AuditHost, HostIdentity(..), AuditRelation(..), VolumeCapacity(..), HostCapacity(..)
-  , withAuditHost, withAuditHostWith, sampleAuditHost ) where
+  , withAuditHost, withAuditHostWith, sampleAuditHost, backendHasExited ) where
 
 import Control.Monad (forM)
 import Control.Exception (mask,finally)
@@ -43,6 +43,7 @@ newtype AuditHost = AuditHost (Ptr ())
 foreign import ccall safe "hmem_audit_host_open" c_open :: CString -> Word16 -> CString -> Word16
   -> Word32 -> Word32 -> Int64 -> Int64 -> CString -> CString -> Ptr CString -> Word32 -> Ptr (Ptr ()) -> IO CInt
 foreign import ccall safe "hmem_audit_host_refresh" c_refresh :: Ptr () -> IO CInt
+foreign import ccall safe "hmem_audit_host_backend_exited" c_backendExited :: Ptr () -> Ptr CInt -> IO CInt
 foreign import ccall unsafe "hmem_audit_host_close" c_close :: Ptr () -> IO ()
 foreign import ccall unsafe "hmem_audit_host_volume_count" c_volumeCount :: Ptr () -> IO Word32
 foreign import ccall unsafe "hmem_audit_host_directory_count" c_directoryCount :: Ptr () -> IO Word32
@@ -112,3 +113,8 @@ sampleAuditHost (AuditHost owner) = do
       pure $ case sequence readings of
         Just values | all (\i -> i>=0 && i<length values) mapping -> Right (HostCapacity values mapping)
         _ -> Left "native_host_capacity_unknown"
+
+backendHasExited :: AuditHost -> IO (Either Text Bool)
+backendHasExited (AuditHost owner)=alloca $ \exited -> do
+  result<-c_backendExited owner exited
+  if result==0 then Right . (/=0) <$>peek exited else pure (Left (hostReason result))

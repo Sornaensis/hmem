@@ -664,6 +664,14 @@ fail:
 uint32_t hmem_audit_host_directory_count(const hmem_audit_host *owner) {
   return owner ? owner->directory_count : 0;
 }
+int hmem_audit_host_backend_exited(const hmem_audit_host *owner, int *exited) {
+  DWORD state;
+  if (!owner || !owner->backend || !exited) return HMEM_AUDIT_HOST_INVALID;
+  *exited = 0;
+  state = WaitForSingleObject(owner->backend, 0);
+  if (state == WAIT_OBJECT_0) { *exited = 1; return HMEM_AUDIT_HOST_OK; }
+  return state == WAIT_TIMEOUT ? HMEM_AUDIT_HOST_OK : HMEM_AUDIT_HOST_PROCESS;
+}
 uint32_t hmem_audit_host_volume_count(const hmem_audit_host *owner) {
   return owner ? owner->volume_count : 0;
 }
@@ -698,6 +706,9 @@ int hmem_audit_host_open(const char *sa, uint16_t sp, const char *ca, uint16_t c
   return HMEM_AUDIT_HOST_UNSUPPORTED;
 }
 int hmem_audit_host_refresh(hmem_audit_host *owner) { (void)owner; return HMEM_AUDIT_HOST_UNSUPPORTED; }
+int hmem_audit_host_backend_exited(const hmem_audit_host *owner, int *exited) {
+  (void)owner; if (exited) *exited = 0; return HMEM_AUDIT_HOST_UNSUPPORTED;
+}
 uint32_t hmem_audit_host_directory_count(const hmem_audit_host *owner) { (void)owner; return 0; }
 uint32_t hmem_audit_host_volume_count(const hmem_audit_host *owner) { (void)owner; return 0; }
 int hmem_audit_host_directory_volume(const hmem_audit_host *owner, uint32_t directory) { (void)owner; (void)directory; return -1; }

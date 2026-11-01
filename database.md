@@ -12,6 +12,8 @@ classDiagram
       JSONB? last_assessment
       JSONB? last_cycle
       JSONB? backup_receipt
+      JSONB? operation
+      JSONB index_cooldowns
     }
   %% Planning
     class workspaces {
@@ -588,3 +590,10 @@ identity and bounded last-assessment/cycle/backup receipts. Fixed privileged
 diagnostics and control functions have no PUBLIC execution grant. The migration
 installs no extension and changes no audit rows. See the
 [audit maintenance reference](docs/reference/audit-maintenance.md).
+
+V057 adds bounded physical-operation state (32 KiB) and per-current-index
+cooldowns (8 KiB) to the same singleton. Fixed functions admit, monitor and
+reconcile audit-only heap/index operations; an administrator-only function
+attests a verified backup/restore. No PUBLIC grant, extension installation or
+audit deletion is introduced. Physical commands use a separate narrow login
+and retain operation ownership through cancellation and recovery.

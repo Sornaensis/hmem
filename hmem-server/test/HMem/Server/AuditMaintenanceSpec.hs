@@ -1,4 +1,4 @@
-module HMem.Server.AuditMaintenanceSpec (spec) where
+module HMem.Server.AuditMaintenanceSpec (spec,withRuntime) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel,wait,waitCatch,withAsync)
@@ -273,7 +273,7 @@ withRuntime env action=do
   let role="audit_runtime_"<>TE.encodeUtf8 suffix
       settings=C.defaultAuditMaintenanceConfig {C.maintenanceUser=Just (TE.decodeUtf8 role),C.timezone="Europe/Copenhagen",C.minimumFreeBytes=1048576}
       cfg=C.defaultConfig {C.database=C.defaultConfig.database {C.host="127.0.0.1",C.port=env.testDb.testDbPort,C.name=env.testDb.testDbName,C.user=Just admin,C.password=Nothing,C.sslmode=Just "disable"},C.auditMaintenance=settings}
-      setup=execute env ("CREATE ROLE "<>role<>" LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; GRANT USAGE ON SCHEMA public TO "<>role<>"; GRANT MAINTAIN ON public.audit_log TO "<>role<>"; GRANT EXECUTE ON FUNCTION public.hmem_audit_runtime_safe(),public.hmem_audit_status(),public.hmem_audit_pause(boolean),public.hmem_audit_schedule(timestamptz,text,text,text,int,boolean),public.hmem_audit_identity(),public.hmem_audit_assess(),public.hmem_audit_record(jsonb,boolean) TO "<>role<>"; UPDATE public.audit_maintenance_control SET paused=FALSE,last_scheduled_date=NULL,last_scheduled_zone=NULL,last_claimed_at=NULL,last_heap_at=NULL,last_index_at=NULL,last_assessment=NULL,last_cycle=NULL,backup_receipt=NULL")
+      setup=execute env ("CREATE ROLE "<>role<>" LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; GRANT USAGE ON SCHEMA public TO "<>role<>"; GRANT MAINTAIN ON public.audit_log TO "<>role<>"; GRANT EXECUTE ON FUNCTION public.hmem_audit_runtime_safe(),public.hmem_audit_status(),public.hmem_audit_pause(boolean),public.hmem_audit_schedule(timestamptz,text,text,text,int,boolean),public.hmem_audit_identity(),public.hmem_audit_assess(),public.hmem_audit_record(jsonb,boolean),public.hmem_audit_operation_catalog(),public.hmem_audit_operation_begin(uuid,text,oid,boolean),public.hmem_audit_operation_running(uuid),public.hmem_audit_operation_monitor(uuid),public.hmem_audit_operation_uncertain(uuid),public.hmem_audit_operation_finish(uuid,text,jsonb,jsonb) TO "<>role<>"; UPDATE public.audit_maintenance_control SET paused=FALSE,last_scheduled_date=NULL,last_scheduled_zone=NULL,last_claimed_at=NULL,last_heap_at=NULL,last_index_at=NULL,last_assessment=NULL,last_cycle=NULL,backup_receipt=NULL,operation=NULL,index_cooldowns='{}'")
   bracket setup (const (execute env ("DROP OWNED BY "<>role<>"; DROP ROLE "<>role))) $ \_ -> action cfg role
 
 execute :: TestEnv -> ByteString -> IO ()

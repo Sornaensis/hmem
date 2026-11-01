@@ -1,5 +1,7 @@
 # Optional block for config.yaml. Omitting it keeps daily 03:00–04:00
-# server-local eligibility enabled. Provision separate credentials first.
+# server-local maintenance enabled. Provision separate narrow credentials and
+# operation-function grants first; heap work also needs a verified backup/restore
+# attestation. Pause requests cancellation/drain; run-once keeps window gates.
 audit_maintenance:
   enabled: true
   heap_compaction_enabled: true

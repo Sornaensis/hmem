@@ -16,6 +16,7 @@ build-type:     Simple
 extra-source-files:
     test/fixtures/session-occurrence-parity.json
     cbits/audit_host.h
+    cbits/audit_cancel.h
 
 library
   exposed-modules:
@@ -27,6 +28,7 @@ library
       HMem.DB.AgentSession
       HMem.DB.Audit
       HMem.DB.AuditMaintenance
+      HMem.DB.AuditMaintenance.Cancel
       HMem.DB.AuditMaintenance.Host
       HMem.DB.Auth
       HMem.DB.ChangeStream
@@ -77,6 +79,7 @@ library
   c-sources:
       cbits/session_archive.c
       cbits/audit_host.c
+      cbits/audit_cancel.c
   extra-libraries:
       z
   build-depends:
@@ -91,6 +94,7 @@ library
     , filepath
     , hasql
     , hasql-pool
+    , postgresql-libpq
     , process
     , random
     , rel8
@@ -179,6 +183,7 @@ test-suite hmem-core-test
     , hmem-core
     , hspec
     , hspec-discover
+    , postgresql-libpq
     , process
     , quickcheck-io
     , random

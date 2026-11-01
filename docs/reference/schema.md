@@ -349,11 +349,11 @@ transaction. Failure restores the prior trigger and audit rows; an applied
 version is skipped. No transcript, session, connection or canonical change-stream
 history changes. Deleted audit rows can be recovered only from a prior backup.
 
-## Audit maintenance controls (V056)
+## Audit maintenance controls (V056–V057)
 
 `audit_maintenance_control` has one true `singleton` Boolean primary key and a
 non-null `paused` Boolean defaulting false. Nullable schedule date/zone/claim
-timestamp fields survive restart; nullable heap/index timestamps record future
+timestamp fields survive restart; nullable heap/index timestamps record completed
 operation cooldowns. Nullable JSONB assessment and cycle receipts are each
 limited to 32 KiB, and a nullable backup receipt to 4 KiB. The zone is limited to
 128 bytes. The table has no foreign keys and no audit/outbox trigger.
@@ -364,3 +364,15 @@ table access nor function execution. V056 and its ledger entry commit together;
 it installs no optional extension and deletes no existing data. See
 [audit maintenance controls](audit-maintenance.md) for the separate login,
 native host proof, scheduling and fail-closed diagnostic policy.
+
+V057 adds nullable `operation` JSONB, limited to 32 KiB, and non-null
+`index_cooldowns` JSONB, limited to 8 KiB and defaulting to `{}`. Operation state
+retains one UUID, target, backend/cluster identity and bounded before/after
+catalog evidence. Fixed functions admit, monitor, mark uncertainty and settle
+that exact generation. Recovery preserves a settled/replaced generation and
+never treats a successful cancellation signal as joined work. Per-index cooldowns
+retain only current valid audit indexes; a heap rewrite cools them together.
+
+The separate backup attestation function has no runtime-login or PUBLIC grant
+and independently requires control-owner authority. Both migrations and their
+ledger entries are atomic; existing audit history and constraints are preserved.

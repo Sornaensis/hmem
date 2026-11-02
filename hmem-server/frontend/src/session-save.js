@@ -999,54 +999,6 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   }
   let latestJump=null,latestIntent=0,followPosition=null
   let activeRenderPending=null,activeRenderPosition=null,pendingEnd=null,activePublication=0,seekStartIntent=null,handoffPosition=null
-  let presentationSwitch=null,presentationHold=null
-  const presentationWindow=viewport=>['data-viewer-owner','data-viewer-generation','data-window-publication','data-sealed-dom-load','data-sealed-page-request'].map(key=>viewport.getAttribute(key)||'').join('|')
-  const holdPresentation=viewport=>presentationSwitch || presentationHold?.scope===viewerScope && presentationHold.window===presentationWindow(viewport)
-  document.addEventListener('keydown',event=>{
-    const tab=event.target?.closest?.('[data-presentation-mode]'),list=tab?.closest?.('.session-presentation-tabs')
-    if(!list||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return
-    const tabs=[...list.querySelectorAll('[data-presentation-mode]')],index=tabs.indexOf(tab)
-    const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length
-    event.preventDefault();tabs[next].focus();tabs[next].click()
-  },true)
-  document.addEventListener('click',event=>{
-    const tab=event.target?.closest?.('[data-presentation-mode]'),list=tab?.closest?.('.session-presentation-tabs'),viewport=document.getElementById?.('session-records')
-    if(!list||list.getAttribute('data-presentation-owner')!==viewerStamp||viewport?.getAttribute('data-viewer-owner')!==viewerStamp)return
-    const mode=tab.getAttribute('data-presentation-mode')
-    if(!['conversation','activity','full'].includes(mode)||mode===viewport.getAttribute('data-presentation'))return
-    const box=viewport.getBoundingClientRect(),leaf=[...viewport.querySelectorAll('[data-fragment-path]')].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-fragment-path],[data-history-gap],[data-body-gap],[data-sealed-body-needed]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom})
-    const row=leaf?.closest('[data-block-key]') || leaf?.querySelector('[data-block-key]'),group=leaf?.closest('[data-group-key]') || leaf?.querySelector('[data-group-key]'),marker=leaf?.closest('[data-mode-key]') || row?.querySelector('[data-mode-key]')
-    const source=row?.getAttribute('data-block-key') || group?.getAttribute('data-group-key') || ''
-    const sourceGroup=row?.getAttribute('data-source-group') || group?.getAttribute('data-group-key') || ''
-    const context=row?.matches('.session-role-system,.session-role-developer')
-    const prose=row&&!row.classList.contains('session-record-activity')&&(!row.getAttribute('data-source-group'))
-    let anchor=leaf?.getAttribute('data-fragment-path') || source
-    if(context && !marker?.open || mode==='activity'&&prose&&!marker?.open)anchor=source
-    else if(mode!=='activity' && marker && !context)anchor=row?.getAttribute('data-source-content') || source
-    if(mode!=='full'&&sourceGroup&&!disclosures.get('group:'+sourceGroup)&&!group?.open)anchor=sourceGroup
-    const ticket={stamp:viewerStamp,scope:viewerScope,generation,intent:viewerIntent,mode,source,sourceGroup,path:leaf?.dataset.fragmentPath,point:leaf?visibleTextPoint(viewport,leaf):null,top:leaf?leaf.getBoundingClientRect().top-box.top:0,scroll:viewport.scrollTop}
-    presentationSwitch=ticket;presentationHold=null
-    send({kind:'viewer-presentation',stamp:viewerStamp,generation,scope:viewerScope,mode,anchor},()=>presentationSwitch===ticket&&viewerStamp===ticket.stamp&&viewerScope===ticket.scope)
-    const restore=attempt=>{
-      if(presentationSwitch!==ticket)return
-      if(viewerStamp!==ticket.stamp||viewerScope!==ticket.scope||viewerIntent!==ticket.intent){presentationSwitch=null;return}
-      const mounted=document.getElementById?.('session-records')
-      if(mounted?.getAttribute('data-viewer-owner')!==ticket.stamp||mounted.getAttribute('data-presentation')!==mode){if(attempt<8)requestAnimationFrame(()=>restore(attempt+1));else presentationSwitch=null;return}
-      const bounds=mounted.getBoundingClientRect(),leaves=[...mounted.querySelectorAll('[data-fragment-path]')]
-      const exact=leaves.find(node=>node.dataset.fragmentPath===ticket.path&&visibleConversationNode(node,mounted))
-      const rows=[...mounted.querySelectorAll('[data-block-key],[data-group-key]')].filter(node=>visibleConversationNode(node,mounted))
-      const same=rows.find(node=>node.getAttribute('data-block-key')===ticket.source)||rows.find(node=>node.getAttribute('data-group-key')===(ticket.sourceGroup||ticket.source))||(ticket.sourceGroup?rows.find(node=>node.getAttribute('data-source-group')===ticket.sourceGroup):null)
-      const rank=key=>{if(!key)return null;try{return indexedCursorRank(key)}catch{return null}}
-      const wanted=rank(ticket.source),nearest=wanted===null?null:rows.reduce((best,node)=>{const value=rank(node.getAttribute('data-block-key')||node.getAttribute('data-group-key'));if(value===null)return best;const distance=value>wanted?value-wanted:wanted-value;return !best||distance<best.distance?{node,distance}:best},null)?.node
-      const target=exact||same||nearest
-      if(exact&&ticket.point){const pre=exact.closest('pre');if(pre&&ticket.point.innerScroll!==null)pre.scrollTop=ticket.point.innerScroll;const rect=payloadTextRange(exact,ticket.point.offset)?.getBoundingClientRect();mounted.scrollTop+=rect?.height?rect.top-bounds.top-ticket.point.top:exact.getBoundingClientRect().top-bounds.top-ticket.top}
-      else if(target)mounted.scrollTop+=target.getBoundingClientRect().top-bounds.top-ticket.top
-      else mounted.scrollTop=Math.min(ticket.scroll,Math.max(0,mounted.scrollHeight-mounted.clientHeight))
-      scrollIntent.positioned();presentationSwitch=null;presentationHold={scope:viewerScope,window:presentationWindow(mounted)};captureResize()
-      updateLatestOverlay(mounted,mounted.getAttribute('data-history-mode')==='sealed'?mounted.getAttribute('data-logical-latest')==='true':Number(mounted.dataset.historyAfter)>=Number(mounted.dataset.historyLatest),scrollIntent.manual())
-    }
-    requestAnimationFrame(()=>restore(0))
-  },true)
   document.addEventListener('toggle',event=>{
     const node=event.target,viewport=document.getElementById?.('session-records'),key=node.getAttribute?.('data-mode-key')
     if(key&&node.getAttribute('data-mode-owner')===viewerStamp&&viewport?.contains(node))send({kind:'viewer-mode-disclosure',stamp:viewerStamp,generation,scope:viewerScope,key,open:node.open})
@@ -1154,8 +1106,6 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   const noteViewerIntent = event => {
     const viewport=document.getElementById?.('session-records')
     if(viewport && (event.target===viewport || viewport.contains?.(event.target))){
-      if(event.type==='toggle'&&presentationSwitch)return
-      if(event.type!=='toggle'&&event.type!=='click'){presentationHold=null;presentationSwitch=null}
       if(event.type==='click'&&(event.isTrusted===false||!event.target?.closest?.('summary')))return
       if(event.type==='toggle'&&handoffPosition?.owner===viewerStamp&&handoffPosition.intent===viewerIntent&&handoffPosition.revision===generation&&(handoffPosition.publication===undefined||Number(viewport.getAttribute?.('data-window-publication'))===handoffPosition.publication)&&handoffPosition.disclosures.some(([key,open])=>key===disclosureKey(event.target)&&open===event.target.open))return
       scrollIntent.note(event,viewport)
@@ -1197,7 +1147,6 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(!viewport || (event && event.target!==viewport) || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp)return
     const attr=name=>viewport.getAttribute?.('data-history-'+name)
     if(attr('mode')!=='active')return
-    if(holdPresentation(viewport))return
     if(handoffPosition?.failed&&attr('error')==='true')handoffPosition=null
     if(attr('error')==='true')return
     if(handoffPosition){
@@ -1276,7 +1225,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const position=snapshot?rememberPresentation({type:'scroll',target:viewport}):ticket.mode==='active'?rememberActivePosition(viewport):null
       captureResize()
       if(ticket.mode==='active')inspectBoundary(undefined,position)
-      else if(!holdPresentation(viewport))sealed.inspectViewport?.(viewport)
+      else sealed.inspectViewport?.(viewport)
     })
   }
   const continuityObserver=window.MutationObserver?new window.MutationObserver(records=>{

@@ -1381,8 +1381,6 @@ type alias SessionsModel =
     , positionPending : Bool
     , presentationPart : Int
     , presentationAnchor : String
-    , presentationMode : String
-    , presentationSwitchAnchor : String
     , windowPurpose : String
     , manualUp : Bool
     , latestRequest : Int
@@ -1432,7 +1430,6 @@ emptySessionsModel =
     { workspace = Nothing, epoch = 0, selected = Nothing, viewerScope = "", returnTaskPanel = Nothing, cursor = Nothing, previous = [], linksCursor = Nothing, today = "", owned = []
     , filters = Api.workspaceSessionFilters, stamp = "", downloadStamp = "", deliveryRetirement = 0, generation = 0, bridgedGeneration = -1, resetPending = True, start = Nothing, offset = 0, end = 0, following = True, loadWindow = True, windowDirection = "tail", windowAligned = False, historyBefore = 0, historyAfter = 0, historyScanBefore = 0, historyScanAfter = 0, historyScanEnd = 0, historyTop = 0, historyBottom = 0, historyTopCount = 0, historyBottomCount = 0, historyTopGroup = "", historyBottomGroup = "", historyAnchor = "", historyHeights = Dict.empty, historyGaps = [], historyActivity = Dict.empty, historyClosed = Set.empty, historyOpen = Set.empty, windowPublication = 0, positionPending = False, presentationPart = -1, presentationAnchor = "", windowPurpose = "latest", manualUp = False, latestRequest = 0, latestPending = False, latestError = Nothing, pending = False, rows = [], notice = "", error = Nothing, now = 0
     , saveBlocked = False, saveCapability = Nothing, save = Nothing, archive = Nothing, archiveMessageTask = Nothing, archiveRequests = Dict.empty, nextOperation = 1, saveMessage = ""
-    , presentationMode = "conversation", presentationSwitchAnchor = ""
     , sealed = emptySealedSessionView
     , heartbeats = Dict.empty, lastFilterRefresh = 0, taskPages = Dict.empty, taskHints = Dict.empty, taskAssociations = Dict.empty, hintOrder = [], sectionOrder = [], taskFilter = Nothing, projectFilter = Nothing, projectFacetCursor = Nothing, taskFacetCursor = Nothing, activityDirty = False, lastActivityRefresh = 0, taskCursors = Dict.empty, taskPreviousPages = Dict.empty, taskPanel = Nothing, taskCursor = Nothing, taskPrevious = [] }
 

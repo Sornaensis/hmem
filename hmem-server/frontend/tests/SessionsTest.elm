@@ -25,20 +25,25 @@ suite : Test.Test
 suite =
     describe "Sessions production wire contract"
         [ describe "workspace completed reader" completedReaderTests
-        , test "presentation modes preserve source authority, transport, following and disclosure state" <| \_ ->
+        , test "native context disclosures preserve source authority, transport, following and existing state" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
                 old=entered.sessions
                 state={old | rows=[sampleRecord],pending=True,offset=64,end=128,windowPublication=9,historyOpen=Set.singleton "existing",manualUp=True,following=False}
                 current={entered | sessions=state}
-                packet stamp generation scope mode=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-presentation"),("stamp",Encode.string stamp),("generation",Encode.int generation),("scope",Encode.string scope),("mode",Encode.string mode),("anchor",Encode.string "source:content")])
-                valid=packet state.stamp state.generation state.viewerScope "activity"
-                next=Sessions.update valid current |> Tuple.first
-                ignored=[packet "retired" state.generation state.viewerScope "activity",packet state.stamp (state.generation-1) state.viewerScope "activity",packet state.stamp state.generation "retired" "activity",packet state.stamp state.generation state.viewerScope "unbounded"]
+                packet stamp generation scope=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-mode-disclosure"),("stamp",Encode.string stamp),("generation",Encode.int generation),("scope",Encode.string scope),("key",Encode.string "context:source"),("open",Encode.bool True)])
+                next=Sessions.update (packet state.stamp state.generation state.viewerScope) current |> Tuple.first
+                ignored=[packet "retired" state.generation state.viewerScope,packet state.stamp (state.generation-1) state.viewerScope,packet state.stamp state.generation "retired"]
             in Expect.all
-                [\_ -> Expect.equal {state | presentationMode="activity",presentationSwitchAnchor="source:content"} next.sessions
+                [\_ -> Expect.equal {state | historyOpen=Set.insert "mode:context:source" state.historyOpen} next.sessions
                 ,\_ -> Expect.equal current.sessionDelivery next.sessionDelivery
                 ,\_ -> Expect.equal True (List.all (\event -> (Sessions.update event current |> Tuple.first |> .sessions)==state) ignored)] ()
+        , test "active conversation is a named region without presentation tabs" <| \_ ->
+            let reader=Query.fromHtml (Sessions.view workspace (Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first))
+            in Expect.all
+                [\_ -> reader |> Query.find [Selector.id "session-records"] |> Query.has [Selector.attribute (Html.Attributes.attribute "role" "region"),Selector.attribute (Html.Attributes.attribute "aria-label" "Session conversation")]
+                ,\_ -> reader |> Query.hasNot [Selector.class "session-presentation-tabs"]
+                ,\_ -> reader |> Query.hasNot [Selector.attribute (Html.Attributes.attribute "role" "tabpanel")]] ()
         , test "disclosure UI acknowledgements preserve exact generation and transport authority" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
@@ -1129,7 +1134,12 @@ completedReaderTests =
             in {entered | sessionDelivery={delivery | resources=Dict.insert (Delivery.key workspace target) resource delivery.resources},sessions={state | taskPanel=Just "one",sealed={sealed | phase=phase,canRetry=True,canPrevious=False,canNext=True}}}
         workspaceView phase = Query.fromHtml (Sessions.view workspace (model phase))
     in
-    [ test "sealed latest retains the verified reader lifetime while issuing a fresh jump request" <| \_ ->
+    [ test "verified conversation is a named region without presentation tabs" <| \_ ->
+        Expect.all
+            [\_ -> workspaceView "ready" |> Query.find [Selector.id "session-records"] |> Query.has [Selector.attribute (Html.Attributes.attribute "role" "region"),Selector.attribute (Html.Attributes.attribute "aria-label" "Verified archive records")]
+            ,\_ -> workspaceView "ready" |> Query.hasNot [Selector.class "session-presentation-tabs"]
+            ,\_ -> workspaceView "ready" |> Query.hasNot [Selector.attribute (Html.Attributes.attribute "role" "tabpanel")]] ()
+    , test "sealed latest retains the verified reader lifetime while issuing a fresh jump request" <| \_ ->
         let ready=model "ready"
             state=ready.sessions
             next=Sessions.update SessionsJumpLatest ready |> Tuple.first |> .sessions

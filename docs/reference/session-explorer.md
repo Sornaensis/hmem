@@ -19,17 +19,13 @@ authority. Live/Quiet and separately labelled lifecycle times retain their own
 clocks. See [transcript occurrence time](session-occurrence.md) for eligibility,
 historical correction and the server's exact cursor contract.
 
-Both workspace and task readers default to **Conversation** for a new session.
-**Activity** replaces prose with expandable source-message markers; **Full
-transcript** shows loaded source pieces in order without the outer activity
-runs. Native system/developer messages remain labelled context disclosures,
-including their original content. Tool and structured-record inspection remains
-available. These controls change presentation of the current bounded data only;
-they neither fetch the entire active session nor enable an active download.
-Modes and disclosures belong to the selected reader authority and carry across
-supported task/workspace navigation. A mode change preserves the visible source
-occurrence, using its marker or the nearest surviving occurrence when necessary.
-It does not count as manual upward input or reveal Jump to latest.
+Workspace and task readers share one Conversation view. Native system/developer
+messages remain labelled context disclosures exposing their original content;
+tool and structured-record inspection remains available inside activity groups.
+Disclosures belong to the selected reader authority and carry across supported
+task/workspace navigation. Ordinary prose retains a readable line length and
+aligns with its timestamps, roles and nearby activity summaries. Code, tables and
+structured content may use the available reader width.
 
 Consecutive thinking, tool calls, results and inspectable JSON payloads share a collapsed activity group,
 including a run that currently has only one event. User and agent prose stays

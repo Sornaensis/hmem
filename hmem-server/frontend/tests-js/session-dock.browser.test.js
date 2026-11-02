@@ -50,7 +50,7 @@ test('task-owned Active Agent dock retains task context, grouped transcript, evi
  Object.assign(other,{committed_bytes:bytes.length,committed_records:1});h.content.set(other.id,bytes)
  try{
   await h.start();await h.idle();await until(()=>agent(h,0).isEnabled())
-  assert.deepEqual((await page.locator('.workspace-tabs > button').allTextContents()).slice(0,4),['Projects','Sessions','Observations','Timeline'])
+  assert.deepEqual((await page.locator('.workspace-tabs > button').evaluateAll(elements=>elements.map(element=>element.getAttribute('aria-label')))).slice(0,4),['Projects','Sessions','Observations','Timeline'])
   assert.equal(await page.locator('.task-session-active').count(),0)
   assert.equal(await card(h,0).locator('.card-extras').count(),0)
   await agent(h,0).locator('.session-activity-core').click();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()

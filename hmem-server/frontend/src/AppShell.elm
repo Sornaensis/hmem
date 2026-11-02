@@ -92,6 +92,7 @@ initModel key url page flags storedFilters legacyFrag =
             , timestamps = TimestampDisplay.empty
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
+            , workspaceDetailsExpanded = True
             , mainContentScrollY = 0
             , workspaces = Dict.empty
             , projects = Dict.empty

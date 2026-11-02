@@ -14,6 +14,7 @@ import Feature.Search
 import Feature.Focus
 import Feature.TimestampDisplay
 import Page.Workspace
+import UpdateRouter
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
 import Html.Attributes as Attributes
@@ -24,7 +25,27 @@ import Test exposing (..)
 suite : Test
 suite =
     describe "observation unified-search presentation"
-        [ test "Search has an exhaustive route codec and accepts bounded versioned return links" <| \_ ->
+        [ test "workspace badge shows only current canonical open-project totals" <| \_ ->
+            let
+                loading = liveModel.dataLoading
+                counts = loading.planningCounts
+                current = { liveModel | dataLoading = { loading | planningCounts = { counts | current = True, value = Just { openProjects = 7, openTasks = 2 } } } }
+                stale = { current | dataLoading = { loading | planningCounts = { counts | current = False, value = Just { openProjects = 7, openTasks = 2 } } } }
+            in
+            Expect.all
+                [ \_ -> Page.Workspace.viewWorkspaceContext current |> Query.fromHtml |> Query.find [ Selector.class "workspace-tab-count" ] |> Query.has [ Selector.text "7" ]
+                , \_ -> Page.Workspace.viewWorkspaceContext stale |> Query.fromHtml |> Query.findAll [ Selector.class "workspace-tab-count" ] |> Query.count (Expect.equal 0)
+                ] ()
+        , test "Details is transient presentation and reopens at workspace or session boundaries" <| \_ ->
+            let
+                closed = UpdateRouter.update ToggleWorkspaceDetails liveModel |> Result.withDefault ( liveModel, Cmd.none ) |> Tuple.first
+                same = Page.Workspace.reconcilePresentation closed ( closed, Cmd.none ) |> Tuple.first
+                moved = Page.Workspace.reconcilePresentation closed ( { closed | selectedWorkspaceId = Just "other" }, Cmd.none ) |> Tuple.first
+                renewed = Page.Workspace.reconcilePresentation closed ( { closed | sessionRequestEpoch = closed.sessionRequestEpoch + 1 }, Cmd.none ) |> Tuple.first
+            in
+            Expect.equal { initial = True, closed = False, same = False, moved = True, renewed = True, filters = Encode.encode 0 (Helpers.encodeFilterState liveModel) }
+                { initial = liveModel.workspaceDetailsExpanded, closed = closed.workspaceDetailsExpanded, same = same.workspaceDetailsExpanded, moved = moved.workspaceDetailsExpanded, renewed = renewed.workspaceDetailsExpanded, filters = Encode.encode 0 (Helpers.encodeFilterState closed) }
+        , test "Search has an exhaustive route codec and accepts bounded versioned return links" <| \_ ->
             let
                 built = Helpers.buildFragment SearchTab Nothing Nothing
                 sourceUrl = liveModel.url

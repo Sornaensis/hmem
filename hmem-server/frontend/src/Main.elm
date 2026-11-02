@@ -19,6 +19,7 @@ import Feature.Sessions
 import Helpers exposing (parseFragment)
 import Json.Decode as Decode
 import Ports
+import Page.Workspace
 import Route exposing (handleUrlChange, handleUrlRequest, urlToPage)
 import Types exposing (..)
 import UpdateRouter
@@ -133,7 +134,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.Focus.reconcilePreview msg |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile
+    updateCore msg model |> Feature.Focus.reconcilePreview msg |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile |> Page.Workspace.reconcilePresentation model
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )

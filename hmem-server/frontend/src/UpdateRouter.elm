@@ -27,6 +27,7 @@ import Feature.WorkspaceAdmin
 import Helpers
 import Http
 import Ports
+import Permissions
 import Toast
 import Types exposing (..)
 import Url
@@ -89,6 +90,9 @@ reconcileFocusedFilters previous ( updated, command ) =
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
+        ToggleWorkspaceDetails ->
+            Ok ( if Permissions.canReadCurrentWorkspace model then { model | workspaceDetailsExpanded = not model.workspaceDetailsExpanded } else model, Cmd.none )
+
         SessionsNextPage _ -> Ok (Feature.Sessions.update msg model)
         SessionsToggleDock _ -> Ok (Feature.Sessions.update msg model)
         SessionsSelectDock _ _ -> Ok (Feature.Sessions.update msg model)

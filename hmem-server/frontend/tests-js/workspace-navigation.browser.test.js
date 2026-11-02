@@ -14,7 +14,7 @@ test('initial Search, soft tabs and always-visible hierarchy filters retain inde
     await h.page.addInitScript(id=>localStorage.setItem('hmem-ws-'+id,JSON.stringify({workspaceId:id,searchSectionExpanded:false,searchQuery:'root',filterShowOnly:'all'})),fixture.workspace.id)
     await h.page.goto(h.origin+'/workspace/'+fixture.workspace.id+'#tab=search');await section(h,'Search').waitFor();await h.idle()
     assert.equal(await section(h,'Search').getAttribute('aria-current'),'page')
-    assert.deepEqual((await tabs(h).getByRole('button').allTextContents()).slice(0,6),['Projects','Sessions','Observations','Timeline','Search','Audit'])
+    assert.deepEqual((await tabs(h).getByRole('button').evaluateAll(elements=>elements.map(element=>element.getAttribute('aria-label')))).slice(0,6),['Projects','Sessions','Observations','Timeline','Search','Audit'])
     assert.equal(await h.page.getByRole('group',{name:'Search Entities',exact:true}).getByRole('button').count(),3)
     assert.equal(await h.page.locator('.hierarchy-search-input').count(),0)
     assert.equal(createHash('sha256').update(await readFile(new URL('../public/hmem-logo.svg',import.meta.url))).digest('hex'),'6b07f1af02d677188064a57ace9a0b57809fb3674923cbb87de60a805da8c9f5')
@@ -27,7 +27,7 @@ test('initial Search, soft tabs and always-visible hierarchy filters retain inde
       const geometry=await h.page.evaluate(()=>{const logo=document.querySelector('.global-logo').getBoundingClientRect(),image=document.querySelector('.global-logo img').getBoundingClientRect();return{logo:logo.toJSON(),image:image.toJSON(),overflow:document.documentElement.scrollWidth>innerWidth}})
       assert.ok(Math.abs((geometry.logo.left+geometry.logo.right)/2-(geometry.image.left+geometry.image.right)/2)<=1,JSON.stringify(geometry))
       assert.equal(geometry.overflow,false)
-      await h.page.screenshot({path:'../../output/workspace-navigation-f3a34ca9/navigation-'+width+'.png'})
+      await h.page.screenshot({path:'../../output/playwright/fidelity-91d9ee2f/navigation-'+width+'.png'})
       assert.equal(await h.page.locator('.titlebar-breadcrumbs').count(),1)
       assert.equal(await h.page.locator('#main-content-scroll .focus-breadcrumb-bar, .popover-card-breadcrumb, .audit-return-bar').count(),0)
       const filters=await h.page.locator('.project-filter-panel button,.project-filter-panel select').evaluateAll(values=>values.map(value=>{const r=value.getBoundingClientRect(),p=value.closest('.project-filter-panel').getBoundingClientRect();return{shown:r.width>0&&r.height>0,fit:r.left>=p.left-1&&r.right<=p.right+1}}))
@@ -60,7 +60,7 @@ test('next-task pointer and keyboard previews share title navigation without cha
 })
 
 
-test('long focused and preview breadcrumbs wrap inside the narrow title bar', {timeout:30000}, async()=>{
+test('long focused and preview breadcrumbs wrap inside desktop and narrow title bars', {timeout:30000}, async()=>{
   const fixture=hierarchyFixture();fixture.projects=fixture.projects.slice(0,1);fixture.tasks=fixture.tasks.slice(0,1)
   fixture.projects[0].name='Project-'+ 'LongUnbroken'.repeat(25);fixture.tasks[0].title='Task-'+ 'LongUnbroken'.repeat(25)
   const h=await openHierarchy(fixture)
@@ -74,8 +74,10 @@ test('long focused and preview breadcrumbs wrap inside the narrow title bar', {t
     await h.page.setViewportSize({width:390,height:950});await h.start();await h.idle()
     await h.page.locator('#entity-root-project .btn-extras-toggle').first().click();await h.idle()
     await h.page.locator('.next-task-candidate').first().hover();await h.page.locator('.titlebar-preview-trail').waitFor();await fits('.titlebar-preview-trail .focus-crumb')
+    for(const width of [390,1920]){await h.page.setViewportSize({width,height:1100});await h.page.locator('.next-task-candidate').first().focus();await h.page.locator('.titlebar-preview-trail').waitFor();await fits('.titlebar-preview-trail .focus-crumb');await h.page.screenshot({path:'../../output/playwright/fidelity-91d9ee2f/long-preview-'+width+'.png'})}
     await h.page.goto(h.origin+'/workspace/'+fixture.workspace.id+'#tab=projects&focus=task:'+fixture.tasks[0].id)
     await h.page.locator('#entity-'+fixture.tasks[0].id).waitFor();await h.idle();await fits('.titlebar-focus-trail .focus-crumb:not(.focus-crumb-link) , .titlebar-focus-trail .focus-crumb-link')
+    for(const width of [1920,390]){await h.page.setViewportSize({width,height:1100});await fits('.titlebar-focus-trail .focus-crumb:not(.focus-crumb-link) , .titlebar-focus-trail .focus-crumb-link');await h.page.screenshot({path:'../../output/playwright/fidelity-91d9ee2f/long-focus-'+width+'.png'})}
     assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
   }finally{await h.close()}
 })

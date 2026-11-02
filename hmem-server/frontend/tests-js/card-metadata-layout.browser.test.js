@@ -30,7 +30,7 @@ test('copy-only identifiers retain exact native copy feedback and card footers h
 test('New Project fits the dedicated hierarchy toolbar at desktop, narrow and zoom and retains inline creation',{timeout:30000},async()=>{
  const f=hierarchyFixture(),h=await openHierarchy(f),{page}=h
  try{
-  await h.start();await h.idle();const create=page.getByRole('button',{name:'+ New Project',exact:true}),tree=page.locator('.hierarchy-toolbar')
+  await h.start();await h.idle();const create=page.getByRole('button',{name:'New project',exact:true}),tree=page.locator('.hierarchy-toolbar')
   for(const [width,zoom] of [[2560,1],[1440,1],[900,1],[430,1],[1440,1.5]]){
    await page.setViewportSize({width,height:1000});await page.evaluate(zoom=>{document.documentElement.style.zoom=String(zoom)},zoom);await h.idle()
    const [button,bounds]=await Promise.all([create.boundingBox(),tree.boundingBox()]);assert.ok(button.width>0&&button.x>=bounds.x&&button.x+button.width<=bounds.x+bounds.width+1,JSON.stringify({width,zoom,button,bounds}));assert.ok(button.y>=bounds.y&&button.y+button.height<=bounds.y+bounds.height+1)

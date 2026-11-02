@@ -4,6 +4,7 @@ module Page.Workspace exposing
     , viewWorkspacePage
     , workspaceSummaryParts
     , workspaceTabLabel
+    , reconcilePresentation
     )
 
 import Api
@@ -21,6 +22,7 @@ import Helpers
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick)
+import Icon
 import Permissions
 import TimestampDisplay
 import Types exposing (..)
@@ -39,6 +41,14 @@ viewWorkspacePage wsId model =
                 text ""
         , viewWorkspaceContent wsId model
         ]
+
+
+reconcilePresentation : Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+reconcilePresentation previous ( current, command ) =
+    ( if previous.page /= current.page || previous.selectedWorkspaceId /= current.selectedWorkspaceId || previous.sessionRequestEpoch /= current.sessionRequestEpoch then
+        { current | workspaceDetailsExpanded = True }
+      else current
+    , command )
 
 
 viewWorkspaceContent : String -> Model -> Html Msg
@@ -110,8 +120,12 @@ viewReadableWorkspaceContext model ws =
                              else if counts.error /= Nothing then "Observation total unavailable"
                              else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
                         , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
-                  else text "" ]
-            , div [class "workspace-metadata"]
+                  else text ""
+                , span [ class "workspace-summary-separator", attribute "aria-hidden" "true" ] [ text " · " ]
+                , button [ class "workspace-details-toggle", type_ "button", onClick ToggleWorkspaceDetails, attribute "aria-expanded" (if model.workspaceDetailsExpanded then "true" else "false"), attribute "aria-controls" "workspace-metadata" ]
+                    [ text "Details", Icon.view (if model.workspaceDetailsExpanded then "chevron-down" else "chevron-right") ]
+                ]
+            , div [class "workspace-metadata", id "workspace-metadata", hidden (not model.workspaceDetailsExpanded)]
                 [ div [ class "workspace-details" ]
                   [ div [ class "workspace-detail" ]
                     [ Helpers.copyableValue "workspace-detail-value card-id card-id-copy" "workspace ID" ws.id ws.id ]
@@ -218,18 +232,18 @@ viewTabs : Model -> Html Msg
 viewTabs model =
     div [ class "tabs workspace-tabs", attribute "aria-label" "Workspace sections" ]
         (List.filterMap identity
-            [ Just (viewTab ProjectsTab model.activeTab (workspaceTabLabel ProjectsTab))
-            , Just (viewTab SessionsTab model.activeTab (workspaceTabLabel SessionsTab))
-            , Just (viewTab ObservationsTab model.activeTab (workspaceTabLabel ObservationsTab))
-            , Just (viewTab TimelineTab model.activeTab (workspaceTabLabel TimelineTab))
-            , Just (viewTab SearchTab model.activeTab (workspaceTabLabel SearchTab))
+            [ Just (viewTab ProjectsTab model (workspaceTabLabel ProjectsTab))
+            , Just (viewTab SessionsTab model (workspaceTabLabel SessionsTab))
+            , Just (viewTab ObservationsTab model (workspaceTabLabel ObservationsTab))
+            , Just (viewTab TimelineTab model (workspaceTabLabel TimelineTab))
+            , Just (viewTab SearchTab model (workspaceTabLabel SearchTab))
             , if Permissions.canViewCurrentWorkspaceAudit model then
-                Just (viewTab AuditTab model.activeTab (workspaceTabLabel AuditTab))
+                Just (viewTab AuditTab model (workspaceTabLabel AuditTab))
 
               else
                 Nothing
             , if Permissions.canViewWorkspaceAdministration model then
-                Just (viewTab AdministrationTab model.activeTab (workspaceTabLabel AdministrationTab))
+                Just (viewTab AdministrationTab model (workspaceTabLabel AdministrationTab))
 
               else
                 Nothing
@@ -262,11 +276,23 @@ workspaceTabLabel tab =
             "Administration"
 
 
-viewTab : WorkspaceTab -> WorkspaceTab -> String -> Html Msg
-viewTab tab activeTab label =
+viewTab : WorkspaceTab -> Model -> String -> Html Msg
+viewTab tab model label =
+    let
+        icon =
+            case tab of
+                ProjectsTab -> "folder-kanban"
+                SessionsTab -> "terminal"
+                ObservationsTab -> "scan-eye"
+                TimelineTab -> "history"
+                SearchTab -> "search"
+                AuditTab -> "shield-check"
+                AdministrationTab -> "settings-2"
+        count = model.dataLoading.planningCounts
+    in
     button
         [ class
-            (if tab == activeTab then
+            (if tab == model.activeTab then
                 "tab active"
 
              else
@@ -274,9 +300,15 @@ viewTab tab activeTab label =
             )
         , onClick (SwitchTab tab)
         , type_ "button"
-        , attribute "aria-current" (if tab == activeTab then "page" else "false")
+        , attribute "aria-label" label
+        , attribute "aria-current" (if tab == model.activeTab then "page" else "false")
         ]
-        [ text label ]
+        [ Icon.view icon
+        , text label
+        , if tab == ProjectsTab && count.current then
+            count.value |> Maybe.map (\value -> span [ class "workspace-tab-count", attribute "aria-hidden" "true", title "Open projects" ] [ text (String.fromInt value.openProjects) ]) |> Maybe.withDefault (text "")
+          else text ""
+        ]
 
 
 viewTabContent : String -> Model -> Html Msg
@@ -285,10 +317,12 @@ viewTabContent wsId model =
         ProjectsTab ->
             div [ class "hierarchy-content-section" ]
                 [ div [ class "hierarchy-toolbar" ]
-                    [ h2 [] [ text "Project hierarchy" ]
+                    [ h2 [ class "hierarchy-label" ] [ Icon.view "list-tree", text "Project hierarchy" ]
                     , div [ class "tree-toolbar" ]
-                        [ button [ class "btn-small btn-ghost", onClick ExpandAllNodes ] [ text "Expand All" ]
-                        , button [ class "btn-small btn-ghost", onClick CollapseAllNodes ] [ text "Collapse All" ]
+                        [ div [ class "hierarchy-action-pair" ]
+                            [ button [ class "btn-small btn-ghost", type_ "button", attribute "aria-label" "Expand All", onClick ExpandAllNodes ] [ Icon.view "unfold-vertical", text "Expand all" ]
+                            , button [ class "btn-small btn-ghost", type_ "button", attribute "aria-label" "Collapse All", onClick CollapseAllNodes ] [ Icon.view "fold-vertical", text "Collapse all" ]
+                            ]
                         , Feature.Editing.viewInlineCreateInput model Nothing "project"
                         ]
                     ]
@@ -312,7 +346,7 @@ viewTabContent wsId model =
 
         SearchTab ->
             div [ class "workspace-search-page" ]
-                [ h2 [] [ text "Search all entities" ]
+                [ h2 [] [ text "Search All Entities" ]
                 , Feature.Search.viewSearchBar model
                 , if model.search.isSearching then Feature.Search.viewUnifiedSearchLoading model
                   else case model.search.searchError of

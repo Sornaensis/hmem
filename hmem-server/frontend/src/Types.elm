@@ -56,6 +56,7 @@ type alias Model =
     , timestamps : TimestampDisplay.State
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
+    , workspaceDetailsExpanded : Bool
     , mainContentScrollY : Float
     , workspaces : Dict String Api.Workspace
     , projects : Dict String Api.Project
@@ -1546,6 +1547,7 @@ type Route
 
 type Msg
     = UrlRequested Browser.UrlRequest
+    | ToggleWorkspaceDetails
     | TimestampsFormatted Encode.Value
     | ObservationViewportChanged Encode.Value
     | UrlChanged Url.Url

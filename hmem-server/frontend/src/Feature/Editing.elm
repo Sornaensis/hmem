@@ -30,6 +30,7 @@ module Feature.Editing exposing
 
 import Api
 import Dict
+import Icon
 import Helpers exposing (beginTrackedMutation, editElementId, editingValue, focusElement)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -1526,9 +1527,10 @@ viewInlineCreateInput model parentId inputType =
         div [ class "inline-create-row" ]
             [ button
                 [ class "btn-inline-create-top"
+                , type_ "button"
                 , onClick (ShowInlineCreate (InlineCreateProject { parentId = Nothing, name = "" }))
                 ]
-                [ text "+ New Project" ]
+                [ Icon.view "plus", text "New project" ]
             ]
 
     else

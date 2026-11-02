@@ -11,7 +11,11 @@ recheck fails, use **Retry session** before you continue.
 
 The workspace header keeps its identity, totals and
 section navigation available while scrolling. Its UUID, creation date, modification date
-and available repository information stay visible. Projects uses the full main
+and available repository information start visible; **Details** temporarily hides or
+shows them. A workspace or session change restores the expanded view. The Projects
+badge repeats the current open-project total when it is available. On narrow screens,
+use **Workspaces** to return Home and switch workspaces while the catalog is hidden.
+Projects uses the full main
 pane; session event details remain available in the **Sessions** tab. The title
 bar owns workspace, section and focused-entity breadcrumbs, forward focus links,
 preview context and Search, Timeline or Audit return controls.

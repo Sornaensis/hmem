@@ -34,6 +34,7 @@ import Feature.FocusedFilters
 import Feature.Focus
 import Feature.Observation
 import Dict
+import Icon
 import Permissions
 import Helpers exposing (replaceFragment, saveFiltersCmd, scrollToElement, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
 import Html exposing (..)
@@ -573,7 +574,7 @@ viewSearchBar model =
                 , on "compositionstart" (Decode.succeed GlobalSearchCompositionStart)
                 , on "compositionend" (Decode.map GlobalSearchCompositionEnd (Decode.at [ "target", "value" ] Decode.string)) ] []
             , if not (String.isEmpty model.search.globalQuery) then
-                button [ class "search-clear", type_ "button", attribute "aria-label" "Clear all entities search", onClick (GlobalSearchInput "") ] [ text "✕" ]
+                button [ class "search-clear", type_ "button", attribute "aria-label" "Clear all entities search", onClick (GlobalSearchInput "") ] [ Icon.view "x" ]
               else text "" ]
         , viewEntityTypeFilters model ]
 
@@ -625,9 +626,10 @@ viewSearchControls searchPlaceholder model =
 viewHierarchySearch : String -> Model -> Html Msg
 viewHierarchySearch searchPlaceholder model =
     div [ class "search-bar" ]
-            [ input [ class "hierarchy-search-input", type_ "text", placeholder searchPlaceholder, attribute "aria-label" searchPlaceholder, value model.search.query, onInput SearchInput ] []
+            [ Icon.view "search"
+            , input [ class "hierarchy-search-input", type_ "text", placeholder searchPlaceholder, attribute "aria-label" searchPlaceholder, value model.search.query, onInput SearchInput ] []
             , if not (String.isEmpty model.search.query) then
-                button [ class "search-clear", onClick (SearchInput ""), type_ "button", attribute "aria-label" "Clear hierarchy filter" ] [ text "✕" ]
+                button [ class "search-clear", onClick (SearchInput ""), type_ "button", attribute "aria-label" "Clear hierarchy filter" ] [ Icon.view "x" ]
               else text "" ]
 
 
@@ -635,30 +637,20 @@ viewFilterBar : Model -> Html Msg
 viewFilterBar model =
     div [ class "filter-bar" ]
         [ div [ class "filter-group" ]
-            [ span [ class "filter-label" ] [ text "Show:" ]
+            [ span [ class "filter-label" ] [ text "Show" ]
             , viewFilterPill "All" (model.search.filterShowOnly == ShowAll) (SetFilterShowOnly ShowAll)
             , viewFilterPill "Projects" (model.search.filterShowOnly == ShowProjectsOnly) (SetFilterShowOnly ShowProjectsOnly)
             , viewFilterPill "Tasks" (model.search.filterShowOnly == ShowTasksOnly) (SetFilterShowOnly ShowTasksOnly)
             ]
         , div [ class "filter-group" ]
-            [ viewFilterPill "Show empty projects" model.search.filterShowEmptyProjects (SetFilterShowEmptyProjects (not model.search.filterShowEmptyProjects)) ]
-        , div [ class "filter-group" ]
-            [ span [ class "filter-label" ] [ text "Project:" ]
+            [ span [ class "filter-label" ] [ text "Project" ]
             , viewFilterPill "Active" (List.isEmpty model.search.filterProjectStatuses || List.member "active" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "active")
             , viewFilterPill "Paused" (List.isEmpty model.search.filterProjectStatuses || List.member "paused" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "paused")
             , viewFilterPill "Completed" (List.isEmpty model.search.filterProjectStatuses || List.member "completed" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "completed")
             , viewFilterPill "Archived" (List.isEmpty model.search.filterProjectStatuses || List.member "archived" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "archived")
             ]
         , div [ class "filter-group" ]
-            [ span [ class "filter-label" ] [ text "Task:" ]
-            , viewFilterPill "Todo" (List.isEmpty model.search.filterTaskStatuses || List.member "todo" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "todo")
-            , viewFilterPill "In Progress" (List.isEmpty model.search.filterTaskStatuses || List.member "in_progress" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "in_progress")
-            , viewFilterPill "Blocked" (List.isEmpty model.search.filterTaskStatuses || List.member "blocked" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "blocked")
-            , viewFilterPill "Done" (List.isEmpty model.search.filterTaskStatuses || List.member "done" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "done")
-            , viewFilterPill "Cancelled" (List.isEmpty model.search.filterTaskStatuses || List.member "cancelled" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "cancelled")
-            ]
-        , div [ class "filter-group" ]
-            [ span [ class "filter-label" ] [ text "Priority:" ]
+            [ span [ class "filter-label" ] [ text "Priority" ]
             , select
                 [ class "filter-select"
                 , onInput
@@ -755,8 +747,19 @@ viewFilterBar model =
                         ]
                         []
             ]
-        , div [ class "filter-group filter-active-session" ]
-            [ viewFilterPill "Has Active Session" model.search.filterHasActiveSession (SetFilterHasActiveSession (not model.search.filterHasActiveSession)) ]
+        , div [ class "filter-group" ]
+            [ span [ class "filter-label" ] [ text "Task" ]
+            , viewFilterPill "Todo" (List.isEmpty model.search.filterTaskStatuses || List.member "todo" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "todo")
+            , viewFilterPill "In Progress" (List.isEmpty model.search.filterTaskStatuses || List.member "in_progress" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "in_progress")
+            , viewFilterPill "Blocked" (List.isEmpty model.search.filterTaskStatuses || List.member "blocked" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "blocked")
+            , viewFilterPill "Done" (List.isEmpty model.search.filterTaskStatuses || List.member "done" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "done")
+            , viewFilterPill "Cancelled" (List.isEmpty model.search.filterTaskStatuses || List.member "cancelled" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "cancelled")
+            ]
+        , div [ class "filter-group filter-options" ]
+            [ span [ class "filter-label" ] [ text "Options" ]
+            , viewFilterPill "Show empty projects" model.search.filterShowEmptyProjects (SetFilterShowEmptyProjects (not model.search.filterShowEmptyProjects))
+            , viewFilterPill "Has active session" model.search.filterHasActiveSession (SetFilterHasActiveSession (not model.search.filterHasActiveSession))
+            ]
         ]
 
 

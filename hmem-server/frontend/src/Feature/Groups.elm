@@ -4,6 +4,7 @@ import Api
 import Feature.SessionActivity
 import SessionActivityLight
 import Dict
+import Icon
 import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -271,7 +272,7 @@ viewWorkspaceRail model =
             model.groups.workspaceGroups |> Dict.values |> List.sortBy .name
     in
     nav [ class "sidebar" ]
-        [ a [ class "sidebar-workspaces-header", href "/" ] [ span [ class "sidebar-icon icon-workspace", attribute "aria-hidden" "true" ] [], text "Workspaces" ]
+        [ a [ class "sidebar-workspaces-header", href "/" ] [ span [ class "workspace-heading-icon" ] [ Icon.view "panels-top-left" ], text "Workspaces" ]
         , if model.dataLoading.loadingWorkspaces then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Unassigned" ]
@@ -279,7 +280,7 @@ viewWorkspaceRail model =
                 ]
 
           else if not (List.isEmpty groups) then
-            div []
+            div [ class "sidebar-catalog" ]
                 (List.map (viewSidebarGroup model) groups)
 
           else
@@ -315,7 +316,7 @@ viewWorkspaceRail model =
                 [ if Permissions.canViewGlobalAudit model then
                     li []
                         [ a [ href "/audit", class "sidebar-link" ]
-                            [ span [ class "sidebar-icon icon-audit" ] []
+                            [ span [ class "sidebar-icon" ] [ Icon.view "shield-check" ]
                             , text "Audit Log"
                             ]
                         ]
@@ -360,8 +361,10 @@ viewSidebarGroup model group =
             Dict.get group.id model.groups.collapsedGroups |> Maybe.withDefault False
     in
     div [ class "sidebar-section" ]
-        [ div
+        [ button
             [ class "sidebar-section-title sidebar-group-title"
+            , type_ "button"
+            , attribute "aria-expanded" (if collapsed then "false" else "true")
             , onClick (ToggleWorkspaceGroup group.id)
             , style "cursor" "pointer"
             , style "display" "flex"
@@ -369,14 +372,7 @@ viewSidebarGroup model group =
             , style "gap" "0.25rem"
             ]
             [ span [ class "collapse-toggle" ]
-                [ text
-                    (if collapsed then
-                        "▸"
-
-                     else
-                        "▾"
-                    )
-                ]
+                [ Icon.view (if collapsed then "chevron-right" else "chevron-down") ]
             , text group.name
             , span [ style "margin-left" "auto", style "font-size" "0.75rem", style "opacity" "0.6" ]
                 [ text (String.fromInt (List.length memberWs)) ]
@@ -406,20 +402,20 @@ viewSidebarWorkspace model ws =
         icon =
             case ws.workspaceType of
                 Api.Repository ->
-                    "⌂"
+                    "folder-git-2"
 
                 Api.Planning ->
-                    "◇"
+                    "layout-list"
 
                 Api.Personal ->
-                    "●"
+                    "user"
 
                 Api.Organization ->
-                    "◆"
+                    "building-2"
     in
     li []
         [ a [ href ("/workspace/" ++ ws.id), class cls ]
-            [ span [ class "sidebar-icon" ] [ text icon ]
+            [ span [ class "sidebar-icon" ] [ Icon.view icon ]
             , text ws.name
             , SessionActivityLight.view (Feature.SessionActivity.active ("workspace:" ++ ws.id) model) "Active sessions in this workspace"
             ]

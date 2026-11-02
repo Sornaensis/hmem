@@ -164,7 +164,7 @@ for(const [format,native,first]of[['Copilot',copilotRecords,'Inspect café λ�
   const appended=format+' appended native message';await h.appendRecords(nativeMessage(format,1000,appended));await page.getByText(appended,{exact:true}).waitFor();await resync(h);await page.getByText(appended,{exact:true}).waitFor()
   phase='open task dock';await page.getByRole('button',{name:'Projects',exact:true}).click();await h.idle();await page.getByRole('button',{name:'Expand All',exact:true}).click();await h.scrollTo('task:'+h.fixture.tasks[0].id);const task=page.locator('#entity-'+h.fixture.tasks[0].id),agent=task.locator(':scope > .card-header .task-sessions-icon');await until(()=>agent.isEnabled());await agent.click();await task.getByText(appended,{exact:true}).waitFor()
   phase='return from dock'
-  await task.getByRole('link',{name:'Open full session ↗'}).click();await page.getByText(appended,{exact:true}).waitFor()
+  await task.getByRole('link',{name:'Jump To Session ↗'}).click();await page.getByText(appended,{exact:true}).waitFor()
   const sealed=h.content.get(h.active.id);await page.getByRole('button',{name:'Completed',exact:true}).click();Object.assign(h.active,{state:'terminated',terminated_at:new Date().toISOString(),final_bytes:sealed.length,final_sha256:hash(sealed)})
   phase='prepare completed archive after actual lifecycle update';await resync(h);await page.getByText('Verified complete archive.',{exact:true}).waitFor();await h.idle();await page.locator('#session-records').press('Home');await page.getByText(first,{exact:true}).waitFor()
   phase='assert completed native disclosures';await assertNativeContent(page,format)

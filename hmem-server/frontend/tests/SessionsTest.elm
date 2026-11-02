@@ -25,6 +25,20 @@ suite : Test.Test
 suite =
     describe "Sessions production wire contract"
         [ describe "workspace completed reader" completedReaderTests
+        , test "presentation modes preserve source authority, transport, following and disclosure state" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                state={old | rows=[sampleRecord],pending=True,offset=64,end=128,windowPublication=9,historyOpen=Set.singleton "existing",manualUp=True,following=False}
+                current={entered | sessions=state}
+                packet stamp generation scope mode=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer-presentation"),("stamp",Encode.string stamp),("generation",Encode.int generation),("scope",Encode.string scope),("mode",Encode.string mode),("anchor",Encode.string "source:content")])
+                valid=packet state.stamp state.generation state.viewerScope "activity"
+                next=Sessions.update valid current |> Tuple.first
+                ignored=[packet "retired" state.generation state.viewerScope "activity",packet state.stamp (state.generation-1) state.viewerScope "activity",packet state.stamp state.generation "retired" "activity",packet state.stamp state.generation state.viewerScope "unbounded"]
+            in Expect.all
+                [\_ -> Expect.equal {state | presentationMode="activity",presentationSwitchAnchor="source:content"} next.sessions
+                ,\_ -> Expect.equal current.sessionDelivery next.sessionDelivery
+                ,\_ -> Expect.equal True (List.all (\event -> (Sessions.update event current |> Tuple.first |> .sessions)==state) ignored)] ()
         , test "disclosure UI acknowledgements preserve exact generation and transport authority" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first

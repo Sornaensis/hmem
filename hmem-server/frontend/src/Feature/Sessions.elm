@@ -405,8 +405,11 @@ update msg model =
             let
                 first = List.head state.rows |> Maybe.map .offset |> Maybe.withDefault state.historyBefore
                 scanning = state.windowPurpose == "fill" && state.historyScanBefore < first
+                boundary = if scanning then state.historyScanBefore else first
                 end = if scanning then state.historyScanEnd else List.take 20 state.rows |> List.filter (\row -> row.end - first <= 65536) |> List.reverse |> List.head |> Maybe.map .end |> Maybe.withDefault first
-                begin = max 0 (end - 65536)
+                -- Reserve two older chunks separately from contextual overlap;
+                -- larger leading fragments still use bounded lookback recovery.
+                begin = max 0 (boundary - 131072)
             in
             ( { model | sessions = { state | loadWindow = True, latestPending=False,latestError=Nothing,windowPurpose=if state.windowPurpose == "fill" then "fill" else "older",windowDirection = "tail", windowAligned = False, start = Just begin, offset = begin, end = end, pending = False, generation = state.generation + 1, resetPending = True, error = Nothing } }, Cmd.none )
         SessionsNewer ->

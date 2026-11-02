@@ -169,7 +169,37 @@ suite =
                 last={sampleRecord | offset=4048578,end=5097156}
                 model={sessionModel | sessions={old | historyBefore=3000000,historyAfter=last.end,rows=[first,last],offset=last.end,end=last.end}}
                 next=Sessions.update SessionsOlder model |> Tuple.first |> .sessions
-            in Expect.equal (Just 2934464,2934464,3000000) (next.start,next.offset,next.end)
+            in Expect.equal (Just 2868928,2868928,3000000) (next.start,next.offset,next.end)
+        , test "older reads reserve new history before a saturated retained overlap" <| \_ ->
+            let
+                first=3000000
+                rows=List.range 0 19 |> List.map (\index -> {sampleRecord | offset=first+index*3276,end=first+(index+1)*3276})
+                old=emptySessionsModel
+                reading={sessionModel | sessions={old | following=False,historyBefore=first,historyAfter=first+65520,rows=rows,historyAnchor=String.fromInt first}}
+                next=Sessions.update SessionsOlder reading |> Tuple.first |> .sessions
+            in Expect.equal {start=Just (first-131072),end=first+65520,rows=rows,anchor=String.fromInt first} {start=next.start,end=next.end,rows=next.rows,anchor=next.historyAnchor}
+        , test "short-view fill advances from its scanned boundary before compacted mounted rows" <| \_ ->
+            let
+                old=emptySessionsModel
+                reading={sessionModel | sessions={old | windowPurpose="fill",historyBefore=4000000,historyScanBefore=3000000,historyScanEnd=3000500,rows=[{sampleRecord | offset=4000000,end=4000500}]}}
+                next=Sessions.update SessionsOlder reading |> Tuple.first |> .sessions
+            in Expect.equal {start=Just 2868928,end=3000500,purpose="fill",aligned=False} {start=next.start,end=next.end,purpose=next.windowPurpose,aligned=next.windowAligned}
+        , test "short-view fill preserves a maximum-sized scanned overlap and its occurrence context" <| \_ ->
+            let
+                old=emptySessionsModel
+                rows=[{sampleRecord | offset=5000000,end=5000500,activityAnchors=Dict.fromList [("0","3000000:0")]}]
+                reading={sessionModel | sessions={old | windowPurpose="fill",historyBefore=5000000,historyScanBefore=3000000,historyScanEnd=4048578,rows=rows,historyAnchor="5000000",presentationAnchor="5000000:0:0"}}
+                next=Sessions.update SessionsOlder reading |> Tuple.first |> .sessions
+            in Expect.equal {range=(Just 2868928,4048578),context=(rows,"5000000","5000000:0:0")} {range=(next.start,next.end),context=(next.rows,next.historyAnchor,next.presentationAnchor)}
+        , test "repeated older reads move before each accepted boundary and clamp at the beginning" <| \_ ->
+            let
+                old=emptySessionsModel
+                reading={sessionModel | sessions={old | historyBefore=300000,rows=[{sampleRecord | offset=300000,end=300100}]}}
+                first=Sessions.update SessionsOlder reading |> Tuple.first
+                previous=first.sessions
+                advanced={first | sessions={previous | historyBefore=40000,rows=[{sampleRecord | offset=40000,end=40100}],pending=False}}
+                next=Sessions.update SessionsOlder advanced |> Tuple.first |> .sessions
+            in Expect.equal {first=Just 168928,next=Just 0,end=40100,generation=old.generation+2} {first=first.sessions.start,next=next.start,end=next.end,generation=next.generation}
         , test "a tail entirely inside one record expands once within the existing bounded lookback" <| \_ ->
             let
                 entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first

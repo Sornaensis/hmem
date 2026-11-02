@@ -427,31 +427,26 @@ test('global authorization refresh uses route epoch and retires stale route repl
 })
 
 
-test('search disclosure persists per workspace and keeps keyboard and filter controls available', { timeout: 60000 }, async () => {
+test('dedicated Search and hierarchy filters remain keyboard reachable across workspace switches', { timeout: 60000 }, async () => {
   const h = await workspaceFixture(), page = h.page
   try {
     await h.start(); await h.idle(); await page.getByRole('link', { name: /Workspace B/ }).waitFor()
-    const disclosure = page.getByRole('button', { name: 'Search', exact: true })
-    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
-    await disclosure.focus(); await page.keyboard.press('Enter'); await page.waitForFunction(() => document.querySelector('.search-section-toggle')?.getAttribute('aria-expanded') === 'false')
-    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
-    assert.equal(await page.getByPlaceholder('Search all entities...').isVisible(), false)
-    assert.equal(await page.getByRole('button', { name: 'Show empty projects', exact: true }).isVisible(), true)
-    await page.getByRole('link', { name: /Workspace B/ }).click(); await page.locator('.workspace-header-title').filter({ hasText: 'Workspace B' }).waitFor(); await h.idle()
-    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
-    await page.getByRole('link', { name: /Workspace A/ }).click(); await page.locator('.workspace-header-title').filter({ hasText: 'Workspace A' }).waitFor(); await h.idle()
-    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
-    await page.reload(); await h.idle(); await disclosure.waitFor()
-    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
-    await disclosure.focus(); await page.keyboard.press('Space'); await page.waitForFunction(() => document.querySelector('.search-section-toggle')?.getAttribute('aria-expanded') === 'true')
-    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
+    const searchTab=page.locator('.workspace-tabs').getByRole('button',{name:'Search',exact:true})
+    assert.equal(await page.locator('.search-section-toggle').count(),0)
+    assert.equal(await page.getByRole('button',{name:'Show empty projects',exact:true}).isVisible(),true)
+    await searchTab.focus();await page.keyboard.press('Enter');await page.getByPlaceholder('Search all entities...').waitFor()
+    assert.equal(await page.getByRole('group',{name:'Search Entities',exact:true}).getByRole('button').count(),3)
     await page.getByPlaceholder('Search all entities...').fill('working')
-    await page.getByRole('button', { name: 'Clear all entities search' }).click(); await page.getByPlaceholder('Filter project hierarchy...').waitFor()
-    assert.equal(await page.getByPlaceholder('Filter project hierarchy...').isVisible(), true)
-    assert.equal(await page.locator('.sidebar-workspaces-header').innerText(), 'Workspaces')
-    assert.equal(await page.locator('.sidebar-section-title').filter({ hasText: 'Unassigned' }).count(), 1)
-    assert.deepEqual(h.errors, [])
-  } finally { await h.close() }
+    await page.getByRole('button',{name:'Clear all entities search'}).click()
+    await page.locator('.workspace-tabs').getByRole('button',{name:'Projects',exact:true}).click();await page.getByPlaceholder('Filter project hierarchy...').waitFor()
+    assert.equal(await page.getByPlaceholder('Filter project hierarchy...').isVisible(),true)
+    await page.getByRole('link',{name:/Workspace B/}).click();await page.locator('.workspace-header-title').filter({hasText:'Workspace B'}).waitFor();await h.idle()
+    assert.equal(await page.getByPlaceholder('Filter project hierarchy...').isVisible(),true)
+    await page.getByRole('link',{name:/Workspace A/}).click();await page.locator('.workspace-header-title').filter({hasText:'Workspace A'}).waitFor();await h.idle()
+    assert.equal(await page.locator('.sidebar-workspaces-header').innerText(),'Workspaces')
+    assert.equal(await page.locator('.sidebar-section-title').filter({hasText:'Unassigned'}).count(),1)
+    assert.deepEqual(h.errors,[])
+  }finally{await h.close()}
 })
 
 
@@ -476,14 +471,14 @@ test('nested project and task guides paint ancestor lanes and narrow chrome rema
     if(process.env.HMEM_UX_PREVIEW) await page.screenshot({path:process.env.HMEM_UX_PREVIEW})
     for(const width of [430,320]) {
       await page.setViewportSize({width,height:1200})
-      for(const control of [page.getByPlaceholder('Search all entities...'),page.getByPlaceholder('Filter project hierarchy...'),page.getByRole('button',{name:'Show empty projects',exact:true}),page.getByRole('button',{name:'Has Active Session',exact:true})]) {
+      for(const control of [page.getByPlaceholder('Filter project hierarchy...'),page.getByRole('button',{name:'Show empty projects',exact:true}),page.getByRole('button',{name:'Has Active Session',exact:true})]) {
         await control.scrollIntoViewIfNeeded()
         assert.equal(await control.evaluate(n => {const b=n.getBoundingClientRect();return document.elementFromPoint(b.x+b.width/2,b.y+b.height/2)===n}),true)
       }
-      await page.getByRole('button',{name:'Search',exact:true}).click(); await page.waitForFunction(()=>document.querySelector('.search-section-toggle').getAttribute('aria-expanded')==='false')
-      assert.equal(await page.getByPlaceholder('Search all entities...').isVisible(),false)
+      await page.locator('.workspace-tabs').getByRole('button',{name:'Search',exact:true}).click(); await page.getByPlaceholder('Search all entities...').waitFor()
+      assert.equal(await page.getByPlaceholder('Search all entities...').isVisible(),true)
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false)
-      await page.getByRole('button',{name:'Search',exact:true}).click(); await page.getByPlaceholder('Search all entities...').waitFor()
+      await page.locator('.workspace-tabs').getByRole('button',{name:'Projects',exact:true}).click(); await page.getByPlaceholder('Filter project hierarchy...').waitFor()
     }
     assert.deepEqual(h.errors,[]); assert.deepEqual(h.unhandled,[]); t.diagnostic(JSON.stringify({lanes,narrowReachable:[430,320],virtualizedCap:25}))
   } finally {await h.close()}

@@ -529,7 +529,7 @@ navigateAuditEntity scrollY entry destination model =
                 , auditLog = { state | activeNavigationId = Nothing }
                 , observations = Feature.Observation.clearSelection model.observations
                 , search = Feature.FocusedFilters.clearTransientSearchState model.search
-                , focus = { focusedEntity = maybeFocus, breadcrumbAnchor = maybeFocus, history = Maybe.map List.singleton maybeFocus |> Maybe.withDefault [], historyIndex = 0, returnContext = Just context }
+                , focus = { focusedEntity = maybeFocus, breadcrumbAnchor = maybeFocus, breadcrumbPreview = Nothing, history = Maybe.map List.singleton maybeFocus |> Maybe.withDefault [], historyIndex = 0, returnContext = Just context }
             }
                 |> Feature.FocusedFilters.enter
         ( verified, verifyCmd ) =

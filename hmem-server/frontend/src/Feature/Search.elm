@@ -3,6 +3,7 @@ module Feature.Search exposing
     , SearchResultBadge
     , SearchResultPresentation
     , viewNavigation
+    , viewReturnButton
     , routeChanged
     , reconcileNavigation
     , selectedEntityTypes
@@ -554,8 +555,7 @@ viewNavigation model content =
                 Just value ->
                     if target then
                         div [ class "search-jump-target" ]
-                            [ button [ class "btn btn-secondary search-return-button", type_ "button", onClick ReturnSearchResults ] [ text "Back to search results" ]
-                            , if failed value then div [ id "search-jump-unavailable", tabindex -1, attribute "role" "alert" ] [ text "This target is unavailable or access has changed. You can return to search results." ]
+                            [ if failed value then div [ id "search-jump-unavailable", tabindex -1, attribute "role" "alert" ] [ text "This target is unavailable or access has changed. You can return to search results." ]
                               else if value.entityType == "observation" then Feature.Observation.viewSearchDetail model
                               else content ]
                     else content
@@ -575,7 +575,7 @@ viewSearchBar model =
             , if not (String.isEmpty model.search.globalQuery) then
                 button [ class "search-clear", type_ "button", attribute "aria-label" "Clear all entities search", onClick (GlobalSearchInput "") ] [ text "✕" ]
               else text "" ]
-        , if String.isEmpty (String.trim model.search.globalQuery) then text "" else viewEntityTypeFilters model ]
+        , viewEntityTypeFilters model ]
 
 
 viewWorkspaceSearchBar : Model -> Html Msg
@@ -584,27 +584,14 @@ viewWorkspaceSearchBar model =
         normal = { model | search = Feature.FocusedFilters.normalSearch model }
         hierarchyView view =
             if model.focusedFilters /= Nothing then view model else view normal |> Html.map WorkspaceSearch
-        hasGlobalQuery = not (String.isEmpty (String.trim model.search.globalQuery))
     in
     if model.activeTab /= ProjectsTab then text "" else
     div [ class ("workspace-search-filter-bar project-filter-panel" ++ (if model.focusedFilters /= Nothing then " focused-search-filter-bar" else "")) ]
-        [ if hasGlobalQuery then text "" else
-            hierarchyView (\current ->
-                div [ class "hierarchy-filter-controls" ]
-                    [ if current.focusedFilters /= Nothing then div [ class "filter-label" ] [ text "Focused view filters" ] else text ""
-                    , viewFilterBar current ])
-        , div [ class "project-search-section" ]
-            [ button [ class "search-section-toggle", type_ "button", onClick ToggleSearchSection
-                , attribute "aria-expanded" (if model.search.searchSectionExpanded then "true" else "false")
-                , attribute "aria-controls" "workspace-search-fields" ]
-                [ span [ attribute "aria-hidden" "true" ] [ text (if model.search.searchSectionExpanded then "▾" else "▸") ]
-                , text "Search"
-                , if hasGlobalQuery || not (String.isEmpty model.search.query) then span [ class "search-active-indicator" ] [ text "Active" ] else text "" ]
-            , div [ id "workspace-search-fields", class "workspace-search-fields", hidden (not model.search.searchSectionExpanded) ]
-                [ viewSearchBar model
-                , if hasGlobalQuery then text "" else
-                    hierarchyView (viewHierarchySearch (if model.focusedFilters /= Nothing then "Filter focused view..." else "Filter project hierarchy...")) ]
-            ]
+        [ hierarchyView (viewHierarchySearch (if model.focusedFilters /= Nothing then "Filter focused view..." else "Filter project hierarchy..."))
+        , hierarchyView (\current ->
+            div [ class "hierarchy-filter-controls" ]
+                [ if current.focusedFilters /= Nothing then div [ class "filter-label" ] [ text "Focused view filters" ] else text ""
+                , viewFilterBar current ])
         ]
 
 
@@ -1268,3 +1255,13 @@ refreshAcceptedSearch incoming =
         ( model, Cmd.none )
     else
         startGlobalSearch model
+
+
+viewReturnButton : Model -> Html Msg
+viewReturnButton model =
+    case model.search.returnReceipt of
+        Just receipt ->
+            if receipt.phase == "target" && receiptMatches model receipt then
+                button [ class "btn btn-secondary search-return-button", type_ "button", onClick ReturnSearchResults ] [ text "Back to search results" ]
+            else text ""
+        Nothing -> text ""

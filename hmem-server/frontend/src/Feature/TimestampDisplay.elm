@@ -47,6 +47,7 @@ sources model =
                                                 else []
                                             TimelineTab -> Feature.Timeline.timestampSources model.timeline
                                             SessionsTab -> Feature.Sessions.timestampSources model
+                                            SearchTab -> []
                                             _ ->
                                                 if model.search.isSearching || model.search.searchError /= Nothing || model.search.unifiedResults /= Nothing then []
                                                 else if model.activeTab == ObservationsTab then

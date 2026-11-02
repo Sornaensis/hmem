@@ -116,8 +116,8 @@ route msg model =
         SessionsCancelSave -> Ok (Feature.Sessions.update msg model)
         SessionsTaskNextPage _ _ -> Ok (Feature.Sessions.update msg model)
         SessionsTaskPreviousPage _ -> Ok (Feature.Sessions.update msg model)
-        OpenAuditDiff _ _ -> Ok (Feature.AuditDiff.update msg model)
-        OpenAuditDiffFrom _ _ _ -> Ok (Feature.AuditDiff.update msg model)
+        OpenAuditDiff _ _ -> Ok (Feature.AuditDiff.updateFromCardRows (Feature.Cards.mountedViewportKeys model) msg model)
+        OpenAuditDiffFrom _ _ _ -> Ok (Feature.AuditDiff.updateFromCardRows (Feature.Cards.mountedViewportKeys model) msg model)
         CloseAuditDiff -> Ok (Feature.AuditDiff.update msg model)
         AuditDiffMode _ -> Ok (Feature.AuditDiff.update msg model)
         AuditDiffBaseline _ -> Ok (Feature.AuditDiff.update msg model)
@@ -969,6 +969,9 @@ route msg model =
 
         ScrollToEntity _ ->
             Ok (Feature.Cards.update msg model)
+
+        SetBreadcrumbPreview _ ->
+            Ok (Feature.Focus.update msg model)
 
         FocusEntity _ _ ->
             Ok (Feature.Focus.update msg model)

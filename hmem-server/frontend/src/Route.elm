@@ -157,6 +157,7 @@ handleUrlChangeWithoutProtectedExit url model =
                     updatedFocus =
                         { currentFocus
                             | focusedEntity = frag.focus
+                            , breadcrumbPreview = Nothing
                             , breadcrumbAnchor =
                                 if focusChangedExternally then
                                     frag.focus

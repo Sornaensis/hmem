@@ -962,6 +962,7 @@ type alias DragDropModel =
 type alias FocusModel =
     { focusedEntity : Maybe ( String, String )
     , breadcrumbAnchor : Maybe ( String, String )
+    , breadcrumbPreview : Maybe (List ( String, String, String ))
     , history : List ( String, String )
     , historyIndex : Int
     , returnContext : Maybe FocusReturnContext
@@ -1061,6 +1062,7 @@ type alias AuditDiffDialog =
     { entry : Api.AuditLogEntry
     , field : String
     , origin : String
+    , openerRow : Maybe ( String, String )
     , againstCurrent : Bool
     , beforeBaseline : Bool
     , token : Int
@@ -1326,6 +1328,7 @@ type WorkspaceTab
     = ProjectsTab
     | ObservationsTab
     | TimelineTab
+    | SearchTab
     | SessionsTab
     | AuditTab
     | AdministrationTab
@@ -1857,6 +1860,7 @@ type Msg
       -- Local storage
     | LocalStorageLoaded Encode.Value
       -- Focus mode
+    | SetBreadcrumbPreview (Maybe ( String, List ( String, String, String ) ))
     | FocusEntity String String
     | FocusEntityKeepForward String String
     | NavigateToAuditEntity Api.AuditLogEntry

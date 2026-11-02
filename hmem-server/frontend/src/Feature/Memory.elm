@@ -649,21 +649,14 @@ viewLinkEntityPopover model memoryId linkedProjects linkedTasks =
                                             |> List.filter (\( eid, _, _ ) -> eid /= p.id)
                                 in
                                 div
-                                    [ class "popover-card"
+                                    ([ class "popover-card"
                                     , onClick (PerformLinkEntity "project" p.id memoryId)
-                                    ]
+                                    ] ++ Feature.Focus.previewAttributes p.workspaceId (buildProjectBreadcrumb model p []))
                                     [ div [ class "popover-card-header" ]
                                         [ span [ class "entity-type-label entity-type-project" ] [ text "PRJ" ]
                                         , span [ class "popover-card-title" ] [ text p.name ]
                                         ]
-                                    , if not (List.isEmpty crumbs) then
-                                        div [ class "popover-card-breadcrumb" ]
-                                            (List.intersperse (span [] [ text " › " ])
-                                                (List.map (\( _, label, _ ) -> span [] [ text label ]) crumbs)
-                                            )
-
-                                      else
-                                        text ""
+                                    , text ""
                                     , div [ class "popover-card-meta" ]
                                         [ span [ class ("popover-card-status card-status-" ++ Api.projectStatusToString p.status) ]
                                             [ text (Api.projectStatusToString p.status) ]
@@ -685,9 +678,9 @@ viewLinkEntityPopover model memoryId linkedProjects linkedTasks =
                                                 |> List.filter (\( eid, _, _ ) -> eid /= t.id)
                                     in
                                     div
-                                        [ class "popover-card"
+                                        ([ class "popover-card"
                                         , onClick (PerformLinkEntity "task" t.id memoryId)
-                                        ]
+                                        ] ++ Feature.Focus.previewAttributes t.workspaceId (buildTaskBreadcrumb model t []))
                                         [ div [ class "popover-card-header" ]
                                             [ span
                                                 [ class
@@ -710,14 +703,7 @@ viewLinkEntityPopover model memoryId linkedProjects linkedTasks =
                                                 ]
                                             , span [ class "popover-card-title" ] [ text t.title ]
                                             ]
-                                        , if not (List.isEmpty crumbs) then
-                                            div [ class "popover-card-breadcrumb" ]
-                                                (List.intersperse (span [] [ text " › " ])
-                                                    (List.map (\( _, label, _ ) -> span [] [ text label ]) crumbs)
-                                                )
-
-                                          else
-                                            text ""
+                                        , text ""
                                         , div [ class "popover-card-meta" ]
                                             [ span [ class (taskPopoverStatusClass t.status), title (taskStatusTitle t.status) ]
                                                 [ text (taskStatusDisplayText t.status) ]

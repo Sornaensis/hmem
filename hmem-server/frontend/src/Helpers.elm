@@ -126,6 +126,9 @@ parseFragment fragment =
                         "timeline" ->
                             TimelineTab
 
+                        "search" ->
+                            SearchTab
+
                         "sessions" ->
                             SessionsTab
 
@@ -190,6 +193,9 @@ buildFragment tab focus observationId =
 
                 TimelineTab ->
                     "tab=timeline"
+
+                SearchTab ->
+                    "tab=search"
 
                 SessionsTab ->
                     "tab=sessions"
@@ -315,7 +321,7 @@ observationUrlContext url =
             List.length pairs == List.length parts
                 && List.length keys == Set.size (Set.fromList keys)
                 && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox", "search-jump", "session", "task" ]) keys
-                && (lookup "tab" |> Maybe.map (\tab -> List.member tab [ "projects", "observations", "timeline", "sessions", "audit", "administration" ]) |> Maybe.withDefault True)
+                && (lookup "tab" |> Maybe.map (\tab -> List.member tab [ "projects", "observations", "timeline", "sessions", "search", "audit", "administration" ]) |> Maybe.withDefault True)
                 && (lookup "focus" |> Maybe.map (\focus -> case String.split ":" focus of
                         [ kind, entityId ] -> List.member kind [ "project", "task", "memory" ] && not (String.isEmpty entityId)
                         _ -> False

@@ -11,13 +11,51 @@ import Types exposing (..)
 import Url
 import Expect
 import Feature.Search
+import Feature.Focus
+import Feature.TimestampDisplay
+import Page.Workspace
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
+import Html.Attributes as Attributes
+import Set
 import Test exposing (..)
 
 
 suite : Test
 suite =
     describe "observation unified-search presentation"
-        [ jumpSuite
+        [ test "Search has an exhaustive route codec and accepts bounded versioned return links" <| \_ ->
+            let
+                built = Helpers.buildFragment SearchTab Nothing Nothing
+                sourceUrl = liveModel.url
+                context = Helpers.observationUrlContext { sourceUrl | fragment = Just "tab=search&search-jump=1&ox=excluded" }
+            in
+            Expect.equal ( "tab=search", SearchTab, SearchTab ) ( built, (Helpers.parseFragment (Just built)).tab, context.fragment.tab )
+        , test "blank Search exposes supported choices and legacy collapsed preferences cannot hide hierarchy controls" <| \_ ->
+            let state = liveModel.search
+                collapsed = { liveModel | search = { state | searchSectionExpanded = False } }
+            in
+            Expect.all
+                [ \_ -> Feature.Search.viewSearchBar collapsed |> Query.fromHtml |> Query.findAll [ Selector.class "filter-pill" ] |> Query.count (Expect.equal 3)
+                , \_ -> Feature.Search.viewWorkspaceSearchBar collapsed |> Query.fromHtml |> Query.findAll [ Selector.class "hierarchy-search-input" ] |> Query.count (Expect.equal 1)
+                , \_ -> Feature.Search.viewWorkspaceSearchBar collapsed |> Query.fromHtml |> Query.hasNot [ Selector.attribute (Attributes.hidden True) ]
+                ] ()
+        , test "empty Search timestamp demand never falls through to hierarchy cards" <| \_ ->
+            let loading = liveModel.dataLoading
+                visible = { liveModel | activeTab = SearchTab, dataLoading = { loading | loadingWorkspaceData = False }, projects = Dict.singleton "p" (project "p" "Visible hierarchy") }
+                next = Feature.TimestampDisplay.reconcile ( visible, Cmd.none ) |> Tuple.first
+            in
+            Expect.equal (Set.fromList [ workspace.createdAt, workspace.updatedAt ]) next.timestamps.demand
+        , test "preview context is ephemeral and cannot alter focus history or URL" <| \_ ->
+            let crumbs = [ ( "p", "Project", "project" ), ( "t", "Task", "task" ) ]
+                previewed = Feature.Focus.update (SetBreadcrumbPreview (Just ( workspace.id, crumbs ))) liveModel |> Tuple.first
+                ended = Feature.Focus.update (SetBreadcrumbPreview Nothing) previewed |> Tuple.first
+                switched = Feature.Focus.reconcilePreview (SwitchTab SearchTab) ( previewed, Cmd.none ) |> Tuple.first
+                foreign = Feature.Focus.update (SetBreadcrumbPreview (Just ( "foreign", crumbs ))) liveModel |> Tuple.first
+            in
+            Expect.equal { preview = Just crumbs, ended = Nothing, switched = Nothing, foreign = Nothing, focus = liveModel.focus.focusedEntity, history = liveModel.focus.history, url = liveModel.url }
+                { preview = previewed.focus.breadcrumbPreview, ended = ended.focus.breadcrumbPreview, switched = switched.focus.breadcrumbPreview, foreign = foreign.focus.breadcrumbPreview, focus = previewed.focus.focusedEntity, history = previewed.focus.history, url = previewed.url }
+        , jumpSuite
         , liveSuite
         , test "search disclosure restores only its workspace and defaults old preferences to expanded" <| \_ ->
             let

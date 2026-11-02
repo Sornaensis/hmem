@@ -38,6 +38,7 @@ import Char
 import CardSections
 import Dict
 import Feature.DataLoading
+import Feature.AuditDiff
 import Feature.AuditLog
 import Feature.Dependencies
 import Feature.Move
@@ -1493,18 +1494,6 @@ viewProjectsTreeLegacy wsId model =
         taskPassesFilters =
             taskPassesCurrentFilters model
 
-        expandCollapseBar =
-            div [ class "tree-toolbar" ]
-                [ button [ class "btn-small btn-ghost", onClick ExpandAllNodes ] [ text "Expand All" ]
-                , button [ class "btn-small btn-ghost", onClick CollapseAllNodes ] [ text "Collapse All" ]
-                ]
-
-        inlineCreateView =
-            Feature.Editing.viewInlineCreateInput model Nothing "project"
-
-        focusBreadcrumbBar =
-            Feature.Focus.viewFocusBreadcrumbBar model
-
         treeContent =
             case model.focus.focusedEntity of
                 Just ( "project", projId ) ->
@@ -1616,9 +1605,9 @@ viewProjectsTreeLegacy wsId model =
     in
     Keyed.node "div"
         [ class "tree-view" ]
-        (( "expand-collapse-bar", expandCollapseBar )
-            :: ( "inline-create", inlineCreateView )
-            :: ( "focus-breadcrumb", focusBreadcrumbBar )
+        (( "expand-collapse-bar", text "" )
+            :: ( "inline-create", text "" )
+            :: ( "focus-breadcrumb", text "" )
             :: contentWithEmptyState
         )
 
@@ -2037,7 +2026,7 @@ viewNextTaskCandidate model candidate =
             Feature.Focus.buildTaskBreadcrumb model task []
                 |> List.filter (\( eid, _, _ ) -> eid /= task.id)
     in
-    div [ class ("next-task-candidate popover-card " ++ nextTaskCandidateClass candidate) ]
+    div ([ class ("next-task-candidate popover-card " ++ nextTaskCandidateClass candidate) ] ++ Feature.Focus.previewAttributes task.workspaceId (Feature.Focus.buildTaskBreadcrumb model task []))
         [ div [ class "popover-card-header" ]
             [ span [ class ("entity-type-label " ++ (if task.parentId /= Nothing then "entity-type-subtask" else "entity-type-task")) ]
                 [ text
@@ -2052,14 +2041,7 @@ viewNextTaskCandidate model candidate =
             , div [ class "dep-item-actions" ]
                 (List.map viewNextTaskCardAction (nextTaskCardActions candidate))
             ]
-        , if not (List.isEmpty crumbs) then
-            div [ class "popover-card-breadcrumb" ]
-                (List.intersperse (span [] [ text " › " ])
-                    (List.map (\( _, label, _ ) -> span [] [ text label ]) crumbs)
-                )
-
-          else
-            text ""
+        , text ""
         , div [ class "popover-card-meta" ]
             [ span [ class (taskPopoverStatusClass task.status), title (taskStatusTitle task.status) ]
                 [ text (taskStatusDisplayText task.status) ]
@@ -3389,7 +3371,7 @@ viewportPins model =
         drag = model.dragDrop.dragging |> Maybe.map (\value -> ( value.entityType, value.entityId ))
         viewport = model.cards.viewport
     in
-    [ model.focus.focusedEntity, editTarget model, inlineCreateTarget model, drag ]
+    [ model.focus.focusedEntity, editTarget model, inlineCreateTarget model, drag, Feature.AuditDiff.cardOrigin model ]
         |> List.filterMap identity |> List.map entityKey |> Set.fromList
         |> Set.union viewport.nativePins
         |> Set.union (viewport.target |> Maybe.map Set.singleton |> Maybe.withDefault Set.empty)
@@ -3547,6 +3529,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
                 || previous.dataLoading.navigationVisibleTaskIds /= model.dataLoading.navigationVisibleTaskIds
                 || previous.cards.collapsedNodes /= model.cards.collapsedNodes
                 || previous.cards.nodesCollapsedByDefault /= model.cards.nodesCollapsedByDefault
+                || Maybe.map .token previous.auditDiff.dialog /= Maybe.map .token model.auditDiff.dialog
                 || previous.focus.focusedEntity /= model.focus.focusedEntity
                 || previous.search.query /= model.search.query
                 || previous.search.filterShowEmptyProjects /= model.search.filterShowEmptyProjects
@@ -3862,12 +3845,7 @@ viewHierarchyViewport ws incoming =
             ( key, Keyed.node "div" [ class "hierarchy-segment", style "display" "contents" ] (groupedPieces contents) )
     in
     div [ class "tree-view" ]
-        [ div [ class "tree-toolbar" ]
-            [ button [ class "btn-small btn-ghost", onClick ExpandAllNodes ] [ text "Expand All" ]
-            , button [ class "btn-small btn-ghost", onClick CollapseAllNodes ] [ text "Collapse All" ]
-            ]
-        , Feature.Editing.viewInlineCreateInput model Nothing "project"
-        , Feature.Focus.viewFocusBreadcrumbBar model
+        [ text ""
         , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", attribute "data-hierarchy-context" config
             , style "min-height" (String.fromFloat (if pendingFilterMembership then viewport.filterExtent else 0) ++ "px")
             ]

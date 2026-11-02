@@ -6,6 +6,8 @@ import AuditDiff exposing (Value(..), Comparison(..))
 import Dict
 import Expect
 import Feature.AuditDiff as Dialog
+import Feature.Cards as Cards
+import HierarchyViewport as Viewport
 import Http
 import Json.Encode as Encode
 import Main
@@ -56,6 +58,39 @@ suite = describe "literal audit text comparison and frozen-current lifetime"
     , test "field shortcuts retain their own origin and stable title-before-description order" <| \_ ->
         let fieldOpened = base |> step (OpenAuditDiff entry "description")
         in Expect.equal ( [ "title", "description" ], Just "audit-diff-origin-event-description" ) ( Dialog.fields entry, fieldOpened.auditDiff.dialog |> Maybe.map .origin )
+    , test "one current modal History opener stays mounted offscreen and native close restoration releases on genuine blur" <| \_ ->
+        let
+            source = pinnedOpenerModel
+            closed = Dialog.update CloseAuditDiff source |> Tuple.first
+            viewport = closed.cards.viewport
+            blurred = Cards.updateViewport (Encode.object
+                [ ( "workspace", Encode.string "ws" ), ( "epoch", Encode.int closed.sessionRequestEpoch )
+                , ( "generation", Encode.int closed.dataLoading.navigationGeneration ), ( "revision", Encode.int viewport.revision )
+                , ( "top", Encode.float viewport.top ), ( "height", Encode.float viewport.height ), ( "pins", Encode.list Encode.string [] ) ]) closed |> Tuple.first
+        in
+        Expect.equal { active = Just ( "task", "task" ), mounted = True, bounded = True, closePin = Set.singleton "task:task", closed = Nothing, blurPin = Set.empty, released = False }
+            { active = Dialog.cardOrigin source, mounted = List.member "task:task" (Cards.mountedViewportKeys source), bounded = List.length (Cards.mountedViewportKeys source) <= 26
+            , closePin = closed.cards.viewport.nativePins, closed = closed.auditDiff.dialog, blurPin = blurred.cards.viewport.nativePins, released = List.member "task:task" (Cards.mountedViewportKeys blurred) }
+    , test "a logical cached row alone never invents a mounted modal opener" <| \_ ->
+        let source = pinnedOpenerModel
+            closed = Dialog.update CloseAuditDiff source |> Tuple.first
+            cards = closed.cards
+            viewport = cards.viewport
+            retired = { closed | cards = { cards | viewport = { viewport | nativePins = Set.empty } } }
+            reopened = Dialog.updateFromCardRows [] (OpenAuditDiff entry "title") retired |> Tuple.first
+        in Expect.equal Nothing (Dialog.cardOrigin reopened)
+    , test "modal opener pin cannot survive workspace session route authorization or non-History ownership" <| \_ ->
+        let
+            source = pinnedOpenerModel
+            foreignUrl = source.url
+            rowOrigin = source.auditDiff.dialog |> Maybe.map (\dialog -> { dialog | origin = "audit-diff-row-event" })
+            audit = source.auditDiff
+            retired = [ { source | sessionContext = Nothing }, { source | selectedWorkspaceId = Just "other" }, { source | sessionRequestEpoch = source.sessionRequestEpoch + 1 }
+                , { source | url = { foreignUrl | fragment = Just "other" } }, { source | auth = { status = AuthRequired, mode = Nothing } }
+                , { source | auditDiff = { audit | dialog = rowOrigin } } ]
+        in
+        Expect.equal (List.repeat 6 ( Nothing, Set.empty ))
+            (List.map (\model -> ( Dialog.cardOrigin model, (Dialog.update CloseAuditDiff model |> Tuple.first).cards.viewport.nativePins )) retired)
     , test "close/reopen rejects HTTP and loaded-at callbacks and retains physical occupancy" <| \_ ->
         let request = requestId opened
             token = dialogToken opened
@@ -149,3 +184,18 @@ base : Model
 base =
     let initial = AppShell.initModel Nothing { protocol = Url.Https, host = "app.example", port_ = Nothing, path = "/workspace/ws", query = Nothing, fragment = Nothing } (WorkspacePage "ws") { apiUrl = "https://api.example", wsUrl = "wss://api.example", sessionId = "session", runtimeMode = "local", authTokenStorageKey = "token", authTokenPresent = False, loginUrl = Nothing, logoutUrl = Nothing } Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
     in { initial | selectedWorkspaceId = Just "ws", auth = { status = AuthReady, mode = Just "local" }, sessionContext = Just { authMode = "local", effectiveActor = Nothing, principal = { actorType = "user", actorId = "local", actorLabel = "Local", authority = "local_superadmin", grantUserId = Nothing }, globalPermissions = { createWorkspace = True, superadmin = True }, workspace = Nothing } }
+
+
+pinnedOpenerModel : Model
+pinnedOpenerModel =
+    let
+        cards = base.cards
+        viewport = cards.viewport
+        keys = "task:task" :: List.map (\n -> "task:other-" ++ String.fromInt n) (List.range 1 150)
+        row = { key = "task:task", kind = "task", entityId = "task", depth = 0, parentKind = "workspace_root", parentId = Nothing, zone = Nothing }
+        mounted = { base | cards = { cards | viewport = { viewport | workspaceId = Just "ws", sessionEpoch = base.sessionRequestEpoch, generation = base.dataLoading.navigationGeneration, rows = Dict.singleton row.key row, index = Viewport.build 160 Dict.empty keys, top = 0, height = 500, nativePins = Set.empty, target = Nothing } } }
+        openedFromCard = Dialog.updateFromCardRows (Cards.mountedViewportKeys mounted) (OpenAuditDiff entry "title") mounted |> Tuple.first
+        openedCards = openedFromCard.cards
+        openedViewport = openedCards.viewport
+    in
+    { openedFromCard | cards = { openedCards | viewport = { openedViewport | top = 16000 } } }

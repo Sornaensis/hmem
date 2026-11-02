@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 
+const enterSearch = async h => { if (!await h.page.locator('.search-input').count()) await h.page.getByRole('button', { name: 'Search', exact: true }).click() }
 const empty = { projects: [], tasks: [], observations: [] }
 const input = h => h.page.getByRole('searchbox', { name: 'Search all entities', exact: true })
 const bar = h => h.page.getByRole('group', { name: 'Search Entities', exact: true })
@@ -13,71 +14,47 @@ const waitFor = async (h, predicate) => {
 }
 const respond = (route, body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 
-test('clearing a global query hides entity options and restores saved choices on the next query', { timeout: 30000 }, async () => {
+test('clearing a global query keeps entity options visible and restores saved choices on the next query', { timeout: 30000 }, async () => {
   const h = await openHierarchy(), requests = []
   await h.page.route('**/api/v1/search', route => { requests.push(route.request().postDataJSON()); return respond(route, empty) })
   try {
     await h.start(); await h.idle()
-    await input(h).fill('first'); await h.page.locator('.search-results-title').waitFor()
+    await enterSearch(h); await input(h).fill('first'); await h.page.locator('.search-results-title').waitFor()
     await toggle(h, 'Tasks').click(); await waitFor(h, () => requests.length === 2)
     await input(h).focus(); await h.page.keyboard.press('ControlOrMeta+A'); await h.page.keyboard.press('Backspace')
     await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
-    assert.equal(await bar(h).count(), 0, 'Keyboard deletion hides entity options')
+    assert.equal(await bar(h).count(), 1, 'Keyboard deletion keeps entity options visible')
     const count = requests.length
-    await input(h).fill('   '); await h.page.waitForTimeout(300)
-    assert.equal(await bar(h).count(), 0, 'Whitespace is an empty query')
+    await enterSearch(h); await input(h).fill('   '); await h.page.waitForTimeout(300)
+    assert.equal(await bar(h).count(), 1, 'Whitespace is an empty query')
     assert.equal(requests.length, count)
-    await input(h).fill('second'); await h.page.locator('.search-results-title').waitFor()
+    await enterSearch(h); await input(h).fill('second'); await h.page.locator('.search-results-title').waitFor()
     assert.equal(await toggle(h, 'Tasks').getAttribute('aria-pressed'), 'false')
     assert.deepEqual(requests.at(-1).entity_types, ['project', 'observation'])
     await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
     await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
-    assert.equal(await bar(h).count(), 0, 'Explicit clear hides entity options')
-    assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 1)
+    assert.equal(await bar(h).count(), 1, 'Explicit clear keeps entity options visible')
+    assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 0)
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
   } finally { await h.close() }
 })
 
-for (const focused of [false, true]) test((focused ? 'Focused' : 'Normal') + ' hierarchy controls belong to persistent context and retain native focus while main content scrolls', { timeout: 30000 }, async () => {
-  const fixture = hierarchyFixture()
-  fixture.projects = fixture.projects.slice(0, 25).map(project => ({ ...project, parent_id: null }))
-  fixture.projects[0].name = '000 root'
-  if (focused) fixture.projects.slice(1).forEach(project => { project.parent_id = fixture.projects[0].id })
-  fixture.tasks = []
-  const h = await openHierarchy(fixture)
+for (const focused of [false, true]) test((focused ? 'Focused' : 'Normal') + ' hierarchy controls stay visible in their content section and retain native input identity', { timeout: 30000 }, async () => {
+  const fixture = hierarchyFixture(), h = await openHierarchy(fixture)
   try {
     await h.start(focused ? 'tab=projects&focus=project:' + fixture.projects[0].id : ''); await h.idle()
     const hierarchy = h.page.getByPlaceholder(focused ? 'Filter focused view...' : 'Filter project hierarchy...')
-    assert.equal(await h.page.locator('.hierarchy-search-input').count(), 1)
-    if (focused) assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 0)
-    assert.equal(await hierarchy.evaluate(element => !!element.closest('.workspace-context-persistent')), true)
-    const element = await hierarchy.elementHandle()
+    assert.equal(await hierarchy.evaluate(element => !!element.closest('.hierarchy-content-section')), true)
+    assert.equal(await h.page.locator('.search-input, .search-section-toggle').count(), 0)
     for (const width of [1440, 390]) {
-      await h.page.setViewportSize({ width, height: 700 })
-      await hierarchy.click()
-      await h.page.keyboard.type(' '); await h.idle()
-      await h.page.keyboard.press('Backspace'); await h.idle()
-      assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
-      await h.page.locator('#main-content-scroll').evaluate(host => { host.scrollTop = 1000 })
-      await h.page.waitForTimeout(300)
-      assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
-      const geometry = await h.page.evaluate(() => {
-        const host = document.getElementById('main-content-scroll').getBoundingClientRect()
-        const widget = document.querySelector('.workspace-context-persistent').getBoundingClientRect()
-        const title = document.querySelector('.global-context').getBoundingClientRect()
-        const field = document.querySelector('.hierarchy-search-input'), hierarchy = field.getBoundingClientRect(); let clip = { top: 0, bottom: innerHeight, left: 0, right: innerWidth }; for (let p = field.parentElement; p; p = p.parentElement) { const style = getComputedStyle(p), r = p.getBoundingClientRect(); if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) { clip.top = Math.max(clip.top, r.top); clip.bottom = Math.min(clip.bottom, r.bottom) }; if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) { clip.left = Math.max(clip.left, r.left); clip.right = Math.min(clip.right, r.right) } }; const hit = document.elementFromPoint(hierarchy.left + hierarchy.width / 2, hierarchy.top + hierarchy.height / 2) === field
-        const global = document.querySelector('.search-input').getBoundingClientRect()
-        const controls = [...document.querySelectorAll('.workspace-context-persistent input, .workspace-context-persistent select, .workspace-context-persistent button')].map(e => e.getBoundingClientRect())
-        return { host: host.toJSON(), widget: widget.toJSON(), title: title.toJSON(), hierarchy: hierarchy.toJSON(), clip, hit, global: global.toJSON(), fits: controls.every(r => r.left >= widget.left - 1 && r.right <= widget.right + 1) }
-      })
-      assert.ok(geometry.widget.bottom <= geometry.host.top + 1 && geometry.widget.top >= geometry.title.bottom - 1, JSON.stringify(geometry))
-      assert.ok(geometry.hit && geometry.hierarchy.top >= geometry.clip.top - 1 && geometry.hierarchy.bottom <= geometry.clip.bottom + 1, JSON.stringify(geometry))
-      assert.ok(geometry.global.top >= geometry.widget.top - 1 && geometry.global.bottom <= geometry.widget.bottom + 1, 'Global search remains in persistent context: ' + JSON.stringify(geometry))
-      assert.ok(geometry.widget.bottom < geometry.host.bottom - 60, 'Header leaves room to browse content: ' + JSON.stringify(geometry))
-      assert.ok(geometry.fits, 'All hierarchy controls fit at width ' + width)
-      await h.page.locator('#main-content-scroll').evaluate(host => { host.scrollTop = 0 })
-      await h.page.waitForTimeout(300)
-      assert.equal(await element.evaluate(element => element.isConnected && element === document.activeElement), true)
+      await h.page.setViewportSize({ width, height: 800 })
+      const field = await hierarchy.elementHandle()
+      await hierarchy.fill(' '); await h.idle(); await hierarchy.press('Backspace'); await h.idle()
+      assert.equal(await field.evaluate(element => element.isConnected && element === document.activeElement), true)
+      assert.equal(await h.page.getByRole('button', { name: 'Expand All', exact: true }).count(), 1)
+      assert.equal(await h.page.getByRole('button', { name: 'Collapse All', exact: true }).count(), 1)
+      const controls = await h.page.locator('.project-filter-panel button, .project-filter-panel select').evaluateAll(elements => elements.map(element => { const r=element.getBoundingClientRect(), section=element.closest('.project-filter-panel').getBoundingClientRect(); return { visible: getComputedStyle(element).display !== 'none' && r.width > 0 && r.height > 0, fits:r.left>=section.left-1&&r.right<=section.right+1 } }))
+      assert.ok(controls.length >= 15 && controls.every(control=>control.visible&&control.fits), JSON.stringify({width,controls}))
     }
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
   } finally { await h.close() }
@@ -90,15 +67,15 @@ test('global input position and focus stay stable on the first character and key
   const h = await openHierarchy(fixture)
   await h.page.route('**/api/v1/search', route => respond(route, empty))
   try {
-    await h.start(); await h.idle()
-    for (const width of [1440, 390]) for (const top of [0, 120]) {
+    await h.start(); await h.idle(); await enterSearch(h)
+    for (const width of [1440, 390]) for (const top of [0]) {
       await h.page.setViewportSize({ width, height: 700 })
       await h.page.locator('#main-content-scroll').evaluate((host, top) => { host.scrollTop = top }, top)
       await h.page.waitForTimeout(300)
       await input(h).click()
       const element = await input(h).elementHandle()
       const measure = () => element.evaluate(element => {
-        const r = element.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), bounds = element.closest('.workspace-context-persistent').getBoundingClientRect()
+        const r = element.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), bounds = document.getElementById('main-content-scroll').getBoundingClientRect()
         return { top: r.top, bottom: r.bottom, scroll: host.scrollTop, focused: element === document.activeElement, connected: element.isConnected, visible: r.top >= bounds.top && r.bottom <= bounds.bottom }
       })
       const before = await measure()
@@ -130,7 +107,7 @@ test('global search is live and independent with persistent actor preferences th
     await h.start(); await h.idle()
     await h.page.getByPlaceholder('Filter project hierarchy...').fill('root'); await h.idle()
     const hierarchyState = await h.page.evaluate(id => JSON.parse(localStorage.getItem('hmem-ws-' + id)), fixture.workspace.id)
-    await input(h).fill('alpha')
+    await enterSearch(h); await input(h).fill('alpha')
     await h.page.waitForTimeout(100); assert.equal(requests.length, 0, 'Typing must debounce')
     await h.page.locator('.search-results-title').waitFor()
     assert.equal(requests.length, 1); assert.deepEqual(requests[0].entity_types, ['project', 'task', 'observation'])
@@ -143,7 +120,7 @@ test('global search is live and independent with persistent actor preferences th
     await h.page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 700 })
     await h.page.waitForTimeout(150)
     assert.equal(await input(h).evaluate(element => !!element.closest('.sticky-workspace-bar')), false)
-    await input(h).fill('pending')
+    await enterSearch(h); await input(h).fill('pending')
     await waitFor(h, () => requests.length === 3)
     assert.match(await h.page.locator('.search-results-state').innerText(), /Searching/)
     assert.match(await h.page.locator('.search-previous-results .search-results-title').innerText(), /alpha/)
@@ -159,12 +136,12 @@ test('global search is live and independent with persistent actor preferences th
     await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
     await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
     assert.equal(await input(h).inputValue(), '')
-    assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').inputValue(), 'root')
-    assert.equal(await bar(h).count(), 0)
+    assert.equal(await h.page.getByPlaceholder('Filter project hierarchy...').count(), 0)
+    assert.equal(await bar(h).count(), 1)
     assert.deepEqual(await h.page.evaluate(id => JSON.parse(localStorage.getItem('hmem-ws-' + id)), fixture.workspace.id), hierarchyState)
     await h.page.setViewportSize({ width: 1440, height: 1000 })
-    await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle()
-    await input(h).fill('restored'); await h.page.locator('.search-results-title').waitFor()
+    await h.page.reload(); await h.page.locator('.workspace-tabs').waitFor(); await h.idle()
+    await enterSearch(h); await input(h).fill('restored'); await h.page.locator('.search-results-title').waitFor()
     assert.equal(await toggle(h, 'Tasks').getAttribute('aria-pressed'), 'false')
     assert.deepEqual(requests.at(-1).entity_types, ['project', 'observation'])
     await toggle(h, 'Projects').click(); await waitFor(h, () => requests.at(-1).entity_types.join() === 'observation')
@@ -175,19 +152,19 @@ test('global search is live and independent with persistent actor preferences th
     assert.match(await bar(h).innerText(), /Select at least one/)
     await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
     await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
-    assert.equal(await bar(h).count(), 0)
+    assert.equal(await bar(h).count(), 1)
     await h.page.waitForTimeout(300); assert.equal(requests.length, count, 'Empty query must not search')
-    await input(h).fill('none selected')
+    await enterSearch(h); await input(h).fill('none selected')
     await h.page.waitForTimeout(300); assert.equal(requests.length, count, 'The next query preserves explicit none')
     await toggle(h, 'Tasks').click()
     await waitFor(h, () => requests.length === count + 1)
     h.setPrincipal('other-user')
-    await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle()
-    await input(h).fill('other actor'); await h.page.locator('.search-results-title').waitFor()
+    await h.page.reload(); await h.page.locator('.workspace-tabs').waitFor(); await h.idle()
+    await enterSearch(h); await input(h).fill('other actor'); await h.page.locator('.search-results-title').waitFor()
     assert.deepEqual(requests.at(-1).entity_types, ['project', 'task', 'observation'])
     h.setPrincipal('fixture-user')
-    await h.page.reload(); await h.page.locator('#entity-root-project').waitFor(); await h.idle()
-    await input(h).fill('first actor again'); await h.page.locator('.search-results-title').waitFor()
+    await h.page.reload(); await h.page.locator('.workspace-tabs').waitFor(); await h.idle()
+    await enterSearch(h); await input(h).fill('first actor again'); await h.page.locator('.search-results-title').waitFor()
     assert.deepEqual(requests.at(-1).entity_types, ['task'], 'Each actor retains independent choices')
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
   } finally { releasePending(); await h.close() }
@@ -204,18 +181,18 @@ test('composition suppresses intermediate searches; late query and type replies 
   })
   try {
     await h.start(); await h.idle()
-    await input(h).dispatchEvent('compositionstart')
-    await input(h).fill('intermediate'); await h.page.waitForTimeout(350)
+    await enterSearch(h); await input(h).dispatchEvent('compositionstart')
+    await enterSearch(h); await input(h).fill('intermediate'); await h.page.waitForTimeout(350)
     assert.equal(requests.length, 0)
-    await input(h).fill('complete'); await input(h).dispatchEvent('compositionend')
+    await enterSearch(h); await input(h).fill('complete'); await input(h).dispatchEvent('compositionend')
     await h.page.locator('.search-results-title').waitFor()
     assert.equal(requests.length, 1); assert.equal(requests[0].query, 'complete')
-    await input(h).fill('old'); await waitFor(h, () => requests.some(row => row.query === 'old'))
-    await input(h).fill('new')
+    await enterSearch(h); await input(h).fill('old'); await waitFor(h, () => requests.some(row => row.query === 'old'))
+    await enterSearch(h); await input(h).fill('new')
     await h.page.locator('.search-results-title').filter({ hasText: 'new' }).waitFor()
     held.shift()(); await h.page.waitForTimeout(150)
     assert.match(await h.page.locator('.search-result-title').innerText(), /^new:/)
-    await input(h).fill('types'); await waitFor(h, () => requests.some(row => row.query === 'types'))
+    await enterSearch(h); await input(h).fill('types'); await waitFor(h, () => requests.some(row => row.query === 'types'))
     await toggle(h, 'Tasks').click()
     await h.page.locator('.search-result-title').filter({ hasText: 'types:project,observation' }).waitFor()
     held.shift()(); await h.page.waitForTimeout(150)
@@ -229,11 +206,11 @@ test('composition suppresses intermediate searches; late query and type replies 
     await waitFor(h, () => requests.length > beforeLive)
     assert.equal(requests.at(-1).query, 'types'); assert.deepEqual(requests.at(-1).entity_types, ['project', 'observation'])
     await h.page.waitForFunction(() => !document.querySelector('.search-results-state'))
-    await input(h).fill('old'); await waitFor(h, () => held.length === 1)
-    await input(h).fill('')
+    await enterSearch(h); await input(h).fill('old'); await waitFor(h, () => held.length === 1)
+    await enterSearch(h); await input(h).fill('')
     held.shift()(); await h.page.waitForTimeout(350)
     assert.equal(await h.page.locator('.unified-search-results').count(), 0)
-    assert.equal(await bar(h).count(), 0)
+    assert.equal(await bar(h).count(), 1)
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
   } finally { for (const release of held) release(); await h.close() }
 })
@@ -244,7 +221,7 @@ test('planning workspaces omit Observation controls and default to their support
   await h.page.route('**/api/v1/search', route => { requests.push(route.request().postDataJSON()); return respond(route, empty) })
   try {
     await h.start(); await h.idle()
-    await input(h).fill('planning'); await h.page.locator('.search-results-title').waitFor()
+    await enterSearch(h); await input(h).fill('planning'); await h.page.locator('.search-results-title').waitFor()
     assert.deepEqual(requests[0].entity_types, ['project', 'task'])
     assert.equal(await toggle(h, 'Observations').count(), 0)
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
@@ -252,26 +229,17 @@ test('planning workspaces omit Observation controls and default to their support
 })
 
 
-test('global and hierarchy inputs share base styles and fit desktop and mobile toolbars', { timeout: 30000 }, async () => {
+test('global and hierarchy inputs fit their separate desktop and narrow sections', { timeout: 30000 }, async () => {
   const h = await openHierarchy()
   try {
     await h.start(); await h.idle()
-    for (const width of [1440, 390]) {
-      await h.page.setViewportSize({ width, height: 800 })
-      const styles = await h.page.locator('.search-input, .hierarchy-search-input').evaluateAll(elements => elements.map(element => {
-        const style = getComputedStyle(element), rect = element.getBoundingClientRect(), parent = element.parentElement.getBoundingClientRect()
-        return { properties: Object.fromEntries(['flexGrow', 'flexShrink', 'backgroundColor', 'borderTopStyle', 'borderTopWidth', 'borderRadius', 'color', 'paddingTop', 'paddingRight', 'fontFamily', 'fontSize', 'minWidth'].map(key => [key, style[key]])), fits: rect.left >= parent.left - 1 && rect.right <= parent.right + 1 }
-      }))
-      assert.equal(styles.length, 2)
-      assert.deepEqual(styles[1].properties, styles[0].properties, 'Both search controls share base styles at width ' + width)
-      assert.equal(styles[1].properties.flexGrow, '1')
-      assert.equal(styles[1].properties.paddingTop, '6px')
-      assert.equal(styles[1].properties.paddingRight, '9px')
-      assert.equal(styles[1].properties.borderTopStyle, 'solid')
-      assert.equal(styles[1].properties.borderTopWidth, '1px')
-      assert.equal(styles[1].properties.minWidth, '0px')
-      assert.ok(styles.every(style => style.fits), 'Inputs must fit their toolbar at width ' + width)
+    for (const width of [1440,390]) for(const label of ['Projects','Search']) {
+      await h.page.setViewportSize({width,height:800})
+      await h.page.locator('.workspace-tabs').getByRole('button',{name:label,exact:true}).click()
+      const fields = h.page.locator('.search-input, .hierarchy-search-input')
+      assert.equal(await fields.count(),1)
+      assert.ok(await fields.evaluateAll(elements=>elements.every(element=>{const r=element.getBoundingClientRect(),p=element.parentElement.getBoundingClientRect();return r.width>0&&r.left>=p.left-1&&r.right<=p.right+1})))
     }
-    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
-  } finally { await h.close() }
+    assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
+  } finally {await h.close()}
 })

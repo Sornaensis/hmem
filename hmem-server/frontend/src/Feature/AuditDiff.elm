@@ -1,4 +1,4 @@
-module Feature.AuditDiff exposing (init, update, reconcile, view, fields, recompute, timestampSources)
+module Feature.AuditDiff exposing (init, update, reconcile, view, fields, recompute, timestampSources, cardOrigin, updateFromCardRows)
 
 import Api
 import AuditDiff exposing (Value(..), Comparison(..))
@@ -39,6 +39,36 @@ close model =
 authorized : Model -> Bool
 authorized model = model.auth.status == AuthReady && (Permissions.canViewGlobalAudit model || Permissions.canReadCurrentWorkspace model)
 
+{-| Keep only the existing History opener row while the native modal owns
+focus. Explicit close hands it back to the ordinary native-focus pin until
+restoration/blur reports its next current viewport state.
+-}
+cardOrigin : Model -> Maybe ( String, String )
+cardOrigin model =
+    model.auditDiff.dialog |> Maybe.andThen (\dialog ->
+        if currentLifetime dialog model then
+            dialog.openerRow |> Maybe.andThen (\opener ->
+                if eligibleCardOrigin dialog.origin dialog.entry model == Just opener then Just opener else Nothing)
+        else Nothing)
+
+
+eligibleCardOrigin : String -> Api.AuditLogEntry -> Model -> Maybe ( String, String )
+eligibleCardOrigin origin entry model =
+    let
+        kind = if entry.entityType == "project" then "project" else "task"
+        key = kind ++ ":" ++ entry.entityId
+    in
+    if model.activeTab == ProjectsTab && entry.workspaceId == model.selectedWorkspaceId
+        && model.cards.viewport.workspaceId == model.selectedWorkspaceId
+        && model.cards.viewport.sessionEpoch == model.sessionRequestEpoch
+        && model.cards.viewport.generation == model.dataLoading.navigationGeneration
+        && List.any (\field -> origin == originId entry field) (fields entry)
+        && List.member entry.entityType [ "project", "task", "subtask" ]
+        && Dict.member key model.cards.viewport.rows then
+        Just ( kind, entry.entityId )
+    else Nothing
+
+
 otherModal : Model -> Bool
 otherModal model = model.move.dialog /= Nothing || model.editing.createForm /= Nothing || model.dragDrop.dropActionModal /= Nothing || model.cards.deleteConfirmation /= Nothing || model.auditLog.revertConfirmation /= Nothing || model.workspaceAdmin.purgeConfirmation /= Nothing || model.groups.workspaceDeletion /= Nothing || model.observations.deleteConfirmation /= Nothing
 
@@ -49,15 +79,29 @@ valid : Int -> Int -> Model -> Maybe AuditDiffDialog
 valid token request model = model.auditDiff.dialog |> Maybe.andThen (\dialog -> if dialog.token == token && dialog.request == Just request && currentLifetime dialog model then Just dialog else Nothing)
 
 update : Msg -> Model -> ( Model, Cmd Msg )
-update msg model =
+update =
+    updateFromCardRows []
+
+
+updateFromCardRows : List String -> Msg -> Model -> ( Model, Cmd Msg )
+updateFromCardRows mountedRows msg model =
     case msg of
         OpenAuditDiff entry field ->
-            open (originId entry field) entry field model
+            open mountedRows (originId entry field) entry field model
 
         OpenAuditDiffFrom origin entry field ->
-            open origin entry field model
+            open mountedRows origin entry field model
 
-        CloseAuditDiff -> ( close model, Cmd.none )
+        CloseAuditDiff ->
+            let
+                restored = case cardOrigin model of
+                    Just ( kind, entityId ) ->
+                        let cards = model.cards
+                            viewport = cards.viewport
+                        in { model | cards = { cards | viewport = { viewport | nativePins = Set.singleton (kind ++ ":" ++ entityId) } } }
+                    Nothing -> model
+            in
+            ( close restored, Cmd.none )
 
         AuditDiffProjectFetched token request result ->
             finish token request (Result.map (\p -> { id = p.id, workspaceId = p.workspaceId, name = p.name, description = p.description, updatedAt = p.updatedAt }) result) model
@@ -87,12 +131,13 @@ update msg model =
                             ( set { dialog | queued = True, request = Nothing, error = Nothing, changed = False } model, Cmd.none )
                         _ -> ( model, Cmd.none )
 
-open : String -> Api.AuditLogEntry -> String -> Model -> ( Model, Cmd Msg )
-open origin entry field model =
+open : List String -> String -> Api.AuditLogEntry -> String -> Model -> ( Model, Cmd Msg )
+open mountedRows origin entry field model =
     if not (authorized model) || otherModal model || not (List.member field (fields entry)) then ( model, Cmd.none ) else
     let
         state = model.auditDiff
-        dialog = { entry = entry, field = field, origin = origin, againstCurrent = False, beforeBaseline = False, token = state.nextToken, request = Nothing, queued = False, current = Nothing, error = Nothing, changed = False, epoch = model.sessionRequestEpoch, audience = model.sessionContext, route = Url.toString model.url, workspace = model.selectedWorkspaceId, comparison = Equal }
+        openerRow = eligibleCardOrigin origin entry model |> Maybe.andThen (\( kind, entityId ) -> if List.member (kind ++ ":" ++ entityId) mountedRows then Just ( kind, entityId ) else Nothing)
+        dialog = { entry = entry, field = field, origin = origin, openerRow = openerRow, againstCurrent = False, beforeBaseline = False, token = state.nextToken, request = Nothing, queued = False, current = Nothing, error = Nothing, changed = False, epoch = model.sessionRequestEpoch, audience = model.sessionContext, route = Url.toString model.url, workspace = model.selectedWorkspaceId, comparison = Equal }
     in ( set dialog { model | auditDiff = { state | nextToken = state.nextToken + 1 } }, Cmd.none )
 
 finish : Int -> Int -> Result Http.Error { id : String, workspaceId : String, name : String, description : Maybe String, updatedAt : String } -> Model -> ( Model, Cmd Msg )

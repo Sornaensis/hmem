@@ -408,7 +408,7 @@ suite =
                 , \_ -> input "Filter project hierarchy..." "workspace query" (Main.update ClearFocus focused |> Tuple.first)
                 , \_ -> hidden { focused | activeTab = TimelineTab }
                 , \_ -> hidden { focused | activeTab = ObservationsTab }
-                , \_ -> hidden (Main.update (GlobalSearchInput "global query") focused |> Tuple.first)
+                , \_ -> input "Filter focused view..." "focused query" (Main.update (GlobalSearchInput "global query") focused |> Tuple.first)
                 ] ()
         , test "cold focused URLs inherit late stored base until deliberate focused edits" <| \_ ->
             let

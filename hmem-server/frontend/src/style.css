@@ -5808,3 +5808,54 @@ textarea.observation-edit-content {
   .workspace-context-persistent .workspace-tabs .tab { padding: 11px 12px; }
   .project-filter-panel > .hierarchy-filter-controls > .filter-bar { gap: 10px 18px; }
 }
+
+/* Shared title navigation and content-scoped hierarchy controls. */
+.global-logo { justify-content: center; }
+.global-context { align-items: center; }
+.titlebar-breadcrumbs, .titlebar-focus-trail { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.titlebar-breadcrumbs { flex: 1 1 260px; padding: 10px 0; font-size: 12px; }
+.titlebar-breadcrumbs > *, .titlebar-focus-trail > * { max-width: 100%; overflow-wrap: anywhere; }
+.titlebar-breadcrumbs .focus-crumb { border: 0; background: transparent; color: var(--text-muted); padding: 3px 2px; font: inherit; text-align: left; }
+.titlebar-breadcrumbs .focus-crumb-current, .titlebar-section { color: var(--text); }
+.titlebar-breadcrumbs .focus-crumb:is(:hover, :focus-visible) { color: var(--text); text-decoration: underline; }
+.titlebar-breadcrumbs :is(button, a):focus-visible, .popover-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.titlebar-breadcrumbs .focus-clear-btn { margin: 0; }
+.titlebar-breadcrumbs :is(.focus-return-btn, .search-return-button) { min-height: 28px; font-size: 12px; }
+.sidebar-workspaces-header { display: flex; align-items: center; gap: 10px; }
+.app > .workspace-context-persistent { display: flex; flex-direction: column; max-height: min(38dvh, 280px); }
+.app > .workspace-context-persistent > .workspace-header { order: 0; }
+.app > .workspace-context-persistent > .workspace-tabs { order: 1; position: static; }
+.workspace-context-persistent .workspace-tabs { flex-wrap: wrap; gap: 5px; padding: 4px 16px 12px; border-top: 0; }
+.workspace-context-persistent .workspace-tabs .tab { flex: 0 1 auto; min-height: 36px; padding: 7px 12px; border: 1px solid transparent; border-radius: 8px; font-size: 13px; }
+.workspace-context-persistent .workspace-tabs .tab.active { color: #c7c9ff; background: #303352; border-color: #525783; }
+.workspace-context-persistent .workspace-tabs .tab:hover { background: var(--bg-elevated, #263247); }
+.workspace-tabs .tab + .tab::before { content: none; }
+.hierarchy-content-section { min-width: 0; }
+.hierarchy-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 14px 16px; border: 1px solid var(--border); border-bottom: 0; border-radius: 7px 7px 0 0; background: var(--bg-surface); }
+.hierarchy-toolbar h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.hierarchy-toolbar .tree-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; }
+.hierarchy-toolbar .inline-create-container { margin: 0; }
+.hierarchy-content-section > .project-filter-panel { display: flex; flex-direction: column; gap: 12px; padding: 0 16px 16px; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 7px 7px; background: var(--bg-surface); }
+.hierarchy-content-section .project-filter-panel .search-bar { margin: 0; width: 100%; }
+.hierarchy-content-section .project-filter-panel .hierarchy-search-input { width: 100%; min-width: 0; }
+.hierarchy-content-section .hierarchy-filter-controls > .filter-bar { margin: 0; display: flex; flex-wrap: wrap; gap: 10px 20px; padding: 0; border: 0; background: transparent; }
+.hierarchy-content-section .filter-group { flex-wrap: wrap; max-width: 100%; }
+.hierarchy-content-section > .tree-view { margin-top: 16px; }
+.workspace-search-page > h2 { margin: 0 0 16px; font-size: 16px; font-weight: 500; }
+.workspace-search-page .global-search-bar { margin-bottom: 16px; }
+.workspace-search-page .search-entities-filter-bar { display: flex; flex-wrap: wrap; margin-top: 12px; }
+@media(max-width:650px) {
+  .global-context { gap: 4px 10px; }
+  .titlebar-breadcrumbs { padding: 8px 12px; flex-basis: 180px; }
+  .app > .workspace-context-persistent { max-height: 38dvh; }
+  .hierarchy-toolbar { align-items: flex-start; padding: 12px; }
+  .hierarchy-content-section > .project-filter-panel { padding: 0 12px 12px; }
+  .hierarchy-content-section .filter-group { gap: 6px; }
+  .hierarchy-content-section :is(button, input, select), .titlebar-breadcrumbs :is(button, a) { min-height: 36px; }
+}
+
+.titlebar-breadcrumbs .focus-breadcrumb-bar { padding: 0; margin: 0; border: 0; background: transparent; }
+
+.sidebar-workspaces-header .icon-workspace { display: inline-block; width: 20px; height: 20px; border: 1px solid var(--accent); border-radius: 4px; background: linear-gradient(90deg, transparent 45%, var(--accent) 45%, var(--accent) 51%, transparent 51%); }
+
+.titlebar-breadcrumbs .focus-crumb { white-space: normal; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }

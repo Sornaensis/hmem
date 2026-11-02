@@ -27,13 +27,13 @@ test('copy-only identifiers retain exact native copy feedback and card footers h
  }finally{await h.close()}
 })
 
-test('New Project shares the actual hierarchy width at desktop, narrow and zoom and retains inline creation',{timeout:30000},async()=>{
+test('New Project fits the dedicated hierarchy toolbar at desktop, narrow and zoom and retains inline creation',{timeout:30000},async()=>{
  const f=hierarchyFixture(),h=await openHierarchy(f),{page}=h
  try{
-  await h.start();await h.idle();const create=page.getByRole('button',{name:'+ New Project',exact:true}),tree=page.locator('#hierarchy-viewport')
+  await h.start();await h.idle();const create=page.getByRole('button',{name:'+ New Project',exact:true}),tree=page.locator('.hierarchy-toolbar')
   for(const [width,zoom] of [[2560,1],[1440,1],[900,1],[430,1],[1440,1.5]]){
    await page.setViewportSize({width,height:1000});await page.evaluate(zoom=>{document.documentElement.style.zoom=String(zoom)},zoom);await h.idle()
-   const [button,bounds]=await Promise.all([create.boundingBox(),tree.boundingBox()]);assert.ok(Math.abs(button.width-bounds.width)<1,JSON.stringify({width,zoom,button,bounds}));assert.ok(Math.abs(button.x-bounds.x)<1)
+   const [button,bounds]=await Promise.all([create.boundingBox(),tree.boundingBox()]);assert.ok(button.width>0&&button.x>=bounds.x&&button.x+button.width<=bounds.x+bounds.width+1,JSON.stringify({width,zoom,button,bounds}));assert.ok(button.y>=bounds.y&&button.y+button.height<=bounds.y+bounds.height+1)
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));assert.ok(await page.locator('[data-hierarchy-key]').count()<=25);assert.ok(h.caps().maxDetails<=6);assert.ok(h.caps().maxBranches<=4)
   }
   await page.evaluate(()=>{document.documentElement.style.zoom=''});await create.click();const input=page.getByPlaceholder('New project name...');await input.waitFor();await input.fill('A reviewable new project');await input.press('Escape');await create.waitFor()

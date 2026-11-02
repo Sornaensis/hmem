@@ -5,6 +5,7 @@ import { dirname } from 'node:path'
 import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 
+const enterSearch = async h => { if (!await h.page.locator('.search-input').count()) await h.page.getByRole('button', { name: 'Search', exact: true }).click() }
 const empty = { projects: [], tasks: [], observations: [] }
 const search = h => h.page.getByRole('searchbox', { name: 'Search all entities', exact: true })
 const resultsReady = h => h.page.waitForFunction(() => document.querySelector('.search-results-title') && !document.querySelector('.search-results-state'))
@@ -29,7 +30,7 @@ test('condensed cards avoid result hydration; keyboard Jump To loads uncached pa
     await h.page.getByPlaceholder('Filter project hierarchy...').fill('unrelated hierarchy'); await h.idle()
     const saved = await h.page.evaluate(id => localStorage.getItem('hmem-ws-' + id), f.workspace.id)
     const before = h.requests.length
-    await search(h).fill('preview'); await resultsReady(h)
+    await enterSearch(h); await search(h).fill('preview'); await resultsReady(h)
     assert.equal(await h.page.locator('.search-result-condensed').count(), 3)
     assert.deepEqual(await h.page.locator('.search-result-action').allTextContents(), ['Jump To', 'Jump To', 'Jump To'])
     assert.ok((await h.page.locator('.search-result-summary').allTextContents()).every(text => [...text].length <= 240))
@@ -42,7 +43,7 @@ test('condensed cards avoid result hydration; keyboard Jump To loads uncached pa
       await h.page.screenshot({ path: process.env.HMEM_SEARCH_SCREENSHOT, fullPage: false })
       assert.ok((await stat(process.env.HMEM_SEARCH_SCREENSHOT)).size < 4 * 1024 * 1024)
     }
-    await search(h).fill('needle'); await resultsReady(h)
+    await enterSearch(h); await search(h).fill('needle'); await resultsReady(h)
     for (const [kind, id, back] of [['project', 'deep-project-69', false], ['task', 'hidden-task-9', true]]) {
       const action = h.page.locator('#' + buttonId(kind, id))
       await action.scrollIntoViewIfNeeded(); await action.focus()
@@ -78,7 +79,7 @@ test('Observation Jump To reveals full readonly detached detail outside Subject 
     await h.page.getByLabel('Subjects', { exact: true }).fill('docs/'); await h.page.waitForTimeout(350); await h.idle()
     const tree = await h.page.getByRole('tree', { name: 'Stored subject paths', exact: true }).innerText()
     const saved = await h.page.evaluate(id => localStorage.getItem('hmem-ws-' + id), h.fixture.workspace.id)
-    await search(h).fill('cache'); await resultsReady(h)
+    await enterSearch(h); await search(h).fill('cache'); await resultsReady(h)
     const before = h.receipts.length
     const action = h.page.getByRole('button', { name: 'Jump To observation: src/Main.elm', exact: true })
     await action.focus(); await h.page.keyboard.press('Enter')
@@ -92,7 +93,7 @@ test('Observation Jump To reveals full readonly detached detail outside Subject 
     await h.page.goBack(); await focused(h, buttonId('observation', target.id))
     assert.equal(await search(h).inputValue(), 'cache')
     await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
-    await h.page.getByLabel('Subjects', { exact: true }).waitFor()
+    await h.page.locator('.workspace-tabs').getByRole('button', { name: 'Observations', exact: true }).click(); await h.page.getByLabel('Subjects', { exact: true }).waitFor()
     assert.equal(await h.page.getByLabel('Subjects', { exact: true }).inputValue(), 'docs/')
     assert.equal(await h.page.getByRole('tree', { name: 'Stored subject paths', exact: true }).innerText(), tree)
     assert.equal(await h.page.evaluate(id => localStorage.getItem('hmem-ws-' + id), h.fixture.workspace.id), saved)
@@ -105,7 +106,7 @@ test('retired target callbacks cannot steal a newer jump or query, and unavailab
   await h.page.route('**/api/v1/search', route => respond(route, payload))
   const held = h.gate(r => r.path.endsWith('/navigation/focus/task/hidden-task-9'), { hold: true })
   try {
-    await h.start(); await h.idle(); await search(h).fill('race'); await resultsReady(h)
+    await h.start(); await h.idle(); await enterSearch(h); await search(h).fill('race'); await resultsReady(h)
     await h.page.locator('#' + buttonId('task', 'hidden-task-9')).click()
     await h.bounded(held.arrived, 10000, 'Delayed canonical target')
     await h.page.getByRole('button', { name: 'Back to search results', exact: true }).click()
@@ -114,7 +115,7 @@ test('retired target callbacks cannot steal a newer jump or query, and unavailab
     await focused(h, 'entity-deep-project-69')
     held.release(); await h.idle()
     assert.equal(await h.page.evaluate(() => document.activeElement.id), 'entity-deep-project-69')
-    await search(h).fill('new query'); await resultsReady(h)
+    await enterSearch(h); await search(h).fill('new query'); await resultsReady(h)
     assert.equal(await h.page.locator('.search-jump-target').count(), 0)
     const missing = h.gate(r => r.path.endsWith('/navigation/focus/task/hidden-task-8'), { error: 404 })
     await h.page.locator('#' + buttonId('task', 'hidden-task-8')).click()
@@ -141,7 +142,7 @@ test('Observation Jump To URL reload preserves excluded Subject Tree filters and
   try {
     await h.start(); await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle()
     await h.page.getByLabel('Subjects', { exact: true }).fill('docs/'); await h.page.waitForTimeout(350); await h.idle()
-    await search(h).fill('cache'); await resultsReady(h)
+    await enterSearch(h); await search(h).fill('cache'); await resultsReady(h)
     await h.page.locator('#' + buttonId('observation', target.id)).click()
     await h.page.locator('#search-observation-detail').waitFor(); await h.idle()
     const link = h.page.url()
@@ -174,7 +175,7 @@ test('search invalidations during target navigation revalidate membership and co
   let returnedTop = 0
   await h.page.route('**/api/v1/search', async route => { calls++; if (held) await held.promise; await respond(route, payload) })
   try {
-    await h.start(); await h.idle(); await search(h).fill('live'); await resultsReady(h)
+    await h.start(); await h.idle(); await enterSearch(h); await search(h).fill('live'); await resultsReady(h)
     for (const history of [false, true]) {
       const action = h.page.locator('#' + buttonId('task', 'hidden-task-9'))
       await action.scrollIntoViewIfNeeded(); await action.focus()
@@ -221,7 +222,7 @@ test('return remount honors new pointer and wheel intent and gives removed resul
   let payload = searchPayload(f), held = null
   await h.page.route('**/api/v1/search', async route => { if (held) await held.promise; await respond(route, payload) })
   try {
-    await h.start(); await h.idle(); await search(h).fill('intent'); await resultsReady(h)
+    await h.start(); await h.idle(); await enterSearch(h); await search(h).fill('intent'); await resultsReady(h)
     for (const kind of ['pointer', 'wheel', 'removed']) {
       const action = h.page.locator('#' + buttonId('task', 'hidden-task-9'))
       await action.scrollIntoViewIfNeeded(); await action.click(); await focused(h, 'entity-hidden-task-9')

@@ -195,6 +195,7 @@ handleOwnedRaw ownedMsg model =
                         |> (\currentModel ->
                                 { currentModel
                                     | activeTab = tab
+                                    , focus = let state = currentModel.focus in { state | breadcrumbPreview = Nothing }
                                     , observations = Feature.Observation.selectionForTab tab currentModel.observations
                                     , search = Feature.Search.clearTransientSearchState currentModel.search
                                 }
@@ -1019,8 +1020,7 @@ viewDocument model =
                 text ""
             , Keyed.node "div"
                 [ class "main-content", id "main-content-scroll" ]
-                [ ( "audit-return", Feature.Focus.viewAuditReturn model )
-                , ( "retained-observation-draft", Feature.Observation.viewRetainedDraft model )
+                [ ( "retained-observation-draft", Feature.Observation.viewRetainedDraft model )
                 , ( pageKey model.page, viewPage model )
                 ]
             , Toast.view model.toast
@@ -1052,14 +1052,19 @@ viewGlobalNavigation model =
     in
     header [ class "global-context", attribute "aria-label" "Application navigation" ]
         [ a [ class "global-logo", href "/" ] [ img [ src "/hmem-logo.svg", alt "hmem", width 183, height 48 ] [] ]
-        , case (if contextVisible then model.page else NotFound) of
+        , case (if contextVisible || model.focus.returnContext /= Nothing then model.page else NotFound) of
             WorkspacePage wsId ->
-                case Dict.get wsId model.workspaces of
-                    Just ws ->
-                        span [ class "global-location" ] [ text ws.name ]
-
-                    Nothing ->
-                        text ""
+                nav [ class "titlebar-breadcrumbs", attribute "aria-label" "Breadcrumb" ]
+                    [ if contextVisible then
+                        a [ class "global-location", attribute "aria-label" "Workspace home", href ("/workspace/" ++ wsId) ]
+                            [ text (Dict.get wsId model.workspaces |> Maybe.map .name |> Maybe.withDefault "Workspace") ]
+                      else span [ class "global-location" ] [ text "Workspace" ]
+                    , span [ class "focus-crumb-sep" ] [ text "›" ]
+                    , span [ class "titlebar-section" ] [ text (Page.Workspace.workspaceTabLabel model.activeTab) ]
+                    , if contextVisible && (model.activeTab == ProjectsTab || model.focus.breadcrumbPreview /= Nothing) then Feature.Focus.viewFocusBreadcrumbBar model else text ""
+                    , Feature.Focus.viewAuditReturn model
+                    , Feature.Search.viewReturnButton model
+                    ]
 
             AuditLogPage ->
                 span [ class "global-location" ] [ text "Audit Log" ]

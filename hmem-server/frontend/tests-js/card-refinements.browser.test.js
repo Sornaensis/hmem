@@ -37,7 +37,7 @@ test('card controls align, share motion, and nested Focus/Move content preserves
   const [labelBox,arrowBox]=await Promise.all([move.locator('.card-action-label').boundingBox(),move.locator('.card-action-icon').boundingBox()]);assert.ok(arrowBox.x>=labelBox.x+labelBox.width)
   await move.locator('.card-action-label').click()
   await page.getByRole('dialog').waitFor();assert.equal(focusTarget(page),null)
-  await page.keyboard.press('Escape');await project.getByRole('button',{name:'Focus project',exact:true}).focus();await page.keyboard.press('Enter')
+  await page.keyboard.press('Escape');await page.getByRole('dialog').waitFor({state:'detached'});await h.idle();await project.getByRole('button',{name:'Focus project',exact:true}).focus();await page.keyboard.press('Enter')
   await until(()=>Promise.resolve(focusTarget(page)==='project:root-project'))
   await page.emulateMedia({reducedMotion:'reduce'})
   assert.equal(await page.locator('.card-details-control').first().evaluate(n=>getComputedStyle(n).transitionDuration.split(',').every(x=>x.trim()==='0s')),true)

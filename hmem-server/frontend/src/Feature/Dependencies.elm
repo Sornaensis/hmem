@@ -736,9 +736,9 @@ viewAddDependencyPopover model taskId deps =
                                                     |> List.filter (\( eid, _, _ ) -> eid /= t.id)
                                         in
                                         div
-                                            [ class "popover-card"
+                                            ([ class "popover-card"
                                             , onClick (PerformAddDependency taskId t.id)
-                                            ]
+                                            ] ++ Feature.Focus.previewAttributes t.workspaceId (buildTaskBreadcrumb model t []))
                                             [ div [ class "popover-card-header" ]
                                                 [ span
                                                     [ class
@@ -761,14 +761,7 @@ viewAddDependencyPopover model taskId deps =
                                                     ]
                                                 , span [ class "popover-card-title" ] [ text t.title ]
                                                 ]
-                                            , if not (List.isEmpty crumbs) then
-                                                div [ class "popover-card-breadcrumb" ]
-                                                    (List.intersperse (span [] [ text " › " ])
-                                                        (List.map (\( _, label, _ ) -> span [] [ text label ]) crumbs)
-                                                    )
-
-                                              else
-                                                text ""
+                                            , text ""
                                             , div [ class "popover-card-meta" ]
                                                 [ span [ class (taskPopoverStatusClass t.status), title (taskStatusTitle t.status) ]
                                                     [ text (taskStatusDisplayText t.status) ]
@@ -813,7 +806,7 @@ viewTaskReference model dep fallbackStatus actions =
         depTask =
             Dict.get dep.id model.tasks
     in
-    div [ class "dep-item popover-card" ]
+    div ([ class "dep-item popover-card" ] ++ (depTask |> Maybe.map (\t -> Feature.Focus.previewAttributes t.workspaceId (buildTaskBreadcrumb model t [])) |> Maybe.withDefault []))
         (case depTask of
             Just t ->
                 let
@@ -845,14 +838,7 @@ viewTaskReference model dep fallbackStatus actions =
                     , div [ class "dep-item-actions" ]
                         actions
                     ]
-                , if not (List.isEmpty crumbs) then
-                    div [ class "popover-card-breadcrumb" ]
-                        (List.intersperse (span [] [ text " › " ])
-                            (List.map (\( _, label, _ ) -> span [] [ text label ]) crumbs)
-                        )
-
-                  else
-                    text ""
+                , text ""
                 , div [ class "popover-card-meta" ]
                     [ span [ class (taskPopoverStatusClass t.status), title (taskStatusTitle t.status) ]
                         [ text (taskStatusDisplayText t.status) ]

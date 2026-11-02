@@ -1,4 +1,4 @@
-module Feature.Focus exposing (auditDestinationStatus, auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, returnContextForUrl, restoreAuditReturnAuthority, shouldShowReturnContext, timelineReturnContext, update, viewAuditReturn, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
+module Feature.Focus exposing (auditDestinationStatus, auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, returnContextForUrl, restoreAuditReturnAuthority, shouldShowReturnContext, timelineReturnContext, update, viewAuditReturn, viewFocusBreadcrumbBar, viewTaskBreadcrumb, previewAttributes, reconcilePreview)
 
 import Api
 import Feature.AuditRequest as AuditRequest
@@ -7,6 +7,7 @@ import Feature.DataLoading
 import Feature.FocusedFilters
 import Helpers exposing (buildFragment, pushUrl, replaceFragment, scrollToElement)
 import Html exposing (..)
+import Permissions
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import String
@@ -18,6 +19,7 @@ init : Maybe ( String, String ) -> FocusModel
 init maybeFocus =
     { focusedEntity = maybeFocus
     , breadcrumbAnchor = maybeFocus
+    , breadcrumbPreview = Nothing
     , history = Maybe.map List.singleton maybeFocus |> Maybe.withDefault []
     , historyIndex = 0
     , returnContext = Nothing
@@ -152,9 +154,7 @@ viewAuditReturn : Model -> Html Msg
 viewAuditReturn model =
     case model.focus.returnContext of
         Just context ->
-            if context.source /= ReturnFromTimeline then
-                div [ class "audit-return-bar" ] [ button [ class "btn btn-secondary focus-return-btn", onClick ReturnToFocusSource ] [ text (focusReturnContextLabel context) ] ]
-            else text ""
+            button [ class "btn btn-secondary focus-return-btn", type_ "button", onClick ReturnToFocusSource ] [ text (focusReturnContextLabel context) ]
         Nothing -> text ""
 
 
@@ -215,6 +215,13 @@ expandedEntriesForReturn context =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        SetBreadcrumbPreview preview ->
+            let
+                state = model.focus
+                selected = if Permissions.canReadCurrentWorkspace model then Maybe.andThen (\( workspaceId, crumbs ) -> if Just workspaceId == model.selectedWorkspaceId then Just crumbs else Nothing) preview else Nothing
+            in
+            ( { model | focus = { state | breadcrumbPreview = selected } }, Cmd.none )
+
         ReturnToFocusSource ->
             returnToFocusSource model
 
@@ -423,6 +430,16 @@ returnToGlobalAuditSource model =
 
 viewFocusBreadcrumbBar : Model -> Html Msg
 viewFocusBreadcrumbBar model =
+    case model.focus.breadcrumbPreview of
+        Just crumbs ->
+            span [ class "titlebar-focus-trail titlebar-preview-trail", attribute "aria-label" "Preview context" ]
+                (List.intersperse (span [ class "focus-crumb-sep" ] [ text "›" ])
+                    (List.map (\( entityId, label, kind ) -> button [ class "focus-crumb focus-crumb-link", type_ "button", onClick (FocusEntity kind entityId) ] [ text label ]) crumbs))
+        Nothing -> viewCanonicalFocusBreadcrumb model
+
+
+viewCanonicalFocusBreadcrumb : Model -> Html Msg
+viewCanonicalFocusBreadcrumb model =
     case model.focus.breadcrumbAnchor of
         Just ( aType, aId ) ->
             let
@@ -459,8 +476,8 @@ viewFocusBreadcrumbBar model =
                                     span [ class "focus-crumb focus-crumb-current" ] [ text cName ]
 
                                 else
-                                    span
-                                        [ class "focus-crumb focus-crumb-link"
+                                    button
+                                        [ type_ "button", class "focus-crumb focus-crumb-link"
                                         , onClick (FocusEntityKeepForward cType cId)
                                         ]
                                         [ text cName ]
@@ -511,8 +528,8 @@ viewFocusBreadcrumbBar model =
 
                                 else
                                     Just
-                                        ( span
-                                            [ class "focus-crumb focus-crumb-forward"
+                                        ( button
+                                            [ type_ "button", class "focus-crumb focus-crumb-forward"
                                             , onClick (FocusBreadcrumbNav (forwardStartIdx + i))
                                             ]
                                             [ text name ]
@@ -528,21 +545,10 @@ viewFocusBreadcrumbBar model =
                     else
                         span [ class "focus-crumb-sep" ] [ text " › " ] :: forwardCrumbs
 
-                returnSection =
-                    case model.focus.returnContext of
-                        Just context ->
-                            if context.source /= ReturnFromTimeline then [] else
-                            [ button [ class "focus-return-btn", onClick ReturnToFocusSource, title context.label ] [ text (focusReturnContextLabel context) ]
-                            , span [ class "focus-crumb-sep" ] [ text " › " ]
-                            ]
-
-                        Nothing ->
-                            []
             in
-            div [ class "focus-breadcrumb-bar" ]
+            span [ class "titlebar-focus-trail focus-breadcrumb-bar" ]
                 ([ button [ class "focus-clear-btn", onClick ClearFocus, title "Exit focus mode" ] [ text "✕" ] ]
-                    ++ returnSection
-                    ++ [ span [ class "focus-crumb focus-crumb-link", onClick ClearFocus ] [ text "All" ] ]
+                    ++ [ button [ type_ "button", class "focus-crumb focus-crumb-link", onClick ClearFocus ] [ text "All" ] ]
                     ++ (if not (List.isEmpty treeCrumbLinks) then
                             span [ class "focus-crumb-sep" ] [ text " › " ] :: treeCrumbLinks ++ forwardSection
 
@@ -619,3 +625,34 @@ buildProjectBreadcrumb model project acc =
 
             Nothing ->
                 currentCrumb :: acc
+
+
+previewAttributes : String -> List ( String, String, String ) -> List (Attribute Msg)
+previewAttributes workspaceId crumbs =
+    [ onMouseEnter (SetBreadcrumbPreview (Just ( workspaceId, crumbs )))
+    , onMouseLeave (SetBreadcrumbPreview Nothing)
+    , onFocus (SetBreadcrumbPreview (Just ( workspaceId, crumbs )))
+    , onBlur (SetBreadcrumbPreview Nothing)
+    , tabindex 0
+    ]
+
+
+reconcilePreview : Msg -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+reconcilePreview msg ( model, command ) =
+    let
+        clear = case msg of
+            UrlChanged _ -> True
+            SwitchTab _ -> True
+            SelectWorkspace _ -> True
+            FocusEntity _ _ -> True
+            FocusEntityKeepForward _ _ -> True
+            FocusBreadcrumbNav _ -> True
+            ClearFocus -> True
+            CancelAddDependency -> True
+            PerformAddDependency _ _ -> True
+            CancelLinkEntity -> True
+            PerformLinkEntity _ _ _ -> True
+            _ -> False
+        state = model.focus
+    in
+    ( if clear then { model | focus = { state | breadcrumbPreview = Nothing } } else model, command )

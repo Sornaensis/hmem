@@ -9,10 +9,12 @@ recheck fails, use **Retry session** before you continue.
 
 ## Workspace context
 
-The workspace header keeps its identity, totals, section navigation and current
-controls available while scrolling. Its UUID, creation date, modification date
+The workspace header keeps its identity, totals and
+section navigation available while scrolling. Its UUID, creation date, modification date
 and available repository information stay visible. Projects uses the full main
-pane; session event details remain available in the **Sessions** tab.
+pane; session event details remain available in the **Sessions** tab. The title
+bar owns workspace, section and focused-entity breadcrumbs, forward focus links,
+preview context and Search, Timeline or Audit return controls.
 
 ## Timeline and history
 
@@ -21,8 +23,8 @@ text. Its contextual controls let you adjust these filters while exploring.
 Switching focus or choosing the same focus link keeps those selections and closes
 previous search results. The focused target stays accessible even when excluded
 by the filters; its descendants follow the selected filters.
-Focused controls replace the workspace filters in the persistent header. Global
-search has a separate input and keeps your focused view for return when cleared.
+Focused controls replace the normal hierarchy filters in the content toolbar. The Search tab
+keeps all-entities queries separate from these hierarchy filters.
 Closing focus or returning to its Timeline or Audit source restores your saved
 workspace filters. Focused changes never replace those preferences.
 
@@ -64,16 +66,19 @@ unknown. A failed current read leaves the historical comparison usable.
 
 ## Search all entities
 
-Type in **Search all entities** to search after a short pause. The **Search Entities**
-bar selects Projects, Tasks and, in repositories, Observations. Choices are saved
-for the signed-in actor and workspace, separately from hierarchy filters. Selecting
-no types pauses searching. Clearing the query hides the options and returns to
-your previous view; your choices apply to the next query. The project hierarchy
-filter and Search all entities are in the **Search** section below the project filter
-buttons. Collapse or expand this section as needed; each workspace remembers your
-choice. **Show empty projects** and **Has Active Session** are toggle buttons.
-While updating or after a failure, the last completed
-results remain labelled with their query; use **Retry search** to try again.
+Open the **Search** workspace tab and type in **Search all entities** to search
+after a short pause. The always-visible **Search Entities** controls select
+Projects, Tasks and, in repositories, Observations. Choices are saved for the
+signed-in actor and workspace, separately from hierarchy filters. Selecting no
+types pauses searching. Clearing the query keeps these choices visible. Ordinary
+tab switches and reloads clear the query.
+
+The **Projects** content toolbar keeps Expand All, Collapse All, New Project,
+hierarchy text filtering and every type, status, priority and option control
+visible. These filters wrap on narrow screens and remain independent of Search.
+**Show empty projects** and **Has Active Session** are toggle buttons. While a
+search updates or after a failure, the last completed results remain labelled
+with their query; use **Retry search** to try again.
 
 Results use compact previews with copyable IDs. **Jump To** opens the canonical
 project, task or Observation, including targets outside your current filters.

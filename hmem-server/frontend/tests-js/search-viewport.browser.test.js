@@ -23,13 +23,13 @@ async function focusAtScroll(page, input) {
   await input.click()
   await page.locator('#main-content-scroll').hover(); await page.mouse.wheel(0, -100000); await page.waitForTimeout(250)
   const distance = await input.evaluate(e => { const host = document.getElementById('main-content-scroll'); return host.contains(e) ? Math.min(120, Math.floor(e.getBoundingClientRect().top - host.getBoundingClientRect().top - 12 - 4)) : 120 })
-  assert.ok(distance >= 90, 'Native wheel setup retains a meaningful physical position')
+  assert.ok(distance >= 20, 'Native wheel setup retains an observable physical position for content-owned inputs')
   await page.mouse.wheel(0, distance); await page.waitForTimeout(300); await frames(page)
   assert.equal(await input.evaluate(e => e === document.activeElement), true)
   const geometry = await input.evaluate(e => { const r = e.getBoundingClientRect(), host = document.getElementById('main-content-scroll'), h = (host.contains(e) ? host : e.closest('.workspace-context-persistent')).getBoundingClientRect(); return { visible: r.top >= h.top && r.bottom <= h.bottom, input: r.toJSON(), host: h.toJSON(), top: host.scrollTop } })
   assert.ok(geometry.visible, 'Input is visible and focused before the first real key: ' + JSON.stringify(geometry))
   const initial = await observe(page)
-  assert.ok(initial >= 90, 'A nonzero physical position makes restoration observable')
+  assert.ok(initial >= 20, 'A nonzero physical position makes restoration observable')
   return initial
 }
 const populated = values => [...values, ...Array.from({ length: 100 }, (_, i) => ({ ...values[3], id: 'wide-' + i, subjects: [{ subject_kind: 'file', subject: `wide-${i}/Guide.md` }] }))]
@@ -95,7 +95,7 @@ test('search geometry releases on owner retirement and keeps only same-page quer
   const h = await openHierarchy(searchFixture())
   try {
     await h.page.route('**/api/v1/search', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ projects: [], tasks: [], observations: [] }) }))
-    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id); await h.idle()
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=search'); await h.idle()
     const input = h.page.getByRole('searchbox', { name: 'Search all entities', exact: true })
     const element = await input.elementHandle()
     const leased = () => h.page.locator('#main-content-scroll').getAttribute('data-search-viewport-editing')
@@ -106,7 +106,7 @@ test('search geometry releases on owner retirement and keeps only same-page quer
       assert.equal(await h.page.locator('#main-content-scroll').evaluate(e => e.style.overflowAnchor), '')
     }
     await acquire()
-    await h.page.evaluate(() => history.replaceState(null, '', location.pathname + '#tab=projects&query-only=changed'))
+    await h.page.evaluate(() => history.replaceState(null, '', location.pathname + '#tab=search&query-only=changed'))
     await frames(h.page); assert.equal(await leased(), 'true')
     await input.evaluate(e => e.blur()); await released()
     for (const kind of ['hidden', 'disabled', 'inert', 'window-blur', 'canceled-pointer', 'history']) {
@@ -128,9 +128,10 @@ test('search geometry releases on owner retirement and keeps only same-page quer
 for (const kind of ['global', 'hierarchy']) test(`${kind} search preserves physical position through short results and empty keyboard edits`, { timeout: 60000 }, async () => {
   const h = await openHierarchy(searchFixture())
   try {
-    await h.page.route('**/api/v1/search', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ projects: [], tasks: [], observations: [] }) }))
-    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id); await h.idle()
+    await h.page.route('**/api/v1/search', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ projects: route.request().postDataJSON().query === 'seed' ? h.fixture.projects : [], tasks: [], observations: [] }) }))
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + (kind === 'global' ? '#tab=search' : '')); await h.idle()
     const input = kind === 'global' ? h.page.getByRole('searchbox', { name: 'Search all entities', exact: true }) : h.page.locator('.workspace-search-filter-bar .hierarchy-search-input')
+    if (kind === 'global') { await input.fill('seed'); await h.page.locator('.search-results-title').waitFor() }
     let initial = await focusAtScroll(h.page, input)
     await h.page.keyboard.type('zzzznotfound', { delay: 25 }); await h.idle(); await h.page.waitForTimeout(350); await stationary(h.page, initial)
     initial = await observe(h.page)

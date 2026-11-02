@@ -271,7 +271,7 @@ viewWorkspaceRail model =
             model.groups.workspaceGroups |> Dict.values |> List.sortBy .name
     in
     nav [ class "sidebar" ]
-        [ a [ class "sidebar-workspaces-header", href "/" ] [ text "Workspaces" ]
+        [ a [ class "sidebar-workspaces-header", href "/" ] [ span [ class "sidebar-icon icon-workspace", attribute "aria-hidden" "true" ] [], text "Workspaces" ]
         , if model.dataLoading.loadingWorkspaces then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Unassigned" ]

@@ -146,11 +146,7 @@ viewReadableWorkspaceContext model ws =
                   ]
                 ]
             ]
-        , if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab || model.activeTab == SessionsTab then
-            text ""
-          else
-            if model.activeTab == ProjectsTab then text "" else Feature.Search.viewSearchBar model
-        , Feature.Search.viewWorkspaceSearchBar model
+
           ]
 
 
@@ -162,30 +158,14 @@ viewReadableWorkspacePage wsId model ws =
 
           else
             div []
-                [ Feature.Search.viewNavigation model (if model.activeTab == AdministrationTab then
-                    viewTabContent wsId model
+                [ Feature.Search.viewNavigation model
+                    (if model.activeTab == AdministrationTab || model.activeTab == SearchTab then
+                        viewTabContent wsId model
+                     else if model.dataLoading.loadingWorkspaceData then
+                        div [ class "loading-indicator" ] [ text "Loading..." ]
+                     else
+                        viewTabContent wsId model)
 
-                  else if model.dataLoading.loadingWorkspaceData then
-                    div [ class "loading-indicator" ] [ text "Loading..." ]
-
-                  else if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == SessionsTab then
-                    viewTabContent wsId model
-
-                  else if model.search.isSearching then
-                    Feature.Search.viewUnifiedSearchLoading model
-
-                  else
-                    case model.search.searchError of
-                        Just message ->
-                            Feature.Search.viewUnifiedSearchError model message
-
-                        Nothing ->
-                            case model.search.unifiedResults of
-                                Just results ->
-                                    Feature.Search.viewUnifiedSearchResults model results
-
-                                Nothing ->
-                                    viewTabContent wsId model)
                 ]
         ]
 
@@ -242,6 +222,7 @@ viewTabs model =
             , Just (viewTab SessionsTab model.activeTab (workspaceTabLabel SessionsTab))
             , Just (viewTab ObservationsTab model.activeTab (workspaceTabLabel ObservationsTab))
             , Just (viewTab TimelineTab model.activeTab (workspaceTabLabel TimelineTab))
+            , Just (viewTab SearchTab model.activeTab (workspaceTabLabel SearchTab))
             , if Permissions.canViewCurrentWorkspaceAudit model then
                 Just (viewTab AuditTab model.activeTab (workspaceTabLabel AuditTab))
 
@@ -271,6 +252,9 @@ workspaceTabLabel tab =
         SessionsTab ->
             "Sessions"
 
+        SearchTab ->
+            "Search"
+
         AuditTab ->
             "Audit"
 
@@ -299,7 +283,18 @@ viewTabContent : String -> Model -> Html Msg
 viewTabContent wsId model =
     case model.activeTab of
         ProjectsTab ->
-            Feature.Cards.viewProjectsTree wsId model
+            div [ class "hierarchy-content-section" ]
+                [ div [ class "hierarchy-toolbar" ]
+                    [ h2 [] [ text "Project hierarchy" ]
+                    , div [ class "tree-toolbar" ]
+                        [ button [ class "btn-small btn-ghost", onClick ExpandAllNodes ] [ text "Expand All" ]
+                        , button [ class "btn-small btn-ghost", onClick CollapseAllNodes ] [ text "Collapse All" ]
+                        , Feature.Editing.viewInlineCreateInput model Nothing "project"
+                        ]
+                    ]
+                , Feature.Search.viewWorkspaceSearchBar model
+                , Feature.Cards.viewProjectsTree wsId model
+                ]
 
         ObservationsTab ->
             case Dict.get wsId model.workspaces of
@@ -314,6 +309,18 @@ viewTabContent wsId model =
 
         SessionsTab ->
             Feature.Sessions.view wsId model
+
+        SearchTab ->
+            div [ class "workspace-search-page" ]
+                [ h2 [] [ text "Search all entities" ]
+                , Feature.Search.viewSearchBar model
+                , if model.search.isSearching then Feature.Search.viewUnifiedSearchLoading model
+                  else case model.search.searchError of
+                    Just message -> Feature.Search.viewUnifiedSearchError model message
+                    Nothing -> case model.search.unifiedResults of
+                        Just results -> Feature.Search.viewUnifiedSearchResults model results
+                        Nothing -> div [ class "empty-state" ] [ text "Search projects, tasks and observations in this workspace." ]
+                ]
 
         AuditTab ->
             Feature.AuditLog.viewWorkspaceAuditPanel wsId model

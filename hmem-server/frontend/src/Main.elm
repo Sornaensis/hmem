@@ -2,6 +2,7 @@ module Main exposing (main, update)
 
 import Api exposing (..)
 import AppShell
+import Feature.Focus
 import Feature.Search
 import Feature.AuditDiff
 import Browser
@@ -132,7 +133,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile
+    updateCore msg model |> Feature.Focus.reconcilePreview msg |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )

@@ -1,0 +1,1089 @@
+{
+  "schemaVersion": 1,
+  "taskId": "e6c5b3b6-9984-421b-af24-ccc8a59d8e06",
+  "recordedAt": "2026-11-02T17:20:53.838Z",
+  "status": "PASS",
+  "retention": {
+    "scope": "bounded reader qualification summary; no raw transcript/trace/samples",
+    "reason": "reproducible release qualification and phase attribution",
+    "owner": "project maintainer",
+    "disposition": "retain until explicitly superseded"
+  },
+  "provenance": {
+    "implementationRevision": "052cccba3775d95ec1fa5da987b5598a8d90bf96",
+    "harnessSha256": "d66ea7dde639f44b2c74c7ed8be7be43f0f3e6e8d62a7d3f4a466d0586fe4f28",
+    "sources": {
+      "hmem-server/frontend/src/main.js": "b0320dd9f82b101375ffe2eca0f0a538b8f599f2ded877419c2d000fdb7325bb",
+      "hmem-server/frontend/src/session-save.js": "8a0ddec12357f12aa7e4e3eaee52438af7249449572aab23fcc28e2c914b837e",
+      "hmem-server/frontend/src/session-viewer.js": "570249454297bbc0586761e48ad980bc1784b1dd391cd887f198f71ea90fc54b",
+      "hmem-server/frontend/src/session-archive-worker.js": "e5239585b3a34175548f4f5d322a49a2c0e75cd32d12bb6c2a87658e3573ec40",
+      "hmem-server/frontend/src/Feature/Sessions.elm": "0126f6fdf98892a6e42bb5b4875237383b354122bb1e2d4377d42011200f43d8",
+      "hmem-server/frontend/src/SessionWindow.elm": "17266af0acdad0476a745a30adeb82ff3199a88d0b6fe28ccfc2e494f73bc4e7",
+      "hmem-server/frontend/package.json": "21266a5a06422a59eb50113c19796438e608c6a328b47e2685383fc54ca1264e",
+      "hmem-server/frontend/tests-js/hierarchy-fixture.mjs": "f9820ef59e607cf272a53e3bad31e10e12966f9e7497b0f5fbc54ad087de6c5f",
+      "hmem-server/frontend/tests-js/support/sessions-ux-fixture.mjs": "435dcf04b2484c01e2a09995da05c2a784af205da7645cf5a8514a0475db4a9c"
+    },
+    "workload": {
+      "sha256": "bc379abd31257cd439d860c3ea6275c5dc874594ee2a892074651a8fbd27736a",
+      "bytes": 2866428,
+      "records": 1082,
+      "activityCount": 900,
+      "activityStart": 2350930,
+      "activityMiddle": 2510460,
+      "finalOffset": 2670329,
+      "largestRecordBytes": 196099,
+      "kind": "deterministic UTF-8 JSONL: prose, one 900-call activity run, split final prose"
+    },
+    "assets": {
+      "main": {
+        "name": "index-j8dxg8MM.js",
+        "sha256": "b66b424bbc5c1559256627180b5f172e99a06d96575f6b16e59a423ff8bbce0b",
+        "instrumentedSha256": "92c8fa038eb518fb2af2ae404528c6982fc973e41c0abe578f6fbbf5189cf32d",
+        "bindings": [
+          {
+            "kind": "elmUpdate",
+            "count": 1,
+            "startUtf16": 211289,
+            "endUtf16": 211346,
+            "spanSha256": "e71c6f7c3e145742e86b5d5d394c0c3b07bcd4958555b245aea30e3a205ce8aa",
+            "replacementSha256": "67c678601c9a9dedf4b4b41f23582999457f592d3172a4ac45991ee49c909820"
+          },
+          {
+            "kind": "activeRawParse",
+            "count": 1,
+            "startUtf16": 64737,
+            "endUtf16": 64872,
+            "spanSha256": "f9e6db5febd23f1dca3705408017b3750feb414c1ab4de6ea29fb0a4a3fa22b2",
+            "replacementSha256": "f6ca3d9db8405eb134612e724e368aeb3104b0d8f089781de43be4722bc97555"
+          },
+          {
+            "kind": "elmDraw",
+            "count": 1,
+            "startUtf16": 223205,
+            "endUtf16": 223340,
+            "spanSha256": "ab179cece9119f01ed9ca123a4462e6bc14b3a83429f9c3bd1f7b36ad688d008",
+            "replacementSha256": "dbe48c032679bfecf2380ffe248a0c48559ad7e3f974073076242baa1464ec13",
+            "insertionUtf16": 223222
+          },
+          {
+            "kind": "bridgeCommand",
+            "count": 1,
+            "startUtf16": 183867,
+            "endUtf16": 196514,
+            "spanSha256": "543c462e92d77d9c14dffe0f3a94722db057609ab7b625d4d3c7c9279ff4a004",
+            "replacementSha256": "26d7e62792b468ca19671d6ad3c3397f08bf9354c78ecfd2e3898f389ca26923"
+          },
+          {
+            "kind": "viewerCaps",
+            "count": 1,
+            "startUtf16": 154343,
+            "endUtf16": 154377,
+            "spanSha256": "1c9d47fc8d7de83178dcddf31dfb95c01ce8b103fa7fbc3e077ded24f46555ae",
+            "replacementSha256": "768627a1ee0abf5dd67163df9a994f875aed24d31577d1bbdcca421e482ff92e"
+          }
+        ]
+      },
+      "worker": {
+        "name": "session-archive-worker-hAcySs4N.js",
+        "sha256": "dbf9178bd21ca273ce44f5b86f2d11f074156c037b60dfc3ed30d1095d0e4109",
+        "instrumentedSha256": "2b2d08a285c4e6671bd12c7bd6b46843f3dac1d3f09a21ac48711f9f7aeb0f06",
+        "bindings": [
+          {
+            "kind": "sealedRawParse",
+            "count": 1,
+            "startUtf16": 33964,
+            "endUtf16": 34025,
+            "spanSha256": "f0edd5ea4a49927e53525c6a1fb8631ad4c9e7adba5cff866f5f9408328f25ce",
+            "replacementSha256": "03f13463bf88303fa7f2109558e2859ffa2b04f6c3f79114cc16f8823935b9cc"
+          }
+        ]
+      },
+      "supportingAssets": {
+        "index-CRWwB6Wk.css": "b9cb33286628d1f229efafbab7fd6a05bd6a8e72e463a50bf7ea03d5bc99d916",
+        "vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+      },
+      "helperSha256": "73f4d1d2ce6706f2f4079b66f7b451f5a5131442e79d5756d056eeedfabd4ae4",
+      "workerTelemetrySha256": "4b91ef7bfe5a4f70f1ca9075a9d380a4eb279a122577ee0a35ecdd1fdcc6f313"
+    }
+  },
+  "host": {
+    "node": "v24.15.0",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logicalCpus": 24,
+    "totalMemoryBytes": 68207595520
+  },
+  "cells": [
+    {
+      "id": "active-workspace-clean",
+      "lifecycle": "active",
+      "scope": "workspace",
+      "surface": "Sessions",
+      "navigationOrigin": "workspace Sessions route",
+      "instrumented": false,
+      "elapsedMs": 8012.1301,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 1803.0102000000002
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 938.2839999999997
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 491.15269999999964
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 2611.5752
+        }
+      ],
+      "assertions": [
+        "complete intermediate rows visible while later response held",
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "live append follows, native historical intent pauses, explicit latest resumes"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 16,
+            "transcript": 109
+          },
+          "roundTrip": {
+            "samples": 123,
+            "totalMs": 2678.6904999999983,
+            "maxMs": 86.97450000000026,
+            "p50Ms": 17.789600000000064,
+            "p95Ms": 42.92839999999978
+          },
+          "observedSessionPeak": 3,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 106,
+          "maxTranscriptLimit": 65536
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 142.5882000000006,
+          "maxMs": 49.58339999999998,
+          "p50Ms": 48.036700000000565,
+          "p95Ms": 48.036700000000565
+        },
+        "sampledBounds": {
+          "samples": 10,
+          "mountedRows": 33,
+          "sourceGaps": 3,
+          "fragmentBytes": 616108
+        },
+        "cdp": {
+          "ScriptDuration": 3.227448,
+          "TaskDuration": 4.190528,
+          "LayoutDuration": 0.339359,
+          "RecalcStyleDuration": 0.052913,
+          "LayoutCount": 103,
+          "RecalcStyleCount": 133
+        },
+        "paintTrace": {
+          "count": 204,
+          "durationMs": 86.28399999999996,
+          "prePaintCount": 466,
+          "prePaintDurationMs": 83.48000000000016,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 345,
+          "rafMaxMs": 66.69999999999982,
+          "rafOver50": 5,
+          "longTasks": 1,
+          "longTaskMs": 50
+        },
+        "mainProbe": null,
+        "workerProbes": []
+      },
+      "archive": null,
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    },
+    {
+      "id": "active-workspace-instrumented",
+      "lifecycle": "active",
+      "scope": "workspace",
+      "surface": "Sessions",
+      "navigationOrigin": "workspace Sessions route",
+      "instrumented": true,
+      "elapsedMs": 8417.748200000002,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 2008.2843000000012
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 938.262999999999
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 520.1867000000002
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 2819.590900000001
+        }
+      ],
+      "assertions": [
+        "complete intermediate rows visible while later response held",
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "live append follows, native historical intent pauses, explicit latest resumes"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 16,
+            "transcript": 95
+          },
+          "roundTrip": {
+            "samples": 110,
+            "totalMs": 2667.160699999995,
+            "maxMs": 70.59599999999955,
+            "p50Ms": 20.57050000000163,
+            "p95Ms": 52.240999999999985
+          },
+          "observedSessionPeak": 3,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 91,
+          "maxTranscriptLimit": 65536
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 136.78520000000026,
+          "maxMs": 50.48790000000008,
+          "p50Ms": 47.725500000000466,
+          "p95Ms": 47.725500000000466
+        },
+        "sampledBounds": {
+          "samples": 10,
+          "mountedRows": 6,
+          "sourceGaps": 0,
+          "fragmentBytes": 644932
+        },
+        "cdp": {
+          "ScriptDuration": 3.531383,
+          "TaskDuration": 4.512112,
+          "LayoutDuration": 0.338225,
+          "RecalcStyleDuration": 0.054471,
+          "LayoutCount": 103,
+          "RecalcStyleCount": 131
+        },
+        "paintTrace": {
+          "count": 206,
+          "durationMs": 86.49000000000002,
+          "prePaintCount": 482,
+          "prePaintDurationMs": 85.59600000000013,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 371,
+          "rafMaxMs": 66.79999999999973,
+          "rafOver50": 5,
+          "longTasks": 1,
+          "longTaskMs": 55
+        },
+        "mainProbe": {
+          "metrics": {
+            "elmUpdate": {
+              "count": 346,
+              "totalMs": 811.8999999985099,
+              "maxMs": 12.899999998509884,
+              "units": 0
+            },
+            "bridgeCommandEntry": {
+              "count": 350,
+              "totalMs": 526.2999999895692,
+              "maxMs": 14.599999994039536,
+              "units": 0
+            },
+            "elmDrawEntry": {
+              "count": 144,
+              "totalMs": 1906.3999999985099,
+              "maxMs": 43.30000000447035,
+              "units": 0
+            },
+            "rawParse": {
+              "count": 2318,
+              "totalMs": 7.4000000059604645,
+              "maxMs": 1,
+              "units": 5095423
+            }
+          },
+          "caps": {
+            "rows": 102,
+            "retainedBytes": 1298808,
+            "rawBytes": 1298708
+          },
+          "pending": 0
+        },
+        "workerProbes": []
+      },
+      "archive": null,
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    },
+    {
+      "id": "active-task-clean",
+      "lifecycle": "active",
+      "scope": "task-linked",
+      "surface": "task-dock",
+      "navigationOrigin": "Projects task Active Agents button",
+      "instrumented": false,
+      "elapsedMs": 9331.3381,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 2657.0697999999975
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 922.744999999999
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 586.6180999999997
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 2913.553899999999
+        }
+      ],
+      "assertions": [
+        "complete intermediate rows visible while later response held",
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "live append follows, native historical intent pauses, explicit latest resumes"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 14,
+            "transcript": 107
+          },
+          "roundTrip": {
+            "samples": 120,
+            "totalMs": 3111.3852000000225,
+            "maxMs": 76.85800000000017,
+            "p50Ms": 22.708999999998923,
+            "p95Ms": 55.465400000000955
+          },
+          "observedSessionPeak": 3,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 105,
+          "maxTranscriptLimit": 65536
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 140.45910000000367,
+          "maxMs": 48.60870000000068,
+          "p50Ms": 46.102200000001176,
+          "p95Ms": 46.102200000001176
+        },
+        "sampledBounds": {
+          "samples": 10,
+          "mountedRows": 6,
+          "sourceGaps": 2,
+          "fragmentBytes": 616108
+        },
+        "cdp": {
+          "ScriptDuration": 4.444661,
+          "TaskDuration": 5.593300999999999,
+          "LayoutDuration": 0.389033,
+          "RecalcStyleDuration": 0.103604,
+          "LayoutCount": 99,
+          "RecalcStyleCount": 460
+        },
+        "paintTrace": {
+          "count": 784,
+          "durationMs": 83.11200000000024,
+          "prePaintCount": 514,
+          "prePaintDurationMs": 130.1090000000001,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 377,
+          "rafMaxMs": 66.70000000000027,
+          "rafOver50": 9,
+          "longTasks": 2,
+          "longTaskMs": 111
+        },
+        "mainProbe": null,
+        "workerProbes": []
+      },
+      "archive": null,
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    },
+    {
+      "id": "active-task-instrumented",
+      "lifecycle": "active",
+      "scope": "task-linked",
+      "surface": "task-dock",
+      "navigationOrigin": "Projects task Active Agents button",
+      "instrumented": true,
+      "elapsedMs": 9421.291200000003,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 2661.5043000000005
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 939.1310000000012
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 599.522399999998
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 2864.010399999999
+        }
+      ],
+      "assertions": [
+        "complete intermediate rows visible while later response held",
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "live append follows, native historical intent pauses, explicit latest resumes"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 14,
+            "transcript": 106
+          },
+          "roundTrip": {
+            "samples": 119,
+            "totalMs": 3075.4483999999866,
+            "maxMs": 71.90080000000307,
+            "p50Ms": 22.357199999998556,
+            "p95Ms": 53.09339999999793
+          },
+          "observedSessionPeak": 2,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 105,
+          "maxTranscriptLimit": 65536
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 134.88960000000588,
+          "maxMs": 51.02050000000236,
+          "p50Ms": 47.40190000000075,
+          "p95Ms": 47.40190000000075
+        },
+        "sampledBounds": {
+          "samples": 10,
+          "mountedRows": 11,
+          "sourceGaps": 2,
+          "fragmentBytes": 616108
+        },
+        "cdp": {
+          "ScriptDuration": 4.434297,
+          "TaskDuration": 5.601547,
+          "LayoutDuration": 0.380279,
+          "RecalcStyleDuration": 0.103543,
+          "LayoutCount": 97,
+          "RecalcStyleCount": 449
+        },
+        "paintTrace": {
+          "count": 782,
+          "durationMs": 84.69799999999992,
+          "prePaintCount": 502,
+          "prePaintDurationMs": 132.28300000000007,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 369,
+          "rafMaxMs": 83.39999999999964,
+          "rafOver50": 15,
+          "longTasks": 3,
+          "longTaskMs": 163
+        },
+        "mainProbe": {
+          "metrics": {
+            "elmUpdate": {
+              "count": 452,
+              "totalMs": 973.2999999448657,
+              "maxMs": 11.600000001490116,
+              "units": 0
+            },
+            "elmDrawEntry": {
+              "count": 212,
+              "totalMs": 3173.5999999940395,
+              "maxMs": 43.5,
+              "units": 0
+            },
+            "bridgeCommandEntry": {
+              "count": 453,
+              "totalMs": 598.6000000983477,
+              "maxMs": 12.799999997019768,
+              "units": 0
+            },
+            "rawParse": {
+              "count": 2926,
+              "totalMs": 9.799999989569187,
+              "maxMs": 1.2000000029802322,
+              "units": 5900211
+            }
+          },
+          "caps": {
+            "rows": 102,
+            "retainedBytes": 1298808,
+            "rawBytes": 1298708
+          },
+          "pending": 0
+        },
+        "workerProbes": []
+      },
+      "archive": null,
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    },
+    {
+      "id": "sealed-workspace-clean",
+      "lifecycle": "sealed",
+      "scope": "workspace",
+      "surface": "Sessions",
+      "navigationOrigin": "workspace Sessions route",
+      "instrumented": false,
+      "elapsedMs": 3609.6916999999958,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 487.8454000000056
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 905.9719000000041
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 362.9774000000034
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 306.91139999999723
+        }
+      ],
+      "assertions": [
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "verified sealed reader reaches logical latest without a live append capability"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 6,
+            "archiveManifest": 1,
+            "archiveContent": 2
+          },
+          "roundTrip": {
+            "samples": 9,
+            "totalMs": 77.43649999999616,
+            "maxMs": 17.65769999999611,
+            "p50Ms": 7.926000000006752,
+            "p95Ms": 16.099699999998847
+          },
+          "observedSessionPeak": 3,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 0,
+          "maxTranscriptLimit": 0
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 137.15550000000076,
+          "maxMs": 49.834100000000035,
+          "p50Ms": 49.7896000000037,
+          "p95Ms": 49.7896000000037
+        },
+        "sampledBounds": {
+          "samples": 9,
+          "mountedRows": 80,
+          "sourceGaps": 1,
+          "fragmentBytes": 686208
+        },
+        "cdp": {
+          "ScriptDuration": 0.20150700000000002,
+          "TaskDuration": 0.40559799999999996,
+          "LayoutDuration": 0.037492,
+          "RecalcStyleDuration": 0.018983,
+          "LayoutCount": 31,
+          "RecalcStyleCount": 48
+        },
+        "paintTrace": {
+          "count": 62,
+          "durationMs": 20.808999999999997,
+          "prePaintCount": 189,
+          "prePaintDurationMs": 9.940999999999992,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 155,
+          "rafMaxMs": 16.800000000000182,
+          "rafOver50": 0,
+          "longTasks": 0,
+          "longTaskMs": 0
+        },
+        "mainProbe": null,
+        "workerProbes": []
+      },
+      "archive": {
+        "compressedBytes": 15632,
+        "compressedSha256": "407294b4ced63e557d2a6aae07c1243aec99037ba053f4ddca82658655e1e9b1"
+      },
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    },
+    {
+      "id": "sealed-workspace-instrumented",
+      "lifecycle": "sealed",
+      "scope": "workspace",
+      "surface": "Sessions",
+      "navigationOrigin": "workspace Sessions route",
+      "instrumented": true,
+      "elapsedMs": 3612.856200000002,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 502.0066999999981
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 921.120600000002
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 347.35029999999824
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 292.9308999999994
+        }
+      ],
+      "assertions": [
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "verified sealed reader reaches logical latest without a live append capability"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 6,
+            "archiveManifest": 1,
+            "archiveContent": 2
+          },
+          "roundTrip": {
+            "samples": 9,
+            "totalMs": 81.17229999999836,
+            "maxMs": 18.642299999999523,
+            "p50Ms": 8.97620000000461,
+            "p95Ms": 18.125499999994645
+          },
+          "observedSessionPeak": 3,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 0,
+          "maxTranscriptLimit": 0
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 125.76299999999173,
+          "maxMs": 48.67190000000119,
+          "p50Ms": 41.199299999992945,
+          "p95Ms": 41.199299999992945
+        },
+        "sampledBounds": {
+          "samples": 9,
+          "mountedRows": 80,
+          "sourceGaps": 1,
+          "fragmentBytes": 686208
+        },
+        "cdp": {
+          "ScriptDuration": 0.216738,
+          "TaskDuration": 0.424668,
+          "LayoutDuration": 0.038631,
+          "RecalcStyleDuration": 0.018856,
+          "LayoutCount": 32,
+          "RecalcStyleCount": 49
+        },
+        "paintTrace": {
+          "count": 62,
+          "durationMs": 21.147999999999993,
+          "prePaintCount": 191,
+          "prePaintDurationMs": 10.741999999999992,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 156,
+          "rafMaxMs": 16.800000000000182,
+          "rafOver50": 0,
+          "longTasks": 0,
+          "longTaskMs": 0
+        },
+        "mainProbe": {
+          "metrics": {
+            "elmUpdate": {
+              "count": 87,
+              "totalMs": 111.10000001639128,
+              "maxMs": 7.5,
+              "units": 0
+            },
+            "bridgeCommandEntry": {
+              "count": 87,
+              "totalMs": 10.100000016391277,
+              "maxMs": 1.6000000014901161,
+              "units": 0
+            },
+            "elmDrawEntry": {
+              "count": 32,
+              "totalMs": 42.69999998062849,
+              "maxMs": 4.200000002980232,
+              "units": 0
+            }
+          },
+          "caps": {
+            "rows": 0,
+            "retainedBytes": 0,
+            "rawBytes": 0
+          },
+          "pending": 0
+        },
+        "workerProbes": [
+          {
+            "rawParse": {
+              "count": 1082,
+              "totalMs": 3.7000000029802322,
+              "maxMs": 0.5,
+              "units": 2754146
+            }
+          },
+          {}
+        ]
+      },
+      "archive": {
+        "compressedBytes": 15632,
+        "compressedSha256": "407294b4ced63e557d2a6aae07c1243aec99037ba053f4ddca82658655e1e9b1"
+      },
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    },
+    {
+      "id": "sealed-task-clean",
+      "lifecycle": "sealed",
+      "scope": "task-linked",
+      "surface": "Sessions",
+      "navigationOrigin": "canonical task-filtered Sessions route",
+      "instrumented": false,
+      "elapsedMs": 3647.019800000002,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 509.09560000000056
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 905.6412999999957
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 385.0353999999934
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 306.8672000000006
+        }
+      ],
+      "assertions": [
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "verified sealed reader reaches logical latest without a live append capability"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 6,
+            "archiveManifest": 1,
+            "archiveContent": 2
+          },
+          "roundTrip": {
+            "samples": 9,
+            "totalMs": 96.00439999999799,
+            "maxMs": 18.181900000003225,
+            "p50Ms": 8.359600000003411,
+            "p95Ms": 18.06619999999384
+          },
+          "observedSessionPeak": 3,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 0,
+          "maxTranscriptLimit": 0
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 133.54189999999653,
+          "maxMs": 49.3096000000005,
+          "p50Ms": 44.71059999999852,
+          "p95Ms": 44.71059999999852
+        },
+        "sampledBounds": {
+          "samples": 9,
+          "mountedRows": 120,
+          "sourceGaps": 0,
+          "fragmentBytes": 1026936
+        },
+        "cdp": {
+          "ScriptDuration": 0.269167,
+          "TaskDuration": 0.530503,
+          "LayoutDuration": 0.053478,
+          "RecalcStyleDuration": 0.03576,
+          "LayoutCount": 40,
+          "RecalcStyleCount": 54
+        },
+        "paintTrace": {
+          "count": 74,
+          "durationMs": 29.361000000000004,
+          "prePaintCount": 202,
+          "prePaintDurationMs": 16.918000000000003,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 159,
+          "rafMaxMs": 16.800000000000182,
+          "rafOver50": 0,
+          "longTasks": 0,
+          "longTaskMs": 0
+        },
+        "mainProbe": null,
+        "workerProbes": []
+      },
+      "archive": {
+        "compressedBytes": 15632,
+        "compressedSha256": "407294b4ced63e557d2a6aae07c1243aec99037ba053f4ddca82658655e1e9b1"
+      },
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    },
+    {
+      "id": "sealed-task-instrumented",
+      "lifecycle": "sealed",
+      "scope": "task-linked",
+      "surface": "Sessions",
+      "navigationOrigin": "canonical task-filtered Sessions route",
+      "instrumented": true,
+      "elapsedMs": 3648.5040999999983,
+      "phases": [
+        {
+          "name": "open-and-useful-progress",
+          "elapsedMs": 489.68419999999605
+        },
+        {
+          "name": "native-scroll-history-resize",
+          "elapsedMs": 922.4902999999977
+        },
+        {
+          "name": "activity-occurrences",
+          "elapsedMs": 369.8281000000061
+        },
+        {
+          "name": "logical-latest-and-append",
+          "elapsedMs": 309.82250000000204
+        }
+      ],
+      "assertions": [
+        "native history motion and resize preserve visible source block, viewer ownership and ordered bounded occurrences",
+        "activity summary retains exactly 900 distinct source contributions; opened rows keep occurrence ordering",
+        "verified sealed reader reaches logical latest without a live append capability"
+      ],
+      "metrics": {
+        "requests": {
+          "counts": {
+            "metadata": 6,
+            "archiveManifest": 1,
+            "archiveContent": 2
+          },
+          "roundTrip": {
+            "samples": 9,
+            "totalMs": 80.69739999999001,
+            "maxMs": 18.610000000000582,
+            "p50Ms": 8.164599999996426,
+            "p95Ms": 18.12960000000021
+          },
+          "observedSessionPeak": 3,
+          "fixtureSourcePeak": 2,
+          "transcriptRanges": 0,
+          "maxTranscriptLimit": 0
+        },
+        "inputToTwoFramesHostProxy": {
+          "samples": 3,
+          "totalMs": 140.9001000000062,
+          "maxMs": 50.83380000000034,
+          "p50Ms": 50.42120000000432,
+          "p95Ms": 50.42120000000432
+        },
+        "sampledBounds": {
+          "samples": 9,
+          "mountedRows": 120,
+          "sourceGaps": 0,
+          "fragmentBytes": 1026936
+        },
+        "cdp": {
+          "ScriptDuration": 0.256675,
+          "TaskDuration": 0.508871,
+          "LayoutDuration": 0.053396,
+          "RecalcStyleDuration": 0.032948,
+          "LayoutCount": 37,
+          "RecalcStyleCount": 54
+        },
+        "paintTrace": {
+          "count": 76,
+          "durationMs": 30.737,
+          "prePaintCount": 198,
+          "prePaintDurationMs": 16.487,
+          "dataLoss": false
+        },
+        "sensors": {
+          "rafCount": 158,
+          "rafMaxMs": 16.800000000000182,
+          "rafOver50": 0,
+          "longTasks": 0,
+          "longTaskMs": 0
+        },
+        "mainProbe": {
+          "metrics": {
+            "elmUpdate": {
+              "count": 96,
+              "totalMs": 128.30000004917383,
+              "maxMs": 8.600000001490116,
+              "units": 0
+            },
+            "bridgeCommandEntry": {
+              "count": 96,
+              "totalMs": 8.000000014901161,
+              "maxMs": 1.6000000014901161,
+              "units": 0
+            },
+            "elmDrawEntry": {
+              "count": 33,
+              "totalMs": 59.50000001490116,
+              "maxMs": 6.799999997019768,
+              "units": 0
+            }
+          },
+          "caps": {
+            "rows": 0,
+            "retainedBytes": 0,
+            "rawBytes": 0
+          },
+          "pending": 0
+        },
+        "workerProbes": [
+          {
+            "rawParse": {
+              "count": 1082,
+              "totalMs": 3.400000013411045,
+              "maxMs": 0.29999999701976776,
+              "units": 2754146
+            }
+          },
+          {}
+        ]
+      },
+      "archive": {
+        "compressedBytes": 15632,
+        "compressedSha256": "407294b4ced63e557d2a6aae07c1243aec99037ba053f4ddca82658655e1e9b1"
+      },
+      "environment": {
+        "browser": "151.0.7922.34",
+        "playwright": "1.62.1",
+        "executableSha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "timezone": "UTC",
+        "mode": "nonpersistent"
+      }
+    }
+  ],
+  "limitations": [
+    "Synthetic local HTTP fixture measures frontend mechanics, not production database/network latency.",
+    "Clean cells retain light RAF/long-task/CDP observation overhead; instrumented cells separately attribute compiled production bindings.",
+    "Bridge entry is synchronous callback invocation elapsed; lifetime includes awaits and is not CPU. Nested parse/update/draw and CDP style/layout can overlap; never sum these into exclusive CPU or wall time.",
+    "Raw parse units are UTF-16 code units. Worker durations use worker-local clocks.",
+    "DOM bounds are sampled at phase boundaries, not a full heap or every transient frame measurement.",
+    "Task dock supports active readers only. Sealed task-linked reader uses canonical task-filtered full Sessions route; Evidence-click navigation is not measured.",
+    "Finite workflow deadlines are correctness/cleanup guards, not latency budgets. No cross-machine, cross-browser, or hard timing threshold is introduced."
+  ]
+}

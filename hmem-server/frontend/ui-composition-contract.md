@@ -2,8 +2,6 @@
 
 The six accepted directions define the shared visual system. The current follow-up layout explicitly supersedes the earlier Projects inspector, metadata disclosures and session-pane order. Original HTML, reopened review and prior release captures remain immutable historical inputs; simplified controls and example records do not replace production capabilities.
 
-The approved [Sessions Navigator and card design specification](../../docs/reference/sessions-and-card-design.md) is the next implementation target for workspace Sessions and card-local presentation. It supersedes this reference only for Sessions pane order, embedded task-card pane order and summary splitter target, full-description placement and Description-first Details, local reader modes, and full UUID presentation in those scoped surfaces. The outer Projects page, shell, workspace overview, hierarchy and navigation remain outside that change. Other contracts below still apply; historical inputs and qualification records are unchanged and do not establish acceptance of the new design.
-
 ## Inputs and selected stages
 
 Original SHA-256: `e4fb5d4475170c64af5a0680086d41a229acd5d0896cf946043e153bad40f2d9`.

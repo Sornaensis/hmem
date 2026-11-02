@@ -26,7 +26,7 @@ module Main where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception  (SomeException, try)
-import Control.Monad      (filterM, when)
+import Control.Monad      (when)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
@@ -41,10 +41,9 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
-import System.Directory   (createDirectoryIfMissing, copyFile,
+import System.Directory   (createDirectoryIfMissing,
                            doesDirectoryExist, doesFileExist,
                            findExecutable, getHomeDirectory,
-                           listDirectory,
                            removeDirectoryRecursive, removeFile)
 import System.Exit        (ExitCode(..), exitFailure, exitSuccess, exitWith)
 import System.FilePath    ((</>))
@@ -68,13 +67,13 @@ import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AuthUsers qualified as AuthUsers
 import HMem.Server.CtlMigrate qualified as CtlMigrate
+import HMem.Server.CtlMigrations qualified as CtlMigrations
 import HMem.Server.CtlArchivesCli qualified as CtlArchivesCli
 import HMem.Server.CtlAuditMaintenanceCli qualified as CtlAuditMaintenanceCli
 import HMem.Server.CtlEmbeddingsCli qualified as CtlEmbeddingsCli
 import HMem.Server.CtlPgvectorCli qualified as CtlPgvectorCli
 import HMem.Server.CtlPaths
 import HMem.Types
-import Paths_hmem_server qualified as Paths
 
 ------------------------------------------------------------------------
 -- CLI
@@ -1532,43 +1531,5 @@ ensureInitialized commandName = do
     exitFailure
   pure dir
 
-isMigrationFile :: FilePath -> Bool
-isMigrationFile ('V':_) = True
-isMigrationFile _ = False
-
 installMigrations :: FilePath -> IO (FilePath, [FilePath])
-installMigrations hmemDir = do
-  srcMigrations <- findMigrationsDir hmemDir
-  let destMigrations = hmemDir </> "migrations"
-  createDirectoryIfMissing True destMigrations
-  files <- filter isMigrationFile <$> listDirectory srcMigrations
-  mapM_ (copyReplacing srcMigrations destMigrations) files
-  pure (destMigrations, files)
-
-copyReplacing :: FilePath -> FilePath -> FilePath -> IO ()
-copyReplacing srcDir destDir fileName = do
-  let destPath = destDir </> fileName
-  destExists <- doesFileExist destPath
-  when destExists $ removeFile destPath
-  copyFile (srcDir </> fileName) destPath
-
--- | Search candidate paths for the migrations directory.
-findMigrationsDir :: FilePath -> IO FilePath
-findMigrationsDir hmemDir = do
-  bundledMigrations <- Paths.getDataFileName "migrations"
-  let candidates =
-        [ bundledMigrations
-        , hmemDir </> "migrations"
-        , "sql" </> "migrations"
-        , ".." </> "sql" </> "migrations"
-        , ".." </> ".." </> "sql" </> "migrations"
-        ]
-  found <- filterM doesDirectoryExist candidates
-  case found of
-    (p:_) -> pure p
-    []    -> do
-      hPutStrLn stderr "Error: migrations directory not found."
-      hPutStrLn stderr $ "Searched: " <> show candidates
-      hPutStrLn stderr
-        "Reinstall hmem-server or run from the project root so the bundled migrations are available."
-      exitFailure
+installMigrations = CtlMigrations.installBundledMigrations

@@ -1,5 +1,19 @@
 # Upgrade reference
 
+## Native migration refresh
+
+The native CLI installs the SQL bundle embedded when it was built. Refreshes
+replace that managed set and remove obsolete versioned SQL filenames, including
+files left behind after a migration was renumbered. Other files are preserved.
+Mutable Cabal data directories and the current directory are not migration
+sources for native setup or startup. Custom builds must include the canonical
+`hmem-server/migrations` source directory when compiling the CLI.
+
+V053 is `V053__session_runtime_harness.sql`; bounded replay retention is V055.
+An older `V053__bounded_outbox_retention.sql` payload must not be used to rename
+or replace the database's existing migration ledger entry. Upgrade the CLI before
+refreshing migrations; preserve the configured database and configuration.
+
 ## Scoped audit space maintenance (V056 and V057)
 
 Choose matching server/CLI artifacts and apply the ordered migrations with the

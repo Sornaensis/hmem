@@ -98,6 +98,7 @@ library
       HMem.Server.CtlEmbeddings
       HMem.Server.CtlEmbeddingsCli
       HMem.Server.CtlMigrate
+      HMem.Server.CtlMigrations
       HMem.Server.CtlPaths
       HMem.Server.CtlPgvector
       HMem.Server.CtlPgvectorCli
@@ -516,6 +517,7 @@ test-suite hmem-server-test
       HMem.Server.CtlEmbeddingsCliSpec
       HMem.Server.CtlEmbeddingsSpec
       HMem.Server.CtlMigrateSpec
+      HMem.Server.CtlMigrationsSpec
       HMem.Server.CtlPathsSpec
       HMem.Server.CtlPgvectorCliSpec
       HMem.Server.CtlPgvectorSpec

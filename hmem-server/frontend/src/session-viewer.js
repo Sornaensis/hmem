@@ -464,6 +464,20 @@ export function createRecordFramer(startOffset = 0, options = {}) {
   }
   const anchors = new Map((options.anchors || []).slice(0,MAX_VIEW_ROWS).map(row=>[row.offset,row]))
   const runRanges=(options.runRanges || []).slice(0,MAX_VIEW_ROWS+1).filter(range=>range.group&&Number.isSafeInteger(Number(range.before))&&Number.isSafeInteger(Number(range.after))).map(range=>({...range,before:Number(range.before),after:Number(range.after)}))
+  const runAliases=new Map()
+  const canonicalRun=key=>runAliases.get(key) || key
+  function rebindRun(previous,target) {
+    const canonical=canonicalRun(target)
+    if(previous===canonical)return
+    const rebind=value=>value===previous?canonical:value
+    for(const [key,value] of runAliases)runAliases.set(key,rebind(value))
+    runAliases.set(previous,canonical)
+    for(const item of [...rows,...anchors.values(),...(firstParsedRow?[firstParsedRow]:[])])item.activityAnchors=Object.fromEntries(Object.entries(item.activityAnchors || {}).map(([key,value])=>[key,rebind(value)]))
+    for(const range of runRanges)range.group=rebind(range.group)
+    if(discardedGroup===previous)discardedGroup=canonical
+    if(groupDeltas.has(previous)){const count=groupDeltas.get(previous);groupDeltas.delete(previous);bump(canonical,count)}
+    if(previousContribution)previousContribution.groups=previousContribution.groups.map(rebind)
+  }
   function append(bytes) {
     if (!bytes.length) return
     if (pendingSize + bytes.length > MAX_RECORD_BYTES + 2) throw new Error('record_limit')
@@ -497,22 +511,14 @@ export function createRecordFramer(startOffset = 0, options = {}) {
         // A backward overlap can discover an earlier part of the same run.
         // Rebind only that retained run to the already mounted disclosure key.
         const previous=activityAnchor
-        for(const item of rows)item.activityAnchors=Object.fromEntries(Object.entries(item.activityAnchors || {}).map(([key,value])=>[key,value===previous?carried:value]))
-        if(firstParsedRow)firstParsedRow.activityAnchors=Object.fromEntries(Object.entries(firstParsedRow.activityAnchors || {}).map(([key,value])=>[key,value===previous?carried:value]))
-        if(discardedGroup===previous)discardedGroup=carried
-        if(groupDeltas.has(previous)){const count=groupDeltas.get(previous);groupDeltas.delete(previous);bump(carried,count)}
-        if(previousContribution)previousContribution.groups=previousContribution.groups.map(key=>key===previous?carried:key)
+        rebindRun(previous,carried)
         activityAnchor=carried
       }
     }
     if(provenRun){
       const previous=activityAnchor
       if(previous&&previous!==provenRun){
-        for(const item of rows)item.activityAnchors=Object.fromEntries(Object.entries(item.activityAnchors || {}).map(([key,value])=>[key,value===previous?provenRun:value]))
-        if(firstParsedRow)firstParsedRow.activityAnchors=Object.fromEntries(Object.entries(firstParsedRow.activityAnchors || {}).map(([key,value])=>[key,value===previous?provenRun:value]))
-        if(discardedGroup===previous)discardedGroup=provenRun
-        if(groupDeltas.has(previous)){const count=groupDeltas.get(previous);groupDeltas.delete(previous);bump(provenRun,count)}
-        if(previousContribution)previousContribution.groups=previousContribution.groups.map(key=>key===previous?provenRun:key)
+        rebindRun(previous,provenRun)
       }
       activityAnchor=provenRun
       row.activityAnchors=Object.fromEntries(Object.entries(row.activityAnchors || {}).map(([key])=>[key,provenRun]))
@@ -582,7 +588,7 @@ export function createRecordFramer(startOffset = 0, options = {}) {
     }
   }
   function snapshot() {
-    return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,completeThrough,parsedBefore:parsedBefore??before,parsedOverlapEnd,groups:Object.fromEntries(groupDeltas),discarded:discardedCount?{before:parsedBefore??before,after:before,count:discardedCount,group:discardedGroup||''}:null,pendingBytes:pendingSize,retainedBytes:retained,notice,before,pageFull,skipping,needsLookback:startOffset>0&&!options.aligned&&completeRecords===0}
+    return {rows:rows.map(({bytes,eventEnvelope,pairedOffset,category,...row})=>row),through,completeThrough,parsedBefore:parsedBefore??before,parsedOverlapEnd,groups:Object.fromEntries(groupDeltas),runAliases:Object.fromEntries(runAliases),discarded:discardedCount?{before:parsedBefore??before,after:before,count:discardedCount,group:discardedGroup||''}:null,pendingBytes:pendingSize,retainedBytes:retained,notice,before,pageFull,skipping,needsLookback:startOffset>0&&!options.aligned&&completeRecords===0}
   }
 
   return {
@@ -592,6 +598,10 @@ export function createRecordFramer(startOffset = 0, options = {}) {
         if (lastInput && offset === lastInput.offset && equal(input,lastInput.bytes)) return snapshot()
         throw new Error('range_gap')
       }
+      // The next contiguous request follows the preceding publication ACK.
+      // Keep corrections for exact replay; normalize proof inputs before
+      // retiring them so an older carried key cannot reverse a correction.
+      runAliases.clear()
       lastInput = {offset,bytes:input.slice()}
       let begin = 0
       let consumed = input.length

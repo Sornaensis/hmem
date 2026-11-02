@@ -910,6 +910,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   let stamp = '', viewerStamp = '', generation = -1, framer = null, viewerIntent = 0
   let activeSave = null
   let reportedGroups=new Map()
+  let publishedThrough=0
+  let olderBoundary=0
   const send = (value,current=()=>true) => queueMicrotask(()=>{if(current())app.ports.sessionBridgeEvent.send(value)})
   const scrollIntent=createReaderScrollIntent()
   let activeReadingPosition=null
@@ -918,6 +920,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   let viewerScope = '', presentation = null
   let historyTransition = false, boundaryKey = '', restoreRevision = 0, resizeViewport=null, resizeSnapshot=null, resizeReady=false, lastFollowing=false, boundaryIntent=0
   let disclosures = new Map()
+  const disclosureTargets=new WeakMap()
   const disclosureActions=new Map()
   let disclosureRequest=0,disclosureTimer=null,disclosureRetiredOwner='',disclosureRetry=null,disclosureRetriedGeneration=-1,disclosureFallback=null
   const disclosureNow=()=>window.performance?.now?.() ?? now()
@@ -968,7 +971,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   }
   const makeDisclosure=(node,namespace,key)=>{
     const group=node.closest?.('[data-group-key]'),ancestorNode=group&&group!==node?group:null
-    return {owner:viewerStamp,scope:viewerScope,namespace,key,open:node.open,node,ancestorNode,ancestor:ancestorNode?.getAttribute('data-group-key') || '',request:++disclosureRequest,generation:-1,createdGeneration:generation,phase:'delivery',attempts:0,deadline:disclosureNow()+5000}
+    return {owner:viewerStamp,scope:viewerScope,namespace,key,open:node.open,node,ancestorNode,ancestor:ancestorNode?disclosureKey(ancestorNode)?.slice(6) || '':'',request:++disclosureRequest,generation:-1,createdGeneration:generation,phase:'delivery',attempts:0,deadline:disclosureNow()+5000}
   }
   const retryDisclosures=()=>{
     const marker=disclosureRetry
@@ -976,8 +979,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     disclosureRetry=null;disclosureRetriedGeneration=marker.generation
     const viewport=document.getElementById?.('session-records')
     if(viewport?.getAttribute?.('data-viewer-owner')!==viewerStamp||viewport.getAttribute('data-history-mode')!=='active')return
-    for(const node of viewport.querySelectorAll('details')){
-      const namespace=disclosureKey(node),key=node.getAttribute('data-group-key') ?? node.getAttribute('data-event-key'),prior=disclosureActions.get(namespace)
+    for(const node of disclosureNodes(viewport.querySelectorAll('details')).values()){
+      const namespace=disclosureKey(node),key=namespace?.slice(6),prior=disclosureActions.get(namespace)
       if(namespace===null||key===null||!disclosures.has(namespace)||disclosures.get(namespace)!==node.open||prior?.createdGeneration>marker.generation)continue
       disclosureActions.set(namespace,makeDisclosure(node,namespace,key))
     }
@@ -1024,10 +1027,26 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   }
   const disclosureKey = node => {
     const group = node.getAttribute?.('data-group-key')
-    if(group!==null && group!==undefined)return 'group:'+group
+    if(group!==null && group!==undefined){
+      const target=disclosureTargets.get(node)
+      if(target?.owner===viewerStamp&&target.scope===viewerScope&&target.source===group)return 'group:'+target.key
+      if(target)disclosureTargets.delete(node)
+      return 'group:'+group
+    }
+    disclosureTargets.delete(node)
     const event=node.getAttribute?.('data-event-key')
     return event!==null && event!==undefined ? 'event:'+event : null
   }
+  const disclosureNodes = nodes => {
+    const selected=new Map()
+    for(const node of nodes){
+      const key=disclosureKey(node),target=disclosureTargets.get(node)
+      const aliased=target&&target.source!==target.key
+      if(key!==null&&(!aliased||!selected.has(key)))selected.set(key,node)
+    }
+    return selected
+  }
+  const snapshotDisclosures=nodes=>[...disclosureNodes(nodes)].map(([key,node])=>[key,node.open])
   const rememberActivePosition=viewport=>{
     if(!viewport?.querySelectorAll||viewport.getAttribute?.('data-history-mode')!=='active'||viewport.getAttribute('data-viewer-owner')!==viewerStamp)return null
     const box=viewport.getBoundingClientRect?.()
@@ -1049,7 +1068,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(!returning && !(event.type==='scroll' && event.target===viewport) && !(event.type==='toggle' && viewport.contains?.(event.target)))return
     rememberActivePosition(viewport)
     const box=viewport.getBoundingClientRect?.(),leaf=box?[...viewport.querySelectorAll('[data-fragment-path]')].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-history-gap],[data-body-gap],[data-sealed-body-needed]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom}):null
-    presentation={scope:viewerScope,top:viewport.scrollTop,point:leaf?visibleTextPoint(viewport,leaf):null,disclosures:[...viewport.querySelectorAll('details')].map(node=>[disclosureKey(node),node.open])}
+    presentation={scope:viewerScope,top:viewport.scrollTop,point:leaf?visibleTextPoint(viewport,leaf):null,disclosures:snapshotDisclosures(viewport.querySelectorAll('details'))}
   }
   // One bounded snapshot holds only position/disclosure flags, never payloads.
   // Capture before route handlers replace the task/full-session DOM.
@@ -1057,8 +1076,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   document.addEventListener('toggle',event=>{
     const viewport=document.getElementById?.('session-records'),node=event.target
     if(viewport?.getAttribute?.('data-history-mode')!=='active'||viewport.getAttribute('data-viewer-owner')!==viewerStamp||viewerStamp===disclosureRetiredOwner||!viewport.contains?.(node))return
-    const key=node.getAttribute?.('data-group-key') ?? node.getAttribute?.('data-event-key')
     const cached=disclosureKey(node)
+    const key=cached?.slice(6)
     if(cached!==null){disclosures.delete(cached);disclosures.set(cached,node.open);while(disclosures.size>400)disclosures.delete(disclosures.keys().next().value)}
     if(key!==null&&key!==undefined){
       expireDisclosures()
@@ -1163,7 +1182,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     const gapFraction=gapBox&&box?Math.max(0,Math.min(1,((atEnd?box.bottom-1:viewport.scrollTop<=1?box.top+1:box.top+box.height/2)-gapBox.top)/Math.max(1,gapBox.height))):0
     const key=[viewerStamp,generation,attr('before'),attr('after'),edge,gapBefore,gapAfter,gapDirection,Math.floor(gapFraction*100)].join(':')
     if(!edge || key===boundaryKey)return
-    const closedGroups=[...(viewport.querySelectorAll?.('[data-group-key]') || [])].filter(node=>!node.open).map(node=>node.getAttribute('data-group-key')).slice(0,200)
+    const closedGroups=snapshotDisclosures(viewport.querySelectorAll?.('[data-group-key]') || []).filter(([,open])=>!open).map(([key])=>key.slice(6)).slice(0,200)
     boundaryKey=key;boundaryIntent=viewerIntent;seekStartIntent=null;send({kind:'viewer-boundary',stamp:viewerStamp,generation,edge,fill,anchor:anchor?.padStart(20,'0') || '',fragmentAnchor:gap?'':leaf?.dataset.fragmentPath || '',heights,closedGroups,...(gap?{before:Number(gapBefore),after:Number(gapAfter),fraction:gapFraction,direction:gapDirection}:{})})
   }
   let continuityQueued=false
@@ -1500,6 +1519,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       const predecessor=command.direction==='forward'?framer?.predecessor(command.reset):null
       framer = createRecordFramer(command.reset,command.direction ? {direction:command.direction,aligned:command.aligned,anchors,predecessor,runAnchor:command.runAnchor,runRanges:command.runRanges,knownBefore:command.knownBefore,knownAfter:command.knownAfter} : {})
       reportedGroups=new Map()
+      publishedThrough=command.reset
+      olderBoundary=command.olderBoundary ?? command.knownBefore ?? 0
       historyTransition = command.historical===true
       boundaryIntent=viewerIntent
     }
@@ -1529,17 +1550,31 @@ export function installSessionBridge(app, { document = globalThis.document, wind
         }).slice(0,8).map(node=>{const attribute=node.hasAttribute('data-fragment-path')?'data-fragment-path':node.hasAttribute('data-block-key')?'data-block-key':'data-group-key';return {attribute,key:node.getAttribute(attribute),top:node.getBoundingClientRect().top-bounds.top}})
         return [...visible('[data-fragment-path]'),...visible('[data-block-key]'),...visible('[data-group-key]')]
       })() : []
-      for(const node of viewport?.querySelectorAll?.('details') || []){
-        const key=disclosureKey(node)
-        if(key!==null){disclosures.delete(key);disclosures.set(key,node.open)}
-      }
+      for(const [key,open] of snapshotDisclosures(viewport?.querySelectorAll?.('details') || [])){disclosures.delete(key);disclosures.set(key,open)}
       while(disclosures.size>400)disclosures.delete(disclosures.keys().next().value)
       const result = framer.push(command.chunk.offset,bytes,command.chunk.final)
+      for(const [previous,target] of Object.entries(result.runAliases || {})){
+        const oldKey='group:'+previous,key='group:'+target
+        for(const node of viewport?.querySelectorAll?.('details') || [])if(disclosureKey(node)===oldKey)disclosureTargets.set(node,{owner:viewerStamp,scope:viewerScope,source:node.getAttribute('data-group-key'),key:target})
+        if(disclosures.has(oldKey)&&!disclosures.has(key))disclosures.set(key,disclosures.get(oldKey))
+        disclosures.delete(oldKey)
+        const rebindSnapshot=entries=>{
+          const states=new Map(entries)
+          if(states.has(oldKey)&&!states.has(key))states.set(key,states.get(oldKey))
+          states.delete(oldKey)
+          return [...states]
+        }
+        if(presentation?.scope===viewerScope)presentation.disclosures=rebindSnapshot(presentation.disclosures)
+        if(handoffPosition?.owner===viewerStamp&&handoffPosition.scope===viewerScope)handoffPosition.disclosures=rebindSnapshot(handoffPosition.disclosures)
+        // The old action owns its old DOM node and request. Never restamp it
+        // as a new canonical-node action or accept its late acknowledgement.
+        for(const [namespace,action] of disclosureActions)if(namespace===oldKey||action.ancestor===previous)disclosureActions.delete(namespace)
+      }
+      if(Object.keys(result.runAliases || {}).length)expireDisclosures()
       const publicationPosition=command.follow?null:rememberActivePosition(viewport)
-      // A finite captured end owns publication. A large initial window (or a
-      // live burst) advances the bounded byte handshake without painting and
-      // following every intermediate 64 KiB history fragment.
-      if ((!result.rows.length && (!command.chunk.final || result.pendingBytes>0)) || (!command.chunk.final && (!command.direction || command.direction==='tail'))) { send({kind:'viewer-progress',...captured,through:result.through,pendingBytes:result.pendingBytes,notice:result.notice}); return }
+      // Publish complete records while the finite range is still arriving.
+      // Partial-only chunks acknowledge bytes without repainting old rows.
+      if ((!result.rows.length && (!command.chunk.final || result.pendingBytes>0)) || (!command.chunk.final && result.completeThrough<=publishedThrough)) { send({kind:'viewer-progress',...captured,through:result.through,pendingBytes:result.pendingBytes,notice:result.notice}); return }
       // Own the pending position before publication can grow the DOM. End
       // transfers existing follow intent; other input still retires it.
       const pendingFollow=command.follow && atTail ? {viewport,...captured,top:previousTop,pending:true} : null
@@ -1551,7 +1586,8 @@ export function installSessionBridge(app, { document = globalThis.document, wind
       }
       reportedGroups=new Map(Object.entries(result.groups || {}))
       const revision=++restoreRevision
-      send({kind:'viewer',...captured,...result,groups,publication:revision,...(publicationPosition?{position:publicationPosition}:{})})
+      publishedThrough=result.completeThrough
+      send({kind:'viewer',...captured,...result,olderProgress:result.parsedBefore<olderBoundary,groups,publication:revision,...(publicationPosition?{position:publicationPosition}:{})})
       const publicationCurrent=()=>revision===restoreRevision&&viewerStamp===captured.stamp&&(generation===captured.generation||activePublication===revision)
       const afterPublication=callback=>{
         if(!command.publication){requestAnimationFrame(callback);return}

@@ -296,6 +296,7 @@ reconcile ( model, command ) =
             , ("direction",Encode.string current.windowDirection)
             , ("purpose",Encode.string current.windowPurpose)
             , ("knownBefore",Encode.int (if current.windowPurpose == "latest" then 0 else current.historyScanBefore))
+            , ("olderBoundary",Encode.int (if current.windowPurpose == "fill" then current.historyScanBefore else current.historyBefore))
             , ("knownAfter",Encode.int (if current.windowPurpose == "latest" then 0 else current.historyScanAfter))
             , ("runAnchor",Encode.string (if current.windowPurpose=="gap" then current.historyGaps |> List.filter (\gap -> gap.group/="" && (String.toInt gap.before |> Maybe.map (\begin -> begin <= Maybe.withDefault 0 current.start) |> Maybe.withDefault False) && (String.toInt gap.after |> Maybe.map (\finish -> finish > Maybe.withDefault 0 current.start) |> Maybe.withDefault False)) |> List.head |> Maybe.map .group |> Maybe.withDefault "" else ""))
             , ("runRanges",Encode.list (\gap -> Encode.object [("before",Encode.string gap.before),("after",Encode.string gap.after),("group",Encode.string gap.group)]) (if current.windowPurpose=="latest" then [] else List.filter (\gap -> gap.group/="") current.historyGaps |> List.take 201))
@@ -467,17 +468,22 @@ composeRecords : Decode.Value -> Int -> Int -> Int -> List SessionRecord -> Sess
 composeRecords packet before through completeThrough incoming state =
     let
         field name decoder fallback = Decode.decodeValue (Decode.field name decoder) packet |> Result.withDefault fallback
+        aliases = field "runAliases" (Decode.dict Decode.string) Dict.empty
+        canonical key = Dict.get key aliases |> Maybe.withDefault key
+        rebind row = {row | activityAnchors=Dict.map (\_ -> canonical) row.activityAnchors}
+        closed = Set.map canonical state.historyClosed
+        open = Set.foldl (\key keys -> let target=canonical key in if target/=key && Set.member target state.historyClosed && not (Set.member target state.historyOpen) then keys else Set.insert target keys) Set.empty state.historyOpen
         seeking = state.windowPurpose == "latest"
-        allPrevious = if seeking then [] else state.rows
+        allPrevious = if seeking then [] else List.map rebind state.rows
         compact row (kept,dropped,seen) =
             let group=recordGroup row in
-            if List.member state.windowPurpose ["fill","gap"] && state.following && group/="" && Set.member group state.historyClosed then
+            if List.member state.windowPurpose ["fill","gap"] && state.following && group/="" && Set.member group closed then
                 if Set.member group seen then (kept,row::dropped,seen) else (row::kept,dropped,Set.insert group seen)
             else (row::kept,dropped,seen)
         (previous,compacted,_) = List.foldl compact ([],[],Set.empty) (List.reverse allPrevious)
         policy = { identity = .presentationOffset >> String.fromInt, source = recordSource, bytes = \row -> max 0 (row.end-row.offset) }
         anchor = if state.historyAnchor == "" then Nothing else Just state.historyAnchor
-        result = SessionWindow.composeRange (Just (String.padLeft 20 '0' (String.fromInt before),String.padLeft 20 '0' (String.fromInt completeThrough))) policy 200 4194304 anchor state.following (List.member state.windowPurpose ["older","fill"]) previous incoming
+        result = SessionWindow.composeRange (Just (String.padLeft 20 '0' (String.fromInt before),String.padLeft 20 '0' (String.fromInt completeThrough))) policy 200 4194304 anchor state.following (List.member state.windowPurpose ["older","fill"]) previous (List.map rebind incoming)
         measured row = Dict.get (recordSource row) state.historyHeights |> Maybe.withDefault 64 |> max 32
         extent = List.map measured >> List.sum
         oldFirst = List.head previous |> Maybe.map .offset |> Maybe.withDefault before
@@ -507,9 +513,12 @@ composeRecords packet before through completeThrough incoming state =
         prefixDiscard = field "discarded" (Decode.map4 (\start finish count group -> [{before=String.padLeft 20 '0' (String.fromInt start),after=String.padLeft 20 '0' (String.fromInt finish),pixels=min 10000000 (64*toFloat count),group=group}]) (Decode.field "before" Decode.int) (Decode.field "after" Decode.int) (Decode.field "count" Decode.int) (Decode.field "group" Decode.string)) []
         represented = Just (String.padLeft 20 '0' (String.fromInt before),String.padLeft 20 '0' (String.fromInt completeThrough))
         gaps = SessionWindow.reconcileGaps represented (List.map (\row -> (recordSource row,String.padLeft 20 '0' (String.fromInt row.end))) result.rows)
-            (compactedRuns ++ gapForRows result.removedBefore ++ gapForRows result.removedAfter ++ prefixDiscard) (if seeking then [] else state.historyGaps)
+            (compactedRuns ++ gapForRows result.removedBefore ++ gapForRows result.removedAfter ++ prefixDiscard) (if seeking then [] else List.map (\gap -> {gap | group=canonical gap.group}) state.historyGaps)
         deltas = field "groups" (Decode.dict Decode.int) Dict.empty |> Dict.toList |> List.take 200
-        activity = List.foldl (\(key,count) counts -> Dict.update key (\old -> Just (max 0 (Maybe.withDefault 0 old+count))) counts) (if seeking then Dict.empty else state.historyActivity) deltas
+        -- Deltas compare cumulative framer snapshots. Apply a former key's
+        -- negative delta before merging its remaining count into the proven key.
+        activityDeltas = List.foldl (\(key,count) counts -> Dict.update key (\old -> Just (max 0 (Maybe.withDefault 0 old+count))) counts) (if seeking then Dict.empty else state.historyActivity) deltas
+        activity = Dict.foldl (\key count counts -> Dict.update (canonical key) (\old -> Just (Maybe.withDefault 0 old+count)) counts) Dict.empty activityDeltas
         keptGroups = Set.fromList (List.map .group gaps ++ List.map recordGroup result.rows)
         boundedActivity = Dict.filter (\key _ -> key/="" && Set.member key keptGroups) activity |> Dict.toList |> List.take 400 |> Dict.fromList
         presentationAnchor =
@@ -530,9 +539,9 @@ composeRecords packet before through completeThrough incoming state =
         , historyTop = if topCount == 0 then 0 else top
         , historyBottom = if bottomCount == 0 then 0 else bottom
         , historyTopCount = topCount, historyBottomCount = bottomCount
-        , historyTopGroup = if topCount == 0 then "" else edgeGroup result.removedBefore first (if seeking then "" else state.historyTopGroup)
-        , historyBottomGroup = if bottomCount == 0 then "" else edgeGroup result.removedAfter last (if seeking then "" else state.historyBottomGroup)
-        , historyGaps = gaps, historyActivity = boundedActivity, presentationAnchor=presentationAnchor
+        , historyTopGroup = if topCount == 0 then "" else edgeGroup result.removedBefore first (if seeking then "" else canonical state.historyTopGroup)
+        , historyBottomGroup = if bottomCount == 0 then "" else edgeGroup result.removedAfter last (if seeking then "" else canonical state.historyBottomGroup)
+        , historyGaps = gaps, historyActivity = boundedActivity, historyClosed=closed, historyOpen=open, presentationAnchor=presentationAnchor
         , windowPurpose = if seeking then "append" else state.windowPurpose
     }
 
@@ -658,7 +667,7 @@ receiveBridge value model =
             if List.length rows <= 200 && List.sum (List.map (.raw >> String.length) rows) <= 4194304 then
                 if List.isEmpty rows && field "pendingBytes" Decode.int 0 > 0 then
                     ( {model | sessions={state | offset=through,pending=False,notice=field "notice" Decode.string state.notice}},Cmd.none )
-                else if ((List.isEmpty rows && (field "skipping" Decode.bool False || field "needsLookback" Decode.bool False)) || (List.member state.windowPurpose ["older","fill"] && field "parsedBefore" Decode.int (field "before" Decode.int 0) >= (if state.windowPurpose=="fill" then state.historyScanBefore else state.historyBefore))) && through >= state.end && Maybe.withDefault 0 state.start > max 0 (state.end - 2097152) then
+                else if ((List.isEmpty rows && (field "skipping" Decode.bool False || field "needsLookback" Decode.bool False)) || (List.member state.windowPurpose ["older","fill"] && not (field "olderProgress" Decode.bool False) && field "parsedBefore" Decode.int (field "before" Decode.int 0) >= (if state.windowPurpose=="fill" then state.historyScanBefore else state.historyBefore))) && through >= state.end && Maybe.withDefault 0 state.start > max 0 (state.end - 2097152) then
                     let begin = max 0 (state.end - 2097152) in
                     ( {model | sessions={state | start=Just begin,offset=begin,pending=False,generation=state.generation+1,resetPending=True}},Cmd.none )
                 else

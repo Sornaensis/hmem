@@ -208,6 +208,32 @@ suite =
                 event=Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string old.stamp),("generation",Encode.int old.generation),("through",Encode.int 3065536),("skipping",Encode.bool True),("rows",Encode.list identity [])]
                 next=Sessions.update (SessionsBridgeEvent event) reading |> Tuple.first |> .sessions
             in Expect.equal {start=Just 968384,offset=968384,end=3065536,reset=True} {start=next.start,offset=next.offset,end=next.end,reset=next.resetPending}
+        , test "a final progressive fill compares progress with its original boundary instead of its intermediate scan cursor" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                reading={entered | sessions={old | windowPurpose="fill",start=Just 3000000,offset=3065500,end=3065536,pending=True,historyBefore=3030000,historyScanBefore=3000100}}
+                event progress generation skipping=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string old.stamp),("generation",Encode.int generation),("through",Encode.int 3065536),("before",Encode.int 3030000),("parsedBefore",Encode.int 3000100),("olderProgress",Encode.bool progress),("skipping",Encode.bool skipping),("rows",Encode.list identity [])])
+                complete=Sessions.update (event True old.generation False) reading |> Tuple.first |> .sessions
+                noProgress=Sessions.update (event False old.generation False) reading |> Tuple.first |> .sessions
+                fragment=Sessions.update (event True old.generation True) reading |> Tuple.first |> .sessions
+                stale=Sessions.update (event True (old.generation-1) False) reading |> Tuple.first |> .sessions
+            in Expect.equal {complete=(Just 3000000,3065536,old.generation),recovery=(Just 968384,Just 968384),stale=(3000000+65500,True)}
+                {complete=(complete.start,complete.offset,complete.generation),recovery=(noProgress.start,fragment.start),stale=(stale.offset,stale.pending)}
+        , test "proven run corrections apply count deltas before merging evicted rows and gap labels" <| \_ ->
+            let
+                entered=Sessions.reconcile (sessionModel,Cmd.none) |> Tuple.first
+                old=entered.sessions
+                retained={sampleRecord | activityAnchors=Dict.fromList [("0","temporary")]}
+                gaps=[{before="100",after="110",pixels=100,group="temporary"},{before="120",after="130",pixels=100,group="canonical"}]
+                reading={entered | sessions={old | windowPurpose="append",following=False,start=Just 10000,offset=10000,end=10064,pending=True,rows=[retained],historyGaps=gaps,historyActivity=Dict.fromList [("temporary",408),("canonical",492)],historyOpen=Set.singleton "temporary",historyClosed=Set.singleton "canonical"}}
+                packet generation=SessionsBridgeEvent (Encode.object [("kind",Encode.string "viewer"),("stamp",Encode.string old.stamp),("generation",Encode.int generation),("through",Encode.int 10064),("before",Encode.int 10000),("rows",Encode.list identity []),("groups",Encode.object [("temporary",Encode.int -408),("canonical",Encode.int 408)]),("runAliases",Encode.object [("temporary",Encode.string "canonical")])])
+                accepted=Sessions.update (packet old.generation) reading |> Tuple.first
+                repeated=Sessions.update (packet old.generation) accepted |> Tuple.first |> .sessions
+                stale=Sessions.update (packet (old.generation-1)) reading |> Tuple.first |> .sessions
+                next=accepted.sessions
+            in Expect.equal {counts=Dict.singleton "canonical" 900,anchors=[Dict.singleton "0" "canonical"],gaps=Set.singleton "canonical",open=Set.empty,replay=True,stale=Dict.fromList [("temporary",408),("canonical",492)]}
+                {counts=next.historyActivity,anchors=List.map .activityAnchors next.rows,gaps=List.map .group next.historyGaps |> Set.fromList,open=next.historyOpen,replay=repeated==next,stale=stale.historyActivity}
         , describe "direct task association presence" associationTests
         , describe "authoritative evidence availability" evidenceAvailabilityTests
         , describe "card-owned dock authority" dockTests

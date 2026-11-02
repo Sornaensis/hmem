@@ -35,6 +35,30 @@ const shortTailTranscript=()=>Buffer.from([
  ...Array.from({length:20},(_,i)=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'inspect',call_id:`short-tail-${i}`,arguments:JSON.stringify({value:'x'.repeat(350)})}})),
 ].join('\n')+'\n')
 
+test('live recovery renders complete intermediate history before its next serialized range returns',{timeout:45000},async()=>{
+ const prefix=Array.from({length:120},(_,i)=>JSON.stringify({text:`Intermediate history ${i}. `+'Readable context. '.repeat(100)})+'\n').join('')
+ const raw=Buffer.from(prefix+JSON.stringify({text:'Final large occurrence. '+'x'.repeat(180000)})+'\n'),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
+ let release=null,held=false
+ try{
+  await page.route('**/sessions/**/transcript**',async route=>{
+   const offset=Number(new URL(route.request().url()).searchParams.get('offset'))
+   if(offset===65536&&!held){held=true;await new Promise(resolve=>{release=resolve})}
+   await route.fallback()
+  })
+  await h.start();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id)
+  await until(()=>release!==null)
+  const intermediate=await page.locator('#session-records').evaluate(node=>({loading:node.dataset.historyLoading,after:Number(node.dataset.historyAfter),offsets:[...node.querySelectorAll('.session-record')].map(row=>Number(row.dataset.offset)),text:node.textContent}))
+  assert.ok(intermediate.offsets.length>0,'the already completed first recovery chunk must be rendered while the next request is held')
+  assert.ok(intermediate.offsets.every(offset=>offset<65536));assert.equal(intermediate.loading,'true')
+  assert.ok(intermediate.after>0&&intermediate.after<raw.length);assert.match(intermediate.text,/Intermediate history/);assert.doesNotMatch(intermediate.text,/Final large occurrence/)
+  release();release=null
+  await until(async()=>!(await state(page)).loading)
+  const complete=await state(page);assert.equal(complete.after,raw.length)
+  assert.equal(new Set(complete.offsets).size,complete.offsets.length);assert.ok(complete.offsets.every((offset,index)=>index===0||offset>complete.offsets[index-1]))
+  assert.ok(h.reads.filter(read=>read.path.endsWith('/transcript')).every(read=>Number(new URLSearchParams(read.query).get('limit'))<=65536));assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
+ }finally{release?.();await h.close()}
+})
+
 test('continuous contract unknown JSON events preserve raw tokens in a bounded continuous inspector',{timeout:60000},async()=>{
  const source='{"type":"large_unknown","n":9007199254740993,"overflow":1e400,"underflow":1e-400,"negative":-0,"escaped":"\\u0061","duplicate":1,"duplicate":2,"values":'+JSON.stringify(Array.from({length:2000},(_,i)=>`${i===0?'EVENT START':i===1999?'EVENT END':'Event'} ${i}. `+'x'.repeat(95)))+'}'
  const raw=Buffer.from('{"type":"event_msg","payload":{"type":"tiny_unknown","value":1}}\n{"type":"event_msg","payload":'+source+'}\n'),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h,viewport=()=>page.locator('#session-records'),inspector=()=>page.locator('session-event-json')
@@ -167,7 +191,7 @@ test('same-authority route retains the actual reading character while an old fra
   const point=await page.evaluate(()=>window.sessionPointFacts.filter(fact=>!fact.restore).at(-1)?.point);assert.ok(point)
   const readPoint=()=>viewer().evaluate((node,point)=>{const leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>leaf.dataset.fragmentPath===point.path);if(!leaf)return null;const walker=document.createTreeWalker(leaf,4);let text=walker.nextNode(),offset=point.offset;while(text&&offset>text.length){offset-=text.length;text=walker.nextNode()}if(!text)return null;const range=document.createRange();range.setStart(text,offset);range.setEnd(text,Math.min(text.length,offset+1));const r=range.getBoundingClientRect(),box=node.getBoundingClientRect();return {char:range.toString(),top:r.top-box.top,visible:r.height>0&&r.bottom>box.top&&r.top<box.bottom,manual:node.closest('.session-viewer').dataset.manualUp}},point)
   const before=await readPoint();assert.equal(before?.visible,true);assert.equal(before.manual,'true');const readsBeforeRoute=h.reads.filter(read=>read.path.endsWith('/transcript')).length
-  await card.getByRole('link',{name:'Open full session ↗',exact:true}).click();await page.locator('.session-detail').waitFor();await until(()=>viewer().evaluate(node=>node.dataset.historyLoading==='false'))
+  await card.locator('.task-session-open-full').click();await page.locator('.session-detail').waitFor();await until(()=>viewer().evaluate(node=>node.dataset.historyLoading==='false'))
   const handoff=await page.evaluate(()=>window.sessionOwnerChanges.at(-1));assert.equal(handoff.continueViewer,false);assert.equal(handoff.preservePresentation,true);assert.notEqual(handoff.reset,null);assert.ok(h.reads.filter(read=>read.path.endsWith('/transcript')).length>readsBeforeRoute,'fresh transport replays the captured window');const after=await readPoint();assert.equal(after?.char,before.char,JSON.stringify({phase:'pending-route',before,after,point,held:await page.evaluate(()=>window.heldViewerPublication),changes:await page.evaluate(()=>window.sessionOwnerChanges)}));assert.equal(after?.visible,true);assert.equal(after.manual,'true');assert.ok(Math.abs(after.top-before.top)<=4)
   await page.evaluate(()=>window.releaseViewerPublication?.());await h.idle();const stale=await readPoint();assert.equal(stale?.char,before.char);assert.equal(stale?.visible,true);assert.ok(Math.abs(stale.top-before.top)<=4,'old owner publication cannot overwrite the restored point');assert.ok(h.peak()<=2);assert.deepEqual(h.errors,[])
  }finally{await page.evaluate(()=>window.releaseViewerPublication?.()).catch(()=>{});await h.close()}

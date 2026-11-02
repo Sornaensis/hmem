@@ -81,11 +81,36 @@ test('consecutive maximum-sized records progress in both reader directions acros
 test('backward overlap reconciles the entire retained activity run to one stable disclosure',()=>{
  const bytes=encode(Array.from({length:500},(_,i)=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'read_'+i,arguments:JSON.stringify({data:'x'.repeat(400)})}})+'\n').join(''))
  const begin=bytes.length-65536,old=createRecordFramer(begin,{direction:'tail'}),latest=old.push(begin,bytes.subarray(begin),true)
- const end=latest.rows[19].end,older=createRecordFramer(0,{direction:'tail',anchors:old.readerAnchors()});let result
- for(let at=0;at<end;at+=65536)result=older.push(at,bytes.subarray(at,Math.min(end,at+65536)),at+65536>=end)
+ const end=latest.rows[19].end,older=createRecordFramer(0,{direction:'tail',anchors:old.readerAnchors()});let result,published,correction
+ for(let at=0;at<end;at+=65536){
+  const input=bytes.subarray(at,Math.min(end,at+65536)),final=at+65536>=end
+  result=older.push(at,input,final);published??=result.rows[0]
+  if(result.runAliases[published.activityAnchors[0]]){
+   correction=result.runAliases[published.activityAnchors[0]]
+   assert.deepEqual(older.push(at,input,final).runAliases,result.runAliases,'exact replay retains the same correction receipt')
+  }
+ }
  const key=Object.values(latest.rows[0].activityAnchors)[0]
  assert.deepEqual([...new Set(result.rows.flatMap(row=>Object.values(row.activityAnchors)))],[key])
  assert.ok(result.rows[0].offset<latest.rows[0].offset)
+ assert.ok(published.offset<result.rows[0].offset,'the earlier published prefix has genuinely left the framer')
+ assert.equal(correction,key,'the consumer can correct the evicted published prefix at the proven overlap')
+ assert.deepEqual(older.push(end,bytes.subarray(end,end+1),false).runAliases,{},'only a new contiguous chunk retires the previous correction receipt')
+ assert.ok(older.readerAnchors().every(row=>Object.values(row.activityAnchors||{}).every(anchor=>anchor===key)))
+})
+
+test('proven run corrections flatten chains and normalize carried proof keys without crossing prose',()=>{
+ const activity=index=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'read_'+index,arguments:'{}'}})+'\n'
+ const lines=Array.from({length:5},(_,index)=>activity(index)),source=encode(lines.join('')),baseline=createRecordFramer().push(0,source,true).rows
+ const first='100000:0',last='200000:0',anchors=[{...baseline[1],activityAnchors:{0:first}},{...baseline[3],activityAnchors:{0:last}}]
+ const result=createRecordFramer(0,{direction:'tail',anchors,runRanges:[{before:String(baseline[4].offset),after:String(source.length),group:first}]}).push(0,source,true)
+ assert.equal(result.runAliases['0:0'],last);assert.equal(result.runAliases[first],last)
+ assert.ok(result.rows.every(row=>row.activityAnchors[0]===last),'a stale later range cannot reverse the established representative')
+ assert.deepEqual(result.rows.map(row=>row.raw),baseline.map(row=>row.raw))
+ const prose=encode(activity(0)+JSON.stringify({text:'A distinct source message'})+'\n'+activity(1)+activity(2)),plain=createRecordFramer().push(0,prose,true).rows
+ const separate=createRecordFramer(0,{direction:'tail',anchors:[{...plain[3],activityAnchors:{0:last}}]}).push(0,prose,true)
+ assert.equal(separate.rows[0].activityAnchors[0],'0:0');assert.equal(separate.runAliases['0:0'],undefined)
+ assert.equal(separate.rows[2].activityAnchors[0],last)
 })
 
 test('meaningful unhandled Codex events retain exact inspectable JSON and activity source order',()=>{

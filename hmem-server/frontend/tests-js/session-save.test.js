@@ -6,6 +6,106 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const session = bytes => ({id:'s',workspace:'w',state:'terminated',finalBytes:bytes.length,finalSha256:digest(bytes),revision:7})
 const chunk = (row,bytes,offset=0) => ({session:row,offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64')})
 
+test('tail delivery publishes complete intermediate records once while partial and stale chunks only advance safely',async()=>{
+ const previousFrame=globalThis.requestAnimationFrame,previousParse=JSON.parse,events=[],frames=[];let incoming,parsed=0
+ const first='{"text":"Intermediate λ😀"}',second='{"text":"Complete next occurrence"}'
+ const bytes=Buffer.from(first+'\r\n'+second+'\n'),split=Buffer.byteLength(first+'\r\n')+10
+ globalThis.requestAnimationFrame=fn=>frames.push(fn)
+ JSON.parse=function(value,...args){if(value===first||value===second)parsed++;return previousParse.call(this,value,...args)}
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>null,addEventListener(){}},window:{},now:()=>0})
+  const send=(offset,end,extra={})=>incoming({stamp:'owner',generation:3,reset:offset===0?0:null,olderBoundary:offset===0?1000:0,direction:'tail',follow:true,chunk:{offset,nextOffset:end,dataBase64:bytes.subarray(offset,end).toString('base64'),final:end===bytes.length},...extra})
+  const utf8Split=bytes.indexOf(Buffer.from('😀'))+2
+  send(0,utf8Split);await flush()
+  assert.equal(parsed,0);assert.equal(events.filter(value=>value.kind==='viewer-progress').at(-1)?.kind,'viewer-progress','split UTF-8 remains an unexposed partial record')
+  send(utf8Split,split);await flush()
+  const intermediate=events.filter(value=>value.kind==='viewer')
+  assert.equal(intermediate.length,1,'a complete record is published before the finite end arrives')
+  assert.deepEqual(intermediate[0].rows.map(row=>row.raw),[first]);assert.equal(intermediate[0].pendingBytes,10)
+  assert.equal(intermediate[0].olderProgress,true,'progress uses the boundary captured at reset')
+  assert.equal(parsed,1,'the partial next record is not parsed or exposed')
+  send(split,split+3);await flush()
+  assert.equal(events.at(-1).kind,'viewer-progress');assert.equal(events.filter(value=>value.kind==='viewer').length,1,'an incomplete-only chunk does not repaint retained records')
+  send(split,split+3,{reset:null});await flush()
+  assert.equal(parsed,1,'an exact byte replay reuses the framer snapshot')
+  send(split+3,bytes.length,{generation:2,reset:null});await flush()
+  assert.equal(parsed,1,'a retired generation cannot parse its delayed chunk')
+  send(split+3,bytes.length,{reset:null});await flush()
+  const complete=events.filter(value=>value.kind==='viewer').at(-1)
+  assert.deepEqual(complete.rows.map(row=>row.raw),[first,second]);assert.equal(complete.pendingBytes,0);assert.equal(parsed,2)
+  assert.equal(complete.olderProgress,true,'later bridge commands cannot lower the original window boundary')
+  assert.ok(complete.publication>intermediate[0].publication)
+  assert.equal(events.some(value=>value.kind==='viewer-error'),false)
+ }finally{globalThis.requestAnimationFrame=previousFrame;JSON.parse=previousParse}
+})
+
+test('proven run correction migrates native disclosure state while an existing canonical target keeps its intent',async()=>{
+ for(const canonicalPresent of [false,true]){
+  const previous=globalThis.requestAnimationFrame,frames=[],events=[];let incoming,details=[]
+  const attrs={'data-viewer-owner':'owner','data-viewer-generation':'1','data-history-mode':'active'}
+  const detail=(key,open)=>({open,getAttribute:name=>name==='data-group-key'?key:null,getBoundingClientRect:()=>({top:20,bottom:40,height:20})})
+  const viewport={scrollTop:40,scrollHeight:1000,clientHeight:100,getAttribute:name=>attrs[name]??null,getBoundingClientRect:()=>({top:0,bottom:100,height:100}),querySelectorAll:selector=>selector==='details'?details:[],contains:node=>details.includes(node)}
+  globalThis.requestAnimationFrame=fn=>frames.push(fn)
+  try{
+   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(){}},window:{},now:()=>0})
+   const bytes=Buffer.from(Array.from({length:500},(_,index)=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'read_'+index,arguments:JSON.stringify({value:'x'.repeat(400)})}})+'\n').join(''))
+   const begin=bytes.length-65536
+   incoming({stamp:'owner',generation:1,reset:begin,direction:'tail',follow:false,publication:{request:0,pending:false},chunk:{offset:begin,nextOffset:bytes.length,dataBase64:bytes.subarray(begin).toString('base64'),final:true}});await flush()
+   const latest=events.filter(value=>value.kind==='viewer').at(-1),canonical=Object.values(latest.rows[0].activityAnchors)[0],end=latest.rows[19].end
+   const stable=detail(canonical,false);details=canonicalPresent?[stable]:[];attrs['data-viewer-generation']='2'
+   let temporary
+   for(let offset=0;offset<end;offset+=65536){
+    const next=Math.min(end,offset+65536)
+    incoming({stamp:'owner',generation:2,reset:offset===0?0:null,direction:'tail',follow:false,knownBefore:latest.parsedBefore,publication:{request:0,pending:false},chunk:{offset,nextOffset:next,dataBase64:bytes.subarray(offset,next).toString('base64'),final:next===end}});await flush()
+    if(offset===0){temporary=Object.values(events.filter(value=>value.kind==='viewer').at(-1).rows[0].activityAnchors)[0];assert.notEqual(temporary,canonical);details=[...(canonicalPresent?[stable]:[]),detail(temporary,true)]}
+   }
+   assert.ok(events.some(value=>value.runAliases?.[temporary]===canonical))
+   const rendered=detail(canonical,canonicalPresent);details=[rendered];attrs['data-window-publication']=String(events.filter(value=>value.kind==='viewer').at(-1).publication)
+   for(let step=0;frames.length&&step<100;step++){const batch=frames.splice(0);for(const callback of batch)callback();await flush()}
+   assert.equal(rendered.open,!canonicalPresent,canonicalPresent?'canonical closed intent wins over a temporary open key':'an opened temporary run stays open after proven correction')
+   assert.equal(events.some(value=>value.kind==='viewer-error'),false)
+  }finally{globalThis.requestAnimationFrame=previous}
+ }
+})
+
+test('fresh intent on an aliased lagging node uses its canonical key and a late old action ACK cannot settle it',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners={},timers=new Map();let incoming,details=[],timerId=0
+ const attrs={'data-viewer-owner':'owner','data-viewer-generation':'1','data-history-mode':'active'}
+ const detail=(key,open)=>({open,isConnected:true,getAttribute:name=>name==='data-group-key'?key:null,getBoundingClientRect:()=>({top:20,bottom:40,height:20})})
+ const viewport={scrollTop:40,scrollHeight:1000,clientHeight:100,getAttribute:name=>attrs[name]??null,getBoundingClientRect:()=>({top:0,bottom:100,height:100}),querySelectorAll:selector=>selector==='details'?details:[],contains:node=>details.includes(node)}
+ globalThis.requestAnimationFrame=fn=>frames.push(fn)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(type,fn){(listeners[type]||=[]).push(fn)}},window:{setTimeout(fn){timers.set(++timerId,fn);return timerId},clearTimeout(id){timers.delete(id)}},now:()=>0})
+  const command=extra=>incoming({stamp:'owner',viewerScope:'source',generation:2,reset:null,chunk:null,follow:false,...extra})
+  const toggle=node=>{for(const fn of listeners.toggle||[])fn({type:'toggle',target:node,isTrusted:true})}
+  const actions=()=>events.filter(value=>value.kind==='viewer-disclosure')
+  const bytes=Buffer.from(Array.from({length:500},(_,index)=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'read_'+index,arguments:JSON.stringify({value:'x'.repeat(400)})}})+'\n').join(''))
+  const begin=bytes.length-65536
+  command({generation:1,reset:begin,direction:'tail',publication:{request:0,pending:false},chunk:{offset:begin,nextOffset:bytes.length,dataBase64:bytes.subarray(begin).toString('base64'),final:true}});await flush()
+  const latest=events.filter(value=>value.kind==='viewer').at(-1),canonical=Object.values(latest.rows[0].activityAnchors)[0],end=latest.rows[19].end
+  const stable=detail(canonical,false);details=[stable];attrs['data-viewer-generation']='2'
+  let oldNode,oldAction,temporary
+  for(let offset=0;offset<end;offset+=65536){
+   const next=Math.min(end,offset+65536)
+   command({reset:offset===0?0:null,direction:'tail',knownBefore:latest.parsedBefore,publication:{request:0,pending:false},chunk:{offset,nextOffset:next,dataBase64:bytes.subarray(offset,next).toString('base64'),final:next===end}});await flush()
+   if(offset===0){temporary=Object.values(events.filter(value=>value.kind==='viewer').at(-1).rows[0].activityAnchors)[0];oldNode=detail(temporary,false);details=[stable,oldNode];toggle(oldNode);await flush();oldAction=actions().at(-1);assert.equal(oldAction.key,temporary)}
+  }
+  assert.ok(events.some(value=>value.runAliases?.[temporary]===canonical));assert.equal(timers.size,0,'the obsolete node action is retired at correction')
+  oldNode.open=true;toggle(oldNode);await flush()
+  const fresh=actions().at(-1)
+  assert.equal(oldNode.getAttribute('data-group-key'),temporary,'the actual lagging DOM node is not rewritten')
+  assert.deepEqual({namespace:fresh.namespace,key:fresh.key,open:fresh.open,scope:fresh.scope,generation:fresh.generation},{namespace:'group:'+canonical,key:canonical,open:true,scope:'source',generation:2})
+  assert.notEqual(fresh.request,oldAction.request);assert.equal(timers.size,1)
+  command({disclosureAck:{scope:oldAction.scope,namespace:oldAction.namespace,key:oldAction.key,ancestor:oldAction.ancestor,open:oldAction.open,request:oldAction.request}})
+  command({generation:3});await flush()
+  assert.equal(actions().at(-1).request,fresh.request,'the fresh canonical action still replays after the old ACK')
+  assert.equal(actions().at(-1).generation,3);assert.equal(timers.size,1)
+  command({generation:3,disclosureAck:{scope:fresh.scope,namespace:fresh.namespace,key:fresh.key,ancestor:fresh.ancestor,open:fresh.open,request:fresh.request}})
+  assert.equal(timers.size,0,'only the fresh exact action ACK settles its timer')
+  assert.equal(events.some(value=>value.kind==='viewer-error'),false)
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
 test('latest overlay requires manual upward intent and only mutates its own reader host',()=>{
  const attrs={},foreign={},host={setAttribute:(key,value)=>{attrs[key]=value}},other={setAttribute:(key,value)=>{foreign[key]=value}}
  const flags={},viewport={scrollTop:900,scrollHeight:1000,clientHeight:100,closest:()=>host,getAttribute:key=>flags[key]}
@@ -396,7 +496,7 @@ test('new transcript chunks preserve a scrolled-up reader and follow readers at 
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
-test('finite windows publish once and same-owner generation handoff replays one unacknowledged short tail before growth',async()=>{
+test('finite windows publish progressively and same-owner generation handoff replays one unacknowledged short tail before growth',async()=>{
  const previous=globalThis.requestAnimationFrame,frames=[],events=[];let incoming
  const viewport={scrollTop:0,scrollHeight:0,clientHeight:300}
  globalThis.requestAnimationFrame=callback=>frames.push(callback)
@@ -405,7 +505,7 @@ test('finite windows publish once and same-owner generation handoff replays one 
   const first=Buffer.from('{"text":"First admitted message"}\n'),tail=Buffer.from('{"text":"Short tail"}\n'),growth=Buffer.from('{"text":"Later growth"}\n')
   const chunk=(offset,bytes,final)=>({offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64'),final})
   incoming({stamp:'owner',generation:1,reset:0,chunk:chunk(0,first,false),follow:true})
-  await flush();assert.equal(events.filter(event=>event.kind==='viewer-progress').at(-1).through,first.length);assert.equal(events.filter(event=>event.kind==='viewer').length,0);assert.equal(frames.length,0)
+  await flush();assert.equal(events.filter(event=>event.kind==='viewer').at(-1).through,first.length);assert.deepEqual(events.filter(event=>event.kind==='viewer').at(-1).rows.map(row=>row.text),['First admitted message']);assert.equal(frames.length,1)
   incoming({stamp:'owner',generation:1,reset:null,chunk:chunk(first.length,tail,true),follow:true})
   // Retire the acknowledgement after JS has framed the old finite end. Growth
   // is deliberately a later chunk; replay keeps the original short boundary.

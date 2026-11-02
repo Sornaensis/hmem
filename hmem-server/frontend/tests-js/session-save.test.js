@@ -6,6 +6,81 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const session = bytes => ({id:'s',workspace:'w',state:'terminated',finalBytes:bytes.length,finalSha256:digest(bytes),revision:7})
 const chunk = (row,bytes,offset=0) => ({session:row,offset,nextOffset:offset+bytes.length,dataBase64:bytes.toString('base64')})
 
+test('scroll bursts coalesce heavy geometry at the latest position and report only real follow changes',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],events=[],listeners={};let incoming,queries=0,rects=0,readTop=null
+ const attrs={'data-viewer-owner':'owner','data-viewer-generation':'1','data-history-mode':'active','data-history-loading':'true','data-history-after':'100','data-history-latest':'100','data-render-more':'false'}
+ const viewport={scrollTop:900,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key]??null,setAttribute(){},getBoundingClientRect(){rects++;readTop=this.scrollTop;return{top:0,bottom:100,height:100}},querySelectorAll(){queries++;return[]},contains:node=>node===viewport}
+ const emit=(type,extra={})=>{for(const fn of listeners[type]||[])fn({type,target:viewport,isTrusted:true,...extra})}
+ globalThis.requestAnimationFrame=fn=>frames.push(fn)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(type,fn){(listeners[type]||=[]).push(fn)}},window:{},now:()=>0})
+  incoming({stamp:'owner',viewerScope:'source',generation:1,reset:0,chunk:null,follow:true});await flush()
+  for(let index=0;index<100;index++)emit('scroll')
+  assert.equal(queries,0);assert.equal(rects,0,'unchanged scroll bursts perform no synchronous subtree or record geometry scans')
+  assert.equal(frames.length,1)
+  frames.shift()();await flush()
+  assert.ok(queries>0&&queries<10);assert.ok(rects>0&&rects<10)
+  assert.equal(events.filter(value=>value.kind==='viewer-follow').length,0,'unchanged following state does not enter the Elm update path')
+  emit('wheel',{deltaY:-100});viewport.scrollTop=800;emit('scroll');await flush()
+  assert.equal(events.filter(value=>value.kind==='viewer-follow').at(-1)?.manualUp,true,'actual movement pauses follow before a queued frame or chunk')
+  const scans=queries,geometry=rects
+  for(let index=0;index<100;index++){viewport.scrollTop=800-index;emit('scroll')}
+  assert.equal(queries,scans);assert.equal(rects,geometry)
+  frames.splice(0).forEach(fn=>fn());await flush()
+  assert.equal(readTop,701,'the coalesced frame reads the latest coordinates rather than the first queued scroll')
+  assert.equal(events.filter(value=>value.kind==='viewer-follow').length,1)
+  incoming({stamp:'owner',viewerScope:'source',generation:2,reset:null,chunk:null,follow:false});attrs['data-viewer-generation']='2'
+  for(let index=0;index<100;index++)emit('scroll')
+  const before=queries
+  attrs['data-viewer-owner']='replacement';incoming({stamp:'replacement',viewerScope:'other-source',generation:3,reset:null,chunk:null,follow:true})
+  frames.splice(0).forEach(fn=>fn());await flush()
+  assert.equal(queries,before,'a retired queued owner/generation cannot inspect the replacement DOM')
+  assert.equal(events.filter(value=>value.kind==='viewer-follow').length,1)
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('a replacement reader keeps its first pre-resize anchor when another owner already queued the frame',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[];let incoming,resize,viewport,shiftA=0,shiftB=0
+ const view=(owner,top,shift)=>{
+  const attrs={'data-viewer-owner':owner,'data-viewer-generation':owner==='A'?'1':'2','data-history-mode':'active','data-history-loading':'true','data-history-after':'100','data-history-latest':'100'}
+  const node={scrollTop:top,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key]??null,setAttribute(){},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),querySelectorAll:selector=>selector==='[data-block-key]'?[block]:[]}
+  const block={getAttribute:key=>key==='data-block-key'?owner+'-block':null,getBoundingClientRect:()=>({top:300+shift()-node.scrollTop,bottom:400+shift()-node.scrollTop,height:100})}
+  return node
+ }
+ const first=view('A',100,()=>shiftA),second=view('B',200,()=>shiftB);viewport=first
+ globalThis.requestAnimationFrame=fn=>frames.push(fn)
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send(){}}}},{document:{getElementById:()=>viewport,addEventListener(){}},window:{ResizeObserver:class{constructor(fn){resize=fn}observe(){}disconnect(){}}},now:()=>0})
+  incoming({stamp:'A',viewerScope:'source-A',generation:1,reset:0,chunk:null,follow:false});resize()
+  shiftA=50;resize()
+  viewport=second;incoming({stamp:'B',viewerScope:'source-B',generation:2,reset:0,chunk:null,follow:false});resize()
+  shiftB=50;resize()
+  assert.equal(frames.length,1)
+  frames.shift()();await flush()
+  assert.equal(first.scrollTop,100,'retired A geometry cannot be applied to either reader')
+  assert.equal(second.scrollTop,250,'B uses its own first snapshot despite A owning the original queued resize')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
+test('coalesced source anchor changes remain meaningful when follow mode is unchanged',async()=>{
+ const previous=globalThis.requestAnimationFrame,frames=[],listeners={},events=[];let incoming,offset=100
+ const attrs={'data-viewer-owner':'owner','data-viewer-generation':'1','data-history-mode':'active','data-history-loading':'true','data-history-after':'1000','data-history-latest':'1000'}
+ const row={dataset:{get offset(){return String(offset)}}},leaf={dataset:{get fragmentPath(){return String(offset).padStart(19,'0')+':0000000:content:0'}},textContent:'source text',querySelector:()=>null,closest:selector=>selector==='.session-record'?row:null,getBoundingClientRect:()=>({top:10,bottom:30,height:20})}
+ const viewport={scrollTop:900,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key]??null,setAttribute(){},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),querySelectorAll:selector=>selector==='[data-fragment-path]'?[leaf]:[]}
+ globalThis.requestAnimationFrame=fn=>frames.push(fn)
+ const scroll=()=>{for(const fn of listeners.scroll||[])fn({type:'scroll',target:viewport})},paint=async()=>{frames.splice(0).forEach(fn=>fn());await flush()},updates=()=>events.filter(value=>value.kind==='viewer-follow')
+ try{
+  installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(type,fn){(listeners[type]||=[]).push(fn)}},window:{},now:()=>0})
+  incoming({stamp:'owner',viewerScope:'source',generation:1,reset:0,chunk:null,follow:true});scroll();await paint()
+  assert.equal(updates().at(-1).anchor,String(100).padStart(20,'0'));assert.equal(updates().at(-1).following,true)
+  const first=updates().length
+  for(let index=0;index<100;index++)scroll();await paint();assert.equal(updates().length,first,'the unchanged source anchor is deduplicated')
+  offset=200;for(let index=0;index<100;index++)scroll();assert.equal(updates().length,first);await paint()
+  assert.equal(updates().length,first+1);assert.equal(updates().at(-1).anchor,String(200).padStart(20,'0'));assert.equal(updates().at(-1).following,true)
+  incoming({stamp:'owner',viewerScope:'source',generation:1,reset:null,chunk:null,follow:true});scroll();await paint();assert.equal(updates().length,first+1,'same-lifetime commands preserve the accepted anchor fingerprint')
+ }finally{globalThis.requestAnimationFrame=previous}
+})
+
 test('tail delivery publishes complete intermediate records once while partial and stale chunks only advance safely',async()=>{
  const previousFrame=globalThis.requestAnimationFrame,previousParse=JSON.parse,events=[],frames=[];let incoming,parsed=0
  const first='{"text":"Intermediate λ😀"}',second='{"text":"Complete next occurrence"}'
@@ -147,7 +222,7 @@ test('sealed resize follows only the matching latest tail and preserves historic
    if(variant==='page')attrs['data-sealed-page-request']='11'
    if(variant==='render-request')attrs['data-render-request']='1'
    if(variant==='render-part')attrs['data-render-part']='7'
-   viewport.scrollHeight=2000;resize();await flush()
+   viewport.scrollHeight=2000;for(let index=0;index<100;index++)resize();if(variant==='latest')assert.equal(frames.length,1,'resize bursts share one geometry frame');frames.splice(0).forEach(fn=>fn());await flush()
    if(variant==='manual'||variant==='stale-active-manual')assert.ok(events.some(event=>event.kind==='viewer-follow'&&event.manualUp===true),'negative really starts in manual history')
    assert.equal(viewport.scrollTop,variant==='latest'?2000:top,variant)
   }finally{globalThis.requestAnimationFrame=previous}
@@ -313,15 +388,15 @@ test('owned tail positioning preserves follow through finite-window handoffs wit
   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document:{getElementById:()=>viewport,addEventListener(name,handler){listeners.set(name,[...(listeners.get(name)||[]),handler])}},window:{},now:()=>0})
   const bytes=Buffer.from('{"text":"Progressive tail"}\n')
   incoming({stamp:'owner',generation:1,reset:0,chunk:{offset:0,nextOffset:bytes.length,dataBase64:bytes.toString('base64'),final:true},direction:'tail',follow:true});paint();await flush()
-  emit('scroll');await flush();assert.equal(latestFollow().following,true,'following survives an incomplete logical tail while loading')
-  attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow().following,true,'the owned position survives the finite-window scheduling gap')
-  viewport.scrollHeight=1200;emit('scroll');await flush();assert.equal(latestFollow().following,true,'newly rendered rows cannot revoke follow before owned tail positioning')
+  emit('scroll');await flush();assert.equal(latestFollow(),undefined,'unchanged following through an incomplete tail needs no update')
+  attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow(),undefined,'the owned scheduling gap cannot manufacture a follow change')
+  viewport.scrollHeight=1200;emit('scroll');await flush();assert.equal(latestFollow(),undefined,'newly rendered rows cannot revoke follow before owned tail positioning')
   viewport.scrollHeight=1000
-  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:true});emit('scroll');await flush();assert.equal(latestFollow().manualUp,false,'a generation handoff cannot invent manual upward intent')
+  incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:true});emit('scroll');await flush();assert.equal(latestFollow(),undefined,'a generation handoff cannot invent manual upward intent')
   incoming({stamp:'owner',generation:2,reset:null,chunk:{offset:bytes.length,nextOffset:bytes.length*2,dataBase64:bytes.toString('base64'),final:true},direction:'tail',follow:true});paint();await flush()
   emit('wheel',{deltaY:-300});viewport.scrollTop=500;emit('scroll');await flush();assert.equal(latestFollow().following,false,'real above-tail intent pauses follow')
   incoming({stamp:'owner',generation:2,reset:null,chunk:null,direction:'tail',follow:false});viewport.scrollTop=900;attrs['data-history-loading']='true';emit('keydown',{key:'End'});emit('scroll');paint();await flush();assert.equal(latestFollow().manualUp,true,'End retains the manual latch until matching latest acknowledgment');assert.ok(events.some(event=>event.kind==='viewer-end'&&event.stamp==='owner'&&event.generation===2),'real scoped End seeks the logical document end after its publication frame')
-  incoming({stamp:'other',generation:3,reset:null,chunk:null,direction:'tail',follow:true});attrs['data-viewer-owner']='other';attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(latestFollow().manualUp,false,'a new selection starts following without inherited manual intent')
+  incoming({stamp:'other',generation:3,reset:null,chunk:null,direction:'tail',follow:true});attrs['data-viewer-owner']='other';attrs['data-history-loading']='false';emit('scroll');await flush();assert.equal(events.some(event=>event.kind==='viewer-follow'&&event.stamp==='other'&&event.manualUp),false,'a new selection starts following without inherited manual intent')
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
@@ -604,13 +679,13 @@ test('a tall side-cell marker cannot skip intervening cached presentation slices
    if(typeof direction==='string')emit('keydown',0,'Home')
    if(typeof direction==='string'&&direction.startsWith('cancelled Home'))emit('keydown',0,'PageUp')
    if(typeof direction==='string'&&direction.endsWith('late toggle'))emit('toggle')
-   attrs['data-history-loading']='false';if(typeof direction==='number')emit('wheel',100*direction);viewport.scrollTop+=backward?-10:10;emit('scroll');await flush()
+   attrs['data-history-loading']='false';if(typeof direction==='number')emit('wheel',100*direction);viewport.scrollTop+=backward?-10:10;emit('scroll');frames.splice(0).forEach(fn=>fn());await flush()
    const explicitHome=typeof direction==='string'&&direction.startsWith('Home')
    if(!explicitHome){
     assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'a near side column cannot admit an unrelated unmounted frontier')
     if(backward)gap.dataset.fragmentTo=String(Math.min(40,...admittedParts)-1)
     else gap.dataset.fragmentFrom=String(Math.max(40,...admittedParts)+1)
-    emit('scroll');await flush()
+    emit('scroll');frames.splice(0).forEach(fn=>fn());await flush()
    }
    assert.deepEqual(events.filter(event=>event.kind==='viewer-render').map(event=>event.part),[explicitHome?0:backward?39:41],'only a matching explicit Home seeks directly; ordinary/stale Home admits the adjacent slice')
    attrs['data-viewer-owner']='retired';emit('wheel',-100);emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'retired DOM cannot advance presentation')
@@ -629,15 +704,15 @@ test('a visible center leaf survives neighbor trimming and owned positioning can
  const emit=(type,deltaY)=>(listeners[type]||[]).forEach(handler=>handler({type,target:viewport,deltaY,isTrusted:true}))
  try{
   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:event=>events.push(event)}}},{document:{getElementById:()=>viewport,addEventListener(type,handler){(listeners[type]??=[]).push(handler)}},window:{},now:()=>0})
-  incoming({stamp:'owner',generation:1,reset:null,chunk:null,follow:false});emit('wheel',-100);viewport.scrollTop=700;emit('scroll');await flush();attrs['data-history-loading']='false';selection={isCollapsed:false,anchorNode:selectedToken};emit('wheel',100);viewport.scrollTop=710;emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'prefetch cannot replace the selected visible neighbor with another occurrence');selection=null;admitted=[40];gap.dataset.fragmentFrom='41';emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'an adaptive single-part window keeps its visible reading center');admitted=[39,40,41];gap.dataset.fragmentFrom='42';emit('scroll');await flush()
+  incoming({stamp:'owner',generation:1,reset:null,chunk:null,follow:false});emit('wheel',-100);viewport.scrollTop=700;emit('scroll');await flush();attrs['data-history-loading']='false';selection={isCollapsed:false,anchorNode:selectedToken};emit('wheel',100);viewport.scrollTop=710;emit('scroll');frames.splice(0).forEach(fn=>fn());await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'prefetch cannot replace the selected visible neighbor with another occurrence');selection=null;admitted=[40];gap.dataset.fragmentFrom='41';emit('scroll');frames.splice(0).forEach(fn=>fn());await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,0,'an adaptive single-part window keeps its visible reading center');admitted=[39,40,41];gap.dataset.fragmentFrom='42';emit('scroll');frames.splice(0).forEach(fn=>fn());await flush()
   assert.equal(events.filter(event=>event.kind==='viewer-render').at(-1).part,41)
   leaves[0].isConnected=false;shift=80;admitted=[40,41,42];gap.dataset.fragmentFrom='43';attrs['data-render-part']='41'
   for(let frame=0;frame<5;frame++)frames.splice(0).forEach(callback=>callback());await flush()
   assert.equal(viewport.scrollTop,790,'restore the same prepublication center leaf, not the removed oldest neighbor')
   assert.equal(leaves[1].getBoundingClientRect().top,10)
   assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'the owned restore cannot create a feedback chain')
-  viewport.scrollHeight=800;viewport.scrollTop=700;emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'a provable layout clamp is not continued movement')
-  viewport.scrollHeight=2000;viewport.scrollTop=720;emit('scroll');await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').at(-1).part,42,'continued native displacement in the same gesture remains admitted')
+  viewport.scrollHeight=800;viewport.scrollTop=700;emit('scroll');frames.splice(0).forEach(fn=>fn());await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'a provable layout clamp is not continued movement')
+  viewport.scrollHeight=2000;viewport.scrollTop=720;emit('scroll');frames.splice(0).forEach(fn=>fn());await flush();assert.equal(events.filter(event=>event.kind==='viewer-render').at(-1).part,42,'continued native displacement in the same gesture remains admitted')
  }finally{globalThis.requestAnimationFrame=previous}
 })
 
@@ -655,7 +730,7 @@ test('a render acknowledgement cannot undo continued native Home movement within
  try{
   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:event=>events.push(event)}}},{document:{getElementById:()=>viewport,addEventListener(type,handler){(listeners[type]??=[]).push(handler)}},window:{},now:()=>0})
   incoming({stamp:'owner',viewerScope:'owner',generation:1,reset:null,chunk:null,follow:false})
-  emit('keydown');viewport.scrollTop=600;emit('scroll');await flush()
+  emit('keydown');viewport.scrollTop=600;emit('scroll');frames.splice(0).forEach(fn=>fn());await flush()
   assert.equal(events.filter(event=>event.kind==='viewer-render').length,1,'an intermediate Home frame starts a presentation refill')
   if(publicationClamp){viewport.scrollHeight=600;viewport.scrollTop=500;leafTop=510}else {viewport.scrollTop=0;if(phase==='motion with geometry')leafTop=820}
   attrs['data-render-part']='0'
@@ -678,9 +753,12 @@ test('task/full presentation restoration yields to newer scroll, disclosure and 
    installSessionBridge({ports:{sessionBridgeCommand:{subscribe(fn){incoming=fn}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document,window:{},now:()=>0})
    incoming({stamp:'dock',viewerScope:'authorized-source',generation:1,reset:0,chunk:null})
    for(const listener of listeners.scroll)listener({type:'scroll',target:viewport})
+   for(const listener of listeners.click)listener({type:'click',target:{closest:selector=>selector==='.task-session-transcript a[href]'?{}:null}})
+   frames.splice(0).forEach(fn=>fn())
    disclosure=node();viewport=view('full')
    incoming({stamp:'full',viewerScope:'authorized-source',preservePresentation:true,continueViewer:continuing,generation:2,reset:continuing?null:0,chunk:null,publication:{request:8,pending:!continuing}})
-   assert.equal(frames.length,1)
+   assert.equal(frames.length,2)
+   frames.shift()() // Retired pre-handoff continuity cannot inspect the new owner.
    if(change==='up')viewport.scrollTop=-20
    if(change==='down')viewport.scrollTop=20
    if(change==='toggle')for(const listener of listeners.pointerdown)listener({type:'pointerdown',target:disclosure,isTrusted:true})
@@ -710,6 +788,7 @@ test('handoff positioning fences the earlier continuity frame and has a finite m
   installSessionBridge({ports:{sessionBridgeCommand:{subscribe(callback){incoming=callback}},sessionBridgeEvent:{send:value=>events.push(value)}}},{document,window:{}})
   incoming({stamp:'dock',viewerScope:'same',generation:1,chunk:null,reset:0,follow:false})
   for(const callback of listeners.scroll)callback({type:'scroll',target:viewport})
+  for(const callback of listeners.click)callback({type:'click',target:{closest:selector=>selector==='.task-session-transcript a[href]'?{}:null}})
   viewport={...viewport,scrollTop:0};attrs['data-viewer-owner']=missing===true?'not-mounted':'full';attrs['data-viewer-generation']='2';attrs['data-history-loading']='false'
   incoming({stamp:'full',viewerScope:'same',preservePresentation:true,continueViewer:false,generation:2,chunk:null,reset:0,follow:false,publication:{request:8,pending:true}})
   if(missing==='input')for(const callback of listeners.keydown)callback({type:'keydown',target:viewport,key:'Shift',isTrusted:true})
@@ -745,9 +824,13 @@ test('presentation snapshots scan admitted disclosures once and ignore unrelated
   for(const type of ['click','scroll','toggle'])for(const listener of listeners[type])listener({type,target:{closest:()=>null}})
   assert.equal(queries,0,'outside-viewer activity does not snapshot the admitted DOM')
   for(const listener of listeners.scroll)listener({type:'scroll',target:viewport})
+  assert.equal(queries,0,'native scroll snapshots wait for the shared geometry frame')
+  frames.shift()()
   assert.equal(queries,1);assert.equal(keys,1200,'two constant-time key reads per admitted detail')
   viewport=view('full');viewport.scrollTop=0
   incoming({stamp:'full',viewerScope:'source',continueViewer:true,generation:2,reset:null,chunk:null})
+  frames.shift()()
+  assert.equal(queries,1,'the retired queued owner cannot scan the replacement')
   frames.shift()()
   assert.equal(queries,2);assert.equal(keys,2400);assert.equal(nodes[599].open,true)
  }finally{globalThis.requestAnimationFrame=previous}

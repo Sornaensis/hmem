@@ -170,7 +170,7 @@ export function updateLatestOverlay(viewport,logicalEnd,manualUp) {
   if(bounds&&records)host.style?.setProperty('--session-latest-bottom',Math.max(10,bounds.bottom-Math.min(bounds.bottom,records.bottom)+12)+'px')
 }
 
-export function createSealedViewer({send,fetchArchive,document,window,workerFactory=()=>new Worker(new URL('./session-archive-worker.js',import.meta.url),{type:'module'}),cleanupMs=10000,custodyFactory=acquireArchiveCustody,deleteStage=deleteArchiveStage,scrollIntent=createReaderScrollIntent(),getActivePosition=()=>null}) {
+export function createSealedViewer({send,fetchArchive,document,window,workerFactory=()=>new Worker(new URL('./session-archive-worker.js',import.meta.url),{type:'module'}),cleanupMs=10000,custodyFactory=acquireArchiveCustody,deleteStage=deleteArchiveStage,scrollIntent=createReaderScrollIntent(),getActivePosition=()=>null,requestViewport}) {
   let active=null,pending=null,sequence=0,authority=0,blocked=false,stopped='',authorityFence='',blockedNotice='',domEpoch='',indexRetry=''
   const clear=owned=>{
     if(!owned || active!==owned || owned.domCleared)return
@@ -750,6 +750,15 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     else if(action==='position'){const input=document.getElementById('sealed-position');void page(owned,{offset:input?.value || '0'})}
   })
   let boundary=''
+  let viewportQueued=false
+  const queueViewport=()=>{
+    if(requestViewport){requestViewport();return}
+    if(viewportQueued)return
+    const owned=active,viewport=document.getElementById?.('session-records')
+    if(!window.requestAnimationFrame){if(viewport)inspectSealedBoundary({target:viewport});return}
+    viewportQueued=true
+    window.requestAnimationFrame(()=>{viewportQueued=false;if(owned===active&&viewport===document.getElementById?.('session-records'))inspectSealedBoundary({target:viewport})})
+  }
   for(const name of ['wheel','touchstart','touchmove','pointerdown','keydown'])document.addEventListener(name,domEvent=>{
     const viewport=document.getElementById?.('session-records')
     const button=domEvent.target?.closest?.('.session-jump-latest')
@@ -761,7 +770,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       if(active.seekStartIntent===active.viewportIntent)boundary=''
       const forward=['ArrowDown','PageDown','End',' '],backward=['ArrowUp','PageUp','Home']
       const gesture=name==='wheel'&&typeof domEvent.deltaY==='number'&&domEvent.deltaY!==0 || name==='touchmove' || name==='pointerdown'&&domEvent.target===viewport || name==='keydown'&&(forward.includes(domEvent.key)||backward.includes(domEvent.key))
-      if(gesture){active.handoff=null;active.boundaryGesture=active.viewportIntent;active.boundaryDirection=name==='wheel'?(domEvent.deltaY<0?'previous':'next'):name==='keydown'?(backward.includes(domEvent.key)?'previous':'next'):'';window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:viewport}))}
+      if(gesture){active.handoff=null;active.boundaryGesture=active.viewportIntent;active.boundaryDirection=name==='wheel'?(domEvent.deltaY<0?'previous':'next'):name==='keydown'?(backward.includes(domEvent.key)?'previous':'next'):'';queueViewport()}
     }
   },true)
   const inspectSealedBoundary=domEvent=>{
@@ -816,7 +825,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     if(direction==='previous')void page(owned,{before:fill?viewport.getAttribute('data-sealed-scan-first') || owned.first:viewport.getAttribute('data-sealed-older-boundary') || owned.first,continuity:fill?'fill':'older'})
     else void page(owned,{after:viewport.getAttribute('data-sealed-newer-boundary') || owned.last,continuity:'newer'})
   }
-  document.addEventListener('scroll',inspectSealedBoundary,true)
+  document.addEventListener('scroll',domEvent=>{if(domEvent.target?.id==='session-records'&&active){if(!requestViewport)scrollIntent.inspect(domEvent.target,false);queueViewport()}},true)
   document.addEventListener('toggle',domEvent=>{
     const node=domEvent.target,owned=active,key=node.getAttribute?.('data-sealed-key')
     if(!key || !owned || !current(owned) || node.getAttribute('data-sealed-owner')!==owned.config.stamp)return
@@ -830,7 +839,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       // while a newer verified page waits for publication. Its body cannot
       // acquire an acknowledgement for a piece the accepted page evicted.
       if(admitted&&node.open&&!key.startsWith('group:')&&!owned.pagePending&&!owned.pageAwaiting&&!owned.followPending&&!owned.markdownBusy&&!owned.latestJump)return hydrateBody(owned,key,0)
-      window.requestAnimationFrame?.(()=>inspectSealedBoundary({target:document.getElementById?.('session-records')}))
+      queueViewport()
     }).catch(error=>failure(owned,error))
   },true)
   window.addEventListener?.('pagehide',()=>{pending=null;clear(active);void retire(active)})
@@ -854,7 +863,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         if(Number.isSafeInteger(config?.latestRequest)&&config.latestRequest>=0&&active.latestCommand!==config.latestRequest)beginLatest(active,config.latestRequest)
         if(config?.latestRequest===-1)active.latestJump=null
         acknowledgeLatest(active)
-        const owner=active;window.requestAnimationFrame?.(()=>{if(current(owner))refreshSealedLatest(owner)})
+        queueViewport()
       }
     },
     retireAuthority(){authorityFence=active?.config.stamp || '';authority++;pending=null;if(active){clear(active);event(active,'cancelled');void retire(active)}},
@@ -915,10 +924,11 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   const send = (value,current=()=>true) => queueMicrotask(()=>{if(current())app.ports.sessionBridgeEvent.send(value)})
   const scrollIntent=createReaderScrollIntent()
   let activeReadingPosition=null
-  const sealed=createSealedViewer({send,fetchArchive,document,window,workerFactory,scrollIntent,getActivePosition:scope=>activeReadingPosition?.scope===readerScopeKey(scope)&&activeReadingPosition.intent===latestIntent?activeReadingPosition:null})
+  const sealed=createSealedViewer({send,fetchArchive,document,window,workerFactory,scrollIntent,requestViewport:()=>scheduleContinuity(),getActivePosition:scope=>activeReadingPosition?.scope===readerScopeKey(scope)&&activeReadingPosition.intent===latestIntent?activeReadingPosition:null})
   let heartbeatKey = ''
   let viewerScope = '', presentation = null
   let historyTransition = false, boundaryKey = '', restoreRevision = 0, resizeViewport=null, resizeSnapshot=null, resizeReady=false, lastFollowing=false, boundaryIntent=0
+  let followReported=null,pendingResize=null
   let disclosures = new Map()
   const disclosureTargets=new WeakMap()
   const disclosureActions=new Map()
@@ -1066,13 +1076,14 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(handoffPosition&&handoffPosition.owner===viewerStamp&&handoffPosition.intent===viewerIntent)return
     const returning=event.type==='click' && (event.target?.closest?.('.task-session-transcript a[href]') || event.target?.closest?.('button.tab')?.textContent?.trim()==='Projects')
     if(!returning && !(event.type==='scroll' && event.target===viewport) && !(event.type==='toggle' && viewport.contains?.(event.target)))return
-    rememberActivePosition(viewport)
+    const reading=rememberActivePosition(viewport)
     const box=viewport.getBoundingClientRect?.(),leaf=box?[...viewport.querySelectorAll('[data-fragment-path]')].find(node=>{const r=node.getBoundingClientRect();return !node.querySelector('[data-history-gap],[data-body-gap],[data-sealed-body-needed]')&&visibleConversationNode(node,viewport)&&r.bottom>box.top&&r.top<box.bottom}):null
     presentation={scope:viewerScope,top:viewport.scrollTop,point:leaf?visibleTextPoint(viewport,leaf):null,disclosures:snapshotDisclosures(viewport.querySelectorAll('details'))}
+    return reading
   }
   // One bounded snapshot holds only position/disclosure flags, never payloads.
   // Capture before route handlers replace the task/full-session DOM.
-  for(const event of ['click','scroll','toggle'])document.addEventListener(event,rememberPresentation,true)
+  for(const event of ['click','toggle'])document.addEventListener(event,rememberPresentation,true)
   document.addEventListener('toggle',event=>{
     const viewport=document.getElementById?.('session-records'),node=event.target
     if(viewport?.getAttribute?.('data-history-mode')!=='active'||viewport.getAttribute('data-viewer-owner')!==viewerStamp||viewerStamp===disclosureRetiredOwner||!viewport.contains?.(node))return
@@ -1118,7 +1129,16 @@ export function installSessionBridge(app, { document = globalThis.document, wind
   // anchoring. Actual input/disclosure events own intent; the position guard
   // below also detects later programmatic scrolling in either direction.
   for(const event of ['click','toggle','wheel','touchstart','touchmove','pointerdown','keydown']) document.addEventListener(event,noteViewerIntent,true)
-  const inspectBoundary = event => {
+  const reportFollow=(viewport,manual,trackAnchor=false,position)=>{
+    if(pendingEnd||latestJump||viewport.getAttribute('data-latest-pending')==='true')return
+    const sameMode=followReported?.stamp===viewerStamp&&followReported.scope===viewerScope&&followReported.generation===generation&&followReported.manual===manual&&followReported.following===!manual
+    if(sameMode&&!trackAnchor)return
+    const reading=position===undefined?rememberActivePosition(viewport):position,anchor=reading?.anchor ?? followReported?.anchor
+    if(sameMode&&anchor===followReported.anchor)return
+    followReported={stamp:viewerStamp,scope:viewerScope,generation,manual,following:!manual,anchor}
+    send({kind:'viewer-follow',stamp:viewerStamp,generation,manualUp:manual,following:!manual,...(reading || {})})
+  }
+  const inspectBoundary = (event,position) => {
     const viewport=document.getElementById?.('session-records')
     if(!viewport || (event && event.target!==viewport) || viewport.getAttribute?.('data-viewer-owner')!==viewerStamp)return
     const attr=name=>viewport.getAttribute?.('data-history-'+name)
@@ -1139,8 +1159,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(pendingEnd||latestJump||viewport.getAttribute('data-latest-pending')==='true')return
     // Replacing rows can grow the DOM before the owned tail RAF runs. An
     // unchanged, intent-stamped position still belongs to that handoff.
-    const reading=rememberActivePosition(viewport)
-    if(event || manual===lastFollowing)send({kind:'viewer-follow',stamp:viewerStamp,generation,manualUp:manual,following:!manual,...(reading || {})})
+    reportFollow(viewport,manual,true,position)
     if(attr('loading')==='true')return
     if(activeRenderPending&&(activeRenderPending.stamp!==viewerStamp||activeRenderPending.generation!==generation))activeRenderPending=null
     if(activeRenderPending)return
@@ -1185,16 +1204,23 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     const closedGroups=snapshotDisclosures(viewport.querySelectorAll?.('[data-group-key]') || []).filter(([,open])=>!open).map(([key])=>key.slice(6)).slice(0,200)
     boundaryKey=key;boundaryIntent=viewerIntent;seekStartIntent=null;send({kind:'viewer-boundary',stamp:viewerStamp,generation,edge,fill,anchor:anchor?.padStart(20,'0') || '',fragmentAnchor:gap?'':leaf?.dataset.fragmentPath || '',heights,closedGroups,...(gap?{before:Number(gapBefore),after:Number(gapAfter),fraction:gapFraction,direction:gapDirection}:{})})
   }
-  let continuityQueued=false
-  const scheduleContinuity=()=>{
-    if(continuityQueued)return
+  let continuityQueued=false,continuityTicket=null,continuityScroll=false
+  const scheduleContinuity=(scroll=false)=>{
     const ownedViewport=document.getElementById?.('session-records')
-    if(!ownedViewport?.getBoundingClientRect || !ownedViewport?.querySelectorAll || typeof requestAnimationFrame!=='function')return
+    if(!ownedViewport?.querySelectorAll || typeof requestAnimationFrame!=='function')return
+    continuityTicket={viewport:ownedViewport,stamp:viewerStamp,scope:viewerScope,generation,mode:ownedViewport.getAttribute?.('data-history-mode')}
+    continuityScroll=continuityScroll||scroll
+    if(continuityQueued)return
     continuityQueued=true
     requestAnimationFrame(()=>{
-      continuityQueued=false
+      const ticket=continuityTicket,snapshot=continuityScroll
+      continuityQueued=false;continuityTicket=null;continuityScroll=false
       const viewport=document.getElementById?.('session-records')
-      if(viewport?.getAttribute?.('data-history-mode')==='active')inspectBoundary()
+      if(viewport!==ticket.viewport||viewerStamp!==ticket.stamp||viewerScope!==ticket.scope||generation!==ticket.generation||viewport.getAttribute?.('data-viewer-owner')!==ticket.stamp||viewport.getAttribute?.('data-history-mode')!==ticket.mode)return
+      restoreResize()
+      const position=snapshot?rememberPresentation({type:'scroll',target:viewport}):ticket.mode==='active'?rememberActivePosition(viewport):null
+      captureResize()
+      if(ticket.mode==='active')inspectBoundary(undefined,position)
       else sealed.inspectViewport?.(viewport)
     })
   }
@@ -1203,10 +1229,16 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(records.some(record=>record.target?.closest?.('.session-viewer') || [...(record.addedNodes || [])].some(node=>node.matches?.('.session-viewer') || node.querySelector?.('.session-viewer'))))scheduleContinuity()
   }):null
   continuityObserver?.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['data-history-error','data-history-loading','data-history-before','data-history-after','data-history-scan-before','data-sealed-page-request','data-render-request','data-render-part','open']})
-  document.addEventListener('scroll',inspectBoundary,true)
+  document.addEventListener('scroll',event=>{
+    const viewport=document.getElementById?.('session-records')
+    if(event.target!==viewport||viewport?.getAttribute?.('data-viewer-owner')!==viewerStamp)return
+    const manual=scrollIntent.inspect(viewport,false)
+    if(viewport.getAttribute('data-history-mode')==='active')reportFollow(viewport,manual)
+    scheduleContinuity(true)
+  },true)
   for(const name of ['wheel','keydown'])document.addEventListener(name,event=>{
     const viewport=document.getElementById?.('session-records')
-    if(viewport && (event.target===viewport || viewport.contains?.(event.target)))requestAnimationFrame(()=>inspectBoundary({target:viewport}))
+    if(viewport && (event.target===viewport || viewport.contains?.(event.target)))scheduleContinuity()
   },true)
   const sealedResizeWindow = viewport => JSON.stringify(['data-sealed-dom-owner','data-sealed-dom-load','data-sealed-page-request','data-render-request','data-render-part'].map(key=>viewport.getAttribute(key)))
   const sealedResizeFollowing = viewport => viewport.getAttribute('data-sealed-dom-owner')===viewerStamp && viewport.getAttribute('data-sealed-dom-load')===String(generation) && viewport.getAttribute('data-following')==='true' && viewport.getAttribute('data-logical-latest')==='true' && !scrollIntent.manual()
@@ -1217,21 +1249,23 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     resizeSnapshot={stamp:viewerStamp,generation,intent:viewerIntent,mode,sealedWindow:mode==='sealed'?sealedResizeWindow(viewport):null,sealedFollowing:mode==='sealed'&&sealedResizeFollowing(viewport),top:viewport.scrollTop,tail:viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<=48,
       anchors:[...(viewport.querySelectorAll?.('[data-block-key]') || [])].filter(node=>node.getBoundingClientRect().bottom>bounds.top).slice(0,8).map(node=>({key:node.getAttribute('data-block-key'),top:node.getBoundingClientRect().top-bounds.top}))}
   }
-  document.addEventListener('scroll',event=>{if(event.target===document.getElementById?.('session-records'))captureResize()},true)
-  const resizeObserver=window.ResizeObserver?new window.ResizeObserver(()=>{
-    if(!resizeReady){resizeReady=true;captureResize();return}
-    const saved=resizeSnapshot,viewport=resizeViewport
-    if(!saved || saved.stamp!==viewerStamp || saved.generation!==generation || saved.intent!==viewerIntent || viewport!==document.getElementById?.('session-records') || saved.mode!==viewport.getAttribute('data-history-mode') || (saved.mode==='sealed'&&saved.sealedWindow!==sealedResizeWindow(viewport)) || !ownedPositionUnchanged(viewport,saved.top))return
+  const restoreResize=()=>{
+    const queued=pendingResize;pendingResize=null
+    if(!queued)return
+    const {saved,viewport}=queued
+    if(!saved || queued.scope!==viewerScope || saved.stamp!==viewerStamp || saved.generation!==generation || saved.intent!==viewerIntent || viewport!==document.getElementById?.('session-records') || saved.mode!==viewport.getAttribute('data-history-mode') || (saved.mode==='sealed'&&saved.sealedWindow!==sealedResizeWindow(viewport)) || !ownedPositionUnchanged(viewport,saved.top))return
     if(saved.tail&&(saved.mode==='sealed'?saved.sealedFollowing&&sealedResizeFollowing(viewport):lastFollowing))positionAtTail(viewport)
     else {
       const bounds=viewport.getBoundingClientRect(),nodes=[...viewport.querySelectorAll('[data-block-key]')]
       for(const anchor of saved.anchors){const node=nodes.find(node=>node.getAttribute('data-block-key')===anchor.key);if(node){viewport.scrollTop+=node.getBoundingClientRect().top-bounds.top-anchor.top;break}}
       scrollIntent.positioned()
     }
-    captureResize()
-    inspectActiveLatest()
-    scheduleContinuity()
     if(viewport?.getAttribute?.('data-history-mode')==='sealed')updateLatestOverlay(viewport,viewport.getAttribute('data-logical-latest')==='true')
+  }
+  const resizeObserver=window.ResizeObserver?new window.ResizeObserver(()=>{
+    if(!resizeReady){resizeReady=true;captureResize();return}
+    if(!pendingResize||pendingResize.viewport!==resizeViewport||pendingResize.scope!==viewerScope||pendingResize.saved?.stamp!==viewerStamp||pendingResize.saved?.generation!==generation||pendingResize.saved?.mode!==resizeSnapshot?.mode||pendingResize.saved?.sealedWindow!==resizeSnapshot?.sealedWindow)pendingResize={saved:resizeSnapshot,viewport:resizeViewport,scope:viewerScope}
+    scheduleContinuity()
   }):null
   async function retireSave(owned = activeSave) {
     if (!owned) return true
@@ -1512,7 +1546,10 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     }else latestJump=null
     if(command.latest)requestAnimationFrame(()=>requestAnimationFrame(inspectActiveLatest))
     const currentViewport=document.getElementById?.('session-records')
-    lastFollowing=command.follow && currentViewport?.getAttribute?.('data-history-mode')!=='sealed'
+    const nextFollowing=command.follow && currentViewport?.getAttribute?.('data-history-mode')!=='sealed'
+    if(followReported?.stamp!==viewerStamp||followReported?.scope!==viewerScope||followReported?.generation!==generation)followReported={stamp:viewerStamp,scope:viewerScope,generation,manual:scrollIntent.manual(),following:nextFollowing}
+    else if(nextFollowing!==lastFollowing)followReported={...followReported,manual:scrollIntent.manual(),following:nextFollowing}
+    lastFollowing=nextFollowing
     if(resizeObserver && currentViewport!==resizeViewport){resizeObserver.disconnect();resizeViewport=currentViewport;resizeSnapshot=null;resizeReady=false;if(currentViewport){captureResize();resizeObserver.observe(currentViewport)}}
     if (command.reset !== null) {
       const anchors=(framer?.readerAnchors() || []).filter(row=>row.offset>=command.reset && row.offset<(command.windowEnd ?? Infinity))

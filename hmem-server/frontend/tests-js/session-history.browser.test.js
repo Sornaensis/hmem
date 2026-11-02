@@ -35,6 +35,39 @@ const shortTailTranscript=()=>Buffer.from([
  ...Array.from({length:20},(_,i)=>JSON.stringify({type:'response_item',payload:{type:'function_call',name:'inspect',call_id:`short-tail-${i}`,arguments:JSON.stringify({value:'x'.repeat(350)})}})),
 ].join('\n')+'\n')
 
+for(const sealed of [false,true])test(`scroll bursts coalesce production ${sealed?'sealed':'active'} reader scans without repeated follow updates`,{timeout:45000},async()=>{
+ const raw=Buffer.from(Array.from({length:24},(_,index)=>JSON.stringify({text:`Scroll geometry ${index}. `+'Readable context. '.repeat(8)})+'\n').join('')),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
+ try{
+  await traceSessionBridge(h)
+  await page.addInitScript(()=>{window.scrollBurstFollow=0;window.sessionBridgeDispatch=(send,value)=>{if(value.kind==='viewer-follow'||value.kind==='sealed-follow')window.scrollBurstFollow++;send(value)}})
+  if(sealed)await routeVerifiedArchive(h,raw)
+  await h.start();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+(sealed?h.saved.id:h.active.id));await page.locator('.session-record').first().waitFor();await h.idle()
+  const receipt=await page.locator('#session-records').evaluate(async node=>{
+   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))
+   const mounted=node.querySelectorAll('.session-record').length,counts={queries:0,rects:0,textRects:0,scalars:0},qsa=node.querySelectorAll,elementRect=Element.prototype.getBoundingClientRect,textRect=Range.prototype.getBoundingClientRect
+   const scalarKeys=['scrollTop','scrollHeight','clientHeight'],follow=window.scrollBurstFollow
+   node.querySelectorAll=function(...args){counts.queries++;return qsa.apply(this,args)}
+   Element.prototype.getBoundingClientRect=function(...args){if(this===node||node.contains(this))counts.rects++;return elementRect.apply(this,args)}
+   Range.prototype.getBoundingClientRect=function(...args){if(node.contains(this.commonAncestorContainer))counts.textRects++;return textRect.apply(this,args)}
+   for(const key of scalarKeys){let proto=node,descriptor;while(proto&&!descriptor){descriptor=Object.getOwnPropertyDescriptor(proto,key);proto=Object.getPrototypeOf(proto)}Object.defineProperty(node,key,{configurable:true,get(){counts.scalars++;return descriptor.get.call(this)},set:descriptor.set?function(value){descriptor.set.call(this,value)}:undefined})}
+   try{
+    for(let index=0;index<100;index++)node.dispatchEvent(new Event('scroll'))
+    const before={...counts}
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))
+    return {mounted,before,after:{...counts},follow:window.scrollBurstFollow-follow}
+   }finally{delete node.querySelectorAll;for(const key of scalarKeys)delete node[key];Element.prototype.getBoundingClientRect=elementRect;Range.prototype.getBoundingClientRect=textRect}
+  })
+  assert.equal(receipt.before.queries,0);assert.equal(receipt.before.rects,0);assert.equal(receipt.before.textRects,0)
+  assert.ok(receipt.before.scalars>0,'cheap scalar reads keep native motion synchronous')
+  // This flat one-fragment-per-record fixture has at most twelve row passes
+  // (reading/presentation 4, resize 1, boundary 7), plus eight resize anchors
+  // and fixed viewport/leaf work. It is not a bound for arbitrary rich content.
+  assert.ok(receipt.after.queries>0&&receipt.after.queries<20,JSON.stringify(receipt));assert.ok(receipt.after.rects>0&&receipt.after.rects<=12*receipt.mounted+64,JSON.stringify(receipt))
+  assert.equal(receipt.follow,0,'unchanged follow intent never enters the Elm update path');assert.deepEqual(h.errors,[])
+  console.log(JSON.stringify({phase:'coalesced-scroll',mode:sealed?'sealed':'active',...receipt}))
+ }finally{await h.close()}
+})
+
 test('live recovery renders complete intermediate history before its next serialized range returns',{timeout:45000},async()=>{
  const prefix=Array.from({length:120},(_,i)=>JSON.stringify({text:`Intermediate history ${i}. `+'Readable context. '.repeat(100)})+'\n').join('')
  const raw=Buffer.from(prefix+JSON.stringify({text:'Final large occurrence. '+'x'.repeat(180000)})+'\n'),h=await openSessionExplorer({transcriptBytes:raw}),{page}=h
@@ -209,7 +242,7 @@ for(const distance of [320,1200])test(`continuous contract dock and workspace pr
   const readPoint=()=>viewport().evaluate((node,point)=>{const leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>leaf.dataset.fragmentPath===point.path);if(!leaf)throw Error('Selected source fragment is not mounted');const walker=document.createTreeWalker(leaf,4);let text=walker.nextNode(),offset=point.offset;while(text&&offset>text.length){offset-=text.length;text=walker.nextNode()}if(!text)throw Error('Selected source text offset is missing');const range=document.createRange();range.setStart(text,offset);range.setEnd(text,Math.min(text.length,offset+1));const r=range.getBoundingClientRect(),box=node.getBoundingClientRect();return {character:range.toString(),top:r.top-box.top,visible:r.height>0&&r.bottom>box.top&&r.top<box.bottom&&r.right>box.left&&r.left<box.right,scrollTop:node.scrollTop,maximum:node.scrollHeight-node.clientHeight,manual:node.closest('.session-viewer').dataset.manualUp}},selectedPoint)
   const beforePoint=await readPoint();assert.equal(beforePoint.visible,true)
   const oldHandoff=await viewport().evaluate(node=>{const box=node.getBoundingClientRect(),leaf=[...node.querySelectorAll('[data-fragment-path]')].find(leaf=>{const r=leaf.getBoundingClientRect();return !leaf.querySelector('[data-fragment-path],[data-history-gap]')&&r.height&&r.bottom>box.top&&r.top<box.bottom});return {attrs:{...node.dataset},top:node.scrollTop,height:node.clientHeight,scroll:node.scrollHeight,reading:leaf?{path:leaf.dataset.fragmentPath,text:leaf.textContent.slice(0,50),top:leaf.getBoundingClientRect().top-box.top}:null}})
-  await card.getByRole('link',{name:'Open full session ↗'}).click();await page.locator('.session-detail').waitFor();await h.idle()
+  await card.locator('.task-session-open-full').click();await page.locator('.session-detail').waitFor();await h.idle()
   const afterPoint=await readPoint(),wanted=afterPoint.scrollTop+afterPoint.top-beforePoint.top,clamped=wanted>afterPoint.maximum+3&&Math.abs(afterPoint.scrollTop-afterPoint.maximum)<=3||wanted< -3&&afterPoint.scrollTop<=3
   assert.equal(afterPoint.character,beforePoint.character);assert.equal(afterPoint.visible,true);assert.equal(afterPoint.manual,'true');assert.ok(Math.abs(afterPoint.top-beforePoint.top)<=3||clamped,JSON.stringify({beforePoint,afterPoint,clamped,selectedPoint}));if(distance===1200)assert.equal(clamped,false,'the genuinely historical witness has room to preserve its exact character pixel')
   assert.equal(await jump().isVisible(),afterPoint.scrollTop<afterPoint.maximum-4,'only a handoff that actually still trails latest needs the overlay');assert.equal(await conversationPaging(page).count(),0)
@@ -331,6 +364,7 @@ test('continuous contract backfills and refetches a collapsed run beyond framer 
  try{
   await h.start();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.active.id)
   await until(async()=>await viewport().evaluate(node=>node.dataset.historyLoading==='false'&&Number(node.dataset.historyScanBefore)===0))
+  await until(async()=>await viewport().evaluate(node=>node.dataset.historyLoading==='false'&&node.textContent.includes('Before the long activity run.')))
   const collapsed=await viewport().evaluate(node=>({rows:node.querySelectorAll('.session-record').length,summary:node.querySelector('.session-activity-summary')?.textContent,gaps:node.querySelectorAll('[data-history-gap="source"]').length,prose:node.textContent.includes('Before the long activity run.'),manual:node.closest('.session-viewer').dataset.manualUp}))
   assert.ok(collapsed.prose,'automatic scan traverses the collapsed run to older readable prose: '+JSON.stringify(collapsed))
   assert.ok(collapsed.rows<=200&&collapsed.gaps<=201,'payload and omitted-span metadata stay bounded')
@@ -540,7 +574,7 @@ test('Jump to latest is shared by dock and workspace and reacquires the logical 
  try{
   await h.start();await h.idle();const card=page.locator('#entity-'+h.fixture.tasks[0].id);await until(()=>card.locator('.task-sessions-icon').isEnabled());await card.locator('.task-sessions-icon').click();await page.locator('.session-record').first().waitFor()
   for(const surface of ['dock','workspace']){
-   if(surface==='workspace'){await card.getByRole('link',{name:'Open full session ↗'}).click();await page.locator('.session-detail').waitFor()}
+   if(surface==='workspace'){await card.locator('.task-session-open-full').click();await page.locator('.session-detail').waitFor()}
    await until(async()=>!(await state(page)).loading)
    await h.idle();await until(atEnd)
    assert.equal(await latest().isVisible(),false)

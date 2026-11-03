@@ -30,6 +30,8 @@ module HMem.DB.Auth
   , resolveUserPrincipalByAuthSubject
   , createAuthSession
   , resolveAuthSessionPrincipal
+  , resolveAuthSessionAuthentication
+  , revalidateCredentialOrigin
   , authSessionCsrfMatches
   , revokeAuthSession
   , listWorkspaceMemberships
@@ -69,6 +71,7 @@ import GHC.Generics (Generic)
 
 import HMem.DB.Pool (runSession)
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
+import HMem.Auth.CredentialOrigin
 
 ------------------------------------------------------------------------
 -- Roles and permissions
@@ -301,6 +304,48 @@ createAuthSession pool userId sessionToken csrfToken expiresAt =
 resolveAuthSessionPrincipal :: Pool Hasql.Connection -> Text -> IO (Maybe Principal)
 resolveAuthSessionPrincipal pool sessionToken =
   runSession pool $ Session.statement (accessTokenHash sessionToken) authSessionPrincipalStatement
+
+-- Grant renewal is deliberately SELECT-only: a streamed part is not session use.
+resolveAuthSessionAuthentication :: Pool Hasql.Connection -> Text -> IO (Maybe ResolvedRequestAuth)
+resolveAuthSessionAuthentication pool sessionToken = runSession pool $ Session.statement (accessTokenHash sessionToken)
+  (browserAuthenticationStatement "s.session_hash=$1" (Enc.param (Enc.nonNullable Enc.text)))
+
+revalidateCredentialOrigin :: Pool Hasql.Connection -> CredentialOrigin -> IO (Maybe ResolvedRequestAuth)
+revalidateCredentialOrigin pool origin = case origin of
+  AccessTokenOrigin identifier -> runSession pool $ Session.statement identifier patAuthenticationByIdStatement
+  BrowserSessionOrigin identifier -> runSession pool $ Session.statement identifier
+    (browserAuthenticationStatement "s.id=$1" (Enc.param (Enc.nonNullable Enc.uuid)))
+  _ -> pure Nothing
+
+browserAuthenticationStatement :: ByteString -> Enc.Params a -> Statement.Statement a (Maybe ResolvedRequestAuth)
+browserAuthenticationStatement predicate encoder = Statement.Statement
+  ("SELECT s.id,u.id,COALESCE(u.display_name,u.email,u.auth_subject,u.id::text),s.expires_at FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE "
+    <> predicate <> " AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND u.disabled_at IS NULL") encoder decoder True
+  where
+    decoder = Dec.rowMaybe $ do
+      identifier <- Dec.column (Dec.nonNullable Dec.uuid)
+      userId <- Dec.column (Dec.nonNullable Dec.uuid)
+      label <- Dec.column (Dec.nonNullable Dec.text)
+      expires <- Dec.column (Dec.nonNullable Dec.timestamptz)
+      pure (ResolvedRequestAuth (Principal ActorUser (UUID.toText userId) label (PrincipalGrantUser userId))
+        (BrowserSessionOrigin identifier) (Just expires))
+
+patAuthenticationByIdStatement :: Statement.Statement UUID (Maybe ResolvedRequestAuth)
+patAuthenticationByIdStatement = Statement.Statement
+  "SELECT at.id,at.grant_user_id,at.actor_type::text,at.actor_label,at.expires_at FROM access_tokens at JOIN users u ON u.id=at.grant_user_id WHERE at.id=$1 AND at.revoked_at IS NULL AND (at.expires_at IS NULL OR at.expires_at>clock_timestamp()) AND u.disabled_at IS NULL"
+  (Enc.param (Enc.nonNullable Enc.uuid)) decoder True
+  where
+    decoder = Dec.rowMaybe $ do
+      identifier <- Dec.column (Dec.nonNullable Dec.uuid)
+      userId <- Dec.column (Dec.nonNullable Dec.uuid)
+      actor <- Dec.column (Dec.nonNullable Dec.text) >>= \case
+        "user" -> pure ActorUser
+        "bot" -> pure ActorBot
+        _ -> fail "Invalid token actor"
+      label <- Dec.column (Dec.nonNullable Dec.text)
+      expires <- Dec.column (Dec.nullable Dec.timestamptz)
+      let actorId = if actor==ActorUser then UUID.toText userId else UUID.toText identifier
+      pure (ResolvedRequestAuth (Principal actor actorId label (PrincipalGrantUser userId)) (AccessTokenOrigin identifier) expires)
 
 authSessionCsrfMatches :: Pool Hasql.Connection -> Text -> Text -> IO Bool
 authSessionCsrfMatches pool sessionToken csrfToken =

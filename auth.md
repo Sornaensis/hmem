@@ -224,6 +224,24 @@ Set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab storage or
 
 ## Access problems
 
+Document download/preview grants can delegate a caller's current workspace read
+access to one explicit role association and immutable representation. Originating
+PAT token IDs and browser session IDs are captured separately from Principal;
+revalidation preserves a bot token actor's separate grant-bearing user and is
+SELECT-only. Credential revocation/expiry, browser logout, a disabled user,
+current role loss or link removal denies further redemption. Local authority is
+bound to current local/loopback configuration and a fresh runtime epoch. Server
+restart invalidates outstanding grants.
+
+JWT-origin grant issuance returns `credential_authority_unavailable` because no
+tracked JWT revocation/introspection authority exists; ordinary JWT API access
+is unchanged. A capability URL contains only its scoped expiring token in a
+protected query, never a PAT, browser session or service bearer. Styled HTML
+redemption rejects application Cookie/Authorization credentials and uses the
+dedicated cookieless application. See
+[document capabilities](docs/reference/document-capabilities.md) for exact scope,
+revocation, origin/cookie configuration and query-free logging.
+
 | Symptom | Check |
 | --- | --- |
 | Login unavailable | OIDC discovery/endpoints, client ID/secret, and registered callback URL. |

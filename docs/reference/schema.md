@@ -395,3 +395,30 @@ retain only current valid audit indexes; a heap rewrite cools them together.
 The separate backup attestation function has no runtime-login or PUBLIC grant
 and independently requires control-owner authority. Both migrations and their
 ledger entries are atomic; existing audit history and constraints are preserved.
+
+## Document download grants (V059)
+
+`document_download_grants` stores UUID `id` primary keys, a unique lowercase
+64-character `token_sha256`, workspace/task/document IDs, immutable `binding`
+and `issuer` JSONB objects, a runtime `authority_epoch` UUID, non-null creation
+and expiry timestamps, and nullable `revoked_at`. Composite task/workspace and
+document/workspace foreign keys prevent cross-workspace placement. The
+`(workspace_id,task_id,created_at DESC,id)` index supports task-scoped lookups.
+Expiry must follow creation and be at most fifteen minutes later. Issuer JSON
+is at most 4 KiB and identifies PAT, browser-session or local authority.
+
+Binding JSON captures the explicit role/association UUID, original hash,
+representation, page, generation/policy and exact immutable payload receipt.
+These JSON identifiers are not SQL foreign keys: Source removal must remain
+possible and instead makes its exact association-bound grant unusable. Shared
+resolution requires a live task/workspace, exact same-workspace role link and,
+for derivatives, the current complete generation with matching original hash.
+It does not substitute a newer generation.
+
+The insert guard requires an exact current binding. Scope, issuer, hash and
+epoch are immutable; only null-to-nonnull revocation is permitted. Delete and
+truncate are refused. Grant tokens and URLs are never persisted. Creation and
+revocation audit only the grant ID and emit no canonical outbox event; document
+resource/count projections are unchanged. V059 and its ledger entry commit in
+one transaction. Runtime restart/configuration replacement changes the shared
+epoch, invalidating earlier grants while retaining the original documents.

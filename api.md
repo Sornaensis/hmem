@@ -789,7 +789,7 @@ active-only facet membership and selected-option behavior.
 The document transport is separate from agent-session JSONL and `evidence.zip`.
 All paths below begin with
 `/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents`. Read operations need
-workspace read access; mutations need edit access and current cookie CSRF
+workspace read access; upload/link mutations need edit access and current cookie CSRF
 verification. The task must be visible and nondeleted in that workspace. Done
 and cancelled tasks remain eligible; document operations never start a task.
 
@@ -876,7 +876,44 @@ Errors include 400 invalid manifest/body/cursor, 401/403 authentication or role/
 404 hidden/missing links,409 request/quota/link conflict,413 body limit,415 type,
 431 metadata header bound, 503 unavailable verified storage and 504 DB timeout.
 No error echoes document bytes, credentials, local paths or SQL diagnostics.
-Image/PDF/styled HTML derivative delivery belongs to the separate renderer and
-isolated-origin capability contracts; original admission does not certify safe
-preview content. Existing session downloads and session-only ZIP contracts are
-unchanged.
+Original admission does not certify safe preview content. Published derivative
+delivery follows the generation and isolated-origin contracts below. Existing
+session downloads and session-only ZIP contracts are unchanged.
+
+### Preview reads and document grants
+
+These suffixes follow `/{documentId}` under the authorized document base:
+
+| Method and suffix | Contract |
+| --- | --- |
+| `GET /previews/current` | `{state,error,generation_id,policy_version,outputs:[{variant,page,media_type,raw_bytes,raw_sha256}]}`; no bytes, payload IDs or bearer URLs. |
+| `GET/HEAD /previews/{generationId}/{variant}/{page}` | Generation-pinned inert `page`/`thumbnail` raster bytes. A stale generation returns409 and never switches to a newer generation. Styled HTML is not available here. |
+| `POST /download-grants` | JSON up to4KiB: explicit `role`, `association_id`, `variant`, `page`; `generation_id` for derivatives; optional `ttl_seconds` (default300,max900). Unknown fields and out-of-range pages/lifetimes are rejected. |
+| `DELETE /download-grants/{grantId}` | Explicit revocation by the issuer or a current workspace admin;204. |
+
+Grant mutations authorize a current read, with the existing browser cookie CSRF
+policy. A role label or declared MCP identity never grants authority. Issuance
+requires an authoritatively recheckable PAT/browser session or explicit local
+loopback authority. JWT-origin issuance returns
+`credential_authority_unavailable`; ordinary JWT API access remains supported.
+
+Variants are `original` (page0,no generation), `page`, `thumbnail`, or
+`styled_html_preview` (page0). Derivatives require the exact current generation;
+pages are0–200. Issuance echoes `grant_id`, `url`, `expires_at`, workspace/task/
+document IDs, exact `role` and `association_id`, representation/generation/policy,
+and a matching byte/hash/media manifest. It never implicitly chooses a role.
+
+GET/HEAD redemption is `/document-grants/{grantId}/{variant}/{page}?token=...`
+at the configured download origin. Styled HTML uses that path exclusively on the
+dedicated preview origin. The token is a transferable capability, not application
+authentication. Fresh issuer credential/account/role, exact link, epoch, expiry/
+revocation and generation checks precede responses and every bounded chunk.
+Source removal/recreation invalidates the old Source grant even if Evidence
+retains the document. Original responses reuse forced attachment headers;
+derivatives serve only their bound verified output. No redirects are issued.
+
+Temporary grant changes produce a grant-ID-only audit projection and no
+canonical workspace outbox event. Document metadata/count projections are
+unchanged. Configuration, dedicated HTML CSP/cookie isolation, restart epochs,
+and query-free application/proxy logging are defined in the
+[capability reference](docs/reference/document-capabilities.md).

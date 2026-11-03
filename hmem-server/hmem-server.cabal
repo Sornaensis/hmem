@@ -76,6 +76,7 @@ data-files:
     migrations/V056__audit_maintenance_controls.sql
     migrations/V057__audit_maintenance_operations.sql
     migrations/V058__task_documents.sql
+    migrations/V059__document_download_grants.sql
 
 library
   exposed-modules:
@@ -103,7 +104,9 @@ library
       HMem.Server.CtlPaths
       HMem.Server.CtlPgvector
       HMem.Server.CtlPgvectorCli
+      HMem.Server.Document.Grant
       HMem.Server.Document.HTTP
+      HMem.Server.Document.PreviewOrigin
       HMem.Server.Embedding.GteQwen2
       HMem.Server.Embedding.Http
       HMem.Server.Embedding.ManagedTei
@@ -524,6 +527,7 @@ test-suite hmem-server-test
       HMem.Server.CtlPgvectorCliSpec
       HMem.Server.CtlPgvectorSpec
       HMem.Server.DeployedSandboxSpec
+      HMem.Server.DocumentGrantSpec
       HMem.Server.DocumentSpec
       HMem.Server.Embedding.GteQwen2Spec
       HMem.Server.Embedding.HttpSpec

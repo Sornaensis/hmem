@@ -28,6 +28,8 @@ module HMem.Config
   , managedTeiGpuProfile
   , TlsConfig(..)
   , WebConfig(..)
+  , DocumentDeliveryConfig(..)
+  , defaultDocumentDeliveryConfig
     -- * Defaults
   , defaultConfig
     -- * Load / Save
@@ -368,7 +370,28 @@ data HMemConfig = HMemConfig
   , embeddingProvider :: !EmbeddingProviderConfig
   , tls      :: !TlsConfig
   , web      :: !WebConfig
+  , documentDelivery :: !DocumentDeliveryConfig
   } deriving stock (Show, Eq)
+
+-- Public origins are explicit; absent cookie-scope declaration disables styled HTML.
+data DocumentDeliveryConfig = DocumentDeliveryConfig
+  { applicationOrigin :: !(Maybe Text), downloadOrigin :: !(Maybe Text)
+  , previewOrigin :: !(Maybe Text), proxyAuthCookieDomains :: !(Maybe [Text])
+  , previewListenHost :: !Text, previewListenPort :: !(Maybe Int)
+  } deriving stock (Show,Eq)
+
+defaultDocumentDeliveryConfig :: DocumentDeliveryConfig
+defaultDocumentDeliveryConfig = DocumentDeliveryConfig Nothing Nothing Nothing Nothing "127.0.0.1" Nothing
+
+instance FromJSON DocumentDeliveryConfig where
+  parseJSON = Aeson.withObject "DocumentDeliveryConfig" $ \o -> DocumentDeliveryConfig
+    <$> o .:? "application_origin" <*> o .:? "download_origin" <*> o .:? "preview_origin"
+    <*> o .:? "proxy_auth_cookie_domains" <*> o .:? "preview_listen_host" .!= "127.0.0.1"
+    <*> o .:? "preview_listen_port"
+instance ToJSON DocumentDeliveryConfig where
+  toJSON cfg = Aeson.object ["application_origin" .= cfg.applicationOrigin,"download_origin" .= cfg.downloadOrigin
+    ,"preview_origin" .= cfg.previewOrigin,"proxy_auth_cookie_domains" .= cfg.proxyAuthCookieDomains
+    ,"preview_listen_host" .= cfg.previewListenHost,"preview_listen_port" .= cfg.previewListenPort]
 
 ------------------------------------------------------------------------
 -- JSON / YAML instances
@@ -648,6 +671,7 @@ instance FromJSON HMemConfig where
     <*> o .:? "embedding" .!= defEmbeddingProvider
     <*> o .:? "tls"      .!= defTls
     <*> o .:? "web"      .!= defWeb
+    <*> o .:? "document_delivery" .!= defaultDocumentDeliveryConfig
 
 instance ToJSON HMemConfig where
   toJSON cfg = Aeson.object
@@ -663,6 +687,7 @@ instance ToJSON HMemConfig where
     , "embedding" .= cfg.embeddingProvider
     , "tls"      .= cfg.tls
     , "web"      .= cfg.web
+    , "document_delivery" .= cfg.documentDelivery
     ]
 
 ------------------------------------------------------------------------
@@ -773,6 +798,7 @@ defaultConfig = HMemConfig
   , embeddingProvider = defEmbeddingProvider
   , tls      = defTls
   , web      = defWeb
+  , documentDelivery = defaultDocumentDeliveryConfig
   }
 
 ------------------------------------------------------------------------

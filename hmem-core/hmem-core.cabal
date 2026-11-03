@@ -23,6 +23,7 @@ library
       HMem.AgentSession
       HMem.AgentSession.Occurrence
       HMem.AgentSession.Transport
+      HMem.Auth.CredentialOrigin
       HMem.BotIdentity
       HMem.Config
       HMem.DB.AgentSession
@@ -33,6 +34,7 @@ library
       HMem.DB.Auth
       HMem.DB.ChangeStream
       HMem.DB.Document
+      HMem.DB.DocumentGrant
       HMem.DB.Embedding
       HMem.DB.Migration
       HMem.DB.Observation
@@ -53,6 +55,7 @@ library
       HMem.DB.Workspace
       HMem.DB.WorkspaceGroup
       HMem.Document.Codec
+      HMem.Document.Grant
       HMem.Document.Types
       HMem.SessionArchive.Codec
       HMem.Types
@@ -127,6 +130,7 @@ test-suite hmem-core-test
       HMem.DB.AuthSpec
       HMem.DB.BotIdentitySpec
       HMem.DB.ChangeStreamSpec
+      HMem.DB.DocumentGrantSpec
       HMem.DB.DocumentSpec
       HMem.DB.EmbeddingSpec
       HMem.DB.ObservationDiscoverySpec

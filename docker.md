@@ -109,6 +109,29 @@ bootstrap exposes implicit superadmin access.
 
 ## Persistence, backups, and recovery
 
+Document bearer links require explicit reachable public origins in
+`document_delivery`; they are never derived from Host headers. Styled HTML also
+requires a dedicated cookieless origin outside every application/proxy auth
+cookie scope and an explicit complete proxy-cookie-domain declaration. Route
+that virtual host only to the dedicated loopback preview listener, with HTTPS
+termination in the same host/network namespace. An ordinary separate Compose
+container cannot reach another container's loopback listener; arrange that
+network boundary explicitly. The default Compose setup does not enable styled
+preview isolation automatically.
+
+Keep queries and credential headers out of all proxy/access/tracing logs: use
+query-free `$uri`, not `$request_uri`, `$request` or `$args`, in an Nginx access
+format. The application request logger records query-free paths; this does not
+certify upstream operator-controlled layers. See the
+[document capability deployment settings and log example](docs/reference/document-capabilities.md#configuration).
+Do not forward application Cookie/Authorization headers to the preview virtual
+host or install browser authentication there. It sets no cookies and serves no
+application/API/static routes. Preserve the original public Host authority and
+port: the preview listener rejects aliases, application/download hosts, missing
+or duplicate Host, and cannot authorize from forwarded-host headers. Its
+configured rate admission also covers public bearer reads. Restart invalidates outstanding grant epochs;
+the PostgreSQL document originals, evidence and grant audit records remain.
+
 `postgres-data` stores application and authentication data. Normal
 `docker compose down`, upgrades, and container replacements retain it.
 Generated hmem configuration and server log files use temporary storage under

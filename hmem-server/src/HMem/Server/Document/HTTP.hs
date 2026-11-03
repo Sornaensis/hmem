@@ -1,5 +1,5 @@
 -- | Authorized bounded document transport. Original bytes never enter JSON.
-module HMem.Server.Document.HTTP (documentMiddleware, metadataHeader) where
+module HMem.Server.Document.HTTP (documentMiddleware, metadataHeader, safeHeaders, originalTransferHeaders) where
 
 import Control.Exception (Exception,fromException,throwIO)
 import Control.Monad (unless,when)
@@ -241,14 +241,17 @@ documentError code
   | otherwise = jsonError status400 "document_invalid_input"
 
 originalHeaders :: Doc.Document -> [Header]
-originalHeaders document=safeHeaders <>
-  [(hContentType,"application/octet-stream"),(hContentLength,B8.pack(show document.rawBytes))
-  ,(hContentDisposition,"attachment; filename=\""<>TE.encodeUtf8 fallback<>"\"; filename*=UTF-8''"<>urlEncode False(TE.encodeUtf8 document.filename))
-  ,(hETag,"\""<>TE.encodeUtf8 document.rawSha256<>"\"")
-  ,("X-HMem-Document-SHA256",TE.encodeUtf8 document.rawSha256)
-  ,("X-HMem-Document-Bytes",B8.pack(show document.rawBytes))
+originalHeaders document=originalTransferHeaders document.filename document.rawBytes document.rawSha256
+
+originalTransferHeaders :: Text -> Int64 -> Text -> [Header]
+originalTransferHeaders filename rawBytes rawSha256=safeHeaders <>
+  [(hContentType,"application/octet-stream"),(hContentLength,B8.pack(show rawBytes))
+  ,(hContentDisposition,"attachment; filename=\""<>TE.encodeUtf8 fallback<>"\"; filename*=UTF-8''"<>urlEncode False(TE.encodeUtf8 filename))
+  ,(hETag,"\""<>TE.encodeUtf8 rawSha256<>"\"")
+  ,("X-HMem-Document-SHA256",TE.encodeUtf8 rawSha256)
+  ,("X-HMem-Document-Bytes",B8.pack(show rawBytes))
   ,("Content-Security-Policy","default-src 'none'; sandbox")]
-  where fallback=T.map(\c -> if isAscii c && isPrint c && c `notElem` ['"','\\','/'] then c else '_') document.filename
+  where fallback=T.map(\c -> if isAscii c && isPrint c && c `notElem` ['"','\\','/'] then c else '_') filename
 
 transferMicros :: Int
 transferMicros=5*60*1000000

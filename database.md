@@ -96,6 +96,19 @@ classDiagram
       JSONB outputs
       TIMESTAMPTZ created_at
     }
+    class document_download_grants {
+      UUID id PK
+      TEXT token_sha256 UNIQUE
+      UUID workspace_id FK
+      UUID task_id FK
+      UUID document_id FK
+      JSONB binding
+      JSONB issuer
+      UUID authority_epoch
+      TIMESTAMPTZ created_at
+      TIMESTAMPTZ expires_at
+      TIMESTAMPTZ? revoked_at
+    }
     workspaces "1" --> "0..1" document_budgets
     workspaces "1" --> "0..*" document_reservations
     workspaces "1" --> "0..*" document_payloads
@@ -112,6 +125,8 @@ classDiagram
     documents "1" --> "0..*" document_preview_attempts
     document_preview_attempts "1" --> "0..1" document_generations
     document_generations "0..1" <-- "0..*" document_previews
+    tasks "1" --> "0..*" document_download_grants
+    documents "1" --> "0..*" document_download_grants
     note for document_payloads "UNIQUE (id, workspace_id) and (workspace_id, raw_sha256, raw_bytes, original)\nPublished manifests and parts are immutable"
     note for documents "UNIQUE (id, workspace_id)\nComposite payload FK enforces workspace"
     note for task_document_sources "UNIQUE (workspace_id, task_id, document_id)\nComposite task/document FKs; removal deletes this link only"
@@ -119,6 +134,7 @@ classDiagram
     note for document_generations "UNIQUE (id, workspace_id)\nOutputs are a bounded JSON descriptor array, validated against same-workspace payloads at publication; descriptors are not SQL foreign keys"
     note for document_preview_attempts "UNIQUE (id, workspace_id)\nImmutable attempted-ID binding survives reservation expiry/abort; generation has a composite attempt FK"
     note for document_requests "link_id is an immutable receipt, not a foreign key; source removal preserves the retry receipt"
+    note for document_download_grants "Composite task/document FKs enforce workspace; token SHA-256 is UNIQUE\nBinding JSON stores exact role/association/generation/policy/payload receipts, not SQL foreign keys\nScope and issuer are immutable; revocation is one-way; audit contains grant ID only, with no outbox event"
     class audit_maintenance_control {
       BOOLEAN singleton PK
       BOOLEAN paused
@@ -724,3 +740,11 @@ metadata event together. Preview generations retain original/policy/output
 bindings independently of originals. These tables do not reuse sessions,
 Observations or session archive receipts. See the
 [document storage reference](docs/reference/task-documents.md).
+
+V059 adds hash-only document bearer grants with immutable exact association and
+representation bindings, nonsecret credential/issuer attribution and a runtime
+authority epoch. Expiry is bounded to fifteen minutes; explicit revocation is
+one-way. Shared resolution rechecks the exact current link and preview receipt.
+Grant creation/revocation adds only a grant-ID audit projection and no canonical
+workspace change event. See the
+[capability reference](docs/reference/document-capabilities.md).

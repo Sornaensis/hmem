@@ -31,7 +31,9 @@ import HMem.DB.Pool qualified as Pool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), newSandboxLifetime, withSandboxedTestEnvBorrowed)
 import HMem.Types (parseEmbeddingSpaceFingerprint)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
-import HMem.Server.App (mkAppWithPrefixProofs)
+import HMem.Server.App (mkAppWithPrefixProofs,mkAppWithDocumentAuthority)
+import HMem.Server.Document.Grant (newDocumentAuthority)
+import HMem.Server.Document.PreviewOrigin (withPreviewListener)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscoveryProvider)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
@@ -421,13 +423,15 @@ runNormalMode opts = do
         let originsAreLocal = not (null cfg.cors.allowedOrigins) && not (Config.corsAllowsRemoteOrigins cfg.cors)
         when (not (Config.serverHostIsLoopback cfg.server.host) && originsAreLocal) $
           logWarn logger $ "CORS allowedOrigins are localhost-only but server is bound to " <> cfg.server.host <> " — remote clients will be rejected by CORS"
-        app <- mkAppWithPrefixProofs prefixes (Just discovery) cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
+        documentAuthority <- newDocumentAuthority pool cfg.auth
+          (Config.ServerConfig {Config.host=cfg.server.host,Config.port=port}) cfg.documentDelivery
+        app <- mkAppWithDocumentAuthority documentAuthority (Just prefixes) (Just discovery) cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
         let runServer = case (mTlsCert, mTlsKey) of
               (Just cert, Just key) -> logInfo logger ("TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key) >> runTLS (tlsSettings cert key) settings app
               (Just _, Nothing) -> logWarn logger "--tls-cert provided without --tls-key; running plain HTTP" >> runSettings settings app
               (Nothing, Just _) -> logWarn logger "--tls-key provided without --tls-cert; running plain HTTP" >> runSettings settings app
               (Nothing, Nothing) -> logInfo logger "TLS disabled (no cert/key configured)" >> runSettings settings app
-        runServer
+        withPreviewListener documentAuthority cfg.rateLimit requestLogger runServer
   bracket (startArchiveWorker pool)
     (\archiveWorker -> stopArchiveWorker archiveWorker >> shutdownDatabase) $ \_archiveWorker ->
     bracket (startAuditWorkerForApplication cfg (T.pack <$> opts.optDbConn)) stopAuditWorker $ \_auditWorker -> mask $ \restore -> do

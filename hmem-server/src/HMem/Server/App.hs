@@ -3,6 +3,7 @@ module HMem.Server.App
   , mkAppWithChangeStream
   , mkAppWithDiscovery
   , mkAppWithPrefixProofs
+  , mkAppWithDocumentAuthority
   , mkAppWithOidcCodeExchange -- ^ Test-only seam; production callers should use 'mkApp'.
   , mkAppWithOidcCodeExchangeAndClock -- ^ Test-only clock for pending-login expiry.
   , OidcCodeExchange -- ^ Test-only injected OIDC code exchange type.
@@ -11,6 +12,7 @@ module HMem.Server.App
   , resolveRequestPrincipalIO
   , authMiddleware
   , botIdentityMiddleware
+  , rateLimitMiddleware
   ) where
 
 import Control.Applicative ((<|>))
@@ -65,6 +67,8 @@ import HMem.Config qualified as Config
 import HMem.Server.API (HMemAPI, serverWithSessionReaders, authorizeAgentSessionWrite)
 import HMem.Server.Archive.HTTP (archiveMiddleware)
 import HMem.Server.Document.HTTP (documentMiddleware)
+import HMem.Auth.CredentialOrigin
+import HMem.Server.Document.Grant qualified as DocumentGrants
 import HMem.Server.SessionPrefix (PrefixRegistry)
 import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
@@ -90,6 +94,11 @@ mkAppWithDiscovery discovery = mkAppWithServices Nothing (Just discovery) defaul
 mkAppWithPrefixProofs :: PrefixRegistry -> Maybe ObservationDiscovery -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
 mkAppWithPrefixProofs prefixes discovery = mkAppWithServices (Just prefixes) discovery defaultOidcCodeExchange
 
+-- The main and dedicated preview listeners share this runtime authority/epoch.
+mkAppWithDocumentAuthority :: DocumentGrants.DocumentAuthority -> Maybe PrefixRegistry -> Maybe ObservationDiscovery -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithDocumentAuthority authority prefixes discovery =
+  mkAppWithServicesAtAndDocuments (Just authority) getCurrentTime prefixes discovery defaultOidcCodeExchange
+
 -- | Provider configuration, authorization code, and its PKCE verifier.
 type OidcCodeExchange = DeployedAuthConfig -> Text -> Text -> IO (Maybe Text)
 
@@ -112,10 +121,16 @@ mkAppWithServices :: Maybe PrefixRegistry -> Maybe ObservationDiscovery -> OidcC
 mkAppWithServices = mkAppWithServicesAt getCurrentTime
 
 mkAppWithServicesAt :: IO UTCTime -> Maybe PrefixRegistry -> Maybe ObservationDiscovery -> OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
-mkAppWithServicesAt oidcNow prefixes discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
+mkAppWithServicesAt = mkAppWithServicesAtAndDocuments Nothing
+
+mkAppWithServicesAtAndDocuments :: Maybe DocumentGrants.DocumentAuthority -> IO UTCTime -> Maybe PrefixRegistry -> Maybe ObservationDiscovery -> OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithServicesAtAndDocuments suppliedAuthority oidcNow prefixes discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   discoveryService <- maybe (newObservationDiscovery False) pure discovery
   rateLimit <- rateLimitMiddleware rateLimitCfg
   archive <- newArchiveMiddleware pool
+  documentAuthority <- maybe
+    (DocumentGrants.newDocumentAuthority pool authCfg Config.defaultConfig.server Config.defaultDocumentDeliveryConfig)
+    pure suppliedAuthority
   -- Verified bytes only: no native decoder, DB lease or background thread
   -- survives a request. The Application owns this bounded heap cache.
   readers <- AgentSessions.newReaderCache
@@ -123,6 +138,8 @@ mkAppWithServicesAt oidcNow prefixes discovery oidcCodeExchange changeStreamConf
   oidcLogins <- newIORef Map.empty
   pure $ requestIdMiddleware
        $ logger
+       $ DocumentGrants.documentFramePolicy documentAuthority
+       $ DocumentGrants.documentRedemptionMiddleware documentAuthority rateLimit
        $ staticMiddleware mStaticDir
         $ corsMiddleware authCfg corsCfg
         $ rateLimit
@@ -131,6 +148,9 @@ mkAppWithServicesAt oidcNow prefixes discovery oidcCodeExchange changeStreamConf
         $ csrfMiddleware authCfg pool
         $ principalContextMiddleware jwksCache authCfg pool
         $ authMiddleware authCfg
+        $ DocumentGrants.documentGrantMiddleware documentAuthority (\request -> do
+            currentPolicy <- readIORef documentAuthority.policy
+            resolveRequestAuthenticationWithCache jwksCache pool currentPolicy.auth request)
         $ archiveMiddleware pool (resolveArchivePrincipal jwksCache pool authCfg)
         $ archive
         $ documentMiddleware pool (resolveArchivePrincipal jwksCache pool authCfg)
@@ -296,6 +316,21 @@ resolveArchivePrincipal jwksCache pool authCfg req = case authCfg.mode of
   AuthModeDeployed -> case bearerToken req of
     Just token -> resolveDeployedBearerPrincipalWithUsage False jwksCache pool authCfg.deployed token
     Nothing -> resolveCookieSessionPrincipal pool authCfg.deployed req
+
+-- Fresh delegation provenance never changes ordinary Principal/effective actor.
+-- Read-only ID renewal avoids per-part token/session usage writes.
+resolveRequestAuthenticationWithCache :: JWKSetCache -> Pool Hasql.Connection -> AuthConfig -> Wai.Request -> IO (Maybe ResolvedRequestAuth)
+resolveRequestAuthenticationWithCache jwksCache pool authCfg req = case authCfg.mode of
+  AuthModeLocal -> pure $ fmap (\principal -> ResolvedRequestAuth principal LocalOrigin Nothing) (resolveRequestPrincipal authCfg req)
+  AuthModeDeployed -> case bearerToken req of
+    Just token -> do
+      resolved <- Auth.resolveAccessTokenPrincipalWithSecret pool authCfg.deployed.tokenHashSecret token
+      case resolved of
+        Just origin -> Auth.revalidateCredentialOrigin pool (AccessTokenOrigin origin.tokenId)
+        Nothing -> fmap (\principal -> ResolvedRequestAuth principal JwtOrigin Nothing) <$> resolveJwtPrincipal jwksCache pool authCfg.deployed token
+    Nothing -> case lookupCookie authCfg.deployed.sessionCookieName req of
+      Nothing -> pure Nothing
+      Just sessionToken -> Auth.resolveAuthSessionAuthentication pool sessionToken
 
 resolveDeployedBearerPrincipal :: JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Maybe Principal)
 resolveDeployedBearerPrincipal = resolveDeployedBearerPrincipalWithUsage True

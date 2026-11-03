@@ -13,6 +13,7 @@ import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.OpenApi
 import Data.Proxy (Proxy(..))
 import Data.Text (Text)
+import Network.HTTP.Media (MediaType)
 import Data.List (isInfixOf)
 import Servant.OpenApi (toOpenApi)
 
@@ -32,17 +33,25 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & components . schemas . at "SessionArchiveManifest" ?~ sessionArchiveManifestSchema
   & components . schemas . at "TaskDocument" ?~ taskDocumentSchema
   & components . schemas . at "TaskDocumentCounts" ?~ taskDocumentCountsSchema
+  & components . schemas . at "TaskDocumentPreviewMetadata" ?~ documentPreviewSchema
+  & components . schemas . at "DocumentDownloadGrantRequest" ?~ documentGrantRequestSchema
+  & components . schemas . at "DocumentDownloadGrant" ?~ documentGrantResponseSchema
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents" ?~ taskDocumentsPath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/counts" ?~ taskDocumentCountsPath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}" ?~ taskDocumentDetailPath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/original" ?~ taskDocumentOriginalPath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/evidence" ?~ taskDocumentEvidencePath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/source" ?~ taskDocumentSourcePath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/previews/current" ?~ documentPreviewMetadataPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/previews/{generationId}/{variant}/{page}" ?~ documentRasterPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/download-grants" ?~ documentGrantsPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/download-grants/{grantId}" ?~ documentGrantRevokePath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/evidence.zip" ?~ taskEvidenceArchivePath
   & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive" ?~ sessionArchiveManifestPath
   & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive/{generationId}/content" ?~ sessionArchiveContentPath
   & paths . traversed . parameters %~ (<> [Inline botIdentityHeader])
   & paths %~ InsOrdMap.mapWithKey documentSessionPath
+  & paths . at "/document-grants/{grantId}/{variant}/{page}" ?~ documentGrantRedeemPath
   & tags .~ InsOrdSet.fromList
       [ Tag "Observations" (Just "Repository-scoped, provenance-bound observations.") Nothing
       , Tag "Workspace Groups" (Just "Global-superadmin workspace group management.") Nothing
@@ -1066,6 +1075,97 @@ taskDocumentEvidencePath=documentPath True & post ?~ (documentOperation "Associa
 taskDocumentSourcePath :: PathItem
 taskDocumentSourcePath=documentPath True & delete ?~ (documentOperation "Remove only this task's Source association" "Idempotent Source removal preserves existing Document evidence, immutable originals and retry receipts. No document/evidence hard delete."
   & responses . responses . at 204 ?~ Inline(mempty & description .~ "Source association absent; no body."))
+
+documentPreviewSchema :: Schema
+documentPreviewSchema=mempty & type_ ?~ OpenApiObject & required .~ ["state","error","generation_id","policy_version","outputs"]
+  & properties .~ InsOrdMap.fromList
+    [("state",Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["queued","processing","ready","unsupported","failed"]))
+    ,("error",Inline(mempty & type_ ?~ OpenApiString & nullable ?~ True & maxLength ?~ 128))
+    ,("generation_id",Inline(grantUuid & nullable ?~ True)),("policy_version",Inline(mempty & type_ ?~ OpenApiString & nullable ?~ True & maxLength ?~ 128))
+    ,("outputs",Inline(mempty & type_ ?~ OpenApiArray & maxItems ?~ 401 & items ?~ OpenApiItemsObject(Inline output)))]
+  where output=mempty & type_ ?~ OpenApiObject & required .~ ["variant","page","media_type","raw_bytes","raw_sha256"]
+          & properties .~ InsOrdMap.fromList
+            [("variant",Inline grantVariant),("page",Inline grantPage),("media_type",Inline(mempty & type_ ?~ OpenApiString))
+            ,("raw_bytes",Inline grantBytes),("raw_sha256",Inline grantHash)]
+
+grantUuid,grantVariant,grantPage,grantBytes,grantHash :: Schema
+grantUuid=mempty & type_ ?~ OpenApiString & format ?~ "uuid"
+grantVariant=mempty & type_ ?~ OpenApiString & enum_ ?~ ["original","page","thumbnail","styled_html_preview"]
+grantPage=mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 0 & maximum_ ?~ 200
+grantBytes=mempty & type_ ?~ OpenApiInteger & format ?~ "int64" & minimum_ ?~ 0 & maximum_ ?~ 104857600
+grantHash=mempty & type_ ?~ OpenApiString & pattern ?~ "^[0-9a-f]{64}$"
+
+documentGrantRequestSchema :: Schema
+documentGrantRequestSchema=mempty & type_ ?~ OpenApiObject & additionalProperties ?~ AdditionalPropertiesAllowed False
+  & required .~ ["role","association_id","variant","page"]
+  & description ?~ "Explicit exact role/association. Original:page0/no generation. Derivatives:current generation; styled_html_preview:page0. Integer bounds are checked before narrowing. TTL defaults300,max900 and is capped by credential expiry."
+  & properties .~ InsOrdMap.fromList
+    [("role",Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["source","evidence"])),("association_id",Inline grantUuid)
+    ,("variant",Inline grantVariant),("page",Inline grantPage),("generation_id",Inline(grantUuid & nullable ?~ True))
+    ,("ttl_seconds",Inline(mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 900 & nullable ?~ True & default_ ?~ Number 300))]
+
+documentGrantResponseSchema :: Schema
+documentGrantResponseSchema=mempty & type_ ?~ OpenApiObject
+  & required .~ ["grant_id","url","expires_at","workspace_id","task_id","document_id","role","association_id","variant","page","generation_id","policy_version","manifest"]
+  & properties .~ InsOrdMap.fromList
+    [("grant_id",Inline grantUuid),("url",Inline(mempty & type_ ?~ OpenApiString & format ?~ "uri" & description ?~ "Transferable bearer URL: scoped query token only; never log, audit or put it in a path."))
+    ,("expires_at",Inline(mempty & type_ ?~ OpenApiString & format ?~ "date-time"))
+    ,("workspace_id",Inline grantUuid),("task_id",Inline grantUuid),("document_id",Inline grantUuid)
+    ,("role",Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["source","evidence"])),("association_id",Inline grantUuid)
+    ,("variant",Inline grantVariant),("page",Inline grantPage),("generation_id",Inline(grantUuid & nullable ?~ True))
+    ,("policy_version",Inline(mempty & type_ ?~ OpenApiString & nullable ?~ True))
+    ,("manifest",Inline(mempty & type_ ?~ OpenApiObject & required .~ ["raw_bytes","raw_sha256","media_type","filename","original_sha256"]
+      & properties .~ InsOrdMap.fromList[("raw_bytes",Inline grantBytes),("raw_sha256",Inline grantHash)
+        ,("media_type",Inline(mempty & type_ ?~ OpenApiString)),("filename",Inline(mempty & type_ ?~ OpenApiString))
+        ,("original_sha256",Inline grantHash)]))]
+
+documentPreviewMetadataPath :: PathItem
+documentPreviewMetadataPath=documentPath True & get ?~ (documentOperation "Read current preview generation metadata" "Authorized read, independent of public-origin configuration. Bounded complete output descriptors contain no bytes, payload IDs or bearer URLs."
+  & responses . responses . at 200 ?~ documentJSONResponse "State/error, exact current generation/policy and output manifests." (Ref(Reference "TaskDocumentPreviewMetadata")))
+
+documentRasterPath :: PathItem
+documentRasterPath=documentPath True
+  & parameters %~ (<> (archivePathParameters ["generationId"]<>[grantVariantParameter False,grantPageParameter]))
+  & get ?~ download & head_ ?~ (download & summary ?~ "Read pinned raster headers")
+  where download=documentOperation "Read a generation-pinned inert raster" "Read-authorized Source/Evidence access. Only page/thumbnail PNG/JPEG/WebP. Stale generations return409 and never substitute newer bytes. Styled HTML bytes require the dedicated-origin grant."
+          & responses . responses . at 200 ?~ binaryDocumentResponse "Verified inert raster (HEAD has no body)." ["image/png","image/jpeg","image/webp"]
+
+documentGrantsPath :: PathItem
+documentGrantsPath=documentPath True & post ?~ (documentOperation "Delegate one exact document role association" "Current workspace read permission and ordinary cookie CSRF. PAT/browser-session/local-loopback origin credentials only; valid JWT delegation returns credential_authority_unavailable while JWT ordinary reads remain available.32CSPRNGbytes, hash-only storage,5min default/15min max capped by credential expiry. Echoes exact immutable role/link/representation and receipt; grant changes audit grant IDs only, with no outbox event."
+  & requestBody ?~ Inline(mempty & required ?~ True & content .~ InsOrdMap.singleton "application/json"(mempty & schema ?~ Ref(Reference "DocumentDownloadGrantRequest")))
+  & responses . responses . at 201 ?~ documentJSONResponse "Scoped transferable URL and exact manifest; contains no service authentication credential." (Ref(Reference "DocumentDownloadGrant"))
+  & responses . responses . at 429 ?~ Inline(mempty & description .~ "Configured request admission exhausted."))
+
+documentGrantRevokePath :: PathItem
+documentGrantRevokePath=documentPath True & parameters %~ (<>archivePathParameters ["grantId"])
+  & delete ?~ (documentOperation "Explicitly revoke a document grant" "The current issuer principal or workspace admin may revoke; cookie mutations retain CSRF. Revocation is one-way, metadata audit contains only grant ID, and no canonical document resource changes."
+    & responses . responses . at 204 ?~ Inline(mempty & description .~ "Grant revoked or already revoked; no body."))
+
+grantVariantParameter :: Bool -> Referenced Param
+grantVariantParameter allVariants=Inline(mempty & name .~ "variant" & in_ .~ ParamPath & required ?~ True
+  & schema ?~ Inline(if allVariants then grantVariant else grantVariant & enum_ ?~ ["page","thumbnail"]))
+grantPageParameter :: Referenced Param
+grantPageParameter=Inline(mempty & name .~ "page" & in_ .~ ParamPath & required ?~ True & schema ?~ Inline grantPage)
+binaryDocumentResponse :: Text -> [MediaType] -> Referenced Response
+binaryDocumentResponse detail types=Inline(mempty & description .~ detail & content .~ InsOrdMap.fromList
+  [(media,mempty & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "binary"))|media<-types])
+
+documentGrantRedeemPath :: PathItem
+documentGrantRedeemPath=mempty
+  & parameters .~ (archivePathParameters ["grantId"]<>[grantVariantParameter True,grantPageParameter
+      ,Inline(mempty & name .~ "token" & in_ .~ ParamQuery & required ?~ True & description ?~ "Scoped secret bearer token; query only, never application credentials."
+        & schema ?~ Inline(mempty & type_ ?~ OpenApiString & minLength ?~ 43 & maxLength ?~ 43 & pattern ?~ "^[A-Za-z0-9_-]{43}$"))])
+  & get ?~ operation & head_ ?~ (operation & summary ?~ "Read bearer representation headers")
+  where operation=mempty & tags .~ InsOrdSet.singleton "Task Documents" & summary ?~ "Redeem a scoped document grant"
+          & description ?~ "Use the configured origin from issuance, never an arbitrary Host. No app authentication is required. Fresh issuer credential/account/role, exact task/link, epoch, grant expiry/revocation and generation/policy/output hash checks precede response and each<=1MiB chunk. Originals force attachment; rasters are inert. Styled HTML is dedicated-origin only, requires one matching configured Host/port, rejects Cookie/Authorization and enforces response CSP sandbox even on direct navigation. Configured rate admission applies on both listeners. No redirects; no-store/no-referrer/nosniff. Restart invalidates runtime epochs."
+          & responses .~ Responses Nothing(InsOrdMap.fromList
+            [(200,binaryDocumentResponse "Exact verified representation (HEAD has no body)." ["application/octet-stream","image/png","image/jpeg","image/webp","text/html"])
+            ,(400,Inline(mempty & description .~ "Invalid token/query or forbidden preview credentials."))
+            ,(403,Inline(mempty & description .~ "Issuer authority revoked or runtime epoch changed."))
+            ,(404,Inline(mempty & description .~ "Grant/scope/link/generation unavailable or expired."))
+            ,(421,Inline(mempty & description .~ "Preview Host authority does not match trusted configuration."))
+            ,(429,Inline(mempty & description .~ "Configured request admission exhausted."))
+            ,(503,Inline(mempty & description .~ "Verified bytes or isolated serving unavailable."))])
 
 taskEvidenceArchivePath :: PathItem
 taskEvidenceArchivePath = mempty

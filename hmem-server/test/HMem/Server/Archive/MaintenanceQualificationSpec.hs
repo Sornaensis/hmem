@@ -37,11 +37,11 @@ import Network.Wai qualified as Wai
 import Network.Wai.Test qualified as W
 import System.CPUTime (getCPUTime)
 import System.Directory (createDirectoryIfMissing,getFileSize,removeFile)
-import System.Environment (getExecutablePath)
+import System.Environment (getExecutablePath,lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.Process
-import System.IO (withBinaryFile,IOMode(..))
+import System.IO (withBinaryFile,IOMode(..),hFlush,stdout)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -151,6 +151,10 @@ qualify recipe chunkCount=do
         createDirectoryIfMissing True (repoRoot </> ".tmp" </> "sealed-archives-8ff1e216")
         LBS.writeFile path (encode (object ["owner".=("Task7"::Text),"expiry".=("Resolve diagnostic at issue resolution/task closure"::Text),"run_id".=runId,"recipe".=recipe,"chunks".=chunkCount,"failed_phase".=name,"observed_phase_seconds".=(fromIntegral (now-start)/1000000000::Double),"completed_phases".=measured,"cause".=T.take 8192 cause,"retained_lifetime_failures".=retained]))
   attempt<-try @SomeException $ timeout 250000000 $ withSandboxedTestEnvBorrowed life acquire drain $ \admin owned -> do
+    diagnostics<-((==Just "1") <$> lookupEnv "HMEM_ARCHIVE_QUAL_DIAGNOSTICS")
+    when diagnostics $ do
+      LBS.hPut stdout (encode (object ["archive_qualification_setup_ready".=True])<>"\n")
+      hFlush stdout
     setupEnd<-getMonotonicTimeNSec
     modifyIORef' phases (<>[object ["phase".=("setup"::Text),"elapsed_seconds".=(fromIntegral (setupEnd-phaseStart)/1000000000::Double),"outcome".=("success"::Text)]])
     let env=admin {pool=owned.runtimePool}
@@ -171,6 +175,9 @@ qualify recipe chunkCount=do
     manifest<-recordPhase "publication_ready" $ A.getPublishedArchive env.pool w sealed.id >>= \case
       Just value -> pure value
       Nothing -> A.getArchiveJob env.pool w sealed.id >>= fail . ("Archive publication failed: "<>) . show
+    when diagnostics $ do
+      LBS.hPut stdout (encode (object ["archive_qualification_manifest_parts".=manifest.partCount,"compressed_bytes".=manifest.compressedBytes,"raw_bytes".=manifest.rawBytes])<>"\n")
+      hFlush stdout
     peakLogical<-number admin ("SELECT "<>B8.pack (show (manifest.compressedBytes+manifest.partCount*512+manifest.checkpointCount*512+manifest.ledgerCount*1024))<>"+coalesce(sum(octet_length(dictionary)),0)::bigint FROM session_archive_checkpoints WHERE generation_id='"<>uuid manifest.id<>"'")
     lsnReady<-text admin "SELECT pg_current_wal_insert_lsn()::text"
     M.configureMaintenance env.pool M.EnableReclamation
@@ -305,33 +312,54 @@ withApp env use=bracket (newPrefixRegistry env.pool) closePrefixRegistry $ \regi
 
 assertPaths :: Wai.Application -> TestEnv -> Text -> Int -> UUID -> Core.AgentSession -> UUID -> A.ArchiveManifest -> IO ()
 assertPaths app env recipe count workspace sealed task manifest=do
+  diagnostics<-(==Just "1") <$> lookupEnv "HMEM_ARCHIVE_QUAL_DIAGNOSTICS"
   let target="/api/v1/workspaces/"<>uuid workspace<>"/sessions/"<>uuid sealed.id
       proofPath=target<>"/prefix-verifications"
       expected offset limit=let first=fromIntegral (offset `div` 1048576); within=fromIntegral (offset `mod` 1048576)
         in BS.take limit (BS.drop within (BS.concat [chunk recipe n | n<-[first..min (count-1) (first+1)]]))
-  forM_ [0,1,1048575,sealed.committedBytes-1,sealed.committedBytes] $ \offset -> do
+      detail :: Text -> IO a -> IO a
+      detail=qualificationDetail diagnostics
+  detail "range_samples" $ forM_ [0,1,1048575,sealed.committedBytes-1,sealed.committedBytes] $ \offset -> do
     response<-request app methodGet (target<>"/evidence?offset="<>B8.pack (show offset)<>"&limit=65536") "" >>= decoded @Wire.SessionRangeResponse
     Wire.decodeSessionBytes response.dataBase64 `shouldBe` Right (expected offset 65536)
-  forM_ [(1048576,1,Core.sessionSha256 (chunk recipe 0)),(sealed.committedBytes,sealed.revision-1,maybe "" id sealed.finalSha256)] $ \(end,revision,digest) -> do
+  forM_ [(1048576,1,Core.sessionSha256 (chunk recipe 0)),(sealed.committedBytes,sealed.revision-1,maybe "" id sealed.finalSha256)] $ \(end,revision,digest) -> detail (if end==1048576 then "prefix_1MiB" else "prefix_full") $ do
     op<-UUID.nextRandom
     _<-request app methodPost proofPath (encode (Wire.PrefixProofRequest op end revision digest)) >>= decoded @Wire.PrefixProofResponse
     result<-timeout 90000000 (await app (proofPath<>"/"<>uuid op))
     fmap (.state) result `shouldBe` Just "verified"
-  replay<-request app methodPost (target<>"/append") (encode (Wire.AppendSessionRequest 0 0 (Wire.encodeSessionBytes (chunk recipe 0)) True)) >>= decoded @Wire.AppendSessionResponse
+  replay<-detail "append_replay" $ request app methodPost (target<>"/append") (encode (Wire.AppendSessionRequest 0 0 (Wire.encodeSessionBytes (chunk recipe 0)) True)) >>= decoded @Wire.AppendSessionResponse
   replay.replayed `shouldBe` True
-  zipResponse<-request app methodGet ("/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>uuid task<>"/evidence.zip") ""
+  zipResponse<-detail "zip_transfer" $ request app methodGet ("/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>uuid task<>"/evidence.zip") ""
   W.simpleStatus zipResponse `shouldBe` status200
-  let bytes=W.simpleBody zipResponse
-      little at width=foldr (\n acc -> acc `shiftL` 8 .|. fromIntegral (LBS.index bytes (at+n))) (0::Word64) [0..width-1]
-      start=30+fromIntegral (little 26 2)+fromIntegral (little 28 2)
-      central=fromIntegral (little (LBS.length bytes-98+48) 8)
-      compressed=LBS.take (central-24-start) (LBS.drop start bytes)
-      (!digest,!lengthBytes)=foldl' (\(!context,!size) piece -> (hashUpdate context piece,size+fromIntegral (BS.length piece))) (hashInit::Context SHA256,0::Int64) (LBS.toChunks (Z.decompress compressed))
-  (lengthBytes,T.pack (show (hashFinalize digest::Digest SHA256))) `shouldBe` (sealed.committedBytes,maybe "" id sealed.finalSha256)
-  content<-request app methodGet (target<>"/archive/"<>uuid manifest.id<>"/content") ""
+  detail "zip_decode_hash" $ do
+    let bytes=W.simpleBody zipResponse
+        little at width=foldr (\n acc -> acc `shiftL` 8 .|. fromIntegral (LBS.index bytes (at+n))) (0::Word64) [0..width-1]
+        start=30+fromIntegral (little 26 2)+fromIntegral (little 28 2)
+        central=fromIntegral (little (LBS.length bytes-98+48) 8)
+        compressed=LBS.take (central-24-start) (LBS.drop start bytes)
+        (!digest,!lengthBytes)=foldl' (\(!context,!size) piece -> (hashUpdate context piece,size+fromIntegral (BS.length piece))) (hashInit::Context SHA256,0::Int64) (LBS.toChunks (Z.decompress compressed))
+    (lengthBytes,T.pack (show (hashFinalize digest::Digest SHA256))) `shouldBe` (sealed.committedBytes,maybe "" id sealed.finalSha256)
+  content<-detail "compressed_transfer" $ request app methodGet (target<>"/archive/"<>uuid manifest.id<>"/content") ""
   W.simpleStatus content `shouldBe` status200
-  (LBS.length content.simpleBody,T.pack (show (hashlazy content.simpleBody::Digest SHA256))) `shouldBe` (manifest.compressedBytes,manifest.compressedSha256)
-  DB.getSession env.pool workspace sealed.id `shouldReturn` Just sealed
+  detail "compressed_hash" $ (LBS.length content.simpleBody,T.pack (show (hashlazy content.simpleBody::Digest SHA256))) `shouldBe` (manifest.compressedBytes,manifest.compressedSha256)
+  detail "metadata" $ DB.getSession env.pool workspace sealed.id `shouldReturn` Just sealed
+
+-- Opt-in bounded phase timings for maintenance qualification.
+qualificationDetail :: Bool -> Text -> IO a -> IO a
+qualificationDetail False _ action=action
+qualificationDetail True name action=do
+  start<-getMonotonicTimeNSec
+  cpuStart<-getCPUTime
+  result<-try @SomeException action
+  finish<-getMonotonicTimeNSec
+  cpuFinish<-getCPUTime
+  LBS.hPut stdout (encode (object
+    ["archive_qualification_detail".=name
+    ,"wall_seconds".=(fromIntegral (finish-start)/1000000000::Double)
+    ,"cpu_seconds".=(fromIntegral (cpuFinish-cpuStart)/1000000000000::Double)
+    ,"outcome".=(either (const "failed") (const "success") result::Text)])<>"\n")
+  hFlush stdout
+  either throwIO pure result
 
 -- The one-GiB case isolates storage/recovery cost. Complete proof/ZIP/content
 -- concurrency is measured by the separate 100-MiB case, then Task8's matrix.

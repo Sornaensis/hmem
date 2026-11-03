@@ -245,6 +245,47 @@ spec = around withTestEnv $ describe "Compatible archive reader" $ do
           fmap (.bytes) result `shouldBe` Just "}\r\n[]"
     readSessionRange env.pool w sealed.id 0 1048576 >>= (\r -> r.bytes `shouldBe` "{}\r\n[]")
 
+  it "normalizes archive timeout units without changing authority context or savepoint restoration" $ \env -> bounded $ do
+    let settings=St.Statement "SELECT pg_backend_pid(),current_setting('lock_timeout'),current_setting('statement_timeout')" E.noParams
+          (D.singleRow ((,,) <$> D.column (D.nonNullable D.int4) <*> D.column (D.nonNullable D.text) <*> D.column (D.nonNullable D.text))) False
+        context=St.Statement "SELECT current_setting('hmem.request_id'),current_setting('hmem.actor_type'),current_setting('hmem.actor_id'),current_setting('hmem.actor_label'),current_setting('hmem.bot_identity'),current_setting('hmem.workspace_id'),current_setting('hmem.change_cause')" E.noParams
+          (D.singleRow (sequence (replicate 7 (D.column (D.nonNullable D.text))))) False
+        setting name=St.Statement ("SELECT set_config('"<>name<>"',$1,true)")
+          (E.param (E.nonNullable E.text)) (D.singleRow (D.column (D.nonNullable D.text))) False
+        need result=either (fail . show) pure result
+        cases=
+          [("0","0",("1s","4s")),("250ms","500ms",("250ms","500ms"))
+          ,("1s","4s",("1s","4s")),("2s","5s",("1s","4s"))
+          ,("1min","2min",("1s","4s")),("1h","2h",("1s","4s")),("1d","2d",("1s","4s"))
+          ,("0.5s","3.25s",("500ms","3250ms")),("1000us","3500000us",("1ms","3500ms"))
+          ,("499us","4500000us",("1s","4s")),("2147483647ms","2147483647ms",("1s","4s"))]
+    bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \single -> withConn single $ \connection -> do
+      let sql statement=S.run (S.sql statement) connection >>= need
+          sample=S.run (S.statement () settings) connection >>= need
+          set name value=S.run (S.statement value (setting name)) connection >>= need
+      before@(pid,_,_) <- sample
+      forM_ ["postgres","postgres_verbose","sql_standard","iso_8601"] $ \style ->
+        forM_ cases $ \(lockLimit,statementLimit,(expectedLock,expectedStatement)) -> do
+          -- Statement limits stay nonbinding for this value test. Existing
+          -- cancellation/error cases below exercise actual deadline behavior.
+          bracket_ (sql "BEGIN") (sql "ROLLBACK") $ do
+            _ <- set "IntervalStyle" style
+            _ <- set "lock_timeout" lockLimit
+            _ <- set "statement_timeout" statementLimit
+            sql "SELECT set_config('hmem.request_id','reader-probe',true),set_config('hmem.actor_type','user',true),set_config('hmem.actor_id','reader-actor',true),set_config('hmem.actor_label','Reader actor',true),set_config('hmem.bot_identity','{}',true),set_config('hmem.workspace_id','00000000-0000-0000-0000-000000000000',true),set_config('hmem.change_cause','rest',true)"
+            expectedContext <- S.run (S.statement () context) connection >>= need
+            expectedContext `shouldBe` ["reader-probe","user","reader-actor","Reader actor","{}","00000000-0000-0000-0000-000000000000","rest"]
+            inside <- S.run (R.archiveReadSession () settings) connection >>= need
+            inside `shouldBe` (pid,expectedLock,expectedStatement)
+            S.run (S.statement () context) connection >>= need >>= (`shouldBe` expectedContext)
+          sample `shouldReturn` before
+      bracket_ (sql "BEGIN; SET LOCAL lock_timeout='10s'; SET LOCAL statement_timeout='30s'; SAVEPOINT before_archive_limits") (sql "ROLLBACK") $ do
+        S.run (R.archiveReadSession () settings) connection >>= need >>= (`shouldBe` (pid,"1s","4s"))
+        sql "ROLLBACK TO SAVEPOINT before_archive_limits"
+        sample `shouldReturn` (pid,"10s","30s")
+      sample `shouldReturn` before
+    getPoolMetrics >>= (\m -> m.activeConnections `shouldBe` 0)
+
   it "restores archive read limits on the same backend after commit and rollback and safely reuses the pool" $ \env -> bounded $ do
     (w,sealed,manifest) <- fixture env ["{}\n"]
     let settings=St.Statement "SELECT pg_backend_pid(),current_setting('lock_timeout'),current_setting('statement_timeout')" E.noParams

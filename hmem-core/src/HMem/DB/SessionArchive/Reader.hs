@@ -54,10 +54,12 @@ instance Exception ArchiveReadFailure
 -- A blocked libpq query can defer Haskell cancellation. Bound the archive
 -- statement itself on PostgreSQL, preserving stricter caller settings. Both
 -- settings are transaction-local and execute before the query in one pipeline
--- turn; no extra round trip or connection is retained by the reader.
+-- turn. Read the two backend values directly: enumerating pg_settings for each
+-- archive part adds work unrelated to the bounded read. PostgreSQL normalizes
+-- these integer-millisecond GUCs; interval conversion preserves their units.
 readLimits :: St.Statement () (Text,Text)
 readLimits = St.Statement
-  "SELECT set_config('lock_timeout',(CASE WHEN l.setting::bigint=0 THEN 1000 ELSE least(l.setting::bigint,1000) END)::text||'ms',true),set_config('statement_timeout',(CASE WHEN s.setting::bigint=0 THEN 4000 ELSE least(s.setting::bigint,4000) END)::text||'ms',true) FROM pg_catalog.pg_settings l CROSS JOIN pg_catalog.pg_settings s WHERE l.name='lock_timeout' AND s.name='statement_timeout'"
+  "SELECT set_config('lock_timeout',(CASE WHEN l=0 THEN 1000 ELSE least(l,1000) END)::text||'ms',true),set_config('statement_timeout',(CASE WHEN s=0 THEN 4000 ELSE least(s,4000) END)::text||'ms',true) FROM (SELECT (extract(epoch FROM pg_catalog.current_setting('lock_timeout')::interval)*1000)::bigint AS l,(extract(epoch FROM pg_catalog.current_setting('statement_timeout')::interval)*1000)::bigint AS s) settings"
   E.noParams (D.singleRow ((,) <$> column D.text <*> column D.text)) True
 
 archiveQuery :: Pool H.Connection -> input -> St.Statement input output -> IO output

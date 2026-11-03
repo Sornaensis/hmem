@@ -346,6 +346,29 @@ frontend, pause/drain maintenance and disable reclamation before switching
 backends. Raw-only code still requires the pre-cleanup backup. Unresolved failure
 diagnostics expire at issue closure.
 
+### Backend maintenance fixture build
+
+Run the timed maintenance fixture with matching optimized core, server and test
+components. When switching a checkout from `--fast`, force one test-enabled
+build before timing:
+
+```text
+stack test hmem-core:test:hmem-core-test hmem-server:test:hmem-server-test --no-run-tests --force-dirty --reconfigure --ghc-options=-O1
+stack test hmem-server:test:hmem-server-test --ghc-options=-O1 --ta=--match=seeded
+```
+
+Stack's [`--fast` option](https://docs.haskellstack.org/en/stable/build_command/) adds `-O0`;
+the default [`rebuild-ghc-options: false`](https://docs.haskellstack.org/en/stable/configure/yaml/non-project/#rebuild-ghc-options) can leave
+those artifacts in use after a later command omits `--fast`. Verify effective
+GHC overrides for both libraries and the test component; Cabal's
+`NormalOptimisation` value alone does not expose a later `-O0` override. Keep
+the test-enabled configuration for subsequent matching checks. The build
+precondition does not replace the fixture's unchanged 250-second guard or its
+integrity, recovery and resource assertions.
+
+`HMEM_ARCHIVE_QUAL_DIAGNOSTICS=1` emits bounded per-path wall/CPU timings and
+manifest counts without retaining raw transcript fixtures or query logs.
+
 ## HTTP and client
 
 Add authorized session archive readiness/manifest and content routes alongside

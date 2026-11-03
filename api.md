@@ -1,7 +1,8 @@
 # API reference
 
 The HTTP API is available at `/api/v1` on your hmem server, normally
-`http://127.0.0.1:8420` for a local installation. Requests and responses use JSON.
+`http://127.0.0.1:8420` for a local installation. Metadata uses JSON; document
+originals and archive downloads carry binary bytes.
 
 ## Connect and discover endpoints
 
@@ -783,3 +784,99 @@ options. An opt-in selected project/task is validated independently of session
 activity, so zero matches preserve the scope. Deleted, foreign-workspace and
 out-of-project selections remain invalid. Omitted activity retains legacy
 active-only facet membership and selected-option behavior.
+## Task Sources and Document evidence
+
+The document transport is separate from agent-session JSONL and `evidence.zip`.
+All paths below begin with
+`/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents`. Read operations need
+workspace read access; mutations need edit access and current cookie CSRF
+verification. The task must be visible and nondeleted in that workspace. Done
+and cancelled tasks remain eligible; document operations never start a task.
+
+| Method and suffix | Contract |
+| --- | --- |
+| `POST /` | Raw `application/octet-stream` original and one metadata header; returns 201 for publication or 200 for an existing exact request. |
+| `GET /?role=source\|evidence` | Descending creation-time/UUID association page, default 50/max 50. Each item has association `id`, `task_id`, `role`, `created_at` and `document`; `next_cursor` is null or `{created_at,id}`. |
+| `GET /counts` | One authorized consistent snapshot: `source_count`, `document_evidence_count`, `agent_session_evidence_count`, `evidence_total`. |
+| `GET /{documentId}` | Immutable original metadata and independent preview state; requires a remaining Source or Evidence link to this task. |
+| `GET /{documentId}/original` | Verified byte-identical original, forced attachment. |
+| `HEAD /{documentId}/original` | Original manifest/download headers, no body. |
+| `POST /{documentId}/evidence` | Add immutable Document evidence using JSON `{ "request_id": "UUID" }`; exact retry is additive/idempotent. |
+| `DELETE /{documentId}/source` | Idempotently remove only this task's Source link;204/no body. |
+
+Upload metadata is a single `X-HMem-Document-Metadata` JSON header, bounded to
+8192 bytes. Duplicate metadata headers and unknown JSON fields are rejected. Browser callers should use
+ASCII JSON escapes (`\uXXXX`, including surrogate pairs when needed) for
+non-ASCII filename/title characters in the header; they decode to the original
+Unicode metadata. Its exact shape is:
+
+```json
+{
+  "request_id": "7b40cae6-7bc4-4a2a-88b9-8873125d9e62",
+  "role": "source",
+  "manifest": {
+    "filename": "notes.txt",
+    "title": "Review notes",
+    "media_type": "text/plain",
+    "raw_bytes": 5,
+    "raw_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  }
+}
+```
+
+This manifest describes the five original UTF-8 bytes `hello`, without a newline.
+Send those bytes as the request body. A declared Content-Length must agree with
+the manifest; chunked requests are bounded to the same exact count. Original
+admission defaults to 25 MiB, filename/title bounds are 255/1024 UTF-8 bytes, and
+type/extension/signature must agree. The allowlist and durable quotas are in the
+[document persistence reference](docs/reference/task-documents.md). No local path
+belongs in metadata, and the server never opens an agent filesystem.
+
+Authorization precedes metadata/body inspection and reservation. Capacity is
+reserved before reading input; complete size/hash/type validation precedes
+atomic publication. An exact retry still verifies the incoming whole file.
+Conflicting request UUID reuse returns 409. Interrupted, mismatched and rejected
+bodies publish no payload/document/link/event. Their private reservation remains
+retryable until 1h expiry; retaining it prevents a bad concurrent exact retry from
+aborting another valid upload. Next admission reconciles expired reservations.
+
+The browser product uploads/removes Sources only. Evidence upload and
+source-to-evidence association are MCP product flows over this same backend;
+claimed client/bot labels are never authorization. There is no browser evidence
+upload/promotion control or destination picker. A Source associated as evidence
+stays in Sources, and later Source removal preserves its evidence and bytes.
+
+Lists accept `limit`, and paired `before_created_at`/`before_id` from
+`next_cursor`. Counts are independent of list cursors and blob deduplication.
+Evidence is distinct Document evidence associations plus distinct linked
+terminated session IDs for this task, excluding active sessions, descendants
+and Source-only links. A failed/unsupported preview still counts. Three document
+evidence items and 27 terminated sessions yield 30 even when only one row is loaded.
+Missing/unauthorized count reads fail; callers must not display their failure as 0.
+
+Canonical document changes invalidate `task:{taskId}` and
+`task_documents:{taskId}`. Session termination retains existing
+`agent_session:{sessionId}`/`sessions:{workspaceId}` hints; demanded task count
+reads must also retire on that workspace session invalidation. Existing task
+restore/delete events and authorization epochs retire their affected count
+reads. Refresh through `/counts`; do not patch totals from page lengths or
+optimistic upload state.
+
+Original responses use `application/octet-stream`, safe attachment filenames
+(ASCII fallback and RFC5987 UTF-8), Content-Length, original SHA-256 ETag and
+`X-HMem-Document-SHA256`/`X-HMem-Document-Bytes`. They send no-store, no-referrer,
+nosniff and a restrictive response CSP. They never apply content encoding or
+embed original HTML/SVG in the app. GET verifies stored gzip framing/length/hash
+before 200 and rechecks current credentials, workspace/task/link access between
+at most 1 MiB transfer chunks. A post-header error aborts the response; clients
+must verify the complete size/hash. Preparation and transfer each have a finite
+five-minute deadline. HEAD reports the immutable manifest without reading bytes.
+
+Errors include 400 invalid manifest/body/cursor, 401/403 authentication or role/CSRF,
+404 hidden/missing links,409 request/quota/link conflict,413 body limit,415 type,
+431 metadata header bound, 503 unavailable verified storage and 504 DB timeout.
+No error echoes document bytes, credentials, local paths or SQL diagnostics.
+Image/PDF/styled HTML derivative delivery belongs to the separate renderer and
+isolated-origin capability contracts; original admission does not certify safe
+preview content. Existing session downloads and session-only ZIP contracts are
+unchanged.

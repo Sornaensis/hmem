@@ -30,6 +30,14 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
   & components . schemas . at "ObservationContentConflict" ?~ observationContentConflictSchema
   & components . schemas . at "SessionArchiveManifest" ?~ sessionArchiveManifestSchema
+  & components . schemas . at "TaskDocument" ?~ taskDocumentSchema
+  & components . schemas . at "TaskDocumentCounts" ?~ taskDocumentCountsSchema
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents" ?~ taskDocumentsPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/counts" ?~ taskDocumentCountsPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}" ?~ taskDocumentDetailPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/original" ?~ taskDocumentOriginalPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/evidence" ?~ taskDocumentEvidencePath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/source" ?~ taskDocumentSourcePath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/evidence.zip" ?~ taskEvidenceArchivePath
   & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive" ?~ sessionArchiveManifestPath
   & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive/{generationId}/content" ?~ sessionArchiveContentPath
@@ -40,6 +48,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
       , Tag "Workspace Groups" (Just "Global-superadmin workspace group management.") Nothing
       , Tag "Timeline" (Just "Workspace lifecycle timeline and histogram.") Nothing
       , Tag "Agent Sessions" (Just "Workspace-scoped JSONL capture and immutable task evidence.") Nothing
+      , Tag "Task Documents" (Just "Durable Sources and immutable Document evidence; originals download as attachments.") Nothing
       ]
   & paths . at "/api/v1/groups" . _Just . get %~ fmap tagWorkspaceGroups
   & paths . at "/api/v1/groups" . _Just . post %~ fmap tagWorkspaceGroups
@@ -991,6 +1000,72 @@ sessionArchiveContentPath = mempty
           ,(403,Inline (mempty & description .~ "Workspace read permission required."))
           ,(404,Inline (mempty & description .~ "Unknown or unbound published generation, workspace or session."))
           ,(503,Inline (mempty & description .~ "archive_unavailable: complete object cannot be read; Retry-After:1."))]))
+
+taskDocumentSchema :: Schema
+taskDocumentSchema=mempty & type_ ?~ OpenApiObject
+  & required .~ ["id","workspace_id","payload_id","filename","title","media_type","raw_bytes","raw_sha256","created_at","uploader","preview_state","preview_error"]
+  & properties .~ InsOrdMap.fromList
+    ([(key,Inline(mempty & type_ ?~ OpenApiString & format ?~ "uuid")) | key<-["id","workspace_id","payload_id"]]
+    <>[(key,Inline(mempty & type_ ?~ OpenApiString)) | key<-["filename","title","media_type","raw_sha256"]]
+    <>[("raw_bytes",Inline(mempty & type_ ?~ OpenApiInteger & format ?~ "int64" & minimum_ ?~ 0 & maximum_ ?~ 26214400))
+      ,("created_at",Inline(mempty & type_ ?~ OpenApiString & format ?~ "date-time"))
+      ,("uploader",Inline(mempty & type_ ?~ OpenApiObject))
+      ,("preview_state",Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["queued","processing","ready","unsupported","failed"]))
+      ,("preview_error",Inline(mempty & type_ ?~ OpenApiString & nullable ?~ True))])
+
+taskDocumentCountsSchema :: Schema
+taskDocumentCountsSchema=mempty & type_ ?~ OpenApiObject
+  & required .~ ["source_count","document_evidence_count","agent_session_evidence_count","evidence_total"]
+  & properties .~ InsOrdMap.fromList[(key,Inline(mempty & type_ ?~ OpenApiInteger & format ?~ "int64" & minimum_ ?~ 0)) | key<-["source_count","document_evidence_count","agent_session_evidence_count","evidence_total"]]
+
+documentPath :: Bool -> PathItem
+documentPath detail=mempty & parameters .~ archivePathParameters(["workspaceId","taskId"]<>["documentId" | detail])
+
+documentOperation :: Text -> Text -> Operation
+documentOperation label detail=mempty & tags .~ InsOrdSet.singleton "Task Documents" & summary ?~ label
+  & description ?~ (detail<>" Authorization precedes metadata/body processing; any visible nondeleted task status is eligible. No task_start requirement. Cookie mutations retain existing CSRF checks. Bot/client labels grant no permission. Metadata is no-store/no-referrer/nosniff; no local paths, original bytes or grant URLs enter audit/change events.")
+  & responses .~ Responses Nothing(InsOrdMap.fromList[(code,Inline(mempty & description .~ message)) | (code,message)<-
+      [(400,"Invalid document metadata, body, cursor or manifest; no publication."),(401,"Authentication required."),(403,"Current workspace role or cookie CSRF required."),(404,"Workspace/task/document/link missing, foreign or soft-deleted."),(409,"Immutable request reuse conflict, quota or link limit; no publication."),(413,"Bounded original/body limit exceeded."),(415,"Unsupported/mismatched original type or non-binary upload body."),(431,"Upload metadata header exceeds8KiB."),(503,"Verified document storage unavailable."),(504,"Document database operation timed out.")]])
+
+documentJSONResponse :: Text -> Referenced Schema -> Referenced Response
+documentJSONResponse detail representation=Inline(mempty & description .~ detail & content .~ InsOrdMap.singleton "application/json"(mempty & schema ?~ representation))
+
+taskDocumentsPath :: PathItem
+taskDocumentsPath=documentPath False
+  & get ?~ (documentOperation "List Source or Document evidence associations" "50-item descending creation-time/UUID keyset. Counts are a separate canonical read and never derived from page length or payload dedup."
+      & parameters .~
+        [Inline(mempty & name .~ "role" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["source","evidence"] & default_ ?~ "source"))
+        ,Inline(mempty & name .~ "limit" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 50 & default_ ?~ Number 50))
+        ,Inline(mempty & name .~ "before_created_at" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "date-time"))
+        ,Inline(mempty & name .~ "before_id" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "uuid"))]
+      & responses . responses . at 200 ?~ documentJSONResponse "Bounded association page: items contain association id/task_id/role/created_at/document; next_cursor is null or {created_at,id}." (Inline(mempty & type_ ?~ OpenApiObject)))
+  & post ?~ (documentOperation "Upload an immutable original" "Raw application/octet-stream body, at most25MiB. One X-HMem-Document-Metadata JSON header (at most8192bytes) contains exactly {request_id:UUID,role:source|evidence,manifest:{filename,title,media_type,raw_bytes,raw_sha256}}. Filename/title limits255/1024UTF-8bytes; lowercase64hex SHA256; accepted type/extension/signature must agree. Role is a placement choice under edit authorization, not client identity. Reserve quota before reading, verify the complete original even on exact retry, then publish atomically. Private interrupted reservations expire after1h; retry the same UUID/manifest. Browser product uses Source-only upload; evidence upload is an MCP product flow using this same authorized API."
+      & parameters .~ [Inline(mempty & name .~ "X-HMem-Document-Metadata" & in_ .~ ParamHeader & required ?~ True & schema ?~ Inline(mempty & type_ ?~ OpenApiString & maxLength ?~ 8192))]
+      & requestBody ?~ Inline(mempty & required ?~ True & content .~ InsOrdMap.singleton "application/octet-stream"(mempty & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "binary" & maxLength ?~ 26214400)))
+      & responses . responses . at 200 ?~ documentJSONResponse "Exact existing request retry; original document receipt." (Ref(Reference "TaskDocument"))
+      & responses . responses . at 201 ?~ documentJSONResponse "Verified payload, immutable document, chosen link and metadata event committed together." (Ref(Reference "TaskDocument")))
+
+taskDocumentCountsPath :: PathItem
+taskDocumentCountsPath=documentPath False & get ?~ (documentOperation "Read canonical task document/evidence counts" "One authorized consistent SQL snapshot counts Source associations, distinct Document evidence associations and distinct linked terminated session IDs, plus their evidence sum. Excludes active sessions, descendant tasks and Sources-only documents; includes failed/unsupported previews.3docs+27terminated sessions yields30 independently of loaded pages."
+  & responses . responses . at 200 ?~ documentJSONResponse "Canonical counts; unknown/loading is not represented as zero." (Ref(Reference "TaskDocumentCounts")))
+
+taskDocumentDetailPath :: PathItem
+taskDocumentDetailPath=documentPath True & get ?~ (documentOperation "Read document metadata" "Requires a retained Source or Evidence association to this task."
+  & responses . responses . at 200 ?~ documentJSONResponse "Current immutable original metadata and separate preview status." (Ref(Reference "TaskDocument")))
+
+taskDocumentOriginalPath :: PathItem
+taskDocumentOriginalPath=documentPath True & get ?~ download & head_ ?~ (download & summary ?~ "Read original download headers")
+  where download=documentOperation "Download verified original bytes" "Forces application/octet-stream attachment with safe ASCII fallback and UTF-8 filename, Content-Length, original SHA256 ETag and X-HMem-Document-SHA256/Bytes. No content encoding or original HTML/SVG embedding. GET verifies stored gzip framing/size/hash before200, then rechecks credentials/workspace/task/link between at-most1MiB transfer chunks. HEAD returns original manifest headers and no body. Five-minute preparation/transfer deadline; post-header failure aborts, never appends JSON."
+          & responses . responses . at 200 ?~ Inline(mempty & description .~ "Byte-identical original attachment (HEAD has no body)." & content .~ InsOrdMap.singleton "application/octet-stream"(mempty & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "binary")))
+
+taskDocumentEvidencePath :: PathItem
+taskDocumentEvidencePath=documentPath True & post ?~ (documentOperation "Associate an existing source as immutable Document evidence" "MCP product flow; uses ordinary workspace edit authorization. Small JSON body contains exactly {request_id:UUID}. Exact retry is additive/idempotent, conflicting reuse fails. No payload copy, no Source removal, no browser evidence creation control."
+  & requestBody ?~ Inline(mempty & required ?~ True & content .~ InsOrdMap.singleton "application/json"(mempty & schema ?~ Inline(mempty & type_ ?~ OpenApiObject & required .~ ["request_id"] & properties .~ InsOrdMap.singleton "request_id"(Inline(mempty & type_ ?~ OpenApiString & format ?~ "uuid")))))
+  & responses . responses . at 200 ?~ documentJSONResponse "Immutable evidence association available; original document metadata." (Ref(Reference "TaskDocument")))
+
+taskDocumentSourcePath :: PathItem
+taskDocumentSourcePath=documentPath True & delete ?~ (documentOperation "Remove only this task's Source association" "Idempotent Source removal preserves existing Document evidence, immutable originals and retry receipts. No document/evidence hard delete."
+  & responses . responses . at 204 ?~ Inline(mempty & description .~ "Source association absent; no body."))
 
 taskEvidenceArchivePath :: PathItem
 taskEvidenceArchivePath = mempty

@@ -64,6 +64,7 @@ import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
 import HMem.Server.API (HMemAPI, serverWithSessionReaders, authorizeAgentSessionWrite)
 import HMem.Server.Archive.HTTP (archiveMiddleware)
+import HMem.Server.Document.HTTP (documentMiddleware)
 import HMem.Server.SessionPrefix (PrefixRegistry)
 import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
@@ -132,6 +133,7 @@ mkAppWithServicesAt oidcNow prefixes discovery oidcCodeExchange changeStreamConf
         $ authMiddleware authCfg
         $ archiveMiddleware pool (resolveArchivePrincipal jwksCache pool authCfg)
         $ archive
+        $ documentMiddleware pool (resolveArchivePrincipal jwksCache pool authCfg)
         $ agentSessionBodyLimit pool
         $ openApiMiddleware
         $ normalizeObservationIfMatch
@@ -995,9 +997,9 @@ corsMiddleware authCfg corsCfg = cors $ \req ->
       | pattern == "*" = True
       | otherwise = False
     policy = simpleCorsResourcePolicy
-      { corsMethods        = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match", "If-None-Match", "X-HMem-Bot-Identity"]
-      , corsExposedHeaders = Just ["X-Request-Id", "ETag", "Retry-After", "X-HMem-Archive-Generation", "X-HMem-Archive-SHA256", "X-HMem-Archive-Raw-Bytes", "X-HMem-Archive-Raw-SHA256"]
+      { corsMethods        = ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]
+      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match", "If-None-Match", "X-HMem-Bot-Identity", "X-HMem-Document-Metadata"]
+      , corsExposedHeaders = Just ["X-Request-Id", "ETag", "Retry-After", "X-HMem-Archive-Generation", "X-HMem-Archive-SHA256", "X-HMem-Archive-Raw-Bytes", "X-HMem-Archive-Raw-SHA256", "Content-Disposition", "X-HMem-Document-SHA256", "X-HMem-Document-Bytes"]
       }
 
 data RateLimitBucket = RateLimitBucket

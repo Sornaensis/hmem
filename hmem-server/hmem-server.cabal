@@ -103,6 +103,7 @@ library
       HMem.Server.CtlPaths
       HMem.Server.CtlPgvector
       HMem.Server.CtlPgvectorCli
+      HMem.Server.Document.HTTP
       HMem.Server.Embedding.GteQwen2
       HMem.Server.Embedding.Http
       HMem.Server.Embedding.ManagedTei
@@ -523,6 +524,7 @@ test-suite hmem-server-test
       HMem.Server.CtlPgvectorCliSpec
       HMem.Server.CtlPgvectorSpec
       HMem.Server.DeployedSandboxSpec
+      HMem.Server.DocumentSpec
       HMem.Server.Embedding.GteQwen2Spec
       HMem.Server.Embedding.HttpSpec
       HMem.Server.Embedding.ManagedTeiSpec

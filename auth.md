@@ -132,7 +132,27 @@ A service token inherits its linked user's grants and workspace roles. It does
 not grant access by itself. Existing workspace membership has no public management
 command or HTTP endpoint; `users upsert` changes global grants only.
 
+### Task document access
+
+Document metadata, canonical evidence counts and original downloads require
+current workspace read access and a visible same-workspace task/link. Uploads,
+immutable evidence association and Source removal require edit access; admin
+includes edit. Completed task status does not change those permissions.
+Cookie-authenticated mutations retain the deployed CSRF policy. Authorization
+precedes upload metadata/body reads and reservation, is checked again before
+publication, and is rechecked between bounded original download chunks.
+Credential expiry/revocation, role withdrawal and task/link removal can abort an
+ongoing transfer.
+
+Source-only browser upload and MCP-only evidence creation describe product
+surfaces, not separate authorities. A client header, bot role/model declaration
+or claimed MCP label grants no access. The adapter uses the same authorized
+HTTP API; local paths stay in the adapter. Source removal preserves immutable
+Document evidence. See the [document API](api.md#task-sources-and-document-evidence)
+and [persistence reference](docs/reference/task-documents.md).
+
 ## Service and MCP tokens
+
 
 Issue a token for a user with the needed permissions:
 

@@ -75,6 +75,7 @@ data-files:
     migrations/V055__bounded_outbox_retention.sql
     migrations/V056__audit_maintenance_controls.sql
     migrations/V057__audit_maintenance_operations.sql
+    migrations/V058__task_documents.sql
 
 library
   exposed-modules:

@@ -1,5 +1,24 @@
 # Schema reference
 
+## Task documents (V058)
+
+`V058__task_documents.sql` installs workspace budget/reservation rows, immutable
+gzip payload manifests and binary parts, independently attributed documents,
+Source links, immutable Document evidence snapshots, request retry receipts,
+preview status, immutable attempt identities and complete immutable generations. Composite foreign keys bind
+payloads, documents, tasks and generations to one workspace. No existing session,
+Observation or audit row is rewritten. DDL and ledger version 58 commit together.
+
+Published payloads/parts, documents, evidence, attempts, generations and request receipts
+reject update/delete and TRUNCATE. Source removal deletes only its link. Task
+soft-delete hides links from reads while preserving their rows and originals;
+restore exposes them again. Budget/reservation/preview control rows are mutable.
+The database diagram lists every column and declared relationship; JSON output
+descriptors receive same-workspace validation but have no SQL foreign key.
+
+See [document persistence](task-documents.md) for limits, atomic publication,
+retry semantics, complete-generation publication and backup requirements.
+
 ## Transcript occurrence projection (V054)
 
 `session_occurrences` is a replaceable sidecar with one composite workspace/session

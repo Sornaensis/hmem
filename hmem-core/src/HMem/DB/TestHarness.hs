@@ -483,7 +483,7 @@ cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
         ]
       guardSql action = B8.pack $ unlines
         [ "DO $$ DECLARE target TEXT; BEGIN"
-        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions','session_archive_jobs','session_archive_generations','session_archive_parts','session_archive_checkpoints','session_archive_ledger'] LOOP"
+        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions','session_archive_jobs','session_archive_generations','session_archive_parts','session_archive_checkpoints','session_archive_ledger','document_payloads','document_payload_parts','documents','task_document_evidence','document_requests','document_generations','document_preview_attempts'] LOOP"
         , "IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.'||target)"
         , "AND tgname='session_evidence_no_truncate' AND NOT tgisinternal) THEN"
         , "EXECUTE format('ALTER TABLE public.%I " <> action <> " TRIGGER session_evidence_no_truncate',target);"

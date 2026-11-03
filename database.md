@@ -1,6 +1,124 @@
 ```mermaid
 classDiagram
   direction TB
+    class document_budgets {
+      UUID workspace_id PK FK
+      BIGINT original_limit
+      BIGINT raw_limit
+      BIGINT binary_limit
+      BIGINT staging_limit
+      INTEGER task_link_limit
+    }
+    class document_reservations {
+      UUID workspace_id PK FK
+      UUID id PK
+      TEXT kind
+      JSONB binding
+      BIGINT reserved_raw
+      BIGINT reserved_binary
+      TIMESTAMPTZ created_at
+      TIMESTAMPTZ expires_at
+    }
+    class document_payloads {
+      UUID id PK
+      UUID workspace_id FK
+      TEXT codec
+      BIGINT raw_bytes
+      TEXT raw_sha256
+      BIGINT compressed_bytes
+      TEXT compressed_sha256
+      INTEGER part_count
+      BOOLEAN original
+      TIMESTAMPTZ? published_at
+    }
+    class document_payload_parts {
+      UUID payload_id PK FK
+      UUID workspace_id FK
+      INTEGER ordinal PK
+      BYTEA data
+    }
+    class documents {
+      UUID id PK
+      UUID workspace_id FK
+      UUID payload_id FK
+      TEXT filename
+      TEXT title
+      TEXT media_type
+      BIGINT raw_bytes
+      TEXT raw_sha256
+      JSONB uploader
+      TIMESTAMPTZ created_at
+    }
+    class task_document_sources {
+      UUID id PK
+      UUID workspace_id FK
+      UUID task_id FK
+      UUID document_id FK
+      TIMESTAMPTZ created_at
+    }
+    class task_document_evidence {
+      UUID id PK
+      UUID workspace_id FK
+      UUID task_id FK
+      UUID document_id FK
+      JSONB snapshot
+      TIMESTAMPTZ created_at
+    }
+    class document_requests {
+      UUID workspace_id PK FK
+      UUID request_id PK
+      JSONB binding
+      UUID document_id FK
+      UUID link_id
+      TIMESTAMPTZ created_at
+    }
+    class document_previews {
+      UUID document_id PK FK
+      UUID workspace_id FK
+      TEXT state
+      TEXT? error_code
+      UUID? generation_id FK
+      UUID? attempt_id
+    }
+    class document_preview_attempts {
+      UUID id PK
+      UUID workspace_id FK
+      UUID document_id FK
+      JSONB binding
+      TIMESTAMPTZ created_at
+    }
+    class document_generations {
+      UUID id PK FK
+      UUID workspace_id FK
+      UUID document_id FK
+      TEXT original_sha256
+      TEXT policy_version
+      JSONB outputs
+      TIMESTAMPTZ created_at
+    }
+    workspaces "1" --> "0..1" document_budgets
+    workspaces "1" --> "0..*" document_reservations
+    workspaces "1" --> "0..*" document_payloads
+    document_payloads "1" --> "1..*" document_payload_parts
+    document_payloads "1" --> "0..*" documents
+    tasks "1" --> "0..*" task_document_sources
+    tasks "1" --> "0..*" task_document_evidence
+    documents "1" --> "0..*" task_document_sources
+    documents "1" --> "0..*" task_document_evidence
+    workspaces "1" --> "0..*" document_requests
+    documents "1" --> "0..*" document_requests
+    documents "1" --> "1" document_previews
+    documents "1" --> "0..*" document_generations
+    documents "1" --> "0..*" document_preview_attempts
+    document_preview_attempts "1" --> "0..1" document_generations
+    document_generations "0..1" <-- "0..*" document_previews
+    note for document_payloads "UNIQUE (id, workspace_id) and (workspace_id, raw_sha256, raw_bytes, original)\nPublished manifests and parts are immutable"
+    note for documents "UNIQUE (id, workspace_id)\nComposite payload FK enforces workspace"
+    note for task_document_sources "UNIQUE (workspace_id, task_id, document_id)\nComposite task/document FKs; removal deletes this link only"
+    note for task_document_evidence "UNIQUE (workspace_id, task_id, document_id)\nComposite task/document FKs; immutable original snapshot"
+    note for document_generations "UNIQUE (id, workspace_id)\nOutputs are a bounded JSON descriptor array, validated against same-workspace payloads at publication; descriptors are not SQL foreign keys"
+    note for document_preview_attempts "UNIQUE (id, workspace_id)\nImmutable attempted-ID binding survives reservation expiry/abort; generation has a composite attempt FK"
+    note for document_requests "link_id is an immutable receipt, not a foreign key; source removal preserves the retry receipt"
     class audit_maintenance_control {
       BOOLEAN singleton PK
       BOOLEAN paused
@@ -597,3 +715,12 @@ reconcile audit-only heap/index operations; an administrator-only function
 attests a verified backup/restore. No PUBLIC grant, extension installation or
 audit deletion is introduced. Physical commands use a separate narrow login
 and retain operation ownership through cancellation and recovery.
+
+V058 adds compressed immutable task documents, independently removable Source
+links and additive Document evidence. Workspace reservations serialize raw,
+binary and staging quotas before upload/preview work. Publication verifies the
+complete payload and commits the document, role link, exact-retry receipt and
+metadata event together. Preview generations retain original/policy/output
+bindings independently of originals. These tables do not reuse sessions,
+Observations or session archive receipts. See the
+[document storage reference](docs/reference/task-documents.md).

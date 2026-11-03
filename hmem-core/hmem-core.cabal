@@ -32,6 +32,7 @@ library
       HMem.DB.AuditMaintenance.Host
       HMem.DB.Auth
       HMem.DB.ChangeStream
+      HMem.DB.Document
       HMem.DB.Embedding
       HMem.DB.Migration
       HMem.DB.Observation
@@ -51,6 +52,8 @@ library
       HMem.DB.Timeline
       HMem.DB.Workspace
       HMem.DB.WorkspaceGroup
+      HMem.Document.Codec
+      HMem.Document.Types
       HMem.SessionArchive.Codec
       HMem.Types
   other-modules:
@@ -124,6 +127,7 @@ test-suite hmem-core-test
       HMem.DB.AuthSpec
       HMem.DB.BotIdentitySpec
       HMem.DB.ChangeStreamSpec
+      HMem.DB.DocumentSpec
       HMem.DB.EmbeddingSpec
       HMem.DB.ObservationDiscoverySpec
       HMem.DB.ObservationFixture
@@ -141,6 +145,7 @@ test-suite hmem-core-test
       HMem.DB.TestHarnessSpec
       HMem.DB.TimelineSpec
       HMem.DB.WorkspaceSpec
+      HMem.Document.CodecSpec
       HMem.ObservationSubjectMatchCorpus
       HMem.SessionArchive.CodecSpec
       HMem.TypesSpec

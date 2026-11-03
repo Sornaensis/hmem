@@ -132,6 +132,9 @@ spec = describe "Archive HTTP" $ do
       value ["progress","raw_bytes"] retryBody `shouldBe` Just (String "0")
       value ["compressed_bytes"] retryBody `shouldBe` Just Null
       Pool.runSession env.pool $ SQL.sql ("UPDATE session_archive_jobs SET retry_at=clock_timestamp() WHERE session_id='"<>uuid sealed.id<>"'")
+      -- A released attempt must drain its unpublished generation before retry.
+      DB.claimArchive env.pool "fixture" `shouldReturn` Nothing
+      DB.cleanupArchiveGeneration env.pool w sealed.id first.generationId `shouldReturn` 1
       Just second <- DB.claimArchive env.pool "fixture"
       second.generationId `shouldNotBe` first.generationId
       DB.releaseArchive env.pool second True "bounded_internal_failure" `shouldReturn` True

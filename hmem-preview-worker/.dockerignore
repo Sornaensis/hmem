@@ -1,0 +1,5 @@
+**
+!Dockerfile
+!requirements.lock
+!preview_worker/
+!preview_worker/*.py

@@ -1,0 +1,25 @@
+{
+  "schema": "hmem-preview-image-v1",
+  "image_id": "sha256:43d5c02754efce8f533ded982f75b1a0f9eca8202c37d186cf1a1b575da890b5",
+  "local_retention_tag": "hmem-preview-worker:8559047b-final1",
+  "availability": "local Docker Desktop Linux image; not a registry publication",
+  "base_image": "python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f",
+  "owner": "worker/integration coordinator",
+  "retention": "Retain while configured; replace only with a verified rebuilt and qualified image reference; retire obsolete pins when unused.",
+  "inputs": {
+    "hmem-preview-worker/Dockerfile": "163a8833f8ef8a1197a02e596ed8489a518b9b6456574bf82de84e6e669b312b",
+    "hmem-preview-worker/.dockerignore": "af9d7e8892af63862bf94dec4fa3f47efa2aa6836f9dbc098a282f45757f59e2",
+    "hmem-preview-worker/requirements.lock": "d04606bb7a170825c64e3badc4aa273025ec3de45e26da34808bbbac8d966bf7",
+    "hmem-preview-worker/preview_worker/__init__.py": "a5c55b7bd6708d15a1c2111c527cf88bae826216315c752aed9ae005431878f1",
+    "hmem-preview-worker/preview_worker/confinement.py": "4013b61b0c2db58f2f86b387a708dca6cfbc1bf85b3d67311b90a6550d4b3a03",
+    "hmem-preview-worker/preview_worker/images.py": "cbad55abeff51017b12eb2146d418812004293f54b241d848e141bc8624ead74",
+    "hmem-preview-worker/preview_worker/launcher.py": "386d4b658a99c90d4918773d14941fe3efe9f44dbe5db24d915727ed4aa67525",
+    "hmem-preview-worker/preview_worker/pdf.py": "7edb0fda2f8d52c2098b79112510590b64358162d5fa95302c7435496f88ff47",
+    "hmem-preview-worker/preview_worker/policy.py": "d8a3fe9722e8f80426d2a662700fbdfd6a652e3e9468a472d246240a735f6664",
+    "hmem-preview-worker/preview_worker/protocol.py": "9c2ac1690af573c1631acf287d9392edbfdd67b674659aa7de312878161cde7a",
+    "hmem-preview-worker/preview_worker/render.py": "34a6b0aaaa78f680040d8663c96f1f5862c4ca4169babd5b425afeaf46f460e4",
+    "hmem-preview-worker/preview_worker/sanitize.py": "b2ea9ff393e2d25783bf1b57687299250ceabab64e65c912d1914c8587c4b15e",
+    "hmem-preview-worker/preview_worker/transport.py": "71b3283ce58a594439aebb9b93971a4b3b55fc9bb4c538ee27460f225b1a7763",
+    "hmem-preview-worker/preview_worker/worker.py": "2d3e99b1394cf8911c0d6e611424d12244f5b62b373c45e3c5f9c69ff47e5a9e"
+  }
+}

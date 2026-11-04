@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M6KY6T861D4V21GKJ8V4P3NJ"
+relation = "amends"
+from_record = "R01M6KY6T86Y50SN2BRSM5A83X6"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M60P7MS1N5N64C35BW57C69V"]
++++
+
+Distinguish opt-in sanitized archive content from original sealed evidence.
+
+<!-- @adrai:eyJhIjp7ImkiOiJkZXZlbG9wZXIiLCJrIjoibGxtIiwibSI6ImNvZGV4OmdwdC02LjEtc29sOmhpZ2gifSwiYiI6ImU2NzM5YzIxNzc1ZmJiN2U1NjJkYTYwNmVmNDgzY2Y0MGJkMThiNzQiLCJpIjoic2hhMjU2OkpaUDNHTjNmZWRfQjdJS2oxZ0tGR3F2M2hpblMtelZkemFyaFAzbGwyUVEiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTZLWTZUODYxRDRWMjFHS0o4VjRQM05KIiwib3AiOiJPMDFNNktZNlQ4Nlk1MFNOMkJSU001QTgzWDYiLCJwIjpbIlIwMU02MFA3TVMxTjVONjRDMzVCVzU3QzY5ViJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1Njp5ZXE2Qjg5U1hUQmJqdnZ2NDNXallXclN1dDZ1X21TekNHTVRvOEFvWUxZIiwidCI6MTc5MzgxODA2MTA2MiwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

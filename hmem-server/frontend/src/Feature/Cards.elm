@@ -2478,20 +2478,6 @@ viewTaskCardBody descendants projection showProject model task =
 
                       else
                         text ""
-                    , let
-                        loadedChildren =
-                            childTasksForTask
-                                |> (if applyLocalTreeCriteria then List.filter (\child -> Set.member child.id projection.taskCriteriaMatches) else identity)
-                                |> orderedTasks model
-                      in
-                      CardSections.section "Loaded subtasks"
-                        (List.map (\child -> div [class "card-subtask-summary"]
-                            [ span [class ("badge badge-" ++ Api.taskStatusToString child.status)] [text (Api.taskStatusToString child.status)]
-                            , button [class "card-subtask-jump",type_ "button",onClick (FocusEntity "task" child.id),attribute "aria-label" ("Jump to subtask: " ++ child.title)] [text child.title]
-                            ]) (List.take 3 loadedChildren)
-                            ++ [if List.length loadedChildren > 3 then p [class "card-meta"] [text "Other loaded subtasks are in the hierarchy below."]
-                                else if List.isEmpty loadedChildren then p [class "card-meta"] [text (if hasChildren then "Subtasks are available in the hierarchy below." else "No loaded subtasks.")]
-                                else text ""])
                     , Feature.Dependencies.viewTaskDependencies model task.id deps]
                     , panel "sources" [Documents.viewPanel "source" model task.id]
                     , panel "evidence" [Documents.viewPanel "evidence" model task.id, Feature.Sessions.viewTaskEvidence task.workspaceId model task.id]

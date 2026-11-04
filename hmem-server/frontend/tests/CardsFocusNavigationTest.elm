@@ -784,12 +784,50 @@ suite =
 
                     expanded =
                         Cards.viewProjectsTree workspaceId expandedModel |> Query.fromHtml
+
+                    work =
+                        expanded |> Query.find [ Selector.id "task-editable-task-work" ]
                 in
                 Expect.all
                     [ \_ -> Query.findAll [ Selector.class "card-task" ] collapsed |> Query.count (Expect.equal 1)
                     , \_ -> Query.findAll [ Selector.class "card-extras" ] collapsed |> Query.count (Expect.equal 0)
                     , \_ -> Query.findAll [ Selector.class "card-extras" ] expanded |> Query.count (Expect.equal 1)
                     , \_ -> Query.find [ Selector.class "card-task" ] expanded |> Query.has [ Selector.class "editable-text", Selector.text "editable-task" ]
+                    , \_ -> work |> Query.has [ Selector.class "task-dependencies-section" ]
+                    , \_ -> work |> Query.hasNot [ Selector.text "Loaded subtasks" ]
+                    ]
+                    ()
+        , test "task Work keeps a partially loaded child in the hierarchy and uses the canonical count" <|
+            \_ ->
+                let
+                    base =
+                        task "parent" Nothing
+
+                    rollup =
+                        base.readinessRollup
+
+                    parent =
+                        { base | hasChildren = True, directSubtaskCount = 2, readinessRollup = { rollup | openSubtaskCount = 2 } }
+
+                    child =
+                        task "loaded-child" (Just parent.id)
+
+                    expanded =
+                        DataLoading.mergeNavigationSummaries [] [ parent, child ] model
+                            |> Cards.update (ToggleCardExpand parent.id)
+                            |> Tuple.first
+                            |> Cards.viewProjectsTree workspaceId
+                            |> Query.fromHtml
+
+                    work =
+                        expanded |> Query.find [ Selector.id "task-parent-work" ]
+                in
+                Expect.all
+                    [ \_ -> expanded |> Query.find [ Selector.id "entity-parent" ] |> Query.has [ Selector.text "2 subtasks" ]
+                    , \_ -> expanded |> Query.has [ Selector.id "entity-loaded-child" ]
+                    , \_ -> work |> Query.has [ Selector.class "task-dependencies-section" ]
+                    , \_ -> work |> Query.hasNot [ Selector.text "Loaded subtasks" ]
+                    , \_ -> work |> Query.hasNot [ Selector.text child.title ]
                     ]
                     ()
         , test "focus and collapse reset reversible presentation cursors without dropping cached cards" <|

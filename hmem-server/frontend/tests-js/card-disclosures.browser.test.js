@@ -33,6 +33,16 @@ async function assertDetails(page, control, expanded) {
   assert.ok(box.width>=32); assert.ok(box.height>=32)
 }
 
+async function assertTaskWork(page, id) {
+  const work = page.locator('#task-' + id + '-work')
+  assert.equal(await work.isVisible(), true)
+  assert.equal(await work.locator('.task-dependencies-section').count(), 1)
+  assert.doesNotMatch(await work.innerText(), /loaded subtasks|subtasks are available in the hierarchy/i)
+  assert.equal(await work.getByRole('button', {name: /Jump to subtask/}).count(), 0)
+  assert.equal(await page.locator('#task-' + id + '-evidence-button').count(), 1)
+  assert.equal(await page.locator('#task-' + id + '-history-button').count(), 1)
+}
+
 for (const width of [1440, 430]) test(`native card details keyboard and unique regions at ${width}px`, {timeout:60000}, async () => {
   const f = hierarchyFixture()
   f.projects = [f.projects[0], {...f.projects[1], id:'nested-project', parent_id:f.projects[0].id, name:'Nested project'}]
@@ -52,11 +62,17 @@ for (const width of [1440, 430]) test(`native card details keyboard and unique r
       await h.page.mouse.move(0,0);await control.focus();await control.locator('.card-details-label').waitFor({state:'visible'})
       await control.focus(); await h.page.keyboard.press('Enter'); await h.idle()
       await assertDetails(h.page,control,true)
+      if (key.startsWith('task:')) await assertTaskWork(h.page, key.slice('task:'.length))
       assert.equal(await control.innerText(),'Hide Details');assert.ok(await control.evaluate(node=>node.parentElement.classList.contains('card-details-toolbar')))
       assert.equal(await control.evaluate(node=>node===document.activeElement),true)
       await control.focus(); await h.page.keyboard.press('Space'); await h.idle()
       await assertDetails(h.page,control,false)
       assert.ok(await control.evaluate(node=>node===document.activeElement))
+    }
+    if (width === 1440) {
+      await h.start('tab=projects&focus=task:child', 'child'); await h.idle()
+      await h.page.locator('#task-child-details-toggle').click(); await h.idle()
+      await assertTaskWork(h.page, 'child')
     }
     assert.deepEqual(h.errors,[]); assert.deepEqual(h.unhandled,[])
   } finally {await h.close()}
@@ -81,6 +97,7 @@ test('complete next work and blocked disclosure exceed both old limits and are i
     assert.ok(pages.some(r=>r.includeBlocked && r.offset===400))
     await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=projects&focus=task:dependent'); await h.idle()
     await h.page.locator('#entity-dependent .btn-extras-toggle').first().click(); await h.idle()
+    await assertTaskWork(h.page, 'dependent')
     const dependencies = h.page.locator('#entity-dependent .task-dependencies-section')
     assert.deepEqual(await dependencies.locator(':scope > .task-dependencies-list .popover-card-title').allTextContents(),['Ready 0'])
     const closed = dependencies.locator('details')

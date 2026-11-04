@@ -1,16 +1,17 @@
 # Sealed session archives
 
 Session `last_activity_at` is a separate [occurrence projection](session-occurrence.md).
-It can be rebuilt from verified gzip evidence after raw reclamation, without
+It can be rebuilt from verified exact gzip evidence after raw reclamation, without
 changing sealed canonical metadata, original bytes or archive receipts. Archive
 backfill/reclamation controls do not disable this bounded metadata correction.
 
 This is the implementation contract for post-seal storage and full-session
-viewing. The standalone codec probe and client qualification below have separate
-scopes; final database/HTTP/browser integration and rollout belong to the aggregate
-qualification.
+viewing. The sanitized representation contract specifies planned behavior. The
+other sections describe the exact representation and shared machinery. The codec
+probe and client qualification cover separate scopes. The aggregate qualification
+covers database, HTTP and browser integration and rollout.
 
-## Representation
+## Exact representation
 
 Every explicitly or automatically terminated session gets one logical
 `gzip-v1` object, including empty, tiny and incompressible transcripts. Active
@@ -36,6 +37,130 @@ All authoritative byte counts, offsets and revision counters are checked
 64-bit values. Use an opaque C shim around zlib's ABI and checked `uInt`
 conversions only for bounded buffers. On Windows, `uLong` can be 32-bit. The
 gzip ISIZE trailer is modulo 2^32 and never replaces `final_bytes`.
+
+## Sanitized representation contract
+
+### Replacement policy
+
+Sanitization is opt-in through an operator-installed database policy. The archive
+control plane installs one validated policy atomically for all workers. An absent
+policy disables sanitization. Reject an invalid installation and keep the prior
+policy active. The v1 JSON policy has this shape.
+
+```json
+{
+  "version": 1,
+  "eligible_from": "2026-12-01T00:00:00Z",
+  "formats": {
+    "codex_jsonl": [
+      {
+        "match": {
+          "/type": "response_item",
+          "/payload/type": "function_call"
+        },
+        "path": "/payload/encrypted_content",
+        "replacement": "Encrypted Payload"
+      }
+    ]
+  }
+}
+```
+
+Use exact, case-sensitive stored format labels and require every discriminator to
+equal the configured JSON string. Use RFC 6901 pointers into the decoded object,
+including canonical array indices. Require a nonempty rule list per format, a
+nonempty discriminator map and non-root pointers. Reject unknown keys, duplicate
+keys or decoded paths, invalid escapes and unsupported versions. Bound the policy
+to 64 KiB UTF-8, with at most 16 formats, 16 rules per format, eight discriminators
+per rule, 16 segments per pointer and 256 UTF-8 bytes per replacement. Omitted
+`replacement` defaults to `Encrypted Payload`. An explicitly empty string is valid.
+
+Record the effective cutoff as the later of `eligible_from` and the policy's
+database activation time. Each job insertion path snapshots the applicable format's
+normalized rules, version, effective cutoff and SHA-256 of the snapshot in the
+same transaction as job creation. Use a versioned UTF-8 JSON encoding with sorted
+object keys, compact separators, explicit defaults and a canonical UTC timestamp.
+Keep the encoded snapshot immutable across retries, including after policy changes
+or disablement. Sessions sealed before the cutoff, formats without rules, preexisting
+jobs and published archives retain the exact representation. Historical or on-demand
+enqueue uses the same cutoff. Keep production eligibility disabled until compatible
+consumers and reclamation guards are deployed.
+
+### Transformation and integrity
+
+Verify the original seal while streaming the ordered raw chunks. Parse bounded
+UTF-8 JSONL records and replace only the token spans of matched nonempty strings.
+Evaluate all rules against the original record. Write replacement tokens with a
+deterministic JSON string encoder. Preserve every other byte, including line
+endings and a complete final record without a delimiter. Missing, empty or
+nonstring targets and unmatched valid records pass through. Fail the attempt on
+malformed or incomplete input, duplicate object keys, multiple matches for one
+target or exceeded bounds. Limit both input and output records to 1 MiB and JSON
+nesting to 64 levels. Check output and staging accounting before bounded writes.
+Expose a bounded failure code for invalid or unsupported source records and for
+resource exhaustion. Failure publishes no partial archive and keeps all original
+chunks. Record the replacement count, including zero, on a successful
+`sanitized-v1` generation.
+The count describes configured replacements only.
+
+Keep the nullable frozen policy on the job. A sanitized generation references
+that job and stores its representation, policy digest, original seal byte count
+and SHA-256, separate sanitized content byte count and SHA-256, replacement count,
+compressed receipt, and part, checkpoint, block and original append-ledger
+bindings. Bind every block row to its generation and uncompressed range. Verify
+the stored gzip by bounded readback against these bindings before publishing the
+generation. Keep `gzip-v1` and the existing physical parts. Checkpoints and
+content reads use sanitized offsets. Authenticate bounded ranges against
+generation-bound hashes of the overlapping 1 MiB sanitized blocks before
+returning their slices. Keep the existing exact generation routes, manifest and
+hash version.
+
+Unqualified HTTP `/evidence` and MCP `session_evidence` continue to return
+original bytes in original offsets with the original seal receipt. Selecting
+sanitized evidence requires an explicit selection bound to an immutable
+generation. Verify and label its content receipt in the manifest, range reads,
+browser views and downloads. All pages of a range read use the selected
+generation and its coordinates.
+
+Existing original evidence exports, including task-triage ZIP, retain their
+original-byte contract and fail if any required original is unavailable. Offer a
+separate sanitized export selection or an explicit opt-in. In an opted-in task
+ZIP, pin the selected representation of each entry and include its identity,
+byte count and SHA-256 in an entry manifest. Validate each entry against its
+selected receipt before publishing a local ZIP. Native receipts retain original
+coordinates and commitments.
+
+### Original retention and cleanup
+
+Keep original reads, prefix rehash/proofs, occurrence rebuilds and exact sealed
+append replay on original bytes while the complete source remains available.
+Once deletion starts, original-only reads and proofs return
+HTTP 409 `original_evidence_unavailable` and sealed replay returns HTTP 409
+`session_state_conflict`. If a request races the first deletion and cannot
+finish from a verified complete original, fail with the same unavailability
+outcome and discard partial results.
+
+Before the first deletion, independently reapply the frozen policy to the complete
+original source and verify the published gzip, sanitized receipt, block hashes,
+checkpoints and source bindings. Persist an attestation bound to the generation,
+manifest, frozen policy and original seal. Reclamation requires separate sanitized
+qualification, explicit enablement, safe runtime role and a valid fenced permit.
+Before the first delete batch, verify that the current canonical occurrence
+projection was computed from original bytes through the final original offset
+with no pending record. Check the derivation version and source boundary in
+the first-delete transaction. A complete projection may have no occurrence.
+If verification is pending or fails, retain originals and defer deletion.
+
+The first successful delete batch atomically marks the full original unavailable.
+Preserve the verified occurrence result. Exclude the session from automatic
+original-dependent occurrence repair once its original is unavailable, including
+after a later derivation version change. Report original-dependent rebuild as
+unavailable and keep the retained result identified by its verified version.
+Later batches recheck the attestation and fences, verify surviving rows against the
+original ledger and record progress with each bounded delete. Report cleanup as
+pending, in progress or complete. Disabled, paused or failed cleanup stays pending
+before deletion and preserves all original chunks. A failure after a committed
+batch preserves the remaining chunks and retry resumes from durable progress.
 
 ## Durable storage and publication
 

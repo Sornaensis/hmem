@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M6KYESFYC8EZGDREBGXYN1JY"
+relation = "amends"
+from_record = "R01M6KYESFYPXRY222Z8WQZWAX9"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M6KY6T86Y50SN2BRSM5A83X6"]
++++
+
+Preserve original evidence selectors and verify occurrence before reclamation.
+
+<!-- @adrai:eyJhIjp7ImkiOiJkZXZlbG9wZXIiLCJrIjoibGxtIiwibSI6ImNvZGV4OmdwdC02LjEtc29sOmhpZ2gifSwiYiI6ImI0OTNjMWEwZDBiZGQ5YzRlNGYyZjQyNmQ5YjdkNTJmNDhhOGNlMTkiLCJpIjoic2hhMjU2OkxLelRFeXJueDRMbmd4NlozWHdzNHItZjBUMVp1MmRyZlVuNi0yT2M3LU0iLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTZLWUVTRllDOEVaR0RSRUJHWFlOMUpZIiwib3AiOiJPMDFNNktZRVNGWVBYUlkyMjJaOFdRWldBWDkiLCJwIjpbIlIwMU02S1k2VDg2WTUwU04yQlJTTTVBODNYNiJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1Njoydzk3UFZ3M0YtcXNkQURMQl9PTkpxMl9BQnFsWXVEd013RzlMX2NxeXlBIiwidCI6MTc5MzgxODMyMjQzMCwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

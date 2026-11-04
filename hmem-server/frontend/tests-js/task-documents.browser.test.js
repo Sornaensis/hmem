@@ -76,16 +76,45 @@ test('Sources and paged evidence share derivatives and original downloads in the
   let countReads = 0
   let refreshBarrier = null
   let releaseRefresh = () => {}
+  let deleteBarrier = null
+  let releaseDelete = () => {}
+  let releaseFrame = () => {}
+  let releaseStalledFrame = () => {}
+  let styledReads = 0
+  let styledGrants = 0
+  let styledNavigations = 0
   const generation = uuid(900)
+  let styledGeneration = generation
   const makeOutput = (variant, pageIndex, mediaType, bytes) => ({
     variant, page: pageIndex, media_type: mediaType, raw_bytes: bytes.length, raw_sha256: sha(bytes),
   })
-  const styled = Buffer.from('<!doctype html><p>Sanitized styled wireframe</p><a href="#visible">Safe link</a><p id="visible">Target</p>')
+  const styled = Buffer.from('<!doctype html><style>body p:last-child{color:red}</style><p>Sanitized styled wireframe</p><a href="about:srcdoc#visible">Safe link</a><p id="visible">Target</p>')
+  const srcdoc = styled.toString().replace(/[&"<>]/g, char => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' })[char])
+  const wrapped = '<!doctype html><body style="margin:0;overflow:hidden"><iframe title="Styled preview" sandbox="" referrerpolicy="no-referrer" style="display:block;width:100%;height:100vh;border:0" srcdoc="' + srcdoc + '"></iframe>'
+  const firstFrame = new Promise(resolve => { releaseFrame = resolve })
+  const stalledFrame = new Promise(resolve => { releaseStalledFrame = resolve })
   const altHost = 'http://localhost:' + new URL(h.origin).port
-  await page.route(altHost + '/document-grants/**', route => route.fulfill({
-    body: styled, contentType: 'text/html',
-    headers: { 'Content-Security-Policy': "sandbox; default-src 'none'; script-src 'none'; frame-ancestors " + h.origin, 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' },
-  }))
+  await page.route(altHost + '/document-grants/**', async route => {
+    const request = route.request()
+    const requestHeaders = await request.allHeaders()
+    assert.equal(new URL(request.url()).searchParams.get('view'), 'frame')
+    assert.equal(requestHeaders.cookie, undefined)
+    assert.equal(requestHeaders.authorization, undefined)
+    assert.equal(requestHeaders.referer, undefined)
+    const headers = {
+      'Content-Security-Policy': "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; sandbox; frame-ancestors " + h.origin,
+      'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store',
+    }
+    if (++styledNavigations === 1) {
+      await firstFrame
+      return route.fulfill({ status: 403, headers, body: '' })
+    }
+    if (styledNavigations === 2) {
+      await stalledFrame
+      return route.abort().catch(() => {})
+    }
+    return route.fulfill({ body: wrapped, contentType: 'text/html;charset=utf-8', headers })
+  })
   await page.route(documentBase + '**', async route => {
     const request = route.request()
     const url = new URL(request.url())
@@ -121,6 +150,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
     const selected = docs.find(row => row.document.id === docId)
     assert.ok(selected)
     if (resource === 'source' && request.method() === 'DELETE') {
+      if (deleteBarrier) await deleteBarrier
       source = source.filter(row => row !== selected)
       return route.fulfill({ status: 204 })
     }
@@ -129,17 +159,19 @@ test('Sources and paged evidence share derivatives and original downloads in the
       return route.fulfill({ body: original, contentType: 'application/octet-stream', headers: { 'Content-Disposition': 'attachment' } })
     }
     if (resource === 'download-grants') {
+      styledGrants++
       const body = request.postDataJSON()
       assert.equal(body.variant, 'styled_html_preview')
-      assert.equal(body.generation_id, generation)
+      assert.equal(body.generation_id, styledGeneration)
       assert.equal(body.association_id, body.role === 'source' ? html.id : evidenceHtml.id)
       return route.fulfill({ json: { ...body, url: altHost + '/document-grants/' + uuid(990) + '/styled_html_preview/0?token=fixture' } })
     }
     if (resource === 'previews' && variant === 'current') {
+      if (selected === html) styledReads++
       const outputs = selected === html ? [makeOutput('styled_html_preview', 0, 'text/html', styled)]
         : selected === pdf ? [1, 2].map(page => makeOutput('page', page, 'image/png', png))
         : [makeOutput('thumbnail', 0, 'image/png', png), makeOutput('page', 0, 'image/png', png)]
-      return route.fulfill({ json: { state: 'ready', generation_id: generation, outputs, retryable: false, generation_metadata: null } })
+      return route.fulfill({ json: { state: 'ready', generation_id: selected === html ? styledGeneration : generation, outputs, retryable: false, generation_metadata: null } })
     }
     assert.equal(variant, generation)
     assert.ok(['page', 'thumbnail'].includes(pageIndex))
@@ -154,6 +186,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
   })
 
   try {
+    await page.clock.install()
     await h.start()
     await h.idle()
     const card = page.locator('#entity-' + task)
@@ -256,9 +289,37 @@ test('Sources and paged evidence share derivatives and original downloads in the
         width: rect.width, background: style.backgroundColor, color: style.color }
     }), { center: true, width: 1120, background: 'rgb(30, 41, 59)', color: 'rgb(248, 250, 252)' })
     const frame = dialog.locator('iframe')
+    const stage = dialog.locator('.document-styled-stage')
+    const innerFrame = dialog.frameLocator('iframe').frameLocator('iframe')
+    const frameContent = innerFrame.getByText('Sanitized styled wireframe')
+    await until(() => styledNavigations === 1)
+    await dialog.getByText('Loading preview…', { exact: true }).waitFor()
+    assert.equal(await frame.isVisible(), false, 'the navigating frame cannot flash before content arrives')
+    const stageBefore = await stage.boundingBox()
+    releaseFrame()
+    const retry = dialog.getByRole('button', { name: 'Retry', exact: true })
+    await dialog.getByText('Preview could not be loaded.', { exact: true }).waitFor()
+    await retry.waitFor()
+    assert.deepEqual(await stage.boundingBox(), stageBefore, 'a failed transfer keeps the loading geometry')
+    await retry.focus()
+    await page.keyboard.press('Enter')
+    await until(() => styledNavigations === 2)
+    assert.equal(await frame.isVisible(), false)
+    await page.clock.fastForward(30001)
+    await dialog.getByText('Preview loading timed out.', { exact: true }).waitFor()
+    releaseStalledFrame()
+    styledGeneration = uuid(901)
+    await retry.click()
+    await frameContent.waitFor()
+    assert.deepEqual(await stage.boundingBox(), stageBefore, 'successful content replaces the loading surface in place')
+    assert.equal(styledReads, 3, 'retry refreshes the generation before requesting its grant')
+    assert.equal(styledGrants, 3, 'retry requests a fresh isolated grant')
+    assert.equal(styledNavigations, 3)
+    assert.equal(await retry.isVisible(), false)
     assert.equal(await frame.getAttribute('sandbox'), '')
     assert.equal(await frame.getAttribute('referrerpolicy'), 'no-referrer')
-    await dialog.frameLocator('iframe').getByText('Sanitized styled wireframe').waitFor()
+    assert.equal(await dialog.frameLocator('iframe').locator('iframe').getAttribute('sandbox'), '')
+    assert.equal(await innerFrame.getByText('Target').evaluate(node => getComputedStyle(node).color), 'rgb(255, 0, 0)')
     assert.ok((await frame.boundingBox()).height >= 600, 'styled previews use more of the desktop viewport')
     assert.equal(await page.getByText('Sanitized styled wireframe').count(), 0)
     const heading = dialog.getByRole('heading', { name: 'wireframe.html' })
@@ -270,7 +331,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
     await page.mouse.up()
     assert.equal(await dialog.isVisible(), true, 'a drag from inside the dialog does not dismiss it')
     const close = dialog.getByRole('button', { name: 'Close', exact: true })
-    const link = dialog.frameLocator('iframe').getByRole('link', { name: 'Safe link' })
+    const link = innerFrame.getByRole('link', { name: 'Safe link' })
     await link.focus()
     await page.keyboard.press('Shift+Tab')
     assert.equal(await close.evaluate(node => node === document.activeElement), true)
@@ -279,11 +340,19 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.equal(await close.evaluate(node => node === document.activeElement), true)
     // A canonical refresh can remount the invoking node before dismissal.
     const originalOrigin = await styledOrigin.elementHandle()
+    const originalFrame = await frame.elementHandle()
+    const readsBeforeRefresh = styledReads
     refreshBarrier = new Promise(resolve => { releaseRefresh = resolve })
-    await push(h, 'document', html.document.id, 'updated', taskHints(task))
+    await push(h, 'document', pdf.document.id, 'updated', taskHints(task))
     await until(async () => !(await originalOrigin.evaluate(node => node.isConnected)))
+    await until(() => styledReads > readsBeforeRefresh)
     releaseRefresh()
     await styledOrigin.waitFor()
+    await h.idle()
+    assert.equal(await originalFrame.evaluate(node => node.isConnected), true, 'same-generation refresh preserves the live frame')
+    assert.equal(await frameContent.isVisible(), true)
+    assert.equal(styledGrants, 3)
+    assert.equal(styledNavigations, 3)
     await page.keyboard.press('Escape')
     await dialog.waitFor({ state: 'detached' })
     assert.equal(await styledOrigin.evaluate(node => node === document.activeElement), true)
@@ -337,10 +406,35 @@ test('Sources and paged evidence share derivatives and original downloads in the
         && getComputedStyle(actions).gridColumn === '1 / -1'
         && actions.getBoundingClientRect().right <= row.getBoundingClientRect().right
     }), true)
+    await documents.getByRole('button', { name: 'Newest documents' }).click()
+    await styledOrigin.click()
+    await frameContent.waitFor()
+    evidence = evidence.filter(row => row !== evidenceHtml)
+    await push(h, 'task_document', evidenceHtml.id, 'removed', taskHints(task))
+    await dialog.waitFor({ state: 'detached' })
+    await until(async () => (await evidenceTab.innerText()) === 'Evidence · 29')
+
+    await sourcesTab.click()
+    deleteBarrier = new Promise(resolve => { releaseDelete = resolve })
+    await sourcePanel.getByRole('button', { name: 'Remove from Sources: diagram-😀.txt' }).click()
+    await sourcePanel.getByRole('button', { name: 'Preview wireframe.html' }).click()
+    await frameContent.waitFor()
+    const sourceFrame = await frame.elementHandle()
+    const countsBeforeDelete = [styledGrants, styledNavigations]
+    releaseDelete()
+    await until(async () => (await sourcesTab.innerText()) === 'Sources · 1')
+    await h.idle()
+    assert.equal(await sourceFrame.evaluate(node => node.isConnected), true, 'an unrelated local write preserves the live frame')
+    assert.deepEqual([styledGrants, styledNavigations], countsBeforeDelete)
+    await close.click()
+    await dialog.waitFor({ state: 'detached' })
     assert.deepEqual(h.errors, [])
     assert.deepEqual(h.unhandled, [])
   } finally {
+    releaseFrame()
+    releaseStalledFrame()
     releaseRefresh()
+    releaseDelete()
     await h.close()
   }
 })

@@ -236,10 +236,17 @@ freshGrant authority request preview identifier tokenHash variant page=do
     else unless(variant/="styled_html_preview" && isJust policy.downloadOrigin)(failGrant status404 "grant_not_found")
   pure grant
 
-tokenForRequest :: Wai.Request -> IO Text
-tokenForRequest request=case Wai.queryString request of
-  [("token",Just token)] | BS.length token==43 && BS.all(\c -> (c>=65&&c<=90)||(c>=97&&c<=122)||(c>=48&&c<=57)||c==45||c==95)token ->pure(TE.decodeUtf8 token)
+tokenForRequest :: Bool -> Wai.Request -> IO (Text,Bool)
+tokenForRequest allowFrame request=case Wai.queryString request of
+  [("token",Just token)]->validate token False
+  [("token",Just token),("view",Just "frame")] | allowFrame->validate token True
+  [("view",Just "frame"),("token",Just token)] | allowFrame->validate token True
   _->failGrant status400 "invalid_grant_token"
+  where
+    validate token framed
+      | BS.length token==43 && BS.all(\c -> (c>=65&&c<=90)||(c>=97&&c<=122)||(c>=48&&c<=57)||c==45||c==95)token =
+          pure(TE.decodeUtf8 token,framed)
+      | otherwise=failGrant status400 "invalid_grant_token"
 
 grantRoute :: Wai.Request -> Maybe(UUID,Text,Int)
 grantRoute request=case Wai.pathInfo request of
@@ -266,19 +273,41 @@ redeemApplication authority preview request respond=do
         (failGrant status400 "application_credentials_forbidden")
       unless(Wai.requestMethod request `elem` [methodGet,methodHead])(failGrant status405 "method_not_allowed")
       (identifier,variant,page)<-maybe(failGrant status404 "grant_not_found")pure(grantRoute request)
-      token<-tokenForRequest request
+      (token,framed)<-tokenForRequest (preview && variant=="styled_html_preview") request
       let tokenHash=payloadSha256(TE.encodeUtf8 token)
           check=freshGrant authority request preview identifier tokenHash variant page
       grant<-check
       policy<-readIORef authority.policy
       let binding=grant.binding
-          headers=if variant=="original" then originalTransferHeaders binding.filename binding.rawBytes binding.rawSha256
+          rawHeaders=if variant=="original" then originalTransferHeaders binding.filename binding.rawBytes binding.rawSha256
             else representationHeaders binding (if preview then fmap (.value) policy.applicationOrigin else Nothing)
+          headers=if framed then filter ((\name->name `notElem` [hContentLength,hETag,"X-HMem-Document-SHA256","X-HMem-Document-Bytes"]) . fst) rawHeaders else rawHeaders
       if Wai.requestMethod request==methodHead then pure(Wai.responseLBS status200 headers "") else do
         bytes<-bounded deadline(DB.readBoundPayload authority.pool binding)
         _<-check
         pure(Wai.responseStream status200 headers $ \send flush->voidBounded deadline $ do
-          mapM_ (\part->do _<-check; send(Builder.byteString part); flush)(chunks bytes))
+          when framed(send styledFrameStart)
+          mapM_ (\part->do _<-check; send(if framed then escapeSrcdoc part else Builder.byteString part); flush)(chunks bytes)
+          when framed $ do
+            -- No child frame is parsed before the entire authorized attribute arrives.
+            _<-check
+            send "\"></iframe>"
+            flush)
+
+styledFrameStart :: Builder.Builder
+styledFrameStart="<!doctype html><meta charset=utf-8><title>Styled preview</title><body style=\"margin:0;overflow:hidden\"><iframe title=\"Styled preview\" sandbox=\"\" referrerpolicy=\"no-referrer\" style=\"display:block;width:100%;height:100vh;border:0\" srcdoc=\""
+
+escapeSrcdoc :: ByteString -> Builder.Builder
+escapeSrcdoc input=
+  let (plain,rest)=BS.break (\c->c==34||c==38||c==60||c==62) input
+  in Builder.byteString plain<>case BS.uncons rest of
+    Nothing->mempty
+    Just (c,tailBytes)->
+      (case c of
+        34->"&quot;"
+        38->"&amp;"
+        60->"&lt;"
+        _->"&gt;")<>escapeSrcdoc tailBytes
 
 representationHeaders :: GrantBinding -> Maybe Text -> [Header]
 representationHeaders binding appOrigin=safeHeaders<>

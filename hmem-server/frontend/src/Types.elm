@@ -92,6 +92,7 @@ type alias DocumentsModel =
     , reads : Dict ( String, String ) DocumentRead
     , visibleThumbnails : Set ( String, String )
     , dialog : Maybe DocumentDialog
+    , styledAttempt : Int
     , nextOperation : Int
     , operation : Maybe Int
     , notice : String
@@ -129,7 +130,7 @@ type DocumentMsg
     | ToggleDocumentZoom
     | RemoveDocumentSource Api.DocumentItem
     | RetryDocumentPreview Api.DocumentItem
-    | DocumentWriteFinished String Int String (Result Http.Error ())
+    | DocumentWriteFinished String Int String (Maybe String) (Result Http.Error ())
     | DocumentTransferEvent Encode.Value
 
 

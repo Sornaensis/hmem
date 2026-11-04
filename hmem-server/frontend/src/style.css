@@ -6138,12 +6138,31 @@ textarea.observation-edit-content {
   background: var(--bg);
 }
 
+.document-styled-stage {
+  display: grid;
+  place-items: center;
+  height: 70vh;
+  height: 70dvh;
+}
+.document-styled-transfer {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+}
+.document-preview-status { text-align: center; }
+.document-styled-mount { position: absolute; inset: 0; visibility: hidden; }
+.document-styled-transfer[data-document-frame-state="ready"] .document-styled-mount { visibility: visible; }
+.document-styled-transfer[data-document-frame-state="ready"] .document-preview-status,
+.document-styled-transfer:not([data-document-frame-state="ready"]) [data-dialog-return],
+.document-styled-transfer:not([data-document-frame-state="failed"]) [data-document-frame-retry] { display: none; }
+
 .document-styled-preview {
   box-sizing: border-box;
   display: block;
   width: 100%;
-  height: 70vh;
-  height: 70dvh;
+  height: 100%;
   background: white;
   border: 0;
   border-radius: 4px;

@@ -106,7 +106,12 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
   function revokeAsset(element, record) {
     record.controller.abort()
     if (record.url) URL.revokeObjectURL(record.url)
-    element.removeAttribute('src')
+    if (element.dataset.documentStyled) {
+      record.frame?.remove()
+      delete element.dataset.documentFrameState
+    } else {
+      element.removeAttribute('src')
+    }
     assets.delete(element)
   }
 
@@ -132,7 +137,10 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
   function assetKey(element) {
     const data = element.dataset
     if (!current(data.documentScope) || (data.documentThumbnail && !visible.has(element))) return null
-    if (data.documentStyled) return JSON.stringify([data.documentStyled, data.documentGeneration, data.documentAssociation, data.documentRole])
+    if (data.documentStyled) {
+      if (!current(data.documentScope, 'preview:' + data.documentAssociation)) return null
+      return JSON.stringify([data.documentStyled, data.documentGeneration, data.documentAssociation, data.documentRole])
+    }
     return data.documentRaster ? JSON.stringify([data.documentRaster, data.documentRasterType, data.documentRasterBytes]) : null
   }
 
@@ -171,6 +179,48 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
     if (task) send('status', task, message)
   }
 
+  function styledState(element, state, message) {
+    element.dataset.documentFrameState = state
+    element.querySelector('[data-document-frame-status]').textContent = message
+  }
+
+  function loadStyledFrame(element, record, url) {
+    const { signal } = record.controller
+    signal.throwIfAborted()
+    const frame = document.createElement('iframe')
+    record.frame = frame
+    frame.className = 'document-styled-preview'
+    frame.title = element.dataset.documentFrameTitle
+    frame.setAttribute('sandbox', '')
+    frame.referrerPolicy = 'no-referrer'
+    frame.tabIndex = -1
+    return new Promise((resolve, reject) => {
+      const fail = () => finish(new Error('The isolated styled preview did not load.'))
+      const loaded = () => {
+        // An opaque frame still exposes its child count. Only the complete
+        // isolated response creates a child, after the full srcdoc arrives.
+        if (frame.contentWindow?.length === 1) finish()
+        else fail()
+      }
+      const aborted = () => finish(signal.reason)
+      function finish(error) {
+        signal.removeEventListener('abort', aborted)
+        frame.removeEventListener('load', loaded)
+        frame.removeEventListener('error', fail)
+        if (error) {
+          frame.remove()
+          reject(error)
+        } else resolve()
+      }
+      frame.addEventListener('load', loaded)
+      frame.addEventListener('error', fail)
+      signal.addEventListener('abort', aborted)
+      // Set the URL before connecting the frame so it never loads about:blank.
+      frame.src = url.href
+      element.querySelector('.document-styled-mount').append(frame)
+    })
+  }
+
   async function startAsset(element, key) {
     const record = { key, controller: new AbortController(), url: null }
     assets.set(element, record)
@@ -182,6 +232,7 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
       const { signal } = record.controller
       const { documentStyled, documentGeneration, documentAssociation, documentRole, documentRaster, documentRasterType, documentRasterBytes } = element.dataset
       if (documentStyled) {
+        styledState(element, 'loading', 'Loading preview…')
         const response = await request(documentStyled, signal, same, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -196,12 +247,18 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
         const app = new URL(document.baseURI)
         if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))
           || url.hostname === app.hostname || url.hostname === api.hostname || url.username || url.password || url.hash
-          || !url.pathname.endsWith('/styled_html_preview/0') || !url.searchParams.has('token')
+          || !url.pathname.endsWith('/styled_html_preview/0') || !url.searchParams.has('token') || url.searchParams.size !== 1
           || grant.role !== documentRole || grant.association_id !== documentAssociation
           || grant.generation_id !== documentGeneration || grant.variant !== 'styled_html_preview' || grant.page !== 0) {
           throw new Error('The isolated styled preview is unavailable.')
         }
-        if (same()) element.src = url.href
+        if (!same()) return
+        url.searchParams.append('view', 'frame')
+        await loadStyledFrame(element, record, url)
+        if (same()) {
+          record.frame.tabIndex = 0
+          styledState(element, 'ready', 'Preview loaded.')
+        }
       } else {
         const expected = Number(documentRasterBytes)
         if (!rasterTypes.has(documentRasterType) || !Number.isSafeInteger(expected) || expected < 1 || expected > maxRaster) {
@@ -220,7 +277,13 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
         }
       }
     } catch (error) {
-      if (same()) previewError(element, error.name === 'AbortError' ? 'Preview transfer timed out. Reopen the preview to retry.' : 'Preview is unavailable. You can download the original.')
+      if (same()) {
+        if (element.dataset.documentStyled) {
+          styledState(element, 'failed', error.name === 'AbortError' ? 'Preview loading timed out.' : 'Preview could not be loaded.')
+        } else {
+          previewError(element, error.name === 'AbortError' ? 'Preview transfer timed out. Reopen the preview to retry.' : 'Preview is unavailable. You can download the original.')
+        }
+      }
     } finally {
       clearTimeout(timer)
       running.delete(record)
@@ -295,6 +358,18 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
   })
 
   document.addEventListener('click', event => {
+    const retry = event.target.closest('[data-document-frame-retry]')
+    if (retry) {
+      const element = retry.closest('[data-document-styled]')
+      const record = assets.get(element)
+      if (record && element.dataset.documentFrameState === 'failed' && assetKey(element) === record.key) {
+        const dialog = retry.closest('[data-document-preview-task]')
+        if (document.activeElement === retry) dialog.querySelector('[data-document-preview-close]').focus({ preventScroll: true })
+        styledState(element, 'loading', 'Loading preview…')
+        send('retry-styled', dialog.dataset.documentPreviewTask, '')
+      }
+      return
+    }
     const button = event.target.closest('[data-document-download]')
     if (!button) return
     transfer(button, async (signal, isCurrent) => {

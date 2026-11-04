@@ -1185,7 +1185,7 @@ applyAction scope action ( model, accumulated ) =
 
         ChangeStream.RefreshTaskDocuments workspace task ->
             if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
-                ( Documents.invalidate False (Set.singleton task) model, accumulated )
+                ( Documents.refreshTask task model, accumulated )
             else ( model, accumulated )
 
         ChangeStream.RetireTaskDocument workspace task association ->

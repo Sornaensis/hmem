@@ -126,6 +126,13 @@ the frame. No scripts, resize messages or shared application credentials are
 needed. Unproven isolation reports preview unavailable without an app-origin
 fallback.
 
+The application opts into a framed HTML response with `view=frame` on the
+isolated grant URL. The response contains one sandboxed `srcdoc` child with the
+escaped snapshot. The server completes that child's opening tag only after
+sending the snapshot and rechecking the grant. The app reveals the loaded
+iframe only when the child exists. Token-only requests still return the raw
+sanitized snapshot and its byte count and digest.
+
 ## Query-free access logging
 
 The application JSON request logger records `rawPathInfo`, without query strings.

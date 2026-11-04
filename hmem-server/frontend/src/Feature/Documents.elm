@@ -1,5 +1,5 @@
 module Feature.Documents exposing
-    ( availability, beginRead, count, init, invalidate, pending, reconcile, retireAssociation, scope, update
+    ( availability, beginRead, count, init, invalidate, pending, reconcile, refreshTask, retireAssociation, scope, update
     , viewDialog, viewPanel
     )
 
@@ -25,7 +25,7 @@ import Url
 init : DocumentsModel
 init =
     { scope = "", transferStamp = ( "", "" ), demand = Set.empty, reads = Dict.empty, visibleThumbnails = Set.empty, dialog = Nothing
-    , nextOperation = 0, operation = Nothing, notice = ""
+    , styledAttempt = 0, nextOperation = 0, operation = Nothing, notice = ""
     }
 
 
@@ -182,16 +182,42 @@ beginRead (( task, kind ) as key) ( model, commands ) =
 
 
 invalidate : Bool -> Set.Set String -> Model -> Model
-invalidate countsOnly tasks model =
+invalidate countsOnly tasks =
+    invalidateReads countsOnly tasks False
+
+
+refreshTask : String -> Model -> Model
+refreshTask task =
+    invalidateReads False (Set.singleton task) True
+
+
+invalidateReads : Bool -> Set.Set String -> Bool -> Model -> Model
+invalidateReads countsOnly tasks preserveStyled model =
     setDocuments
         (\state ->
-            { state | reads = Dict.map
-                (\( task, kind ) entry ->
-                    if Set.member task tasks && (not countsOnly || kind == "counts") then
-                        { entry | dirty = True, failed = False, cursor = Nothing, value = Nothing }
-                    else
-                        entry
-                ) state.reads
+            let
+                styled =
+                    case state.dialog of
+                        Just (PreviewDocumentDialog item _ _) ->
+                            if item.mediaType == "text/html" && Set.member item.taskId tasks then
+                                Just ( item.taskId, previewKey item )
+                            else
+                                Nothing
+                        _ ->
+                            Nothing
+            in
+            { state
+                | reads = Dict.map
+                    (\(( task, kind ) as key) entry ->
+                        if Set.member task tasks && (not countsOnly || kind == "counts") then
+                            { entry | dirty = True, failed = False, cursor = Nothing
+                            , value = if preserveStyled && styled == Just key then entry.value else Nothing
+                            }
+                        else
+                            entry
+                    ) state.reads
+                -- A resync cannot use document-scoped metadata to reauthorize the old association.
+                , styledAttempt = if styled /= Nothing && not countsOnly && not preserveStyled then state.styledAttempt + 1 else state.styledAttempt
             })
         model
 
@@ -260,9 +286,11 @@ update msg source =
         modify change = ( setDocuments change model, Cmd.none )
         updateRead task kind change state =
             { state | reads = Dict.update ( task, kind ) (Maybe.map change) state.reads }
+        retryRead task kind =
+            updateRead task kind (\entry -> { entry | dirty = True, failed = False, value = Nothing })
         target task =
             owner /= "" && Set.member task model.documents.demand
-        write item send =
+        write item removedAssociation send =
             case model.selectedWorkspaceId of
                 Just workspace ->
                     if target item.taskId && Permissions.canEditCurrentWorkspace model && model.documents.operation == Nothing then
@@ -271,7 +299,7 @@ update msg source =
                             url = Api.documentBase model.flags.apiUrl workspace item.taskId ++ "/" ++ Url.percentEncode item.documentId
                         in
                         ( setDocuments (\state -> { state | operation = Just token, nextOperation = token + 1, notice = "" }) model
-                        , send url (DocumentWriteFinished owner token item.taskId >> TaskDocuments)
+                        , send url (DocumentWriteFinished owner token item.taskId removedAssociation >> TaskDocuments)
                         )
                     else
                         ( model, Cmd.none )
@@ -312,7 +340,7 @@ update msg source =
             )
 
         RetryDocumentRead task kind ->
-            modify (updateRead task kind (\entry -> { entry | dirty = True, failed = False }))
+            modify (retryRead task kind)
 
         DocumentPageChanged task kind cursor ->
             modify (updateRead task kind (\entry -> { entry | dirty = True, failed = False, cursor = cursor, value = Nothing }))
@@ -345,12 +373,12 @@ update msg source =
             })
 
         RemoveDocumentSource item ->
-            if item.role == "source" then write item Api.removeDocumentSource else ( model, Cmd.none )
+            if item.role == "source" then write item (Just item.id) Api.removeDocumentSource else ( model, Cmd.none )
 
         RetryDocumentPreview item ->
-            write item Api.retryDocumentPreview
+            write item Nothing Api.retryDocumentPreview
 
-        DocumentWriteFinished requestScope token task result ->
+        DocumentWriteFinished requestScope token task removedAssociation result ->
             if requestScope /= owner || model.documents.operation /= Just token then
                 ( model, Cmd.none )
             else
@@ -359,7 +387,11 @@ update msg source =
                     Err _ -> "Document change could not finish. Please retry."
                   })
                     (case result of
-                        Ok () -> invalidate False (Set.singleton task) model
+                        Ok () ->
+                            removedAssociation
+                                |> Maybe.map (\association -> retireAssociation task association model)
+                                |> Maybe.withDefault model
+                                |> refreshTask task
                         Err _ -> model
                     )
                 , Cmd.none
@@ -382,6 +414,16 @@ update msg source =
                     else Set.insert key state.visibleThumbnails })
             else if field "dialog" /= dialogIdentity model.documents.dialog then
                 ( model, Cmd.none )
+            else if kind == "retry-styled" then
+                case model.documents.dialog of
+                    Just (PreviewDocumentDialog item _ _) ->
+                        if item.taskId == task && item.mediaType == "text/html" then
+                            -- A fast same-generation response can arrive before Elm paints the loading state.
+                            modify (\state -> retryRead task (previewKey item) { state | styledAttempt = state.styledAttempt + 1 })
+                        else
+                            ( model, Cmd.none )
+                    _ ->
+                        ( model, Cmd.none )
             else if kind == "uploaded" then
                 ( invalidate False (Set.singleton task) model |> setDocuments (\state -> { state | dialog = Nothing, notice = "Source uploaded." }), Cmd.none )
             else
@@ -614,27 +656,47 @@ viewPreview heading close model item page zoom =
             _ -> Nothing)
         failed = entry |> Maybe.map .failed |> Maybe.withDefault False
         url = documentUrl model item
+        retryRead = button [ type_ "button", class "btn btn-sm", onClick (TaskDocuments (RetryDocumentRead item.taskId (previewKey item))) ] [ text "Retry" ]
+        readError =
+            div [ class "document-preview-status" ]
+                [ p [ class "card-meta", attribute "role" "status" ] [ text "Preview information could not be loaded." ]
+                , retryRead
+                ]
+        styledPreview state =
+            let
+                ready = state.state == "ready" && List.any (\output -> output.variant == "styled_html_preview" && output.page == 0 && output.mediaType == "text/html") state.outputs
+            in
+            case ( ready, state.generation ) of
+                ( True, Just generation ) ->
+                    Keyed.node "div" [ class "document-styled-stage" ]
+                        [ ( generation ++ ":" ++ String.fromInt model.documents.styledAttempt
+                          , div
+                                [ class "document-styled-transfer"
+                                , attribute "data-document-styled" (url ++ "/download-grants")
+                                , attribute "data-document-generation" generation, attribute "data-document-association" item.id
+                                , attribute "data-document-role" item.role, attribute "data-document-scope" model.documents.scope
+                                , attribute "data-document-frame-title" ("Preview of " ++ item.filename)
+                                ]
+                                [ div [ class "document-styled-mount" ] []
+                                , div [ class "document-preview-status" ]
+                                    [ p [ class "card-meta", attribute "role" "status", attribute "data-document-frame-status" "" ] [ text "Loading preview…" ]
+                                    , button [ type_ "button", class "btn btn-sm", attribute "data-document-frame-retry" "" ] [ text "Retry" ]
+                                    ]
+                                , span [ attribute "tabindex" "0", attribute "data-dialog-return" "" ] []
+                                ]
+                          )
+                        ]
+                _ ->
+                    div [ class "document-styled-stage" ]
+                        [ if state.state == "ready" then readError else p [ class "card-meta", attribute "role" "status" ] [ text (previewState state.state) ] ]
         frame state =
             case state.generation of
                 Just generation ->
                     let
                         outputs = state.outputs |> List.filter (\output -> output.variant == "page")
                         raster = List.filter (\output -> output.page == page && inertRaster output) outputs |> List.head
-                        styled = List.any (\output -> output.variant == "styled_html_preview" && output.page == 0 && output.mediaType == "text/html") state.outputs
                     in
-                    if styled then
-                        div []
-                            [ Html.iframe
-                            [ class "document-styled-preview", title ("Preview of " ++ item.filename)
-                            , attribute "sandbox" "", attribute "referrerpolicy" "no-referrer", attribute "tabindex" "0"
-                            , attribute "data-document-styled" (url ++ "/download-grants")
-                            , attribute "data-document-generation" generation, attribute "data-document-association" item.id
-                            , attribute "data-document-role" item.role, attribute "data-document-scope" model.documents.scope
-                              ] []
-                            , span [ attribute "tabindex" "0", attribute "data-dialog-return" "" ] []
-                            ]
-                    else
-                        case raster of
+                    case raster of
                           Just output ->
                             div [ class ("document-raster-viewport" ++ (if zoom then " document-raster-zoom" else "")) ]
                               [ Html.img
@@ -674,10 +736,16 @@ viewPreview heading close model item page zoom =
             p [ class "card-meta" ] [ text "Animated original · first frame shown" ]
           else
             text ""
-        , if failed then
+        , if item.mediaType == "text/html" then
+            if failed then
+                div [ class "document-styled-stage" ] [ readError ]
+            else
+                preview |> Maybe.map styledPreview |> Maybe.withDefault
+                    (div [ class "document-styled-stage" ] [ p [ class "card-meta", attribute "role" "status" ] [ text "Loading preview…" ] ])
+          else if failed then
             p [ class "card-meta" ]
                 [ text "Preview information could not be loaded. "
-                , button [ type_ "button", class "btn btn-sm", onClick (TaskDocuments (RetryDocumentRead item.taskId (previewKey item))) ] [ text "Retry" ]
+                , retryRead
                 ]
           else
             preview |> Maybe.map frame |> Maybe.withDefault (p [ class "card-meta" ] [ text "Loading preview…" ])

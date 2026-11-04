@@ -309,14 +309,14 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
     fixture<-seed env "<!doctype html><html><script>alert(1)</script></html>" "wireframe.html" "text/html"
     (authority,app)<-application env (mkDeployedSandboxConfig env) deployedDelivery
     (_,_,headers)<-audience env fixture.workspace Auth.WorkspaceRoleRead
-    generation<-styled env fixture "sanitizer1" "<h1 style=\"color:red\">Snapshot</h1>"
+    generation<-styled env fixture "sanitizer1" "<h1 style=\"color:red\">Snapshot &amp; preview</h1>"
     grant<-issue app fixture headers(GrantRequest Doc.Source fixture.source "styled_html_preview" 0(Just generation)Nothing)
     url<-required "url" grant
     shouldSatisfy url(T.isPrefixOf "https://preview.example.net/")
     preview<-previewFor authority
     result<-call preview methodGet(urlPath url)[("Sec-Fetch-Dest","document")] ""
     shouldBe result.simpleStatus status200
-    shouldBe result.simpleBody "<h1 style=\"color:red\">Snapshot</h1>"
+    shouldBe result.simpleBody "<h1 style=\"color:red\">Snapshot &amp; preview</h1>"
     shouldBe (lookup hContentType result.simpleHeaders)(Just "text/html;charset=utf-8")
     shouldBe (lookup "Content-Security-Policy" result.simpleHeaders)(Just styledCSP)
     shouldBe (lookup hSetCookie result.simpleHeaders) Nothing
@@ -326,6 +326,24 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
     headResult<-call preview methodHead(urlPath url) [] ""
     shouldBe headResult.simpleBody ""
     shouldBe (lookup "Content-Security-Policy" headResult.simpleHeaders)(Just styledCSP)
+    let framePath=urlPath url<>"&view=frame"
+    framed<-call preview methodGet framePath [] ""
+    shouldBe framed.simpleStatus status200
+    shouldBe (lookup "Content-Security-Policy" framed.simpleHeaders)(Just styledCSP)
+    shouldBe (lookup hContentType framed.simpleHeaders)(Just "text/html;charset=utf-8")
+    shouldBe (lookup "X-HMem-Document-SHA256" framed.simpleHeaders) Nothing
+    shouldBe (lookup "X-HMem-Document-Bytes" framed.simpleHeaders) Nothing
+    shouldSatisfy (LBS.toStrict framed.simpleBody)
+      (BS.isSuffixOf "srcdoc=\"&lt;h1 style=&quot;color:red&quot;&gt;Snapshot &amp;amp; preview&lt;/h1&gt;\"></iframe>")
+    call preview methodGet(framePath<>"&view=frame") [] "" >>=status status400
+    call preview methodGet(framePath<>"&unexpected=1") [] "" >>=status status400
+    call app methodGet framePath [] "" >>=status status400
+    finalCheckGrant<-issue app fixture headers(GrantRequest Doc.Source fixture.source "styled_html_preview" 0(Just generation)Nothing)
+    finalCheckUrl<-required "url" finalCheckGrant
+    finalCheckId<-required "grant_id" finalCheckGrant
+    sent<-interruptedAfter 2 preview (request methodGet(urlPath finalCheckUrl<>"&view=frame")[]) $
+      call app methodDelete(base fixture<>"/download-grants/"<>uuid finalCheckId)headers "" >>=status status204
+    shouldBe sent (fromIntegral(LBS.length framed.simpleBody)-BS.length "\"></iframe>")
     call preview methodGet(urlPath url)[(hCookie,"hmem_session=leak")] "" >>=status status400
     call preview methodGet(urlPath url)[(hAuthorization,"Bearer must-not-be-resolved")] "" >>=status status400
     shouldReturn(unread preview(request methodPost(urlPath url)[]))(status405,0)
@@ -346,6 +364,7 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
     evidenceUrl<-required "url" evidenceGrant
     Documents.removeSource env.pool fixture.workspace fixture.task fixture.document.id
     call preview methodGet(urlPath url) [] "" >>=status status404
+    call preview methodGet framePath [] "" >>=status status404
     call preview methodGet(urlPath evidenceUrl) [] "" >>=status status200
   it "stops original streams after one bounded chunk on explicit grant or issuer authority withdrawal" $ \env -> do
     forM_ ["grant","credential","membership","link","expiry"] $ \mode->do
@@ -362,7 +381,7 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
             "membership"->Auth.deleteWorkspaceMembership env.pool fixture.workspace user >>pure()
             "expiry"->threadDelay 3200000
             _->Documents.removeSource env.pool fixture.workspace fixture.task fixture.document.id
-      sent<-interrupted app(request methodGet(urlPath url)[])withdraw
+      sent<-interruptedAfter 1 app(request methodGet(urlPath url)[])withdraw
       shouldBe sent 1048576
   it "invalidates an in-flight styled generation instead of sending a replacement generation" $ \env -> do
     fixture<-seed env "<!doctype html><html><p>wireframe</p></html>" "frame.html" "text/html"
@@ -372,7 +391,7 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
     grant<-issue app fixture headers(GrantRequest Doc.Source fixture.source "styled_html_preview" 0(Just generation)Nothing)
     url<-required "url" grant
     preview<-previewFor authority
-    sent<-interrupted preview(request methodGet(urlPath url)[]) $ do
+    sent<-interruptedAfter 1 preview(request methodGet(urlPath url)[]) $ do
       _<-styled env fixture "policy2" "<p>replacement</p>"
       pure()
     shouldBe sent 1048576
@@ -648,17 +667,19 @@ png :: ByteString
 png=BS.pack [137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,4,0,0,0,181,28,12,2,0,0,0,11,73,68,65,84,120,218,99,100,248,15,0,1,5,1,1,39,24,227,102,0,0,0,0,73,69,78,68,174,66,96,130]
 styledCSP :: ByteString
 styledCSP="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; sandbox; frame-ancestors https://app.example.test"
-interrupted :: Wai.Application -> Wai.Request -> IO() -> IO Int
-interrupted app original withdraw=do
+interruptedAfter :: Int -> Wai.Application -> Wai.Request -> IO() -> IO Int
+interruptedAfter sends app original withdraw=do
   sent<-newIORef(0::Int)
+  remaining<-newIORef sends
   withdrawalCompleted<-newIORef False
   result<-try @SomeException $ app original $ \response->do
     shouldBe (Wai.responseStatus response) status200
     let(_,_,withBody)=Wai.responseToStream response
     withBody $ \stream->stream(\builder->do
-      before<-readIORef sent
       modifyIORef' sent(+fromIntegral(LBS.length(Builder.toLazyByteString builder)))
-      if before==0 then withdraw>>writeIORef withdrawalCompleted True else pure())(pure())
+      modifyIORef' remaining (subtract 1)
+      untilWithdrawal<-readIORef remaining
+      if untilWithdrawal==0 then withdraw>>writeIORef withdrawalCompleted True else pure())(pure())
     pure ResponseReceived
   case result of Left _->pure(); Right _->expectationFailure "Revoked stream completed"
   shouldReturn(readIORef withdrawalCompleted) True

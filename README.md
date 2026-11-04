@@ -51,6 +51,8 @@ update conflicts.
 Use `hmem-ctl status` to check services and `hmem-ctl stop` to stop them.
 For container installation, follow the [Docker guide](docker.md), including its
 required bearer token and browser sign-in step.
+For document previews with Compose, use the
+[preview-enabled setup](docker.md#compose-setup-with-document-previews).
 
 ## MCP
 

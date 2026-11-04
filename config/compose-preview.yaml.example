@@ -1,0 +1,28 @@
+# Copy to config.yaml under a private, absolute HMEM_CONFIG_DIR. See docker.md.
+server:
+  host: 127.0.0.1
+  port: 8420
+
+database:
+  host: 127.0.0.1
+  port: 55432 # Match HMEM_PREVIEW_DB_PORT if overridden.
+  name: hmem  # Match POSTGRES_DB.
+  user: hmem  # Match POSTGRES_USER.
+  # Supply HMEM_DB_PASSWORD separately with the value of POSTGRES_PASSWORD.
+
+auth:
+  mode: local
+  enabled: true
+  local:
+    bootstrap_enabled: false
+    # Supply HMEM_AUTH_LOCAL_USER_TOKEN separately.
+
+web:
+  static_dir: hmem-server/static
+
+document_previews:
+  enabled: true
+  python_executable: /absolute/path/to/python3
+  launcher_path: /absolute/path/to/hmem/hmem-preview-worker/launch.py
+  # Replace with the ID of your locally qualified worker image.
+  image_id: sha256:711c3f2a21e27a00bf1d0d17533ee086592eebf53bd87f3747d9a216c8bf0a1e

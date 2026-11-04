@@ -6,6 +6,8 @@
 #      Set its auth profile/token, or set HMEM_ENV_FILE=.env to use root .env
 #      runtime values documented in .env.example instead.
 #   3. Run: docker compose up --build
+# For document previews, use the host launcher and compose.preview.yaml as
+# described in docker.md under Compose setup with document previews.
 #
 # Official postgres is the default. To enable pgvector-backed embedding similarity,
 # set POSTGRES_IMAGE=pgvector/pgvector:pg17 in .env. With the default official

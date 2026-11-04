@@ -5,6 +5,8 @@
 Install Docker with Compose v2. Run these steps from the repository directory.
 The default stack serves the web UI and API locally, with PostgreSQL for storage
 and automatic vectorization disabled.
+For document previews, use the [preview-enabled setup](#compose-setup-with-document-previews)
+with a native hmem server and Compose-managed PostgreSQL.
 
 1. Copy the two configuration templates:
 
@@ -296,14 +298,47 @@ For the rotating application log while hmem is running:
 docker compose exec hmem tail -f /var/lib/hmem/.hmem/logs/hmem-server.log
 ```
 
-## Document preview runtime
+## Compose setup with document previews
 
-Preview generation defaults off. Configure the host-supervised qualified launcher
-and pre-existing immutable worker image using
-[document_previews](docs/reference/document-previews.md#configuration).
-The document container receives no application credentials, host mounts or
-network. Do not mount a Docker socket into the application container as a
-substitute for the supported host launcher. Missing launcher/image/confinement
-reports preview unavailable and preserves originals; no native decoder fallback
-exists. Unverified daemon creation or process/container cleanup retains durable
-ownership and fails closed until exact-owner reconciliation.
+For previews, run `hmem-server` on the trusted host and PostgreSQL in Compose.
+The [native configuration example](config/compose-preview.yaml.example) enables
+the worker by default. The all-container quick start has no host launcher and
+keeps originals downloadable when previews are unavailable.
+
+1. Install the native hmem binaries and build the frontend from this checkout
+   with `stack install` and `stack run build-frontend`. Keep the repository as
+   the working directory when starting the native server.
+2. Set `HMEM_CONFIG_DIR` to a private, absolute directory on the host. Copy
+   `config/compose-preview.yaml.example` to `config.yaml` and `.env.example` to
+   `compose.env` inside that directory. Set a strong `POSTGRES_PASSWORD` in
+   the private `compose.env` file, and set `HMEM_DB_PASSWORD` in the host shell
+   to the same value. Set `HMEM_AUTH_LOCAL_USER_TOKEN` in the host shell to a
+   separate strong browser token. Keep both secrets out of Git. If you change
+   `POSTGRES_DB`, `POSTGRES_USER`, or `HMEM_PREVIEW_DB_PORT` in `compose.env`,
+   match the corresponding database settings in `config.yaml`. The overlay
+   publishes PostgreSQL only on `127.0.0.1`, at port `55432` by default.
+3. Build and [qualify the local worker image](docs/reference/document-preview-worker.md#validation).
+   Set `document_previews.image_id` in `config.yaml` to the resulting immutable
+   image ID. Set `python_executable` and `launcher_path` to absolute paths to
+   host Python and this checkout's `hmem-preview-worker/launch.py`. The host
+   account running hmem must have access to the local Docker runtime.
+4. Start the database in a separate Compose project, migrate it, and run the
+   native server in the same shell. If port `8420` is already in use, choose an
+   unused `server.port` in `config.yaml`.
+
+   ```bash
+   docker compose -p hmem-preview --env-file "$HMEM_CONFIG_DIR/compose.env" \
+     -f compose.yaml -f compose.preview.yaml up -d --wait postgres
+   hmem-ctl migrate --migrations-dir hmem-server/migrations
+   hmem-server
+   ```
+
+   Open `http://127.0.0.1:8420/#hmem_token=<your-HMEM_AUTH_LOCAL_USER_TOKEN>`,
+   using the port and token you configured. To requeue a failed preview after
+   the worker is available, open the attachment and select **Retry preview**.
+
+The host launcher supervises the confined decoder. The decoder receives no
+application credentials, host mounts, or network access. Keep Docker authority
+on the trusted host. Missing launcher, image, or confinement support leaves the
+original downloadable. See the [preview runtime reference](docs/reference/document-previews.md)
+for configuration, failure handling, and recovery.

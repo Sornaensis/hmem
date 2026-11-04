@@ -1,0 +1,5 @@
+# Pair with compose.yaml and start only postgres. See docker.md.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${HMEM_PREVIEW_DB_PORT:-55432}:5432"

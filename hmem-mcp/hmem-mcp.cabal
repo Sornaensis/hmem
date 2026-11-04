@@ -16,6 +16,8 @@ build-type:     Simple
 
 library
   exposed-modules:
+      HMem.MCP.Attachment
+      HMem.MCP.AttachmentHTTP
       HMem.MCP.Config
       HMem.MCP.Server
       HMem.MCP.SessionFile
@@ -110,6 +112,8 @@ test-suite hmem-mcp-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      HMem.MCP.AttachmentHTTPSpec
+      HMem.MCP.AttachmentSpec
       HMem.MCP.ServerSpec
       HMem.MCP.SessionFollowerSpec
       HMem.MCP.ToolsSpec

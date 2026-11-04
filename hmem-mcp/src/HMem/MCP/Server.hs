@@ -7,6 +7,7 @@ module HMem.MCP.Server
   , handleRequest
   , handleStdioLineWithRegistry
   , handleStdioLine
+  , handleStdioLineWithAttachmentScope
   , runMCPServerWithHandles
   , runMCPServerWithHandlesObserved
   , runMCPServerWithHandlesObservedWithFork
@@ -36,8 +37,10 @@ import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, respons
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.IO (Handle, hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
 import HMem.BotIdentity (BotIdentity)
-import HMem.MCP.SessionFollower (Registry, FollowerOptions, defaultFollowerOptions, newRegistryWith, closeRegistry, handleUploadTool, isUploadTool)
-import HMem.MCP.Tools (handleToolCall, searchContextError, toolDefinitions)
+import HMem.MCP.SessionFollower (Registry, FollowerOptions(..), defaultFollowerOptions, newRegistryWith, closeRegistry, handleUploadTool, isUploadTool)
+import HMem.MCP.Tools (handleToolCallWithAttachmentScope, searchContextError, toolDefinitions)
+import HMem.MCP.Attachment (isAttachmentTool)
+import HMem.MCP.AttachmentHTTP qualified as HTTP
 
 ------------------------------------------------------------------------
 -- JSON-RPC types
@@ -86,6 +89,9 @@ jsonRpcError rid code msg = object
 -- MCP server loop
 ------------------------------------------------------------------------
 
+data ProcessOwners = ProcessOwners
+  { followerRegistry :: Maybe Registry, attachmentScope :: Maybe HTTP.AttachmentScope }
+
 -- | Run the MCP server, reading line-delimited JSON-RPC from stdin.
 -- Creates a single HTTP manager for the lifetime of the process.
 -- A fixed pool of worker threads reads from a bounded queue to provide
@@ -131,33 +137,36 @@ runMCPServerWithHandlesObservedWithFork = runMCPServerWithHandlesObservedWithFol
 -- | Exercise the actual registry/stdio lifetime with injected follower scheduling
 -- and observations. Ordinary request admission and worker ownership are unchanged.
 runMCPServerWithHandlesObservedWithFollowerOptions :: FollowerOptions -> (IO () -> IO ThreadId) -> ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
-runMCPServerWithHandlesObservedWithFollowerOptions options forkWorker observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = bracket (newRegistryWith options) cleanupFollower $ \registry -> mask $ \restore -> do
-  lock   <- newMVar ()
-  queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
-  active <- newTVarIO (0 :: Int)
-  initialized <- newTVarIO False
-  wsContext <- newTVarIO (Nothing :: Maybe MCPContext)
-  -- Spawn fixed worker pool with async exceptions masked in the parent so a
-  -- cancellation cannot leak a partially-started pool. Already-started workers
-  -- are cleaned up if a later startup step fails. Workers are explicitly
-  -- unmasked by the fork action so request processing remains interruptible.
-  workerIds <- spawnWorkers forkWorker (max 1 workerCount) $
-    worker (Just registry) output mgr lock serverUrl mApiKey queue active initialized wsContext
-  let cleanupWorkers = mapM_ killThread workerIds
-      requestWorkerCleanup = mapM_ (forkIO . killThread) workerIds
-      runLoop = restore $ do
-        -- Read stdin → queue
-        readLoop (Just registry) input output lock queue active mgr serverUrl mApiKey initialized wsContext
-        observeWorkers workerIds
-        -- Drain: wait for queue to empty and all workers to finish
-        hPutStrLn errHandle "MCP server: stdin closed, draining in-flight requests..."
-        atomically $ do
-          empty <- isEmptyTBQueue queue
-          n     <- readTVar active
-          if empty && n == 0 then pure () else retry
-        hPutStrLn errHandle "MCP server: shutdown complete."
-  runLoop `onException` requestWorkerCleanup
-  cleanupWorkers
+runMCPServerWithHandlesObservedWithFollowerOptions options forkWorker observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = do
+  helper <- options.helperExecutable
+  bracket (HTTP.newAttachmentScope helper) cleanupAttachment $ \attachment ->
+    bracket (newRegistryWith options {helperExecutable=pure helper}) cleanupFollower $ \registry -> mask $ \restore -> do
+      lock   <- newMVar ()
+      queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
+      active <- newTVarIO (0 :: Int)
+      initialized <- newTVarIO False
+      wsContext <- newTVarIO (Nothing :: Maybe MCPContext)
+      -- Spawn fixed worker pool with async exceptions masked in the parent so a
+      -- cancellation cannot leak a partially-started pool. Already-started workers
+      -- are cleaned up if a later startup step fails. Workers are explicitly
+      -- unmasked by the fork action so request processing remains interruptible.
+      workerIds <- spawnWorkers forkWorker (max 1 workerCount) $
+        worker (ProcessOwners (Just registry) (Just attachment)) output mgr lock serverUrl mApiKey queue active initialized wsContext
+      let cleanupWorkers = mapM_ killThread workerIds
+          requestWorkerCleanup = mapM_ (forkIO . killThread) workerIds
+          runLoop = restore $ do
+            -- Read stdin → queue
+            readLoop (ProcessOwners (Just registry) (Just attachment)) input output lock queue active mgr serverUrl mApiKey initialized wsContext
+            observeWorkers workerIds
+            -- Drain: wait for queue to empty and all workers to finish
+            hPutStrLn errHandle "MCP server: stdin closed, draining in-flight requests..."
+            atomically $ do
+              empty <- isEmptyTBQueue queue
+              n     <- readTVar active
+              if empty && n == 0 then pure () else retry
+      runLoop `onException` requestWorkerCleanup
+      cleanupWorkers
+  hPutStrLn errHandle "MCP server: shutdown complete."
 
 forkWorkerUnmasked :: IO () -> IO ThreadId
 forkWorkerUnmasked action = forkIOWithUnmask $ \unmask -> unmask action
@@ -166,6 +175,11 @@ cleanupFollower :: Registry -> IO ()
 cleanupFollower registry = do
   ok <- closeRegistry registry
   if ok then pure () else throwIO (userError "MCP follower cleanup did not complete within its budget")
+
+cleanupAttachment :: HTTP.AttachmentScope -> IO ()
+cleanupAttachment scope = do
+  ok <- HTTP.closeAttachmentScope scope 5000000
+  if ok then pure () else throwIO (userError "MCP attachment cleanup did not complete within its budget")
 
 spawnWorkers :: (IO () -> IO ThreadId) -> Int -> IO () -> IO [ThreadId]
 spawnWorkers forkWorker workerCount action = go workerCount []
@@ -178,7 +192,7 @@ spawnWorkers forkWorker workerCount action = go workerCount []
 
 -- | Worker thread: reads from the queue and processes each line.
 -- Atomically dequeues + increments active counter to prevent drain races.
-worker :: Maybe Registry -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TBQueue QueuedLine -> TVar Int -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
+worker :: ProcessOwners -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TBQueue QueuedLine -> TVar Int -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
 worker follower output mgr lock url mApiKey queue active initialized wsContext = go
   where
     go = do
@@ -195,7 +209,7 @@ worker follower output mgr lock url mApiKey queue active initialized wsContext =
 
 -- | Main read loop: reads lines from an input handle and enqueues them.
 -- If the queue is full, sends an overload error immediately.
-readLoop :: Maybe Registry -> Handle -> Handle -> MVar () -> TBQueue QueuedLine -> TVar Int -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
+readLoop :: ProcessOwners -> Handle -> Handle -> MVar () -> TBQueue QueuedLine -> TVar Int -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> IO ()
 readLoop follower input output lock queue active mgr serverUrl mApiKey initialized wsContext = do
   eof <- hIsEOF input `catch` \(e :: SomeException) -> rethrowAsync e >> pure True
   if eof
@@ -253,11 +267,11 @@ isOrderedContextControl line = case eitherDecodeStrict @JsonRpcRequest line of
         _ -> False
   _ -> False
 
-processLine :: Maybe Registry -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO ()
+processLine :: ProcessOwners -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO ()
 processLine follower output mgr lock serverUrl mApiKey initialized wsContext =
   processLineWithWorkspaceSnapshot follower output mgr lock serverUrl mApiKey initialized wsContext Nothing
 
-processLineWithWorkspaceSnapshot :: Maybe Registry -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO ()
+processLineWithWorkspaceSnapshot :: ProcessOwners -> Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO ()
 processLineWithWorkspaceSnapshot follower output mgr lock serverUrl mApiKey initialized wsContext workspaceSnapshot line = do
   mresp <- handleStdioLineWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized wsContext workspaceSnapshot line
   case mresp of
@@ -269,13 +283,17 @@ processLineWithWorkspaceSnapshot follower output mgr lock serverUrl mApiKey init
 -- stdio loop's no-response behavior.
 handleStdioLine :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
 handleStdioLine mgr serverUrl mApiKey initialized wsContext line
-  = handleStdioLineWithWorkspaceSnapshot Nothing mgr serverUrl mApiKey initialized wsContext Nothing line
+  = handleStdioLineWithWorkspaceSnapshot (ProcessOwners Nothing Nothing) mgr serverUrl mApiKey initialized wsContext Nothing line
 
 handleStdioLineWithRegistry :: Registry -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
 handleStdioLineWithRegistry registry mgr serverUrl mApiKey initialized wsContext =
-  handleStdioLineWithWorkspaceSnapshot (Just registry) mgr serverUrl mApiKey initialized wsContext Nothing
+  handleStdioLineWithWorkspaceSnapshot (ProcessOwners (Just registry) Nothing) mgr serverUrl mApiKey initialized wsContext Nothing
 
-handleStdioLineWithWorkspaceSnapshot :: Maybe Registry -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
+handleStdioLineWithAttachmentScope :: HTTP.AttachmentScope -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
+handleStdioLineWithAttachmentScope scope mgr serverUrl mApiKey initialized wsContext =
+  handleStdioLineWithWorkspaceSnapshot (ProcessOwners Nothing (Just scope)) mgr serverUrl mApiKey initialized wsContext Nothing
+
+handleStdioLineWithWorkspaceSnapshot :: ProcessOwners -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> BS8.ByteString -> IO (Maybe Value)
 handleStdioLineWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized wsContext workspaceSnapshot line
   | BS8.null line = pure Nothing
   | otherwise = case eitherDecodeStrict @Value line of
@@ -313,12 +331,12 @@ extractId _          = Nothing
 -- initialized").
 handleRequest :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
 handleRequest mgr serverUrl mApiKey initialized wsContext =
-  handleRequestWithWorkspaceSnapshot Nothing mgr serverUrl mApiKey initialized wsContext Nothing
+  handleRequestWithWorkspaceSnapshot (ProcessOwners Nothing Nothing) mgr serverUrl mApiKey initialized wsContext Nothing
 
 -- | Handle a request, optionally using the whole context captured by the
 -- input reader.  Direct callers use 'handleRequest' and retain live-state
 -- behavior; queued stdio requests use a stable snapshot.
-handleRequestWithWorkspaceSnapshot :: Maybe Registry -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
+handleRequestWithWorkspaceSnapshot :: ProcessOwners -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
 handleRequestWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized wsContext workspaceSnapshot req = case req.reqMethod of
   "initialize" -> do
     atomically $ modifyTVar' initialized (const True)
@@ -353,7 +371,7 @@ handleRequestWithWorkspaceSnapshot follower mgr serverUrl mApiKey initialized ws
       else handleMethod follower mgr serverUrl mApiKey wsContext workspaceSnapshot req
 
 -- | Dispatch initialized requests to the appropriate handler.
-handleMethod :: Maybe Registry -> Manager -> String -> Maybe Text -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
+handleMethod :: ProcessOwners -> Manager -> String -> Maybe Text -> TVar (Maybe MCPContext) -> Maybe (Maybe MCPContext) -> JsonRpcRequest -> IO (Maybe Value)
 handleMethod follower mgr serverUrl mApiKey wsContext workspaceSnapshot req = case req.reqMethod of
   "tools/list" -> do
     pure $ Just $ jsonRpcResponse req.reqId $ object
@@ -371,7 +389,7 @@ handleMethod follower mgr serverUrl mApiKey wsContext workspaceSnapshot req = ca
                 _               -> Nothing
               _ -> Nothing
         case mToolName of
-          Just "set_workspace" -> handleSetWorkspace wsContext req params
+          Just "set_workspace" -> handleSetWorkspace follower.attachmentScope wsContext req params
           Just "get_workspace" -> handleGetWorkspaceSnapshot wsContext workspaceSnapshot req
           _ -> do
             capturedWorkspace <- case workspaceSnapshot of
@@ -379,17 +397,17 @@ handleMethod follower mgr serverUrl mApiKey wsContext workspaceSnapshot req = ca
               Nothing -> atomically $ readTVar wsContext
             case capturedWorkspace of
               Nothing -> pure $ Just $ jsonRpcResponse req.reqId $
-                if maybe False isUploadTool mToolName || mToolName `elem` (map Just ["task_triage", "search", "observation_discovery", "session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]) then searchContextError else object
+                if maybe False isUploadTool mToolName || maybe False isAttachmentTool mToolName || mToolName `elem` (map Just ["task_triage", "search", "observation_discovery", "session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]) then searchContextError else object
                   [ "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Call set_workspace with workspace_id and identity before using ordinary tools" :: Text)]]
                   , "isError" .= True
                   ]
               Just accepted -> do
                 let params' = injectWorkspaceContextValue capturedWorkspace params
-                result <- case (follower, mToolName, params') of
+                result <- case (follower.followerRegistry, mToolName, params') of
                   (Just registry, Just name, Object fields) | isUploadTool name ->
                     handleUploadTool registry mgr serverUrl mApiKey accepted.identity name (maybe (object []) id (KM.lookup "arguments" fields))
                   (_, Just name, _) | isUploadTool name -> pure $ object ["isError" .= True, "content" .= [object ["type" .= ("text" :: Text), "text" .= ("Uploader requires a process-owned registry" :: Text)]]]
-                  _ -> handleToolCall mgr serverUrl mApiKey accepted.identity params'
+                  _ -> handleToolCallWithAttachmentScope follower.attachmentScope mgr serverUrl mApiKey accepted.identity params'
                 pure $ Just $ jsonRpcResponse req.reqId result
 
   method ->
@@ -417,21 +435,27 @@ encodeStdioResponse = (`BL8.snoc` '\n') . encode
 -- | Validate the complete declaration before atomically replacing context.
 -- Explicit null clears workspace and accepts identity; initialize preserves both.
 -- Identity is forgotten only when this process exits.
-handleSetWorkspace :: TVar (Maybe MCPContext) -> JsonRpcRequest -> Value -> IO (Maybe Value)
-handleSetWorkspace wsContext req params = case parseEither parseDeclaration params of
+handleSetWorkspace :: Maybe HTTP.AttachmentScope -> TVar (Maybe MCPContext) -> JsonRpcRequest -> Value -> IO (Maybe Value)
+handleSetWorkspace scope wsContext req params = case parseEither parseDeclaration params of
   Left err -> pure $ Just $ jsonRpcResponse req.reqId $ object
     [ "content" .= [object ["type" .= ("text" :: Text), "text" .= T.pack err]]
     , "isError" .= True
     ]
   Right context -> do
-    atomically $ modifyTVar' wsContext (const (Just context))
-    pure $ Just $ jsonRpcResponse req.reqId $ mcpJSON $ object
-      [ "ok" .= True
-      , "action" .= (if maybe True (const False) context.workspaceId then "cleared" else "set" :: Text)
-      , "entity_type" .= ("workspace_context" :: Text)
-      , "workspace_id" .= context.workspaceId
-      , "identity" .= context.identity
-      ]
+    installed <- atomically $ do
+      ready <- maybe (pure True) HTTP.attachmentScopeReady scope
+      if ready then modifyTVar' wsContext (const (Just context)) >> pure True else pure False
+    pure $ Just $ jsonRpcResponse req.reqId $
+      if installed then mcpJSON $ object
+        [ "ok" .= True
+        , "action" .= (if maybe True (const False) context.workspaceId then "cleared" else "set" :: Text)
+        , "entity_type" .= ("workspace_context" :: Text)
+        , "workspace_id" .= context.workspaceId
+        , "identity" .= context.identity
+        ]
+      else object ["isError" .= True,"structuredContent" .= object ["error" .= object
+        ["code" .= ("attachment_cleanup_pending" :: Text),"message" .= ("Attachment ownership has not retired; context remains unchanged" :: Text)]],
+        "content" .= [object ["type" .= ("text" :: Text),"text" .= ("Attachment ownership has not retired; context remains unchanged" :: Text)]]]
   where
     parseDeclaration = withObject "set_workspace params" $ \o -> do
       args <- o .: "arguments"

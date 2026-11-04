@@ -40,20 +40,21 @@ int hmem_session_process_destroy(session_process *p) {
   close_handle(&p->process); close_handle(&p->job); free(p);
   InterlockedDecrement(&owners); return 1;
 }
-static int spawn_impl(const char *path, session_process **out, int fail_attributes) {
+static int spawn_impl(const char *path, session_process **out, int fail_attributes, int helper_kind) {
   HANDLE child_in=NULL,child_out=NULL,child_err=NULL,parent_in=NULL,parent_out=NULL,job=NULL;
   PROCESS_INFORMATION pi={0}; SECURITY_ATTRIBUTES sa={sizeof(sa),NULL,TRUE};
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; STARTUPINFOEXW startup={0};
   LPPROC_THREAD_ATTRIBUTE_LIST attrs=NULL; SIZE_T attr_size=0;
   session_process *p=NULL; wchar_t *wide=NULL,*command=NULL; int result=0,attrs_initialized=0;
   *out=NULL;
+  if (helper_kind<0 || helper_kind>1) return 0;
   int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,NULL,0);
   if (!n) goto done;
   wide=calloc((size_t)n,sizeof(wchar_t)); command=calloc((size_t)n+64,sizeof(wchar_t));
   p=calloc(1,sizeof(*p));
   if (!wide || !command || !p || !MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,wide,n)) goto done;
   command[0]=L'"'; memcpy(command+1,wide,((size_t)n-1)*sizeof(wchar_t)); command[n]=L'"';
-  wcscpy(command+n+1,L" --session-http-helper +RTS -N1 -RTS");
+  wcscpy(command+n+1,helper_kind==0 ? L" --session-http-helper +RTS -N1 -RTS" : L" --attachment-http-helper +RTS -N1 -RTS");
   if (!CreatePipe(&child_in,&parent_in,&sa,0) || !CreatePipe(&parent_out,&child_out,&sa,0)) goto done;
   child_err=CreateFileW(L"NUL",GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,&sa,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
   if (child_err==INVALID_HANDLE_VALUE || !SetHandleInformation(parent_in,HANDLE_FLAG_INHERIT,0)
@@ -89,11 +90,12 @@ done:
   free(attrs);
   free(wide); free(command); return result;
 }
-int hmem_session_process_spawn(const char *path, session_process **out) { return spawn_impl(path,out,0); }
+int hmem_session_process_spawn(const char *path, session_process **out) { return spawn_impl(path,out,0,0); }
+int hmem_session_process_spawn_kind(const char *path, int kind, session_process **out) { return spawn_impl(path,out,0,kind); }
 int hmem_session_process_attribute_probe(const char *path) {
   DWORD before=0,after=0; session_process *out=NULL;
   if (!GetProcessHandleCount(GetCurrentProcess(),&before)) return 0;
-  int result=spawn_impl(path,&out,1);
+  int result=spawn_impl(path,&out,1,0);
   return result==0 && out==NULL && GetProcessHandleCount(GetCurrentProcess(),&after) && after==before;
 }
 int hmem_session_process_write(session_process *p,const unsigned char *bytes,int size) {
@@ -185,14 +187,15 @@ int hmem_session_process_destroy(session_process *p) {
   close_fd(&p->input); close_fd(&p->output); close_fd(&p->owner); free(p);
   __sync_sub_and_fetch(&owners,1); return 1;
 }
-int hmem_session_process_spawn(const char *path,session_process **out) {
+int hmem_session_process_spawn_kind(const char *path,int kind,session_process **out) {
   int input[2]={-1,-1},output[2]={-1,-1},owner[2]={-1,-1},nullfd=-1;
   session_process *p=NULL; pid_t child,creator=getpid(); *out=NULL;
+  if (kind<0 || kind>1) return 0;
   if (pipe2(input,O_CLOEXEC) || pipe2(output,O_CLOEXEC) || pipe2(owner,O_CLOEXEC)) goto failure;
   nullfd=open("/dev/null",O_WRONLY|O_CLOEXEC); p=calloc(1,sizeof(*p)); if (nullfd<0 || !p) goto failure;
   child=fork(); if (child<0) goto failure;
   if (!child) {
-    char *const args[]={(char *)path,"--session-http-helper","+RTS","-N1","-RTS",NULL};
+    char *const args[]={(char *)path,kind==0 ? "--session-http-helper" : "--attachment-http-helper","+RTS","-N1","-RTS",NULL};
     if (prctl(PR_SET_PDEATHSIG,SIGKILL)!=0 || getppid()!=creator || setpgid(0,0)!=0) _exit(126);
     if (dup2(input[0],0)<0 || dup2(output[1],1)<0 || dup2(nullfd,2)<0 || dup2(owner[0],3)<0) _exit(126);
     close_child_fd(input[0]); close_child_fd(input[1]); close_child_fd(output[0]); close_child_fd(output[1]);
@@ -213,6 +216,7 @@ failure:
   free(p); close_fd(&input[0]); close_fd(&input[1]); close_fd(&output[0]); close_fd(&output[1]);
   close_fd(&owner[0]); close_fd(&owner[1]); close_fd(&nullfd); return *out ? -1 : 0;
 }
+int hmem_session_process_spawn(const char *path,session_process **out) { return hmem_session_process_spawn_kind(path,0,out); }
 static int pipe_write(int fd,const unsigned char *bytes,int size) {
   sigset_t blocked,previous,pending; sigemptyset(&blocked); sigaddset(&blocked,SIGPIPE);
   if (pthread_sigmask(SIG_BLOCK,&blocked,&previous)) return -1;

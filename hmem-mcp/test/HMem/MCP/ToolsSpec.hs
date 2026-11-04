@@ -43,6 +43,26 @@ import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), Observation
 
 spec :: Spec
 spec = do
+  describe "Attachment MCP definitions" $ do
+    it "advertises six finite file tools with strict schemas and explicit delegation inputs" $ do
+      let definitions = [value | value <- toolDefinitions,
+            Just (String name) <- [jsonField "name" value], "attachment_" `T.isPrefixOf` name]
+      sort [name | value <- definitions, Just (String name) <- [jsonField "name" value]] `shouldBe`
+        ["attachment_add_evidence","attachment_download","attachment_download_link","attachment_list",
+         "attachment_remove_source","attachment_upload"]
+      forM_ definitions $ \definition ->
+        jsonPath ["inputSchema","additionalProperties"] definition `shouldBe` Just (Bool False)
+      let named name = case filter (\value -> jsonField "name" value == Just (String name)) definitions of
+            [value] -> value
+            _ -> Null
+      jsonPath ["inputSchema","properties","association_id","type"] (named "attachment_download")
+        `shouldBe` Just (String "string")
+      jsonPath ["inputSchema","properties","generation_id","type"] (named "attachment_download")
+        `shouldBe` Just (String "string")
+      jsonPath ["inputSchema","required"] (named "attachment_download_link")
+        `shouldSatisfy` maybe False (\value -> all (\key -> contains key value) ["role","association_id"])
+      jsonPath ["inputSchema","properties","limit","maximum"] (named "attachment_list")
+        `shouldBe` Just (Number 50)
   describe "Agent session MCP" $ do
     it "forwards explicit runtime declarations and null clearing separately from connection attribution" $ do
       requests <- newTVarIO []

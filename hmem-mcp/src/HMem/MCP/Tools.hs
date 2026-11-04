@@ -1,6 +1,7 @@
 module HMem.MCP.Tools
   ( toolDefinitions
   , handleToolCall
+  , handleToolCallWithAttachmentScope
   , parseToolCall
   , validateToolCall
   , ToolCall(..)
@@ -23,6 +24,7 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Pair, parseEither)
 import HMem.BotIdentity (BotIdentity)
+import HMem.MCP.AttachmentHTTP (AttachmentScope)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
@@ -48,6 +50,7 @@ import HMem.AgentSession qualified as AgentSession
 import HMem.AgentSession.Transport qualified as SessionWire
 import HMem.MCP.SessionFollower (uploadToolDefinitions)
 import HMem.MCP.TaskTriage (downloadEvidence)
+import HMem.MCP.Attachment qualified as Attachment
 
 -- The MCP surface adapts the authorized HTTP API. The accepted context supplies
 -- workspace IDs when callers omit explicit overrides.
@@ -186,7 +189,7 @@ toolDefinitions =
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation. Done requires closing open descendants. Cancelled also cancels non-done subtasks while preserving done subtasks and dependency links; unrelated dependent tasks are not cancelled. Reopening does not reopen descendants." (schema ["task_id" .= prop "string" "Task UUID", "status" .= enumProp "Final execution state" ["done", "blocked", "cancelled"]] ["task_id", "status"])
-  ] <> sessionToolDefinitions <> uploadToolDefinitions
+  ] <> sessionToolDefinitions <> uploadToolDefinitions <> Attachment.attachmentToolDefinitions
   where
     tool name description inputSchema = object $
       ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]
@@ -411,7 +414,8 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
     _ -> SessionRead workspace <$> o .: "session_id" <*> pure (name == "session_evidence") <*> nonnegative "offset" 0 <*> bounded "limit" 4096 1048576
 
 data ToolCall
-  = SessionCall SessionToolCall
+  = AttachmentCall Attachment.AttachmentCall
+  | SessionCall SessionToolCall
   | ObservationCreate CreateObservation
   | ObservationGet UUID
   | ObservationUpdate UUID UUID ReviewedObservationUpdate
@@ -452,6 +456,7 @@ parseToolCall name args = do
     then parseEither (withObject "planning arguments" rejectPlanningDueFields) args
     else pure ()
   case name of
+    _ | Attachment.isAttachmentTool name -> AttachmentCall <$> Attachment.parseAttachmentCall name args
     _ | isSessionTool name -> SessionCall <$> parseSessionTool name args
     "observation_create" -> ObservationCreate <$> parseCreateObservation args
     "observation_get" -> ObservationGet <$> required "observation_id"
@@ -573,7 +578,10 @@ validateToolCall call = case call of
 data ForwardingContext = ForwardingContext (Maybe Text) BotIdentity
 
 handleToolCall :: Manager -> String -> Maybe Text -> BotIdentity -> Value -> IO Value
-handleToolCall manager base token identity params = case parseParams params of
+handleToolCall = handleToolCallWithAttachmentScope Nothing
+
+handleToolCallWithAttachmentScope :: Maybe AttachmentScope -> Manager -> String -> Maybe Text -> BotIdentity -> Value -> IO Value
+handleToolCallWithAttachmentScope attachmentScope manager base token identity params = case parseParams params of
   Left err -> pure (mcpError (T.pack err))
   Right (name, args) -> case parseToolCall name args of
     Left err -> pure (localError name "invalid_arguments" (T.pack err))
@@ -582,20 +590,27 @@ handleToolCall manager base token identity params = case parseParams params of
         UnifiedSearch input -> searchError "validation_error" (searchValidationField input (T.pack err)) (T.pack err) []
         ObservationDiscoveryCall input -> searchError "validation_error" (discoveryValidationField input (T.pack err)) (T.pack err) []
         _ -> mcpError (T.pack err)
-      Right call -> execute manager base (ForwardingContext token identity) call
+      Right call -> execute attachmentScope manager base (ForwardingContext token identity) call
   where
     localError "search" code message = searchError code (searchErrorField message) message []
     localError "observation_discovery" code message = searchError code (discoveryErrorField message) message []
     localError "task_triage" _ _ = sessionToolError "invalid_arguments" Nothing "task_triage requires task_id, a new local destination path and workspace context"
     localError "session_create" _ _ = sessionToolError "invalid_arguments" Nothing "session_create requires task_id (a same-workspace in_progress task UUID), session_id, a very short descriptive title and format_label"
     localError name _ _ | isSessionTool name = sessionToolError "invalid_arguments" Nothing "Invalid session tool arguments"
+    localError name _ _ | Attachment.isAttachmentTool name = sessionToolError "invalid_arguments" Nothing "Invalid attachment arguments; check explicit workspace, paths, representation and association bindings"
     localError _ _ message = mcpError message
 
 parseParams :: Value -> Either String (Text, Value)
 parseParams = parseEither $ withObject "params" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []
 
-execute :: Manager -> String -> ForwardingContext -> ToolCall -> IO Value
-execute manager base apiKey = \case
+execute :: Maybe AttachmentScope -> Manager -> String -> ForwardingContext -> ToolCall -> IO Value
+execute attachmentScope manager base apiKey = \case
+  AttachmentCall call -> case attachmentScope of
+    Nothing -> pure (sessionToolError "attachment_transport_unavailable" Nothing "Attachment operations require the server-owned ordinary transport scope")
+    Just scope -> do
+      let ForwardingContext credential identity = apiKey
+      provenance <- mcpProvenanceHeaders
+      Attachment.executeAttachment scope manager base credential identity provenance call
   SessionCall call -> executeSessionTool manager base apiKey call
   ObservationCreate input -> request manager base apiKey "POST" "/api/v1/observations" (Just (encode input)) (mutationAck "created" "observation" . compactObservationSummary)
   ObservationGet oid -> request manager base apiKey "GET" ("/api/v1/observations/" <> uuidPath oid) Nothing compactObservationDetail

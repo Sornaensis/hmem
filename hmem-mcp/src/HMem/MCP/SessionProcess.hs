@@ -7,6 +7,7 @@ module HMem.MCP.SessionProcess
   , frameHeader, parseFrameHeader, frameCap
   , attributeFailureProbe
   , killProcessId, childProcessIds, processImage, blockChildProbe
+  , AttachmentPipes(..), runAttachmentExchange, attachmentContextReady, attachmentCancellationRequested
   ) where
 
 import Control.Concurrent
@@ -29,6 +30,7 @@ import System.Timeout (timeout)
 
 data NativeProcess
 foreign import ccall safe "hmem_session_process_spawn" spawnNative :: CString -> Ptr (Ptr NativeProcess) -> IO CInt
+foreign import ccall safe "hmem_session_process_spawn_kind" spawnKindNative :: CString -> CInt -> Ptr (Ptr NativeProcess) -> IO CInt
 foreign import ccall safe "hmem_session_process_kill" killNative :: Ptr NativeProcess -> IO CInt
 foreign import ccall safe "hmem_session_process_wait" waitNative :: Ptr NativeProcess -> CInt -> IO CInt
 foreign import ccall unsafe "hmem_session_process_destroy" destroyNative :: Ptr NativeProcess -> IO CInt
@@ -96,6 +98,197 @@ cancelProcessScope :: ProcessScope -> STM ()
 cancelProcessScope scope = do
   writeTVar scope.closing True
   readTVar scope.leases >>= mapM_ (\lease -> writeTVar lease.cancelled True)
+
+-- Ordinary attachment ownership is server-scoped and independent of follower
+-- leases. A timed-out caller never erases a still-owned child or pipe reader.
+attachmentContextReady :: ProcessScope -> STM Bool
+attachmentContextReady scope = do
+  leases <- readTVar scope.leases
+  pipes <- readTVar scope.pipes
+  pure (Map.null leases && pipes == 0)
+
+-- Observe cleanup entry without sleeps when qualifying interrupted retirement.
+attachmentCancellationRequested :: ProcessScope -> STM Bool
+attachmentCancellationRequested scope = do
+  leases <- readTVar scope.leases
+  or <$> mapM (readTVar . (.cancelled)) (Map.elems leases)
+
+data AttachmentPipes = AttachmentPipes
+  { sendAttachmentFrame :: BS.ByteString -> IO ()
+  , receiveAttachmentFrame :: IO BS.ByteString
+  , expectAttachmentEOF :: IO ()
+  }
+
+runAttachmentExchange :: ProcessScope -> FilePath -> Word64 -> Word64 -> (Int -> IO ())
+  -> (AttachmentPipes -> IO ()) -> (AttachmentPipes -> IO BS.ByteString)
+  -> IO (Either ProcessFault BS.ByteString)
+runAttachmentExchange scope executable cutoff deadline onSpawn input output = mask $ \restore -> do
+  valid <- if isAbsolute executable then doesFileExist executable else pure False
+  canonical <- if valid then canonicalizePath executable else pure ""
+  available <- remaining cutoff
+  if not valid || canonical /= executable then pure (Left ProcessUnavailable)
+  else if available <= 0 then pure (Left ProcessDeadline)
+  else do
+    cancelled <- newTVarIO False
+    result <- newEmptyMVar
+    retired <- newEmptyTMVarIO
+    complete <- newEmptyTMVarIO
+    replies <- newTBQueueIO 2
+    readerFailure <- newTVarIO Nothing
+    let lease = Lease cancelled result
+    key <- atomically $ do
+      poisoned <- readTVar scope.poisoned
+      closing <- readTVar scope.closing
+      when poisoned (throwSTM ProcessOwnership)
+      when closing (throwSTM ProcessUnavailable)
+      key <- readTVar scope.sequenceNumber
+      writeTVar scope.sequenceNumber (key+1)
+      modifyTVar' scope.leases (Map.insert key lease)
+      pure key
+    let finish value = do
+          atomically $ do
+            modifyTVar' scope.leases (Map.delete key)
+            putTMVar retired value
+          putMVar result value
+        poisonIfUnconfirmed = atomically $ do
+          confirmed <- tryReadTMVar retired
+          case confirmed of
+            Just _ -> pure ()
+            Nothing -> writeTVar scope.poisoned True
+        cancelAndWait = (do
+          atomically $ writeTVar cancelled True
+          left <- remaining deadline
+          done <- timeout left (atomically (readTMVar retired))
+          case done of
+            Just value -> pure value
+            Nothing -> poisonIfUnconfirmed >> throwIO ProcessOwnership)
+          `onException` poisonIfUnconfirmed
+        receive = atomically $ readTBQueue replies `orElse` do
+          failure <- readTVar readerFailure
+          case failure of
+            Just fault -> throwSTM fault
+            Nothing -> do
+              done <- readTMVar retired
+              case done of Left fault -> throwSTM fault; Right _ -> pure Nothing
+        readFrame = receive >>= maybe (throwIO ProcessProtocol) pure
+        eof = receive >>= \frame -> unless (frame == Nothing) (throwIO ProcessProtocol)
+        -- Input executes only in the owned writer. Semantic callbacks and file
+        -- writes execute in the caller, never in a retained background pump.
+        consumer = AttachmentPipes (const (throwIO ProcessProtocol)) readFrame eof
+    _ <- asyncBound (ownAttachmentProcess scope lease executable cutoff onSpawn input complete replies readerFailure >>= finish)
+      `onException` atomically (modifyTVar' scope.leases (Map.delete key))
+    left <- remaining cutoff
+    observed <- try @SomeException (restore (timeout left (output consumer)))
+    case observed of
+      Left exception -> cancelAndWait >> throwIO exception
+      Right Nothing -> cancelAndWait >> pure (Left ProcessDeadline)
+      Right (Just bytes) -> do
+        atomically $ putTMVar complete bytes
+        rest <- remaining deadline
+        answer <- restore (timeout rest (readMVar result)) `onException` void cancelAndWait
+        case answer of
+          Just value -> pure value
+          Nothing -> cancelAndWait >> pure (Left ProcessDeadline)
+
+ownAttachmentProcess :: ProcessScope -> Lease -> FilePath -> Word64 -> (Int -> IO ())
+  -> (AttachmentPipes -> IO ()) -> TMVar BS.ByteString -> TBQueue (Maybe BS.ByteString)
+  -> TVar (Maybe ProcessFault) -> IO (Either ProcessFault BS.ByteString)
+ownAttachmentProcess scope lease executable cutoff onSpawn input complete replies readerFailure = mask $ \restore -> do
+  let permitted = do
+        left <- remaining cutoff
+        stopped <- readTVarIO lease.cancelled
+        pure (left > 0 && not stopped)
+  before <- permitted
+  if not before then pure (Left ProcessDeadline) else do
+    spawned <- BS.useAsCString (TE.encodeUtf8 (T.pack executable)) $ \path -> alloca $ \out -> do
+      poke out nullPtr
+      code <- spawnKindNative path 1 out
+      pointer <- peek out
+      pure (code,pointer)
+    case spawned of
+      (_,pointer) | pointer == nullPtr -> pure (Left ProcessUnavailable)
+      (code,pointer) -> do
+        pumps <- newIORef []
+        ready <- newEmptyMVar
+        let reap = do
+              _ <- killNative pointer
+              exited <- waitNative pointer 100
+              unless (exited == 1) (threadDelay 1000 >> reap)
+            startPipe action = do
+              atomically $ modifyTVar' scope.pipes (+1)
+              worker <- asyncBound (restore action `finally` atomically (modifyTVar' scope.pipes (subtract 1)))
+                `onException` atomically (modifyTVar' scope.pipes (subtract 1))
+              modifyIORef' pumps (worker:)
+              pure worker
+            boundedSend bytes = do
+              allowed <- permitted
+              unless allowed (throwIO ProcessDeadline)
+              when (BS.length bytes > 1048577) (throwIO ProcessProtocol)
+              sendFrame pointer bytes
+            channel = AttachmentPipes boundedSend (throwIO ProcessProtocol) (throwIO ProcessProtocol)
+            run = do
+              pid <- fromIntegral <$> nativePid pointer
+              onSpawn pid
+              allowed <- permitted
+              unless (code == 1 && allowed) (throwIO ProcessDeadline)
+              _ <- startPipe $ (do
+                hello <- receiveAttachmentNative pointer
+                unless (hello == Just "HMATTACH1") (throwIO ProcessProtocol)
+                putMVar ready ()
+                let receive = do
+                      frame <- receiveAttachmentNative pointer
+                      atomically $ writeTBQueue replies frame
+                      case frame of Nothing -> pure (); Just _ -> receive
+                receive) `catch` \(exception :: SomeException) ->
+                  atomically (writeTVar readerFailure (Just (maybe ProcessProtocol id (fromException exception))))
+              _ <- startPipe $ do
+                takeMVar ready
+                allowedNow <- permitted
+                unless allowedNow (throwIO ProcessDeadline)
+                input channel `finally` void (closeInput pointer)
+              let waiting = do
+                    cancelled <- readTVar lease.cancelled
+                    if cancelled then pure Nothing else Just <$> readTMVar complete
+              left <- remaining cutoff
+              observed <- restore (timeout left (atomically waiting))
+              pure $ case observed of Just (Just bytes) -> Right bytes; _ -> Left ProcessDeadline
+        outcome <- try @SomeException run
+        -- Spawn failure cleanup can outlive the caller only while this bound
+        -- creator and its lease retain every native handle and pipe pump.
+        reap
+        hook <- try @SomeException scope.afterReap
+        ownedPumps <- readIORef pumps
+        mapM_ cancel ownedPumps
+        mapM_ waitCatch ownedPumps
+        let destroy = do
+              destroyed <- destroyNative pointer
+              unless (destroyed == 1) (threadDelay 1000 >> destroy)
+        destroy
+        pure $ case (hook,outcome) of
+          (Left _,_) -> Left ProcessProtocol
+          (_,Right value) -> value
+          (_,Left exception) -> Left (maybe ProcessProtocol id (fromException exception))
+
+receiveAttachmentNative :: Ptr NativeProcess -> IO (Maybe BS.ByteString)
+receiveAttachmentNative pointer = allocaBytes 1 $ \raw -> do
+  count <- readNative pointer raw 1
+  if count == 0 then pure Nothing else do
+    unless (count == 1) (throwIO ProcessProtocol)
+    first <- BS.packCStringLen (castPtr raw,1)
+    rest <- readAttachmentBytes pointer 3
+    size <- maybe (throwIO ProcessProtocol) pure (parseFrameHeader (first <> rest))
+    when (size > 1048577) (throwIO ProcessProtocol)
+    Just <$> readAttachmentBytes pointer size
+
+readAttachmentBytes :: Ptr NativeProcess -> Int -> IO BS.ByteString
+readAttachmentBytes pointer count = go count []
+  where
+    go 0 chunks = pure (BS.concat (reverse chunks))
+    go left chunks = allocaBytes (min left 16384) $ \raw -> do
+      n <- fromIntegral <$> readNative pointer raw (fromIntegral (min left 16384))
+      when (n <= 0) (throwIO ProcessProtocol)
+      bytes <- BS.packCStringLen (castPtr raw,n)
+      go (left-n) (bytes:chunks)
 
 -- Two process-owned transports retain native ownership while idle. Every
 -- borrowed exchange still includes startup/recovery and kill/reap/pipe joins

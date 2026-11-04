@@ -9,6 +9,7 @@ import HMem.Config qualified as Config
 import HMem.MCP.Config (resolveForwardedToken, resolveServerUrl, safeServerUrlForLog)
 import HMem.MCP.Server (runMCPServer)
 import HMem.MCP.SessionHTTP (runSessionHTTPHelper)
+import HMem.MCP.AttachmentHTTP (runAttachmentHTTPHelper)
 
 data Opts = Opts
   { optServerUrl :: Maybe String
@@ -37,7 +38,10 @@ optsParser = Opts
 main :: IO ()
 main = do
   args <- getArgs
-  if args == ["--session-http-helper"] then runSessionHTTPHelper else runNormal
+  case args of
+    ["--session-http-helper"] -> runSessionHTTPHelper
+    ["--attachment-http-helper"] -> runAttachmentHTTPHelper
+    _ -> runNormal
 
 runNormal :: IO ()
 runNormal = do

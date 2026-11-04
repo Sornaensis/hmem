@@ -392,3 +392,81 @@ or replacing the immutable original creator.
 
 Finite receipts describe observed source bytes and identity. They cannot detect
 an external mutate-and-restore write entirely between observations.
+
+## Task attachments
+
+The six attachment tools use the ordinary captured workspace, identity and
+credential epoch. They run inside its bounded request queue and drain before
+`set_workspace` retires that context. Local file paths stay in the MCP process;
+document contents are transferred as binary HTTP bodies, never base64 tool text.
+
+| Tool | Required operation inputs |
+| --- | --- |
+| `attachment_upload` | `task_id`, explicit regular-file `path`, `role` (`source` or `evidence`), stable `request_id`; optional filename, title and media type |
+| `attachment_list` | `task_id`, `role`; optional server cursor and limit (1–50) |
+| `attachment_download` | `task_id`, `attachment_id`, new destination `path`; optional variant, page and generation |
+| `attachment_download_link` | `task_id`, `attachment_id`, explicit `role` and `association_id`; optional variant, page, generation and lifetime (1–900 seconds) |
+| `attachment_add_evidence` | `task_id`, `attachment_id`, stable `request_id` |
+| `attachment_remove_source` | `task_id`, `attachment_id` |
+
+`attachment_id` is the immutable document UUID. `association_id` identifies its
+separate Source or Evidence association. Removing Source preserves evidence and
+does not change task status. Uploading evidence and promoting Source to evidence
+use exact server idempotency; retry an uncertain mutation with the same request
+UUID, bytes and metadata. Never invent a replacement UUID after a lost response.
+
+Uploads read a stable native regular-file handle in chunks of at most 1 MiB and
+snapshot at most 25 MiB. Exact length, native identity and full SHA-256 sweeps
+must agree before dispatch; the immutable snapshot is the HTTP body. Metadata
+uses ASCII JSON escaping, including surrogate pairs for non-BMP filenames, while
+the backend retains the original Unicode. A post-publication observed source
+change returns the known durable receipt and original manifest with the error.
+An external change followed by restoration entirely between observations cannot
+be detected. NUL paths, directories and files above the upload limit are rejected.
+
+Lists return bounded rows with uploader, manifest, compact preview state,
+generation, variants and page count. Canonical Source, document-evidence and
+session-evidence counts come from one server snapshot; the server cursor and
+next request are preserved. Preview output bodies and exhaustive output
+descriptors are omitted. Additive verified generation metadata may include the
+animation first-frame fact. Missing, null or unknown verification never means
+that animation is false.
+
+Downloads resolve metadata first, pin generation/variant/page and stream the
+exact advertised length and SHA-256. Derivatives may exceed the 25 MiB upload
+limit, within the server's 100 MiB generation output allowance. Redirects and
+transparent decompression are disabled. A same-directory temporary file is
+flushed and atomically published without replacement; an existing destination,
+including one created during the transfer, is never overwritten. Failure,
+timeout or cancellation removes partial output.
+
+Raster derivatives require explicit `generation_id`. Styled HTML downloads also
+require caller-supplied `role` and `association_id`, obtain a generation-pinned
+grant, and fetch only that isolated grant URL. Service authorization, bot
+identity, provenance and cookies are not forwarded. The fixed sandbox CSP,
+content type, no-store, no-referrer and nosniff policy are checked before local
+publication. All link variants require explicit role and association, and echo
+the actual grant binding. Revoked, expired, stale or ineligible delegation fails
+closed; JWT callers without authoritative credential revalidation receive
+`credential_authority_unavailable` while ordinary authenticated downloads remain
+available.
+
+Each operation has one 120-second deadline spanning snapshot, page enrichment,
+HTTP, publication and cleanup, with a reserved cleanup interval and 30-second
+individual HTTP response bounds. Successful mutation acknowledgements are kept
+even if association refresh or counts later fail or time out: the receipt says
+`publication_confirmed: true`, carries its immutable identity/request/manifest,
+and returns unavailable counts plus a bounded `attachment_list` refresh request.
+Unavailable counts are never replaced with zero. Other errors use fixed safe
+codes and preserve the stable request/manifest for caller reconciliation.
+
+HTTP exchanges use separate owned helpers with bounded binary framing; credentials
+stay in private pipes. A complete mutation acknowledgement is recorded before
+protocol retirement and cleanup. If either cannot be confirmed, the operation
+returns an explicit error with its known receipt instead of ordinary success.
+Reuse the original request UUID when reconciling that result.
+
+Unconfirmed native cleanup retains its owner and closes attachment admission.
+Workspace and identity declarations leave the accepted context unchanged while
+an old attachment lease remains. Retired helpers and their pipe owners cannot
+later act under a new declaration; follower uploads keep their separate lifetime.

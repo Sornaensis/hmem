@@ -14,17 +14,21 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import HMem.BotIdentity (BotIdentity, mkBotIdentity)
-import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, newManager)
+import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, managerIdleConnectionCount, newManager)
 import Network.HTTP.Types (hContentType, status200)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
-import System.Directory (removeFile)
+import System.Directory (canonicalizePath, getTemporaryDirectory, removeFile)
+import System.Environment (getExecutablePath)
+import System.FilePath ((</>), takeDirectory)
+import System.Info qualified as Info
 import System.IO (Handle, SeekMode(..), hClose, hSeek, openTempFile)
 import GHC.Conc (ThreadStatus(..), threadStatus)
 import Test.Hspec
 
-import HMem.MCP.Server (MCPContext(..), encodeStdioResponse, handleStdioLine, injectWorkspaceContext, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, sendResponseToHandle)
+import HMem.MCP.Server (MCPContext(..), encodeStdioResponse, handleStdioLine, injectWorkspaceContext, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, runMCPServerWithHandlesObservedWithFollowerOptions, sendResponseToHandle)
 import HMem.MCP.Tools (toolDefinitions)
+import HMem.MCP.SessionFollower (FollowerOptions(..), defaultFollowerOptions)
 
 spec :: Spec
 spec = do
@@ -168,7 +172,8 @@ spec = do
           responseContains "Call set_workspace" response `shouldBe` True
           ) [("project_create", object ["workspace_id" .= workspaceA, "name" .= ("bypass" :: Text)])
             , ("workspace_list", object [])
-            , ("workspace_register", object ["name" .= ("bypass" :: Text)])]
+            , ("workspace_register", object ["name" .= ("bypass" :: Text)])
+            , ("attachment_list", object ["workspace_id" .= workspaceA,"task_id" .= workspaceB,"role" .= ("source" :: Text)])]
         getResponse <- workspaceCall mgr initialized context "get" Nothing
         contextPayload getResponse `shouldBe` Just (object ["workspace_id" .= Null, "identity" .= Null])
 
@@ -223,6 +228,54 @@ spec = do
         observed <- readTVarIO captured
         map snd observed `shouldBe` map (pure . BL.toStrict . encode) [testIdentity, testIdentity, testIdentity, secondIdentity]
         map (\(body, _) -> body >>= jsonField "workspace_id") observed `shouldBe` map (Just . String) [workspaceA, workspaceA, workspaceA, workspaceB]
+
+    it "keeps attachment HTTP authority inside the accepted queue epoch until workspace retirement" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        captured <- newTVarIO []
+        firstSeen <- newEmptyMVar
+        release <- newEmptyMVar
+        completed <- newEmptyMVar
+        let app request respond
+              | "/counts" `BS8.isSuffixOf` Wai.rawPathInfo request =
+                  respond (Wai.responseLBS status200 [("Content-Type","application/json")]
+                    (encode (object ["source_count" .= (0::Int),"document_evidence_count" .= (0::Int),
+                      "agent_session_evidence_count" .= (0::Int),"evidence_total" .= (0::Int)])))
+              | otherwise = do
+                  atomically $ modifyTVar' captured (<> [(Wai.rawPathInfo request,
+                    lookup "X-HMem-Bot-Identity" (Wai.requestHeaders request))])
+                  _ <- tryPutMVar firstSeen ()
+                  _ <- readMVar release
+                  respond (Wai.responseLBS status200 [("Content-Type","application/json")]
+                    (encode (object ["items" .= ([] :: [Value]),"next_cursor" .= Null])))
+            attachment identifier = object ["jsonrpc" .= ("2.0" :: Text),"id" .= (identifier :: Text),
+              "method" .= ("tools/call" :: Text),"params" .= object ["name" .= ("attachment_list" :: Text),
+                "arguments" .= object ["task_id" .= workspaceA,"role" .= ("source" :: Text)]]]
+        testWithApplication (pure app) $ \port ->
+          bracket (newManager defaultManagerSettings {managerIdleConnectionCount=0}) closeManager $ \mgr -> do
+            let base = "http://127.0.0.1:" <> show port
+                requests = [initializeRequest "init",setWorkspaceRequest "a" (Just (String workspaceA)),
+                  attachment "old-1",attachment "old-2",
+                  setWorkspaceRequestWithIdentity "b" (Just (String workspaceB)) secondIdentity,attachment "new"]
+            BL.hPut input (BL.intercalate "\n" (map encode requests) <> "\n")
+            hSeek input AbsoluteSeek 0
+            thread <- forkIO $ try @SomeException
+              (runMCPServerWithHandlesObservedWithFollowerOptions
+                defaultFollowerOptions {helperExecutable=mcpHelperExecutable}
+                (\action -> forkIOWithUnmask (\unmask -> unmask action)) (const (pure ()))
+                1 8 input output errHandle mgr base Nothing) >>= putMVar completed
+            outcome <- (do
+              waitForSignal firstSeen
+              readTVarIO captured >>= \seen -> length seen `shouldBe` 1
+              putMVar release ()
+              waitForResult "Timed out draining attachment epoch" completed)
+              `finally` (tryPutMVar release () >> killThread thread)
+            case outcome of Left err -> expectationFailure (show err); Right () -> pure ()
+        seen <- readTVarIO captured
+        map snd seen `shouldBe` map (Just . BL.toStrict . encode) [testIdentity,testIdentity,secondIdentity]
+        map fst seen `shouldBe` map (\ws -> "/api/v1/workspaces/" <> TE.encodeUtf8 ws <> "/tasks/" <>
+          TE.encodeUtf8 workspaceA <> "/documents") [workspaceA,workspaceA,workspaceB]
 
     it "starts independent stdio process lifetimes without another process's declaration" $
       withTempResponseFile $ \firstInput ->
@@ -591,14 +644,14 @@ recordStartedWorker firstWorkerVar action = do
 withTempResponseFile :: (Handle -> IO a) -> IO a
 withTempResponseFile action =
   bracket
-    (openTempFile "." "mcp-response.jsonl")
+    (getTemporaryDirectory >>= \directory -> openTempFile directory "mcp-response.jsonl")
     (\(path, handle) -> hClose handle >> removeFile path)
     (\(_, handle) -> action handle)
 
 withClosedTempHandle :: (Handle -> IO a) -> IO a
 withClosedTempHandle action =
   bracket
-    (openTempFile "." "mcp-closed-response.jsonl")
+    (getTemporaryDirectory >>= \directory -> openTempFile directory "mcp-closed-response.jsonl")
     (\(path, _handle) -> removeFile path)
     (\(_, handle) -> hClose handle >> action handle)
 
@@ -685,3 +738,9 @@ withIdentityCaptureServer captured wait action = testWithApplication (pure app) 
       atomically $ modifyTVar' captured (<> [(decode body, [value | (name, value) <- request.requestHeaders, name == "X-HMem-Bot-Identity"])])
       wait
       respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"
+
+mcpHelperExecutable :: IO FilePath
+mcpHelperExecutable = do
+  executable <- getExecutablePath
+  canonicalizePath (takeDirectory (takeDirectory executable) </> "hmem-mcp" </>
+    ("hmem-mcp" <> if Info.os == "mingw32" then ".exe" else ""))

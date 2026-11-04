@@ -12,6 +12,7 @@ import Data.UUID (UUID)
 import GHC.Generics (Generic)
 import HMem.Auth.CredentialOrigin (GrantIssuer)
 import HMem.Document.Types (DocumentRole,jsonOptions)
+import HMem.Document.Preview (PreviewMetadata)
 
 data GrantRequest = GrantRequest
   { role :: !DocumentRole, associationId :: !UUID, variant :: !Text, page :: !Int
@@ -73,10 +74,20 @@ instance FromJSON PreviewOutput where parseJSON = genericParseJSON jsonOptions
 data PreviewStatus = PreviewStatus
   { state :: !Text, errorCode :: !(Maybe Text), generationId :: !(Maybe UUID)
   , policyVersion :: !(Maybe Text), outputs :: ![PreviewOutput]
+  , generationMetadata :: !(Maybe PreviewMetadata), retryable :: !Bool
   } deriving stock (Show,Eq)
 instance ToJSON PreviewStatus where
   toJSON p = object ["state" .= p.state,"error" .= p.errorCode,"generation_id" .= p.generationId
-    ,"policy_version" .= p.policyVersion,"outputs" .= p.outputs]
+    ,"policy_version" .= p.policyVersion,"outputs" .= p.outputs
+    , "retryable" .= p.retryable,"generation_metadata" .= case p.generationMetadata of
+       Just metadata->toJSON metadata
+       Nothing->if p.generationId==Nothing then Null else object["verification" .= ("unknown"::Text)]]
 instance FromJSON PreviewStatus where
-  parseJSON = withObject "PreviewStatus" $ \o -> PreviewStatus <$> o .: "state" <*> o .:? "error"
-    <*> o .:? "generation_id" <*> o .:? "policy_version" <*> o .: "outputs"
+  parseJSON = withObject "PreviewStatus" $ \o -> do
+    value<-o .:? "generation_metadata"
+    metadata<-case value of
+      Nothing->pure Nothing
+      Just(Object fields) | KM.lookup "verification" fields==Just(String "unknown")->pure Nothing
+      Just found->Just <$>parseJSON found
+    PreviewStatus <$> o .: "state" <*> o .:? "error" <*> o .:? "generation_id"
+      <*> o .:? "policy_version" <*> o .: "outputs" <*>pure metadata <*>o .:? "retryable" .!= False

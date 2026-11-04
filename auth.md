@@ -250,3 +250,9 @@ revocation, origin/cookie configuration and query-free logging.
 | HTTP 403 | Required global grant or workspace role. Check `/api/v1/session?workspace_id=<uuid>` with the same credential. |
 | `csrf_required` | Matching CSRF cookie/header on cookie-authenticated writes, including logout. |
 | `unsafe local bootstrap` | Loopback bind and restricted CORS, or switch to bearer/deployed authentication. |
+
+Preview retries use the existing workspace edit authorization and browser CSRF
+boundary on any visible nondeleted task status. Background rendering does not
+impersonate an uploader or grant reader authority. The existing exact-role,
+current-generation capability resolver remains responsible for all derivative
+access; native ownership and preview queue state confer no read permission.

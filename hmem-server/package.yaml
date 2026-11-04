@@ -62,6 +62,11 @@ ghc-options:
   - -Wcompat
   - -Wredundant-constraints
 
+when:
+  - condition: os(windows)
+    dependencies:
+      - Win32
+
 library:
   source-dirs: src
 

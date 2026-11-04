@@ -17,6 +17,23 @@ import HMem.Config
 
 spec :: Spec
 spec = do
+  describe "document preview configuration" $ do
+    it "defaults disabled and round-trips a pinned bounded launcher configuration" $ do
+      let cfg=defaultConfig{documentPreviews=defaultPreviewConfig{enabled=True,
+            launcherPath=Just "private-launcher-location",workers=1,queueLimit=8}}
+      Aeson.eitherDecode(Aeson.encode cfg) `shouldBe` Right cfg
+      defaultConfig.documentPreviews.enabled `shouldBe` False
+      show cfg.documentPreviews `shouldSatisfy` (not . isInfixOf "private-launcher-location")
+    it "rejects widening bounds, invalid deadlines, integer overflow and unknown controls" $
+      mapM_(\bytes->(Aeson.eitherDecode bytes::Either String HMemConfig) `shouldSatisfy` isLeft)
+        ["{\"document_previews\":{\"workers\":3}}","{\"document_previews\":{\"queue_limit\":33}}",
+         "{\"document_previews\":{\"max_attempts\":4}}","{\"document_previews\":{\"image_seconds\":31}}",
+         "{\"document_previews\":{\"pdf_seconds\":121}}","{\"document_previews\":{\"image_seconds\":5}}",
+         "{\"document_previews\":{\"workers\":4294967296}}","{\"document_previews\":{\"shell\":\"unsafe\"}}",
+         "{\"document_previews\":{\"limits\":{\"image_pixels\":40000001}}}",
+         "{\"document_previews\":{\"limits\":{\"pdf_pages\":201}}}",
+         "{\"document_previews\":{\"limits\":{\"output_bytes\":-1}}}",
+         "{\"document_previews\":{\"limits\":{\"unknown_limit\":1}}}"]
   describe "process configuration directory" $ do
     it "preserves the legacy home path when HMEM_CONFIG_DIR is absent" $
       withEnvVar "HMEM_CONFIG_DIR" Nothing $ do

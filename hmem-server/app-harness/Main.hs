@@ -55,6 +55,7 @@ import HMem.DB.SessionArchive.Maintenance qualified as ArchiveMaintenance
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), TestSandbox(..), SandboxLifetime, createTestWorkspace, newSandboxLifetime, newSandboxLifetimeWithReleaseHooks, withSandboxedTestEnvBorrowed, retrySandboxLifetime)
 import HMem.Server.AccessTracker (flushNow, newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
+import HMem.Server.Document.Worker (withPreviewWorker)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
@@ -231,7 +232,7 @@ runHarnessEnvWith qualified opts env = do
         , log_file_size = 10 * 1024 * 1024
         , log_backup_number = 3
         }
-  (bracket
+  withPreviewWorker env.pool cfg.documentPreviews $ (bracket
       (startChangeStreamWorker env.pool cfg.changeStream wsState)
       stopChangeStreamWorker
       (\_streamWorker ->

@@ -917,3 +917,21 @@ canonical workspace outbox event. Document metadata/count projections are
 unchanged. Configuration, dedicated HTML CSP/cookie isolation, restart epochs,
 and query-free application/proxy logging are defined in the
 [capability reference](docs/reference/document-capabilities.md).
+
+### Preview generation and retry
+
+`POST /api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/previews/retry`
+uses ordinary workspace edit authorization and browser cookie CSRF. It accepts
+no document bytes and does not start/change the task. 202/`{"accepted":true}`
+means an eligible failed job was admitted; 200/false preserves ready/active/
+queued/unsupported/quarantined work or unavailable admission.
+
+`GET .../previews/current` additionally returns `retryable` and
+`generation_metadata`. The latter is null when nonready,
+`{"verification":"unknown"}` for legacy ready output, or an immutable
+verified receipt containing plan_sha256, original_sha256, limits_sha256,
+policy_version, image_id, output_count, page_count, decoded_pixels,
+pdf_decoded_bytes and animated_first_frame. Unknown verification is not evidence
+of a static source. Output shape and generation-pinned routes remain unchanged.
+Failures preserve original download access; see
+[persisted previews](docs/reference/document-previews.md) for limits and recovery.

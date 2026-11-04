@@ -30,6 +30,8 @@ module HMem.Config
   , WebConfig(..)
   , DocumentDeliveryConfig(..)
   , defaultDocumentDeliveryConfig
+  , PreviewConfig(..)
+  , defaultPreviewConfig
     -- * Defaults
   , defaultConfig
     -- * Load / Save
@@ -85,6 +87,7 @@ import System.FilePath ((</>), isAbsolute, isValid, isDrive, normalise, dropTrai
 import System.IO (hPutStrLn, stderr)
 import System.Info (os)
 import Text.Read (readMaybe)
+import HMem.Document.Preview (PreviewConfig(..),defaultPreviewConfig)
 
 ------------------------------------------------------------------------
 -- Config types
@@ -371,6 +374,7 @@ data HMemConfig = HMemConfig
   , tls      :: !TlsConfig
   , web      :: !WebConfig
   , documentDelivery :: !DocumentDeliveryConfig
+  , documentPreviews :: !PreviewConfig
   } deriving stock (Show, Eq)
 
 -- Public origins are explicit; absent cookie-scope declaration disables styled HTML.
@@ -672,6 +676,7 @@ instance FromJSON HMemConfig where
     <*> o .:? "tls"      .!= defTls
     <*> o .:? "web"      .!= defWeb
     <*> o .:? "document_delivery" .!= defaultDocumentDeliveryConfig
+    <*> o .:? "document_previews" .!= defaultPreviewConfig
 
 instance ToJSON HMemConfig where
   toJSON cfg = Aeson.object
@@ -688,6 +693,7 @@ instance ToJSON HMemConfig where
     , "tls"      .= cfg.tls
     , "web"      .= cfg.web
     , "document_delivery" .= cfg.documentDelivery
+    , "document_previews" .= cfg.documentPreviews
     ]
 
 ------------------------------------------------------------------------
@@ -799,6 +805,7 @@ defaultConfig = HMemConfig
   , tls      = defTls
   , web      = defWeb
   , documentDelivery = defaultDocumentDeliveryConfig
+  , documentPreviews = defaultPreviewConfig
   }
 
 ------------------------------------------------------------------------

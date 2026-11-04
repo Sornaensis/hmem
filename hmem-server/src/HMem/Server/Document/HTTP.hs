@@ -35,6 +35,7 @@ import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
 import HMem.DB.Document qualified as DB
+import HMem.DB.DocumentPreview qualified as Preview
 import HMem.DB.Task qualified as Task
 import HMem.DB.Pool (DBException(..))
 import HMem.DB.RequestContext
@@ -48,7 +49,7 @@ import HMem.Types qualified as Types
 metadataHeader :: HeaderName
 metadataHeader="X-HMem-Document-Metadata"
 
-data Route=Collection | Counts | Detail UUID | Original UUID | Evidence UUID | Source UUID
+data Route=Collection | Counts | Detail UUID | Original UUID | Evidence UUID | Source UUID | RetryPreview UUID
 data HTTPFailure=HTTPFailure Status Text deriving stock(Show)
 instance Exception HTTPFailure
 newtype AccessFailure=AccessFailure ServerError deriving stock(Show)
@@ -127,6 +128,10 @@ documentMiddleware pool resolve app request respond=case documentRoute request o
             ("DELETE",Source identifier) -> do
               DB.removeSource pool workspace task identifier
               pure(Wai.responseLBS status204 safeHeaders "")
+            ("POST",RetryPreview identifier) -> do
+              _<-lookupDocument identifier
+              accepted<-Preview.retry pool workspace task identifier
+              pure(json (if accepted then status202 else status200)(object["accepted" .= accepted]))
             _ -> problem status405 "method_not_allowed"
     attempted<-trySynchronous(timeout transferMicros prepare)
     -- Streaming is deliberately outside the error-to-JSON handler: a failure
@@ -155,6 +160,7 @@ documentRoute req=case dropWhileEnd T.null(Wai.pathInfo req) of
       [identifier,"original"] -> Original <$> UUID.fromText identifier
       [identifier,"evidence"] -> Evidence <$> UUID.fromText identifier
       [identifier,"source"] -> Source <$> UUID.fromText identifier
+      [identifier,"previews","retry"] -> RetryPreview <$> UUID.fromText identifier
       _ -> Nothing
     pure(workspace,task,route)
   _ -> Nothing

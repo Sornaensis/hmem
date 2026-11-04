@@ -43,6 +43,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/evidence" ?~ taskDocumentEvidencePath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/source" ?~ taskDocumentSourcePath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/previews/current" ?~ documentPreviewMetadataPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/previews/retry" ?~ documentPreviewRetryPath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/previews/{generationId}/{variant}/{page}" ?~ documentRasterPath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/download-grants" ?~ documentGrantsPath
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents/{documentId}/download-grants/{grantId}" ?~ documentGrantRevokePath
@@ -1077,16 +1078,33 @@ taskDocumentSourcePath=documentPath True & delete ?~ (documentOperation "Remove 
   & responses . responses . at 204 ?~ Inline(mempty & description .~ "Source association absent; no body."))
 
 documentPreviewSchema :: Schema
-documentPreviewSchema=mempty & type_ ?~ OpenApiObject & required .~ ["state","error","generation_id","policy_version","outputs"]
+documentPreviewSchema=mempty & type_ ?~ OpenApiObject & required .~ ["state","error","generation_id","policy_version","outputs","retryable","generation_metadata"]
   & properties .~ InsOrdMap.fromList
     [("state",Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["queued","processing","ready","unsupported","failed"]))
     ,("error",Inline(mempty & type_ ?~ OpenApiString & nullable ?~ True & maxLength ?~ 128))
     ,("generation_id",Inline(grantUuid & nullable ?~ True)),("policy_version",Inline(mempty & type_ ?~ OpenApiString & nullable ?~ True & maxLength ?~ 128))
+    ,("retryable",Inline(mempty & type_ ?~ OpenApiBoolean))
+    ,("generation_metadata",Inline(mempty & oneOf ?~ [Inline absentMetadata,Inline unknownMetadata,Inline verifiedMetadata]))
     ,("outputs",Inline(mempty & type_ ?~ OpenApiArray & maxItems ?~ 401 & items ?~ OpenApiItemsObject(Inline output)))]
   where output=mempty & type_ ?~ OpenApiObject & required .~ ["variant","page","media_type","raw_bytes","raw_sha256"]
           & properties .~ InsOrdMap.fromList
             [("variant",Inline grantVariant),("page",Inline grantPage),("media_type",Inline(mempty & type_ ?~ OpenApiString))
             ,("raw_bytes",Inline grantBytes),("raw_sha256",Inline grantHash)]
+        -- OpenAPI 3.0 allows null through nullable on a schema with a type.
+        absentMetadata=mempty & type_ ?~ OpenApiString & nullable ?~ True & enum_ ?~ [Null]
+        unknownMetadata=mempty & type_ ?~ OpenApiObject & required .~ ["verification"]
+          & additionalProperties ?~ AdditionalPropertiesAllowed False
+          & properties .~ InsOrdMap.singleton "verification"(Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["unknown"]))
+        verifiedMetadata=mempty & type_ ?~ OpenApiObject
+          & required .~ ["verification","plan_sha256","original_sha256","limits_sha256","policy_version","image_id","output_count","page_count","decoded_pixels","pdf_decoded_bytes","animated_first_frame"]
+          & properties .~ InsOrdMap.fromList
+            [("verification",Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["verified"]))
+            ,("plan_sha256",Inline grantHash),("original_sha256",Inline grantHash),("limits_sha256",Inline grantHash)
+            ,("policy_version",Inline(mempty & type_ ?~ OpenApiString)),("image_id",Inline(mempty & type_ ?~ OpenApiString & pattern ?~ "^sha256:[0-9a-f]{64}$"))
+            ,("output_count",Inline(boundedInteger 1 401)),("page_count",Inline(boundedInteger 0 200))
+            ,("decoded_pixels",Inline(boundedInteger 0 40000000)),("pdf_decoded_bytes",Inline(boundedInteger 0 2147483648))
+            ,("animated_first_frame",Inline(mempty & type_ ?~ OpenApiBoolean))]
+        boundedInteger lower upper=mempty & type_ ?~ OpenApiInteger & minimum_ ?~ lower & maximum_ ?~ upper
 
 grantUuid,grantVariant,grantPage,grantBytes,grantHash :: Schema
 grantUuid=mempty & type_ ?~ OpenApiString & format ?~ "uuid"
@@ -1122,6 +1140,13 @@ documentGrantResponseSchema=mempty & type_ ?~ OpenApiObject
 documentPreviewMetadataPath :: PathItem
 documentPreviewMetadataPath=documentPath True & get ?~ (documentOperation "Read current preview generation metadata" "Authorized read, independent of public-origin configuration. Bounded complete output descriptors contain no bytes, payload IDs or bearer URLs."
   & responses . responses . at 200 ?~ documentJSONResponse "State/error, exact current generation/policy and output manifests." (Ref(Reference "TaskDocumentPreviewMetadata")))
+
+documentPreviewRetryPath :: PathItem
+documentPreviewRetryPath=documentPath True & post ?~ (documentOperation "Retry an eligible failed preview" "Workspace edit authorization and ordinary cookie CSRF precede admission. No document body. A live task in any status is allowed. Ready/active/queued/unsupported/quarantined work is preserved. Does not start or change the task."
+  & responses . responses . at 202 ?~ result "Eligible failure admitted to the bounded queue."
+  & responses . responses . at 200 ?~ result "No replacement admitted; current state preserved.")
+  where result detail=documentJSONResponse detail(Inline(mempty & type_ ?~ OpenApiObject & required .~ ["accepted"]
+          & properties .~ InsOrdMap.singleton "accepted"(Inline(mempty & type_ ?~ OpenApiBoolean))))
 
 documentRasterPath :: PathItem
 documentRasterPath=documentPath True

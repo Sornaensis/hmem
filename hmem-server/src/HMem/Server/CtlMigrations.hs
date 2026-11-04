@@ -12,7 +12,7 @@ import Control.Exception (bracket)
 import Control.Monad (forM_, unless, when)
 import Data.ByteString qualified as BS
 import Data.Char (isDigit)
-import Data.FileEmbed (embedDir, makeRelativeToProject)
+import Data.FileEmbed (embedDir, embedFile, makeRelativeToProject)
 import Data.List (nub, sortOn)
 import System.Directory
   ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist
@@ -23,7 +23,12 @@ import System.IO (hClose, openBinaryTempFile)
 import Text.Read (readMaybe)
 
 bundledMigrations :: [(FilePath, BS.ByteString)]
-bundledMigrations = $(makeRelativeToProject "migrations" >>= embedDir)
+bundledMigrations = $(do
+  -- embedDir tracks existing files, but cannot notice a newly added migration.
+  -- Hpack's generated inventory changes on additions and removals, making the
+  -- complete source bundle an explicit compile-time dependency as well.
+  _ <- makeRelativeToProject "hmem-server.cabal" >>= embedFile
+  makeRelativeToProject "migrations" >>= embedDir)
 
 installBundledMigrations :: FilePath -> IO (FilePath, [FilePath])
 installBundledMigrations hmemDir = do

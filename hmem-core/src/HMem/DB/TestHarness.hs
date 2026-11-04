@@ -474,7 +474,8 @@ cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
   let savepoint = "hmem_fixture_" <> T.replace "-" "" (T.pack (show identifier))
       savepointBytes = B8.pack (T.unpack savepoint)
       sql = mconcat
-        [ "TRUNCATE change_stream_snapshot_page_tokens, change_stream_snapshot_items, "
+        [ "DO $$ BEGIN IF to_regclass('public.document_preview_runtime') IS NOT NULL THEN EXECUTE 'TRUNCATE public.document_preview_runtime'; END IF; END $$; "
+        , "TRUNCATE change_stream_snapshot_page_tokens, change_stream_snapshot_items, "
         , "change_stream_snapshot_sessions, change_stream_resume_tokens, "
         , "change_stream_outbox, change_stream_scope_counters, "
         , "audit_log, access_tokens, workspace_memberships, users, "
@@ -483,7 +484,7 @@ cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
         ]
       guardSql action = B8.pack $ unlines
         [ "DO $$ DECLARE target TEXT; BEGIN"
-        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions','session_archive_jobs','session_archive_generations','session_archive_parts','session_archive_checkpoints','session_archive_ledger','document_payloads','document_payload_parts','documents','task_document_evidence','document_requests','document_generations','document_preview_attempts','document_download_grants'] LOOP"
+        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions','session_archive_jobs','session_archive_generations','session_archive_parts','session_archive_checkpoints','session_archive_ledger','document_payloads','document_payload_parts','documents','task_document_evidence','document_requests','document_generations','document_preview_attempts','document_download_grants','document_preview_runtime','document_preview_jobs','document_preview_runs'] LOOP"
         , "IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.'||target)"
         , "AND tgname='session_evidence_no_truncate' AND NOT tgisinternal) THEN"
         , "EXECUTE format('ALTER TABLE public.%I " <> action <> " TRIGGER session_evidence_no_truncate',target);"

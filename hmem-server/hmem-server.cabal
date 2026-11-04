@@ -77,6 +77,7 @@ data-files:
     migrations/V057__audit_maintenance_operations.sql
     migrations/V058__task_documents.sql
     migrations/V059__document_download_grants.sql
+    migrations/V060__document_preview_jobs.sql
 
 library
   exposed-modules:
@@ -106,7 +107,9 @@ library
       HMem.Server.CtlPgvectorCli
       HMem.Server.Document.Grant
       HMem.Server.Document.HTTP
+      HMem.Server.Document.Launcher
       HMem.Server.Document.PreviewOrigin
+      HMem.Server.Document.Worker
       HMem.Server.Embedding.GteQwen2
       HMem.Server.Embedding.Http
       HMem.Server.Embedding.ManagedTei
@@ -195,6 +198,9 @@ library
     , yaml
     , zlib
   default-language: Haskell2010
+  if os(windows)
+    build-depends:
+        Win32
 
 executable build-frontend
   main-is: BuildFrontend.hs
@@ -268,6 +274,9 @@ executable build-frontend
     , yaml
     , zlib
   default-language: Haskell2010
+  if os(windows)
+    build-depends:
+        Win32
 
 executable hmem-ctl
   main-is: Main.hs
@@ -346,6 +355,9 @@ executable hmem-ctl
     , yaml
     , zlib
   default-language: Haskell2010
+  if os(windows)
+    build-depends:
+        Win32
 
 executable hmem-server
   main-is: Main.hs
@@ -421,6 +433,9 @@ executable hmem-server
     , yaml
     , zlib
   default-language: Haskell2010
+  if os(windows)
+    build-depends:
+        Win32
 
 executable hmem-test-harness
   main-is: Main.hs
@@ -497,6 +512,9 @@ executable hmem-test-harness
     , yaml
     , zlib
   default-language: Haskell2010
+  if os(windows)
+    build-depends:
+        Win32
 
 test-suite hmem-server-test
   type: exitcode-stdio-1.0
@@ -527,6 +545,8 @@ test-suite hmem-server-test
       HMem.Server.CtlPgvectorCliSpec
       HMem.Server.CtlPgvectorSpec
       HMem.Server.DeployedSandboxSpec
+      HMem.Server.Document.LauncherSpec
+      HMem.Server.Document.PreviewSpec
       HMem.Server.DocumentGrantSpec
       HMem.Server.DocumentSpec
       HMem.Server.Embedding.GteQwen2Spec
@@ -621,3 +641,6 @@ test-suite hmem-server-test
     , yaml
     , zlib
   default-language: Haskell2010
+  if os(windows)
+    build-depends:
+        Win32

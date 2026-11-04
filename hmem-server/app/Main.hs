@@ -34,6 +34,7 @@ import HMem.Server.AccessTracker (newAccessTracker, flushNow)
 import HMem.Server.App (mkAppWithPrefixProofs,mkAppWithDocumentAuthority)
 import HMem.Server.Document.Grant (newDocumentAuthority)
 import HMem.Server.Document.PreviewOrigin (withPreviewListener)
+import HMem.Server.Document.Worker (withPreviewWorker)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscoveryProvider)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
@@ -431,7 +432,8 @@ runNormalMode opts = do
               (Just _, Nothing) -> logWarn logger "--tls-cert provided without --tls-key; running plain HTTP" >> runSettings settings app
               (Nothing, Just _) -> logWarn logger "--tls-key provided without --tls-cert; running plain HTTP" >> runSettings settings app
               (Nothing, Nothing) -> logInfo logger "TLS disabled (no cert/key configured)" >> runSettings settings app
-        withPreviewListener documentAuthority cfg.rateLimit requestLogger runServer
+        withPreviewListener documentAuthority cfg.rateLimit requestLogger $
+          withPreviewWorker pool cfg.documentPreviews runServer
   bracket (startArchiveWorker pool)
     (\archiveWorker -> stopArchiveWorker archiveWorker >> shutdownDatabase) $ \_archiveWorker ->
     bracket (startAuditWorkerForApplication cfg (T.pack <$> opts.optDbConn)) stopAuditWorker $ \_auditWorker -> mask $ \restore -> do

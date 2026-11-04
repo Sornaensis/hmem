@@ -5,6 +5,7 @@ module HMem.DB.Document
   , getDocument, listDocuments, getTaskDocumentCounts, readOriginal
   , addEvidence, removeSource, reservePreview, publishPreview, failPreview
   , Derivative(..), readDerivative
+  , PreparedPreview, preparePreview, storePreparedPreview, readPreviewOriginal
   ) where
 
 import Control.Exception (throwIO)
@@ -203,22 +204,46 @@ reservePreview pool ws document generation policy outputs budget = do
 
 data Derivative = Derivative { variant :: !Text, page :: !Int, mediaType :: !Text, bytes :: !ByteString }
 
-publishPreview :: Pool H.Connection -> UUID -> UUID -> UUID -> Text -> [Derivative] -> IO ()
-publishPreview pool ws document generation policy outputs = do
+newtype PreparedPreview = PreparedPreview [(Derivative,UUID,PayloadManifest,[ByteString])]
+
+-- Preparation is bounded and does no database work. The job controller can put
+-- it inside its total generation deadline, then publish under the shared locks.
+preparePreview :: [Derivative] -> IO PreparedPreview
+preparePreview outputs = do
   when (null outputs || length outputs>401 || sum(map (fromIntegral . BS.length . (.bytes)) outputs)>maxDerivativeBytes) (problem "document_preview_bound")
   encoded <- forM outputs $ \output -> do
-    unless (output.variant `elem` ["thumbnail","page","styled_html_preview"] && output.page>=0 && output.page<=200 && output.mediaType `elem` ["image/png","image/jpeg","image/webp","text/html"]) (problem "document_preview_representation")
+    unless (elem output.variant ["thumbnail","page","styled_html_preview"] && output.page>=0 && output.page<=200 && elem output.mediaType ["image/png","image/jpeg","image/webp","text/html"]) (problem "document_preview_representation")
     identifier <- UUID.nextRandom
     (manifest,parts) <- encodePayload maxDerivativeBytes output.bytes
     pure(output,identifier,manifest,parts)
+  pure(PreparedPreview encoded)
+
+-- Caller holds the workspace budget lock. Parts and descriptors remain in the
+-- caller's transaction until its complete-generation authority accepts them.
+storePreparedPreview :: UUID -> PreparedPreview -> S.Session Value
+storePreparedPreview ws (PreparedPreview encoded) = toJSON <$>forM encoded (\(output,identifier,manifest,parts) -> do
+  stored <- storePayload ws identifier False manifest parts
+  S.statement (stored,ws) (voidStatement "SELECT hmem_document_validate_payload($1,$2)" pair)
+  pure(object["variant" .= output.variant,"page" .= output.page,"media_type" .= output.mediaType,"payload_id" .= stored,"manifest" .= manifest]))
+
+publishPreview :: Pool H.Connection -> UUID -> UUID -> UUID -> Text -> [Derivative] -> IO ()
+publishPreview pool ws document generation policy outputs = do
+  prepared <- preparePreview outputs
   runTransaction pool $ do
     lockBudget ws
-    descriptors <- forM encoded $ \(output,identifier,manifest,parts) -> do
-      stored <- storePayload ws identifier False manifest parts
-      S.statement (stored,ws) (voidStatement "SELECT hmem_document_validate_payload($1,$2)" pair)
-      pure(object["variant" .= output.variant,"page" .= output.page,"media_type" .= output.mediaType,"payload_id" .= stored,"manifest" .= manifest])
+    descriptors <- storePreparedPreview ws prepared
     S.statement (ws,document,generation,policy,toJSON descriptors) (voidStatement "SELECT hmem_document_publish_preview($1,$2,$3,$4,$5)"
       (param (\(a,_,_,_,_)->a) E.uuid <> param (\(_,b,_,_,_)->b) E.uuid <> param (\(_,_,c,_,_)->c) E.uuid <> param (\(_,_,_,d,_)->d) E.text <> param (\(_,_,_,_,e)->e) E.jsonb))
+
+-- Internal renderer authority: exact immutable workspace/document/original
+-- binding, independent of task visibility. Public reads retain their link gate.
+readPreviewOriginal :: Pool H.Connection -> UUID -> UUID -> Text -> IO ByteString
+readPreviewOriginal pool ws document expected = do
+  payload <- runSession pool $ S.statement (ws,document,expected) $ St.Statement
+    "SELECT payload_id FROM documents WHERE workspace_id=$1 AND id=$2 AND raw_sha256=$3"
+    (param (\(a,_,_)->a) E.uuid <> param (\(_,b,_)->b) E.uuid <> param (\(_,_,c)->c) E.text)
+    (D.rowMaybe(D.column(D.nonNullable D.uuid))) True
+  maybe(problem "document_original_integrity") (\identifier->readPayload pool ws identifier maxOriginalBytes) payload
 
 -- Nothing is the still-unclaimed queued state (e.g. admission saturation).
 -- A delayed worker may only fail its own active processing attempt.

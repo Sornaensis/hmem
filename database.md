@@ -94,6 +94,57 @@ classDiagram
       TEXT original_sha256
       TEXT policy_version
       JSONB outputs
+      JSONB? preview_metadata
+      TIMESTAMPTZ created_at
+    }
+    class document_preview_runtime {
+      BOOLEAN singleton PK
+      INTEGER worker_limit
+      INTEGER queue_limit
+      TIMESTAMPTZ? available_until
+      TEXT? policy_version
+      TEXT? image_id
+      TEXT? limits_sha256
+    }
+    class document_preview_jobs {
+      UUID document_id PK FK
+      UUID workspace_id FK
+      TEXT state
+      BIGINT version
+      INTEGER attempts
+      INTEGER max_attempts
+      UUID? run_id FK
+      TIMESTAMPTZ available_at
+      TEXT? error_code
+      BOOLEAN retryable
+      TIMESTAMPTZ created_at
+      TIMESTAMPTZ updated_at
+    }
+    class document_preview_runs {
+      UUID id PK
+      UUID workspace_id FK
+      UUID document_id FK
+      BIGINT job_version
+      UUID controller_id
+      UUID lease_token
+      TEXT original_sha256
+      TEXT policy_version
+      TEXT image_id
+      JSONB limits
+      TEXT limits_sha256
+      TIMESTAMPTZ deadline_at
+      TIMESTAMPTZ lease_until
+      TEXT phase
+      BIGINT? native_pid
+      BOOLEAN native_exited
+      BOOLEAN cleanup_verified
+      BOOLEAN creation_uncertain
+      TEXT? plan_sha256
+      INTEGER? output_count
+      INTEGER? page_count
+      BIGINT? reserved_bytes
+      TEXT? error_code
+      TIMESTAMPTZ? released_at
       TIMESTAMPTZ created_at
     }
     class document_download_grants {
@@ -127,6 +178,12 @@ classDiagram
     document_generations "0..1" <-- "0..*" document_previews
     tasks "1" --> "0..*" document_download_grants
     documents "1" --> "0..*" document_download_grants
+    documents "1" --> "0..1" document_preview_jobs
+    document_preview_jobs "1" --> "0..*" document_preview_runs
+    document_preview_runs "0..1" <-- "0..1" document_preview_jobs : current run composite FK
+    note for document_preview_runtime "True singleton; no foreign keys\nWorker limit1..2; admitted limit1..32 includes unresolved owners"
+    note for document_preview_jobs "UNIQUE (document_id, workspace_id)\nComposite document/workspace and current-run scope foreign keys\nQueued due index; rows cannot be deleted"
+    note for document_preview_runs "UNIQUE (id, workspace_id, document_id)\nComposite job/workspace FK; immutable target and monotonic closure receipts\nUnreleased lease index; rows cannot be deleted\nExpired lease or absent container does not prove cleanup"
     note for document_payloads "UNIQUE (id, workspace_id) and (workspace_id, raw_sha256, raw_bytes, original)\nPublished manifests and parts are immutable"
     note for documents "UNIQUE (id, workspace_id)\nComposite payload FK enforces workspace"
     note for task_document_sources "UNIQUE (workspace_id, task_id, document_id)\nComposite task/document FKs; removal deletes this link only"
@@ -748,3 +805,15 @@ one-way. Shared resolution rechecks the exact current link and preview receipt.
 Grant creation/revocation adds only a grant-ID audit projection and no canonical
 workspace change event. See the
 [capability reference](docs/reference/document-capabilities.md).
+
+V060 adds bounded persisted preview runtime, per-document jobs and immutable
+per-launch ownership runs. Composite scope keys retain one workspace; the job
+document primary key and composite current-run scope permit at most one job to
+reference a given run. Generation preview_metadata
+is nullable for legacy unknown verification and immutable with its outputs.
+Atomic publication fences current lease/target/attempt and absolute completion
+deadline; stale failure cannot overwrite a later generation. Uncertain physical
+cleanup retains physical admission independently of ordinary payload reservation
+expiry. See the
+[preview schema reference](docs/reference/schema.md#document-preview-jobs-v060)
+and [controller reference](docs/reference/document-previews.md).

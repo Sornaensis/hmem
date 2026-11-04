@@ -295,3 +295,15 @@ For the rotating application log while hmem is running:
 ```bash
 docker compose exec hmem tail -f /var/lib/hmem/.hmem/logs/hmem-server.log
 ```
+
+## Document preview runtime
+
+Preview generation defaults off. Configure the host-supervised qualified launcher
+and pre-existing immutable worker image using
+[document_previews](docs/reference/document-previews.md#configuration).
+The document container receives no application credentials, host mounts or
+network. Do not mount a Docker socket into the application container as a
+substitute for the supported host launcher. Missing launcher/image/confinement
+reports preview unavailable and preserves originals; no native decoder fallback
+exists. Unverified daemon creation or process/container cleanup retains durable
+ownership and fails closed until exact-owner reconciliation.

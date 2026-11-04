@@ -422,3 +422,54 @@ revocation audit only the grant ID and emit no canonical outbox event; document
 resource/count projections are unchanged. V059 and its ledger entry commit in
 one transaction. Runtime restart/configuration replacement changes the shared
 epoch, invalidating earlier grants while retaining the original documents.
+
+## Document preview jobs (V060)
+
+V060 adds nullable `document_generations.preview_metadata` JSONB: an object
+of at most 4096 bytes, immutable with its generation. Null explicitly preserves
+unknown historical verification; no metadata is inferred for legacy output.
+
+`document_preview_runtime` has a true Boolean singleton primary key, required
+worker_limit (default 2, 1–2), queue_limit (default 32, 1–32), and nullable
+available_until, policy_version (1–128 bytes), image_id (SHA256 syntax)
+and limits_sha256. It has no foreign key. A five-second heartbeat represents
+current launcher availability, independently of persisted ownership.
+
+`document_preview_jobs` has document_id primary key; required workspace_id,
+state (queued/processing/ready/failed/quarantined), version (default 1, positive),
+attempts (default 0, 0–3), max_attempts (default 3, 1–3), available_at,
+retryable (default false), created_at and updated_at. Optional run_id identifies
+its current owner, and optional error_code is 1–80 lowercase alphanumeric or
+underscore characters. Unique (document_id,workspace_id) supports same-workspace
+document and run foreign keys. A partial (available_at,document_id) index covers
+queued jobs.
+
+`document_preview_runs` has UUID id primary key, required workspace_id,
+document_id, positive job_version, controller_id, lease_token, original_sha256,
+policy_version, image_id, limits JSONB (object, at most 4096 bytes), limits_sha256,
+deadline_at, lease_until, phase, native_exited, cleanup_verified,
+creation_uncertain and created_at. Target/creation fields are immutable. Optional
+native_pid is positive; plan_sha256 is lowercase SHA256; output_count 1–401,
+page_count 0–200 and reserved_bytes 0–105906176 form an immutable admitted
+receipt. Optional error_code follows the job error bound; released_at is nullable.
+Phase is allocated/started/inspected/admitted/rendering/closed/quarantined.
+
+Unique (id,workspace_id,document_id) and the composite job/workspace foreign key
+enforce scope. Jobs' nullable current-run foreign key points back to this tuple.
+Although run_id has no standalone UNIQUE declaration, the job document primary
+key and composite scope allow at most one job to reference a given run. An unreleased
+(lease_until,id) index supports bounded recovery. Deadline follows creation by
+at most 120 s, lease ends from the deadline through 15 s later, verified cleanup
+requires native exit, and release requires exit, cleanup and no creation
+uncertainty. Ordinary payload reservation expiry does not clear physical
+ownership/admission. Closure/identity/admission receipts cannot regress or change after
+release. All three tables refuse deletion/truncation in production.
+
+Original enqueue and preview state changes retain metadata-only document
+audit/outbox projections; binary parts, native PIDs, paths and run controls are
+not projected. Publication verifies the entire generation and its current owner,
+then commits payloads, ready state, quota reconciliation and job completion
+atomically with final deadline fences. V060 and its ledger entry are one
+transaction. Existing queued originals become retryable renderer_unavailable
+failures during upgrade; ready generations retain unknown metadata. See
+[persisted previews](document-previews.md).

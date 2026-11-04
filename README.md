@@ -6,61 +6,72 @@
 hmem stores repository observations, projects, and tasks in PostgreSQL, with a web
 interface, HTTP API, and MCP tools.
 
-## Deploy with Docker Compose
+## Deploy locally without sign-in
 
-Install Docker with Compose v2 and run these steps from the repository root.
+Use rootful Docker Engine 28 or later on Linux with Docker Compose 2.24.4 or
+later. This setup gives local clients superadmin access without a login or token.
+Use it on a trusted machine with ports 8420 and 55432 available.
 
-1. Copy the configuration templates.
+1. From the repository root, copy `.env.example` to `.env` for a fresh setup.
+   Set a strong `POSTGRES_PASSWORD` and update these values. Leave hmem token
+   settings unset and `HMEM_CORS_ALLOWED_ORIGINS` empty.
 
-   ```bash
-   cp .env.example .env
-   cp config/compose.env.example config/compose.env
+   ```dotenv
+   HMEM_ENV_FILE=.env
+   HMEM_AUTH_MODE=local
+   HMEM_AUTH_ENABLED=false
+   HMEM_AUTH_LOCAL_BOOTSTRAP_ENABLED=true
+   HMEM_AUTH_LOCAL_ALLOW_REMOTE_BOOTSTRAP=false
    ```
 
-2. Set a strong `POSTGRES_PASSWORD` in `.env` and keep
-   `HMEM_HTTP_BIND=127.0.0.1` for local access. In `config/compose.env`, uncomment
-   and set `HMEM_AUTH_LOCAL_USER_TOKEN` to a strong URL-safe browser sign-in
-   token, such as 32 random bytes encoded as hex. Keep both secrets out of Git.
+2. Save this as `compose.no-auth.yaml` in the repository root. Host networking
+   lets hmem listen directly on loopback and serve live browser updates.
+
+   ```yaml
+   services:
+     postgres:
+       ports:
+         - "127.0.0.1:55432:5432"
+     hmem:
+       network_mode: host
+       ports: !reset []
+       environment:
+         HMEM_SERVER_HOST: "127.0.0.1"
+         HMEM_DB_HOST: "127.0.0.1"
+         HMEM_DB_PORT: "55432"
+   ```
+
 3. Build and start the stack, then check its status.
 
    ```bash
-   docker compose up --build -d
-   docker compose ps
+   docker compose -f compose.yaml -f compose.no-auth.yaml up --build -d
+   docker compose -f compose.yaml -f compose.no-auth.yaml ps
    ```
 
-4. When `hmem` is healthy, open `http://127.0.0.1:8420/#hmem_token=<your-token>`
-   with the token from `HMEM_AUTH_LOCAL_USER_TOKEN`. On the Workspaces page,
-   select **+ Workspace** to create a repository workspace. Open it and copy
+4. When `hmem` is healthy, open [http://127.0.0.1:8420](http://127.0.0.1:8420).
+   Select **+ Workspace** to create a repository workspace. Open it and copy
    the UUID from `/workspace/<workspace-uuid>` for your MCP client.
 
-PostgreSQL keeps application data in the `postgres-data` volume. Use
-`docker compose down` to stop the stack and retain that volume. For shared
-access, configure [OIDC](docker.md#shared-oidc-authentication) and
-[HTTPS](docker.md#configuration-and-secrets) before exposing the service. The
-[Docker guide](docker.md) covers backups and recovery, troubleshooting, and
-[setup for image and styled HTML previews](docker.md#compose-setup-with-document-previews).
+Stop the stack with `docker compose -f compose.yaml -f compose.no-auth.yaml down`.
+PostgreSQL keeps application data in the `postgres-data` volume. For shared
+access, use the [authenticated Docker setup](docker.md#shared-oidc-authentication).
+The [Docker guide](docker.md) also covers backups and
+[image and styled HTML previews](docker.md#compose-setup-with-document-previews).
 
 ## Connect an MCP client
-
-For the local Compose stack, set `HMEM_API_KEY` in `config/compose.env` to a
-strong token distinct from the browser token. Set `HMEM_MCP_AUTH_TOKEN` in the
-same file to the `HMEM_API_KEY` value. If the stack is already running, apply the
-settings with `docker compose up -d hmem` and wait for it to be healthy.
 
 Configure your MCP client to launch this command from the Compose project
 directory as a stdio server.
 
 ```bash
-docker compose exec -T hmem hmem-entrypoint hmem-mcp
+docker compose -f compose.yaml -f compose.no-auth.yaml exec -T hmem hmem-entrypoint hmem-mcp --no-auth
 ```
 
 If you have `hmem-mcp` installed on the host, you can connect it directly to the
-published port. Set `HMEM_MCP_AUTH_TOKEN` in the client's environment to the
-local stack's `HMEM_API_KEY`, or use a [service token](auth.md#service-and-mcp-tokens)
-and the server's HTTPS URL for a shared deployment.
+local server.
 
 ```bash
-hmem-mcp --server-url http://127.0.0.1:8420
+hmem-mcp --server-url http://127.0.0.1:8420 --no-auth
 ```
 
 After the MCP handshake, call `set_workspace` with your workspace UUID and both
@@ -70,9 +81,9 @@ identity fields.
 {"workspace_id":"<workspace-uuid>","identity":{"role":"Developer","model-id":"codex:gpt-6.1-sol:high"}}
 ```
 
-Use your client's actual role and model identity. See the
-[Docker MCP setup](docker.md#mcp-stdio-client) for container settings and
-[MCP setup](hmem-mcp/README.md) for native clients.
+Use your client's actual role and model identity. See
+[MCP setup](hmem-mcp/README.md) for client configuration or
+[Docker MCP setup](docker.md#mcp-stdio-client) for authenticated deployments.
 
 ## Walkthrough
 

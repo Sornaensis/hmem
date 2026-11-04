@@ -1,5 +1,24 @@
 // Elm owns modal lifetime; the native top layer provides inertness and Escape.
 // Retain the actual invoking element across field switches and restore it on close.
+function installBackdropDismiss(dialog) {
+  let pressedOutside = null
+  function isBackdrop(event) {
+    if (event.target !== dialog) return false
+    const { left, right, top, bottom } = dialog.getBoundingClientRect()
+    return event.clientX < left || event.clientX >= right || event.clientY < top || event.clientY >= bottom
+  }
+  dialog.addEventListener('pointerdown', event => {
+    pressedOutside = event.isPrimary && event.button === 0 && isBackdrop(event) ? dialog.dataset.dialogToken : null
+  })
+  dialog.addEventListener('pointercancel', () => { pressedOutside = null })
+  dialog.addEventListener('click', event => {
+    const dismiss = pressedOutside !== null && pressedOutside === dialog.dataset.dialogToken
+      && dialog.getAttribute('closedby') === 'any' && event.detail > 0 && isBackdrop(event)
+    pressedOutside = null
+    if (dismiss) dialog.dispatchEvent(new Event('cancel', { cancelable: true }))
+  })
+}
+
 export function installNativeDialog({ document, id }) {
   let active = null, token = null, origin = null, originId = null, owner = null
   const observer = new MutationObserver(() => {
@@ -23,6 +42,7 @@ export function installNativeDialog({ document, id }) {
     next.querySelector('[autofocus], button')?.focus()
     if (!next.dataset.dialogFocusInstalled) {
       next.dataset.dialogFocusInstalled = 'true'
+      if (!('closedBy' in next)) installBackdropDismiss(next)
       next.addEventListener('keydown', event => {
         if (event.key !== 'Tab') return
         const choices = [...next.querySelectorAll('button, input, select, textarea, a[href], iframe, [tabindex]')]

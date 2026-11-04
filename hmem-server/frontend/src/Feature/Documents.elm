@@ -7,7 +7,7 @@ import Api
 import Dict
 import Helpers
 import Html exposing (Html, button, div, h3, h4, p, span, text)
-import Html.Attributes exposing (attribute, class, disabled, id, title, type_)
+import Html.Attributes exposing (attribute, class, classList, disabled, id, title, type_)
 import Html.Events exposing (onClick)
 import Html.Keyed as Keyed
 import Http
@@ -561,7 +561,7 @@ viewDialog model =
                 token = dialogIdentity (Just dialog)
                 close = button [ type_ "button", class "btn btn-sm", attribute "autofocus" "", attribute "data-document-preview-close" "", onClick (TaskDocuments CloseDocumentDialog) ] [ text "Close" ]
                 heading label = h3 [ id "task-document-dialog-title" ] [ text label ]
-                ( origin, body ) =
+                ( origin, body, isPreview ) =
                     case dialog of
                         UploadSourceDialog task ->
                             ( "document-upload-" ++ task
@@ -584,12 +584,12 @@ viewDialog model =
                                     , div [ class "task-document-actions task-document-dialog-footer" ]
                                         [ close, button [ type_ "submit", class "btn btn-sm" ] [ text "Upload source" ] ]
                                     ]
-                              ] )
+                              ], False )
                         PreviewDocumentDialog item page zoom ->
-                            ( "document-preview-" ++ item.id, viewPreview (heading item.filename) close model item page zoom )
+                            ( "document-preview-" ++ item.id, viewPreview (heading item.filename) close model item page zoom, True )
             in
             Html.node "dialog"
-                [ id "task-document-dialog", class "task-document-dialog"
+                ([ id "task-document-dialog", classList [ ( "task-document-dialog", True ), ( "task-document-preview-dialog", isPreview ) ]
                 , attribute "aria-labelledby" "task-document-dialog-title"
                 , attribute "data-dialog-token" token
                 , attribute "data-dialog-origin" origin
@@ -598,7 +598,7 @@ viewDialog model =
                     UploadSourceDialog task -> task
                     PreviewDocumentDialog item _ _ -> item.taskId)
                 , Html.Events.preventDefaultOn "cancel" (Decode.succeed ( TaskDocuments CloseDocumentDialog, True ))
-                ]
+                 ] ++ (if isPreview then [ attribute "closedby" "any" ] else []))
                 (body ++
                  [ p [ class "card-meta task-document-dialog-notice", attribute "role" "status", attribute "data-document-transfer-status" "" ] [ text model.documents.notice ] ])
         _ ->

@@ -1,10 +1,26 @@
-module AuditNavigation exposing (destinationType, destinationUrl, related, resolve, snapshotId, validId)
+module AuditNavigation exposing (destinationStatus, destinationType, destinationUrl, related, resolve, snapshotId, validId)
 
 import Api
+import Dict
 import Helpers
 import Json.Decode as Decode
 import Types exposing (..)
 import Url
+
+
+destinationStatus : Model -> Maybe String
+destinationStatus model =
+    model.focus.returnContext |> Maybe.andThen (\context ->
+        if context.source /= ReturnFromTimeline && List.member context.entityType [ "project", "task" ] then
+            case Dict.get (context.entityType ++ ":" ++ context.entityId) model.dataLoading.navigationFocuses of
+                Just request ->
+                    if request.inFlight then Just "Loading entity destination..."
+                    else if not request.succeeded then Just "Entity destination unavailable. It may no longer exist or be accessible."
+                    else Nothing
+                Nothing -> Just "Loading entity destination..."
+        else if context.source /= ReturnFromTimeline && context.entityType == "observation" && model.observations.detailError /= Nothing then
+            Just "Entity destination unavailable. It may no longer exist or be accessible."
+        else Nothing)
 
 
 {-| Relation keys are read from snapshots, never from composite relation IDs.

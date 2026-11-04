@@ -8,11 +8,11 @@ module Page.Workspace exposing
     )
 
 import Api
+import AuditNavigation
 import Dict
 import Feature.AuditLog
 import Feature.Cards
 import Feature.Editing
-import Feature.Focus
 import Feature.Observation
 import Feature.Search
 import Feature.Sessions
@@ -56,17 +56,19 @@ viewWorkspaceContent wsId model =
     if model.auth.status == AuthReady && not (Permissions.canReadCurrentWorkspace model) then
         viewUnauthorizedWorkspace model
 
-    else if Feature.Focus.auditDestinationStatus model /= Nothing then
-        div [ class "empty-state audit-destination-status", attribute "role" "status" ] [ text (Maybe.withDefault "Entity destination unavailable." (Feature.Focus.auditDestinationStatus model)) ]
-
     else
-        case Dict.get wsId model.workspaces of
-            Nothing ->
-                div [ class "page" ]
-                    [ div [ class "loading-indicator" ] [ text "Loading..." ] ]
+        case AuditNavigation.destinationStatus model of
+            Just status ->
+                div [ class "empty-state audit-destination-status", attribute "role" "status" ] [ text status ]
 
-            Just ws ->
-                viewReadableWorkspacePage wsId model ws
+            Nothing ->
+                case Dict.get wsId model.workspaces of
+                    Nothing ->
+                        div [ class "page" ]
+                            [ div [ class "loading-indicator" ] [ text "Loading..." ] ]
+
+                    Just ws ->
+                        viewReadableWorkspacePage wsId model ws
 
 
 viewWorkspaceContext : Model -> Html Msg

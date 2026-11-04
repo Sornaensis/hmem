@@ -1,4 +1,4 @@
-module Feature.Focus exposing (auditDestinationStatus, auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, returnContextForUrl, restoreAuditReturnAuthority, shouldShowReturnContext, timelineReturnContext, update, viewAuditReturn, viewFocusBreadcrumbBar, viewTaskBreadcrumb, previewAttributes, reconcilePreview)
+module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, returnContextForUrl, restoreAuditReturnAuthority, shouldShowReturnContext, timelineReturnContext, update, viewAuditReturn, viewFocusBreadcrumbBar, viewTaskBreadcrumb, previewAttributes, reconcilePreview)
 
 import Api
 import Feature.AuditRequest as AuditRequest
@@ -156,21 +156,6 @@ viewAuditReturn model =
         Just context ->
             button [ class "btn btn-secondary focus-return-btn", type_ "button", onClick ReturnToFocusSource ] [ text (focusReturnContextLabel context) ]
         Nothing -> text ""
-
-
-auditDestinationStatus : Model -> Maybe String
-auditDestinationStatus model =
-    model.focus.returnContext |> Maybe.andThen (\context ->
-        if context.source /= ReturnFromTimeline && List.member context.entityType [ "project", "task" ] then
-            case Dict.get (context.entityType ++ ":" ++ context.entityId) model.dataLoading.navigationFocuses of
-                Just request ->
-                    if request.inFlight then Just "Loading entity destination..."
-                    else if not request.succeeded then Just "Entity destination unavailable. It may no longer exist or be accessible."
-                    else Nothing
-                Nothing -> Just "Loading entity destination..."
-        else if context.source /= ReturnFromTimeline && context.entityType == "observation" && model.observations.detailError /= Nothing then
-            Just "Entity destination unavailable. It may no longer exist or be accessible."
-        else Nothing)
 
 
 shouldShowReturnContext : FocusModel -> Bool

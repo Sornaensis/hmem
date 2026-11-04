@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, rmdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
 import { openSessionExplorer } from './support/sessions-ux-fixture.mjs'
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4d0AAAAASUVORK5CYII=', 'base64')
@@ -498,6 +499,119 @@ test('Source tabs distinguish pending counts from zero and keep each canonical t
     assert.deepEqual(h.errors, [])
   } finally {
     releaseFirst()
+    await h.close()
+  }
+})
+
+test('Timeline focus loads documents outside the filtered hierarchy without changing membership', { timeout: 45000 }, async () => {
+  const fixture = hierarchyFixture()
+  const [project] = fixture.projects
+  const [task, ordinary] = fixture.tasks
+  Object.assign(task, { status: 'done', completed_at: stamp })
+  fixture.projects = [project]
+  fixture.tasks = [task, ordinary]
+  fixture.timelineEvents = [{
+    id: 'focused-documents', workspace_id: fixture.workspace.id, event_type: 'task_completed',
+    entity_type: 'task', entity_id: task.id, title: 'Open task with documents', occurred_at: stamp,
+    actor: null, project: { id: project.id, name: project.name }, parent_task: null, status_transition: null,
+    navigation: { entity_type: 'task', entity_id: task.id }, source_audit_id: null,
+  }]
+  const h = await openHierarchy(fixture)
+  const { page } = h
+  const source = item(task.id, 51, 'source', 'focused-source.txt', 'text/plain')
+  const evidence = item(task.id, 52, 'evidence', 'focused-evidence.txt', 'text/plain')
+  const staleSource = item(task.id, 53, 'source', 'retired-source.txt', 'text/plain')
+  const documents = '/tasks/' + task.id + '/documents'
+  const reads = []
+  let evidenceTotal = 1
+  let holdSource = false
+  let releaseSource
+  const heldSource = new Promise(resolve => { releaseSource = resolve })
+
+  try {
+    await page.addInitScript(workspace => {
+      localStorage.setItem('hmem-ws-' + workspace, JSON.stringify({ nodesCollapsedByDefault: true }))
+    }, fixture.workspace.id)
+    await page.route('**/api/v1/workspaces/*' + documents + '**', async route => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/counts')) {
+        reads.push('counts')
+        return route.fulfill({ json: counts(1, evidenceTotal, 0) })
+      }
+      const role = url.searchParams.get('role')
+      reads.push(role)
+      if (role === 'source' && holdSource) {
+        await heldSource
+        return route.fulfill({ json: { items: [staleSource], next_cursor: null } })
+      }
+      return route.fulfill({ json: { items: role === 'source' ? [source] : evidenceTotal ? [evidence] : [], next_cursor: null } })
+    })
+
+    await h.start(); await h.idle()
+    const target = page.locator('#entity-' + task.id)
+    const projectToggle = page.locator('#entity-' + project.id + ' .tree-toggle').first()
+    const doneFilter = page.locator('.workspace-search-filter-bar').getByRole('button', { name: 'Done', exact: true })
+    const disclosure = target.locator('.card-details-control')
+    const sourceTab = target.getByRole('button', { name: 'Sources', exact: true })
+    const evidenceTab = target.getByRole('button', { name: 'Evidence', exact: true })
+    const workTab = target.getByRole('button', { name: 'Work', exact: true })
+    assert.equal(await projectToggle.innerText(), '▶')
+    assert.equal(await doneFilter.getAttribute('aria-pressed'), 'false')
+    assert.equal(await target.count(), 0)
+
+    await page.getByRole('button', { name: 'Timeline', exact: true }).click()
+    await page.locator('#timeline-event-focused-documents').click()
+    await disclosure.click()
+    await until(async () => (await sourceTab.innerText()) === 'Sources · 1')
+    await sourceTab.click()
+    await target.getByText(source.document.filename, { exact: true }).waitFor()
+    await evidenceTab.click()
+    await target.getByText(evidence.document.filename, { exact: true }).waitFor()
+    assert.deepEqual(reads, ['counts', 'source', 'evidence'])
+
+    evidenceTotal = 0
+    assert.equal(await evidenceTab.getAttribute('aria-pressed'), 'true')
+    await push(h, 'task_document', evidence.id, 'deleted', taskHints(task.id))
+    await until(() => evidenceTab.isDisabled())
+    assert.equal(await workTab.getAttribute('aria-pressed'), 'true')
+    assert.equal(await evidenceTab.getAttribute('aria-pressed'), 'false')
+
+    holdSource = true
+    const readsBeforeDelay = reads.length
+    await sourceTab.click()
+    await until(() => reads.length > readsBeforeDelay)
+    assert.deepEqual(reads.slice(readsBeforeDelay), ['source'])
+    await page.locator('.focus-clear-btn').click()
+    await target.waitFor({ state: 'detached' })
+    assert.equal(await projectToggle.innerText(), '▶')
+    assert.equal(await doneFilter.getAttribute('aria-pressed'), 'false')
+    const retiredResponse = page.waitForResponse(response => new URL(response.url()).pathname.endsWith(documents))
+    releaseSource()
+    await retiredResponse
+    holdSource = false
+
+    await projectToggle.click(); await h.idle()
+    await page.locator('#entity-' + ordinary.id).waitFor()
+    assert.equal(await target.count(), 0, 'ordinary navigation still excludes Done tasks')
+    const readsBeforeOrdinary = reads.length
+    await doneFilter.click()
+    await disclosure.waitFor()
+    if (await disclosure.getAttribute('aria-expanded') === 'false') await disclosure.click()
+    if (await sourceTab.getAttribute('aria-pressed') === 'false') await sourceTab.click()
+    await target.getByText(source.document.filename, { exact: true }).waitFor()
+    await until(async () => (await sourceTab.innerText()) === 'Sources · 1')
+    assert.equal(await target.getByText(staleSource.document.filename, { exact: true }).count(), 0)
+    await h.idle()
+    assert.deepEqual(reads.slice(readsBeforeOrdinary).sort(), ['counts', 'source'])
+
+    const readsBeforeFocus = reads.length
+    await target.locator('.btn-focus').click()
+    await page.locator('.focus-clear-btn').waitFor()
+    await target.getByText(source.document.filename, { exact: true }).waitFor()
+    await h.idle()
+    assert.equal(reads.length, readsBeforeFocus, 'an already admitted task retains one set of document reads when focused')
+  } finally {
+    releaseSource()
     await h.close()
   }
 })

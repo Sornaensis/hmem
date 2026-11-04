@@ -4,6 +4,7 @@ module Feature.Documents exposing
     )
 
 import Api
+import AuditNavigation
 import Dict
 import Helpers
 import Html exposing (Html, button, div, h3, h4, p, span, text)
@@ -75,8 +76,24 @@ sync model =
                 let
                     ordinary = model.dataLoading.visibleDetailDemand |> Maybe.map Tuple.second |> Maybe.withDefault Set.empty
                     pins = model.dataLoading.viewportDetailPins |> Set.filter (Tuple.first >> (==) "task") |> Set.map Tuple.second
+                    viewport = model.cards.viewport
+                    mountedFocus =
+                        case model.focus.focusedEntity of
+                            Just ( "task", task ) ->
+                                -- Direct focus pins its row even outside ordinary navigation membership.
+                                if viewport.workspaceId == model.selectedWorkspaceId
+                                    && viewport.sessionEpoch == model.sessionRequestEpoch
+                                    && viewport.generation == model.dataLoading.navigationGeneration
+                                    && Dict.member ("task:" ++ task) viewport.rows
+                                    && AuditNavigation.destinationStatus model == Nothing then
+                                    Set.singleton task
+                                else
+                                    Set.empty
+
+                            _ ->
+                                Set.empty
                 in
-                Set.union ordinary pins
+                Set.union (Set.union ordinary pins) mountedFocus
                     |> Set.filter (\task -> Helpers.isExpanded model task && Dict.member task model.tasks)
 
         dialogTask =

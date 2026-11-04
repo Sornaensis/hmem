@@ -53,6 +53,7 @@ type alias Model =
     , sessionActivity : SessionActivityModel
     , sessionDelivery : Feature.SessionDelivery.State
     , sessions : SessionsModel
+    , documents : DocumentsModel
     , timestamps : TimestampDisplay.State
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
@@ -82,6 +83,54 @@ type alias Model =
     , timeline : TimelineModel
     , workspaceAdmin : WorkspaceAdminModel
     }
+
+
+type alias DocumentsModel =
+    { scope : String
+    , transferStamp : ( String, String )
+    , demand : Set String
+    , reads : Dict ( String, String ) DocumentRead
+    , visibleThumbnails : Set ( String, String )
+    , dialog : Maybe DocumentDialog
+    , nextOperation : Int
+    , operation : Maybe Int
+    , notice : String
+    }
+
+
+type alias DocumentRead =
+    { request : Maybe Int
+    , dirty : Bool
+    , failed : Bool
+    , value : Maybe DocumentReadValue
+    , cursor : Maybe Api.DocumentCursor
+    }
+
+
+type DocumentReadValue
+    = DocumentCountsValue Api.DocumentCounts
+    | DocumentPageValue Api.DocumentPage
+    | DocumentPreviewValue Api.DocumentPreview
+
+
+type DocumentDialog
+    = UploadSourceDialog String
+    | PreviewDocumentDialog Api.DocumentItem Int Bool
+
+
+type DocumentMsg
+    = DocumentReadFinished String ( String, String ) Int (Result Http.Error DocumentReadValue)
+    | RetryDocumentRead String String
+    | DocumentPageChanged String String (Maybe Api.DocumentCursor)
+    | OpenUploadSource String
+    | OpenDocumentPreview Api.DocumentItem
+    | CloseDocumentDialog
+    | DocumentPreviewPage Int
+    | ToggleDocumentZoom
+    | RemoveDocumentSource Api.DocumentItem
+    | RetryDocumentPreview Api.DocumentItem
+    | DocumentWriteFinished String Int String (Result Http.Error ())
+    | DocumentTransferEvent Encode.Value
 
 
 type alias MoveModel =
@@ -1547,6 +1596,7 @@ type Route
 
 type Msg
     = UrlRequested Browser.UrlRequest
+    | TaskDocuments DocumentMsg
     | ToggleWorkspaceDetails
     | TimestampsFormatted Encode.Value
     | ObservationViewportChanged Encode.Value

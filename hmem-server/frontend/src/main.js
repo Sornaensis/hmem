@@ -15,8 +15,10 @@ import { installSessionBridge } from './session-save.js'
 import { createSessionActivityStream } from './session-activity-stream.js'
 import { Elm } from './Main.elm'
 import { installNativeDialog } from './native-dialog.js'
+import { installDocumentTransfer } from './document-transfer.js'
 
 installNativeDialog({ document, id: 'audit-diff-dialog' })
+installNativeDialog({ document, id: 'task-document-dialog' })
 
 // Native modal semantics contain keyboard focus and make the background inert.
 // Elm owns lifetime and actions; this bridge only manages native DOM focus.
@@ -462,7 +464,19 @@ const app = Elm.Main.init({
   }
 })
 
+const documentTransfer = installDocumentTransfer({
+  document, apiUrl, authHeaders: authHeaderObject, csrfHeaders: csrfHeaderObject,
+  authGuard() {
+    const generation = authTokenGeneration, signature = authTokenSignature()
+    return () => generation === authTokenGeneration && signature === authTokenSignature()
+  },
+  onUnauthorized: () => notifyUnauthorized(),
+  onEvent: value => app.ports.documentTransferEvent.send(value),
+})
+app.ports.documentTransferOwner.subscribe(value => documentTransfer.configure(value))
+
 notifyUnauthorized = function () {
+  documentTransfer.retire()
   sessionBridge?.retireAuthority()
   const now = Date.now()
   if (now - lastUnauthorizedNotificationAt < 2000) return
@@ -474,6 +488,7 @@ function notifyAuthTokenChanged(force) {
   const signature = authTokenSignature()
   if (!force && signature === lastAuthTokenSignature) return
   sessionBridge?.retireAuthority()
+  documentTransfer.retire()
   if (signature !== lastAuthTokenSignature) authTokenGeneration += 1
   lastAuthTokenSignature = signature
   if (app.ports.authTokenChanged) app.ports.authTokenChanged.send(signature !== null)

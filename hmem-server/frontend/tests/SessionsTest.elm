@@ -6,6 +6,7 @@ import AppShell
 import Dict
 import Expect
 import Feature.Sessions as Sessions
+import Feature.Documents as Documents
 import Feature.Cards as Cards
 import Feature.SessionDelivery as Delivery
 import Helpers
@@ -1079,43 +1080,33 @@ evidenceAvailabilityTests : List Test.Test
 evidenceAvailabilityTests =
     let
         base = associationFixture
-        cursor = {createdAt="2026-10-24T00:00:00Z",id="older"}
-        sample = Decode.decodeString Api.sessionPageDecoder canonicalPage |> Result.toMaybe |> Maybe.andThen (.items >> List.head)
-        page items next = {items=items,nextCursor=next}
-        cached value before epoch =
-            let state=base.sessions in {base | sessions={state | taskPages=Dict.singleton "terminated:one" {result=value,cursor=before,epoch=epoch}}}
-        empty = cached (Ok (page [] Nothing)) Nothing base.sessionDelivery.listInvalidation
-        target = Delivery.TaskSessionsFiltered "one" {state="terminated",freshness="",activity=Nothing} Nothing
-        resident dirty proven error =
-            let delivery=empty.sessionDelivery
-                entry={workspace=workspace,target=target,dirty=dirty,settled=0,data=Just (Delivery.SessionsPage (page [] Nothing)),ranges=[],error=error,proven=proven,incarnation=0,retry=Delivery.Available}
-            in {empty | sessionDelivery={delivery | resources=Dict.singleton (Delivery.key workspace target) entry}}
         available model = Sessions.taskEvidenceAvailable workspace model "one"
+        received source documents sessions =
+            let
+                state = base.documents
+                value = DocumentCountsValue { sourceCount = source, documentEvidenceCount = documents, agentSessionEvidenceCount = sessions, evidenceTotal = documents + sessions }
+                entry = { request = Nothing, dirty = False, failed = False, value = Just value, cursor = Nothing }
+            in
+            { base | documents = { state | scope = Documents.scope base, reads = Dict.singleton ( "one", "counts" ) entry } }
+        empty = received 2 0 0
+        positive = received 0 3 27
+        selected model =
+            let cards = model.cards in
+            { model | cards = { cards | expandedCards = Dict.singleton "one" True, taskSections = Dict.singleton "one" "evidence" } }
+        section model = Dict.get "one" model.cards.taskSections
     in
-    [ test "only current complete first-page absence disables evidence" <| \_ ->
-        Expect.equal [Nothing,Just False,Nothing,Nothing,Nothing,Nothing]
-            [available base,available empty,available (cached (Ok (page [] (Just cursor))) Nothing base.sessionDelivery.listInvalidation),available (cached (Ok (page [] Nothing)) (Just cursor) base.sessionDelivery.listInvalidation),available (cached (Ok (page [] Nothing)) Nothing (base.sessionDelivery.listInvalidation-1)),available (cached (Err "unavailable") Nothing base.sessionDelivery.listInvalidation)]
-    , test "loading, proof retirement, errors and foreign workspace cannot reuse an empty cache" <| \_ ->
-        Expect.equal [Nothing,Nothing,Nothing,Nothing]
-            [available (resident 1 True Nothing),available (resident 0 False Nothing),available (resident 0 True (Just "failed")),Sessions.taskEvidenceAvailable "foreign" empty "one"]
-    , test "a terminated session including empty evidence is present rather than absent" <| \_ ->
-        case sample of
-            Just session ->
-                let present=cached (Ok (page [{session | state=Api.SessionTerminated,committedBytes=0,finalBytes=Just 0}] Nothing)) Nothing base.sessionDelivery.listInvalidation
-                    state=present.sessions
-                    conflicting={present | sessions={state | taskAssociations=Dict.singleton "one" {present=False,error=False,epoch=base.sessionDelivery.listInvalidation}}}
-                    later=cached (Ok (page [{session | state=Api.SessionTerminated}] Nothing)) (Just cursor) base.sessionDelivery.listInvalidation
-                in Expect.equal [Just True,Just True,Just True] [available present,available conflicting,available later]
-            Nothing -> Expect.fail "Invalid session fixture"
-    , test "confirmed no association also confirms no current session evidence" <| \_ ->
-        driveAssociations [] (Ok []) base |> Tuple.first |> available |> Expect.equal (Just False)
-    , test "selected empty Evidence falls back to Work and cannot be selected until available or unknown" <| \_ ->
-        let cards=empty.cards
-            selected={empty | cards={cards | expandedCards=Dict.singleton "one" True,taskSections=Dict.singleton "one" "evidence"}}
-            fallback=Sessions.reconcile (selected,Cmd.none) |> Tuple.first
-            denied=Cards.update (SetTaskCardSection "one" "evidence") fallback |> Tuple.first
-            unknown=Cards.update (SetTaskCardSection "one" "evidence") base |> Tuple.first
-        in Expect.equal [Just "work",Just "work",Just "evidence"] [Dict.get "one" fallback.cards.taskSections,Dict.get "one" denied.cards.taskSections,Dict.get "one" unknown.cards.taskSections]
+    [ test "availability is unknown before a canonical response and excludes source-only links" <| \_ ->
+        Expect.equal [ Nothing, Just False, Just True ] (List.map available [ base, empty, positive ])
+    , test "workspace or session epoch retirement cannot reuse canonical counts" <| \_ ->
+        Expect.equal ( Nothing, Nothing )
+            ( Sessions.taskEvidenceAvailable "foreign" empty "one", available { empty | sessionRequestEpoch = empty.sessionRequestEpoch + 1 } )
+    , test "only a current zero falls back to Work and blocks manual selection" <| \_ ->
+        let
+            fallback = Sessions.reconcile (selected empty, Cmd.none) |> Tuple.first
+            denied = Cards.update (SetTaskCardSection "one" "evidence") fallback |> Tuple.first
+            retained = Sessions.reconcile (selected positive, Cmd.none) |> Tuple.first
+        in
+        Expect.equal [ Just "work", Just "work", Just "evidence" ] (List.map section [ fallback, denied, retained ])
     ]
 
 

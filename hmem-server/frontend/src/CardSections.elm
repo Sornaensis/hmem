@@ -1,4 +1,4 @@
-module CardSections exposing (cardDisclosure, detailsId, disclosure, disclosureIcon, fact, facts, focusIcon, horizontalDisclosureIcon, metadata, panel, section, tabs, tabsWithEvidence)
+module CardSections exposing (cardDisclosure, detailsId, disclosure, disclosureIcon, fact, facts, focusIcon, horizontalDisclosureIcon, metadata, panel, section, tabs, tabsWithEvidence, taskTabs)
 
 import Html exposing (Html, div, footer, h4, label, span, text)
 import Html.Attributes exposing (attribute, class)
@@ -14,11 +14,25 @@ tabs kind entityId current select =
 
 tabsWithEvidence : Bool -> String -> String -> String -> (String -> msg) -> Html msg
 tabsWithEvidence evidenceAvailable kind entityId current select =
+    sectionTabs evidenceAvailable kind entityId current select [ ( "work", "Work" ), ( "evidence", "Evidence" ), ( "history", "History" ) ]
+
+
+taskTabs : Maybe Int -> String -> String -> (String -> msg) -> Html msg
+taskTabs evidenceTotal entityId current select =
+    sectionTabs (evidenceTotal /= Just 0) "Task" entityId current select
+        [ ( "work", "Work" ), ( "sources", "Sources" )
+        , ( "evidence", "Evidence" ++ (evidenceTotal |> Maybe.map (String.fromInt >> (++) " · ") |> Maybe.withDefault "") )
+        , ( "history", "History" )
+        ]
+
+
+sectionTabs : Bool -> String -> String -> String -> (String -> msg) -> List ( String, String ) -> Html msg
+sectionTabs evidenceAvailable kind entityId current select sections =
     Html.nav [ class "card-local-sections", attribute "aria-label" (kind ++ " sections") ]
         (List.map
             (\( name, label ) ->
                 Html.button
-                    [ class ("card-section-button" ++ (if current == name then " selected" else ""))
+                    ([ class ("card-section-button" ++ (if current == name then " selected" else ""))
                     , Html.Attributes.type_ "button"
                     , Html.Attributes.id (String.toLower kind ++ "-" ++ entityId ++ "-" ++ name ++ "-button")
                     , attribute "aria-controls" (String.toLower kind ++ "-" ++ entityId ++ "-" ++ name)
@@ -26,9 +40,11 @@ tabsWithEvidence evidenceAvailable kind entityId current select =
                     , Html.Attributes.disabled (name == "evidence" && not evidenceAvailable)
                     , onClick (select name)
                     ]
+                    ++ (if kind == "Task" && name == "evidence" then [ attribute "aria-label" "Evidence", attribute "aria-description" label ] else [])
+                    )
                     [ text label ]
             )
-            [ ( "work", "Work" ), ( "evidence", "Evidence" ), ( "history", "History" ) ]
+            sections
         )
 
 

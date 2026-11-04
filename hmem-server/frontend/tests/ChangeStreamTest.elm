@@ -44,8 +44,22 @@ suite =
                 progress = ChangeStream.reduceFrame (Api.CanonicalChange event) (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
                 membership = {event | invalidations=event.invalidations ++ [{kind="collection",target="active_sessions:w"}]}
                 changed = ChangeStream.reduceFrame (Api.CanonicalChange membership) (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
-            in Expect.equal {progress=[ChangeStream.RefreshAgentSessionProgress "w" agentId],lists=True,activity=True,membershipProgress=False}
-                {progress=progress,lists=List.member (ChangeStream.RefreshAgentSessionList "w") changed,activity=List.member (ChangeStream.RefreshSessionActivityMembership "w") changed,membershipProgress=List.member (ChangeStream.RefreshAgentSessionProgress "w" agentId) changed}
+            in Expect.equal {progress=[ChangeStream.RefreshAgentSessionProgress "w" agentId],lists=True,activity=True,membershipProgress=False,documentCounts=True}
+                {progress=progress,lists=List.member (ChangeStream.RefreshAgentSessionList "w") changed,activity=List.member (ChangeStream.RefreshSessionActivityMembership "w") changed,membershipProgress=List.member (ChangeStream.RefreshAgentSessionProgress "w" agentId) changed,documentCounts=List.member (ChangeStream.RefreshDocumentCounts "w") changed}
+        , test "raw Source removal and preview publication coalesce into a targeted refresh" <| \_ ->
+            let
+                hints = [ ( "entity", "task:" ++ linkedTaskId ), ( "collection", "task_documents:" ++ linkedTaskId ) ]
+                raw kind action =
+                    canonicalWire action hints
+                        |> String.replace "\"type\":\"task\"" ("\"type\":\"" ++ kind ++ "\"")
+                        |> String.replace "\"id\":\"t\"" ("\"id\":\"" ++ agentId ++ "\"")
+                removal = Api.decodeCanonicalFrame (raw "task_document" "removed")
+                updated = Api.decodeCanonicalFrame (raw "document" "updated" |> String.replace "\"event_id\":\"e\"" "\"event_id\":\"preview\"")
+                actions = ChangeStream.reduceFrames (List.filterMap identity [ removal, updated ]) (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+            in
+            Expect.equal
+                ( [ ChangeStream.RefreshTaskDocuments "w" linkedTaskId, ChangeStream.RetireTaskDocument "w" linkedTaskId agentId ], True, Nothing )
+                ( actions, updated /= Nothing, Api.decodeCanonicalFrame (raw "task" "removed") )
         , test "session composites, invalidation ownership and global scope fail closed without generic entity reads" <|
             \_ ->
                 let

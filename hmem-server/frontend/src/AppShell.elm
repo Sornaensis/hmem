@@ -12,6 +12,7 @@ import Feature.AuditRequest as AuditRequest
 import Feature.Cards
 import Feature.ChangeStream
 import Feature.DataLoading
+import Feature.Documents
 import Feature.Dependencies
 import Feature.Move
 import Feature.DragDrop
@@ -89,6 +90,7 @@ initModel key url page flags storedFilters legacyFrag =
             , sessionActivity = Feature.SessionActivity.init
             , sessionDelivery = Feature.SessionDelivery.init
             , sessions = emptySessionsModel
+            , documents = Feature.Documents.init
             , timestamps = TimestampDisplay.empty
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
@@ -1003,6 +1005,7 @@ subscriptions =
         , Ports.clipboardResult ClipboardResult
         , Ports.timestampsFormatted TimestampsFormatted
         , Ports.sessionBridgeEvent SessionsBridgeEvent
+        , Ports.documentTransferEvent (TaskDocuments << DocumentTransferEvent)
         , onMainContentScroll MainContentScrolled
         ]
 
@@ -1029,6 +1032,7 @@ viewDocument model =
             , if model.auth.status == AuthReady then
                 div []
                     [ Feature.AuditDiff.view model
+                    , Feature.Documents.viewDialog model
                     , Feature.Move.view model
                     , Feature.Editing.viewCreateFormModal model
                     , Feature.DragDrop.viewDropActionModal model

@@ -5,32 +5,32 @@ import {hierarchyFixture,openHierarchy} from './hierarchy-fixture.mjs'
 const until=async fn=>{const end=Date.now()+12000;while(Date.now()<end){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,25))}throw Error('Card availability did not converge')}
 // The shared fixture matches task IDs within URLs; keep them distinct from its workspace ID.
 const separateTaskIds=h=>{const ids=new Map(h.fixture.tasks.map(task=>[task.id,task.id.replace(/^10000000/,'11000000')]));for(const task of h.fixture.tasks)task.id=ids.get(task.id);for(const [session,tasks] of h.sessionLinks)h.sessionLinks.set(session,new Set([...tasks].map(id=>ids.get(id)||id)));return h}
-const changed=async h=>h.page.evaluate(({workspace,session})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'availability-'+crypto.randomUUID(),scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'availability',cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:h.fixture.workspace.id,session:h.active.id})
+const changed=async h=>h.page.evaluate(({workspace,session})=>window.pushHierarchyFrames([{schema_version:1,type:'change',event:{schema_version:1,event_id:'availability-'+crypto.randomUUID(),scope:'workspace',workspace_id:workspace,occurred_at:new Date().toISOString(),transaction:{id:'availability',cause:'rest',request_id:null},actor:{type:'system',id:null},entity:{type:'agent_session',id:session,action:'updated'},invalidations:[{kind:'entity',target:'agent_session:'+session},{kind:'collection',target:'sessions:'+workspace},{kind:'collection',target:'active_sessions:'+workspace}]}}]),{workspace:h.fixture.workspace.id,session:h.active.id})
 
-test('Evidence remains accessible for unknown, loading, error and partial pages and disables only confirmed absence',{timeout:60000},async()=>{
+test('Evidence remains accessible for unknown, loading and failed counts and disables only canonical zero',{timeout:60000},async()=>{
  const h=separateTaskIds(await openSessionExplorer({savedCount:0})),{page}=h,id=h.fixture.tasks[0].id
  let mode='held',release,arrived=false,reads=0
  const held=new Promise(resolve=>release=resolve)
- await page.route('**/api/v1/**/tasks/'+id+'/sessions?**',async route=>{
-  if(new URL(route.request().url()).searchParams.get('state')!=='terminated')return route.fallback()
+ await page.route('**/api/v1/**/tasks/'+id+'/documents/counts',async route=>{
   reads++;if(mode==='held'){arrived=true;await held}
   if(mode==='error')return route.fulfill({status:503,json:{error:'controlled availability failure'}})
-  return route.fulfill({json:{items:mode==='present'?[h.saved]:[],next_cursor:mode==='partial'?{created_at:h.saved.created_at,id:h.saved.id}:null}})
+  const documents=mode==='document-only'?1:0
+  return route.fulfill({json:{source_count:0,document_evidence_count:documents,agent_session_evidence_count:0,evidence_total:documents}})
  })
  try{
   await h.start();await h.idle();const card=page.locator('#entity-'+id)
-  assert.equal(reads,0,'collapsed cards add no evidence read')
+  assert.equal(reads,0,'collapsed cards add no document count read')
   await card.locator('.btn-extras-toggle').click();await until(()=>arrived)
   const evidence=card.getByRole('button',{name:'Evidence',exact:true}),work=card.getByRole('button',{name:'Work',exact:true})
   assert.equal(await evidence.isDisabled(),false);await evidence.click();await until(async()=>await evidence.getAttribute('aria-pressed')==='true')
   mode='empty';release();await until(()=>evidence.isDisabled());assert.equal(await work.getAttribute('aria-pressed'),'true');assert.equal(await evidence.getAttribute('aria-pressed'),'false')
   assert.ok(Number(await evidence.evaluate(node=>getComputedStyle(node).opacity))<1)
-  mode='error';await changed(h);await until(()=>evidence.isEnabled());await evidence.click();await card.locator('.task-session-evidence p').filter({hasText:'Sessions could not be loaded.'}).waitFor();assert.equal(await evidence.isDisabled(),false)
-  mode='partial';await changed(h);await card.getByRole('button',{name:'Older sessions',exact:true}).waitFor();assert.equal(await evidence.isDisabled(),false)
-  h.allSessions.push(h.saved);h.content.set(h.saved.id,h.bytes);h.sessionLinks.set(h.saved.id,new Set([id]));mode='present';await changed(h)
-  await card.locator('.task-session-evidence .session-card').waitFor();assert.equal(await evidence.isDisabled(),false);await card.getByRole('button',{name:/Download session/}).waitFor()
+  mode='error';await changed(h);await until(()=>evidence.isEnabled());await evidence.click()
+  assert.equal(await evidence.innerText(),'Evidence')
+  mode='document-only';await changed(h);await until(async()=>await evidence.innerText()==='Evidence · 1')
+  assert.equal(await evidence.getAttribute('aria-pressed'),'true','an empty session page cannot reset a document-only Evidence panel')
   assert.deepEqual(h.errors,[]);assert.deepEqual(h.unhandled,[])
- }catch(error){throw new Error(error.message+' '+JSON.stringify({mode,reads,text:(await page.locator('#entity-'+id).innerText()).slice(-1000),queries:h.reads.slice(-12)}),{cause:error})}finally{release();await h.close()}
+ }finally{release();await h.close()}
 })
 
 test('session icon is omitted only for current complete absence while active and terminated associations retain controls',{timeout:60000},async()=>{

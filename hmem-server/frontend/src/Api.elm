@@ -1,5 +1,7 @@
 module Api exposing
-    ( SessionActivityResponse
+    ( DocumentCounts, DocumentCursor, DocumentItem, DocumentPage, DocumentPreview, DocumentOutput
+    , documentBase, fetchDocumentCounts, fetchDocumentPage, fetchDocumentPreview, removeDocumentSource, retryDocumentPreview
+    , SessionActivityResponse
     , fetchSessionActivity
     , ApiError
     , AgentSession
@@ -2605,7 +2607,7 @@ canonicalEntityTypeDecoder =
     nonEmptyStringDecoder
         |> D.andThen
             (\entityType ->
-                if List.member entityType [ "workspace", "workspace_group", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership", "agent_session", "task_session" ] then
+                if List.member entityType [ "workspace", "workspace_group", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership", "agent_session", "task_session", "document", "task_document" ] then
                     D.succeed entityType
 
                 else
@@ -2615,10 +2617,10 @@ canonicalEntityTypeDecoder =
 
 canonicalEntityActionDecoder : Decoder String
 canonicalEntityActionDecoder =
-    nonEmptyStringDecoder
+    D.map2 Tuple.pair (D.field "type" canonicalEntityTypeDecoder) (D.field "action" nonEmptyStringDecoder)
         |> D.andThen
-            (\action ->
-                if List.member action [ "created", "updated", "deleted", "restored" ] then
+            (\( kind, action ) ->
+                if List.member action [ "created", "updated", "deleted", "restored" ] || (kind == "task_document" && action == "removed") then
                     D.succeed action
 
                 else
@@ -2696,7 +2698,7 @@ canonicalEnvelopeDecoder =
                 (D.field "workspace_id" (D.nullable nonEmptyStringDecoder))
                 (D.field "entity" (D.field "type" canonicalEntityTypeDecoder))
                 (D.field "entity" (D.field "id" nonEmptyStringDecoder))
-                (D.field "entity" (D.field "action" canonicalEntityActionDecoder))
+                (D.field "entity" canonicalEntityActionDecoder)
                 (D.field "invalidations" (nonEmptyListDecoder canonicalInvalidationDecoder))
 
         metadataDecoder =
@@ -3315,6 +3317,121 @@ fetchTasksPage apiUrl wsId offset toMsg =
 fetchTask : String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
 fetchTask apiUrl taskId toMsg =
     fetchFullRecord taskDecoder apiUrl ("tasks/" ++ taskId) toMsg
+
+
+type alias DocumentCounts =
+    { sourceCount : Int, documentEvidenceCount : Int, agentSessionEvidenceCount : Int, evidenceTotal : Int }
+
+
+type alias DocumentCursor =
+    { createdAt : String, id : String }
+
+
+type alias DocumentItem =
+    { id : String, taskId : String, role : String, documentId : String, filename : String
+    , title : String, mediaType : String, rawBytes : Int, createdAt : String, uploader : String
+    , previewState : String
+    }
+
+
+type alias DocumentPage =
+    { items : List DocumentItem, next : Maybe DocumentCursor }
+
+
+type alias DocumentOutput =
+    { variant : String, page : Int, mediaType : String, rawBytes : Int }
+
+
+type alias DocumentPreview =
+    { state : String, generation : Maybe String, outputs : List DocumentOutput
+    , retryable : Bool, animatedFirstFrame : Bool
+    }
+
+
+documentBase : String -> String -> String -> String
+documentBase apiUrl workspace task =
+    apiUrl ++ "/api/v1/workspaces/" ++ Url.percentEncode workspace ++ "/tasks/" ++ Url.percentEncode task ++ "/documents"
+
+
+fetchDocumentCounts : String -> (Result Http.Error DocumentCounts -> msg) -> Cmd msg
+fetchDocumentCounts base toMsg =
+    documentRequest "GET" (base ++ "/counts")
+        (Http.expectJson toMsg
+            (D.map4 DocumentCounts
+                (D.field "source_count" D.int)
+                (D.field "document_evidence_count" D.int)
+                (D.field "agent_session_evidence_count" D.int)
+                (D.field "evidence_total" D.int)
+            )
+        )
+
+
+fetchDocumentPage : String -> String -> Maybe DocumentCursor -> (Result Http.Error DocumentPage -> msg) -> Cmd msg
+fetchDocumentPage base role cursor toMsg =
+    let
+        query =
+            cursor
+                |> Maybe.map (\page -> "&before_created_at=" ++ Url.percentEncode page.createdAt ++ "&before_id=" ++ Url.percentEncode page.id)
+                |> Maybe.withDefault ""
+
+        decoder =
+            D.succeed DocumentItem
+                |> required "id" D.string
+                |> required "task_id" D.string
+                |> required "role" D.string
+                |> custom (D.at [ "document", "id" ] D.string)
+                |> custom (D.at [ "document", "filename" ] D.string)
+                |> custom (D.at [ "document", "title" ] D.string)
+                |> custom (D.at [ "document", "media_type" ] D.string)
+                |> custom (D.at [ "document", "raw_bytes" ] D.int)
+                |> custom (D.at [ "document", "created_at" ] D.string)
+                |> custom (D.oneOf
+                    [ D.at [ "document", "uploader", "actor_label" ] D.string
+                    , D.at [ "document", "uploader", "actor_id" ] D.string
+                    , D.succeed "Unknown uploader"
+                    ])
+                |> custom (D.at [ "document", "preview_state" ] D.string)
+    in
+    documentRequest "GET" (base ++ "?limit=50&role=" ++ Url.percentEncode role ++ query)
+        (Http.expectJson toMsg
+            (D.map2 DocumentPage (D.field "items" (D.list decoder))
+                (D.field "next_cursor" (D.nullable (D.map2 DocumentCursor (D.field "created_at" D.string) (D.field "id" D.string))))
+            )
+        )
+
+
+fetchDocumentPreview : String -> (Result Http.Error DocumentPreview -> msg) -> Cmd msg
+fetchDocumentPreview documentUrl toMsg =
+    documentRequest "GET" (documentUrl ++ "/previews/current")
+        (Http.expectJson toMsg
+            (D.map5 DocumentPreview
+                (D.field "state" D.string)
+                (D.field "generation_id" (D.nullable D.string))
+                (D.field "outputs" (D.list (D.map4 DocumentOutput
+                    (D.field "variant" D.string)
+                    (D.field "page" D.int)
+                    (D.field "media_type" D.string)
+                    (D.field "raw_bytes" D.int)
+                )))
+                (D.field "retryable" D.bool)
+                (D.oneOf [ D.at [ "generation_metadata", "animated_first_frame" ] D.bool, D.succeed False ])
+            )
+        )
+
+
+removeDocumentSource : String -> (Result Http.Error () -> msg) -> Cmd msg
+removeDocumentSource documentUrl toMsg =
+    documentRequest "DELETE" (documentUrl ++ "/source") (Http.expectWhatever toMsg)
+
+
+retryDocumentPreview : String -> (Result Http.Error () -> msg) -> Cmd msg
+retryDocumentPreview documentUrl toMsg =
+    documentRequest "POST" (documentUrl ++ "/previews/retry") (Http.expectWhatever toMsg)
+
+
+documentRequest : String -> String -> Http.Expect msg -> Cmd msg
+documentRequest method url expect =
+    Http.request { method = method, url = url, headers = [], body = Http.emptyBody, expect = expect, timeout = Just 30000, tracker = Nothing }
 
 
 fetchTaskForComparison : String -> String -> (Result Http.Error Task -> msg) -> Cmd msg

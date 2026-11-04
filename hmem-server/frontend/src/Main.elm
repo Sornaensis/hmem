@@ -12,6 +12,7 @@ import Browser.Navigation as Nav
 import Feature.Cards as Cards
 import Feature.Move
 import Feature.DataLoading
+import Feature.Documents
 import Feature.Observation
 import Feature.TimestampDisplay
 import Feature.SessionActivity
@@ -134,7 +135,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.Focus.reconcilePreview msg |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile |> Page.Workspace.reconcilePresentation model
+    updateCore msg model |> Feature.Focus.reconcilePreview msg |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.Documents.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile |> Page.Workspace.reconcilePresentation model
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )

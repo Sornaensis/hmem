@@ -68,6 +68,9 @@ type Action
     | RefreshSessionActivityMembership String
     | RefreshSessionActivity String
     | RefreshTaskSessions String String
+    | RefreshTaskDocuments String String
+    | RetireTaskDocument String String String
+    | RefreshDocumentCounts String
     | AccessGranted String
     | ClearWorkspace String
     | RefreshTimeline
@@ -244,7 +247,7 @@ validEnvelope envelope =
         entityMatches =
             case envelope.scope of
                 Api.WorkspaceScope _ ->
-                    List.member envelope.entityType [ "workspace", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership", "agent_session", "task_session" ]
+                    List.member envelope.entityType [ "workspace", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership", "agent_session", "task_session", "document", "task_document" ]
 
                 Api.GlobalScope ->
                     List.member envelope.entityType [ "workspace", "workspace_group" ]
@@ -281,6 +284,21 @@ validSessionEnvelope envelope =
                 , ( "collection", "sessions:" ++ workspace ), ( "collection", "task_sessions:" ++ task ) ]
         ( _, "agent_session", _ ) -> False
         ( _, "task_session", _ ) -> False
+        ( Api.WorkspaceScope _, kind, [ id ] ) ->
+            if kind == "document" || kind == "task_document" then
+                let
+                    allowed = if kind == "document" then envelope.entityAction == "updated" else List.member envelope.entityAction [ "created", "removed" ]
+                    documentTargets = List.filterMap (\item -> case ( item.kind, String.split ":" item.target ) of
+                        ( "collection", [ "task_documents", task ] ) -> Just task
+                        _ -> Nothing) envelope.invalidations
+                in
+                uuid id && allowed && (case documentTargets of
+                    [ task ] -> uuid task && matches [ ( "entity", "task:" ++ task ), ( "collection", "task_documents:" ++ task ) ]
+                    _ -> False)
+            else
+                True
+        ( _, "document", _ ) -> False
+        ( _, "task_document", _ ) -> False
         _ -> True
 
 
@@ -363,7 +381,20 @@ invalidationActions envelope invalidation =
     in
     case ( envelope.scope, invalidation.kind, parts ) of
         ( Api.WorkspaceScope workspace, "collection", [ "active_sessions", expected ] ) ->
-            if workspace == expected && List.member envelope.entityType ["agent_session","task_session"] then [RefreshSessionActivityMembership workspace] else [BeginResync]
+            if workspace == expected && List.member envelope.entityType ["agent_session","task_session"] then
+                [ RefreshSessionActivityMembership workspace ] ++ (if envelope.entityType == "agent_session" then [ RefreshDocumentCounts workspace ] else [])
+            else [ BeginResync ]
+
+        ( Api.WorkspaceScope workspace, "collection", [ "task_documents", task ] ) ->
+            if envelope.entityType == "task_document" && envelope.entityAction == "removed" then
+                [ RefreshTaskDocuments workspace task, RetireTaskDocument workspace task envelope.entityId ]
+            else if List.member envelope.entityType [ "document", "task_document" ] then
+                [ RefreshTaskDocuments workspace task ]
+            else
+                [ BeginResync ]
+
+        ( Api.WorkspaceScope _, "entity", [ "task", task ] ) ->
+            if List.member envelope.entityType [ "document", "task_document" ] then [] else entityAction "task" task
 
         ( Api.WorkspaceScope workspace, "entity", [ "agent_session", id ] ) ->
             if sessionProgress envelope then [ RefreshAgentSessionProgress workspace id ]
@@ -617,6 +648,15 @@ coalesce actions =
 
                 RefreshTaskSessions workspace task ->
                     "task-sessions:" ++ workspace ++ ":" ++ task
+
+                RefreshTaskDocuments workspace task ->
+                    "task-documents:" ++ workspace ++ ":" ++ task
+
+                RetireTaskDocument workspace task association ->
+                    "task-document-removed:" ++ workspace ++ ":" ++ task ++ ":" ++ association
+
+                RefreshDocumentCounts workspace ->
+                    "document-counts:" ++ workspace
 
                 AccessGranted workspace ->
                     "grant:" ++ workspace

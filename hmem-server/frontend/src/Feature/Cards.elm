@@ -48,6 +48,7 @@ import Feature.Focus
 import SessionActivityLight
 import Feature.SessionActivity
 import Feature.Sessions
+import Feature.Documents as Documents
 import Permissions
 import Helpers exposing (..)
 import Html exposing (..)
@@ -116,7 +117,7 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         SetTaskCardSection task section ->
-            if Dict.member task model.tasks && List.member section ["work","evidence","history"] && not (section == "evidence" && Feature.Sessions.taskEvidenceAvailable (Maybe.withDefault "" model.selectedWorkspaceId) model task == Just False) then
+            if Dict.member task model.tasks && List.member section ["work","sources","evidence","history"] && not (section == "evidence" && Documents.count "total" model task == Just 0) then
                 selectCardSection "task" task section
                     (updateCardsModel (\state -> {state | taskSections = Dict.insert task section state.taskSections}) model)
             else (model,Cmd.none)
@@ -2460,7 +2461,7 @@ viewTaskCardBody descendants projection showProject model task =
                 div [ class "card-extras", id (CardSections.detailsId "task" task.id) ]
                     [ div [ class "card-details-toolbar" ]
                         [ CardSections.cardDisclosure True (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
-                        , CardSections.tabsWithEvidence (Feature.Sessions.taskEvidenceAvailable task.workspaceId model task.id /= Just False) "Task" task.id currentSection (SetTaskCardSection task.id)
+                        , CardSections.taskTabs (Documents.count "total" model task.id) task.id currentSection (SetTaskCardSection task.id)
                         ]
                     , panel "work" [if showProject then
                         case projectName of
@@ -2487,7 +2488,8 @@ viewTaskCardBody descendants projection showProject model task =
                                 else if List.isEmpty loadedChildren then p [class "card-meta"] [text (if hasChildren then "Subtasks are available in the hierarchy below." else "No loaded subtasks.")]
                                 else text ""])
                     , Feature.Dependencies.viewTaskDependencies model task.id deps]
-                    , panel "evidence" [Feature.Sessions.viewTaskEvidence task.workspaceId model task.id]
+                    , panel "sources" [Documents.viewPanel "source" model task.id]
+                    , panel "evidence" [Documents.viewPanel "evidence" model task.id, Feature.Sessions.viewTaskEvidence task.workspaceId model task.id]
                     , panel "history" [Feature.AuditLog.viewEntityHistoryContent model "task" task.id]
                     ]
 
@@ -3567,20 +3569,23 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
             cards = model.cards
             initial = init.viewport
             viewport = { initial | workspaceId = model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch, generation = model.dataLoading.navigationGeneration, revision = old.revision + 1 }
-            retired = { model | cards = { cards | viewport = viewport } }
+            ( retired, retiredCommand ) =
+                ( { model | cards = { cards | viewport = viewport } }, command ) |> Documents.reconcile
         in
-        ( retired, Cmd.batch [ command, Ports.syncHierarchyViewport (viewportConfiguration retired Nothing 0) ] )
+        ( retired, Cmd.batch [ Ports.syncHierarchyViewport (viewportConfiguration retired Nothing 0), retiredCommand ] )
     else if not changed then
         let
+            ( hydrated, hydratedCommand ) =
+                ( model, command ) |> Documents.reconcile |> Feature.DataLoading.pumpDocumentDetails
             -- Outgoing port effects are delivered in reverse batch order.
             -- The authoritative final layout must arrive after nested layouts.
-            metadataCommand = Cmd.batch [ if previous.dataLoading.backgroundAdmission /= model.dataLoading.backgroundAdmission || viewportBackgroundReady previous /= viewportBackgroundReady model then Ports.syncHierarchyViewport (viewportConfiguration model Nothing 0) else Cmd.none, command ]
+            metadataCommand = Cmd.batch [ if previous.dataLoading.backgroundAdmission /= hydrated.dataLoading.backgroundAdmission || viewportBackgroundReady previous /= viewportBackgroundReady hydrated then Ports.syncHierarchyViewport (viewportConfiguration hydrated Nothing 0) else Cmd.none, hydratedCommand ]
         in
         if previous.dependencies.taskDependencyLinks /= model.dependencies.taskDependencyLinks || taskStatusesChanged
             || previous.dependencies.taskReadinessRollups /= model.dependencies.taskReadinessRollups
             || previous.dependencies.projectReadinessRollups /= model.dependencies.projectReadinessRollups then
             let
-                cards = model.cards
+                cards = hydrated.cards
                 viewport = cards.viewport
                 projection = viewport.projection |> Maybe.map (\cached -> { cached
                     | taskDirectOpenDependencyCounts = directOpenDependencyCounts model.tasks model.dependencies.taskDependencyLinks
@@ -3588,9 +3593,9 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
                     , projectRollups = model.dependencies.projectReadinessRollups
                     })
             in
-            ( { model | cards = { cards | viewport = { viewport | projection = projection } } }, metadataCommand )
+            ( { hydrated | cards = { cards | viewport = { viewport | projection = projection } } }, metadataCommand )
         else
-            ( model, metadataCommand )
+            ( hydrated, metadataCommand )
     else
         case model.selectedWorkspaceId of
             Nothing -> ( model, command )
@@ -3628,7 +3633,8 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
                         }
                     cards = model.cards
                     rebuilt = { model | cards = { cards | viewport = viewport } }
-                    ( demanded, details ) = viewportDetailDemand rebuilt
+                    ( demanded, details ) =
+                        viewportDetailDemand rebuilt |> Documents.reconcile |> Feature.DataLoading.pumpDocumentDetails
                 in
                 ( demanded, Cmd.batch [ Ports.syncHierarchyViewport (viewportConfiguration demanded (if sameContext then anchor else Nothing) delta), details, command ] )
 

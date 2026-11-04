@@ -13,6 +13,7 @@ import Feature.SessionDelivery as Delivery
 import Feature.WebSocket as WebSocket
 import Feature.DataLoading as DataLoading
 import Feature.Dependencies as Dependencies
+import Feature.Documents as Documents
 import Html exposing (..)
 import Html.Attributes exposing (attribute, class, disabled, href, tabindex, value)
 import Html.Events exposing (onClick, onInput, stopPropagationOn)
@@ -1183,22 +1184,7 @@ taskAssociation workspace model task =
 
 taskEvidenceAvailable : String -> Model -> String -> Maybe Bool
 taskEvidenceAvailable workspace model task =
-    let
-        presence page = if not (List.isEmpty page.items) then Just True else if page.nextCursor == Nothing then Just False else Nothing
-        target = Delivery.TaskSessionsFiltered task {state="terminated",freshness="",activity=Nothing} Nothing
-        cachedPresence = Dict.get (sectionKey True task) model.sessions.taskPages |> Maybe.andThen (\cached ->
-            if cached.epoch /= model.sessionDelivery.listInvalidation then Nothing else Result.toMaybe cached.result |> Maybe.andThen (\page ->
-                if not (List.isEmpty page.items) then Just True else if cached.cursor == Nothing then presence page else Nothing))
-        confirmed = if cachedPresence == Just True then Just True else case resource workspace target model of
-            Just entry -> if entry.error /= Nothing || not entry.proven || entry.dirty /= entry.settled then Nothing else case entry.data of
-                Just (Delivery.SessionsPage page) -> presence page
-                _ -> Nothing
-            Nothing -> cachedPresence
-    in
-    if model.sessions.workspace /= Just workspace || model.selectedWorkspaceId /= Just workspace || model.sessions.epoch /= model.sessionRequestEpoch || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then Nothing
-    else if confirmed /= Nothing then confirmed
-    else if taskAssociation workspace model task == Just False then Just False
-    else Nothing
+    Documents.availability workspace model task
 
 
 taskActivityCurrent : String -> Model -> String -> Bool
@@ -1321,14 +1307,15 @@ viewTaskSection evidence workspace model task =
         page = taskPage evidence workspace model task
         key = sectionKey evidence task
         sessions = page |> Maybe.map (.items >> List.filter (\session -> (session.state == Api.SessionTerminated) == evidence)) |> Maybe.withDefault []
-        heading = if evidence then "Evidence" else "Active sessions"
+        heading = if evidence then "Agent sessions" else "Active sessions"
+        total = if evidence then Documents.count "sessions" model task else Maybe.map (always (List.length sessions)) page
         entry = resource workspace (sectionTarget evidence model task) model
         cachedError = Dict.get key model.sessions.taskPages |> Maybe.andThen (\cached -> case cached.result of
             Err message -> Just message
             _ -> Nothing)
     in
     section [class ("task-session-section " ++ (if evidence then "task-session-evidence" else "task-session-active")),attribute "aria-label" heading]
-        [h4 [class "card-section-heading"] [text (heading ++ (if page /= Nothing then " · " ++ String.fromInt (List.length sessions) else ""))]
+        [h4 [class "card-section-heading"] [text (heading ++ (total |> Maybe.map (String.fromInt >> (++) " · ") |> Maybe.withDefault ""))]
         ,if evidence then viewArchive model task else text ""
         ,if page == Nothing then p [class "card-meta"] [text (if cachedError /= Nothing then "Sessions could not be loaded." else "Loading sessions…"),if cachedError /= Nothing then button [class "btn btn-sm",onClick SessionsRetry] [text "Retry"] else text ""]
          else if List.isEmpty sessions then p [class "card-meta"] [text ("No " ++ String.toLower heading ++ " on this page.")]

@@ -8,6 +8,7 @@ import Feature.AuditLog
 import Feature.AuditDiff
 import Feature.Cards
 import Feature.DataLoading
+import Feature.Documents
 import Feature.Dependencies
 import Feature.Move
 import Feature.DragDrop
@@ -90,6 +91,12 @@ reconcileFocusedFilters previous ( updated, command ) =
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
+        TaskDocuments message ->
+            let result = Feature.Documents.update message model in
+            Ok (case message of
+                DocumentReadFinished _ _ request _ -> Feature.DataLoading.settleDocumentWave request model result
+                _ -> result)
+
         ToggleWorkspaceDetails ->
             Ok ( if Permissions.canReadCurrentWorkspace model then { model | workspaceDetailsExpanded = not model.workspaceDetailsExpanded } else model, Cmd.none )
 

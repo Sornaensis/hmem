@@ -82,6 +82,11 @@ export async function openSessionExplorer({many=false,empty=false,creator=null,r
     while(current&&!seen.has(current.id)){seen.add(current.id);if(projects.has(current.project_id))return true;current=f.tasks.find(t=>t.id===current.parent_id)}return false
   }
   f.sessionActivity=id=>allSessions.some(session=>session.state==='active'&&sessionLinks.get(session.id)?.has(id))
+  await h.page.route('**/api/v1/workspaces/*/tasks/*/documents/counts', async route => {
+    const task = new URL(route.request().url()).pathname.split('/').at(-3)
+    const total = allSessions.filter(session => session.state === 'terminated' && sessionLinks.get(session.id)?.has(task)).length
+    await route.fulfill({ json: { source_count: 0, document_evidence_count: 0, agent_session_evidence_count: total, evidence_total: total } })
+  })
   const matchesActivity=(session,selection)=>selection===null?true:selection.split(',').includes(session.state==='terminated'?'completed':Date.now()-Date.parse(session.last_seen_at)<30000?'live':'quiet')
   const eligible=selection=>f.tasks.filter(t=>allSessions.some(session=>(selection===null?session.state==='active':selection.split(',').some(value=>value==='completed'?session.state==='terminated':(value==='live'||value==='quiet')&&session.state==='active'))&&sessionLinks.get(session.id)?.has(t.id)))
   await h.page.route('**/api/v1/**',async route=>{

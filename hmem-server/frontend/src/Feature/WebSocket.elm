@@ -14,6 +14,7 @@ import ActorAttribution
 import Api
 import Dict
 import Feature.ChangeStream as ChangeStream
+import Feature.Documents as Documents
 import Feature.DataLoading
 import Feature.Dependencies as Dependencies
 import Feature.Observation as Observation
@@ -819,7 +820,7 @@ applyCanonicalSnapshot scope profile items token model =
             let
                 withoutStale =
                     invalidateScopeRequests scope model
-                        |> (\current -> if scopeMatchesSelectedWorkspace scope model then Feature.DataLoading.invalidatePlanningCounts current else current)
+                        |> (\current -> if scopeMatchesSelectedWorkspace scope model then Feature.DataLoading.invalidatePlanningCounts (Documents.invalidate False current.documents.demand current) else current)
 
                 key =
                     ChangeStream.scopeKey scope
@@ -1179,7 +1180,22 @@ applyAction scope action ( model, accumulated ) =
 
         ChangeStream.RefreshTaskSessions workspace task ->
             if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
-                ( { model | sessionDelivery = SessionDelivery.invalidateReadProof workspace model.sessionDelivery }, accumulated )
+                ( Documents.invalidate True (Set.singleton task) { model | sessionDelivery = SessionDelivery.invalidateReadProof workspace model.sessionDelivery }, accumulated )
+            else ( model, accumulated )
+
+        ChangeStream.RefreshTaskDocuments workspace task ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                ( Documents.invalidate False (Set.singleton task) model, accumulated )
+            else ( model, accumulated )
+
+        ChangeStream.RetireTaskDocument workspace task association ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                ( Documents.retireAssociation task association model, accumulated )
+            else ( model, accumulated )
+
+        ChangeStream.RefreshDocumentCounts workspace ->
+            if scope == ChangeStream.Workspace workspace && scopeMatchesSelectedWorkspace scope model then
+                ( Documents.invalidate True model.documents.demand model, accumulated )
             else ( model, accumulated )
 
         ChangeStream.RefetchEntity entity identity ->

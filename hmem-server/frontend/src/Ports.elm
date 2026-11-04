@@ -3,6 +3,12 @@ port module Ports exposing (..)
 import Json.Encode as Encode
 
 
+port documentTransferOwner : Encode.Value -> Cmd msg
+
+
+port documentTransferEvent : (Encode.Value -> msg) -> Sub msg
+
+
 -- Presentation-only browser timezone formatting.
 port formatTimestamps : Encode.Value -> Cmd msg
 

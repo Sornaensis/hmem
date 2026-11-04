@@ -199,7 +199,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
       const navigation = path.endsWith('/navigation')
       const navigationBatch = path.endsWith('/navigation/batch')
       const logicalPages = [], ownerControls = []
-      const detail = /^\/api\/v1\/(projects|tasks)\/[^/]+$/.test(path)
+      const detail = /^\/api\/v1\/(projects|tasks)\/[^/]+$/.test(path) || /^\/api\/v1\/workspaces\/[^/]+\/tasks\/[^/]+\/documents(?:\/counts|\/[^/]+\/previews\/current)?$/.test(path)
       const receipt = { method: request.method(), path, parent: url.searchParams.get('parent_id'), kind: url.searchParams.get('parent_kind'), includeProjects: url.searchParams.get('include_projects') !== 'false', includeTasks: url.searchParams.get('include_tasks') !== 'false', projectOffset: Number(url.searchParams.get('project_offset') || 0), taskOffset: Number(url.searchParams.get('task_offset') || 0), query: url.searchParams.get('query') || '', showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), includeBlocked: url.searchParams.get('include_blocked') === 'true', arrived: performance.now(), done: false }
       requests.push(receipt)
       if (navigation) { activeBranches++; maxBranches = Math.max(maxBranches, activeBranches) }
@@ -226,6 +226,8 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           open_projects: fixture.projects.filter(row => row.workspace_id === fixture.workspace.id && !row.deleted_at && ['active','paused'].includes(row.status)).length,
           open_tasks: fixture.tasks.filter(row => row.workspace_id === fixture.workspace.id && !row.deleted_at && ['todo','in_progress','blocked'].includes(row.status)).length,
         }
+        else if (/^\/api\/v1\/workspaces\/[^/]+\/tasks\/[^/]+\/documents\/counts$/.test(path)) value = { source_count: 0, document_evidence_count: 0, agent_session_evidence_count: 0, evidence_total: 0 }
+        else if (/^\/api\/v1\/workspaces\/[^/]+\/tasks\/[^/]+\/documents$/.test(path)) value = { items: [], next_cursor: null }
         else if (/^\/api\/v1\/workspaces\/[^/]+\/tasks\/[^/]+\/sessions$/.test(path)) value = { items: [], next_cursor: null }
         else if (path === '/api/v1/workspaces/' + fixture.workspace.id + '/memberships') value = { items: [], has_more: false }
         else if (path === '/api/v1/workspaces/' + fixture.workspace.id + '/timeline') value = { items: fixture.timelineEvents, has_more: false }

@@ -1,9 +1,10 @@
-module Feature.DataLoading exposing (cardDetailPresentationOwner, cardDetailPresentation, reconcileCardDetailPresentation, preserveCardDetailPresentation, forgetCardDetailPresentation, mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, ensureExpandedBranches, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, revalidateNavigationForTasksReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (settleDocumentWave, pumpDocumentDetails, cardDetailPresentationOwner, cardDetailPresentation, reconcileCardDetailPresentation, preserveCardDetailPresentation, forgetCardDetailPresentation, mergeNavigationSummariesAt, markMissingNavigationSummaries, ensurePresentedCardDetails, ensureExpandedBranches, pumpNavigation, emptyPlanningCounts, retirePlanningCounts, invalidatePlanningCounts, syncPlanningCounts, syncPlanningCountsResult, startupBackgroundReady, acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, revalidateNavigationForTaskReadiness, revalidateNavigationForTasksReadiness, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
 import Feature.ChangeStream
+import Feature.Documents
 import Feature.FocusedFilters
 import Helpers exposing (indexBy, isCollapsed, navigationPresentationWindow, presentationOrdinaryCapacity, taskPresentationOrder)
 import Http
@@ -525,6 +526,42 @@ openBackgroundWave state credits model =
         ( detailed, detailCommand ) = ensurePresentedCardDetails branched
     in
     ( detailed, Cmd.batch [ countCommand, branchCommand, detailCommand ] )
+
+
+settleDocumentWave : Int -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+settleDocumentWave request previous result =
+    if Set.member request previous.dataLoading.cardDetailAdmissions then
+        Tuple.mapFirst yieldBackgroundAdmission result
+    else
+        result
+
+
+pumpDocumentDetails : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+pumpDocumentDetails ( model, command ) =
+    let
+        wanted = Feature.Documents.pending model
+        admit key (( current, _ ) as state) =
+            let
+                loading = current.dataLoading
+                permit = loading.backgroundAdmission
+            in
+            if permit.remaining <= 0 || not (StartupAdmission.canOrdinary loading.startupAdmission) || (permit.details >= 3 && not (List.isEmpty loading.navigationQueue)) then
+                state
+            else
+                let
+                    ( next, nextCommands ) = Feature.Documents.beginRead key state
+                in
+                if next.dataLoading.nextCardDetailRequestId == loading.nextCardDetailRequestId then
+                    state
+                else
+                    consumeBackground Nothing next |> Maybe.map (\admitted -> ( admitted, nextCommands )) |> Maybe.withDefault state
+
+        ( hydrated, commands ) = List.foldl admit ( model, [ command ] ) wanted
+    in
+    if List.isEmpty wanted then
+        ( model, command )
+    else
+        ( yieldBackgroundAdmission hydrated, Cmd.batch commands )
 
 
 consumeBackground : Maybe String -> Model -> Maybe Model

@@ -162,7 +162,7 @@ test('Sessions tab, task filters, native conversations and direct evidence downl
   const active=card.locator('.task-session-dock'),evidence=card.locator('.task-session-evidence')
   await card.locator(':scope > .card-header .task-sessions-icon').click();await card.getByRole('button',{name:'Evidence',exact:true}).click();await until(async()=>await card.getByRole('button',{name:'Evidence',exact:true}).getAttribute('aria-pressed')==='true')
   await card.locator('.task-session-work-context').getByRole('button',{name:/Codex/}).waitFor()
-  assert.equal(await card.locator('.card-extras .task-session-active').count(),0);assert.equal(await card.locator('.card-section-button[aria-pressed="true"]').innerText(),'Evidence');assert.equal(await card.locator('.task-dependencies-section').count(),1)
+  assert.equal(await card.locator('.card-extras .task-session-active').count(),0);assert.equal(await card.locator('.card-section-button[aria-pressed="true"]').innerText(),'Evidence · 1');assert.equal(await card.locator('.task-dependencies-section').count(),1)
   const downloadPromise=page.waitForEvent('download');await evidence.getByRole('button',{name:/Download session/}).click();const download=await downloadPromise
   const target=join(scratch,'session.jsonl');await download.saveAs(target);assert.deepEqual(await readFile(target),h.bytes)
   await page.evaluate(()=>Object.defineProperty(navigator.storage,'getDirectory',{configurable:true,value:async()=>{throw new Error('storage denied')}}))
@@ -200,7 +200,7 @@ test('active hints converge beyond sixteen mounted tasks and refresh after an as
   assert.equal(await first.locator(':scope > .card-header .task-sessions-icon').getAttribute('aria-label'),'View Agents');assert.equal(await first.locator(':scope > .card-header .task-sessions-icon').isEnabled(),true)
   for(const task of h.fixture.tasks)await h.page.locator('#entity-'+task.id+' .btn-extras-toggle').click()
   await until(()=>new Set(h.reads.filter(read=>read.query.includes('state=terminated')).map(read=>read.path)).size===22)
-  await last.getByRole('button',{name:'Evidence',exact:true}).click();await until(async()=>await last.locator('.task-session-evidence .card-section-heading').innerText()==='Evidence · 1')
+  await last.getByRole('button',{name:'Evidence',exact:true}).click();await until(async()=>await last.locator('.task-session-evidence .card-section-heading').innerText()==='Agent sessions · 1')
   assert.ok(h.peak()<=2)
  }finally{await h.close()}
 })

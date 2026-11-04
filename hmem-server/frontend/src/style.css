@@ -5949,3 +5949,106 @@ textarea.observation-edit-content {
   .hierarchy-toolbar .tree-toolbar button, .hierarchy-content-section .filter-pill, .hierarchy-content-section .filter-select, .hierarchy-content-section .filter-priority-input, .workspace-search-page .search-entities-filter-bar .filter-pill { min-height: 44px; }
   .hierarchy-content-section .project-filter-panel .hierarchy-search-input { min-height: 44px; font-size: 16px; }
 }
+/* Document panels use the existing card and button styles. */
+.task-documents {
+  min-width: 0;
+  display: grid;
+  gap: .55rem;
+}
+
+.task-documents-heading,
+.task-document-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .4rem .6rem;
+}
+
+.task-documents-heading {
+  justify-content: space-between;
+}
+
+.task-document-list {
+  display: grid;
+  gap: .45rem;
+}
+
+.task-document-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .55rem;
+  min-width: 0;
+  padding-block: .45rem;
+  border-block-end: 1px solid var(--border-color, currentColor);
+}
+
+.task-document-label {
+  display: grid;
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-document-label > p {
+  margin-block: .18rem 0;
+}
+
+.document-thumbnail {
+  display: grid;
+  place-items: center;
+  width: 4rem;
+  min-height: 2.75rem;
+  padding: .2rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--border-color, currentColor);
+  border-radius: .25rem;
+  font: inherit;
+  font-size: .7rem;
+  cursor: pointer;
+}
+
+.document-thumbnail img {
+  display: block;
+  width: 100%;
+  height: 2.5rem;
+  object-fit: contain;
+}
+
+.task-document-dialog {
+  box-sizing: border-box;
+  max-width: calc(100% - 1rem);
+  max-height: calc(100% - 1rem);
+  width: min(54rem, calc(100% - 1rem));
+  padding: clamp(.75rem, 3vw, 1.25rem);
+  color: inherit;
+  background: var(--bg-card, Canvas);
+  border: 1px solid var(--border-color, currentColor);
+  border-radius: .5rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.task-document-dialog::backdrop { background: rgb(0 0 0 / .55); }
+.task-document-dialog h3 { margin: 0 0 .5rem; }
+.task-document-dialog form { display: grid; gap: .5rem; margin-top: .6rem; }
+.task-document-dialog input { box-sizing: border-box; max-width: 100%; }
+.document-styled-preview {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: min(53vh, 38rem);
+  margin-block: .5rem;
+  background: white;
+  border: 1px solid var(--border-color, currentColor);
+}
+.task-document-dialog [data-dialog-return] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+.document-raster-viewport { margin-block: .5rem; overflow: auto; }
+.document-raster-viewport img { display: block; max-width: 100%; max-height: 52vh; object-fit: contain; margin: 0 auto .45rem; }
+.document-raster-zoom img { max-width: none; max-height: none; }

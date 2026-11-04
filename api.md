@@ -180,6 +180,25 @@ continue at `next_offset`, concatenate the original bytes, then verify metadata'
 `final_bytes` and lowercase `final_sha256`. Never treat a response window as the
 whole transcript when `has_more=true`.
 
+`GET .../archive?representation=available-v1` can discover a sealed
+`sanitized-v1` generation. Its `raw_*` fields describe the original seal.
+`content_bytes`, `content_sha256` and `policy_sha256` describe the selected
+content and frozen policy. Use the manifest's generation-bound
+`sanitized-content` path for gzip or `sanitized-evidence` path for verified
+JSONL windows. The latter accepts the same bounded offsets and limits, in
+sanitized coordinates. The gzip route sends the sanitized receipt in
+`X-HMem-Archive-Content-Bytes` and `X-HMem-Archive-Content-SHA256`.
+
+Unqualified `/evidence`, prefix proofs and task `evidence.zip` use original
+bytes. After the first committed raw deletion, those original-only operations
+return 409 `original_evidence_unavailable`. Exact sealed append replay
+returns 409 `session_state_conflict`. An interrupted ZIP has no final index.
+For a representation-aware task ZIP, opt in with
+`?representation=available-v1`. Sanitized entries end in
+`-sanitized.jsonl`. Both ZIP headers carry the same versioned per-entry
+representation, generation and SHA-256 receipt. The uncompressed size remains
+in the ZIP64 header.
+
 Session changes use the existing durable workspace stream as compact
 `agent_session` and `task_session` invalidations. Creation, termination and new links additionally invalidate `active_sessions:{workspaceId}`; ordinary append and heartbeat events do not. Link IDs are
 `session_id:task_id`. Create/append/seal replays and duplicate links add no event;

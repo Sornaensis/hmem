@@ -283,8 +283,9 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
     const rawFile=await directory.getFileHandle('raw.jsonl',{create:!adoptManifest})
     if(!compressedFile.createSyncAccessHandle || !rawFile.createSyncAccessHandle)throw Error('archive_unsupported')
     if(adoptManifest){
-      if(BigInt((await rawFile.getFile()).size)!==decimal(adoptManifest.raw_bytes)||BigInt((await compressedFile.getFile()).size)!==decimal(adoptManifest.compressed_bytes))throw Error('archive_receipt_mismatch')
-      raw=await rawFile.createSyncAccessHandle();rawReads.publish(adoptManifest.raw_bytes)
+      const contentBytes=adoptManifest.content_bytes??adoptManifest.raw_bytes
+      if(BigInt((await rawFile.getFile()).size)!==decimal(contentBytes)||BigInt((await compressedFile.getFile()).size)!==decimal(adoptManifest.compressed_bytes))throw Error('archive_receipt_mismatch')
+      raw=await rawFile.createSyncAccessHandle();rawReads.publish(contentBytes)
     }else{compressed=await compressedFile.createSyncAccessHandle();raw=await rawFile.createSyncAccessHandle()}
     const write=(handle,offset,bytes)=>{
       if(adoptManifest)throw Error('archive_read_only')
@@ -300,7 +301,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       retireReads:()=>rawReads.retire(),
       async detach(){if(!custody||adoptManifest)throw Error('archive_custody_required');await closeHandles()},
       async releaseReader(){if(!custody||!adoptManifest)throw Error('archive_reader_required');await closeHandles()},
-      async publish(manifest){if(adoptManifest)throw Error('archive_read_only');if(closed)throw Error('retired_store');raw.flush();await put('meta',{key:'verified',manifest,indexVersion:INDEX_VERSION});await flush();if(closed)throw Error('retired_store');rawReads.publish(manifest.raw_bytes)},
+      async publish(manifest){if(adoptManifest)throw Error('archive_read_only');if(closed)throw Error('retired_store');raw.flush();await put('meta',{key:'verified',manifest,indexVersion:INDEX_VERSION});await flush();if(closed)throw Error('retired_store');rawReads.publish(manifest.content_bytes??manifest.raw_bytes)},
       async disclosure(key,open){await put('disclosures',{key,open});await flush()},
       closeAndDelete
     }

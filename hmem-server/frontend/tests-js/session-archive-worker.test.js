@@ -223,6 +223,34 @@ async function indexed(values,action){
   finally{await engine.cleanup();globalThis.Worker=prior}
 }
 
+test('sanitized archive indexing verifies transformed receipts and content coordinates',async()=>{
+  const prior=globalThis.Worker;globalThis.Worker=class{}
+  const source=Buffer.from('{"text":"original opaque content"}\r\n{"text":"tail"}')
+  const content=Buffer.from('{"text":"Encrypted Payload"}\r\n{"text":"tail"}'),gzip=gzipSync(content)
+  const path=`/api/v1/workspaces/${workspace}/sessions/${session}/archive/${generation}`
+  const info={...manifest(source,gzip),representation:'sanitized-v1',content_bytes:String(content.length),
+    content_sha256:digest(content),policy_sha256:'a'.repeat(64),original_available:false,
+    content_path:path+'/sanitized-content',evidence_path:path+'/sanitized-evidence'}
+  try {
+    for(const selected of [info,{...info,content_sha256:digest(source)}]){
+      const store=memoryStore(),engine=createArchiveEngine({openStore:async()=>store})
+      try {
+        await engine.start({name:'sanitized',stamp:{workspace,session},manifest:selected})
+        await engine.chunk(gzip)
+        if(selected===info){
+          await engine.finish()
+          assert.deepEqual(store.readRaw('0',String(content.length)),content)
+          assert.equal(engine.snapshot().rawBytes,String(content.length))
+          assert.equal(store.tables.records.has(String(content.indexOf(10)+1).padStart(19,'0')),true)
+        } else {
+          await assert.rejects(engine.finish(),/raw_receipt_mismatch/)
+          assert.equal(store.published,false)
+        }
+      } finally {await engine.cleanup()}
+    }
+  } finally {globalThis.Worker=prior}
+})
+
 test('native Copilot occurrences index and hydrate with the same visible blocks and exact raw source as live framing',async()=>{
  const values=[...copilotRecords,{type:'future.output',data:{content:{unrecognized:true}}}],raw=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')+'\n')
  const live=createRecordFramer().push(0,raw,true).rows

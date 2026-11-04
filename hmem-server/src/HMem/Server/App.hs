@@ -65,7 +65,7 @@ import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), Pr
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Config qualified as Config
 import HMem.Server.API (HMemAPI, serverWithSessionReaders, authorizeAgentSessionWrite)
-import HMem.Server.Archive.HTTP (archiveMiddleware)
+import HMem.Server.Archive.HTTP (archiveMiddlewareWithCache)
 import HMem.Server.Document.HTTP (documentMiddleware)
 import HMem.Auth.CredentialOrigin
 import HMem.Server.Document.Grant qualified as DocumentGrants
@@ -74,7 +74,7 @@ import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.Server.ObservationDiscovery (ObservationDiscovery, newObservationDiscovery)
 import HMem.Server.OpenAPI (openApiSpec)
 import HMem.Server.Static (staticMiddleware)
-import HMem.Server.SessionArchive (newArchiveMiddleware)
+import HMem.Server.SessionArchive (newArchiveMiddlewareWithResolver)
 import HMem.Server.WebSocket (WSState, wsMiddleware)
 
 -- | Build the WAI Application.
@@ -127,7 +127,6 @@ mkAppWithServicesAtAndDocuments :: Maybe DocumentGrants.DocumentAuthority -> IO 
 mkAppWithServicesAtAndDocuments suppliedAuthority oidcNow prefixes discovery oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   discoveryService <- maybe (newObservationDiscovery False) pure discovery
   rateLimit <- rateLimitMiddleware rateLimitCfg
-  archive <- newArchiveMiddleware pool
   documentAuthority <- maybe
     (DocumentGrants.newDocumentAuthority pool authCfg Config.defaultConfig.server Config.defaultDocumentDeliveryConfig)
     pure suppliedAuthority
@@ -135,6 +134,7 @@ mkAppWithServicesAtAndDocuments suppliedAuthority oidcNow prefixes discovery oid
   -- survives a request. The Application owns this bounded heap cache.
   readers <- AgentSessions.newReaderCache
   jwksCache <- newIORef Nothing
+  archive <- newArchiveMiddlewareWithResolver pool (Just (resolveArchivePrincipal jwksCache pool authCfg))
   oidcLogins <- newIORef Map.empty
   pure $ requestIdMiddleware
        $ logger
@@ -151,7 +151,7 @@ mkAppWithServicesAtAndDocuments suppliedAuthority oidcNow prefixes discovery oid
         $ DocumentGrants.documentGrantMiddleware documentAuthority (\request -> do
             currentPolicy <- readIORef documentAuthority.policy
             resolveRequestAuthenticationWithCache jwksCache pool currentPolicy.auth request)
-        $ archiveMiddleware pool (resolveArchivePrincipal jwksCache pool authCfg)
+        $ archiveMiddlewareWithCache (Just readers) pool (resolveArchivePrincipal jwksCache pool authCfg)
         $ archive
         $ documentMiddleware pool (resolveArchivePrincipal jwksCache pool authCfg)
         $ agentSessionBodyLimit pool
@@ -1034,7 +1034,7 @@ corsMiddleware authCfg corsCfg = cors $ \req ->
     policy = simpleCorsResourcePolicy
       { corsMethods        = ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]
       , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match", "If-None-Match", "X-HMem-Bot-Identity", "X-HMem-Document-Metadata"]
-      , corsExposedHeaders = Just ["X-Request-Id", "ETag", "Retry-After", "X-HMem-Archive-Generation", "X-HMem-Archive-SHA256", "X-HMem-Archive-Raw-Bytes", "X-HMem-Archive-Raw-SHA256", "Content-Disposition", "X-HMem-Document-SHA256", "X-HMem-Document-Bytes"]
+      , corsExposedHeaders = Just ["X-Request-Id", "ETag", "Retry-After", "X-HMem-Archive-Generation", "X-HMem-Archive-SHA256", "X-HMem-Archive-Raw-Bytes", "X-HMem-Archive-Raw-SHA256", "X-HMem-Archive-Representation", "X-HMem-Archive-Content-Bytes", "X-HMem-Archive-Content-SHA256", "Content-Disposition", "X-HMem-Document-SHA256", "X-HMem-Document-Bytes"]
       }
 
 data RateLimitBucket = RateLimitBucket

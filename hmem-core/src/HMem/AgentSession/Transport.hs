@@ -2,7 +2,7 @@
 module HMem.AgentSession.Transport
   ( CreateSessionRequest(..), ImportSessionRequest(..), AppendSessionRequest(..), TerminateSessionRequest(..)
   , AppendSessionResponse(..), SessionPageResponse(..), SessionTaskPageResponse(..)
-  , SessionRangeResponse(..), SessionTransportError(..), decodeSessionBytes, encodeSessionBytes
+  , SessionRangeResponse(..), SanitizedRangeResponse(..), SessionTransportError(..), decodeSessionBytes, encodeSessionBytes
   , PrefixProofRequest(..), PrefixProofResponse(..)
   , maxSessionRequestBytes, maxSessionBase64Chars, defaultSessionRangeBytes
   ) where
@@ -93,6 +93,14 @@ data SessionRangeResponse = SessionRangeResponse
   deriving stock (Show, Eq, Generic)
 instance ToJSON SessionRangeResponse where toJSON = genericToJSON jsonOptions
 instance FromJSON SessionRangeResponse where parseJSON = genericParseJSON jsonOptions
+
+data SanitizedRangeResponse = SanitizedRangeResponse
+  { workspaceId :: !UUID, sessionId :: !UUID, generationId :: !UUID
+  , representation :: !Text, policySha256 :: !Text, contentBytes :: !Text, contentSha256 :: !Text
+  , offset :: !Int64, nextOffset :: !Int64, hasMore :: !Bool, dataBase64 :: !Text }
+  deriving stock (Show, Eq, Generic)
+instance ToJSON SanitizedRangeResponse where toJSON = genericToJSON jsonOptions
+instance FromJSON SanitizedRangeResponse where parseJSON = genericParseJSON jsonOptions
 
 data SessionTransportError = SessionBase64Invalid | SessionBytesTooLarge deriving stock (Show, Eq)
 

@@ -512,6 +512,8 @@ handleSessionErrors action = do
       AgentSession.SessionConflict -> sessionError err409 "session_conflict" "Session cursor, receipt or immutable metadata conflicts"
       AgentSession.SessionRuntimeConflict -> sessionError err409 "session_runtime_conflict" "Runtime identity revision conflicts; refresh runtime_revision from session metadata"
       AgentSession.SessionTerminated -> sessionError err409 "session_terminated" "Session is terminated"
+      AgentSession.SessionOriginalUnavailable -> sessionError err409 "original_evidence_unavailable" "Complete original evidence is unavailable"
+      AgentSession.SessionReplayUnavailable -> sessionError err409 "session_state_conflict" "Exact sealed replay requires complete original evidence"
       AgentSession.SessionInvalidInput -> sessionError err400 "session_invalid_input" "Invalid session cursor, metadata or bounds"
       AgentSession.SessionTaskNotInProgress status -> err409
         { errBody = Aeson.encode (object ["error" .= ("session_task_not_in_progress" :: Text), "field" .= ("task_id" :: Text), "message" .= ("Start the task before creating or associating a session. Required status is in_progress; current status is " <> status <> "."), "required_status" .= ("in_progress" :: Text), "current_status" .= status])
@@ -716,7 +718,9 @@ agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH 
       audience <- proofAudience
       registry <- proofRegistry
       result <- liftIO $ Prefix.lookupPrefixProof registry workspace identifier audience operation
-      maybe (throwError $ sessionError err404 "verification_unknown" "Prefix verification operation unknown; revalidate source with a new operation") pure result
+      case result of
+        Nothing -> throwError $ sessionError err404 "verification_unknown" "Prefix verification operation unknown; revalidate source with a new operation"
+        Just proof -> sessionIO pool workspace (AgentSessions.requireOriginalEvidence pool workspace identifier) >> pure proof
     proofError = \case
       Prefix.PrefixInvalid -> sessionError err400 "verification_target_invalid" "Prefix target must be an exact committed append boundary and SHA-256"
       Prefix.PrefixConflict -> sessionError err409 "verification_operation_conflict" "Operation UUID is already bound to another target"

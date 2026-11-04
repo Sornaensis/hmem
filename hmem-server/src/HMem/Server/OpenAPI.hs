@@ -31,6 +31,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
   & components . schemas . at "ObservationContentConflict" ?~ observationContentConflictSchema
   & components . schemas . at "SessionArchiveManifest" ?~ sessionArchiveManifestSchema
+  & components . schemas . at "SanitizedRangeResponse" ?~ toSchema (Proxy @SessionWire.SanitizedRangeResponse)
   & components . schemas . at "TaskDocument" ?~ taskDocumentSchema
   & components . schemas . at "TaskDocumentCounts" ?~ taskDocumentCountsSchema
   & components . schemas . at "TaskDocumentPreviewMetadata" ?~ documentPreviewSchema
@@ -50,6 +51,8 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/workspaces/{workspaceId}/tasks/{taskId}/evidence.zip" ?~ taskEvidenceArchivePath
   & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive" ?~ sessionArchiveManifestPath
   & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive/{generationId}/content" ?~ sessionArchiveContentPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive/{generationId}/sanitized-content" ?~ sanitizedArchiveContentPath
+  & paths . at "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/archive/{generationId}/sanitized-evidence" ?~ sanitizedEvidencePath
   & paths . traversed . parameters %~ (<> [Inline botIdentityHeader])
   & paths %~ InsOrdMap.mapWithKey documentSessionPath
   & paths . at "/document-grants/{grantId}/{variant}/{page}" ?~ documentGrantRedeemPath
@@ -293,6 +296,7 @@ instance ToSchema SessionWire.AppendSessionResponse where declareNamedSchema = g
 instance ToSchema SessionWire.SessionPageResponse where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionWire.SessionTaskPageResponse where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionWire.SessionRangeResponse where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionWire.SanitizedRangeResponse where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionWire.PrefixProofRequest where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy
@@ -967,6 +971,11 @@ sessionArchiveManifestSchema = mempty
      <> [("state",Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["preparing","retrying","ready","failed"]))]
      <> [(key,Inline (mempty & type_ ?~ OpenApiString & nullable ?~ True)) | key<-["generation_id","codec","codec_implementation","raw_sha256","compressed_sha256","content_path","error","message"]]
      <> [(key,Inline (decimalSchema & nullable ?~ (key=="compressed_bytes"))) | key<-["raw_bytes","raw_records","compressed_bytes"]]
+     <> [(key,Inline decimalSchema) | key<-["content_bytes","replacement_count","raw_revision"]]
+     <> [(key,Inline (mempty & type_ ?~ OpenApiString)) | key<-["content_sha256","policy_sha256","evidence_path"]]
+     <> [("representation",Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["sanitized-v1"]))
+        ,("original_available",Inline (mempty & type_ ?~ OpenApiBoolean))
+        ,("original_cleanup",Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["pending","in_progress","complete"]))]
      <> [("retryable",Inline (mempty & type_ ?~ OpenApiBoolean))
         ,("retry_after_ms",Inline (mempty & type_ ?~ OpenApiInteger & nullable ?~ True & minimum_ ?~ 1000 & maximum_ ?~ 60000))
         ,("progress",Inline (mempty & type_ ?~ OpenApiObject & required .~ ["phase","raw_bytes","compressed_bytes"]
@@ -981,10 +990,10 @@ archivePathParameters = map (\key -> Inline (mempty & name .~ key & in_ .~ Param
 
 sessionArchiveManifestPath :: PathItem
 sessionArchiveManifestPath = mempty
-  & parameters .~ archivePathParameters ["workspaceId","sessionId"]
+  & parameters .~ (archivePathParameters ["workspaceId","sessionId"] <> [archiveRepresentationParameter])
   & get ?~ (mempty & tags .~ InsOrdSet.singleton "Agent Sessions"
       & summary ?~ "Check complete sealed-session archive readiness"
-      & description ?~ "Current workspace read permission and session identity are checked before metadata. Idempotently schedules a terminated session; never changes its receipt or serves staged generations. All counts use decimal strings. Preparing/retrying returns bounded current-attempt progress and Retry-After; failed requires operator repair. Cache-Control:no-store."
+      & description ?~ "Select representation=available-v1 to discover a sanitized generation with separate content receipt, frozen policy digest and original-retention status. Without the selector, manifests remain exact-only. Current workspace read permission and session identity are checked before metadata. Preparing/retrying includes bounded progress and Retry-After. Counts use decimal strings."
       & responses .~ Responses Nothing (InsOrdMap.fromList
           ([(code,Inline (mempty & description .~ message & content .~ InsOrdMap.singleton "application/json"
               (mempty & schema ?~ (if code == 503 then Inline (mempty & oneOf ?~
@@ -998,7 +1007,11 @@ sessionArchiveManifestPath = mempty
           <> [(401,Inline (mempty & description .~ "Authentication required."))
              ,(403,Inline (mempty & description .~ sessionEvidenceForbidden))
              ,(404,Inline (mempty & description .~ "Active workspace or same-workspace session not found."))
-             ,(409,Inline (mempty & description .~ "session_state_conflict: session is active."))])))
+             ,(409,Inline (mempty & description .~ "The session is active or explicit selection of the published sanitized representation is required."))])))
+
+archiveRepresentationParameter :: Referenced Param
+archiveRepresentationParameter = Inline (mempty & name .~ "representation" & in_ .~ ParamQuery
+  & schema ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["available-v1"]))
 
 sessionArchiveContentPath :: PathItem
 sessionArchiveContentPath = mempty
@@ -1015,6 +1028,29 @@ sessionArchiveContentPath = mempty
           ,(403,Inline (mempty & description .~ sessionEvidenceForbidden))
           ,(404,Inline (mempty & description .~ "Unknown or unbound published generation, workspace or session."))
           ,(503,Inline (mempty & description .~ "archive_unavailable: complete object cannot be read; Retry-After:1."))]))
+
+sanitizedArchiveContentPath :: PathItem
+sanitizedArchiveContentPath = sessionArchiveContentPath
+  & get . _Just . summary ?~ "Download the explicitly selected sanitized gzip generation"
+  & get . _Just . description ?~ "Verifies the same bounded gzip transfer as the exact archive route. X-HMem-Archive-Representation is sanitized-v1. Content-Bytes and Content-SHA256 bind decoded sanitized content, while Raw-Bytes and Raw-SHA256 describe the original seal."
+
+sanitizedEvidencePath :: PathItem
+sanitizedEvidencePath = mempty
+  & parameters .~ (archivePathParameters ["workspaceId","sessionId","generationId"] <>
+      [Inline (mempty & name .~ "offset" & in_ .~ ParamQuery & schema ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 0))
+      ,Inline (mempty & name .~ "limit" & in_ .~ ParamQuery & schema ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 1048576))])
+  & get ?~ (mempty & tags .~ InsOrdSet.singleton "Agent Sessions"
+      & summary ?~ "Read a bounded sanitized JSONL range"
+      & description ?~ "Pins one immutable sanitized generation. Offsets and content SHA-256 identify the transformed bytes; each overlapping content block is verified before slicing. The original evidence endpoint retains its own coordinate and receipt contract."
+      & responses .~ Responses Nothing (InsOrdMap.fromList
+          [(200,Inline (mempty & description .~ "Verified range and sanitized content receipt."
+            & content .~ InsOrdMap.singleton "application/json" (mempty & schema ?~ Ref (Reference "#/components/schemas/SanitizedRangeResponse"))))
+          ,(400,Inline (mempty & description .~ "Invalid offset or limit."))
+          ,(401,Inline (mempty & description .~ "Authentication required."))
+          ,(403,Inline (mempty & description .~ sessionEvidenceForbidden))
+          ,(404,Inline (mempty & description .~ "Unknown or unbound sanitized generation."))
+          ,(409,Inline (mempty & description .~ "Offset exceeds the sanitized content length."))
+          ,(503,Inline (mempty & description .~ "Verified range temporarily unavailable."))]))
 
 sessionEvidenceForbidden :: Text
 sessionEvidenceForbidden="Workspace read permission required. Bot evidence reads return evidence_task_not_terminal unless all tasks linked to the session are done or cancelled."
@@ -1213,14 +1249,15 @@ documentGrantRedeemPath=mempty
 
 taskEvidenceArchivePath :: PathItem
 taskEvidenceArchivePath = mempty
-  & parameters .~ map (\key -> Inline (mempty & name .~ key & in_ .~ ParamPath & required ?~ True & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid"))) ["workspaceId","taskId"]
+  & parameters .~ (archivePathParameters ["workspaceId","taskId"] <> [archiveRepresentationParameter])
   & get ?~ (mempty
       & tags .~ InsOrdSet.singleton "Agent Sessions"
       & summary ?~ "Download this task’s saved sessions as a compressed ZIP"
-      & description ?~ "Requires read access to an active workspace and a visible same-workspace task before archive work. Includes only associated terminated sessions across all server keyset pages. Streams original JSONL bytes in ZIP64 entries using actual raw DEFLATE (method 8), with receipt/SHA-256/CRC verification and safe UUID filenames. Content-Type is application/zip with an attachment filename and Cache-Control:no-store. Two concurrent exports per application; overload returns 503 with Retry-After:1. A 15-minute deadline, disconnect, authority withdrawal or verification failure aborts the transfer without a successful ZIP footer. This is live keyset enumeration, not a historical association snapshot."
+      & description ?~ "Includes associated terminated sessions. Original ZIP64 entries are the default. Explicit representation=available-v1 permits labeled sanitized entries and adds per-entry generation, representation and content SHA-256 receipts to both ZIP headers, with X-HMem-Evidence-Zip:representations-v2. Two concurrent exports per application. A 15-minute deadline, disconnect, authority withdrawal or receipt failure aborts the transfer without a ZIP footer."
       & responses .~ Responses Nothing (InsOrdMap.fromList
           [(200,Inline (mempty & description .~ "Binary compressed ZIP attachment." & content .~ InsOrdMap.singleton "application/zip" (mempty & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "binary"))))
           ,(401,Inline (mempty & description .~ "Authentication required."))
           ,(403,Inline (mempty & description .~ (sessionEvidenceForbidden<>" A bot ZIP export also requires the requested task to be done or cancelled.")))
           ,(404,Inline (mempty & description .~ "Active workspace or visible same-workspace task not found."))
+          ,(409,Inline (mempty & description .~ "A required complete original is unavailable."))
           ,(503,Inline (mempty & description .~ "Both export admissions are occupied; retry after one second."))]))

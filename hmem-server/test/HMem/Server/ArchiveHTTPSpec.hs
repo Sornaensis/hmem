@@ -30,6 +30,7 @@ import System.Timeout (timeout)
 import Test.Hspec
 
 import HMem.AgentSession qualified as S
+import HMem.AgentSession.Transport qualified as Wire
 import HMem.Config qualified as Config
 import HMem.DB.AgentSession qualified as Sessions
 import HMem.DB.Auth qualified as Auth
@@ -122,6 +123,73 @@ spec = describe "Archive HTTP" $ do
         value ["paths",route,"get"] openapi `shouldSatisfy` (/=Nothing)
       value ["components","schemas","SessionArchiveManifest","properties","raw_bytes","type"] openapi `shouldBe` Just (String "string")
 
+  it "pins sanitized receipts while legacy reads and exports use only original evidence" $
+    withLocalSandboxAppContext $ \ctx -> bounded $ do
+      let env=ctx.localEnv; app=ctx.localApplication
+          original="{ \"kind\":\"call\", \"encrypted\":\"opaque secret\" }\r\n[]"
+          sanitized="{ \"kind\":\"call\", \"encrypted\":\"Encrypted Payload\" }\r\n[]"
+          snapshot="{\"eligible_from\":\"2000-01-01T00:00:00Z\",\"format_label\":\"jsonl\",\"rules\":[{\"match\":{\"/kind\":\"call\"},\"path\":\"/encrypted\",\"replacement\":\"Encrypted Payload\"}],\"version\":1}"
+      Pool.runSession env.pool $ SQL.sql ("INSERT INTO session_archive_replacement_policies VALUES('jsonl','2000-01-01T00:00:00Z',convert_to('"<>snapshot<>"','UTF8'))")
+      (w,sealed) <- fixture env original
+      task <- Task.createTask env.pool (Types.CreateTask w Nothing Nothing "Mixed export fixture" Nothing Nothing Nothing)
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid task.id<>"'")
+      Sessions.associateSessionTask env.pool w sealed.id task.id
+      Reader.ensureArchive env.pool w sealed.id
+      implementation <- Codec.codecImplementation
+      Just lease <- DB.claimArchive env.pool implementation
+      prepared <- compressArchive env.pool lease
+      verifyAndPublishArchive env.pool lease prepared
+      let path=archivePath w sealed.id
+          selected=path<>"/"<>uuid lease.generationId
+          available=path<>"?representation=available-v1"
+          originalPath=BS.take (BS.length path-8) path<>"/evidence"
+          taskZip="/api/v1/workspaces/"<>uuid w<>"/tasks/"<>uuid task.id<>"/evidence.zip"
+      get app path [] >>= hasStatus status409
+      get app (selected<>"/content") [] >>= hasStatus status404
+      response <- get app available []
+      hasStatus status200 response
+      document <- decoded response
+      value ["representation"] document `shouldBe` Just (String "sanitized-v1")
+      value ["raw_sha256"] document `shouldBe` Just (String $ S.sessionSha256 original)
+      value ["content_sha256"] document `shouldBe` Just (String $ S.sessionSha256 sanitized)
+      value ["original_available"] document `shouldBe` Just (Bool True)
+      content <- get app (selected<>"/sanitized-content") []
+      hasStatus status200 content
+      lookup "X-HMem-Archive-Content-SHA256" content.simpleHeaders `shouldBe` Just (TE.encodeUtf8 (S.sessionSha256 sanitized))
+      Just tag <- pure (lookup hETag content.simpleHeaders)
+      get app (selected<>"/sanitized-content") [(hIfNoneMatch,tag)] >>= hasStatus status304
+      let evidence=selected<>"/sanitized-evidence?offset=4&limit=11"
+      get app evidence [] >>= \rangeResponse -> do
+        hasStatus status200 rangeResponse
+        range <- either fail pure (eitherDecode @Wire.SanitizedRangeResponse rangeResponse.simpleBody)
+        range.offset `shouldBe` 4
+        range.nextOffset `shouldBe` 15
+        Wire.decodeSessionBytes range.dataBase64 `shouldBe` Right (BS.take 11 (BS.drop 4 sanitized))
+      get app evidence [("X-HMem-Bot-Identity","{\"role\":\"Archive Test\",\"model-id\":\"test:fixture:default\"}")] >>= hasStatus status403
+      get app originalPath [] >>= hasStatus status200
+      get app taskZip [] >>= hasStatus status200
+      -- Simulate the durable first-delete signal without granting deletion to
+      -- this fixture. Even physically present raw rows must now be rejected.
+      Pool.runTransaction env.pool $ SQL.sql
+        ("ALTER TABLE session_archive_reclamation DISABLE TRIGGER session_archive_exact_reclamation_guard; "<>
+         "INSERT INTO session_archive_reclamation(generation_id,session_id,workspace_id,metadata_sha256,verified_at,deleted_revision,deleted_bytes) "<>
+         "SELECT id,session_id,workspace_id,metadata_sha256,clock_timestamp(),1,1 FROM session_archive_generations WHERE id='"<>uuid lease.generationId<>"'; "<>
+         "ALTER TABLE session_archive_reclamation ENABLE TRIGGER session_archive_exact_reclamation_guard")
+      gone <- get app (originalPath<>"?offset=1&limit=1") []
+      hasStatus status409 gone
+      decoded gone >>= \body -> value ["error"] body `shouldBe` Just (String "original_evidence_unavailable")
+      Sessions.validateSessionPrefixBoundary env.pool w sealed.id 0 0 `shouldThrow` unavailableOriginal
+      Sessions.deriveSessionOccurrence env.pool w sealed.id `shouldThrow` unavailableOriginal
+      Sessions.appendSession env.pool w sealed.id (S.AppendSession 0 0 original True) `shouldThrow`
+        (\(exception :: S.SessionException) -> exception.code == S.SessionReplayUnavailable)
+      get app taskZip [] >>= hasStatus status409
+      mixed <- get app (taskZip<>"?representation=available-v1") []
+      hasStatus status200 mixed
+      lookup "X-HMem-Evidence-Zip" mixed.simpleHeaders `shouldBe` Just "representations-v2"
+      LBS.toStrict mixed.simpleBody `shouldSatisfy` BS.isInfixOf "-sanitized.jsonl"
+      LBS.toStrict mixed.simpleBody `shouldSatisfy` BS.isInfixOf (TE.encodeUtf8 (S.sessionSha256 sanitized))
+      get app available [] >>= decoded >>= \body -> value ["original_available"] body `shouldBe` Just (Bool False)
+      get app evidence [] >>= hasStatus status200
   it "archives an empty receipt as exactly twenty gzip bytes and rejects active sessions" $
     withLocalSandboxAppContext $ \ctx -> bounded $ do
       let env=ctx.localEnv; app=ctx.localApplication
@@ -343,6 +411,9 @@ spec = describe "Archive HTTP" $ do
 bounded :: IO () -> IO ()
 bounded action = timeout (60*1000000) action >>= (`shouldBe` Just ())
 
+unavailableOriginal :: S.SessionException -> Bool
+unavailableOriginal exception = exception.code == S.SessionOriginalUnavailable
+
 fixture :: TestEnv -> ByteString -> IO (UUID,S.AgentSession)
 fixture env bytes = do
   workspace <- createTestWorkspace env "archive-http"
@@ -406,8 +477,10 @@ contentPath :: DB.ArchiveManifest -> ByteString
 contentPath m = archivePath m.workspaceId m.sessionId<>"/"<>uuid m.id<>"/content"
 get :: Wai.Application -> ByteString -> [Header] -> IO SResponse
 get app path headers = runSession (srequest $ SRequest request "") app
-  where request=Wai.defaultRequest{Wai.requestMethod=methodGet,Wai.rawPathInfo=path
-        ,Wai.pathInfo=filter (not . T.null) (T.splitOn "/" $ TE.decodeUtf8 path),Wai.requestHeaders=headers}
+  where
+    (route,queryString)=B8.break (=='?') path
+    request=Wai.defaultRequest{Wai.requestMethod=methodGet,Wai.rawPathInfo=route,Wai.rawQueryString=queryString
+      ,Wai.queryString=parseQuery queryString,Wai.pathInfo=filter (not . T.null) (T.splitOn "/" $ TE.decodeUtf8 route),Wai.requestHeaders=headers}
 hasStatus :: Status -> SResponse -> IO ()
 hasStatus status response = response.simpleStatus `shouldBe` status
 decoded :: SResponse -> IO Value

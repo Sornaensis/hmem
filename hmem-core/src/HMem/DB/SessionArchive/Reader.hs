@@ -3,6 +3,8 @@
 module HMem.DB.SessionArchive.Reader
   ( ArchiveReader, openArchiveReader, closeArchiveReader, readArchiveRange
   , verifiedManifest, verifiedPart, ensureArchive
+  , SanitizedManifest(..), verifiedSanitizedManifest, verifiedSanitizedPart, openSanitizedReader
+  , withCachedSanitizedReader, originalUnavailableSQL
   , verifiedLedger, ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..)
   , newReaderCache, closeReaderCache, withCachedReader
   , ReaderMetrics(..), readerMetrics
@@ -93,18 +95,58 @@ verifiedManifest pool workspace session = do
   found <- archiveQuery pool (workspace,session) $ St.Statement
     "SELECT to_jsonb(g) FROM session_archives g WHERE g.workspace_id=$1 AND g.session_id=$2"
     (param fst E.uuid <> param snd E.uuid)
-    (D.rowMaybe (column (D.refine (\value -> case Data.Aeson.fromJSON value of
-      Data.Aeson.Success result -> Right result
-      Data.Aeson.Error message -> Left (T.pack message)) D.jsonb))) True
+    (D.rowMaybe manifestRow) True
   case found of
     Nothing -> pure Nothing
     Just m -> do
       valid <- query pool (workspace,session,m.id,0)
-        "SELECT g.metadata_sha256=hmem_archive_binding('',jsonb_build_array(g.id,g.session_id,g.workspace_id,g.codec,g.codec_implementation,g.codec_parameters,g.raw_bytes,g.raw_records,g.raw_revision,g.raw_sha256,g.compressed_bytes,g.compressed_sha256,g.part_count,g.checkpoint_count,g.ledger_count,(SELECT binding_sha256 FROM session_archive_parts WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),(SELECT binding_sha256 FROM session_archive_checkpoints WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),coalesce((SELECT binding_sha256 FROM session_archive_ledger WHERE generation_id=g.id ORDER BY revision DESC LIMIT 1),''))) FROM session_archives g WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND $4::bigint=0"
+        ("SELECT g.metadata_sha256="<>manifestBinding<>" FROM session_archives g WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND $4::bigint=0")
         (column D.bool)
-      require (valid == Just True && m.codec == "gzip-v1" && m.rawBytes >= 0 && m.compressedBytes >= 20
-        && m.codecParameters == toJSON (parameters :: Parameters))
+      require (valid == Just True && validCodec m)
       pure (Just m)
+
+manifestRow :: D.Row A.ArchiveManifest
+manifestRow = column $ D.refine (\value -> case Data.Aeson.fromJSON value of
+  Data.Aeson.Success result -> Right result
+  Data.Aeson.Error message -> Left (T.pack message)) D.jsonb
+
+manifestBinding :: ByteString
+manifestBinding =
+  "hmem_archive_binding('',jsonb_build_array(g.id,g.session_id,g.workspace_id,g.codec,g.codec_implementation,g.codec_parameters,g.raw_bytes,g.raw_records,g.raw_revision,g.raw_sha256,g.compressed_bytes,g.compressed_sha256,g.part_count,g.checkpoint_count,g.ledger_count,(SELECT binding_sha256 FROM session_archive_parts WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),(SELECT binding_sha256 FROM session_archive_checkpoints WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),coalesce((SELECT binding_sha256 FROM session_archive_ledger WHERE generation_id=g.id ORDER BY revision DESC LIMIT 1),'')))"
+
+validCodec :: A.ArchiveManifest -> Bool
+validCodec m = m.codec == "gzip-v1" && m.rawBytes >= 0 && m.compressedBytes >= 20
+  && m.codecParameters == toJSON parameters
+
+data SanitizedManifest = SanitizedManifest
+  { archive :: !A.ArchiveManifest, content :: !A.SanitizedContent
+  , originalAvailable :: !Bool, cleanupComplete :: !Bool
+  } deriving stock (Show, Eq)
+
+-- The legacy view is intentionally exact-only. Resolve sanitized generations
+-- through their own receipt binding, including the frozen policy and ready job.
+sanitizedRelation :: ByteString
+sanitizedRelation =
+  "(SELECT a.* FROM session_archive_generations a JOIN session_archive_jobs j ON (j.generation_id,j.session_id,j.workspace_id)=(a.id,a.session_id,a.workspace_id) JOIN session_archive_sanitized_contents v ON (v.generation_id,v.session_id,v.workspace_id)=(a.id,a.session_id,a.workspace_id) WHERE j.state='ready' AND a.published_at IS NOT NULL AND v.policy_sha256=j.replacement_policy_sha256)"
+
+verifiedSanitizedManifest :: Pool H.Connection -> UUID -> UUID -> Maybe UUID -> IO (Maybe SanitizedManifest)
+verifiedSanitizedManifest pool workspace session generation = do
+  found <- archiveQuery pool (workspace,session,generation) $ St.Statement
+    ("SELECT to_jsonb(g),v.policy_sha256,v.content_bytes,v.content_sha256,v.replacement_count,coalesce(r.deleted_bytes,0)=0,coalesce(r.complete,false),coalesce(g.metadata_sha256=hmem_archive_sanitized_binding("<>manifestBinding<>",g.id) AND (r.generation_id IS NULL OR r.metadata_sha256=g.metadata_sha256),false) FROM "<>
+     sanitizedRelation<>" g JOIN session_archive_sanitized_contents v ON v.generation_id=g.id LEFT JOIN session_archive_reclamation r ON (r.generation_id,r.session_id,r.workspace_id)=(g.id,g.session_id,g.workspace_id) WHERE g.workspace_id=$1 AND g.session_id=$2 AND ($3::uuid IS NULL OR g.id=$3)")
+    (param (\(w,_,_)->w) E.uuid <> param (\(_,s,_)->s) E.uuid <> contramap (\(_,_,g)->g) (E.param (E.nullable E.uuid)))
+    (D.rowMaybe ((,) <$> (SanitizedManifest <$> manifestRow <*> contentRow <*> column D.bool <*> column D.bool) <*> column D.bool)) True
+  forM_ found $ \(m,bound) -> require (bound && validCodec m.archive && m.content.contentBytes >= 0)
+  pure (fst <$> found)
+  where
+    contentRow = A.SanitizedContent <$> column D.text <*> column D.int8 <*> column D.text <*> column D.int8
+
+-- This intentionally fails closed even if a deletion attestation's metadata
+-- binding is inconsistent. Positive committed progress means the full source
+-- is unavailable. No byte was lost for an empty completed reclamation.
+originalUnavailableSQL :: ByteString -> ByteString -> ByteString
+originalUnavailableSQL workspace session =
+  "EXISTS(SELECT 1 FROM session_archive_jobs j JOIN session_archive_sanitized_contents v ON (v.generation_id,v.session_id,v.workspace_id)=(j.generation_id,j.session_id,j.workspace_id) JOIN session_archive_reclamation r ON (r.generation_id,r.session_id,r.workspace_id)=(v.generation_id,v.session_id,v.workspace_id) WHERE j.workspace_id="<>workspace<>" AND j.session_id="<>session<>" AND r.deleted_bytes>0)"
 
 -- Parameters are compared structurally, avoiding dependence on JSON key order.
 type Parameters = Data.Aeson.Value
@@ -113,11 +155,16 @@ parameters = Data.Aeson.object ["level" Data.Aeson..= (6::Int), "window_bits" Da
 
 partRow :: D.Row A.ArchivePart
 partRow = A.ArchivePart <$> column D.int8 <*> column D.int8 <*> column D.int8 <*> column D.bytea <*> column D.text <*> column D.text
-partSQL :: ByteString
-partSQL = "SELECT p.ordinal,p.start_offset,p.end_offset,p.data,p.data_sha256,p.binding_sha256 FROM session_archives g JOIN session_archive_parts p ON p.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND p.ordinal=$4 AND p.data_sha256=encode(sha256(p.data),'hex') AND p.binding_sha256=hmem_archive_binding(coalesce((SELECT q.binding_sha256 FROM session_archive_parts q WHERE q.generation_id=p.generation_id AND q.ordinal=p.ordinal-1),''),jsonb_build_array(p.generation_id,p.ordinal,p.start_offset,p.end_offset,p.data_sha256))"
 verifiedPart :: Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe A.ArchivePart)
-verifiedPart pool w s g n = do
-  part <- query pool (w,s,g,n) partSQL partRow
+verifiedPart = verifiedPartFrom "session_archives"
+
+verifiedSanitizedPart :: Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe A.ArchivePart)
+verifiedSanitizedPart = verifiedPartFrom sanitizedRelation
+
+verifiedPartFrom :: ByteString -> Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe A.ArchivePart)
+verifiedPartFrom relation pool w s g n = do
+  part <- query pool (w,s,g,n)
+    ("SELECT p.ordinal,p.start_offset,p.end_offset,p.data,p.data_sha256,p.binding_sha256 FROM "<>relation<>" g JOIN session_archive_parts p ON p.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND p.ordinal=$4 AND p.data_sha256=encode(sha256(p.data),'hex') AND p.binding_sha256=hmem_archive_binding(coalesce((SELECT q.binding_sha256 FROM session_archive_parts q WHERE q.generation_id=p.generation_id AND q.ordinal=p.ordinal-1),''),jsonb_build_array(p.generation_id,p.ordinal,p.start_offset,p.end_offset,p.data_sha256))") partRow
   forM_ part $ \p -> require (p.ordinal == n && p.startOffset >= 0 && p.endOffset-p.startOffset == fromIntegral (BS.length p.bytes)
     && not (BS.null p.bytes) && BS.length p.bytes <= 1048576 && sessionSha256 p.bytes == p.dataSha256)
   pure part
@@ -134,7 +181,7 @@ data Chunk = Chunk !Int64 !Text !ByteString
 data ReaderState = ReaderState !(Maybe DecodeState) ![Chunk] !Bool
 data ArchiveReader = ArchiveReader
   { archiveManifest :: !A.ArchiveManifest, pool :: !(Pool H.Connection), state :: !(MVar ReaderState)
-  , metrics :: !(IORef ReaderMetrics) }
+  , metrics :: !(IORef ReaderMetrics), sanitized :: !(Maybe A.SanitizedContent) }
 
 data ReaderMetrics = ReaderMetrics { restores :: !Int64, inflatedBytes :: !Int64, verifiedBytes :: !Int64 }
   deriving stock (Show,Eq)
@@ -150,7 +197,20 @@ addMetrics reader restores inflated verified = do
   writeIORef reader.metrics (ReaderMetrics a b c)
 
 openArchiveReader :: Pool H.Connection -> A.ArchiveManifest -> IO ArchiveReader
-openArchiveReader pool manifest = ArchiveReader manifest pool <$> newMVar (ReaderState Nothing [] False) <*> newIORef (ReaderMetrics 0 0 0)
+openArchiveReader pool manifest = newArchiveReader pool manifest Nothing
+
+openSanitizedReader :: Pool H.Connection -> SanitizedManifest -> IO ArchiveReader
+openSanitizedReader pool manifest = newArchiveReader pool manifest.archive (Just manifest.content)
+
+newArchiveReader :: Pool H.Connection -> A.ArchiveManifest -> Maybe A.SanitizedContent -> IO ArchiveReader
+newArchiveReader pool manifest content =
+  ArchiveReader manifest pool <$> newMVar (ReaderState Nothing [] False) <*> newIORef (ReaderMetrics 0 0 0) <*> pure content
+
+readerRelation :: ArchiveReader -> ByteString
+readerRelation reader = maybe "session_archives" (const sanitizedRelation) reader.sanitized
+
+readerBytes :: ArchiveReader -> Int64
+readerBytes reader = maybe reader.archiveManifest.rawBytes (.contentBytes) reader.sanitized
 closeArchiveReader :: ArchiveReader -> IO ()
 closeArchiveReader reader = modifyMVar_ reader.state $ \(ReaderState decoder _ _) -> do
   forM_ decoder $ \(DecodeState _ d) -> C.closeDecoder d
@@ -165,8 +225,9 @@ pauseArchiveReader reader = modifyMVar_ reader.state $ \(ReaderState decoder chu
 restart :: ArchiveReader -> Int64 -> IO DecodeState
 restart reader offset = mask $ \restore -> do
   let m = reader.archiveManifest; w = m.workspaceId; s = m.sessionId; g = m.id
+      relation = readerRelation reader
   point <- query reader.pool (w,s,g,offset)
-    "WITH chosen AS MATERIALIZED (SELECT c.* FROM session_archives g JOIN session_archive_checkpoints c ON c.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND c.raw_offset<=$4 ORDER BY c.raw_offset DESC LIMIT 1) SELECT c.raw_offset,c.compressed_offset,c.unused_bits,c.dictionary FROM chosen c WHERE c.dictionary_sha256=encode(sha256(c.dictionary),'hex') AND c.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_checkpoints p WHERE p.generation_id=c.generation_id AND p.ordinal=c.ordinal-1),''),jsonb_build_array(c.generation_id,c.ordinal,c.raw_offset,c.compressed_offset,c.unused_bits,c.dictionary_sha256))"
+    ("WITH chosen AS MATERIALIZED (SELECT c.* FROM "<>relation<>" g JOIN session_archive_checkpoints c ON c.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND c.raw_offset<=$4 ORDER BY c.raw_offset DESC LIMIT 1) SELECT c.raw_offset,c.compressed_offset,c.unused_bits,c.dictionary FROM chosen c WHERE c.dictionary_sha256=encode(sha256(c.dictionary),'hex') AND c.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_checkpoints p WHERE p.generation_id=c.generation_id AND p.ordinal=c.ordinal-1),''),jsonb_build_array(c.generation_id,c.ordinal,c.raw_offset,c.compressed_offset,c.unused_bits,c.dictionary_sha256))")
     (C.Checkpoint <$> column D.int8 <*> column D.int8 <*> (fromIntegral <$> column D.int2) <*> column D.bytea)
   cp <- maybe (throwIO (C.CodecFailure "archive_checkpoint_unavailable")) pure point
   require (cp.rawOffset <= offset && offset-cp.rawOffset <= 1048576 && cp.compressedOffset < m.compressedBytes)
@@ -175,8 +236,8 @@ restart reader offset = mask $ \restore -> do
         at <- readIORef compressedAt
         if at == m.compressedBytes then pure Nothing else do
           ordinal <- query reader.pool (w,s,g,at)
-            "SELECT p.ordinal FROM session_archives g JOIN session_archive_parts p ON p.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND p.start_offset<=$4 AND p.end_offset>$4 ORDER BY p.start_offset DESC LIMIT 1" (column D.int8)
-          p <- maybe (throwIO (C.CodecFailure "archive_part_unavailable")) (verifiedPart reader.pool w s g >=> maybe (throwIO (C.CodecFailure "archive_part_corrupt")) pure) ordinal
+            ("SELECT p.ordinal FROM "<>relation<>" g JOIN session_archive_parts p ON p.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND p.start_offset<=$4 AND p.end_offset>$4 ORDER BY p.start_offset DESC LIMIT 1") (column D.int8)
+          p <- maybe (throwIO (C.CodecFailure "archive_part_unavailable")) (verifiedPartFrom relation reader.pool w s g >=> maybe (throwIO (C.CodecFailure "archive_part_corrupt")) pure) ordinal
           require (p.startOffset <= at && p.endOffset > at && p.endOffset <= m.compressedBytes)
           writeIORef compressedAt p.endOffset
           pure (Just (BS.drop (fromIntegral (at-p.startOffset)) p.bytes))
@@ -186,9 +247,25 @@ restart reader offset = mask $ \restore -> do
     addMetrics reader 1 (offset-cp.rawOffset) 0
     pure (DecodeState offset decoder)) `onException` C.closeDecoder decoder
 
+chunkBinding :: ArchiveReader -> Int64 -> IO (Int64,Int64,Text)
+chunkBinding reader offset = do
+  let m = reader.archiveManifest
+      identity = (m.workspaceId,m.sessionId,m.id,offset `div` 1048576)
+      missing = throwIO (C.CodecFailure "archive_ledger_unavailable")
+  case reader.sanitized of
+    Nothing -> do
+      row <- verifiedLedger reader.pool m.workspaceId m.sessionId m.id offset >>= maybe missing pure
+      pure (row.startOffset,row.endOffset,row.rawSha256)
+    Just content -> do
+      (start,end,digest) <- query reader.pool identity
+        ("SELECT b.start_offset,b.end_offset,b.content_sha256 FROM "<>sanitizedRelation<>" g JOIN session_archive_content_blocks b ON b.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND b.ordinal=$4 AND b.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_content_blocks p WHERE p.generation_id=b.generation_id AND p.ordinal=b.ordinal-1),''),jsonb_build_array(b.generation_id,b.ordinal,b.start_offset,b.end_offset,b.content_sha256))")
+        ((,,) <$> column D.int8 <*> column D.int8 <*> column D.text) >>= maybe missing pure
+      require (start == offset - offset `mod` 1048576 && end-start == min 1048576 (content.contentBytes-start))
+      pure (start,end,digest)
+
 readArchiveRange :: ArchiveReader -> Int64 -> Int -> IO ByteString
 readArchiveRange reader offset limit = mask $ \restore -> do
-  require (offset >= 0 && offset <= reader.archiveManifest.rawBytes && limit >= 0 && limit <= 1048576)
+  require (offset >= 0 && offset <= readerBytes reader && limit >= 0 && limit <= 1048576)
   old <- takeMVar reader.state
   let ReaderState initial _ _ = old
   owned <- newIORef initial
@@ -196,7 +273,7 @@ readArchiveRange reader offset limit = mask $ \restore -> do
       poisoned = ReaderState Nothing [] True
       run (ReaderState decoder chunks closed) = do
         require (not closed)
-        let end = offset + min (fromIntegral limit) (reader.archiveManifest.rawBytes-offset)
+        let end = offset + min (fromIntegral limit) (readerBytes reader-offset)
             go at active cached pieces
               | at == end = pure (BS.concat (reverse pieces),ReaderState active cached False)
               | otherwise = case [chunk | chunk@(Chunk start _ bytes) <- cached, start <= at, at-start < fromIntegral (BS.length bytes)] of
@@ -208,23 +285,22 @@ readArchiveRange reader offset limit = mask $ \restore -> do
                         retained=hit:[c | c@(Chunk other _ _) <- cached,other /= start]
                     go stop active retained (piece:pieces)
                   [] -> do
-                    let m=reader.archiveManifest
-                    row <- verifiedLedger reader.pool m.workspaceId m.sessionId m.id at >>= maybe (throwIO (C.CodecFailure "archive_ledger_unavailable")) pure
-                    require (row.startOffset <= at && row.endOffset > at && row.endOffset-row.startOffset <= 1048576 && row.endOffset <= m.rawBytes)
+                    (start,stop,digest) <- chunkBinding reader at
+                    require (start <= at && stop > at && stop-start <= 1048576 && stop <= readerBytes reader)
                     chosen <- case active of
-                      Just d@(DecodeState cursor _) | cursor == row.startOffset -> pure d
+                      Just d@(DecodeState cursor _) | cursor == start -> pure d
                       _ -> mask_ $ do
                         forM_ active $ \(DecodeState _ d) -> C.closeDecoder d
                         writeIORef owned Nothing
-                        value <- restart reader row.startOffset
+                        value <- restart reader start
                         writeIORef owned (Just value)
                         pure value
                     let DecodeState _ d = chosen
-                    bytes <- C.readDecoder d (fromIntegral (row.endOffset-row.startOffset)) `onException` C.closeDecoder d
-                    require (fromIntegral (BS.length bytes) == row.endOffset-row.startOffset && sessionSha256 bytes == row.rawSha256) `onException` C.closeDecoder d
-                    addMetrics reader 0 (row.endOffset-row.startOffset) (row.endOffset-row.startOffset)
-                    let retained=take 2 (Chunk row.startOffset row.rawSha256 bytes:cached)
-                    go at (Just (DecodeState row.endOffset d)) retained pieces
+                    bytes <- C.readDecoder d (fromIntegral (stop-start)) `onException` C.closeDecoder d
+                    require (fromIntegral (BS.length bytes) == stop-start && sessionSha256 bytes == digest) `onException` C.closeDecoder d
+                    addMetrics reader 0 (stop-start) (stop-start)
+                    let retained=take 2 (Chunk start digest bytes:cached)
+                    go at (Just (DecodeState stop d)) retained pieces
         go offset decoder chunks []
   result <- try @SomeException (restore (run old))
   case result of
@@ -234,7 +310,7 @@ readArchiveRange reader offset limit = mask $ \restore -> do
 newtype ArchiveAudience = ArchiveAudience Text deriving stock (Eq,Ord,Show)
 data ReaderCacheBusy = ReaderCacheBusy deriving stock (Show)
 instance Exception ReaderCacheBusy
-type Key = (ArchiveAudience,UUID,UUID,UUID)
+type Key = (ArchiveAudience,UUID,UUID,UUID,Bool)
 data Entry = Entry !Key !UTCTime !Bool !ArchiveReader
 data CacheState = CacheState !Bool ![Entry]
 newtype ReaderCache = ReaderCache (MVar CacheState)
@@ -250,9 +326,15 @@ closeReaderCache (ReaderCache lock) = modifyMVar_ lock $ \(CacheState _ entries)
 
 -- Caller has revalidated authorization. Only idle entries expire/evict.
 withCachedReader :: ReaderCache -> ArchiveAudience -> Pool H.Connection -> A.ArchiveManifest -> (ArchiveReader -> IO a) -> IO a
-withCachedReader (ReaderCache lock) audience pool manifest action = mask $ \restore -> do
+withCachedReader cache audience pool manifest = withCachedArchive cache audience pool manifest Nothing
+
+withCachedSanitizedReader :: ReaderCache -> ArchiveAudience -> Pool H.Connection -> SanitizedManifest -> (ArchiveReader -> IO a) -> IO a
+withCachedSanitizedReader cache audience pool manifest = withCachedArchive cache audience pool manifest.archive (Just manifest.content)
+
+withCachedArchive :: ReaderCache -> ArchiveAudience -> Pool H.Connection -> A.ArchiveManifest -> Maybe A.SanitizedContent -> (ArchiveReader -> IO a) -> IO a
+withCachedArchive (ReaderCache lock) audience pool manifest content action = mask $ \restore -> do
   now <- getCurrentTime
-  let key=(audience,manifest.workspaceId,manifest.sessionId,manifest.id)
+  let key=(audience,manifest.workspaceId,manifest.sessionId,manifest.id,maybe False (const True) content)
   reader <- modifyMVar lock $ \(CacheState closed entries) -> do
     when closed (throwIO ReaderCacheBusy)
     let expired (Entry _ used busy _) = not busy && diffUTCTime now used >= 30
@@ -267,7 +349,7 @@ withCachedReader (ReaderCache lock) audience pool manifest action = mask $ \rest
           [] -> throwIO ReaderCacheBusy
           e@(Entry oldKey _ _ _):_ -> pure ([x | x@(Entry k _ _ _)<-live,k/=oldKey],[e])
         mapM_ (\(Entry _ _ _ r)->closeArchiveReader r) evicted
-        r <- openArchiveReader pool manifest
+        r <- newArchiveReader pool manifest content
         pure (CacheState False (Entry key now True r:retained),r)
   -- Ordinary pagination caches verified bytes only. The native seek state is
   -- request-owned and always released before returning its admission lease.

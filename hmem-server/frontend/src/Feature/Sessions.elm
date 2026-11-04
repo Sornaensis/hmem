@@ -826,11 +826,11 @@ receiveSealed value model =
     else if kind == "sealed-demand" then
         ({model | sessions={state | sealed={sealed | http=Just {sequence=field "sequence" Decode.int -1,path=field "path" Decode.string ""}}}},Cmd.none)
     else if kind == "sealed-clear" then
-        ({model | sessions={state | rows=[],historyGaps=[],historyTop=0,historyBottom=0,sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,canPrevious=False,canNext=False,renderPart=0,bodies=Dict.empty,markdown=emptySealedSessionView.markdown}}},Cmd.none)
+        ({model | sessions={state | rows=[],historyGaps=[],historyTop=0,historyBottom=0,sealed={sealed | phase="preparing",http=Nothing,rows=[],first="",last="",more=False,canPrevious=False,canNext=False,renderPart=0,bodies=Dict.empty,markdown=emptySealedSessionView.markdown,representation="",originalAvailable=True,exportMessage=""}}},Cmd.none)
     else if kind == "sealed-error" then
         let code=field "code" Decode.string "archive_failed" in
         ({model | sessions={state | sealed={sealed | phase="error",canRetry=code /= "archive_cleanup_failed",http=Nothing
-            ,error=Just (if code == "archive_cleanup_failed" then "Archive cleanup could not be confirmed. Reload this page before another archive." else if code == "archive_item_limit" then "One record exceeds the local view limit. The original transcript is still available to download." else if code == "archive_recovery_limit" then "Local archive recovery reached its directory limit. Close other archive tabs or clear this site's stored archive data before retrying." else if code == "archive_recovery_pending" then "Old local archives were removed. Retry to finish recovery." else code)}}},Cmd.none)
+            ,error=Just (if code == "archive_cleanup_failed" then "Archive cleanup could not be confirmed. Reload this page before another archive." else if code == "archive_item_limit" then "One record exceeds the local view limit." else if code == "archive_recovery_limit" then "Local archive recovery reached its directory limit. Close other archive tabs or clear this site's stored archive data before retrying." else if code == "archive_recovery_pending" then "Old local archives were removed. Retry to finish recovery." else code)}}},Cmd.none)
     else if kind == "sealed-cancelled" then
         ({model | sessions={state | sealed={sealed | phase="cancelled",http=Nothing,rows=[],bodies=Dict.empty,markdown=emptySealedSessionView.markdown,error=Nothing}}},Cmd.none)
     else if kind == "sealed-render" then
@@ -898,7 +898,9 @@ receiveSealed value model =
                 ,rows=List.map saveBody sealed.rows
                 ,markdown={previous | key=if complete then "" else previous.key,source=if complete then "" else source,ast=Err "not_loaded",structured=field "structured" Decode.bool False,complete=False,nextPart=previous.nextPart+1,request=field "request" Decode.int 0}}},Cmd.none)
     else if kind == "sealed-progress" then
-        ({model | sessions={state | sealed={sealed | phase=field "phase" Decode.string sealed.phase,rawBytes=field "rawBytes" Decode.string sealed.rawBytes,compressedBytes=field "compressedBytes" Decode.string sealed.compressedBytes,archiveGeneration=field "archiveGeneration" Decode.string sealed.archiveGeneration}}},Cmd.none)
+        ({model | sessions={state | sealed={sealed | phase=field "phase" Decode.string sealed.phase,rawBytes=field "rawBytes" Decode.string sealed.rawBytes,compressedBytes=field "compressedBytes" Decode.string sealed.compressedBytes,archiveGeneration=field "archiveGeneration" Decode.string sealed.archiveGeneration,representation=field "representation" Decode.string sealed.representation,originalAvailable=field "originalAvailable" Decode.bool sealed.originalAvailable}}},Cmd.none)
+    else if kind == "sealed-export" && sealed.representation == "sanitized-v1" then
+        ({model | sessions={state | sealed={sealed | exportMessage=field "message" Decode.string ""}}},Cmd.none)
     else if kind == "sealed-page" then
         case Decode.decodeValue (Decode.field "rows" (Decode.list piece)) value of
             Ok rows ->
@@ -1119,10 +1121,11 @@ viewSave : Model -> Api.AgentSession -> Html Msg
 viewSave model session =
     let
         state = model.sessions
+        sanitized = state.selected == Just session.id && state.sealed.representation == "sanitized-v1"
         config = Encode.encode 0 (Encode.object [("stamp",Encode.string state.downloadStamp),("operation",Encode.int state.nextOperation),("session",encodeReceipt session)])
     in
     if session.state /= Api.SessionTerminated then text ""
-    else button [class "btn btn-sm session-download",attribute "data-session-download" config,disabled (state.saveBlocked || state.save /= Nothing || state.archive /= Nothing || session.finalBytes == Nothing || session.finalSha256 == Nothing),attribute "aria-label" ("Download session " ++ String.left 8 session.id)] [text "↓ Download"]
+    else button [class "btn btn-sm session-download",attribute "data-session-download" config,disabled (state.saveBlocked || state.save /= Nothing || state.archive /= Nothing || session.finalBytes == Nothing || session.finalSha256 == Nothing || (sanitized && not state.sealed.originalAvailable)),attribute "aria-label" ("Download " ++ (if sanitized then "original session " else "session ") ++ String.left 8 session.id)] [text (if sanitized then "↓ Download original" else "↓ Download")]
 
 
 sectionKey : Bool -> String -> String
@@ -1525,7 +1528,7 @@ viewSealedRecords context model session =
         structured=List.any (\piece -> piece.body |> Maybe.map (\content -> content.structured || content.exception) |> Maybe.withDefault False) sealed.rows
         rendered = Transcript.renderWindow (if structured then 524288 else 1048576) sealed.renderPart (if state.following then "" else state.presentationAnchor) (List.map Tuple.second renderEntries)
         message = case sealed.phase of
-            "ready" -> if List.isEmpty sealed.rows then "This session has no messages." else "Verified complete archive."
+            "ready" -> if sealed.representation == "sanitized-v1" then "Verified sanitized transcript." else if List.isEmpty sealed.rows then "This session has no messages." else "Verified complete archive."
             "cancelled" -> "Archive loading cancelled."
             "downloading" -> "Downloading complete archive… " ++ sealed.compressedBytes ++ " bytes"
             "decoding" -> "Verifying and indexing… " ++ sealed.rawBytes ++ " bytes"
@@ -1540,7 +1543,13 @@ viewSealedRecords context model session =
         lastProseMore = List.reverse sealed.rows |> List.head |> Maybe.map (\piece -> piece.kind == "text" && (piece.body |> Maybe.map .more |> Maybe.withDefault False) && not (sealed.markdown.complete && sealed.markdown.key == piece.key)) |> Maybe.withDefault False
         records = Keyed.node "div" [Html.Attributes.id "session-records",class "session-records",tabindex 0,attribute "role" "region",attribute "data-viewer-owner" state.stamp,attribute "data-sealed-dom-owner" state.stamp,attribute "data-sealed-dom-load" (String.fromInt state.generation),attribute "data-sealed-first" sealed.first,attribute "data-sealed-last" sealed.last,attribute "data-sealed-page-request" (String.fromInt sealed.pageRequest),attribute "data-sealed-page-first" sealed.pageFirst,attribute "data-sealed-page-last" sealed.pageLast,attribute "data-sealed-scan-first" sealed.scanFirst,attribute "data-sealed-scan-last" sealed.scanLast,attribute "data-sealed-at-beginning" (if sealed.atBeginning then "true" else "false"),attribute "data-sealed-older-boundary" (List.take 20 sealed.rows |> List.reverse |> List.head |> Maybe.map .key |> Maybe.withDefault sealed.first),attribute "data-sealed-newer-boundary" (List.drop (max 0 (List.length sealed.rows-20)) sealed.rows |> List.head |> Maybe.map .key |> Maybe.withDefault sealed.last),attribute "data-render-request" (String.fromInt sealed.renderRequest),attribute "data-render-part" (String.fromInt rendered.part),attribute "data-render-more" (if rendered.more then "true" else "false"),attribute "data-archive-can-previous" (if sealed.canPrevious then "true" else "false"),attribute "data-archive-can-next" (if sealed.canNext then "true" else "false"),attribute "data-last-prose-more" (if lastProseMore then "true" else "false"),attribute "data-latest-request" (String.fromInt state.latestRequest),attribute "data-latest-pending" (if state.latestPending then "true" else "false"),attribute "data-latest-error" (if state.latestError /= Nothing then "true" else "false"),attribute "data-history-mode" "sealed",attribute "data-presentation-anchor" state.presentationAnchor,attribute "data-following" (if state.following then "true" else "false"),attribute "aria-label" "Verified archive records"] (List.map2 (\key node -> (state.stamp ++ ":" ++ (String.toInt key |> Maybe.andThen (\index -> List.drop index renderEntries |> List.head |> Maybe.map Tuple.first) |> Maybe.withDefault key),node)) rendered.keys rendered.nodes)
         budgetError = if rendered.error then p [attribute "role" "alert"] [text "This formatted piece exceeds the local presentation budget."] else text ""
-        children = [identity,status,viewLatestError state,budgetError,records,footer]
+        sanitizedDownload = if sealed.representation == "sanitized-v1" && sealed.phase == "ready" then
+            div [class "session-sanitized-actions"]
+                [button [class "btn btn-sm",attribute "data-sealed-action" "download-sanitized",attribute "data-sealed-owner" state.stamp] [text "↓ Download sanitized JSONL"]
+                ,span [attribute "role" "status"] [text sealed.exportMessage]
+                ,if sealed.originalAvailable then text "" else span [] [text "Original evidence is unavailable."]]
+            else text ""
+        children = [identity,status,sanitizedDownload,viewLatestError state,budgetError,records,footer]
     in
     Keyed.node "section" [class ("session-viewer session-sealed-viewer" ++ (if workspaceReader then " session-sealed-workspace" else "")),attribute "aria-label" "Session transcript"]
         (sealedHostNodes model (children ++ [viewLatestControl state]))

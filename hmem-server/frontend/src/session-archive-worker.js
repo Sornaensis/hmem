@@ -12,10 +12,22 @@ export function validateManifest(value,workspace,session) {
     || !/^[a-f0-9]{64}$/.test(value.raw_sha256) || !/^[a-f0-9]{64}$/.test(value.compressed_sha256))throw Error('invalid_manifest')
   for(const field of ['raw_bytes','raw_records','compressed_bytes'])decimal(value[field])
   fileOffset(decimal(value.raw_bytes));fileOffset(decimal(value.compressed_bytes))
-  const path=`/api/v1/workspaces/${encodeURIComponent(workspace)}/sessions/${encodeURIComponent(session)}/archive/${value.generation_id}/content`
-  if(value.content_path!==path)throw Error('invalid_content_path')
+  const root=`/api/v1/workspaces/${encodeURIComponent(workspace)}/sessions/${encodeURIComponent(session)}/archive/${value.generation_id}`
+  const representation=value.representation ?? 'exact-v1'
+  if(representation==='sanitized-v1'){
+    if(value.content_path!==root+'/sanitized-content' || value.evidence_path!==root+'/sanitized-evidence'
+      || !/^[a-f0-9]{64}$/.test(value.content_sha256) || !/^[a-f0-9]{64}$/.test(value.policy_sha256)
+      || typeof value.original_available!=='boolean')throw Error('invalid_manifest')
+    fileOffset(decimal(value.content_bytes))
+    return value
+  }
+  if(representation!=='exact-v1' || value.content_path!==root+'/content'
+    || (value.content_bytes!==undefined && value.content_bytes!==value.raw_bytes)
+    || (value.content_sha256!==undefined && value.content_sha256!==value.raw_sha256))throw Error('invalid_content_path')
   return value
 }
+
+const contentBytes=manifest=>decimal(manifest.content_bytes??manifest.raw_bytes)
 
 // Strict sealed EOF differs from the live finite-window adapter. At most one
 // record and one 64 KiB input are retained; offsets never pass through Number.
@@ -162,7 +174,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       stamp=message.stamp;manifest=validateManifest(message.manifest,stamp.workspace,stamp.session)
       if(typeof Worker==='undefined' || typeof DecompressionStream==='undefined')throw Error('archive_unsupported')
       const estimate=await storage?.estimate?.().catch(()=>null)
-      const required=decimal(manifest.compressed_bytes)+decimal(manifest.raw_bytes)*2n+16777216n
+      const required=decimal(manifest.compressed_bytes)+contentBytes(manifest)*2n+16777216n
       if(estimate?.quota!==undefined && estimate?.usage!==undefined && required>BigInt(Math.floor(Math.max(0,estimate.quota-estimate.usage))))storageEstimateLow=true
       current()
       stageName=message.name;stageCustody=message.custody
@@ -174,7 +186,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       stageName=message.name;stageCustody=message.custody
       if(!stageCustody)throw Error('archive_custody_required')
       try{store=await openStore(stageName,{custody:stageCustody,adoptManifest:manifest})}catch(error){if(error.message==='archive_cleanup_failed')cleanupPoisoned=true;throw error}
-      current();downloadBytes=decimal(manifest.compressed_bytes);rawBytes=decimal(manifest.raw_bytes);records=decimal(manifest.raw_records);published=true;progress('ready')
+      current();downloadBytes=decimal(manifest.compressed_bytes);rawBytes=contentBytes(manifest);records=decimal(manifest.raw_records);published=true;progress('ready')
     },
     async detach() {
       current();if(!published||mode!=='processor'||!stageCustody)throw Error('archive_unverified')
@@ -217,7 +229,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
           nativeOutputChunkBytes=Math.max(nativeOutputChunkBytes,result.value.byteLength)
           for(let begin=0;begin<result.value.length;begin+=IO_BYTES) {
             current();const bytes=result.value.subarray(begin,begin+IO_BYTES)
-            if(rawBytes+BigInt(bytes.length)>decimal(manifest.raw_bytes))throw Error('raw_count_mismatch')
+            if(rawBytes+BigInt(bytes.length)>contentBytes(manifest))throw Error('raw_count_mismatch')
             store.writeRaw(rawBytes,bytes);rawHash.update(bytes);rawBytes+=BigInt(bytes.length)
             for(const row of framer.push(bytes)){const pending=index(row);if(pending)await pending}
             if(++sinceYield===16){sinceYield=0;await store.flush();await quota();await new Promise(resolve=>setTimeout(resolve,0))}
@@ -239,7 +251,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
         if(result.error && !primary){pipelinePrimary=result.error;throw result.error}
       }
       current()
-      if(rawBytes!==decimal(manifest.raw_bytes) || records!==decimal(manifest.raw_records) || hex(rawHash.digest())!==manifest.raw_sha256)throw Error('raw_receipt_mismatch')
+      if(rawBytes!==contentBytes(manifest) || records!==decimal(manifest.raw_records) || hex(rawHash.digest())!==(manifest.content_sha256??manifest.raw_sha256))throw Error('raw_receipt_mismatch')
       await store.publish(manifest);current();published=true;previous=null;group=null
       // Publication barrier two: no page is available until strict EOF + receipt.
       progress('ready')

@@ -1,6 +1,6 @@
 -- Download the server's streaming ZIP64 archive, validate it on disk, then
 -- publish a complete new file. No transcript bytes enter the MCP response.
-module HMem.MCP.TaskTriage (downloadEvidence, validateArchive) where
+module HMem.MCP.TaskTriage (downloadEvidence, downloadEvidenceWith, validateArchive, validateArchiveWith) where
 
 import Codec.Compression.Zlib.Internal qualified as Z
 import Control.Exception hiding (handle)
@@ -16,6 +16,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 import Data.Word (Word8, Word32)
 import Network.HTTP.Client
 import Network.HTTP.Types (Header, statusCode)
@@ -26,12 +27,15 @@ import System.Timeout (timeout)
 
 import HMem.MCP.SessionFile (publishNewFile)
 
-data ArchiveFault = ArchiveInvalid | DestinationExists | ArchiveHTTP Int | EvidenceTaskNotTerminal | ArchiveTimeout | PublishFailed
+data ArchiveFault = ArchiveInvalid | DestinationExists | ArchiveHTTP Int | EvidenceTaskNotTerminal | OriginalUnavailable | ArchiveTimeout | PublishFailed
   deriving (Show)
 instance Exception ArchiveFault
 
 downloadEvidence :: Manager -> String -> [Header] -> UUID -> UUID -> FilePath -> IO Value
-downloadEvidence manager base headers workspace task destination = do
+downloadEvidence = downloadEvidenceWith False
+
+downloadEvidenceWith :: Bool -> Manager -> String -> [Header] -> UUID -> UUID -> FilePath -> IO Value
+downloadEvidenceWith mixed manager base headers workspace task destination = do
   attempted <- try @SomeException $ do
     exists <- doesPathExist destination
     when exists $ throwIO DestinationExists
@@ -42,19 +46,25 @@ downloadEvidence manager base headers workspace task destination = do
           when existsNow (removeFile path)
     bracket (openBinaryTempFile directory ".hmem-evidence-") cleanup $ \(temporary,handle) -> do
       completed <- timeout (900*1000000) $ do
-        initial <- parseRequest (base <> "/api/v1/workspaces/" <> show workspace <> "/tasks/" <> show task <> "/evidence.zip")
+        let selector = if mixed then "?representation=available-v1" else ""
+        initial <- parseRequest (base <> "/api/v1/workspaces/" <> show workspace <> "/tasks/" <> show task <> "/evidence.zip" <> selector)
         let request = initial {requestHeaders=headers,responseTimeout=responseTimeoutMicro (30*1000000),decompress=const False
               ,checkResponse = \_ _ -> pure ()}
         (total,digest) <- withResponse request manager $ \response -> do
           let status = statusCode (responseStatus response)
-          when (status == 403) $ do
+          when (status == 403 || status == 409) $ do
             payload <- brReadSome (responseBody response) 4097
             case decode payload of
-              Just (Object fields) | BL.length payload <= 4096
+              Just (Object fields) | status == 403 && BL.length payload <= 4096
                 , KM.lookup "error" fields == Just (String "evidence_task_not_terminal") ->
                     throwIO EvidenceTaskNotTerminal
+              Just (Object fields) | status == 409 && BL.length payload <= 4096
+                , KM.lookup "error" fields == Just (String "original_evidence_unavailable") ->
+                    throwIO OriginalUnavailable
               _ -> pure ()
           unless (status == 200) $ throwIO (ArchiveHTTP status)
+          when (mixed && lookup "X-HMem-Evidence-Zip" (responseHeaders response) /= Just "representations-v2") $
+            throwIO ArchiveInvalid
           let copy total context = do
                 bytes <- brRead (responseBody response)
                 if BS.null bytes then pure (total,T.pack (show (hashFinalize context :: Digest SHA256))) else do
@@ -64,7 +74,7 @@ downloadEvidence manager base headers workspace task destination = do
                   copy next (hashUpdate context bytes)
           copy (0 :: Int64) (hashInit :: Context SHA256)
         hFlush handle
-        count <- validateArchive handle
+        count <- validateArchiveWith mixed handle
         pure (total,digest,count)
       (total,digest,count) <- maybe (throwIO ArchiveTimeout) pure completed
       mask_ $ do
@@ -73,13 +83,15 @@ downloadEvidence manager base headers workspace task destination = do
         unless published $ do
           existsNow <- doesPathExist destination
           throwIO (if existsNow then DestinationExists else PublishFailed)
-        pure $ object ["workspace_id" .= workspace,"task_id" .= task,"archive_bytes" .= total,"sha256" .= digest,"session_count" .= count,"verified" .= True]
+        pure $ object (["workspace_id" .= workspace,"task_id" .= task,"archive_bytes" .= total,"sha256" .= digest,"session_count" .= count,"verified" .= True]
+          <> ["representation" .= ("available-v1" :: Text) | mixed])
   case attempted of
     Right value -> pure $ envelope value
     Left exception | Just (_ :: SomeAsyncException) <- fromException exception -> throwIO exception
     Left exception -> pure $ failure $ case fromException exception of
       Just DestinationExists -> "destination_exists"
       Just EvidenceTaskNotTerminal -> "evidence_task_not_terminal"
+      Just OriginalUnavailable -> "original_evidence_unavailable"
       Just (ArchiveHTTP status) | status == 401 -> "unauthorized"
       Just (ArchiveHTTP status) | status == 403 -> "forbidden"
       Just (ArchiveHTTP status) | status == 404 -> "task_not_found"
@@ -93,12 +105,16 @@ downloadEvidence manager base headers workspace task destination = do
       where message :: Text
             message
               | code == "evidence_task_not_terminal" = "Bots can download a task evidence archive only when the task and every task linked to its completed sessions are done or cancelled."
+              | code == "original_evidence_unavailable" = "Complete original evidence is unavailable."
               | otherwise = "Task evidence archive was not published."
 
 -- Deliberately accepts the bounded ZIP64 profile produced by SessionArchive,
 -- rather than extracting arbitrary ZIPs or materializing their central index.
 validateArchive :: Handle -> IO Int64
-validateArchive handle = do
+validateArchive = validateArchiveWith False
+
+validateArchiveWith :: Bool -> Handle -> IO Int64
+validateArchiveWith mixed handle = do
   lengthValue <- hFileSize handle
   ensure (lengthValue >= 98)
   footer <- at (lengthValue-98) 98
@@ -109,33 +125,42 @@ validateArchive handle = do
     && u32 footer 88 == 0xffffffff && u32 footer 92 == 0xffffffff && u16 footer 96 == 0)
   let count = u64 footer 32; centralSize = u64 footer 40; centralStart = u64 footer 48
   ensure (centralStart+centralSize == lengthValue-98 && count <= centralSize `div` 74 && count <= fromIntegral (maxBound :: Int64))
-  let entries remaining cursor localEnd
+  let receiptSize = if mixed then 106 else 0
+      localSize = 20 + receiptSize
+      centralExtraSize = 28 + receiptSize
+      entries remaining cursor localEnd
         | remaining == 0 = ensure (cursor == centralStart+centralSize && localEnd == centralStart)
         | otherwise = do
             ensure (cursor+46 <= centralStart+centralSize)
             central <- at cursor 46
             let nameLength=u16 central 28; extraLength=u16 central 30; commentLength=u16 central 32
             ensure (u32 central 0 == 0x02014b50 && u16 central 8 == 0x808 && u16 central 10 == 8
-              && nameLength>0 && nameLength<=1024 && extraLength==28 && commentLength==0
+              && nameLength>0 && nameLength<=1024 && extraLength==fromIntegral centralExtraSize && commentLength==0
               && u16 central 34==0 && u32 central 20==0xffffffff && u32 central 24==0xffffffff && u32 central 42==0xffffffff)
             name <- at (cursor+46) (fromInteger nameLength)
-            extra <- at (cursor+46+nameLength) 28
+            extra <- at (cursor+46+nameLength) centralExtraSize
             ensure (u16 extra 0==1 && u16 extra 2==24)
             let rawSize=u64 extra 4; compressed=u64 extra 12; start=u64 extra 20; expected=u32 central 16
-            ensure (start==localEnd && start+30+nameLength+20+compressed+24<=centralStart)
+            ensure (start==localEnd && start+30+nameLength+fromIntegral localSize+compressed+24<=centralStart)
             local <- at start 30
             ensure (u32 local 0==0x04034b50 && u16 local 6==0x808 && u16 local 8==8
-              && u16 local 26==nameLength && u16 local 28==20 && u32 local 18==0xffffffff && u32 local 22==0xffffffff)
+              && u16 local 26==nameLength && u16 local 28==fromIntegral localSize && u32 local 18==0xffffffff && u32 local 22==0xffffffff)
             localName <- at (start+30) (fromInteger nameLength)
-            localExtra <- at (start+30+nameLength) 20
+            localExtra <- at (start+30+nameLength) localSize
             ensure (localName==name && u16 localExtra 0==1 && u16 localExtra 2==16 && u64 localExtra 4==rawSize && u64 localExtra 12==0)
-            let dataStart=start+30+nameLength+20; descriptorStart=dataStart+compressed
+            expectedHash <- if mixed
+              then do
+                let receipt = BS.drop 28 extra
+                ensure (BS.drop 20 localExtra==receipt)
+                Just <$> receiptHash name receipt
+              else pure Nothing
+            let dataStart=start+30+nameLength+fromIntegral localSize; descriptorStart=dataStart+compressed
             hSeek handle AbsoluteSeek dataStart
-            checksum <- inflate compressed rawSize
+            (checksum,actualHash) <- inflate compressed rawSize
             descriptor <- at descriptorStart 24
-            ensure (checksum==expected && u32 descriptor 0==0x08074b50 && u32 descriptor 4==expected
+            ensure (checksum==expected && actualHash==expectedHash && u32 descriptor 0==0x08074b50 && u32 descriptor 4==expected
               && u64 descriptor 8==compressed && u64 descriptor 16==rawSize)
-            entries (remaining-1) (cursor+46+nameLength+28) (descriptorStart+24)
+            entries (remaining-1) (cursor+46+nameLength+fromIntegral centralExtraSize) (descriptorStart+24)
   entries count centralStart 0
   pure (fromInteger count)
   where
@@ -145,22 +170,36 @@ validateArchive handle = do
       bytes <- BS.hGet handle count
       ensure (BS.length bytes==count)
       pure bytes
-    inflate compressed rawSize = go compressed 0 (0xffffffff :: Word32) (Z.decompressIO Z.rawFormat Z.defaultDecompressParams{Z.decompressBufferSize=65536})
+    receiptHash name receipt = do
+      ensure (BS.length receipt==106 && u16 receipt 0==0x484d && u16 receipt 2==102 && BS.index receipt 4==2)
+      let marker=BS.index receipt 5
+          identifier=BS.take 36 (BS.drop 6 receipt)
+          digest=BS.drop 42 receipt
+          sanitized="-sanitized.jsonl" `BS.isSuffixOf` name
+      generation <- maybe (throwIO ArchiveInvalid) pure (either (const Nothing) UUID.fromText (TE.decodeUtf8' identifier))
+      ensure (TE.encodeUtf8 (UUID.toText generation)==identifier && BS.length digest==64
+        && BS.all (\c -> c>=48 && c<=57 || c>=97 && c<=102) digest
+        && ((marker==0 && generation==UUID.nil && not sanitized) || (marker==1 && generation/=UUID.nil && sanitized)))
+      pure (TE.decodeUtf8 digest)
+    inflate compressed rawSize = go compressed 0 (0xffffffff :: Word32) (if mixed then Just hashInit else Nothing)
+      (Z.decompressIO Z.rawFormat Z.defaultDecompressParams{Z.decompressBufferSize=65536})
       where
-        go remaining produced crc (Z.DecompressInputRequired next) = do
+        go remaining produced crc digest (Z.DecompressInputRequired next) = do
           ensure (remaining>0)
           let count=fromInteger (min 65536 remaining)
           bytes <- BS.hGet handle count
           ensure (BS.length bytes==count)
-          next bytes >>= go (remaining-fromIntegral count) produced crc
-        go remaining produced crc (Z.DecompressOutputAvailable bytes next) = do
+          next bytes >>= go (remaining-fromIntegral count) produced crc digest
+        go remaining produced crc digest (Z.DecompressOutputAvailable bytes next) = do
           let total=produced+fromIntegral (BS.length bytes)
           ensure (total<=rawSize)
-          next >>= go remaining total (BS.foldl' crcByte crc bytes)
-        go remaining produced crc (Z.DecompressStreamEnd leftover) = do
+          let updated = fmap (`hashUpdate` bytes) digest
+          mapM_ evaluate updated
+          next >>= go remaining total (BS.foldl' crcByte crc bytes) updated
+        go remaining produced crc digest (Z.DecompressStreamEnd leftover) = do
           ensure (remaining==0 && BS.null leftover && produced==rawSize)
-          pure (toInteger (crc `xor` 0xffffffff))
-        go _ _ _ (Z.DecompressStreamError _) = throwIO ArchiveInvalid
+          pure (toInteger (crc `xor` 0xffffffff), fmap (T.pack . show . (hashFinalize :: Context SHA256 -> Digest SHA256)) digest)
+        go _ _ _ _ (Z.DecompressStreamError _) = throwIO ArchiveInvalid
 
 u16, u32, u64 :: BS.ByteString -> Int -> Integer
 u16 bytes offset = little bytes offset 2

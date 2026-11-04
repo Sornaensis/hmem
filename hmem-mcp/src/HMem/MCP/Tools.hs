@@ -36,6 +36,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.Read qualified as TextRead
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUIDv4
@@ -49,7 +50,7 @@ import HMem.Types
 import HMem.AgentSession qualified as AgentSession
 import HMem.AgentSession.Transport qualified as SessionWire
 import HMem.MCP.SessionFollower (uploadToolDefinitions)
-import HMem.MCP.TaskTriage (downloadEvidence)
+import HMem.MCP.TaskTriage (downloadEvidenceWith)
 import HMem.MCP.Attachment qualified as Attachment
 
 -- The MCP surface adapts the authorized HTTP API. The accepted context supplies
@@ -184,7 +185,7 @@ toolDefinitions =
       , "project_id" .= nullableProp "Destination project UUID, or null/omitted to detach the tasks from a project"
       ] ["task_ids"])
   , tool "task_detail" "Get the task and its full description. Find attached inputs with attachment_list using role=source, or attached evidence files with role=evidence. For completed session evidence use session_list with this task_id and activity=completed, then session_evidence." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
-  , tool "task_triage" "Download all linked completed session evidence as a verified ZIP64 archive to a new explicit local path. Bots require this task and every task linked to the exported sessions to be done or cancelled. Refuses overwrite and removes incomplete or invalid downloads. Returns archive byte count, SHA-256 and session count." (strictSchema ["workspace_id" .= prop "string" "Optional workspace override; accepted identity still required", "task_id" .= prop "string" "Task UUID", "path" .= prop "string" "New explicit local archive destination; parent directory must exist"] ["task_id","path"])
+  , tool "task_triage" "Download all linked completed session evidence as a verified ZIP64 archive to a new explicit local path. Original bytes are the default. Opt in to available-v1 for labeled sanitized entries with verified per-entry receipts. Bots require this task and every task linked to the exported sessions to be done or cancelled." (strictSchema ["workspace_id" .= prop "string" "Optional workspace override; accepted identity still required", "task_id" .= prop "string" "Task UUID", "path" .= prop "string" "New explicit local archive destination; parent directory must exist", "representation" .= object ["type" .= ("string" :: Text),"enum" .= (["available-v1"] :: [Text])]] ["task_id","path"])
   , tool "task_overview" "Get a compact task overview and dependency summaries." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
@@ -319,7 +320,7 @@ outputNullable value = object ["anyOf" .= [value, outputType "null"]]
 -- identities and download bounded byte ranges; no local uploader state exists here.
 isSessionTool :: Text -> Bool
 isSessionTool name = name `elem`
-  ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_set_runtime"]
+  ["session_create", "session_list", "session_detail", "session_tasks", "session_associate", "session_terminate", "session_read", "session_evidence", "session_archive_manifest", "session_set_runtime"]
 
 sessionToolDefinitions :: [Value]
 sessionToolDefinitions =
@@ -339,8 +340,11 @@ sessionToolDefinitions =
       ["session_id" .= uuid, "expected_offset" .= nonnegative, "expected_revision" .= nonnegative, "final_bytes" .= nonnegative
       , "final_sha256" .= object ["type" .= ("string" :: Text), "pattern" .= ("^[0-9a-f]{64}$" :: Text)]]
       ["session_id", "expected_offset", "expected_revision", "final_bytes", "final_sha256"]
-  , range "session_read" "Read active transcript bytes"
-  , range "session_evidence" "Read immutable terminated evidence bytes and final byte count/SHA-256. Bots require every task linked to the session to be done or cancelled"
+  , define "session_archive_manifest" "Get the archive state and receipt of the available sealed representation. Use the sanitized generation UUID for explicit sanitized evidence reads."
+      ["session_id" .= uuid] ["session_id"]
+  , range "session_read" "Read active transcript bytes" []
+  , range "session_evidence" "Read original terminated evidence by default. Supply sanitized_generation_id to read the selected sanitized bytes and their separate receipt. Bots require every linked task to be done or cancelled"
+      ["sanitized_generation_id" .= string "Exact immutable sanitized generation UUID from session_archive_manifest"]
   ]
   where
     runtimeIdentitySchema = object ["description" .= ("Explicit actual target model declaration; do not copy the connection caller unless it is actually that model. New nonnull declarations require the actual running agent role and model; null means unknown. See this operation's initialization/update semantics." :: Text),"anyOf" .= [object ["type" .= ("object" :: Text),"additionalProperties" .= False,"required" .= (["model","role"] :: [Text]),"properties" .= object ["role" .= string "Actual running agent role (1..128 UTF-8 bytes); never infer from the connection caller","model" .= string "Actual target model name (1..256 UTF-8 bytes)","provider" .= string "Optional known provider (1..128 UTF-8 bytes)","reasoning" .= string "Optional known reasoning setting (1..128 UTF-8 bytes)","harness" .= string "Optional actual runtime harness (1..128 UTF-8 bytes); declare only when known, never infer from provider, format or connection caller"]],object ["type" .= ("null" :: Text)]]]
@@ -353,10 +357,10 @@ sessionToolDefinitions =
         ["type" .= ("object" :: Text), "properties" .= object
           ("workspace_id" .= string "Optional workspace UUID overriding the accepted workspace; identity declaration still required" : properties)
         , "required" .= (required :: [Text]), "additionalProperties" .= False]]
-    range name description = define name
+    range name description extra = define name
       (description <> ". Returns canonical padded base64 preserving exact bytes; default 4096 bytes, max 1 MiB. Execute next_request to reconstruct all bytes. HTTP responses are capped at 2 MiB; overflow is an explicit error.")
-      ["session_id" .= uuid, "offset" .= nonnegative
-      , "limit" .= object ["type" .= ("integer" :: Text), "minimum" .= (1 :: Int), "maximum" .= (1048576 :: Int), "default" .= (4096 :: Int)]] ["session_id"]
+      (["session_id" .= uuid, "offset" .= nonnegative
+      , "limit" .= object ["type" .= ("integer" :: Text), "minimum" .= (1 :: Int), "maximum" .= (1048576 :: Int), "default" .= (4096 :: Int)]] <> extra) ["session_id"]
 
 data SessionToolCall
   = SessionCreate UUID SessionWire.CreateSessionRequest
@@ -367,6 +371,8 @@ data SessionToolCall
   | SessionAssociate UUID UUID UUID
   | SessionTerminate UUID UUID SessionWire.TerminateSessionRequest
   | SessionRead UUID UUID Bool Int64 Int
+  | SessionSanitizedRead UUID UUID UUID Int64 Int
+  | SessionArchiveManifest UUID UUID
   deriving (Show, Eq)
 
 parseSessionTool :: Text -> Value -> Either String SessionToolCall
@@ -376,9 +382,11 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
         "session_set_runtime" -> ["session_id","expected_runtime_revision","runtime_identity"]
         "session_list" -> ["task_id", "limit", "before_created_at", "before_id", "activity"]
         "session_detail" -> ["session_id"]
+        "session_archive_manifest" -> ["session_id"]
         "session_tasks" -> ["session_id", "limit", "after_task_id"]
         "session_associate" -> ["session_id", "task_id"]
         "session_terminate" -> ["session_id", "expected_offset", "expected_revision", "final_bytes", "final_sha256"]
+        "session_evidence" -> ["session_id", "offset", "limit", "sanitized_generation_id"]
         _ -> ["session_id", "offset", "limit"]
       bounded key fallback maximumValue = do
         n <- o .:? key .!= fallback
@@ -405,13 +413,21 @@ parseSessionTool name = parseEither $ withObject "session arguments" $ \o -> do
       mapM_ (either (fail . T.unpack) (const $ pure ()) . AgentSession.parseSessionActivity) activity
       SessionList workspace <$> o .:? "task_id" <*> bounded "limit" 50 100 <*> pure cursor <*> pure activity
     "session_detail" -> SessionDetail workspace <$> o .: "session_id"
+    "session_archive_manifest" -> SessionArchiveManifest workspace <$> o .: "session_id"
     "session_tasks" -> SessionTasks workspace <$> o .: "session_id" <*> bounded "limit" 50 100 <*> o .:? "after_task_id"
     "session_associate" -> SessionAssociate workspace <$> o .: "session_id" <*> o .: "task_id"
     "session_terminate" -> do
       input <- SessionWire.TerminateSessionRequest <$> o .: "expected_offset" <*> o .: "expected_revision" <*> o .: "final_bytes" <*> o .: "final_sha256"
       if input.expectedOffset < 0 || input.expectedRevision < 0 || input.finalBytes < 0 then fail "Invalid session receipt" else pure ()
       SessionTerminate workspace <$> o .: "session_id" <*> pure input
-    _ -> SessionRead workspace <$> o .: "session_id" <*> pure (name == "session_evidence") <*> nonnegative "offset" 0 <*> bounded "limit" 4096 1048576
+    "session_evidence" -> do
+      identifier <- o .: "session_id"
+      generation <- o .:? "sanitized_generation_id"
+      cursor <- nonnegative "offset" 0
+      limit <- bounded "limit" 4096 1048576
+      pure $ maybe (SessionRead workspace identifier True cursor limit)
+        (\g -> SessionSanitizedRead workspace identifier g cursor limit) generation
+    _ -> SessionRead workspace <$> o .: "session_id" <*> pure False <*> nonnegative "offset" 0 <*> bounded "limit" 4096 1048576
 
 data ToolCall
   = AttachmentCall Attachment.AttachmentCall
@@ -443,7 +459,7 @@ data ToolCall
   -- not part of BatchMoveTasksRequest, which remains the REST body.
   | TaskMoveBatch (Maybe UUID) BatchMoveTasksRequest
   | TaskDetail UUID
-  | TaskTriage UUID UUID FilePath
+  | TaskTriage UUID UUID FilePath Bool
   | TaskOverviewCall UUID
   | TaskDependency UUID UUID Text
   | TaskStart UUID
@@ -484,9 +500,13 @@ parseToolCall name args = do
     "task_move_batch" -> uncurry TaskMoveBatch <$> parseBatchMoveTasks args
     "task_detail" -> TaskDetail <$> required "task_id"
     "task_triage" -> parseEither (withObject "task triage arguments" $ \o -> do
-      if all (`elem` ["workspace_id","task_id","path"]) (KM.keys o) then pure () else fail "Unsupported fields"
+      if all (`elem` ["workspace_id","task_id","path","representation"]) (KM.keys o) then pure () else fail "Unsupported fields"
       workspace <- o .: "workspace_id"; task <- o .: "task_id"; path <- o .: "path"
-      if null path || '\0' `elem` path then fail "Explicit destination required" else pure (TaskTriage workspace task path)) args
+      selection <- o .:? "representation"
+      if null path || '\0' `elem` path then fail "Explicit destination required" else case (selection :: Maybe Text) of
+        Nothing -> pure (TaskTriage workspace task path False)
+        Just "available-v1" -> pure (TaskTriage workspace task path True)
+        _ -> fail "Invalid archive representation") args
     "task_overview" -> TaskOverviewCall <$> required "task_id"
     "task_dependency" -> TaskDependency <$> required "task_id" <*> required "depends_on_id" <*> required "action"
     "task_start" -> TaskStart <$> required "task_id"
@@ -647,10 +667,10 @@ execute attachmentScope manager base apiKey = \case
         Left errorValue -> pure errorValue
         Right () -> dispatchBatchMove manager base apiKey input
   TaskDetail tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid) Nothing fullTaskDetail
-  TaskTriage workspace tid path -> do
+  TaskTriage workspace tid path mixed -> do
     let ForwardingContext credential identity = apiKey
     provenance <- mcpProvenanceHeaders
-    downloadEvidence manager base ([("X-HMem-Bot-Identity",BL.toStrict (encode identity)),("X-HMem-Change-Cause","mcp")] <> provenance <> maybe [] (\token -> [("Authorization",TE.encodeUtf8 ("Bearer " <> token))]) credential) workspace tid path
+    downloadEvidenceWith mixed manager base ([("X-HMem-Bot-Identity",BL.toStrict (encode identity)),("X-HMem-Change-Cause","mcp")] <> provenance <> maybe [] (\token -> [("Authorization",TE.encodeUtf8 ("Bearer " <> token))]) credential) workspace tid path
   TaskOverviewCall tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid <> "/overview") Nothing compactTaskOverview
   TaskDependency tid depId "add" -> request manager base apiKey "POST" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies") (Just (encode (object ["depends_on_id" .= depId]))) compactTaskDependencyMutation
   TaskDependency tid depId "remove" -> request manager base apiKey "DELETE" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/" <> uuidPath depId) Nothing compactTaskDependencyMutation
@@ -662,6 +682,17 @@ executeSessionTool manager base credentials call = case call of
   SessionCreate workspace input -> run "POST" (root workspace) (Just (toJSON input)) $ metadata workspace (Just input.id) (Just "created") False
   SessionSetRuntime workspace sid input -> run "PUT" (path workspace sid <> "/runtime") (Just (toJSON input)) $ metadata workspace (Just sid) (Just "runtime_updated") False
   SessionDetail workspace sid -> run "GET" (path workspace sid) Nothing $ metadata workspace (Just sid) Nothing True
+  SessionArchiveManifest workspace sid -> run "GET" (path workspace sid <> "/archive?representation=available-v1") Nothing $ \value -> do
+    if textField "workspace_id" value /= Just (UUID.toText workspace) ||
+       textField "session_id" value /= Just (UUID.toText sid) ||
+       textField "state" value `notElem` map Just ["ready","preparing","retrying"] then invalid else
+      case textField "representation" value of
+        Nothing -> Right value
+        Just "sanitized-v1" | Just g <- textField "generation_id" value >>= UUID.fromText
+          , g /= UUID.nil, Just _ <- textField "content_bytes" value >>= contentLength
+          , maybe False digestShape (textField "content_sha256" value)
+          , maybe False digestShape (textField "policy_sha256" value) -> Right value
+        _ -> invalid
   SessionTerminate workspace sid input -> run "POST" (path workspace sid <> "/terminate") (Just (toJSON input)) $ metadata workspace (Just sid) (Just "terminated") False
   SessionAssociate workspace sid tid -> run "PUT" (path workspace sid <> "/tasks/" <> show tid) Nothing $ \value ->
     if value == Null then Right (object ["action" .= ("associated" :: Text), "workspace_id" .= workspace, "session_id" .= sid, "task_id" .= tid]) else invalid
@@ -697,6 +728,22 @@ executeSessionTool manager base credentials call = case call of
            , "next_offset" .= result.nextOffset, "has_more" .= result.hasMore]
            <> ["next_request" .= nextRequest (if evidence then "session_evidence" else "session_read")
                 ["workspace_id" .= workspace, "session_id" .= sid, "offset" .= result.nextOffset, "limit" .= limit] | result.hasMore])
+  SessionSanitizedRead workspace sid generation offset limit -> run "GET"
+    (path workspace sid <> "/archive/" <> show generation <> "/sanitized-evidence" <> query [("offset",Just (show offset)),("limit",Just (show limit))]) Nothing $ \value -> do
+      result <- decodeTyped value :: Either Value SessionWire.SanitizedRangeResponse
+      bytes <- either (const invalid) Right (SessionWire.decodeSessionBytes result.dataBase64)
+      size <- maybe invalid Right (contentLength result.contentBytes)
+      if result.workspaceId /= workspace || result.sessionId /= sid || result.generationId /= generation
+         || result.representation /= "sanitized-v1" || not (digestShape result.contentSha256 && digestShape result.policySha256)
+         || result.offset /= offset || result.nextOffset < offset || result.nextOffset > size
+         || result.nextOffset-offset /= fromIntegral (BS.length bytes) || BS.length bytes > limit
+         || result.hasMore /= (result.nextOffset < size) || (result.hasMore && BS.null bytes)
+        then invalid else case value of
+          Object fields -> Right $ Object $ if result.hasMore
+            then KM.insert "next_request" (nextRequest "session_evidence"
+              ["workspace_id" .= workspace,"session_id" .= sid,"sanitized_generation_id" .= generation,"offset" .= result.nextOffset,"limit" .= limit]) fields
+            else fields
+          _ -> invalid
   where
     workspacePath workspace = "/api/v1/workspaces/" <> show workspace
     root workspace = workspacePath workspace <> "/sessions"
@@ -705,6 +752,10 @@ executeSessionTool manager base credentials call = case call of
     jsonString (String value) = Just (queryText value)
     jsonString _ = Nothing
     invalid = Left (sessionToolError "invalid_response" Nothing "Invalid session response")
+    digestShape value = T.length value == 64 && T.all (`elem` ("0123456789abcdef" :: String)) value
+    contentLength value = case TextRead.decimal value of
+      Right (n,rest) | T.null rest && n <= toInteger (maxBound :: Int64) && value == T.pack (show (n :: Integer)) -> Just (fromInteger n :: Int64)
+      _ -> Nothing
     decodeTyped :: FromJSON a => Value -> Either Value a
     decodeTyped value = either (const invalid) Right (parseEither parseJSON value)
     checkSession :: UUID -> Maybe UUID -> AgentSession.AgentSession -> Either Value ()
@@ -774,7 +825,7 @@ sessionRequest manager base credentials verb target body = do
       where
         payload = decode bytes :: Maybe Value
         reported = payload >>= textField "error"
-        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_task_not_found", "session_conflict", "session_runtime_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress", "evidence_task_not_terminal"]
+        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_task_not_found", "session_conflict", "session_runtime_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress", "evidence_task_not_terminal", "original_evidence_unavailable", "archive_not_found", "archive_failed", "archive_unavailable"]
         code = case reported of Just known | known `elem` allowed -> known; _ -> "HTTP_" <> T.pack (show status)
         message = case status of
           400 -> "Invalid session request"

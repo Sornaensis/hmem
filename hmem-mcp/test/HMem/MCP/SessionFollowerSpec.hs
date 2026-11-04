@@ -40,7 +40,7 @@ import HMem.MCP.SessionHTTP
 import HMem.MCP.SessionProcess
 import HMem.MCP.Server (MCPContext(..), handleStdioLineWithRegistry, runMCPServerWithHandlesObservedWithFollowerOptions)
 import HMem.MCP.Tools (handleToolCall)
-import HMem.MCP.TaskTriage (validateArchive)
+import HMem.MCP.TaskTriage (validateArchive, validateArchiveWith)
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
@@ -49,7 +49,7 @@ import HMem.Types (Workspace(..))
 import Network.HTTP.Client (Manager, newManager, closeManager, defaultManagerSettings, managerIdleConnectionCount)
 import Network.Wai.Handler.Warp (testWithApplication)
 import Network.Wai qualified as Wai
-import Network.HTTP.Types (status200)
+import Network.HTTP.Types (hAuthorization, status200)
 import Network.HTTP.Types.URI (parseQuery)
 import System.Directory
 import System.Environment (getEnv)
@@ -67,7 +67,7 @@ spec :: Spec
 spec = describe "Session follower" $ do
 
   it "HistoricalImport uploads completed-task JSONL, retries a lost seal ack, and triages a verified archive without overwrite" $
-    withBackend $ \env wid manager base -> do
+    withBackendUsing credentialBackend $ \env wid manager base -> do
       runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>BS8.pack (show wid)<>"'")
       let original=BS.concat (replicate 42 ("{\"text\":\""<>BS.replicate 32740 97<>"\"}\r\n"))<>"[1,true]"
       withSourceFile original $ \path -> withCapturedHTTP base $ \captured -> do
@@ -109,6 +109,20 @@ spec = describe "Session follower" $ do
             nested ["structuredContent","session_count"] archived `shouldBe` Just (Number 1)
             withBinaryFile destination ReadMode validateArchive `shouldReturn` 1
             archiveBefore <- BS.readFile destination
+            withSourceFile "" $ \mixedDestination -> do
+              removeFile mixedDestination
+              mixed <- handleToolCall manager base Nothing identity (object ["name" .= ("task_triage" :: Text),
+                "arguments" .= object ["workspace_id" .= wid,"task_id" .= wid,"path" .= mixedDestination,"representation" .= ("available-v1" :: Text)]])
+              nested ["structuredContent","representation"] mixed `shouldBe` Just (String "available-v1")
+              withBinaryFile mixedDestination ReadMode (validateArchiveWith True) `shouldReturn` 1
+              bytes <- BS.readFile mixedDestination
+              let digest=TE.encodeUtf8 (Core.sessionSha256 original)
+                  changed=(if BS.head digest==48 then "1" else "0")<>BS.tail digest
+                  corrupt input = case BS.breakSubstring digest input of
+                    (prefix,rest) | BS.null rest -> prefix
+                                  | otherwise -> prefix<>changed<>corrupt (BS.drop 64 rest)
+              withSourceFile (corrupt bytes) $ \invalidArchive ->
+                withBinaryFile invalidArchive ReadMode (validateArchiveWith True) `shouldThrow` anyException
             refused <- callTriage
             nested ["structuredContent","error","code"] refused `shouldBe` Just (String "destination_exists")
             BS.readFile destination `shouldReturn` archiveBefore
@@ -1220,19 +1234,39 @@ rpc registry manager base initialized context name arguments = handleStdioLineWi
   (object ["jsonrpc" .= ("2.0" :: Text), "id" .= ("follower" :: Text), "method" .= ("tools/call" :: Text), "params" .= object ["name" .= name,"arguments" .= arguments]])))
 
 withBackend :: (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a
-withBackend action = withTestEnv $ \env -> do
+withBackend = withBackendUsing serveBackend
+
+withBackendUsing
+  :: (TestEnv -> UUID -> (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a)
+  -> (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a
+withBackendUsing serve action = withTestEnv $ \env -> do
   wid <- (.id) <$> createTestWorkspace env "follower-tests"
   -- A fixture task shares the workspace UUID only to keep call helpers small.
   runSession env.pool $ SQL.sql ("INSERT INTO tasks(id,workspace_id,title,status) VALUES ('"<>BS8.pack (show wid)<>"','"<>BS8.pack (show wid)<>"','Follower creation task','in_progress')")
-  serveBackend env wid action
+  serve env wid action
 
 serveBackend :: TestEnv -> UUID -> (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a
-serveBackend env wid action = do
+serveBackend = serveBackendWith auth authorized
+  where
+    auth = Config.defaultConfig.auth {Config.mode = Config.AuthModeDeployed, Config.enabled = False}
+    principal = Principal ActorBot "follower-tests" "Follower test" PrincipalSyntheticLocalSuperadmin
+    authorized app req respond = withPrincipalContext (Just principal) (app req respond)
+
+credentialBackend :: TestEnv -> UUID -> (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a
+credentialBackend = serveBackendWith auth attachCredential
+  where
+    base = Config.defaultConfig.auth
+    token = "follower-test-bot-token"
+    auth = base {Config.mode = Config.AuthModeLocal, Config.enabled = False,
+      Config.local = base.local {Config.botTokens = [Config.LocalBotTokenConfig "follower-tests" token]}}
+    attachCredential app req = app req
+      {Wai.requestHeaders = (hAuthorization, "Bearer " <> TE.encodeUtf8 token) : Wai.requestHeaders req}
+
+serveBackendWith :: Config.AuthConfig -> Wai.Middleware -> TestEnv -> UUID -> (TestEnv -> UUID -> Manager -> String -> IO a) -> IO a
+serveBackendWith auth authorized env wid action = do
   tracker <- newAccessTracker env.pool 3600
   websocket <- newWSState
-  let cfg = Config.defaultConfig {Config.auth = Config.defaultConfig.auth {Config.mode = Config.AuthModeDeployed, Config.enabled = False}}
-      principal = Principal ActorBot "follower-tests" "Follower test" PrincipalSyntheticLocalSuperadmin
-      authorized app req respond = withPrincipalContext (Just principal) (app req respond)
+  let cfg = Config.defaultConfig
   bracket (newPrefixRegistry env.pool) closePrefixRegistry $ \prefixes -> do
-    app <- mkAppWithPrefixProofs prefixes Nothing cfg.changeStream authorized cfg.auth cfg.cors cfg.rateLimit env.pool tracker websocket Nothing True
+    app <- mkAppWithPrefixProofs prefixes Nothing cfg.changeStream authorized auth cfg.cors cfg.rateLimit env.pool tracker websocket Nothing True
     testWithApplication (pure app) $ \port -> withManager $ \manager -> action env wid manager ("http://127.0.0.1:" <> show port)

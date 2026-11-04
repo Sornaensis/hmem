@@ -89,8 +89,9 @@ read access; creation, association, runtime changes and termination require edit
 | `session_associate` | `session_id`, `task_id` | New links require `in_progress`; existing links remain idempotent after task completion |
 | `session_terminate` | `session_id`, `expected_offset`, `expected_revision`, `final_bytes`, `final_sha256` | Explicit immutable seal receipt |
 | `session_read` | `session_id`, optional `offset`, `limit` | Active transcript byte range |
-| `session_evidence` | `session_id`, optional `offset`, `limit` | Terminated evidence byte range |
-| `task_triage` | `task_id`, `path` | Verified ZIP of all linked saved sessions to a new local destination |
+| `session_archive_manifest` | `session_id` | Available sealed representation and its receipt |
+| `session_evidence` | `session_id`, optional `offset`, `limit`, `sanitized_generation_id` | Original evidence by default, or a pinned sanitized range |
+| `task_triage` | `task_id`, `path`, optional `representation` | Verified ZIP of all linked saved sessions to a new local destination |
 | `session_import` | `session_id`, `task_id`, `path`, `format_label`, `title`, optional parent/runtime | Pending historical upload; final receipt via `session_upload_status` |
 
 Lists default to 50 rows and accept 1..100. Session lists retain the server's
@@ -364,6 +365,17 @@ The compact receipt contains `archive_bytes`, locally calculated `sha256`,
 `session_count` and `verified`. The archive digest identifies the local download;
 the server does not advertise a transfer digest. The operation has a 15-minute
 total deadline and 30-second HTTP response timeout.
+
+The default archive contains original bytes. If a complete original is
+unavailable, the operation reports `original_evidence_unavailable`. Set
+`representation` to `available-v1` to permit labeled sanitized entries.
+The client validates each entry's representation marker, length, CRC and
+uncompressed SHA-256 before publishing that ZIP.
+
+`session_archive_manifest` reports both the original seal and the separate
+content receipt for a sanitized generation. Pass its UUID as
+`sanitized_generation_id` to `session_evidence` and keep it in every
+continuation. Verify assembled bytes against `content_sha256`.
 
 `session_import` accepts an explicitly supplied completed regular JSONL file and
 returns promptly. It shares the live uploader's four-job registry, two HTTP slots,

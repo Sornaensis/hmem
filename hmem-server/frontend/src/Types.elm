@@ -1494,6 +1494,7 @@ type alias SealedSessionView =
     , rows : List SealedSessionPiece, first : String, last : String, more : Bool, canPrevious : Bool, canNext : Bool
     , pageFirst : String, pageLast : String, pageRequest : Int, scanFirst : String, scanLast : String, atBeginning : Bool, atLatest : Bool
     , rawBytes : String, compressedBytes : String, archiveGeneration : String
+    , representation : String, originalAvailable : Bool, exportMessage : String
     , renderPart : Int, renderRequest : Int, domEpoch : String
     , bodies : Dict String (List SealedSessionBody)
     , markdown : { key : String, source : String, ast : Result String (List MarkdownBlock.Block), structured : Bool, complete : Bool, nextPart : Int, request : Int } }
@@ -1502,7 +1503,7 @@ type alias SealedSessionView =
 emptySealedSessionView : SealedSessionView
 emptySealedSessionView =
     { phase = "preparing", error = Nothing, canRetry = False, http = Nothing, rows = [], first = "", last = "", more = False, canPrevious = False, canNext = False, pageFirst = "", pageLast = "", pageRequest = 0, scanFirst = "", scanLast = "", atBeginning = False, atLatest = False
-    , rawBytes = "0", compressedBytes = "0", archiveGeneration = "", renderPart = 0, renderRequest = 0, domEpoch = "", bodies = Dict.empty
+    , rawBytes = "0", compressedBytes = "0", archiveGeneration = "", representation = "", originalAvailable = True, exportMessage = "", renderPart = 0, renderRequest = 0, domEpoch = "", bodies = Dict.empty
     , markdown = {key="",source="",ast=Err "not_loaded",structured=False,complete=False,nextPart=0,request=0} }
 
 

@@ -172,6 +172,7 @@ export function updateLatestOverlay(viewport,logicalEnd,manualUp) {
 
 export function createSealedViewer({send,fetchArchive,document,window,workerFactory=()=>new Worker(new URL('./session-archive-worker.js',import.meta.url),{type:'module'}),cleanupMs=10000,custodyFactory=acquireArchiveCustody,deleteStage=deleteArchiveStage,scrollIntent=createReaderScrollIntent(),getActivePosition=()=>null,requestViewport}) {
   let active=null,pending=null,sequence=0,authority=0,blocked=false,stopped='',authorityFence='',blockedNotice='',domEpoch='',indexRetry=''
+  let downloadCleanup=null
   const clear=owned=>{
     if(!owned || active!==owned || owned.domCleared)return
     clearPageProgress(owned)
@@ -189,7 +190,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
   }
   const identity=config=>JSON.stringify([config.stamp,config.load,config.authority,authority])
   const event=(owned,kind,extra={})=>send({...extra,kind:'sealed-'+kind,stamp:owned.config.stamp,generation:owned.config.load,load:owned.config.load,request:extra.request ?? owned.lifecycleRequest,
-    workspace:owned.config.workspace,session:owned.config.session,archiveGeneration:owned.manifest?.generation_id || '',authEpoch:owned.authority,domEpoch})
+    workspace:owned.config.workspace,session:owned.config.session,archiveGeneration:owned.manifest?.generation_id || '',representation:owned.manifest?.representation || '',originalAvailable:owned.manifest?.original_available??true,authEpoch:owned.authority,domEpoch})
   const current=owned=>active===owned&&!owned.retired&&owned.authority===authority
   function clearPageProgress(owned,operation) {
     const pending=owned?.pageProgress
@@ -214,7 +215,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     if(!owned || owned.cleaning)return owned?.cleaning
     clearPageProgress(owned)
     owned.renderPending=null
-    owned.retired=true;owned.localIntent=null;owned.controller?.abort()
+    owned.retired=true;owned.localIntent=null;owned.controller?.abort();owned.exportController?.abort()
     if(owned.markdownWaiter){window.clearTimeout(owned.markdownWaiter.timer);owned.markdownWaiter.reject(Error('retired_archive'));owned.markdownWaiter=null}
     // Interrupt the current decode before awaiting the serialized cleanup.
     if(owned.started)owned.worker.postMessage({kind:'interrupt',stamp:owned.workerStamp,request:++sequence})
@@ -222,6 +223,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     owned.actualCleaning=(async()=>{
       try {
         await owned.transport?.catch(()=>{})
+        await owned.exportPromise?.catch(()=>{})
         if(owned.transportCleanupFailed)throw Error('archive_cleanup_failed')
         await owned.phaseTransition?.catch(()=>{})
         if(owned.started&&owned.worker)await rpc(owned,'retire')
@@ -296,10 +298,11 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     if(current(owned)){
       const retry=owned.retryPage;owned.retryPage=null;owned.pagePending=false
       owned.readerReady=true
-      const position=owned.config.historical?getActivePosition(owned.config.scope):null
+      const originalCoordinates=owned.manifest.representation!=='sanitized-v1'
+      const position=originalCoordinates&&owned.config.historical?getActivePosition(owned.config.scope):null
       if(position&&!owned.latestJump&&!retry){owned.handoff={...position,intent:owned.viewportIntent || 0};event(owned,'follow',{manualUp:true,anchor:position.key,fragmentAnchor:position.fragment})}
       const target=owned.handoff?pieceRank(owned.handoff.key):null
-      await page(owned,owned.latestJump?{last:true}:retry?.options || (target!==null?{...(target>0n?{after:rankKey(target-1n)}:{}),continuity:'handoff'}:owned.config.historical&&owned.config.anchor?{offset:BigInt(owned.config.anchor.split(':')[0]).toString()}:{last:true}),owned.latestJump?undefined:retry?.visibleKey)
+      await page(owned,owned.latestJump?{last:true}:retry?.options || (target!==null?{...(target>0n?{after:rankKey(target-1n)}:{}),continuity:'handoff'}:originalCoordinates&&owned.config.historical&&owned.config.anchor?{offset:BigInt(owned.config.anchor.split(':')[0]).toString()}:{last:true}),owned.latestJump?undefined:retry?.visibleKey)
     }
   }
 
@@ -467,11 +470,11 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
       }
     }catch(error){owned.failedPage={options:{...options},visibleKey};clearPageProgress(owned,operation);if(current(owned)){if(owned.latestJump){event(owned,'latest-error',{latestRequest:owned.latestJump.request,code:error.message});owned.latestJump=null}event(owned,'error',{code:error.message})}}finally{clearPageProgress(owned,operation);owned.pagePending=false;if(owned.latestJump?.phase==='page-ready')finishLatestPage(owned);else drainLocalIntent(owned)}
   }
-  async function smallJson(response,owned) {
+  async function smallJson(response,owned,limit=65536) {
     if(!response.body)throw Error('archive_response_failed')
     const reader=response.body.getReader(),parts=[];let count=0
     let primary
-    try{while(true){const part=await reader.read();if(part.done)break;count+=part.value.length;if(count>65536)throw Error('manifest_limit');parts.push(part.value)}
+    try{while(true){const part=await reader.read();if(part.done)break;count+=part.value.length;if(count>limit)throw Error('manifest_limit');parts.push(part.value)}
       const bytes=new Uint8Array(count);let at=0;for(const part of parts){bytes.set(part,at);at+=part.length}return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes))
     }catch(error){primary=error;throw error}finally{await closeReader(reader,primary,owned)}
   }
@@ -485,6 +488,11 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     }catch(error){throw new AggregateError([primary,error].filter(Boolean),'archive_cleanup_failed')}
     finally{window.clearTimeout(timer)}
   }
+  const representationMatches=(headers,manifest)=>manifest.representation==='sanitized-v1'
+    ? headers.get('X-HMem-Archive-Representation')==='sanitized-v1'
+      && headers.get('X-HMem-Archive-Content-Bytes')===manifest.content_bytes
+      && headers.get('X-HMem-Archive-Content-SHA256')===manifest.content_sha256
+    : headers.get('X-HMem-Archive-Representation')===null
   function receiveHttp(request) {
     const owned=active
     if(!owned || !current(owned) || owned.demand?.sequence!==request.sequence){send({...request,kind:'sealed-http',request:request.id,sequence:request.sequence,status:0});return}
@@ -494,7 +502,9 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     owned.transport=(async()=>{
       let response,reader,status=0,next,primary
       try {
-        const transport=await fetchArchive(transportDemand.path,{signal:owned.controller.signal,...(transportDemand.kind==='revalidate'?{headers:{'If-None-Match':owned.etag}}:{})})
+        const headers=transportDemand.kind==='revalidate'?{'If-None-Match':owned.etag}
+          :transportDemand.kind==='manifest'?{Accept:'application/vnd.hmem.session-archive+json; representation=available-v1'}:undefined
+        const transport=await fetchArchive(transportDemand.path,{signal:owned.controller.signal,headers})
         response=transport.response;status=response.status
         if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
         if(transportDemand.kind==='manifest') {
@@ -509,17 +519,17 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
             if(status!==200)throw Error(status===401||status===403?'archive_unauthorized':value.error || 'archive_unavailable')
             owned.manifest=validateManifest(value,owned.config.workspace,owned.config.session)
             owned.workerStamp={workspace:owned.config.workspace,session:owned.config.session,generation:value.generation_id,load:owned.config.load,authEpoch:owned.authority,incarnation:owned.incarnation}
-            owned.deadline=Number((BigInt(value.compressed_bytes)*2000n/12500000n)+120000n*((BigInt(value.raw_bytes)+1073741823n)/1073741824n || 1n)+5000n)
+            owned.deadline=Number((BigInt(value.compressed_bytes)*2000n/12500000n)+120000n*((BigInt(value.content_bytes??value.raw_bytes)+1073741823n)/1073741824n || 1n)+5000n)
             owned.stageName=window.crypto.randomUUID();owned.custody=window.crypto.randomUUID()
             owned.custodyAcquisition=custodyFactory(owned.stageName)
             owned.releaseCustody=await owned.custodyAcquisition
             if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
             owned.started=true
-            await rpc(owned,'start',{name:owned.stageName,custody:owned.custody,manifest:value})
+            await rpc(owned,'start',{name:owned.stageName,custody:owned.custody,manifest:owned.manifest})
             next=()=>demand(owned,owned.config.apiUrl+value.content_path,'content')
           }
         } else if(transportDemand.kind==='revalidate') {
-          if(status!==304||response.headers.get('ETag')!==owned.etag||!owned.detached)throw Error(status===401||status===403?'archive_unauthorized':'archive_revalidation_failed')
+          if(status!==304||response.headers.get('ETag')!==owned.etag||!owned.detached||!representationMatches(response.headers,owned.manifest))throw Error(status===401||status===403?'archive_unauthorized':'archive_revalidation_failed')
           if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
           next=()=>{owned.phaseTransition=adoptReader(owned).catch(error=>failure(owned,error))}
         } else {
@@ -530,7 +540,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
           if(status!==200 || !response.body || !/^application\/gzip(?:;|$)/i.test(headers.get('Content-Type')||'') || headers.get('Content-Encoding')
             || headers.get('Content-Length')!==value.compressed_bytes || headers.get('X-HMem-Archive-Generation')!==value.generation_id
             || headers.get('X-HMem-Archive-SHA256')!==value.compressed_sha256 || headers.get('X-HMem-Archive-Raw-Bytes')!==value.raw_bytes
-            || headers.get('X-HMem-Archive-Raw-SHA256')!==value.raw_sha256)throw Error(status===401||status===403?'archive_unauthorized':'archive_response_mismatch')
+            || headers.get('X-HMem-Archive-Raw-SHA256')!==value.raw_sha256 || !representationMatches(headers,value))throw Error(status===401||status===403?'archive_unauthorized':'archive_response_mismatch')
           while(true){if(!current(owned)||!transport.isCurrent())throw Error('retired_archive');const part=await reader.read();if(part.done)break
             for(let at=0;at<part.value.length;at+=65536){if(!current(owned)||!transport.isCurrent())throw Error('retired_archive');const bytes=part.value.slice(at,at+65536);await rpc(owned,'chunk',{bytes:bytes.buffer})}}
           if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
@@ -545,6 +555,96 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         if(current(owned)&&next)queueMicrotask(next)
       }
     })()
+  }
+  function cleanSanitizedDownload(staging,owned) {
+    if(staging.pending)return staging.pending
+    const fail=()=>{
+      staging.failed=true
+      if(current(owned))event(owned,'export',{message:'Temporary sanitized download cleanup is blocked. Retry cleanup before downloading again.'})
+    }
+    const timer=window.setTimeout(fail,cleanupMs)
+    staging.pending=Promise.resolve().then(staging.remove).then(()=>{
+      if(downloadCleanup===staging)downloadCleanup=null
+      if(staging.failed&&current(owned))event(owned,'export',{message:'Temporary download removed. Download again to save a new copy.'})
+    },fail).finally(()=>{window.clearTimeout(timer);staging.pending=null})
+    return staging.pending
+  }
+  function downloadSanitized(owned) {
+    const manifest=owned.manifest
+    if(!owned.readerReady || owned.exportPromise || manifest?.representation!=='sanitized-v1')return
+    if(downloadCleanup){
+      if(downloadCleanup.failed)void cleanSanitizedDownload(downloadCleanup,owned)
+      else event(owned,'export',{message:'The previous sanitized download is still being released.'})
+      return
+    }
+    const controller=new AbortController()
+    const timer=window.setTimeout(()=>controller.abort(),900000)
+    owned.exportController=controller
+    event(owned,'export',{message:'Preparing sanitized JSONL…'})
+    owned.exportPromise=(async()=>{
+      const total=Number(manifest.content_bytes),digest=sha256.create()
+      let root,name,file,writable,closed=false,published=false,authorized=()=>true,parts=[]
+      const remove=async()=>{
+        if(root&&name)try{await root.removeEntry(name)}catch(error){if(error.name!=='NotFoundError')throw error}
+      }
+      const stillAuthorized=()=>current(owned)&&!controller.signal.aborted&&authorized()
+      try {
+        if(window.navigator?.storage?.getDirectory){
+          root=await(await window.navigator.storage.getDirectory()).getDirectoryHandle('hmem-downloads',{create:true})
+          name='hmem-download-'+window.crypto.randomUUID()+'.jsonl'
+          file=await root.getFileHandle(name,{create:true})
+          writable=await file.createWritable()
+        } else if(total>33554432)throw Error('download_storage_unavailable')
+        let offset=0
+        do {
+          if(!stillAuthorized())throw Error('retired_archive')
+          const url=owned.config.apiUrl+manifest.evidence_path+'?limit=65536&offset='+offset
+          const transport=await fetchArchive(url,{signal:controller.signal}),response=transport.response
+          authorized=transport.isCurrent
+          if(!response.ok){await response.body?.cancel();throw Error('archive_response_failed')}
+          const value=await smallJson(response,owned,98304),bytes=decodeBase64(value.data_base64),end=offset+bytes.length
+          if(!stillAuthorized()||value.workspace_id!==manifest.workspace_id||value.session_id!==manifest.session_id
+            ||value.generation_id!==manifest.generation_id||value.representation!==manifest.representation
+            ||value.policy_sha256!==manifest.policy_sha256||value.content_bytes!==manifest.content_bytes||value.content_sha256!==manifest.content_sha256
+            ||value.offset!==offset||value.next_offset!==end||bytes.length!==Math.min(65536,total-offset)||value.has_more!==(end<total))throw Error('archive_receipt_mismatch')
+          digest.update(bytes)
+          if(writable)await writable.write(bytes);else parts.push(new Blob([bytes]))
+          offset=end
+        }while(offset<total)
+        if(hex(digest.digest())!==manifest.content_sha256)throw Error('archive_receipt_mismatch')
+        if(writable){await writable.close();closed=true}
+        const verified=file?await file.getFile():new Blob(parts,{type:'application/x-ndjson'})
+        if(!stillAuthorized()||verified.size!==total)throw Error('retired_archive')
+        const url=window.URL.createObjectURL(verified),link=document.createElement('a')
+        link.href=url;link.download=manifest.session_id+'-sanitized.jsonl'
+        try{if(!stillAuthorized())throw Error('retired_archive');link.click()}catch(error){window.URL.revokeObjectURL(url);throw error}
+        published=true
+        const staging={remove}
+        downloadCleanup=staging
+        let disposed=false
+        const dispose=()=>{
+          if(disposed)return
+          disposed=true;window.clearTimeout(releaseTimer);window.removeEventListener?.('pagehide',dispose)
+          window.URL.revokeObjectURL(url)
+          void cleanSanitizedDownload(staging,owned)
+        }
+        const releaseTimer=window.setTimeout(dispose,60000)
+        window.addEventListener?.('pagehide',dispose,{once:true})
+        event(owned,'export',{message:'Sanitized JSONL downloaded.'})
+      } finally {
+        digest.destroy();parts=[]
+        if(!published){
+          try{if(writable&&!closed)await writable.abort()}
+          finally{
+            const staging={remove}
+            downloadCleanup=staging
+            await cleanSanitizedDownload(staging,owned)
+          }
+        }
+      }
+    })().catch(error=>{if(current(owned)&&!downloadCleanup?.failed)event(owned,'export',{message:error.message==='download_storage_unavailable'
+      ?'This browser needs temporary file storage for large sanitized downloads.':'Sanitized download could not finish.'})})
+      .finally(()=>{window.clearTimeout(timer);owned.exportController=null;owned.exportPromise=null})
   }
   const demandManifest=owned=>demand(owned,owned.config.apiUrl+`/api/v1/workspaces/${encodeURIComponent(owned.config.workspace)}/sessions/${encodeURIComponent(owned.config.session)}/archive`,'manifest')
   async function readMarkdown(owned,key) {
@@ -746,6 +846,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     else if(action==='body')void page(owned,{...owned.page,bodyKey:button.getAttribute('data-sealed-key'),bodyPart:Number(button.getAttribute('data-sealed-part'))})
     else if(action==='render')renderPart(owned,Number(button.getAttribute('data-sealed-part')))
     else if(action==='markdown')void readMarkdown(owned,button.getAttribute('data-sealed-key'))
+    else if(action==='download-sanitized')downloadSanitized(owned)
     else if(action==='search'){const input=document.getElementById('sealed-search');void page(owned,{query:input?.value || ''})}
     else if(action==='position'){const input=document.getElementById('sealed-position');void page(owned,{offset:input?.value || '0'})}
   })

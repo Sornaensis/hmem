@@ -62,6 +62,76 @@ const makeManifest=(h,raw,gzip)=>({workspace_id:h.fixture.workspace.id,session_i
 const workerAsset=async()=>'/assets/'+(await readdir('../static/assets')).find(name=>/^session-archive-worker-.*\.js$/.test(name))
 const profileScratch=()=>resolve(process.env.HMEM_ARCHIVE_PROFILE_SCRATCH || '../../.tmp/sealed-archives-e0ac6260')
 
+test('sanitized viewer labels and downloads the selected content receipt',{timeout:45000},async()=>{
+ const original=Buffer.from('{"text":"opaque original content"}\r\n{"text":"tail"}')
+ const content=Buffer.from('{"text":"Encrypted Payload"}\r\n{"text":"tail"}'),gzip=gzipSync(content)
+ const h=await openSessionExplorer({transcriptBytes:original}),{page}=h
+ try{
+  await page.addInitScript(()=>{
+   const set=window.setTimeout.bind(window),clear=window.clearTimeout.bind(window),longTimers=new WeakMap()
+   const add=window.addEventListener.bind(window),remove=window.removeEventListener.bind(window),owned=new WeakSet()
+   const removeEntry=FileSystemDirectoryHandle.prototype.removeEntry
+   window.sanitizedCleanup={added:0,removed:0,attempts:0}
+   window.setTimeout=(handler,delay,...args)=>{
+    const timer=set(handler,delay,...args)
+    if(delay===60000&&typeof handler==='function')longTimers.set(handler,timer)
+    return timer
+   }
+   window.addEventListener=(kind,handler,options)=>{
+    if(kind==='pagehide'&&longTimers.has(handler)){
+     clear(longTimers.get(handler));owned.add(handler);window.sanitizedCleanup.added++;set(handler,1500)
+    }
+    add(kind,handler,options)
+   }
+   window.removeEventListener=(kind,handler,options)=>{
+    if(kind==='pagehide'&&owned.has(handler)){owned.delete(handler);window.sanitizedCleanup.removed++}
+    remove(kind,handler,options)
+   }
+   FileSystemDirectoryHandle.prototype.removeEntry=async function(name,options){
+    if(name.startsWith('hmem-download-')&&++window.sanitizedCleanup.attempts===1)
+     throw new DOMException('fixture removal failure','NoModificationAllowedError')
+    return removeEntry.call(this,name,options)
+   }
+  })
+  const exact=makeManifest(h,original,gzip),root=exact.content_path.slice(0,-8)
+  const manifest={...exact,representation:'sanitized-v1',content_bytes:String(content.length),content_sha256:hash(content),
+    policy_sha256:'a'.repeat(64),original_available:false,content_path:root+'/sanitized-content',evidence_path:root+'/sanitized-evidence'}
+  const headers={'Content-Type':'application/gzip','Content-Length':String(gzip.length),ETag:phaseArchiveETag,
+    'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(original.length),
+    'X-HMem-Archive-Raw-SHA256':hash(original),'X-HMem-Archive-Representation':'sanitized-v1',
+    'X-HMem-Archive-Content-Bytes':String(content.length),'X-HMem-Archive-Content-SHA256':hash(content)}
+  await page.route('**/sessions/**/archive**',route=>{
+   const request=route.request(),url=new URL(request.url())
+   if(url.pathname.endsWith('/sanitized-content'))return request.headers()['if-none-match']
+     ? route.fulfill({status:304,headers}):route.fulfill({headers,body:gzip})
+   if(url.pathname.endsWith('/sanitized-evidence')){
+    assert.equal(url.searchParams.get('offset'),'0')
+    return route.fulfill({json:{workspace_id:manifest.workspace_id,session_id:manifest.session_id,generation_id:generation,
+      representation:'sanitized-v1',policy_sha256:manifest.policy_sha256,content_bytes:manifest.content_bytes,
+      content_sha256:manifest.content_sha256,offset:0,next_offset:content.length,has_more:false,data_base64:content.toString('base64')}})
+   }
+   assert.match(request.headers().accept,/representation=available-v1/)
+   return route.fulfill({json:manifest})
+  })
+  await h.start();await h.idle();await page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
+  await page.getByText('Verified sanitized transcript.',{exact:true}).waitFor()
+  await page.getByText('Encrypted Payload',{exact:true}).waitFor()
+  assert.equal(await page.getByText('opaque original content',{exact:true}).count(),0)
+  const downloading=page.waitForEvent('download')
+  await page.getByRole('button',{name:'↓ Download sanitized JSONL',exact:true}).click()
+  const download=await downloading
+  assert.equal(download.suggestedFilename(),h.saved.id+'-sanitized.jsonl')
+  const parts=[]
+  for await(const bytes of await download.createReadStream())parts.push(bytes)
+  assert.deepEqual(Buffer.concat(parts),content)
+  await page.getByText('Temporary sanitized download cleanup is blocked. Retry cleanup before downloading again.',{exact:true}).waitFor()
+  await page.getByRole('button',{name:'↓ Download sanitized JSONL',exact:true}).click()
+  await page.getByText('Temporary download removed. Download again to save a new copy.',{exact:true}).waitFor()
+  assert.deepEqual(await page.evaluate(()=>window.sanitizedCleanup),{added:1,removed:1,attempts:2})
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
 test('Jump to latest reaches a verified final archive page and its actual last formatted part',{timeout:45000},async()=>{
  const destination='https://example.test/'+'x'.repeat(12000),markdown=Array.from({length:800},(_,i)=>`[Final occurrence ${i}][late]`).join(' ')+'\n\n[late]: '+destination
  const raw=Buffer.from([...Array.from({length:180},(_,i)=>({text:`Archive occurrence ${i}`})),{text:markdown}].map(record=>JSON.stringify(record)+'\n').join(''))

@@ -774,7 +774,9 @@ sessionBridge = installSessionBridge(app, { workerFactory:({incarnation,mode})=>
   if(!isApiRequestUrl(url))throw new Error('invalid_archive_origin')
   const generation=authTokenGeneration,signature=authTokenSignature()
   const isCurrent=()=>generation===authTokenGeneration&&signature===authTokenSignature()
-  const response=await fetch(url,{method:'GET',headers:{...authHeaderObject(),...(headers?.['If-None-Match']?{'If-None-Match':headers['If-None-Match']}: {})},credentials:'include',signal})
+  const response=await fetch(url,{method:'GET',headers:{...authHeaderObject(),
+    ...(headers?.Accept?{Accept:headers.Accept}:{}),
+    ...(headers?.['If-None-Match']?{'If-None-Match':headers['If-None-Match']}: {})},credentials:'include',signal})
   if(response.status===401&&isCurrent())notifyUnauthorized()
   return {response,isCurrent}
 } })

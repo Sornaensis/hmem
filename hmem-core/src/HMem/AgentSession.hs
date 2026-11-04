@@ -199,7 +199,7 @@ data SessionRange = SessionRange
   , nextOffset :: !Int64, hasMore :: !Bool
   } deriving stock (Show, Eq)
 
-data SessionErrorCode = SessionNotFound | SessionTaskNotFound | SessionConflict | SessionRuntimeConflict | SessionTerminated | SessionInvalidInput | SessionTaskNotInProgress !Text
+data SessionErrorCode = SessionNotFound | SessionTaskNotFound | SessionConflict | SessionRuntimeConflict | SessionTerminated | SessionOriginalUnavailable | SessionReplayUnavailable | SessionInvalidInput | SessionTaskNotInProgress !Text
   deriving stock (Show, Eq)
 data SessionException = SessionException
   { code :: !SessionErrorCode, message :: !Text

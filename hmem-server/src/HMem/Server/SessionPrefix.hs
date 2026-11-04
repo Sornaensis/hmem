@@ -25,6 +25,7 @@ import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
 import System.Timeout (timeout)
 
+import HMem.AgentSession qualified as Session
 import HMem.AgentSession.Transport qualified as Wire
 import HMem.DB.AgentSession qualified as DB
 
@@ -269,6 +270,8 @@ turn registry job = mask $ \restore -> do
                 writeTVar job.progress updated { phase = if digest == job.target.request.sha256 then "verified" else "mismatch", completedAt = Just updatedAt }
                 pure False
               | otherwise -> writeTVar job.progress updated >> writeTBQueue registry.ready job >> pure True
+            Left failure | Just (Session.SessionException Session.SessionOriginalUnavailable _) <- fromException failure ->
+              writeTVar job.progress (failed "original_evidence_unavailable") >> pure False
             _ -> writeTVar job.progress (failed "verification_unavailable") >> pure False
         else pure False
   -- A successful handoff transfers this turn's ownership to the queue. Later

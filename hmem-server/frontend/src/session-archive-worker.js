@@ -126,7 +126,12 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       current()
       const [index,block]=blocks[at],identity=row.activityAnchors[index] || ''
       if(block.kind!=='text'){
-        if(group?.key!==identity)return store.get('groups',identity).then(value=>{current();group=value || {key:identity,count:'0'};return indexBlocks(row,transition,blocks,at)})
+        if(group?.key!==identity){
+          // Only an unpaired anchor minted at this record and block is new.
+          // Looking it up would flush the index batch before every tool group.
+          if(!transition.paired && identity===`${row.offset}:${index}`)group={key:identity,count:'0'}
+          else return store.get('groups',identity).then(value=>{current();group=value || {key:identity,count:'0'};return indexBlocks(row,transition,blocks,at)})
+        }
         group={...group,endTime:row.time,...(!transition.paired?{count:(BigInt(group.count)+1n).toString()}:{})}
         const pending=store.put('groups',group)
         if(pending)return pending.then(()=>afterGroup(row,transition,blocks,at))

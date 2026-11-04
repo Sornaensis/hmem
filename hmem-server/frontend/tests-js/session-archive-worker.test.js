@@ -172,6 +172,29 @@ test('non-flush indexing completes a whole chunk without per-record promise turn
   })
 })
 
+test('fresh activity groups batch without reads and keep carried and paired occurrence counts',async()=>{
+  const timestamp='2026-01-01T00:00:00Z'
+  const message=text=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})
+  const call=name=>({type:'response_item',payload:{type:'function_call',name,arguments:'{}'}})
+  const pairedEvent={type:'event_msg',timestamp,payload:{type:'agent_reasoning',text:'{\n  "a": 1\n}'}}
+  const pairedRecord={type:'response_item',timestamp,payload:{type:'reasoning',summary:{a:1}}}
+  const values=[message('First'),call('one'),call('two'),message('Reset'),pairedEvent,pairedRecord,message('Reset again'),call('three')]
+  let groupReads=0
+  await stagedEngine(values,store=>{
+    const get=store.get
+    store.get=(table,key)=>{if(table==='groups')groupReads++;return get(table,key)}
+  },async(engine,store)=>{
+    await engine.finish()
+    assert.equal(groupReads,0,'fresh monotonic groups must not force an IndexedDB lookup and flush')
+    const groups=[...store.tables.groups.values()]
+    assert.deepEqual(groups.map(value=>value.count),['2','1','1'])
+    assert.equal(groups[1].endTime,timestamp)
+    const pieces=[...store.tables.pieces.values()].filter(piece=>piece.group)
+    assert.deepEqual(pieces.map(piece=>piece.group),[groups[0].key,groups[0].key,groups[1].key,groups[2].key])
+    assert.equal(store.published,true)
+  })
+})
+
 test('mid-group enqueue resumes once and publication waits for the terminal flush',async()=>{
   let releaseGroup,releaseTerminal,groupHeld=false,publishEntered=false
   const groupGate=new Promise(resolve=>{releaseGroup=resolve}),terminalGate=new Promise(resolve=>{releaseTerminal=resolve})

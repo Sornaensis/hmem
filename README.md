@@ -6,7 +6,7 @@
 hmem stores repository observations, projects, and tasks in PostgreSQL, with a web
 interface, HTTP API, and MCP tools.
 
-https://github.com/user-attachments/assets/4586ebf3-8190-46d9-9cd3-891023db868f
+![hmem walkthrough showing tasks, observations, and the timeline](docs/media/hmem-walkthrough.gif)
 
 ## Native installation
 

@@ -3,6 +3,8 @@
 
 <img src="hmem-server/frontend/public/hmem-logo.svg" alt="hmem connected memory logo" width="366" height="96" />
 
+![hmem walkthrough showing tasks, observations, and the timeline](docs/media/hmem-walkthrough.gif)
+
 hmem stores repository observations, projects, and tasks in PostgreSQL, with a web
 interface, HTTP API, and MCP tools.
 
@@ -84,10 +86,6 @@ identity fields.
 Use your client's actual role and model identity. See
 [MCP setup](hmem-mcp/README.md) for client configuration or
 [Docker MCP setup](docker.md#mcp-stdio-client) for authenticated deployments.
-
-## Walkthrough
-
-![hmem walkthrough showing tasks, observations, and the timeline](docs/media/hmem-walkthrough.gif)
 
 ## Native installation
 

@@ -20,6 +20,14 @@ auth:
 web:
   static_dir: hmem-server/static
 
+document_delivery:
+  application_origin: http://127.0.0.1:8420
+  download_origin: http://127.0.0.1:8420
+  preview_origin: http://localhost:8421
+  proxy_auth_cookie_domains: []
+  preview_listen_host: 127.0.0.1
+  preview_listen_port: 8421
+
 document_previews:
   enabled: true
   python_executable: /absolute/path/to/python3

@@ -17,11 +17,15 @@ tabsWithEvidence evidenceAvailable kind entityId current select =
     sectionTabs evidenceAvailable kind entityId current select [ ( "work", "Work" ), ( "evidence", "Evidence" ), ( "history", "History" ) ]
 
 
-taskTabs : Maybe Int -> String -> String -> (String -> msg) -> Html msg
-taskTabs evidenceTotal entityId current select =
+taskTabs : Maybe Int -> Maybe Int -> String -> String -> (String -> msg) -> Html msg
+taskTabs sourceTotal evidenceTotal entityId current select =
+    let
+        countedLabel label total =
+            label ++ (total |> Maybe.map (String.fromInt >> (++) " · ") |> Maybe.withDefault "")
+    in
     sectionTabs (evidenceTotal /= Just 0) "Task" entityId current select
-        [ ( "work", "Work" ), ( "sources", "Sources" )
-        , ( "evidence", "Evidence" ++ (evidenceTotal |> Maybe.map (String.fromInt >> (++) " · ") |> Maybe.withDefault "") )
+        [ ( "work", "Work" ), ( "sources", countedLabel "Sources" sourceTotal )
+        , ( "evidence", countedLabel "Evidence" evidenceTotal )
         , ( "history", "History" )
         ]
 
@@ -40,7 +44,13 @@ sectionTabs evidenceAvailable kind entityId current select sections =
                     , Html.Attributes.disabled (name == "evidence" && not evidenceAvailable)
                     , onClick (select name)
                     ]
-                    ++ (if kind == "Task" && name == "evidence" then [ attribute "aria-label" "Evidence", attribute "aria-description" label ] else [])
+                    ++ (if kind == "Task" && List.member name [ "sources", "evidence" ] then
+                            [ attribute "aria-label" (if name == "sources" then "Sources" else "Evidence")
+                            , attribute "aria-description" label
+                            ]
+                        else
+                            []
+                       )
                     )
                     [ text label ]
             )

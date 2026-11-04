@@ -166,9 +166,11 @@ test('Sources and paged evidence share derivatives and original downloads in the
     const before = await layout()
     await card.locator('.card-details-control').click()
     const evidenceTab = card.getByRole('button', { name: 'Evidence', exact: true })
+    const sourcesTab = card.getByRole('button', { name: 'Sources', exact: true })
     await until(async () => (await evidenceTab.innerText()) === 'Evidence · 29')
+    assert.equal(await sourcesTab.innerText(), 'Sources · 2')
     assert.equal(await card.getByRole('button', { name: 'Work', exact: true }).getAttribute('aria-pressed'), 'true')
-    await card.getByRole('button', { name: 'Sources', exact: true }).click()
+    await sourcesTab.click()
     const sourcePanel = card.locator('#task-' + task + '-sources')
     await sourcePanel.getByText('Fixture uploader', { exact: false }).first().waitFor()
     assert.deepEqual(await layout(), before)
@@ -208,13 +210,17 @@ test('Sources and paged evidence share derivatives and original downloads in the
     await sourcePanel.getByText('diagram-😀.txt', { exact: true }).waitFor()
     await until(async () => (await evidenceTab.innerText()) === 'Evidence · 29')
     await sourcePanel.getByRole('heading', { name: 'Sources · 3' }).waitFor()
+    assert.equal(await sourcesTab.innerText(), 'Sources · 3')
     await sourcePanel.getByRole('button', { name: 'Remove from Sources: screen.png' }).click()
     await sourcePanel.getByText('screen.png', { exact: true }).waitFor({ state: 'detached' })
     await sourcePanel.getByText('Preview unavailable — export PNG or PDF').waitFor()
+    await until(async () => (await sourcesTab.innerText()) === 'Sources · 2')
+    assert.equal(await evidenceTab.innerText(), 'Evidence · 29')
 
     evidence.push(pdf)
     await push(h, 'task_document', pdf.id, 'created', taskHints(task))
     await until(async () => (await evidenceTab.innerText()) === 'Evidence · 30')
+    assert.equal(await sourcesTab.innerText(), 'Sources · 2')
     await evidenceTab.click()
     const documents = card.locator('#task-' + task + '-evidence').getByRole('region', { name: 'Document evidence' })
     await documents.getByText('screen.png', { exact: true }).waitFor()
@@ -302,6 +308,69 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.deepEqual(h.unhandled, [])
   } finally {
     releaseRefresh()
+    await h.close()
+  }
+})
+
+test('Source tabs distinguish pending counts from zero and keep each canonical total through refresh', { timeout: 45000 }, async () => {
+  const h = distinctTasks(await openSessionExplorer())
+  const { page } = h
+  const [first, second] = h.fixture.tasks
+  const source = item(first.id, 20, 'source', 'visible.txt', 'text/plain', Buffer.from('sample source'))
+  source.document.preview_state = 'unsupported'
+  let firstTotal = 5, firstRequested = false, releaseFirst
+  const firstRead = new Promise(resolve => { releaseFirst = resolve })
+  await page.route('**/tasks/*/documents/counts', async route => {
+    const isFirst = new URL(route.request().url()).pathname.endsWith('/' + first.id + '/documents/counts')
+    if (isFirst) {
+      firstRequested = true
+      await firstRead
+    }
+    return route.fulfill({ json: counts(isFirst ? firstTotal : 0, 0, 0) })
+  })
+  await page.route('**/tasks/*/documents?**', route => {
+    const isFirst = new URL(route.request().url()).pathname.endsWith('/' + first.id + '/documents')
+    return route.fulfill({ json: { items: isFirst ? [source] : [], next_cursor: null } })
+  })
+
+  try {
+    await h.start()
+    await h.idle()
+    const firstCard = page.locator('#entity-' + first.id)
+    const secondCard = page.locator('#entity-' + second.id)
+    const firstTab = firstCard.getByRole('button', { name: 'Sources', exact: true })
+    const secondTab = secondCard.getByRole('button', { name: 'Sources', exact: true })
+    await firstCard.locator('.card-details-control').click()
+    await until(() => firstRequested)
+    assert.equal(await firstTab.innerText(), 'Sources')
+    assert.equal(await firstTab.isEnabled(), true)
+    await secondCard.locator('.card-details-control').click()
+    await until(async () => (await secondTab.innerText()) === 'Sources · 0')
+    await secondTab.click()
+    await secondCard.getByText('No Sources.', { exact: true }).waitFor()
+    releaseFirst()
+    await until(async () => (await firstTab.innerText()) === 'Sources · 5')
+    assert.equal(await firstTab.getAttribute('aria-pressed'), 'false')
+    await firstTab.click()
+    await firstCard.getByText('visible.txt', { exact: true }).waitFor()
+    assert.equal(await firstTab.innerText(), 'Sources · 5', 'the canonical total is independent of visible rows')
+    assert.equal(await firstTab.getAttribute('aria-description'), 'Sources · 5')
+
+    firstTotal = 7
+    await push(h, 'task_document', source.id, 'created', taskHints(first.id))
+    await until(async () => (await firstTab.innerText()) === 'Sources · 7')
+    assert.equal(await secondTab.innerText(), 'Sources · 0')
+
+    firstTotal = 8
+    const resync = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/change-stream/resync')
+    await page.evaluate(() => window.pushHierarchyFrames([{ schema_version: 1, type: 'resync_required' }]))
+    await resync
+    await until(async () => (await firstTab.innerText()) === 'Sources · 8')
+    assert.equal(await firstTab.getAttribute('aria-pressed'), 'true')
+    assert.equal(await secondTab.innerText(), 'Sources · 0')
+    assert.deepEqual(h.errors, [])
+  } finally {
+    releaseFirst()
     await h.close()
   }
 })

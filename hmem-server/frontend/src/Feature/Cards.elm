@@ -2461,7 +2461,12 @@ viewTaskCardBody descendants projection showProject model task =
                 div [ class "card-extras", id (CardSections.detailsId "task" task.id) ]
                     [ div [ class "card-details-toolbar" ]
                         [ CardSections.cardDisclosure True (CardSections.detailsId "task" task.id) ("task: " ++ task.title) (ToggleCardExpand task.id)
-                        , CardSections.taskTabs (Documents.count "total" model task.id) task.id currentSection (SetTaskCardSection task.id)
+                        , CardSections.taskTabs
+                            (Documents.count "source" model task.id)
+                            (Documents.count "total" model task.id)
+                            task.id
+                            currentSection
+                            (SetTaskCardSection task.id)
                         ]
                     , panel "work" [if showProject then
                         case projectName of

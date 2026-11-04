@@ -4,8 +4,10 @@
 module HMem.DB.SessionArchive
   ( ArchiveJob(..), ArchiveManifest(..), ArchivePart(..), ArchiveCheckpoint(..), ArchiveLedger(..)
   , ArchiveLease(..), ArchiveVerification(..)
+  , ArchiveReplacementSnapshot(..), SanitizedContent(..), SanitizedBlock(..), readArchiveReplacementSnapshot
   , enqueueArchives, claimArchive, renewArchive, releaseArchive, archiveProgress
   , stageArchivePart, stageArchiveCheckpoint, stageArchiveLedger, publishArchive
+  , stageSanitizedContent, stageSanitizedBlock, readStagedSanitizedBlock, publishSanitizedArchive
   , getArchiveJob, getPublishedArchive, readArchivePart, findArchiveCheckpoint, readArchiveLedger
   , readStagedPart, cleanupArchiveGeneration, cleanupNextArchiveGeneration
   , ArchiveReceipt(..), ArchiveSourceChunk(..), readArchiveReceipt, readArchiveSourceChunk
@@ -60,6 +62,18 @@ data ArchiveLease = ArchiveLease
 data ArchiveVerification = ArchiveVerification
   { compressedBytes :: !Int64, compressedSha256 :: !Text, partCount :: !Int64
   , checkpointCount :: !Int64, ledgerCount :: !Int64
+  } deriving stock (Show, Eq)
+
+data ArchiveReplacementSnapshot = ArchiveReplacementSnapshot
+  { snapshotBytes :: !ByteString, eligibleFrom :: !UTCTime, formatLabel :: !Text
+  } deriving stock (Show, Eq)
+
+data SanitizedContent = SanitizedContent
+  { policySha256 :: !Text, contentBytes :: !Int64, contentSha256 :: !Text, replacementCount :: !Int64
+  } deriving stock (Show, Eq)
+
+data SanitizedBlock = SanitizedBlock
+  { ordinal :: !Int64, startOffset :: !Int64, endOffset :: !Int64, contentSha256 :: !Text
   } deriving stock (Show, Eq)
 
 data ArchivePart = ArchivePart
@@ -192,18 +206,59 @@ stageArchiveLedger pool lease after limit=do
     (contramap (\(l,_,_)->l) leaseParams<>param (\(_,r,_)->r) E.int8<>param (\(_,_,n)->n) E.int4) (D.singleRow (column D.int8))
 
 publishArchive :: Pool H.Connection -> ArchiveLease -> ArchiveVerification -> IO Bool
-publishArchive pool lease verified=do
+publishArchive pool lease verified=publishArchiveWith pool lease verified Nothing
+
+publishSanitizedArchive :: Pool H.Connection -> ArchiveLease -> ArchiveVerification -> SanitizedContent -> IO Bool
+publishSanitizedArchive pool lease verified content=publishArchiveWith pool lease verified (Just content)
+
+publishArchiveWith :: Pool H.Connection -> ArchiveLease -> ArchiveVerification -> Maybe SanitizedContent -> IO Bool
+publishArchiveWith pool lease verified content=do
   guardInput (verified.compressedBytes>=20 && verified.partCount>0 && verified.checkpointCount>0 && verified.ledgerCount>=0)
-  outcome <- withLease pool lease $ S.statement (lease,verified) $ statement
-    "UPDATE session_archive_generations g SET published_at=clock_timestamp(),compressed_bytes=$6,compressed_sha256=$7,part_count=$8,checkpoint_count=$9,ledger_count=$10,metadata_sha256=hmem_archive_binding('',jsonb_build_array(g.id,g.session_id,g.workspace_id,g.codec,g.codec_implementation,g.codec_parameters,g.raw_bytes,g.raw_records,g.raw_revision,g.raw_sha256,$6::bigint,$7::text,$8::bigint,$9::bigint,$10::bigint,(SELECT binding_sha256 FROM session_archive_parts WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),(SELECT binding_sha256 FROM session_archive_checkpoints WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),coalesce((SELECT binding_sha256 FROM session_archive_ledger WHERE generation_id=g.id ORDER BY revision DESC LIMIT 1),''))) WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND g.lease_token=$4 AND g.attempt=$5"
-    (contramap fst leaseParams<>param ((.compressedBytes) . snd) E.int8<>param ((.compressedSha256) . snd) E.text<>param ((.partCount) . snd) E.int8<>param ((.checkpointCount) . snd) E.int8<>param ((.ledgerCount) . snd) E.int8) D.noResult
+  let identity=contramap fst leaseParams<>param ((.compressedBytes) . snd) E.int8<>param ((.compressedSha256) . snd) E.text
+        <>param ((.partCount) . snd) E.int8<>param ((.checkpointCount) . snd) E.int8<>param ((.ledgerCount) . snd) E.int8
+      params=contramap fst identity<>contramap (fmap (.policySha256) . snd) (E.param (E.nullable E.text))
+        <>contramap (fmap (.contentBytes) . snd) (E.param (E.nullable E.int8))
+        <>contramap (fmap (.contentSha256) . snd) (E.param (E.nullable E.text))
+        <>contramap (fmap (.replacementCount) . snd) (E.param (E.nullable E.int8))
+      fence="g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND g.lease_token=$4 AND g.attempt=$5"
+      contentReceipt="(v.policy_sha256,v.content_bytes,v.content_sha256,v.replacement_count) IS NOT DISTINCT FROM ($11::text,$12::bigint,$13::text,$14::bigint)"
+  outcome <- withLease pool lease $ S.statement ((lease,verified),content) $ statement
+    ("UPDATE session_archive_generations g SET published_at=clock_timestamp(),compressed_bytes=$6,compressed_sha256=$7,part_count=$8,checkpoint_count=$9,ledger_count=$10,metadata_sha256=(SELECT CASE WHEN $11::text IS NULL THEN binding ELSE hmem_archive_sanitized_binding(binding,g.id) END FROM (SELECT hmem_archive_binding('',jsonb_build_array(g.id,g.session_id,g.workspace_id,g.codec,g.codec_implementation,g.codec_parameters,g.raw_bytes,g.raw_records,g.raw_revision,g.raw_sha256,$6::bigint,$7::text,$8::bigint,$9::bigint,$10::bigint,(SELECT binding_sha256 FROM session_archive_parts WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),(SELECT binding_sha256 FROM session_archive_checkpoints WHERE generation_id=g.id ORDER BY ordinal DESC LIMIT 1),coalesce((SELECT binding_sha256 FROM session_archive_ledger WHERE generation_id=g.id ORDER BY revision DESC LIMIT 1),''))) AS binding) m) WHERE "<>fence<>
+     " AND ($11::text IS NULL OR EXISTS(SELECT 1 FROM session_archive_sanitized_contents v WHERE v.generation_id=g.id AND "<>contentReceipt<>")) RETURNING g.id")
+    params (D.rowMaybe (column D.uuid))
   case outcome of
-    Just () -> pure True
-    Nothing -> do
-      existing <- getPublishedArchive pool lease.workspaceId lease.sessionId
-      pure $ case existing of
-        Just m -> m.id==lease.generationId && m.attempt==lease.attempt && m.compressedBytes==verified.compressedBytes && m.compressedSha256==verified.compressedSha256 && m.partCount==verified.partCount && m.checkpointCount==verified.checkpointCount && m.ledgerCount==verified.ledgerCount
-        _ -> False
+    Just published -> pure (maybe False (const True) published)
+    Nothing -> runSession pool $ S.statement ((lease,verified),content) $ statement
+      ("SELECT EXISTS(SELECT 1 FROM session_archive_generations g JOIN session_archive_jobs j ON (j.generation_id,j.session_id,j.workspace_id)=(g.id,g.session_id,g.workspace_id) LEFT JOIN session_archive_sanitized_contents v ON v.generation_id=g.id WHERE "<>fence<>
+       " AND j.state='ready' AND g.published_at IS NOT NULL AND (g.compressed_bytes,g.compressed_sha256,g.part_count,g.checkpoint_count,g.ledger_count)=($6,$7,$8,$9,$10) AND "<>contentReceipt<>")")
+      params (D.singleRow (column D.bool))
+
+readArchiveReplacementSnapshot :: Pool H.Connection -> ArchiveLease -> IO (Maybe (Maybe ArchiveReplacementSnapshot))
+readArchiveReplacementSnapshot pool lease=withLease pool lease $ S.statement (lease.workspaceId,lease.sessionId) $ statement
+  "SELECT j.replacement_snapshot,j.replacement_eligible_from,s.format_label FROM session_archive_jobs j JOIN sessions s ON (s.id,s.workspace_id)=(j.session_id,j.workspace_id) WHERE j.workspace_id=$1 AND j.session_id=$2"
+  pair (D.singleRow ((\bytes cutoff label -> ArchiveReplacementSnapshot <$> bytes <*> cutoff <*> pure label)
+    <$> D.column (D.nullable D.bytea) <*> D.column (D.nullable D.timestamptz) <*> column D.text))
+
+stageSanitizedContent :: Pool H.Connection -> ArchiveLease -> SanitizedContent -> IO Bool
+stageSanitizedContent pool lease content=fmap (maybe False (const True)) $ withLease pool lease $ S.statement (lease,content) $ statement
+  "INSERT INTO session_archive_sanitized_contents(generation_id,session_id,workspace_id,policy_sha256,content_bytes,content_sha256,replacement_count) SELECT $3,$2,$1,$6,$7,$8,$9 WHERE $4::uuid IS NOT NULL AND $5::bigint>0"
+  (contramap fst leaseParams<>param ((.policySha256) . snd) E.text<>param ((.contentBytes) . snd) E.int8
+    <>param ((.contentSha256) . snd) E.text<>param ((.replacementCount) . snd) E.int8) D.noResult
+
+stageSanitizedBlock :: Pool H.Connection -> ArchiveLease -> SanitizedBlock -> IO Bool
+stageSanitizedBlock pool lease block=fmap (maybe False (const True)) $ withLease pool lease $ S.statement (lease,block) $ statement
+  "INSERT INTO session_archive_content_blocks(generation_id,session_id,workspace_id,ordinal,start_offset,end_offset,content_sha256,binding_sha256) SELECT $3,$2,$1,$6,$7,$8,$9,'' WHERE $4::uuid IS NOT NULL AND $5::bigint>0"
+  (contramap fst leaseParams<>param ((.ordinal) . snd) E.int8<>param ((.startOffset) . snd) E.int8
+    <>param ((.endOffset) . snd) E.int8<>param ((.contentSha256) . snd) E.text) D.noResult
+
+readStagedSanitizedBlock :: Pool H.Connection -> ArchiveLease -> Int64 -> IO (Maybe SanitizedBlock)
+readStagedSanitizedBlock pool lease ordinal=do
+  guardInput (ordinal>=0)
+  result <- withLease pool lease $ S.statement (lease,ordinal) $ statement
+    "SELECT b.ordinal,b.start_offset,b.end_offset,b.content_sha256 FROM session_archive_content_blocks b WHERE b.workspace_id=$1 AND b.session_id=$2 AND b.generation_id=$3 AND b.ordinal=$6 AND $4::uuid IS NOT NULL AND $5::bigint>0 AND b.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_content_blocks p WHERE p.generation_id=b.generation_id AND p.ordinal=b.ordinal-1),''),jsonb_build_array(b.generation_id,b.ordinal,b.start_offset,b.end_offset,b.content_sha256))"
+    (contramap fst leaseParams<>param snd E.int8)
+    (D.rowMaybe (SanitizedBlock <$> column D.int8 <*> column D.int8 <*> column D.int8 <*> column D.text))
+  pure (result >>= id)
 
 getArchiveJob :: Pool H.Connection -> UUID -> UUID -> IO (Maybe ArchiveJob)
 getArchiveJob pool workspace session=runSession pool $ S.statement (workspace,session) $ statement
@@ -294,7 +349,7 @@ cleanupArchiveGeneration pool workspace session generation=runTransaction pool $
     Nothing -> pure 0
     Just _ -> do
       count <- S.statement generation $ statement
-        "WITH p AS (DELETE FROM session_archive_parts WHERE (generation_id,ordinal) IN (SELECT generation_id,ordinal FROM session_archive_parts WHERE generation_id=$1 ORDER BY ordinal LIMIT 8) RETURNING 1), c AS (DELETE FROM session_archive_checkpoints WHERE (generation_id,ordinal) IN (SELECT generation_id,ordinal FROM session_archive_checkpoints WHERE generation_id=$1 ORDER BY ordinal LIMIT (8-(SELECT count(*) FROM p))) RETURNING 1), l AS (DELETE FROM session_archive_ledger WHERE (generation_id,revision) IN (SELECT generation_id,revision FROM session_archive_ledger WHERE generation_id=$1 ORDER BY revision LIMIT (8-(SELECT count(*) FROM p)-(SELECT count(*) FROM c))) RETURNING 1) SELECT (SELECT count(*) FROM p)+(SELECT count(*) FROM c)+(SELECT count(*) FROM l)"
+        "WITH p AS (DELETE FROM session_archive_parts WHERE (generation_id,ordinal) IN (SELECT generation_id,ordinal FROM session_archive_parts WHERE generation_id=$1 ORDER BY ordinal LIMIT 8) RETURNING 1), c AS (DELETE FROM session_archive_checkpoints WHERE (generation_id,ordinal) IN (SELECT generation_id,ordinal FROM session_archive_checkpoints WHERE generation_id=$1 ORDER BY ordinal LIMIT (8-(SELECT count(*) FROM p))) RETURNING 1), l AS (DELETE FROM session_archive_ledger WHERE (generation_id,revision) IN (SELECT generation_id,revision FROM session_archive_ledger WHERE generation_id=$1 ORDER BY revision LIMIT (8-(SELECT count(*) FROM p)-(SELECT count(*) FROM c))) RETURNING 1), b AS (DELETE FROM session_archive_content_blocks WHERE (generation_id,ordinal) IN (SELECT generation_id,ordinal FROM session_archive_content_blocks WHERE generation_id=$1 ORDER BY ordinal LIMIT (8-(SELECT count(*) FROM p)-(SELECT count(*) FROM c)-(SELECT count(*) FROM l))) RETURNING 1), v AS (DELETE FROM session_archive_sanitized_contents WHERE generation_id=$1 AND NOT EXISTS(SELECT 1 FROM session_archive_content_blocks WHERE generation_id=$1) AND (SELECT count(*) FROM p)+(SELECT count(*) FROM c)+(SELECT count(*) FROM l)+(SELECT count(*) FROM b)<8 RETURNING 1) SELECT (SELECT count(*) FROM p)+(SELECT count(*) FROM c)+(SELECT count(*) FROM l)+(SELECT count(*) FROM b)+(SELECT count(*) FROM v)"
         (E.param (E.nonNullable E.uuid)) (D.singleRow (column D.int8))
       if count/=0 then pure count else do
         S.statement generation $ statement "DELETE FROM session_archive_generations WHERE id=$1" (E.param (E.nonNullable E.uuid)) D.noResult

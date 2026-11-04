@@ -9,6 +9,9 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.Bits (xor, shiftL, shiftR, (.&.))
+import Data.Functor.Contravariant (contramap)
+import Data.IORef
+import Data.Time (UTCTime)
 import Data.Word (Word64)
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
@@ -25,7 +28,7 @@ import Test.Hspec
 import HMem.AgentSession
 import HMem.AgentSession.Occurrence qualified as Occurrence
 import HMem.DB.AgentSession
-import HMem.DB.Pool (runSession, createPool)
+import HMem.DB.Pool (DBException(..), runSession, createPool)
 import HMem.DB.Pool (runTransaction)
 import HMem.DB.SessionArchive qualified as DB
 import HMem.DB.SessionArchive.Maintenance qualified as Maintenance
@@ -34,6 +37,7 @@ import HMem.DB.TestHarness
 import HMem.Server.Archive.Worker
 import HMem.Server.SessionReaper (reapSessionBatch)
 import HMem.SessionArchive.Codec qualified as Codec
+import HMem.SessionArchive.Replacement qualified as Replacement
 import HMem.Types qualified as Types
 
 spec :: Spec
@@ -235,6 +239,91 @@ spec = around withTestEnv $ describe "Archive worker" $ do
     result `shouldBe` Left (ArchiveFailure "archive_checkpoint_integrity")
     DB.getPublishedArchive env.pool w sealed.id `shouldReturn` Nothing
 
+  it "freezes replacement through retry and verifies an isolated sanitized gzip generation" $ \env -> bounded $ do
+    firstPolicy <- installReplacementPolicy env "first"
+    let prefix = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"encrypted_content\":"
+        suffix = ",\"padding\":\"" <> BS.replicate 7300 112 <> "\"}}\r\n"
+        originalLine = prefix <> "\"" <> BS.replicate 8000 120 <> "\"" <> suffix
+        sanitizedLine = prefix <> "\"first\"" <> suffix
+        originalChunk = BS.concat (replicate 48 originalLine)
+        originalChunks = replicate 3 originalChunk <> [" [] "]
+        original = BS.concat originalChunks
+        expected = BS.concat (replicate 144 sanitizedLine) <> " [] "
+    (w,sealed,_) <- fixtureWithFormat env "codex_jsonl" originalChunks
+    first <- claim env
+    (fmap (fmap (.snapshotBytes)) <$> DB.readArchiveReplacementSnapshot env.pool first) `shouldReturn` Just (Just firstPolicy)
+    before <- compressArchive env.pool first
+    _ <- installReplacementPolicy env "second"
+    DB.releaseArchive env.pool first False "fixture_retry" `shouldReturn` True
+    execute env ("UPDATE session_archive_jobs SET retry_at=clock_timestamp() WHERE session_id='"<>uuid sealed.id<>"'")
+    let drain = do
+          removed <- DB.cleanupArchiveGeneration env.pool w sealed.id first.generationId
+          if removed == 0 then pure () else drain
+    drain
+    second <- claim env
+    second.generationId `shouldNotBe` first.generationId
+    (fmap (fmap (.snapshotBytes)) <$> DB.readArchiveReplacementSnapshot env.pool second) `shouldReturn` Just (Just firstPolicy)
+    after <- compressArchive env.pool second
+    after.encoded `shouldBe` before.encoded
+    after.sanitized `shouldBe` Just (DB.SanitizedContent (sessionSha256 firstPolicy)
+      (fromIntegral (BS.length expected)) (sessionSha256 expected) 144)
+    verifyAndPublishArchive env.pool second after
+    Just job <- DB.getArchiveJob env.pool w sealed.id
+    job.state `shouldBe` "ready"
+    DB.getPublishedArchive env.pool w sealed.id `shouldReturn` Nothing
+    DB.readArchivePart env.pool w sealed.id second.generationId 0 `shouldReturn` Nothing
+    execute env ("INSERT INTO session_archive_reclamation(generation_id,session_id,workspace_id,metadata_sha256,verified_at) "
+      <> "SELECT id,session_id,workspace_id,metadata_sha256,clock_timestamp() FROM session_archive_generations WHERE id='"
+      <> uuid second.generationId <> "'") `shouldThrow` \case
+        DBCheckViolation message -> message == "Sanitized archives require dedicated reclamation verification."
+        _ -> False
+    runSession env.pool (S.statement second.generationId (St.Statement
+      "SELECT content_bytes,content_sha256 FROM session_archive_sanitized_contents WHERE generation_id=$1"
+      (E.param (E.nonNullable E.uuid))
+      (D.singleRow ((,) <$> D.column (D.nonNullable D.int8) <*> D.column (D.nonNullable D.text))) True))
+      `shouldReturn` (fromIntegral (BS.length expected),sessionSha256 expected)
+    parts <- runSession env.pool (S.statement second.generationId (St.Statement
+      "SELECT data FROM session_archive_parts WHERE generation_id=$1 ORDER BY ordinal"
+      (E.param (E.nonNullable E.uuid)) (D.rowList (D.column (D.nonNullable D.bytea))) True))
+    pending <- newIORef parts
+    chunks <- newIORef []
+    let next = atomicModifyIORef' pending $ \case
+          [] -> ([],Nothing)
+          bytes:rest -> (rest,Just bytes)
+    decoded <- Codec.verify (fromIntegral (BS.length expected)) next (\bytes -> modifyIORef' chunks (bytes:)) (const (pure ()))
+    decoded.checkpoints `shouldBe` 2
+    (BS.concat . reverse <$> readIORef chunks) `shouldReturn` expected
+    ((\r -> r.bytes) <$> readSessionRange env.pool w sealed.id 0 (BS.length originalChunk))
+      `shouldReturn` originalChunk
+    getSession env.pool w sealed.id `shouldReturn` Just sealed
+    sessionSha256 original `shouldBe` after.receipt.rawSha256
+
+  it "records ambiguous sanitized source as failed and retains original bytes" $ \env -> bounded $ do
+    _ <- installReplacementPolicy env "first"
+    let duplicate = "{\"x\":1,\"x\":2}\n"
+    (w,sealed,_) <- fixtureWithFormat env "codex_jsonl" [duplicate]
+    lease <- claim env
+    runArchiveLease env.pool lease
+    Just job <- DB.getArchiveJob env.pool w sealed.id
+    (job.state,job.generationId,job.errorCode) `shouldBe` ("failed",Nothing,Just "archive_replacement_record_ambiguous")
+    DB.getPublishedArchive env.pool w sealed.id `shouldReturn` Nothing
+    ((\r -> r.bytes) <$> readSessionRange env.pool w sealed.id 0 65536) `shouldReturn` duplicate
+
+  forM_
+    [ ("ends a sanitized attempt that exhausts its fixed reservation", "reserved_bytes=1024", "failed", "archive_replacement_reservation_exhausted")
+    , ("retries a sanitized attempt blocked by global staging capacity", "staging_budget=1024", "retry", "archive_resource_blocked")
+    ] $ \(description, limit, state, code) -> it description $ \env -> bounded $ do
+      _ <- installReplacementPolicy env (BS.replicate 200 120)
+      let original = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"encrypted_content\":\"x\"}}\n"
+      (w,sealed,_) <- fixtureWithFormat env "codex_jsonl" [original]
+      lease <- claim env
+      execute env ("UPDATE session_archive_control SET "<>limit<>" WHERE singleton")
+      runArchiveLease env.pool lease
+      Just job <- DB.getArchiveJob env.pool w sealed.id
+      (job.state,job.generationId,job.errorCode) `shouldBe` (state,Nothing,Just code)
+      DB.getPublishedArchive env.pool w sealed.id `shouldReturn` Nothing
+      ((\r -> r.bytes) <$> readSessionRange env.pool w sealed.id 0 65536) `shouldReturn` original
+
   it "keeps the empty and 1 GiB attempt budgets finite without rounding above 64-bit boundaries" $ \_ -> do
     archiveAttemptMicros 0 `shouldBe` 30000000
     archiveAttemptMicros 1073741824 `shouldBe` 120000000
@@ -242,15 +331,33 @@ spec = around withTestEnv $ describe "Archive worker" $ do
 bounded :: IO () -> IO ()
 bounded action = timeout 25000000 action >>= \r -> r `shouldBe` Just ()
 fixture :: TestEnv -> [ByteString] -> IO (UUID,AgentSession,UUID)
-fixture env chunks = do
+fixture env = fixtureWithFormat env "jsonl"
+
+fixtureWithFormat :: TestEnv -> T.Text -> [ByteString] -> IO (UUID,AgentSession,UUID)
+fixtureWithFormat env format chunks = do
   w <- (.id) <$> createTestWorkspace env "archive-worker"
   task <- Task.createTask env.pool (Types.CreateTask w Nothing Nothing "Archive worker fixture" Nothing Nothing Nothing)
   execute env ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid task.id<>"'")
   identifier <- UUID.nextRandom
-  initial <- createSession env.pool (CreateSession identifier w "jsonl" "Archive worker fixture" Nothing Nothing task.id)
+  initial <- createSession env.pool (CreateSession identifier w format "Archive worker fixture" Nothing Nothing task.id)
   row <- foldM (\s bytes -> (.session) <$> appendSession env.pool w identifier (AppendSession s.committedBytes s.revision bytes True)) initial chunks
   sealed <- terminateSession env.pool w identifier (TerminateSession row.committedBytes row.revision row.committedBytes (sessionSha256 (BS.concat chunks)))
   pure (w,sealed,task.id)
+
+installReplacementPolicy :: TestEnv -> ByteString -> IO ByteString
+installReplacementPolicy env replacement = do
+  let cutoff = read "2000-01-01 00:00:00 UTC" :: UTCTime
+      label = "codex_jsonl" :: T.Text
+      config = "{\"version\":1,\"eligible_from\":\"2000-01-01T00:00:00Z\",\"formats\":{\"codex_jsonl\":[{\"match\":{\"/type\":\"response_item\",\"/payload/type\":\"function_call\"},\"path\":\"/payload/encrypted_content\",\"replacement\":\""<>replacement<>"\"}]}}"
+  policy <- either (fail . show) pure (Replacement.decodePolicy config)
+  frozen <- either (fail . show) pure (Replacement.freezePolicy cutoff label policy)
+  (eligible,snapshot) <- maybe (fail "replacement policy was not frozen") pure frozen
+  runSession env.pool $ S.statement (label,eligible,snapshot) $ St.Statement
+    "INSERT INTO session_archive_replacement_policies(format_label,eligible_from,snapshot) VALUES($1,$2,$3) ON CONFLICT(format_label) DO UPDATE SET eligible_from=EXCLUDED.eligible_from,snapshot=EXCLUDED.snapshot"
+    (mconcat [contramap (\(l,_,_)->l) (E.param (E.nonNullable E.text)),
+      contramap (\(_,t,_)->t) (E.param (E.nonNullable E.timestamptz)),
+      contramap (\(_,_,s)->s) (E.param (E.nonNullable E.bytea))]) D.noResult True
+  pure snapshot
 claim :: TestEnv -> IO DB.ArchiveLease
 claim env = do
   _ <- DB.enqueueArchives env.pool Nothing 100

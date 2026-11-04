@@ -80,6 +80,7 @@ data-files:
     migrations/V059__document_download_grants.sql
     migrations/V060__document_preview_jobs.sql
     migrations/V061__mp4_document_previews.sql
+    migrations/V062__sanitized_session_archives.sql
 
 library
   exposed-modules:

@@ -29,10 +29,12 @@ import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 
 import HMem.AgentSession (sessionSha256)
+import HMem.DB.Pool (DBException(..))
 import HMem.DB.SessionArchive qualified as DB
 import HMem.DB.SessionArchive.Maintenance qualified as Maintenance
 import HMem.Server.Archive.Maintenance qualified as Reclamation
 import HMem.SessionArchive.Codec qualified as Codec
+import HMem.SessionArchive.Replacement qualified as Replacement
 import HMem.Server.SessionOccurrence qualified as Occurrence
 
 -- A failed join carries the exact unfinished capability, including when its
@@ -50,6 +52,7 @@ data ArchiveWorker = ArchiveWorker OwnedThread OwnedThread
 data PreparedArchive = PreparedArchive
   { receipt :: !DB.ArchiveReceipt, encoded :: !Codec.CodecResult
   , partCount :: !Int64, ledgerCount :: !Int64
+  , sanitized :: !(Maybe DB.SanitizedContent)
   } deriving stock (Show, Eq)
 
 check :: Bool -> Text -> IO ()
@@ -189,17 +192,30 @@ runArchiveLeaseInternal afterCompression renewalCleanup pool lease = mask $ \res
     Left failure -> do
       -- Do not attempt any dependent DB cleanup after unconfirmed child drain.
       if failedDrain failure then throwIO failure else do
-          let code = case fromException failure :: Maybe SomeAsyncException of
-                Just _ -> "archive_cancelled"
-                Nothing -> case fromException failure :: Maybe ArchiveFailure of
-                  Just (ArchiveFailure value) -> value
-                  _ -> "archive_verification_failed"
+          let (terminal,code) = archiveError failure
           -- One finite release; an expired owner stays fenced and is reclaimed
           -- by the next claim. Raw chunks and sealed receipts are never changed.
-          _ <- timeout 5000000 $ synchronous (void (DB.releaseArchive pool lease False code)) (pure ())
+          _ <- timeout 5000000 $ synchronous (void (DB.releaseArchive pool lease terminal code)) (pure ())
           case fromException failure :: Maybe SomeAsyncException of
             Just _ -> throwIO failure
             Nothing -> pure ()
+
+archiveError :: SomeException -> (Bool,Text)
+archiveError failure
+  | Just (_ :: SomeAsyncException) <- fromException failure = (False,"archive_cancelled")
+  | Just (ArchiveFailure code) <- fromException failure = (False,code)
+  | Just issue <- fromException failure = (True, case issue of
+      Replacement.InvalidPolicy -> "archive_replacement_policy_invalid"
+      Replacement.InvalidRecord -> "archive_replacement_record_invalid"
+      Replacement.AmbiguousRecord -> "archive_replacement_record_ambiguous"
+      Replacement.RecordLimit -> "archive_replacement_record_limit")
+  | Just (DBCheckViolation message) <- fromException failure
+  , message == "Sanitized archive reservation exhausted" =
+      (True,"archive_replacement_reservation_exhausted")
+  | Just (DBCheckViolation message) <- fromException failure
+  , message == "Sanitized archive staging capacity exhausted" =
+      (False,"archive_resource_blocked")
+  | otherwise = (False,"archive_verification_failed")
 
 -- Reuse the same owned renewal capability/failure drain as compression. A failed
 -- child join retains admission and is rethrown to the owning worker shutdown.
@@ -235,6 +251,9 @@ runReclamationLeaseWith beforeVerification pool lease=mask $ \restore -> do
 compressArchive :: Pool H.Connection -> DB.ArchiveLease -> IO PreparedArchive
 compressArchive pool lease = do
   receipt <- DB.readArchiveReceipt pool lease >>= need "archive_receipt_unavailable"
+  snapshot <- DB.readArchiveReplacementSnapshot pool lease >>= need "archive_lease_lost"
+  rules <- traverse (\p -> either throwIO pure (Replacement.decodeSnapshot p.formatLabel p.eligibleFrom p.snapshotBytes)) snapshot
+  originalHash <- traverse (const (newIORef (hashInit :: Context SHA256))) rules
   sourcePosition <- newIORef (0,0,0 :: Int64,True)
   partPosition <- newIORef (0,0 :: Int64)
   let source = do
@@ -251,12 +270,13 @@ compressArchive pool lease = do
             let newline = BS.last chunk.bytes == 10
                 count = fromIntegral (BS.count 10 chunk.bytes) + (if newline then 0 else 1) - (if previousNewline then 0 else 1)
             check (end <= receipt.rawBytes && chunk.endsWithNewline == newline && chunk.recordCount == count &&
-              (previousNewline || BS.isPrefixOf "\n" chunk.bytes || BS.isPrefixOf "\r\n" chunk.bytes) &&
+              (maybe False (const True) rules || previousNewline || BS.isPrefixOf "\n" chunk.bytes || BS.isPrefixOf "\r\n" chunk.bytes) &&
               (newline || chunk.allowFinalRecord)) "archive_source_metadata"
             copied <- DB.stageArchiveLedger pool lease revision 1
             check (copied == Just chunk.revision) "archive_ledger_stage_failed"
             totalRecords <- Codec.checkedAdd records count
             writeIORef sourcePosition (end,chunk.revision,totalRecords,newline)
+            mapM_ (\ref -> modifyIORef' ref (`hashUpdate` chunk.bytes)) originalHash
             pure (Just chunk.bytes)
       sink bytes = do
         (ordinal,offset) <- readIORef partPosition
@@ -265,11 +285,19 @@ compressArchive pool lease = do
         writeIORef partPosition (ordinal+1,end)
         (raw,_,_,_) <- readIORef sourcePosition
         live (DB.archiveProgress pool lease "compressing" raw end)
-  encoded <- Codec.compress source sink
-  check (encoded.raw.byteCount == receipt.rawBytes && encoded.raw.sha256 == receipt.rawSha256) "archive_source_receipt_mismatch"
+  (contentSource, replacementCount) <- maybe (pure (source,pure 0)) (\configured -> Replacement.newReplacementSource configured source) rules
+  encoded <- Codec.compress contentSource sink
+  sourceDigest <- maybe (pure encoded.raw.sha256) (fmap digestText . readIORef) originalHash
+  check (sourceDigest == receipt.rawSha256 &&
+    (maybe False (const True) rules || encoded.raw.byteCount == receipt.rawBytes)) "archive_source_receipt_mismatch"
+  replaced <- replacementCount
+  let sanitized = fmap (\policy -> DB.SanitizedContent (sessionSha256 policy.snapshotBytes) encoded.raw.byteCount encoded.raw.sha256 replaced) snapshot
   (parts,_) <- readIORef partPosition
   (_,ledger,_,_) <- readIORef sourcePosition
-  pure (PreparedArchive receipt encoded parts ledger)
+  pure (PreparedArchive receipt encoded parts ledger sanitized)
+
+digestText :: Context SHA256 -> Text
+digestText context = T.pack (show (hashFinalize context :: Digest SHA256))
 
 -- Each pass fetches persisted parts individually and validates the position,
 -- payload digest and SQL's versioned binding chain before giving bytes to zlib.
@@ -298,37 +326,104 @@ verifyAndPublishArchive = verifyAndPublishArchiveWith (pure ())
 verifyAndPublishArchiveWith :: IO () -> Pool H.Connection -> DB.ArchiveLease -> PreparedArchive -> IO ()
 verifyAndPublishArchiveWith afterIndex pool lease prepared = do
   let receipt = prepared.receipt
+      contentBytes = prepared.encoded.raw.byteCount
       verifyResult result = check (result.raw == prepared.encoded.raw && result.compressed == prepared.encoded.compressed) "archive_persisted_receipt_mismatch"
   live (DB.archiveProgress pool lease "verifying" 0 prepared.encoded.compressed.byteCount)
+  mapM_ (live . DB.stageSanitizedContent pool lease) prepared.sanitized
+  (stageContent, finishStage) <- case prepared.sanitized of
+    Nothing -> pure (const (pure ()),pure 0)
+    Just _ -> contentBlockSink contentBytes (live . DB.stageSanitizedBlock pool lease)
   firstSource <- partSource pool lease prepared
   index <- newIORef (0 :: Int64)
-  first <- Codec.verify receipt.rawBytes firstSource (const (pure ())) $ \point -> do
+  first <- Codec.verify contentBytes firstSource stageContent $ \point -> do
     ordinal <- readIORef index
     live (DB.stageArchiveCheckpoint pool lease ordinal point.rawOffset point.compressedOffset (fromIntegral point.unusedBits) point.dictionary)
     writeIORef index (ordinal+1)
   verifyResult first
+  blocks <- finishStage
   points <- readIORef index
   afterIndex
   -- A second persisted readback derives the index anew, comparing exact bytes
   -- and bit positions. Even a self-consistent wrong dictionary must fail.
   secondSource <- partSource pool lease prepared
   indexCheck <- newIORef (0 :: Int64)
-  ledgerSink <- verifyLedgerSink pool lease prepared
-  second <- Codec.verify receipt.rawBytes secondSource (fst ledgerSink) $ \point -> do
+  (verifyContent, finishContent) <- case prepared.sanitized of
+    Nothing -> verifyLedgerSink pool lease prepared
+    Just _ -> do
+      (verifyBlock, finishBlocks) <- contentBlockSink contentBytes $ \block -> do
+        stored <- DB.readStagedSanitizedBlock pool lease block.ordinal
+        check (stored == Just block) "archive_sanitized_block_integrity"
+      pure (verifyBlock, do
+        checked <- finishBlocks
+        extra <- DB.readStagedSanitizedBlock pool lease checked
+        check (checked == blocks && extra == Nothing) "archive_sanitized_block_count"
+        verifyOriginalLedger pool lease prepared)
+  second <- Codec.verify contentBytes secondSource verifyContent $ \point -> do
     ordinal <- readIORef indexCheck
     c <- DB.readStagedCheckpoint pool lease ordinal >>= need "archive_checkpoint_missing_or_binding"
     check (c.ordinal == ordinal && c.rawOffset == point.rawOffset && c.compressedOffset == point.compressedOffset &&
       fromIntegral c.unusedBits == point.unusedBits && c.dictionary == point.dictionary &&
       c.dictionarySha256 == sessionSha256 point.dictionary) "archive_checkpoint_integrity"
     writeIORef indexCheck (ordinal+1)
-  snd ledgerSink
+  finishContent
   verifyResult second
   checkedPoints <- readIORef indexCheck
   extra <- DB.readStagedCheckpoint pool lease checkedPoints
   check (checkedPoints == points && second.checkpoints == points && extra == Nothing) "archive_checkpoint_count"
   currentReceipt <- DB.readArchiveReceipt pool lease >>= need "archive_receipt_unavailable"
   check (currentReceipt == receipt) "archive_receipt_changed"
-  live (DB.publishArchive pool lease (DB.ArchiveVerification second.compressed.byteCount second.compressed.sha256 prepared.partCount points prepared.ledgerCount))
+  let verified = DB.ArchiveVerification second.compressed.byteCount second.compressed.sha256 prepared.partCount points prepared.ledgerCount
+  live (maybe (DB.publishArchive pool lease verified) (DB.publishSanitizedArchive pool lease verified) prepared.sanitized)
+
+-- Derive and check one content block at a time from independent gzip readbacks.
+-- The hash context crosses codec output-buffer boundaries, never coordinates.
+contentBlockSink :: Int64 -> (DB.SanitizedBlock -> IO ()) -> IO (ByteString -> IO (), IO Int64)
+contentBlockSink bytes emit = do
+  position <- newIORef (0,0,hashInit :: Context SHA256)
+  let consume input = unless (BS.null input) $ do
+        (ordinal,offset,context) <- readIORef position
+        let boundary = min (bytes-offset) (1048576 - offset `mod` 1048576)
+            amount = min (BS.length input) (fromIntegral boundary)
+            (piece,rest) = BS.splitAt amount input
+            next = offset + fromIntegral amount
+            updated = hashUpdate context piece
+        check (amount>0) "archive_sanitized_block_overflow"
+        if fromIntegral amount == boundary then do
+          emit (DB.SanitizedBlock ordinal (ordinal*1048576) next (digestText updated))
+          writeIORef position (ordinal+1,next,hashInit)
+        else updated `seq` writeIORef position (ordinal,next,updated)
+        consume rest
+      finish = do
+        (count,offset,_) <- readIORef position
+        check (offset == bytes) "archive_sanitized_block_incomplete"
+        pure count
+  pure (consume,finish)
+
+-- Sanitized inflation is never used to verify the original ledger. Re-read
+-- the sealed chunks and their immutable ledger bindings in original offsets.
+verifyOriginalLedger :: Pool H.Connection -> DB.ArchiveLease -> PreparedArchive -> IO ()
+verifyOriginalLedger pool lease prepared = go 1 0 hashInit
+  where
+    go revision offset context
+      | revision > prepared.ledgerCount = do
+          extra <- DB.readStagedLedger pool lease revision
+          check (extra == Nothing && offset == prepared.receipt.rawBytes &&
+            digestText context == prepared.receipt.rawSha256) "archive_ledger_incomplete"
+      | otherwise = do
+          ledger <- DB.readStagedLedger pool lease revision >>= need "archive_ledger_missing_or_binding"
+          original <- DB.readArchiveSourceChunk pool lease offset >>= need "archive_original_missing"
+          end <- verifyOriginalChunk revision offset ledger original
+          let next = hashUpdate context original.bytes
+          next `seq` go (revision+1) end next
+
+verifyOriginalChunk :: Int64 -> Int64 -> DB.ArchiveLedger -> DB.ArchiveSourceChunk -> IO Int64
+verifyOriginalChunk revision offset ledger original = do
+  end <- Codec.checkedAdd offset (fromIntegral (BS.length original.bytes))
+  check (ledger.revision == revision && original.revision == ledger.revision && original.startOffset == offset &&
+    ledger.startOffset == offset && ledger.endOffset == end && ledger.allowFinalRecord == original.allowFinalRecord &&
+    ledger.recordCount == original.recordCount && ledger.endsWithNewline == original.endsWithNewline &&
+    ledger.rawSha256 == sessionSha256 original.bytes) "archive_ledger_metadata"
+  pure end
 
 -- No original chunk is reconstructed in RAM: one hash context follows its
 -- immutable ledger end, and each decoder buffer may cross several boundaries.
@@ -344,11 +439,7 @@ verifyLedgerSink pool lease prepared = do
           Nothing -> do
             l <- DB.readStagedLedger pool lease (revision+1) >>= need "archive_ledger_missing_or_binding"
             original <- DB.readArchiveSourceChunk pool lease offset >>= need "archive_original_missing"
-            let end = offset + fromIntegral (BS.length original.bytes)
-            check (l.revision == revision+1 && original.revision == l.revision && original.startOffset == offset &&
-              l.startOffset == offset && l.endOffset == end && l.allowFinalRecord == original.allowFinalRecord &&
-              l.recordCount == original.recordCount && l.endsWithNewline == original.endsWithNewline &&
-              l.rawSha256 == sessionSha256 original.bytes) "archive_ledger_metadata"
+            _ <- verifyOriginalChunk (revision+1) offset l original
             writeIORef current (Just l)
             pure l
         let amount = fromIntegral (min (fromIntegral (BS.length bytes)) (ledger.endOffset-offset))
@@ -357,7 +448,7 @@ verifyLedgerSink pool lease prepared = do
             end = offset + fromIntegral amount
         check (amount > 0) "archive_ledger_nonprogress"
         if end == ledger.endOffset then do
-          check (T.pack (show (hashFinalize nextContext :: Digest SHA256)) == ledger.rawSha256) "archive_ledger_raw_hash"
+          check (digestText nextContext == ledger.rawSha256) "archive_ledger_raw_hash"
           writeIORef position (end,ledger.revision,hashInit)
           writeIORef current Nothing
         else nextContext `seq` writeIORef position (end,revision,nextContext)

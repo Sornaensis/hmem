@@ -380,6 +380,9 @@ classDiagram
       BIGINT raw_progress
       BIGINT compressed_progress
       TEXT? error_code
+      BYTEA? replacement_snapshot
+      TIMESTAMPTZ? replacement_eligible_from
+      TEXT? replacement_policy_sha256
     }
     class session_archive_generations {
       UUID id PK
@@ -402,6 +405,31 @@ classDiagram
       BIGINT? checkpoint_count
       BIGINT? ledger_count
       TEXT? metadata_sha256
+    }
+    class session_archive_replacement_policies {
+      TEXT format_label PK
+      TIMESTAMPTZ eligible_from
+      BYTEA snapshot
+    }
+    class session_archive_sanitized_contents {
+      UUID generation_id PK FK
+      UUID session_id FK
+      UUID workspace_id FK
+      TEXT representation
+      TEXT policy_sha256
+      BIGINT content_bytes
+      TEXT content_sha256
+      BIGINT replacement_count
+    }
+    class session_archive_content_blocks {
+      UUID generation_id PK FK
+      UUID session_id FK
+      UUID workspace_id FK
+      BIGINT ordinal PK
+      BIGINT start_offset
+      BIGINT end_offset
+      TEXT content_sha256
+      TEXT binding_sha256
     }
     class session_archive_parts {
       UUID generation_id PK FK
@@ -663,6 +691,9 @@ classDiagram
   sessions "1" --> "0..1" session_archive_jobs : id + workspace_id NO ACTION
   session_archive_jobs "1" --> "0..*" session_archive_generations : session_id + workspace_id NO ACTION
   session_archive_generations "0..1" <-- "0..1" session_archive_jobs : generation_id + session_id + workspace_id NO ACTION
+  session_archive_generations "1" --> "0..1" session_archive_sanitized_contents : id + session_id + workspace_id NO ACTION
+  session_archive_generations "1" --> "0..*" session_archive_content_blocks : id + session_id + workspace_id NO ACTION
+  session_archive_sanitized_contents "1" --> "0..*" session_archive_content_blocks : generation_id NO ACTION
   session_archive_generations "1" --> "0..*" session_archive_parts : id + session_id + workspace_id NO ACTION
   session_archive_generations "1" --> "0..*" session_archive_checkpoints : id + session_id + workspace_id NO ACTION
   session_archive_generations "1" --> "0..*" session_archive_ledger : id + session_id + workspace_id NO ACTION
@@ -690,6 +721,7 @@ classDiagram
   note for session_archive_jobs "UNIQUE (session_id, workspace_id)\nState: queued, running, retry, ready, failed\nCurrent-generation FK deferred until commit"
   note for session_archive_generations "UNIQUE (id, session_id, workspace_id) and (session_id, attempt)\nOne published generation per session\nPublication fields are all NULL until publication"
   note for session_archive_parts "UNIQUE (generation_id, start_offset)\nAt most 1 MiB EXTERNAL payload; ordered hash chain"
+  note for session_archive_content_blocks "UNIQUE (generation_id, start_offset)\n1 MiB sanitized content blocks except the final tail; ordered hash chain"
   note for session_archive_checkpoints "UNIQUE (generation_id, raw_offset)\nAt most 32 KiB EXTENDED dictionary; at most 1 MiB raw gap"
   note for session_archive_ledger "UNIQUE (generation_id, start_offset)\nExact original append metadata and chunk SHA-256"
   note for session_archive_control "One initialized true singleton\nCapacity values are logical policy, not measured free disk/WAL caps\nPermit IDs are control fields without foreign keys"
@@ -820,3 +852,9 @@ and [controller reference](docs/reference/document-previews.md).
 
 V061 extends the document media constraint to MP4 and atomically queues its
 preview during publication. It adds no tables, columns or derivative variants.
+
+V062 adds format-scoped replacement policy storage and freezes its selected
+snapshot on new eligible archive jobs. Sanitized receipts and content block
+hashes are generation sidecars. Original seal receipts and append coordinates
+remain authoritative. The migration installs no active policy and excludes
+sanitized generations from the exact archive view and reclamation capability.

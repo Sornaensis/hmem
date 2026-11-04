@@ -51,6 +51,14 @@ function distinctTasks(h) {
   return h
 }
 
+function outlineStyle(button) {
+  return button.evaluate(node => {
+    const style = getComputedStyle(node)
+    return { background: style.backgroundColor, border: style.borderTop, radius: style.borderRadius,
+      color: style.color, fontSize: style.fontSize, padding: style.padding }
+  })
+}
+
 test('Sources and paged evidence share derivatives and original downloads in the existing hierarchy card', { timeout: 80000 }, async () => {
   const h = distinctTasks(await openSessionExplorer({ savedCount: 27 }))
   const { page } = h
@@ -168,6 +176,15 @@ test('Sources and paged evidence share derivatives and original downloads in the
     const thumb = sourcePanel.getByRole('button', { name: 'Preview screen.png' })
     await thumb.scrollIntoViewIfNeeded()
     await until(async () => (await thumb.locator('img').getAttribute('src'))?.startsWith('blob:'))
+    assert.deepEqual(await thumb.evaluate(node => [node.offsetWidth, node.offsetHeight]), [60, 42])
+    assert.equal(await thumb.locator('[data-lucide="zoom-in"]').count(), 1)
+    const remove = sourcePanel.getByRole('button', { name: 'Remove from Sources: screen.png' })
+    assert.equal(await remove.evaluate(node => node.parentElement.classList.contains('task-document-label')
+      && getComputedStyle(node).borderTopStyle === 'none'), true)
+    const sourceUpload = sourcePanel.getByRole('button', { name: 'Upload source', exact: true })
+    const uploadStyle = await outlineStyle(sourceUpload)
+    assert.equal(uploadStyle.background, 'rgba(0, 0, 0, 0)')
+    assert.equal(uploadStyle.border, '1px solid rgb(71, 85, 105)')
     await thumb.focus()
     await page.keyboard.press('Enter')
     let dialog = page.getByRole('dialog')
@@ -178,7 +195,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
     await dialog.waitFor({ state: 'detached' })
     assert.equal(await thumb.evaluate(node => node === document.activeElement), true)
 
-    await sourcePanel.getByRole('button', { name: 'Upload source', exact: true }).click()
+    await sourceUpload.click()
     dialog = page.getByRole('dialog')
     assert.equal(await dialog.locator('select').count(), 0)
     await dialog.getByLabel('File').setInputFiles({ name: 'diagram-😀.txt', mimeType: 'text/plain', buffer: Buffer.from('verified original') })
@@ -203,6 +220,9 @@ test('Sources and paged evidence share derivatives and original downloads in the
     await documents.getByText('screen.png', { exact: true }).waitFor()
     assert.equal(await card.getByRole('button', { name: /Upload evidence|Add to evidence/ }).count(), 0)
     const download = documents.locator('.task-document-row').filter({ hasText: 'screen.png' }).getByRole('button', { name: '↓ Download', exact: true })
+    const sessionDownload = card.getByRole('region', { name: 'Agent sessions' }).getByRole('button', { name: /^Download session / }).first()
+    assert.deepEqual(await outlineStyle(download), await outlineStyle(sessionDownload))
+    assert.deepEqual(await outlineStyle(download), uploadStyle)
     const pendingDownload = page.waitForEvent('download')
     await download.click()
     const receipt = await pendingDownload
@@ -218,8 +238,14 @@ test('Sources and paged evidence share derivatives and original downloads in the
     }
 
     const styledOrigin = documents.getByRole('button', { name: 'Preview wireframe.html' })
+    assert.equal(await styledOrigin.evaluate(node => node.nextElementSibling?.classList.contains('session-download')), true)
     await styledOrigin.click()
     dialog = page.getByRole('dialog')
+    assert.deepEqual(await dialog.evaluate(node => {
+      const rect = node.getBoundingClientRect(), style = getComputedStyle(node)
+      return { center: Math.round((rect.left + rect.right) / 2) === Math.round(innerWidth / 2),
+        width: rect.width, background: style.backgroundColor, color: style.color }
+    }), { center: true, width: 680, background: 'rgb(30, 41, 59)', color: 'rgb(248, 250, 252)' })
     const frame = dialog.locator('iframe')
     assert.equal(await frame.getAttribute('sandbox'), '')
     assert.equal(await frame.getAttribute('referrerpolicy'), 'no-referrer')
@@ -265,6 +291,13 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.deepEqual(mobile.header, before.header)
     assert.deepEqual(mobile.controls, before.controls)
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    const mobileActions = documents.getByRole('button', { name: 'Preview review.pdf' })
+    assert.equal(await mobileActions.evaluate(node => {
+      const actions = node.parentElement, row = actions.parentElement
+      return getComputedStyle(row).display === 'grid'
+        && getComputedStyle(actions).gridColumn === '1 / -1'
+        && actions.getBoundingClientRect().right <= row.getBoundingClientRect().right
+    }), true)
     assert.deepEqual(h.errors, [])
     assert.deepEqual(h.unhandled, [])
   } finally {

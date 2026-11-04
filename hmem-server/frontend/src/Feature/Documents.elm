@@ -11,6 +11,7 @@ import Html.Attributes exposing (attribute, class, disabled, id, title, type_)
 import Html.Events exposing (onClick)
 import Html.Keyed as Keyed
 import Http
+import Icon
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
@@ -452,8 +453,13 @@ viewRow model item =
     let
         previewable = List.member item.mediaType [ "image/png", "image/jpeg", "image/webp", "application/pdf", "text/html" ]
         imagePreview = String.startsWith "image/" item.mediaType && previewable
-        thumbnailId = "document-preview-" ++ item.id
-        previewLabel = "Preview " ++ item.filename
+        previewButton buttonClass contents =
+            button
+                [ id ("document-preview-" ++ item.id), type_ "button", class buttonClass
+                , attribute "aria-label" ("Preview " ++ item.filename), attribute "data-dialog-owner" model.documents.scope
+                , onClick (TaskDocuments (OpenDocumentPreview item)) ]
+                contents
+
         thumbnail =
             currentEntry model ( item.taskId, previewKey item )
                 |> Maybe.andThen .value
@@ -466,24 +472,21 @@ viewRow model item =
                     _ -> Nothing)
     in
     div [ class "task-document-row" ]
-        [ if previewable then
-            button
-                [ id thumbnailId, type_ "button", class (if imagePreview then "document-thumbnail" else "btn btn-sm document-preview-button")
-                , attribute "aria-label" previewLabel, attribute "data-dialog-owner" model.documents.scope
-                , onClick (TaskDocuments (OpenDocumentPreview item)) ]
-                [ if imagePreview && item.previewState == "ready" then
+        [ if imagePreview then
+            previewButton "document-thumbnail"
+                [ if item.previewState == "ready" then
                     Html.img
                         ([ attribute "alt" "", attribute "data-document-thumbnail" item.documentId
                          , attribute "data-document-task" item.taskId, attribute "data-document-scope" model.documents.scope ]
                          ++ Maybe.withDefault [] thumbnail
                         ) []
-                  else if imagePreview then
-                    text (previewState item.previewState)
                   else
-                    text "Preview"
+                    text ""
+                , span [ class "document-thumbnail-mark" ] [ Icon.view "zoom-in" ]
                 ]
           else
-            text ""
+            span [ class "task-document-icon" ]
+                [ Icon.view (if item.mediaType == "text/html" then "file-code" else "file-text") ]
         , div [ class "task-document-label" ]
             [ Html.strong [] [ text (if String.isEmpty item.title then item.filename else item.title) ]
             , if item.title /= item.filename && not (String.isEmpty item.title) then span [] [ text item.filename ] else text ""
@@ -492,18 +495,22 @@ viewRow model item =
                 , Html.time [ attribute "datetime" item.createdAt ] [ text item.createdAt ]
                 ]
             , p [ class "card-meta" ] [ text (previewState item.previewState) ]
-            ]
-        , div [ class "task-document-actions" ]
-            [ download model item
             , if item.role == "source" && Permissions.canEditCurrentWorkspace model then
                 button
-                    [ type_ "button", class "btn btn-sm", disabled (model.documents.operation /= Nothing)
+                    [ type_ "button", class "task-document-remove", disabled (model.documents.operation /= Nothing)
                     , onClick (TaskDocuments (RemoveDocumentSource item))
                     , attribute "aria-label" ("Remove from Sources: " ++ item.filename)
                     ]
                     [ text "Remove from Sources" ]
               else
                 text ""
+            ]
+        , div [ class "task-document-actions" ]
+            [ if previewable && not imagePreview then
+                previewButton "btn btn-sm" [ text "Preview" ]
+              else
+                text ""
+            , download model item
             ]
         ]
 
@@ -551,28 +558,33 @@ viewDialog model =
             let
                 token = dialogIdentity (Just dialog)
                 close = button [ type_ "button", class "btn btn-sm", attribute "autofocus" "", attribute "data-document-preview-close" "", onClick (TaskDocuments CloseDocumentDialog) ] [ text "Close" ]
-                ( heading, origin, body ) =
+                heading label = h3 [ id "task-document-dialog-title" ] [ text label ]
+                ( origin, body ) =
                     case dialog of
                         UploadSourceDialog task ->
-                            ( "Upload source", "document-upload-" ++ task
-                            , [ close, Html.form
+                            ( "document-upload-" ++ task
+                            , [ div [ class "task-document-dialog-head" ] [ heading "Upload source" ]
+                              , Html.form
                                     [ attribute "data-document-upload" (Api.documentBase model.flags.apiUrl workspace task)
                                     , attribute "data-document-task" task
                                     , attribute "data-document-scope" model.documents.scope
                                     ]
-                                    [ Html.label [ attribute "for" "document-original-file" ] [ text "File" ]
-                                    , Html.input
-                                        [ id "document-original-file", type_ "file", attribute "name" "original"
-                                        , attribute "required" "", attribute "accept" ".png,.jpg,.jpeg,.webp,.pdf,.html,.htm,.svg,.txt,.md,.markdown,.docx,.pptx,.xlsx,.fig,.sketch"
-                                        ] []
-                                    , Html.label [ attribute "for" "document-original-title" ] [ text "Title (optional)" ]
-                                    , Html.input [ id "document-original-title", type_ "text", attribute "name" "title", attribute "maxlength" "255" ] []
-                                    , p [ class "card-meta" ] [ text "Up to 25 MiB." ]
-                                    , button [ type_ "submit", class "btn btn-sm" ] [ text "Upload source" ]
+                                    [ div [ class "task-document-upload-fields" ]
+                                        [ Html.label [ attribute "for" "document-original-file" ] [ text "File" ]
+                                        , Html.input
+                                            [ id "document-original-file", type_ "file", attribute "name" "original"
+                                            , attribute "required" "", attribute "accept" ".png,.jpg,.jpeg,.webp,.pdf,.html,.htm,.svg,.txt,.md,.markdown,.docx,.pptx,.xlsx,.fig,.sketch"
+                                            ] []
+                                        , p [ class "card-meta" ] [ text "Up to 25 MiB." ]
+                                        , Html.label [ attribute "for" "document-original-title" ] [ text "Title (optional)" ]
+                                        , Html.input [ id "document-original-title", type_ "text", attribute "name" "title", attribute "maxlength" "255" ] []
+                                        ]
+                                    , div [ class "task-document-actions task-document-dialog-footer" ]
+                                        [ close, button [ type_ "submit", class "btn btn-sm" ] [ text "Upload source" ] ]
                                     ]
                               ] )
                         PreviewDocumentDialog item page zoom ->
-                            ( item.filename, "document-preview-" ++ item.id, viewPreview close model item page zoom )
+                            ( "document-preview-" ++ item.id, viewPreview (heading item.filename) close model item page zoom )
             in
             Html.node "dialog"
                 [ id "task-document-dialog", class "task-document-dialog"
@@ -585,14 +597,14 @@ viewDialog model =
                     PreviewDocumentDialog item _ _ -> item.taskId)
                 , Html.Events.preventDefaultOn "cancel" (Decode.succeed ( TaskDocuments CloseDocumentDialog, True ))
                 ]
-                ([ h3 [ id "task-document-dialog-title" ] [ text heading ] ] ++ body ++
-                 [ p [ class "card-meta", attribute "role" "status", attribute "data-document-transfer-status" "" ] [ text model.documents.notice ] ])
+                (body ++
+                 [ p [ class "card-meta task-document-dialog-notice", attribute "role" "status", attribute "data-document-transfer-status" "" ] [ text model.documents.notice ] ])
         _ ->
             text ""
 
 
-viewPreview : Html Msg -> Model -> Api.DocumentItem -> Int -> Bool -> List (Html Msg)
-viewPreview close model item page zoom =
+viewPreview : Html Msg -> Html Msg -> Model -> Api.DocumentItem -> Int -> Bool -> List (Html Msg)
+viewPreview heading close model item page zoom =
     let
         entry = currentEntry model ( item.taskId, previewKey item )
         preview = entry |> Maybe.andThen .value |> Maybe.andThen (\value -> case value of
@@ -645,26 +657,31 @@ viewPreview close model item page zoom =
                 Nothing ->
                     p [ class "card-meta" ] [ text (previewState state.state) ]
     in
-    [ div [ class "task-documents-heading" ]
-        [ p [ class "card-meta" ] [ text (item.mediaType ++ " · " ++ byteLabel item.rawBytes) ]
-        , download model item
-        ]
-    , if preview |> Maybe.map .animatedFirstFrame |> Maybe.withDefault False then
-        p [ class "card-meta" ] [ text "Animated original · first frame shown" ]
-      else
-        text ""
-    , close
-    , if failed then
-        p [ class "card-meta" ]
-            [ text "Preview information could not be loaded. "
-            , button [ type_ "button", class "btn btn-sm", onClick (TaskDocuments (RetryDocumentRead item.taskId (previewKey item))) ] [ text "Retry" ]
+    [ div [ class "task-document-dialog-head" ]
+        [ div [ class "task-document-dialog-label" ]
+            [ heading
+            , p [ class "card-meta" ] [ text (item.mediaType ++ " · " ++ byteLabel item.rawBytes) ]
             ]
-      else
-        preview |> Maybe.map frame |> Maybe.withDefault (p [ class "card-meta" ] [ text "Loading preview…" ])
-    , if Permissions.canEditCurrentWorkspace model && (preview |> Maybe.map .retryable |> Maybe.withDefault False) then
-        button [ type_ "button", class "btn btn-sm", disabled (model.documents.operation /= Nothing), onClick (TaskDocuments (RetryDocumentPreview item)) ] [ text "Retry preview" ]
-      else
-        text ""
+        , download model item
+        , close
+        ]
+    , div [ class "task-document-preview-body" ]
+        [ if preview |> Maybe.map .animatedFirstFrame |> Maybe.withDefault False then
+            p [ class "card-meta" ] [ text "Animated original · first frame shown" ]
+          else
+            text ""
+        , if failed then
+            p [ class "card-meta" ]
+                [ text "Preview information could not be loaded. "
+                , button [ type_ "button", class "btn btn-sm", onClick (TaskDocuments (RetryDocumentRead item.taskId (previewKey item))) ] [ text "Retry" ]
+                ]
+          else
+            preview |> Maybe.map frame |> Maybe.withDefault (p [ class "card-meta" ] [ text "Loading preview…" ])
+        , if Permissions.canEditCurrentWorkspace model && (preview |> Maybe.map .retryable |> Maybe.withDefault False) then
+            button [ type_ "button", class "btn btn-sm", disabled (model.documents.operation /= Nothing), onClick (TaskDocuments (RetryDocumentPreview item)) ] [ text "Retry preview" ]
+          else
+            text ""
+        ]
     ]
 
 

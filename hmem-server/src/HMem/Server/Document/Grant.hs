@@ -169,7 +169,7 @@ documentFramePolicy :: DocumentAuthority -> Wai.Middleware
 documentFramePolicy authority app request respond=do
   policy<-readIORef authority.policy
   let origin=maybe "'none'" (.value) policy.previewOrigin
-      csp="frame-src "<>TE.encodeUtf8 origin<>"; child-src "<>TE.encodeUtf8 origin
+      csp="frame-src "<>TE.encodeUtf8 origin<>"; child-src "<>TE.encodeUtf8 origin<>"; worker-src 'self'"
   app request (respond . Wai.mapResponseHeaders (<>[("Content-Security-Policy",csp)]))
 
 data GrantFailure=GrantFailure Status Text deriving stock(Show)

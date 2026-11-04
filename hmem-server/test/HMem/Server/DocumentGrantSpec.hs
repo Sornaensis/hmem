@@ -354,7 +354,7 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
     call preview methodGet wrongVariant [] "" >>=status status404
     health<-call app methodGet "/api/v1/health" [] ""
     shouldBe (lookup "Content-Security-Policy" health.simpleHeaders)
-      (Just "frame-src https://preview.example.net; child-src https://preview.example.net")
+      (Just "frame-src https://preview.example.net; child-src https://preview.example.net; worker-src 'self'")
     evidenceRequest<-UUID.nextRandom
     _<-Documents.addEvidence env.pool fixture.workspace fixture.task fixture.document.id evidenceRequest
     page<-Documents.listDocuments env.pool fixture.workspace fixture.task Doc.Evidence Nothing 50

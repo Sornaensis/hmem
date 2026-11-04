@@ -33,7 +33,7 @@ the build command. The API can run without the web interface.
 
 ## First use
 
-Open [http://127.0.0.1:8420](http://127.0.0.1:8420). The native default allows
+Open [http://localhost:8420](http://localhost:8420). The native default allows
 local access without a login. Keep it on loopback; configure
 [authentication](auth.md) before enabling shared access.
 

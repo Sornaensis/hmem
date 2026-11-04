@@ -329,8 +329,8 @@ are unavailable.
    host Python and this checkout's `hmem-preview-worker/launch.py`. The host
    account running hmem must have access to the local Docker runtime.
 4. Keep the local authentication mode and loopback bindings in the example.
-   The app and downloads use `http://127.0.0.1:8420`. The cookieless HTML listener
-   uses `http://localhost:8421`. The two hostnames keep app cookies off the
+   The app and downloads use `http://localhost:8420`. The cookieless HTML listener
+   uses `http://127.0.0.1:8421`. The two hostnames keep app cookies off the
    preview origin. The example declares no upstream authentication cookies.
    If you change the app port, update `server.port`, `application_origin`, and
    `download_origin` together. If you change the preview port, update
@@ -347,7 +347,7 @@ are unavailable.
    hmem-server
    ```
 
-   Open `http://127.0.0.1:8420/#hmem_token=<your-HMEM_AUTH_LOCAL_USER_TOKEN>`,
+   Open `http://localhost:8420/#hmem_token=<your-HMEM_AUTH_LOCAL_USER_TOKEN>`,
    using the configured app port and token. Use the exact `application_origin`
    hostname in the browser so the HTML listener allows the app to embed previews.
    hmem reads these settings at startup. To requeue a failed generation after

@@ -58,25 +58,29 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec=describe "Document preview integration" $ do
-  it "bundles and installs the current V060 schema in the native artifact" $
+  it "bundles and installs the document preview migrations in the native artifact" $
     withTestSandbox $ \sandbox->do
-      let name="V060__document_preview_jobs.sql"
-      case lookup name bundledMigrations of
-        Nothing->expectationFailure "Native migration inventory omitted V060"
-        Just bytes->do
-          bytes `shouldSatisfy` BS.isInfixOf "CREATE FUNCTION hmem_document_preview_publish_run"
-          source<-BS.readFile(sandbox.sandboxRepoRoot </> "hmem-server" </> "migrations" </> name)
-          bytes `shouldBe` source
-          (destination,names)<-installBundledMigrations(sandbox.sandboxTmpDir </> "native-install")
-          names `shouldContain` [name]
-          BS.readFile(destination </> name) `shouldReturn` source
-          sort(map fst bundledMigrations) `shouldBe` sort names
-  it "renders real PNG, active PDF and styled HTML through the qualified launcher and durable controller" $
+      (destination,names)<-installBundledMigrations(sandbox.sandboxTmpDir </> "native-install")
+      sort(map fst bundledMigrations) `shouldBe` sort names
+      forM_ [("V060__document_preview_jobs.sql","CREATE FUNCTION hmem_document_preview_publish_run"),
+             ("V061__mp4_document_previews.sql","'video/mp4'")] $ \(name,marker)->do
+        names `shouldContain` [name]
+        case lookup name bundledMigrations of
+          Nothing->expectationFailure("Native migration inventory omitted "<>name)
+          Just bytes->do
+            bytes `shouldSatisfy` BS.isInfixOf marker
+            source<-BS.readFile(sandbox.sandboxRepoRoot </> "hmem-server" </> "migrations" </> name)
+            bytes `shouldBe` source
+            BS.readFile(destination </> name) `shouldReturn` source
+  it "renders real PNG, MP4, active PDF and styled HTML through the qualified launcher and durable controller" $
     withTestEnv $ \env->do
       cfg<-configuration
+      root<-resolveRepoRoot
+      -- Synthetic 64x32 H.264 + silent AAC from tests/test_worker.py's mp4 fixture.
+      clip<-BS.readFile(root </> "hmem-server" </> "test" </> "fixtures" </> "document-preview" </> "first-frame.mp4")
       Jobs.heartbeat env.pool cfg
       fixtures<-mapM(\(bytes,name,media)->seed env bytes name media)
-        [(png,"image.png","image/png"),(activePDF,"active.pdf","application/pdf"),
+        [(png,"image.png","image/png"),(clip,"clip.mp4","video/mp4"),(activePDF,"active.pdf","application/pdf"),
          ("<!doctype html><html><body><script>BAD_SCRIPT</script><h1 style=\"color:red\">Safe title</h1><iframe src=\"https://evil.test\"></iframe><p onclick=\"BAD_HANDLER\">Hello</p></body></html>","styled.html","text/html")]
       (withPreviewWorker env.pool cfg $ do
         statuses<-mapConcurrently(awaitReady env)fixtures
@@ -109,7 +113,7 @@ spec=describe "Document preview integration" $ do
                 [("page",1),("thumbnail",0),("thumbnail",1)]
             _->do
               metadata.pageCount `shouldBe` 0
-              metadata.decodedPixels `shouldBe` 1
+              metadata.decodedPixels `shouldBe` if f.document.mediaType=="video/mp4" then 2048 else 1
               sort[(o.variant,o.page)|o<-status.outputs] `shouldBe` [("page",0),("thumbnail",0)]
           forM_ status.outputs $ \output->do
             (_,bytes)<-Documents.readDerivative env.pool f.workspace f.task f.document.id output.variant output.page
@@ -121,13 +125,13 @@ spec=describe "Document preview integration" $ do
           request<-UUID.nextRandom
           _<-Documents.addEvidence env.pool f.workspace f.task f.document.id request
           Jobs.retry env.pool f.workspace f.task f.document.id `shouldReturn` False
-        count env "SELECT count(*) FROM document_preview_runs" `shouldReturn` 3
+        count env "SELECT count(*) FROM document_preview_runs" `shouldReturn` length fixtures
         count env "SELECT count(*) FROM document_preview_runs WHERE released_at IS NULL" `shouldReturn` 0
         count env "SELECT count(*) FROM document_reservations WHERE kind='preview'" `shouldReturn` 0
         ) `onException` reportOwners env
       -- Restart preserves ready generations and does not replay completed jobs.
       (withPreviewWorker env.pool cfg $threadDelay 500000) `onException` reportOwners env
-      count env "SELECT count(*) FROM document_preview_runs" `shouldReturn` 3
+      count env "SELECT count(*) FROM document_preview_runs" `shouldReturn` length fixtures
 
   it "reports quota exhaustion before render and retains the downloadable original" $
     withTestEnv $ \env->do

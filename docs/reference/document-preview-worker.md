@@ -45,8 +45,9 @@ policy/operation are rejected. Requests contain `version:1`, `operation` (`inspe
 or `render`), `media_type`, `original_bytes`, `original_sha256`, `policy_version`,
 `limits`, and a `plan` for render. There are no URLs or filesystem paths.
 
-Inspect reads image header dimensions or PDF page geometry without rasterizing
-frames/pages. HTML inspection checks finite UTF-8/input length only. Plans bind
+Inspect reads image dimensions, bounded MP4 track metadata or PDF page
+geometry without producing raster derivatives. HTML inspection checks finite
+UTF-8/input length only. Plans bind
 the original hash, media type, policy version, complete limits hash, expected
 output shape and maximum publication budget. Render recomputes and compares the
 plan. Animation/frame and embedded-raster decoding happens only during render,
@@ -60,7 +61,7 @@ returning any outputs for publication:
 
 | Original | Required complete shape |
 | --- | --- |
-| PNG/JPEG/WebP | `image` page 0 and `thumbnail` page 0, static PNG |
+| PNG/JPEG/WebP/MP4 | `image` page 0 and `thumbnail` page 0, static PNG |
 | PDF | `pdf_page` and `pdf_thumbnail` for every page 1..N, plus `thumbnail` page 0, all PNG |
 | HTML | One `styled_html_preview` page 0, UTF-8 HTML |
 
@@ -73,7 +74,7 @@ parser exceptions, original markup, credentials or local paths.
 
 The Python `Generation` context holds a single monotonic deadline from inspection
 through caller admission wait, render, native joins and container cleanup:
-30 seconds for images/HTML or 120 seconds for PDF. Its `inspect()` returns the
+30 seconds for images/MP4/HTML or 120 seconds for PDF. Its `inspect()` returns the
 plan; the caller reserves the complete generation count/budget before calling
 `render()`. At most two generation contexts are admitted per launcher process;
 the server's persisted bounded queue is separate.
@@ -110,6 +111,18 @@ No worker files are extracted onto the host. The normal protocol uses bounded
 pipes; the container's tmpfs disappears with confirmed removal. Test/build work
 uses one coordinator-assigned `.tmp/<task>/` directory, removed after owned
 processes exit. Keep only bounded diagnostics for unresolved failures.
+
+## MP4 poster policy
+
+The worker accepts self-contained MP4 with major brand `isom`, `iso2`, `mp41`,
+`mp42` or `avc1` and a single H.264 video track. The hash-pinned PyAV wheel
+supplies FFmpeg. The MOV demuxer reads only in-memory original bytes. External
+data references and secondary I/O fail closed, and the video decoder never
+decodes audio. Stream admission, probing, packets, decoding threads, input
+dimensions and frame allocation are bounded. The maximum decoded dimensions
+are 4096 per side and 8,294,400 total pixels. The first decoded frame becomes
+the PNG preview and thumbnail. The original download remains available when
+rendering fails.
 
 ## Static HTML policy
 
@@ -153,4 +166,6 @@ Primary contracts: [Pillow security](https://pillow.readthedocs.io/en/stable/han
 [PDFium Python API](https://pypdfium2.readthedocs.io/en/stable/python_api.html),
 [Lexbor HTML parser](https://selectolax.readthedocs.io/en/latest/lexbor.html),
 [tinycss2 AST](https://doc.courtbouillon.org/tinycss2/latest/api_reference.html),
+[PyAV file-like input](https://pyav.basswood.io/docs/stable/api/_globals.html),
+[FFmpeg MP4 demuxer controls](https://www.ffmpeg.org/ffmpeg-formats.html#mov_002fmp4_002f3gp),
 [Docker runtime controls](https://docs.docker.com/reference/cli/docker/container/run/).

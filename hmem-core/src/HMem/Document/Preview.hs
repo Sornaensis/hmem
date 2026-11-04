@@ -18,7 +18,7 @@ import HMem.Document.Types (jsonOptions)
 
 previewPolicyVersion, qualifiedPreviewImage :: Text
 previewPolicyVersion = "hmem-static-preview-v1"
-qualifiedPreviewImage = "sha256:43d5c02754efce8f533ded982f75b1a0f9eca8202c37d186cf1a1b575da890b5"
+qualifiedPreviewImage = "sha256:711c3f2a21e27a00bf1d0d17533ee086592eebf53bd87f3747d9a216c8bf0a1e"
 
 data PreviewLimits = PreviewLimits
   { originalBytes :: !Int64, imagePixels :: !Int64, pdfPages :: !Int

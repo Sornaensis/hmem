@@ -89,6 +89,21 @@ spec=describe "Task document HTTP" $ do
       lookup "Content-Disposition" astralResult.simpleHeaders `shouldSatisfy` maybe False(BS.isInfixOf "filename*=UTF-8''notes-%F0%9F%98%80.txt")
       Just current<-Task.getTask ctx.localEnv.pool task
       current.status `shouldBe` Types.Done
+  it "queues an MP4 document for preview and preserves its exact attachment when the renderer is unavailable" $
+    withLocalSandboxAppContext $ \ctx -> do
+      (workspace,task)<-fixture ctx.localEnv
+      requestId<-UUID.nextRandom
+      let bytes=BS.pack [0,0,0,20]<>"ftypisom"<>BS.replicate 4 0<>"mp42"
+          root=documents workspace task
+      created<-call ctx.localApplication methodPost root(uploadHeaders requestId Doc.Source bytes "clip.mp4" "video/mp4")(LBS.fromStrict bytes) >>= document
+      created.mediaType `shouldBe` "video/mp4"
+      (created.previewState,created.previewError) `shouldBe` ("failed",Just "renderer_unavailable")
+      boolean ctx.localEnv ("SELECT EXISTS(SELECT 1 FROM document_preview_jobs WHERE document_id='"<>uuid created.id<>"' AND retryable)") `shouldReturn` True
+      result<-call ctx.localApplication methodGet(root<>"/"<>uuid created.id<>"/original") [] ""
+      simpleStatus result `shouldBe` status200
+      LBS.toStrict result.simpleBody `shouldBe` bytes
+      lookup hContentType result.simpleHeaders `shouldBe` Just "application/octet-stream"
+      lookup "Content-Disposition" result.simpleHeaders `shouldSatisfy` maybe False(BS.isPrefixOf "attachment;")
   it "separates Source/evidence counts, supports agent evidence upload and immutable promotion/removal" $
     withLocalSandboxAppContext $ \ctx -> do
       (workspace,task)<-fixture ctx.localEnv

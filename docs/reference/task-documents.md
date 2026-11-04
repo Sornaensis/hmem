@@ -33,7 +33,7 @@ the original metadata snapshot and is additive/immutable. Source removal affects
 neither evidence nor published bytes. Task status does not gate documents;
 completed/cancelled tasks remain eligible while nondeleted and authorized.
 
-Original admission allows PNG, JPEG, WebP, PDF, HTML, SVG, UTF-8 TXT/Markdown,
+Original admission allows PNG, JPEG, WebP, MP4, PDF, HTML, SVG, UTF-8 TXT/Markdown,
 DOCX, PPTX, XLSX, FIG and SKETCH. Media type, extension and applicable signatures
 must agree. Office/design archives are not extracted. Acceptance as an original
 does not authorize embedding or execution; the renderer owns safe derivatives.

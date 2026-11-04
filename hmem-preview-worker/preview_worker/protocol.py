@@ -5,7 +5,7 @@ import math
 import re
 import struct
 from . import POLICY_VERSION
-from .policy import Limits, PreviewError, canonical, digest, require
+from .policy import Limits, PreviewError, VIDEO_MEDIA, canonical, digest, require, valid_video_size
 
 VERSION = 1
 MAX_REQUEST_HEADER = 64 * 1024
@@ -13,7 +13,7 @@ MAX_RESPONSE_HEADER = 256 * 1024
 MAX_OUTPUTS = 401
 MAX_STDERR = 16 * 1024
 MAX_WIRE = Limits().output_bytes + MAX_RESPONSE_HEADER + 8 * MAX_OUTPUTS + 4
-MEDIA = {"image/png", "image/jpeg", "image/webp", "application/pdf", "text/html"}
+MEDIA = {"image/png", "image/jpeg", "image/webp", "application/pdf", "text/html", VIDEO_MEDIA}
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -113,9 +113,11 @@ def validate_plan(plan, request_header, limits):
             "plan_invalid")
     info, media = plan["info"], plan["media_type"]
     require(isinstance(info, dict), "plan_invalid")
-    if media.startswith("image/"):
+    if media.startswith("image/") or media == VIDEO_MEDIA:
         require(set(info) == {"width", "height"} and all(type(info[x]) is int and info[x] > 0 for x in info)
                 and info["width"] * info["height"] <= limits.image_pixels, "plan_invalid")
+        if media == VIDEO_MEDIA:
+            require(valid_video_size(info["width"], info["height"], limits), "plan_invalid")
         shape = {("image", 0, "image/png"), ("thumbnail", 0, "image/png")}
     elif media == "application/pdf":
         require(set(info) == {"pages", "planned_decoded_bytes"} and isinstance(info["pages"], list)

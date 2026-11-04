@@ -424,7 +424,7 @@ asciiJSON = TE.encodeUtf8 . T.concatMap escape . TE.decodeUtf8 . BL.toStrict . e
 inferMediaType :: Text -> Text
 inferMediaType name = case map toLower (takeExtension (T.unpack name)) of
   ".png" -> "image/png"; ".jpg" -> "image/jpeg"; ".jpeg" -> "image/jpeg"; ".webp" -> "image/webp"
-  ".pdf" -> "application/pdf"; ".html" -> "text/html"; ".htm" -> "text/html"; ".svg" -> "image/svg+xml"
+  ".mp4" -> "video/mp4"; ".pdf" -> "application/pdf"; ".html" -> "text/html"; ".htm" -> "text/html"; ".svg" -> "image/svg+xml"
   ".txt" -> "text/plain"; ".md" -> "text/markdown"; ".markdown" -> "text/markdown"
   ".docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
   ".pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"

@@ -1,12 +1,16 @@
 """Deterministic plans bind inspection to a complete inert generation."""
 from . import POLICY_VERSION
-from .policy import canonical, digest, require
+from .policy import VIDEO_MEDIA, digest, require
 
 
 def inspect(raw, media, limits):
     if media.startswith("image/"):
         from .images import inspect_image
         info = inspect_image(raw, media, limits)
+        count = 2
+    elif media == VIDEO_MEDIA:
+        from .video import inspect_video
+        info = inspect_video(raw, limits)
         count = 2
     elif media == "application/pdf":
         from .pdf import inspect_pdf
@@ -32,6 +36,10 @@ def render(raw, media, limits, plan):
         image, thumbnail, animated = render_image(raw, media, limits, work)
         outputs = [("image", 0, "image/png", image), ("thumbnail", 0, "image/png", thumbnail)]
         pixels = work["pixels"]
+    elif media == VIDEO_MEDIA:
+        from .video import render_video
+        image, thumbnail, pixels = render_video(raw, limits, plan["info"])
+        outputs = [("image", 0, "image/png", image), ("thumbnail", 0, "image/png", thumbnail)]
     elif media == "application/pdf":
         from .pdf import render_pdf
         outputs, pdf_bytes = render_pdf(raw, plan["info"], limits)

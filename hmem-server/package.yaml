@@ -8,6 +8,7 @@ category:            Web
 data-files:
   - migrations/*.sql
 extra-source-files:
+  - test/fixtures/document-preview/first-frame.mp4
   - test/fixtures/embedding-gpu-viability/foundation-contract-v1.json
   - test/fixtures/embedding-gpu-viability/parity-probes-v1.json
   - test/fixtures/embedding-gpu-viability/reference-golden-v1.json

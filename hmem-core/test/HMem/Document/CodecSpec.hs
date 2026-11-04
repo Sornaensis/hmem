@@ -35,6 +35,13 @@ spec = describe "Document codec" $ do
     reject $ validateOriginal (input "text" "script.exe" "text/plain") "text"
     reject $ validateOriginal (input "text" "../notes.txt" "text/plain") "text"
     reject $ validateOriginal (input "text" "notes.txt" "application/octet-stream") "text"
+  it "accepts bounded MP4 signatures and rejects mismatched brands, extensions and box sizes" $ do
+    let sample = BS.pack [0,0,0,20] <> "ftypisom" <> BS.replicate 4 0 <> "mp42"
+        input bytes name=OriginalManifest (fromIntegral(BS.length bytes)) (payloadSha256 bytes) name name "video/mp4"
+    validateOriginal (input sample "clip.MP4") sample
+    reject $ validateOriginal (input sample "clip.mov") sample
+    forM_ [BS.init sample, BS.take 8 sample <> "qt  " <> BS.drop 12 sample, "not MP4"] $ \bad ->
+      reject $ validateOriginal (input bad "clip.mp4") bad
 
 reject :: IO a -> IO ()
 reject action = do result<-try (action>>pure()) :: IO(Either SomeException ()); result `shouldSatisfy` either (const True) (const False)

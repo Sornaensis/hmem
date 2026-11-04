@@ -817,3 +817,6 @@ cleanup retains physical admission independently of ordinary payload reservation
 expiry. See the
 [preview schema reference](docs/reference/schema.md#document-preview-jobs-v060)
 and [controller reference](docs/reference/document-previews.md).
+
+V061 extends the document media constraint to MP4 and atomically queues its
+preview during publication. It adds no tables, columns or derivative variants.

@@ -165,10 +165,11 @@ validatePlan run value planHash=do
       let count=length descriptors
       pure(("thumbnail",0,"image/png"):[(variant,page,"image/png")|page<-[1..count],variant<-["pdf_page","pdf_thumbnail"]],count)
     "text/html"->objectFields[]info >>pure([("styled_html_preview",0,"text/html")],0)
-    media | elem media ["image/png","image/jpeg","image/webp"]->do
+    media | elem media ["image/png","image/jpeg","image/webp","video/mp4"]->do
       image<-objectFields["width","height"]info
       width<-field image "width"::IO Integer; height<-field image "height"::IO Integer
       protocol(width>0&&height>0&&width*height<=fromIntegral run.limits.imagePixels)
+      when(media=="video/mp4")(protocol(width<=4096&&height<=4096&&width*height<=8294400))
       pure([("image",0,"image/png"),("thumbnail",0,"image/png")],0)
     _->throwIO(ProtocolFailure "unsupported")
   protocol(outputs==fromIntegral(length shape)&&outputs<=401)
@@ -409,7 +410,7 @@ requestHeader run=object["version" .= (1::Int),"operation" .= ("inspect"::Text),
 
 knownSettledError :: Text -> Bool
 knownSettledError code=elem code ["worker_crashed","confinement_unavailable","invalid_or_exhausted_input","unsupported","cancelled","deadline_exceeded"]
-  ||any(`T.isPrefixOf`code)["image_","pdf_","html_","css_","dom_","output_","original_","plan_","policy_","limits_","embedded_","version_","operation_","request_","response_","header_","duplicate_","trailing_","truncated_","json_","work_receipt_"]
+  ||any(`T.isPrefixOf`code)["image_","video_","pdf_","html_","css_","dom_","output_","original_","plan_","policy_","limits_","embedded_","version_","operation_","request_","response_","header_","duplicate_","trailing_","truncated_","json_","work_receipt_"]
 
 -- A separate cleanup helper is registered under the same actual native owner.
 -- Its current-absence result never settles an unknown daemon create.

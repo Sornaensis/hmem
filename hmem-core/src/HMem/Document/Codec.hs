@@ -71,6 +71,7 @@ validateOriginal m bytes = do
         "image/png" -> ext ".png" && prefix (BS.pack [137,80,78,71,13,10,26,10])
         "image/jpeg" -> (ext ".jpg" || ext ".jpeg") && prefix (BS.pack [255,216,255])
         "image/webp" -> ext ".webp" && prefix "RIFF" && BS.take 4 (BS.drop 8 bytes) == "WEBP"
+        "video/mp4" -> ext ".mp4" && hasMp4FileType bytes
         "application/pdf" -> ext ".pdf" && prefix "%PDF-"
         "text/html" -> (ext ".html" || ext ".htm") && textual
         "image/svg+xml" -> ext ".svg" && textual
@@ -90,7 +91,7 @@ validateManifest m = do
   require (validName m.filename && validText 1024 m.title) "document_invalid_name"
   let ext= snd (T.breakOnEnd "." (T.toLower m.filename))
       allowed=case m.mediaType of
-        "image/png"->["png"]; "image/jpeg"->["jpg","jpeg"]; "image/webp"->["webp"]; "application/pdf"->["pdf"]
+        "image/png"->["png"]; "image/jpeg"->["jpg","jpeg"]; "image/webp"->["webp"]; "video/mp4"->["mp4"]; "application/pdf"->["pdf"]
         "text/html"->["html","htm"]; "image/svg+xml"->["svg"]; "text/plain"->["txt"]; "text/markdown"->["md","markdown"]
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"->["docx"]
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"->["pptx"]
@@ -100,3 +101,14 @@ validateManifest m = do
   where
     validText n value = not (T.null (T.strip value)) && BS.length (TE.encodeUtf8 value) <= n && not (T.any isControl value)
     validName value = validText 255 value && value /= "." && value /= ".." && not (T.any (`elem` ("/\\" :: String)) value)
+
+-- Restrict the original signature to a bounded leading ISO MP4 file-type box.
+-- The confined decoder verifies the tracks and codec before making derivatives.
+hasMp4FileType :: ByteString -> Bool
+hasMp4FileType bytes =
+  BS.take 4 (BS.drop 4 bytes) == "ftyp"
+  && boxBytes >= 16 && boxBytes <= min 4096 (BS.length bytes)
+  && boxBytes `mod` 4 == 0
+  && BS.take 4 (BS.drop 8 bytes) `elem` ["isom", "iso2", "mp41", "mp42", "avc1"]
+  where
+    boxBytes = BS.foldl' (\size byte -> size * 256 + fromIntegral byte) 0 (BS.take 4 bytes)

@@ -3,6 +3,15 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 
+VIDEO_MEDIA = "video/mp4"
+VIDEO_SIDE = 4096
+VIDEO_PIXELS = 3840 * 2160
+
+
+def valid_video_size(width, height, limits):
+    return (0 < width <= VIDEO_SIDE and 0 < height <= VIDEO_SIDE
+            and width * height <= min(VIDEO_PIXELS, limits.image_pixels))
+
 
 class PreviewError(Exception):
     def __init__(self, code):

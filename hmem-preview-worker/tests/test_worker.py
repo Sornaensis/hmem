@@ -9,6 +9,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import av
 from PIL import Image
 import pypdfium2 as pdfium
 from preview_worker import POLICY_VERSION
@@ -22,6 +23,64 @@ def raster(format="PNG", size=(64, 32)):
     buffer = io.BytesIO()
     Image.new("RGB", size, "#336699").save(buffer, format=format)
     return buffer.getvalue()
+
+
+def mp4(codec="libx264", size=(640, 320), with_audio=False):
+    buffer = io.BytesIO()
+    with av.open(buffer, "w", format="mp4") as container:
+        stream = container.add_stream(codec, rate=10)
+        stream.width, stream.height = size
+        stream.pix_fmt = "yuv420p"
+        if with_audio:
+            audio = add_silent_aac(container)
+        for color in ("#dd2200", "#0033dd"):
+            frame = av.VideoFrame.from_image(Image.new("RGB", size, color))
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+        if with_audio:
+            mux_silent_aac(container, audio)
+    return buffer.getvalue()
+
+
+def audio_only_mp4():
+    buffer = io.BytesIO()
+    with av.open(buffer, "w", format="mp4", options={"brand": "isom"}) as container:
+        mux_silent_aac(container, add_silent_aac(container))
+    return buffer.getvalue()
+
+
+def add_silent_aac(container):
+    stream = container.add_stream("aac", rate=48000)
+    stream.layout = "mono"
+    return stream
+
+
+def mux_silent_aac(container, stream):
+    frame = av.AudioFrame(format="fltp", layout="mono", samples=1024)
+    frame.sample_rate = 48000
+    frame.planes[0].update(bytes(frame.planes[0].buffer_size))
+    for packet in stream.encode(frame) + stream.encode():
+        container.mux(packet)
+
+
+def external_mp4(raw, uri):
+    # The fixture muxes mdat before moov. Widen the data reference and its
+    # containing boxes without changing any original sample offsets.
+    offset = raw.index(b"moov") - 4
+    ancestors = [offset]
+    for kind in (b"trak", b"mdia", b"minf", b"dinf", b"dref", b"url "):
+        offset = raw.index(kind, offset + 8) - 4
+        ancestors.append(offset)
+    entry_end = offset + 12
+    assert raw[offset:entry_end] == b"\0\0\0\x0curl \0\0\0\1"
+    path = uri + b"\0"
+    result = bytearray(raw[:entry_end] + path + raw[entry_end:])
+    result[offset + 11] = 0
+    for box in ancestors:
+        struct.pack_into(">I", result, box, struct.unpack_from(">I", raw, box)[0] + len(path))
+    return bytes(result)
 
 
 def pdf(pages=2):
@@ -74,6 +133,33 @@ class WorkerTests(unittest.TestCase):
             with Image.open(io.BytesIO(payloads[0])) as image:
                 self.assertEqual(image.size, (64, 32)); self.assertEqual(image.format, "PNG")
                 self.assertEqual(getattr(image, "n_frames", 1), 1)
+
+    def test_mp4_first_frame_and_thumbnail_are_inert_rasters(self):
+        raw, media, limits = mp4(with_audio=True), "video/mp4", Limits()
+        plan = inspect(raw, media, limits)
+        records, payloads, work = render(raw, media, limits, plan)
+        self.assertEqual(plan["info"], {"width": 640, "height": 320})
+        self.assertEqual(plan["inspection_decoded_pixels"], 0)
+        self.assertEqual(work["decoded_pixels"], 640 * 320)
+        self.assertEqual([(x["variant"], x["page"], x["media_type"]) for x in records],
+                         [("image", 0, "image/png"), ("thumbnail", 0, "image/png")])
+        for payload, size in zip(payloads, ((640, 320), (320, 160))):
+            with Image.open(io.BytesIO(payload)) as image:
+                self.assertEqual((image.format, image.n_frames, image.size), ("PNG", 1, size))
+                red, _, blue = image.getpixel((20, 20))
+                self.assertGreater(red, 180)
+                self.assertLess(blue, 40)
+
+    def test_mp4_rejects_external_tracks_unsupported_codecs_and_small_budgets(self):
+        raw = mp4()
+        for uri in (b"file:///etc/passwd", b"https://example.invalid/external.mp4"):
+            with self.assertRaisesRegex(PreviewError, "video_external_reference"):
+                inspect(external_mp4(raw, uri), "video/mp4", Limits())
+        for invalid in (mp4("mpeg4"), audio_only_mp4(), raw[:-20], b"not MP4"):
+            with self.assertRaises((PreviewError, av.error.FFmpegError)):
+                inspect(invalid, "video/mp4", Limits())
+        with self.assertRaises((PreviewError, av.error.FFmpegError)):
+            inspect(raw, "video/mp4", replace(Limits(), image_pixels=100))
 
     def test_animation_all_frames_bound_and_first_only(self):
         out = io.BytesIO()

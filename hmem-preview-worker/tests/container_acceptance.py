@@ -19,7 +19,7 @@ from preview_worker.policy import PreviewError, Limits
 from preview_worker.policy import canonical, digest
 from preview_worker.protocol import request, encode_header, read_header
 from preview_worker.render import inspect
-from test_worker import raster, pdf, active_pdf
+from test_worker import raster, pdf, active_pdf, mp4, external_mp4, audio_only_mp4
 
 IMAGE = None
 SCRATCH = Path(__file__).resolve().parents[2] / ".tmp" / "task-preview-worker-8559047b"
@@ -50,6 +50,20 @@ class ContainerAcceptance(unittest.TestCase):
         result, outputs = self.generation(pdf(3), "application/pdf")
         self.assertEqual(len(outputs), 7)
         self.assertEqual({record["page"] for record, _ in outputs if record["variant"] == "pdf_page"}, {1, 2, 3})
+
+    def test_actual_mp4_static_poster_and_external_reference_denial(self):
+        raw = mp4(with_audio=True)
+        result, outputs = self.generation(raw, "video/mp4")
+        self.assertEqual(result["work"]["decoded_pixels"], 640 * 320)
+        self.assertEqual({record["variant"] for record, _ in outputs}, {"image", "thumbnail"})
+        for record, data in outputs:
+            self.assertEqual(record["media_type"], "image/png")
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        for uri in (b"file:///etc/passwd", b"https://example.invalid/external.mp4"):
+            with self.assertRaisesRegex(PreviewError, "video_external_reference"):
+                self.generation(external_mp4(raw, uri), "video/mp4")
+        with self.assertRaises(PreviewError):
+            self.generation(audio_only_mp4(), "video/mp4")
 
     def test_actual_pdf_actions_and_image_polyglot_are_inert_rasters(self):
         for raw, media in ((active_pdf(), "application/pdf"),

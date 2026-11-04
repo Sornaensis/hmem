@@ -14,7 +14,7 @@ The optional top-level JSON object `document_previews` defaults to disabled:
     "enabled": true,
     "python_executable": "python",
     "launcher_path": "/opt/hmem/hmem-preview-worker/launch.py",
-    "image_id": "sha256:43d5c02754efce8f533ded982f75b1a0f9eca8202c37d186cf1a1b575da890b5",
+    "image_id": "sha256:711c3f2a21e27a00bf1d0d17533ee086592eebf53bd87f3747d9a216c8bf0a1e",
     "workers": 2,
     "queue_limit": 32,
     "max_attempts": 3,
@@ -36,7 +36,7 @@ decoded image pixels across frames, 200 PDF pages, 16 million pixels per page,
 20,000 DOM nodes, depth 64, 2,000 CSS rules and 100 embedded images. The optional
 `limits` object uses the worker's snake_case keys; omitted values use defaults.
 Concurrency may be 1–2, queue capacity 1–32, attempts 1–3, and total deadlines 6–30 s
-for images/HTML or 6–120 s for PDF. Five seconds of each deadline are reserved for
+for images/MP4/HTML or 6–120 s for PDF. Five seconds of each deadline are reserved for
 physical cleanup. Inspection, original reading, quota reservation, rendering,
 native exit and cleanup all consume this same absolute generation deadline.
 
@@ -58,7 +58,7 @@ Inspection validates output shape and binds an opaque plan SHA-256 to original,
 policy, image and complete limits. The server reserves a conservative 101 MiB
 compressed-generation budget before acknowledging rendering. It validates all
 framing, descriptor identities, sizes, hashes, bounded work receipts, EOF and
-native exit before publication. Image output is page 0; PDF pages and page
+native exit before publication. Images and static MP4 frames use page 0. PDF pages and page
 thumbnails use 1-based numbering; the document thumbnail is page 0.
 
 All derivative payloads, immutable generation metadata, the current preview,

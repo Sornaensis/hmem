@@ -14,6 +14,7 @@ maintainer:     hmem contributors
 license:        MPL-2.0
 build-type:     Simple
 extra-source-files:
+    test/fixtures/document-preview/first-frame.mp4
     test/fixtures/embedding-gpu-viability/foundation-contract-v1.json
     test/fixtures/embedding-gpu-viability/parity-probes-v1.json
     test/fixtures/embedding-gpu-viability/reference-golden-v1.json
@@ -78,6 +79,7 @@ data-files:
     migrations/V058__task_documents.sql
     migrations/V059__document_download_grants.sql
     migrations/V060__document_preview_jobs.sql
+    migrations/V061__mp4_document_previews.sql
 
 library
   exposed-modules:

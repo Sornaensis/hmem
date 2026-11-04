@@ -579,8 +579,8 @@ viewSearchBar model =
         , viewEntityTypeFilters model ]
 
 
-viewWorkspaceSearchBar : Model -> Html Msg
-viewWorkspaceSearchBar model =
+viewWorkspaceSearchBar : Html Msg -> Model -> Html Msg
+viewWorkspaceSearchBar actions model =
     let
         normal = { model | search = Feature.FocusedFilters.normalSearch model }
         hierarchyView view =
@@ -588,7 +588,10 @@ viewWorkspaceSearchBar model =
     in
     if model.activeTab /= ProjectsTab then text "" else
     div [ class ("workspace-search-filter-bar project-filter-panel" ++ (if model.focusedFilters /= Nothing then " focused-search-filter-bar" else "")) ]
-        [ hierarchyView (viewHierarchySearch (if model.focusedFilters /= Nothing then "Filter focused view..." else "Filter project hierarchy..."))
+        [ div [ class "hierarchy-toolbar" ]
+            [ hierarchyView (viewHierarchySearch (if model.focusedFilters /= Nothing then "Filter focused view..." else "Filter project hierarchy..."))
+            , actions
+            ]
         , hierarchyView (\current ->
             div [ class "hierarchy-filter-controls" ]
                 [ if current.focusedFilters /= Nothing then div [ class "filter-label" ] [ text "Focused view filters" ] else text ""
@@ -652,7 +655,8 @@ viewFilterBar model =
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Priority" ]
             , select
-                [ class "filter-select"
+                [ class "filter-select hierarchy-priority-mode"
+                , attribute "aria-label" "Priority"
                 , onInput
                     (\s ->
                         case s of

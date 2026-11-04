@@ -17,6 +17,7 @@ import Feature.Search
 import Feature.WebSocket as WebSocket
 import Http
 import HierarchyViewport as Viewport
+import Html
 import Html.Attributes as Attributes
 import Json.Encode as Encode
 import Json.Decode as Decode
@@ -398,13 +399,13 @@ suite =
             let
                 search = model.search
                 focused = timelineFocusFrom "task" { model | search = { search | query = "workspace query" } } |> Main.update (SearchInput "focused query") |> Tuple.first
-                input label value source = Feature.Search.viewWorkspaceSearchBar source |> Query.fromHtml |> Query.find [ Selector.attribute (Attributes.placeholder label) ] |> Query.has [ Selector.attribute (Attributes.value value) ]
-                hidden source = Feature.Search.viewWorkspaceSearchBar source |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
+                input label value source = Feature.Search.viewWorkspaceSearchBar (Html.text "") source |> Query.fromHtml |> Query.find [ Selector.attribute (Attributes.placeholder label) ] |> Query.has [ Selector.attribute (Attributes.value value) ]
+                hidden source = Feature.Search.viewWorkspaceSearchBar (Html.text "") source |> Query.fromHtml |> Query.hasNot [ Selector.tag "input" ]
             in
             Expect.all
                 [ \_ -> input "Filter focused view..." "focused query" focused
-                , \_ -> Feature.Search.viewWorkspaceSearchBar focused |> Query.fromHtml |> Query.findAll [ Selector.class "hierarchy-search-input" ] |> Query.count (Expect.equal 1)
-                , \_ -> Feature.Search.viewWorkspaceSearchBar focused |> Query.fromHtml |> Query.hasNot [ Selector.attribute (Attributes.placeholder "Filter project hierarchy...") ]
+                , \_ -> Feature.Search.viewWorkspaceSearchBar (Html.text "") focused |> Query.fromHtml |> Query.findAll [ Selector.class "hierarchy-search-input" ] |> Query.count (Expect.equal 1)
+                , \_ -> Feature.Search.viewWorkspaceSearchBar (Html.text "") focused |> Query.fromHtml |> Query.hasNot [ Selector.attribute (Attributes.placeholder "Filter project hierarchy...") ]
                 , \_ -> input "Filter project hierarchy..." "workspace query" (Main.update ClearFocus focused |> Tuple.first)
                 , \_ -> hidden { focused | activeTab = TimelineTab }
                 , \_ -> hidden { focused | activeTab = ObservationsTab }

@@ -315,18 +315,18 @@ viewTabContent : String -> Model -> Html Msg
 viewTabContent wsId model =
     case model.activeTab of
         ProjectsTab ->
-            div [ class "hierarchy-content-section" ]
-                [ div [ class "hierarchy-toolbar" ]
-                    [ h2 [ class "hierarchy-label" ] [ Icon.view "list-tree", text "Project hierarchy" ]
-                    , div [ class "tree-toolbar" ]
+            let
+                actions =
+                    div [ class "tree-toolbar" ]
                         [ div [ class "hierarchy-action-pair" ]
                             [ button [ class "btn-small btn-ghost", type_ "button", attribute "aria-label" "Expand All", onClick ExpandAllNodes ] [ Icon.view "unfold-vertical", text "Expand all" ]
                             , button [ class "btn-small btn-ghost", type_ "button", attribute "aria-label" "Collapse All", onClick CollapseAllNodes ] [ Icon.view "fold-vertical", text "Collapse all" ]
                             ]
                         , Feature.Editing.viewInlineCreateInput model Nothing "project"
                         ]
-                    ]
-                , Feature.Search.viewWorkspaceSearchBar model
+            in
+            div [ class "hierarchy-content-section" ]
+                [ Feature.Search.viewWorkspaceSearchBar actions model
                 , Feature.Cards.viewProjectsTree wsId model
                 ]
 

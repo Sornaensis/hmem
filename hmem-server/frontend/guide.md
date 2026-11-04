@@ -83,12 +83,14 @@ signed-in actor and workspace, separately from hierarchy filters. Selecting no
 types pauses searching. Clearing the query keeps these choices visible. Ordinary
 tab switches and reloads clear the query.
 
-The **Projects** content toolbar keeps Expand All, Collapse All, New Project,
-hierarchy text filtering and every type, status, priority and option control
-visible. These filters wrap on narrow screens and remain independent of Search.
-**Show empty projects** and **Has Active Session** are toggle buttons. While a
-search updates or after a failure, the last completed results remain labelled
-with their query; use **Retry search** to try again.
+In **Projects**, the hierarchy search sits beside **Expand all**, **Collapse
+all** and **New project**. On narrow screens the actions can wrap below the
+search. Entity, status and priority filters appear below that row, followed by
+**Options** with **Show empty projects** and **Has active session**. Hierarchy
+filters are separate from Search.
+
+While a search updates or after a failure, the last completed results remain
+labelled with their query. Use **Retry search** to try again.
 
 Results use compact previews with copyable IDs. **Jump To** opens the canonical
 project, task or Observation, including targets outside your current filters.

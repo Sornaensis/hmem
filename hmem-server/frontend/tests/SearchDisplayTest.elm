@@ -17,6 +17,7 @@ import Page.Workspace
 import UpdateRouter
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
+import Html
 import Html.Attributes as Attributes
 import Set
 import Test exposing (..)
@@ -58,8 +59,8 @@ suite =
             in
             Expect.all
                 [ \_ -> Feature.Search.viewSearchBar collapsed |> Query.fromHtml |> Query.findAll [ Selector.class "filter-pill" ] |> Query.count (Expect.equal 3)
-                , \_ -> Feature.Search.viewWorkspaceSearchBar collapsed |> Query.fromHtml |> Query.findAll [ Selector.class "hierarchy-search-input" ] |> Query.count (Expect.equal 1)
-                , \_ -> Feature.Search.viewWorkspaceSearchBar collapsed |> Query.fromHtml |> Query.hasNot [ Selector.attribute (Attributes.hidden True) ]
+                , \_ -> Feature.Search.viewWorkspaceSearchBar (Html.text "") collapsed |> Query.fromHtml |> Query.findAll [ Selector.class "hierarchy-search-input" ] |> Query.count (Expect.equal 1)
+                , \_ -> Feature.Search.viewWorkspaceSearchBar (Html.text "") collapsed |> Query.fromHtml |> Query.hasNot [ Selector.attribute (Attributes.hidden True) ]
                 ] ()
         , test "empty Search timestamp demand never falls through to hierarchy cards" <| \_ ->
             let loading = liveModel.dataLoading

@@ -26,7 +26,9 @@ module HMem.Server.API
   , AgentSessionRequest
   , authorizeAgentSessionWrite
   , authorizeTaskEvidenceRead
+  , authorizeTaskEvidenceExport
   , authorizeSessionRead
+  , requireBotSessionEvidence
   , archiveAudience
   ) where
 
@@ -72,7 +74,7 @@ import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, runSession)
 import HMem.DB.Project qualified as Project
-import HMem.DB.RequestContext (Principal(..), EffectiveActor(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, currentEffectiveActor, withWorkspaceIdContext)
+import HMem.DB.RequestContext (Principal(..), EffectiveActor(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, currentEffectiveActor, currentRequestContext, isBotRequest, withWorkspaceIdContext)
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
@@ -590,7 +592,27 @@ authorizeTaskEvidenceRead pool workspace task = do
 authorizeSessionRead :: Pool Hasql.Connection -> UUID -> UUID -> Handler AgentSession.AgentSession
 authorizeSessionRead pool workspace identifier = do
   requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
-  requireAgentSession pool workspace identifier
+  session <- requireAgentSession pool workspace identifier
+  when (session.state == AgentSession.Terminated) $
+    requireBotSessionEvidence pool workspace identifier
+  pure session
+
+requireBotSessionEvidence :: Pool Hasql.Connection -> UUID -> UUID -> Handler ()
+requireBotSessionEvidence pool workspace identifier =
+  requireBotTerminalEvidence (AgentSessions.sessionEvidenceTasksTerminal pool workspace identifier)
+
+authorizeTaskEvidenceExport :: Pool Hasql.Connection -> UUID -> UUID -> Handler ()
+authorizeTaskEvidenceExport pool workspace task = do
+  authorizeTaskEvidenceRead pool workspace task
+  requireBotTerminalEvidence (AgentSessions.taskEvidenceExportAllowed pool workspace task)
+
+requireBotTerminalEvidence :: IO Bool -> Handler ()
+requireBotTerminalEvidence eligible = do
+  bot <- liftIO $ isBotRequest <$> currentRequestContext
+  when bot $ do
+    allowed <- liftIO eligible
+    unless allowed $ throwError $ sessionError err403 "evidence_task_not_terminal"
+      "Bots can download task evidence only when all associated tasks are done or cancelled"
 
 -- Fingerprint the resolved authority and exact credential/session context.
 -- Generic JWT aud and effective bot metadata never identify cache ownership.
@@ -768,6 +790,8 @@ agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH 
         (AgentSession.TerminateSession input.expectedOffset input.expectedRevision input.finalBytes input.finalSha256)
     rangeH expectedState identifier rawOffset rawLimit authorization cookie = do
       readAccess
+      when (expectedState == AgentSession.Terminated) $
+        requireBotSessionEvidence pool workspace identifier
       offset <- maybe (pure 0) (parseSessionParam @Int64) rawOffset
       limit <- maybe (pure SessionWire.defaultSessionRangeBytes) parseSessionParam rawLimit
       principal <- liftIO currentPrincipal >>= maybe (throwError $ sessionError err401 "unauthorized" "Authentication required") pure
@@ -780,6 +804,8 @@ agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH 
           (AgentSessions.ArchiveAudience $ archiveAudience principal authorization cookie) pool workspace identifier offset limit
       when (result.session.state /= expectedState) $
         throwError $ sessionError err409 "session_state_conflict" "Use transcript for active sessions and evidence for terminated sessions"
+      when (expectedState == AgentSession.Terminated) $
+        requireBotSessionEvidence pool workspace identifier
       pure $ SessionWire.SessionRangeResponse result.session result.offset (SessionWire.encodeSessionBytes result.bytes) result.nextOffset result.hasMore
 
 taskAgentSessions :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Handler SessionWire.SessionPageResponse

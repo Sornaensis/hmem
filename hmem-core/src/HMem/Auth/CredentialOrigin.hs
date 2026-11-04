@@ -30,12 +30,16 @@ data ResolvedRequestAuth = ResolvedRequestAuth
   } deriving stock (Show,Eq)
 
 -- The token actor and its grant-bearing user remain separate, including bot PATs.
-data GrantIssuer = GrantIssuer { principal :: !Principal, credentialOrigin :: !CredentialOrigin }
+data GrantIssuer = GrantIssuer
+  { principal :: !Principal, credentialOrigin :: !CredentialOrigin
+  , botRestricted :: !Bool
+  }
   deriving stock (Show,Eq)
 instance ToJSON GrantIssuer where
   toJSON issuer = object
     ["actor_type" .= actorTypeToText issuer.principal.actorType,"actor_id" .= issuer.principal.actorId
     ,"actor_label" .= issuer.principal.actorLabel,"credential_origin" .= issuer.credentialOrigin
+    ,"bot_restricted" .= issuer.botRestricted
     ,"authority" .= case issuer.principal.authority of
        PrincipalGrantUser identifier -> object ["kind" .= ("user"::Text),"id" .= identifier]
        PrincipalSyntheticLocalSuperadmin -> object ["kind" .= ("local"::Text)]
@@ -51,6 +55,7 @@ instance FromJSON GrantIssuer where
       _ -> fail "Invalid issuer authority") authorityValue
     GrantIssuer <$> (Principal actor <$> o .: "actor_id" <*> o .: "actor_label" <*> pure authority)
                 <*> o .: "credential_origin"
+                <*> (o .:? "bot_restricted" .!= (actor == ActorBot))
 
 sameIssuer :: GrantIssuer -> ResolvedRequestAuth -> Bool
 sameIssuer issuer current = issuer.credentialOrigin == current.credentialOrigin

@@ -151,7 +151,7 @@ spec=around withTestEnv $ describe "Document grant storage" $ do
 request :: UUID -> GrantRequest
 request source=GrantRequest Doc.Source source "original" 0 Nothing Nothing
 localIssuer :: GrantIssuer
-localIssuer=GrantIssuer (Principal ActorUser "local-user" "local" PrincipalSyntheticLocalSuperadmin) LocalOrigin
+localIssuer=GrantIssuer (Principal ActorUser "local-user" "local" PrincipalSyntheticLocalSuperadmin) LocalOrigin False
 fixture :: TestEnv -> IO(UUID,UUID,Doc.Document,UUID)
 fixture env=do
   workspace<-createTestWorkspace env "grant-storage"

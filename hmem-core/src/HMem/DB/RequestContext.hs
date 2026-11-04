@@ -19,6 +19,7 @@ module HMem.DB.RequestContext
   , currentRequestId
   , currentPrincipal
   , currentEffectiveActor
+  , isBotRequest
   , currentWorkspaceId
   , currentChangeCause
   ) where
@@ -28,6 +29,7 @@ import Control.Exception (bracket)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.UUID (UUID)
 import System.IO.Unsafe (unsafePerformIO)
@@ -97,6 +99,12 @@ data RequestContext = RequestContext
   , workspaceId :: !(Maybe UUID)
   , changeCause :: !(Maybe ChangeCause)
   } deriving stock (Show, Eq)
+
+-- | Additional bot workflow restrictions do not confer any authority.
+isBotRequest :: RequestContext -> Bool
+isBotRequest context =
+  maybe False (\p -> p.actorType == ActorBot) context.principal ||
+  maybe False (\actor -> actor.actorType == ActorBot || isJust actor.botIdentity) context.effectiveActor
 
 emptyRequestContext :: RequestContext
 emptyRequestContext = RequestContext

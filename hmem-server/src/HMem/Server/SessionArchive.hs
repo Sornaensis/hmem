@@ -32,7 +32,7 @@ import System.Timeout (timeout)
 import HMem.AgentSession qualified as S
 import HMem.DB.AgentSession qualified as DB
 import HMem.DB.RequestContext (currentRequestContext, withRequestContext, RequestContext(..))
-import HMem.Server.API (authorizeTaskEvidenceRead)
+import HMem.Server.API (authorizeTaskEvidenceRead,authorizeTaskEvidenceExport,requireBotSessionEvidence)
 import HMem.Server.Exception (trySynchronous)
 
 -- There is one gate per application, held through network backpressure and cleanup.
@@ -44,7 +44,7 @@ newArchiveMiddleware pool = do
       | Wai.requestMethod request == methodGet
       , Just workspace <- UUID.fromText workspaceText
       , Just task <- UUID.fromText taskText -> do
-          authorized <- runHandler (authorizeTaskEvidenceRead pool workspace task)
+          authorized <- runHandler (authorizeTaskEvidenceExport pool workspace task)
           case authorized of
             Left failure -> respond (Wai.responseLBS (mkStatus failure.errHTTPCode (BS8.pack failure.errReasonPhrase)) failure.errHeaders failure.errBody)
             Right () -> mask $ \restore -> do
@@ -55,9 +55,10 @@ newArchiveMiddleware pool = do
               else do
                 context <- currentRequestContext
                 let check = runHandler (authorizeTaskEvidenceRead pool workspace task) >>= either (const failed) pure
+                    checkEntry identifier = check >> (runHandler (requireBotSessionEvidence pool workspace identifier) >>= either (const failed) pure)
                     body send flush = withRequestContext context{workspaceId=Just workspace} $ do
                       attempted <- trySynchronous $ timeout (15 * 60 * 1_000_000) $
-                        streamArchive pool workspace task check (\bytes -> send (B.byteString bytes) >> flush)
+                        streamArchive pool workspace task check checkEntry (\bytes -> send (B.byteString bytes) >> flush)
                       case attempted of Right (Just ()) -> pure (); _ -> failed
                     headers = [(hContentType,"application/zip"),("Content-Disposition","attachment; filename=task-"<>TE.encodeUtf8 taskText<>"-evidence.zip"),("Cache-Control","no-store"),("X-Content-Type-Options","nosniff")]
                 restore (respond (Wai.responseStream status200 headers body)) `finally`
@@ -74,8 +75,8 @@ archiveEntryName session = TE.encodeUtf8 $ label <> "-" <> UUID.toText session.i
 
 -- Only the current page, one raw range, zlib state and one index record are live.
 -- The original evidence never enters an unbounded lazy ByteString.
-streamArchive :: Pool Hasql.Connection -> UUID -> UUID -> IO () -> (BS.ByteString -> IO ()) -> IO ()
-streamArchive pool workspace task check send = do
+streamArchive :: Pool Hasql.Connection -> UUID -> UUID -> IO () -> (UUID -> IO ()) -> (BS.ByteString -> IO ()) -> IO ()
+streamArchive pool workspace task check checkEntry send = do
   temporary <- getTemporaryDirectory
   bracket (openBinaryTempFile temporary "hmem-task-evidence-index-")
     (\(name,handle) -> hClose handle `finally` removeFile name) $ \(_,index) -> do
@@ -89,7 +90,7 @@ streamArchive pool workspace task check send = do
             writeIORef offset (before+size)
           builder = mapM_ emit . LBS.toChunks . B.toLazyByteString
           entry session = do
-            check
+            checkEntry session.id
             size <- maybe failArchive pure session.finalBytes
             expected <- maybe failArchive pure session.finalSha256
             unless (session.state == S.Terminated && size >= 0 && size == session.committedBytes) failArchive
@@ -104,7 +105,7 @@ streamArchive pool workspace task check send = do
               let input = do
                     at <- readIORef cursor
                     if at == size then pure BS.empty else do
-                      check
+                      checkEntry session.id
                       bytes <- DB.readSessionReader reader at 65536
                       unless (not (BS.null bytes) && fromIntegral (BS.length bytes) == min 65536 (size-at)) failArchive
                       writeIORef cursor (at+fromIntegral (BS.length bytes))
@@ -112,7 +113,7 @@ streamArchive pool workspace task check send = do
                       modifyIORef' hash (`hashUpdate` bytes)
                       pure bytes
                   compress (Z.CompressInputRequired next) = input >>= next >>= compress
-                  compress (Z.CompressOutputAvailable bytes next) = emit bytes >> next >>= compress
+                  compress (Z.CompressOutputAvailable bytes next) = checkEntry session.id >> emit bytes >> next >>= compress
                   compress Z.CompressStreamEnd = pure ()
               compress (Z.compressIO Z.rawFormat Z.defaultCompressParams{Z.compressBufferSize=65536})
             actual <- readIORef cursor

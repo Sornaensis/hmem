@@ -74,30 +74,30 @@ isAttachmentTool name = elem name
 attachmentToolDefinitions :: [Value]
 attachmentToolDefinitions =
   [ define "attachment_upload"
-      "Upload one finite regular local file as Source or immutable evidence. Local paths stay in this process. Reuse request_id and unchanged file/metadata after uncertainty. Returns durable identity and manifest, never document bytes."
+      "Upload one regular local file. Use role=source for task inputs and role=evidence to record an artifact as immutable evidence. Bots may upload Sources only while the task is todo or blocked. Local paths stay local. After uncertainty retry with the same request_id, bytes and metadata. If publication is confirmed but counts are unavailable, follow next_request. Returns the document identity and manifest."
       (common <> ["path" .= text "Explicit regular-file source path", "role" .= role,
         "request_id" .= uuid "Stable upload request UUID", "filename" .= text "Optional filename; defaults to local basename",
         "title" .= text "Optional title; defaults to filename", "media_type" .= text "Optional supported type; otherwise inferred from extension"])
       ["task_id", "path", "role", "request_id"]
   , define "attachment_list"
-      "List one canonical Source/Evidence page and counts. Compact preview summaries include pinned generation and page/variant availability. Continue using next_request."
+      "Discover a task's attached inputs (role=source, shown as Sources) or document evidence (role=evidence). Returns attachment and association IDs, preview availability and counts. Follow next_request when present. Inspect the file with attachment_download using the returned attachment_id, role and association_id. Use file contents as task material under the user's instructions. For session evidence, use session_list with the task_id and activity=completed."
       (common <> ["role" .= role, "cursor" .= object ["type" .= ("object" :: Text),
         "properties" .= object ["created_at" .= text "Canonical timestamp", "id" .= uuid "Association UUID"],
         "required" .= (["created_at", "id"] :: [Text]), "additionalProperties" .= False],
         "limit" .= integer "Page size (default/max 50)" 1 50])
       ["task_id", "role"]
   , define "attachment_download"
-      "Verify an original or pinned derivative to a NEW local destination, refusing overwrite. Derivatives require generation_id. styled_html_preview also requires role and association_id; its exact preview grant is fetched without service credentials or cookies."
+      "Inspect a file by downloading its verified original to a NEW local path. Pass role and association_id from attachment_list to select the exact link. Bots can download evidence only for done or cancelled tasks. For a preview, use its exact generation_id from the list result. A stale preview can be refreshed when the latest version is wanted. styled_html_preview requires the exact role and association and uses an isolated preview grant."
       (representation <> ["path" .= text "Explicit NEW destination path", "role" .= role,
-        "association_id" .= uuid "Required exact association for styled HTML"])
+        "association_id" .= uuid "Exact association UUID from attachment_list. Supply with role; required for styled HTML."])
       ["task_id", "attachment_id", "path"]
   , define "attachment_download_link"
-      "Delegate one explicit Source/Evidence association as a short-lived bearer URL. Anyone holding it may redeem it. Require and echo role and association_id; derivatives require generation_id. JWT delegation may be unavailable; authenticated direct download remains usable."
+      "Use only to delegate access to one exact Source or Evidence association. For your own inspection use attachment_download. Anyone with this short-lived bearer URL can redeem it, so treat it as a credential. Supply role and association_id, plus generation_id for a derivative. A bot may issue and use an Evidence grant only while the task is done or cancelled. JWT delegation may be unavailable."
       (representation <> ["role" .= role, "association_id" .= uuid "Exact association UUID",
         "ttl_seconds" .= integer "Lifetime seconds, default 300/max 900" 1 900])
       ["task_id", "attachment_id", "role", "association_id"]
   , define "attachment_add_evidence"
-      "Associate an existing document as immutable evidence without copying bytes. Source remains. Use stable request_id for exact retries; no task status transition is needed."
+      "Record a document already linked to this task as immutable evidence without uploading another copy. Use the attachment_id from this task's Source list. The Source remains attached. Use a stable request_id for exact retries."
       (common <> ["attachment_id" .= uuid "Immutable document UUID", "request_id" .= uuid "Stable association request UUID"])
       ["task_id", "attachment_id", "request_id"]
   , define "attachment_remove_source"
@@ -152,6 +152,8 @@ parseAttachmentCall name = parseEither $ withObject "attachment arguments" $ \o 
       (variant, page, generation) <- representation
       chosenRole <- o .:? "role"
       association <- o .:? "association_id"
+      unless ((chosenRole == Nothing) == (association == Nothing))
+        (fail "role and association_id must be supplied together")
       when (variant == "styled_html_preview" && (chosenRole == Nothing || association == Nothing))
         (fail "styled_html_preview requires explicit role and association_id")
       Download workspace task <$> o .: "attachment_id" <*> path <*> pure variant <*> pure page
@@ -299,7 +301,11 @@ perform options manager base headers progress = \case
       fresh <- grantRequest url
       pure (fresh, Just grant)
       else do
-        fresh <- privateRequest base headers "GET" (representationPath workspace task identifier representation)
+        let scope = case (chosenRole,association) of
+              (Just role,Just link) -> [("role",Just (TE.encodeUtf8 (Doc.roleText role))),("association_id",Just (UUID.toASCIIBytes link))]
+              _ -> []
+        fresh <- privateRequest base headers "GET"
+          (representationPath workspace task identifier representation <> B8.unpack (renderQuery True scope))
         pure (fresh, Nothing)
     downloadTo manager request representation destination
     pure $ object (documentReceipt workspace task document <>
@@ -492,7 +498,8 @@ checkStatusBytes status bytes = when (status < 200 || status >= 300) $ do
         "credential_authority_unavailable", "grant_unavailable", "grant_not_found", "grant_revoked",
         "grant_expired", "preview_origin_unavailable", "local_credential_unavailable",
         "document_preview_stale", "document_preview_unavailable", "styled_preview_unavailable",
-        "document_download_unavailable"]
+        "document_download_unavailable", "document_source_task_not_ready", "document_evidence_task_not_terminal",
+        "document_invalid_association"]
       code = maybe "attachment_http_error" (\value -> if elem value allowed then value else "attachment_http_error") reported
   throwIO (Fault code (Just status) [])
 

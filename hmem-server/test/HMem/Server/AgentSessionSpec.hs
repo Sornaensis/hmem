@@ -333,6 +333,8 @@ spec = describe "Agent session HTTP" $ do
       otherRow <- seedEvidence env workspace.id other.id "Excluded other task" "true\n"
       active <- seed env workspace.id
       DB.associateSessionTask env.pool workspace.id active.id task.id
+      Pool.runSession env.pool $ SQL.sql
+        ("UPDATE tasks SET status='done' WHERE id IN ('"<>uuid task.id<>"','"<>uuid other.id<>"')")
       reader <- audience ctx workspace.id (Just Auth.WorkspaceRoleRead) False
       outsider <- audience ctx workspace.id Nothing False
       let path=taskArchive workspace.id task.id
@@ -349,6 +351,7 @@ spec = describe "Agent session HTTP" $ do
       ok one
       verifyArchive one.simpleBody [(otherRow,"true\n")]
       empty <- makeTask env workspace.id
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid empty.id<>"'")
       call app methodGet (taskArchive workspace.id empty.id) reader "" >>= (\response -> ok response >> verifyArchive response.simpleBody [])
   it "holds only two export admissions and releases disconnects before the first stream write" $
     withLocalSandboxAppContext $ \ctx -> do
@@ -549,7 +552,7 @@ spec = describe "Agent session HTTP" $ do
         uploaded <- post app (target<>"/append") headers (toJSON $ AppendSessionRequest 0 0 "e30=" True) >>= decoded @AppendSessionResponse
         _ <- post app (target<>"/terminate") headers (toJSON $ TerminateSessionRequest 2 uploaded.session.revision 2 (Core.sessionSha256 "{}")) >>= ok
         call app methodPut (target<>"/tasks/"<>uuid task.id) headers "" >>= ok
-        call app methodGet (target<>"/evidence") reader "" >>= ok
+        call app methodGet (target<>"/evidence") reader "" >>= status status403
         call app methodGet (target<>"/evidence") outsider "" >>= status status403
       call app methodGet (root<>"/"<>uuid foreignRow.id) editor "" >>= status status404
       call app methodPut (path<>"/tasks/"<>uuid foreignTask.id) editor "" >>= status status404

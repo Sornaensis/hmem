@@ -47,6 +47,36 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec=describe "Task document HTTP" $ do
+  it "gates bot Source uploads on every task status before consuming the body" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+      forM_ [("todo",True),("blocked",True),("in_progress",False),("cancelled",False),("done",False)] $ \(state,allowed) -> do
+        (workspace,task)<-fixture env
+        execute env("UPDATE tasks SET status='"<>state<>"' WHERE id='"<>uuid task<>"'")
+        requestId<-UUID.nextRandom
+        let root=documents workspace task
+            headers=botIdentityHeader:uploadHeaders requestId Doc.Source "body" "notes.txt" "text/plain"
+        if allowed
+          then call app methodPost root headers "body" >>= status status201
+          else unread app (mkRequest methodPost root headers){Wai.requestBodyLength=Wai.KnownLength 4}
+            `shouldReturn` (status403,0)
+        getCounts app root [] `shouldReturn` Doc.DocumentCounts (if allowed then 1 else 0) 0 0 0
+  it "rechecks bot Source publication after a status transition during body upload" $
+    withLocalSandboxAppContext $ \ctx -> do
+      let env=ctx.localEnv; app=ctx.localApplication
+      (workspace,task)<-fixture env
+      requestId<-UUID.nextRandom
+      firstRead<-newIORef True
+      result<-newIORef status500
+      let root=documents workspace task
+          headers=botIdentityHeader:uploadHeaders requestId Doc.Source "body" "notes.txt" "text/plain"
+          body=atomicModifyIORef' firstRead(\first -> (False,first)) >>= \first -> if first
+            then execute env("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid task<>"'") >> pure "body"
+            else pure ""
+          request=(mkRequest methodPost root headers){Wai.requestBody=body,Wai.requestBodyLength=Wai.ChunkedBody}
+      _<-app request(\response -> writeIORef result(Wai.responseStatus response) >> pure ResponseReceived)
+      readIORef result `shouldReturn` status403
+      getCounts app root [] `shouldReturn` Doc.DocumentCounts 0 0 0 0
   it "uploads a Source on a completed task, returns exact retries and byte-identical safe original downloads" $
     withLocalSandboxAppContext $ \ctx -> do
       (workspace,task)<-fixture ctx.localEnv
@@ -342,6 +372,8 @@ documents :: UUID -> UUID -> ByteString
 documents workspace task="/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>uuid task<>"/documents"
 uuid :: UUID -> ByteString
 uuid=TE.encodeUtf8 . T.pack . show
+botIdentityHeader :: Header
+botIdentityHeader=("X-HMem-Bot-Identity","{\"role\":\"Document HTTP Test\",\"model-id\":\"test:fixture:default\"}")
 uploadHeaders :: UUID -> Doc.DocumentRole -> ByteString -> Text -> Text -> [Header]
 uploadHeaders requestId role bytes filename mediaType=
   [(hContentType,"application/octet-stream"),(metadataHeader,LBS.toStrict(encode(object["request_id" .= requestId,"role" .= role,"manifest" .= Doc.OriginalManifest (fromIntegral(BS.length bytes))(payloadSha256 bytes) filename filename mediaType])))]

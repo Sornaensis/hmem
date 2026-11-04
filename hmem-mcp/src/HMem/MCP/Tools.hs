@@ -183,8 +183,8 @@ toolDefinitions =
           ]
       , "project_id" .= nullableProp "Destination project UUID, or null/omitted to detach the tasks from a project"
       ] ["task_ids"])
-  , tool "task_detail" "Get task details, including its complete description." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
-  , tool "task_triage" "Download all linked saved/terminated session evidence as a verified ZIP64 archive to a new explicit local path. Refuses overwrite; incomplete or invalid downloads are removed. Returns archive byte count, SHA-256 and session count without transcript content. Active sessions are excluded; task status is unchanged." (strictSchema ["workspace_id" .= prop "string" "Optional workspace override; accepted identity still required", "task_id" .= prop "string" "Task UUID", "path" .= prop "string" "New explicit local archive destination; parent directory must exist"] ["task_id","path"])
+  , tool "task_detail" "Get the task and its full description. Find attached inputs with attachment_list using role=source, or attached evidence files with role=evidence. For completed session evidence use session_list with this task_id and activity=completed, then session_evidence." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
+  , tool "task_triage" "Download all linked completed session evidence as a verified ZIP64 archive to a new explicit local path. Bots require this task and every task linked to the exported sessions to be done or cancelled. Refuses overwrite and removes incomplete or invalid downloads. Returns archive byte count, SHA-256 and session count." (strictSchema ["workspace_id" .= prop "string" "Optional workspace override; accepted identity still required", "task_id" .= prop "string" "Task UUID", "path" .= prop "string" "New explicit local archive destination; parent directory must exist"] ["task_id","path"])
   , tool "task_overview" "Get a compact task overview and dependency summaries." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
@@ -327,7 +327,7 @@ sessionToolDefinitions =
       ["session_id" .= uuid, "format_label" .= string "Provider-neutral format label (1..128 UTF-8 bytes)", "title" .= string "Required very short descriptive title, normally 3–8 words; 1..80 UTF-8 bytes, not a UUID or format label", "task_id" .= uuid, "parent_session_id" .= uuid, "initial_runtime_identity" .= runtimeIdentitySchema] ["session_id", "format_label", "title", "task_id"]
   , define "session_set_runtime" "Declare or change the actual running agent role and target session model while active. New nonnull declarations require both role and model. This self-reported identity is separate from immutable connection caller attribution and grants no permissions. Use the current runtime_revision from session_detail as expected_runtime_revision, never the transcript revision. Explicit runtime_identity:null clears to unknown. An identical lost-ack retry at the immediately prior runtime revision is safe; other stale updates conflict. Transcript bytes/cursor/hash and activity do not change; terminated sessions reject updates."
       ["session_id" .= uuid,"expected_runtime_revision" .= nonnegative,"runtime_identity" .= runtimeIdentitySchema] ["session_id","expected_runtime_revision","runtime_identity"]
-  , define "session_list" "List compact session metadata, optionally for a visible same-workspace task. Descending immutable created_at/UUID keyset; execute next_request to continue in the resolved workspace."
+  , define "session_list" "List compact session metadata. Use task_id and activity=completed to discover a task's saved session evidence, then use session_evidence to read its bytes. Execute next_request to continue in the resolved workspace."
       ["activity" .= string "Optional unique comma-separated subset live,quiet,completed; empty selects none; omitted keeps all sessions", "task_id" .= uuid, "limit" .= pageLimit, "before_created_at" .= string "Returned keyset timestamp, paired with before_id", "before_id" .= uuid] []
   , define "session_detail" "Get session metadata including creator attribution, committed cursor and final receipt; never returns transcript bytes."
       ["session_id" .= uuid] ["session_id"]
@@ -340,7 +340,7 @@ sessionToolDefinitions =
       , "final_sha256" .= object ["type" .= ("string" :: Text), "pattern" .= ("^[0-9a-f]{64}$" :: Text)]]
       ["session_id", "expected_offset", "expected_revision", "final_bytes", "final_sha256"]
   , range "session_read" "Read active transcript bytes"
-  , range "session_evidence" "Read immutable terminated evidence bytes and final byte count/SHA-256"
+  , range "session_evidence" "Read immutable terminated evidence bytes and final byte count/SHA-256. Bots require every task linked to the session to be done or cancelled"
   ]
   where
     runtimeIdentitySchema = object ["description" .= ("Explicit actual target model declaration; do not copy the connection caller unless it is actually that model. New nonnull declarations require the actual running agent role and model; null means unknown. See this operation's initialization/update semantics." :: Text),"anyOf" .= [object ["type" .= ("object" :: Text),"additionalProperties" .= False,"required" .= (["model","role"] :: [Text]),"properties" .= object ["role" .= string "Actual running agent role (1..128 UTF-8 bytes); never infer from the connection caller","model" .= string "Actual target model name (1..256 UTF-8 bytes)","provider" .= string "Optional known provider (1..128 UTF-8 bytes)","reasoning" .= string "Optional known reasoning setting (1..128 UTF-8 bytes)","harness" .= string "Optional actual runtime harness (1..128 UTF-8 bytes); declare only when known, never infer from provider, format or connection caller"]],object ["type" .= ("null" :: Text)]]]
@@ -764,6 +764,8 @@ sessionRequest manager base credentials verb target body = do
       else if BL.length chunk > fromIntegral remaining then pure Nothing
       else readBounded reader (remaining - fromIntegral (BL.length chunk)) (chunk : chunks)
     safeHttpError status bytes
+      | status == 403 && code == "evidence_task_not_terminal" =
+          sessionToolError code (Just status) "Bots can download session evidence only when every linked task is done or cancelled"
       | code == "session_runtime_conflict" = sessionToolError code (Just status) "Runtime identity revision conflicts; refresh runtime_revision with session_detail before retrying"
       | code == "session_task_not_found" = searchError code (Just "task_id") "task_id must identify a live task in this workspace. Start it before creating a session." ["http_status" .= status]
       | code == "session_task_not_in_progress", Just current <- payload >>= textField "current_status", current `elem` ["todo","blocked","done","cancelled"] =
@@ -772,7 +774,7 @@ sessionRequest manager base credentials verb target body = do
       where
         payload = decode bytes :: Maybe Value
         reported = payload >>= textField "error"
-        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_task_not_found", "session_conflict", "session_runtime_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress"]
+        allowed = ["unauthorized", "forbidden", "workspace_not_found", "session_not_found", "task_not_found", "session_task_not_found", "session_conflict", "session_runtime_conflict", "session_terminated", "session_invalid_input", "session_state_conflict", "validation_error", "session_too_large", "session_timeout", "session_internal", "bot_identity_required", "session_task_not_in_progress", "evidence_task_not_terminal"]
         code = case reported of Just known | known `elem` allowed -> known; _ -> "HTTP_" <> T.pack (show status)
         message = case status of
           400 -> "Invalid session request"

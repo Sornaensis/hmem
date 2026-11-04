@@ -52,7 +52,8 @@ archiveMiddleware pool resolve app request respond = case route of
           fresh <- resolve request
           if fresh == Nothing || fresh /= original.principal
             then pure $ Left unauthorized
-            else withPrincipalContext fresh $ runHandler (authorizeSessionRead pool workspace session)
+            else withRequestContext original{workspaceId=Just workspace} $
+              runHandler (authorizeSessionRead pool workspace session)
         check = authorize >>= either (throwIO . ArchiveAccessFailure) (const $ pure ())
         prepare = do
           access <- authorize

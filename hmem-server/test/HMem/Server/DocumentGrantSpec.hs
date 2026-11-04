@@ -54,6 +54,55 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec=around withTestEnv $ describe "Document capabilities" $ do
+  it "gates explicit bot Evidence bytes and grants without blocking the same document's Source" $ \env -> do
+    fixture<-seed env "linked artifact" "artifact.txt" "text/plain"
+    (_,app)<-application env (mkDeployedSandboxConfig env) deployedDelivery
+    (_,_,headers)<-audience env fixture.workspace Auth.WorkspaceRoleRead
+    let localDelivery=deployedDelivery
+          {C.applicationOrigin=Just "http://127.0.0.1:8420",C.downloadOrigin=Just "http://127.0.0.1:8420"
+          ,C.previewOrigin=Just "http://localhost:8421"}
+    (_,localApp)<-application env (mkLocalSandboxConfig env) localDelivery
+    promotion<-UUID.nextRandom
+    _<-Documents.addEvidence env.pool fixture.workspace fixture.task fixture.document.id promotion
+    page<-Documents.listDocuments env.pool fixture.workspace fixture.task Doc.Evidence Nothing 50
+    evidence<-only page.items
+    generation<-raster env fixture "policy1"
+    let (declared,bot)=foldr (\header (identity,credentials) -> if fst header=="X-HMem-Bot-Identity"
+          then (header:identity,credentials) else (identity,header:credentials)) ([],[]) headers
+        path=base fixture
+        evidenceScope="?role=evidence&association_id="<>uuid evidence.id
+        sourceScope="?role=source&association_id="<>uuid fixture.source
+        original=path<>"/original"
+        preview=path<>"/previews/"<>uuid generation<>"/page/1"
+        grantInput=GrantRequest Doc.Evidence evidence.id "original" 0 Nothing Nothing
+        change state=execute env("UPDATE tasks SET status='"<>state<>"' WHERE id='"<>uuid fixture.task<>"'")
+    forM_ [original,preview] $ \target -> do
+      call app methodGet(target<>sourceScope) bot "" >>=status status200
+      call app methodGet target bot "" >>=status status200
+      call app methodGet(target<>evidenceScope) bot "" >>=status status403
+      call app methodHead(target<>evidenceScope) bot "" >>=status status403
+    postJSON app(path<>"/download-grants") headers (toJSON grantInput) >>=status status403
+    call localApp methodGet(original<>evidenceScope) [] "" >>=status status200
+    call localApp methodGet(original<>evidenceScope) declared "" >>=status status403
+    change "done"
+    forM_ [original,preview] $ \target -> call app methodGet(target<>evidenceScope) bot "" >>=status status200
+    issued<-issue app fixture headers grantInput
+    url<-required "url" issued
+    call app methodGet(urlPath url) [] "" >>=status status200
+    declaredGrant<-issue localApp fixture declared grantInput
+    declaredUrl<-required "url" declaredGrant
+    declaredId<-required "grant_id" declaredGrant
+    storedIssuer<-json env("SELECT issuer FROM document_download_grants WHERE id='"<>uuid declaredId<>"'")
+    field ["actor_type"] storedIssuer `shouldBe` Just (String "user")
+    field ["bot_restricted"] storedIssuer `shouldBe` Just (Bool True)
+    call localApp methodGet(urlPath declaredUrl) [] "" >>=status status200
+    change "todo"
+    call app methodGet(urlPath url) [] "" >>=status status403
+    call localApp methodGet(urlPath declaredUrl) [] "" >>=status status403
+    Documents.removeSource env.pool fixture.workspace fixture.task fixture.document.id
+    call app methodGet original bot "" >>=status status403
+    change "cancelled"
+    call app methodGet original bot "" >>=status status200
   it "delegates a read-member PAT with exact role/association, hash-only storage and original fidelity" $ \env -> do
     fixture<-seed env "hello capability" "notes-😀.txt" "text/plain"
     let cfg=mkDeployedSandboxConfig env
@@ -136,6 +185,7 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
     _<-Documents.addEvidence env.pool fixture.workspace fixture.task fixture.document.id evidenceRequest
     page<-Documents.listDocuments env.pool fixture.workspace fixture.task Doc.Evidence Nothing 50
     evidence<-only page.items
+    execute env("UPDATE tasks SET status='done' WHERE id='"<>uuid fixture.task<>"'")
     evidenceGrant<-issue app fixture headers(GrantRequest Doc.Evidence evidence.id "original" 0 Nothing Nothing)
     evidenceUrl<-required "url" evidenceGrant
     Documents.removeSource env.pool fixture.workspace fixture.task fixture.document.id
@@ -291,6 +341,7 @@ spec=around withTestEnv $ describe "Document capabilities" $ do
     _<-Documents.addEvidence env.pool fixture.workspace fixture.task fixture.document.id evidenceRequest
     page<-Documents.listDocuments env.pool fixture.workspace fixture.task Doc.Evidence Nothing 50
     evidence<-only page.items
+    execute env("UPDATE tasks SET status='done' WHERE id='"<>uuid fixture.task<>"'")
     evidenceGrant<-issue app fixture headers(GrantRequest Doc.Evidence evidence.id "styled_html_preview" 0(Just generation)Nothing)
     evidenceUrl<-required "url" evidenceGrant
     Documents.removeSource env.pool fixture.workspace fixture.task fixture.document.id

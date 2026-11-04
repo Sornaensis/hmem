@@ -11,6 +11,7 @@ module HMem.DB.AgentSession
   , ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), newReaderCache, closeReaderCache, readSessionRangeWithCache
   , ArchiveReadFailure(..)
   , readSessionEvidenceRange, readSessionEvidenceRangeWithCache
+  , sessionEvidenceTasksTerminal, taskEvidenceExportAllowed
   , deriveSessionOccurrence
   ) where
 
@@ -74,6 +75,22 @@ sessionSelect = "SELECT to_jsonb(s) || hmem_session_ancestor_context(s.id) FROM 
 
 getStatement :: Bool -> St.Statement (UUID,UUID) (Maybe AgentSession)
 getStatement locked = St.Statement (sessionSelect <> if locked then " FOR UPDATE OF s" else "") pairParams (D.rowMaybe jsonRow) True
+
+-- Check explicit links, including soft-deleted task rows. Historical sessions
+-- with no links have no task status restriction.
+sessionEvidenceTasksTerminal :: Pool Hasql.Connection -> UUID -> UUID -> IO Bool
+sessionEvidenceTasksTerminal pool workspace identifier = runSession pool $
+  S.statement (workspace,identifier) $ St.Statement
+    "SELECT NOT EXISTS(SELECT 1 FROM task_sessions link JOIN tasks t ON t.id=link.task_id AND t.workspace_id=link.workspace_id WHERE link.workspace_id=$1 AND link.session_id=$2 AND t.status NOT IN ('done','cancelled'))"
+    pairParams (D.singleRow (D.column (D.nonNullable D.bool))) True
+
+-- Preflight the entire export before response headers, including sessions
+-- shared with another task. Streaming rechecks the scope of each entry.
+taskEvidenceExportAllowed :: Pool Hasql.Connection -> UUID -> UUID -> IO Bool
+taskEvidenceExportAllowed pool workspace task = runSession pool $
+  S.statement (workspace,task) $ St.Statement
+    "SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.workspace_id=$1 AND t.id=$2 AND t.deleted_at IS NULL AND t.status IN ('done','cancelled')) AND NOT EXISTS(SELECT 1 FROM task_sessions requested JOIN sessions s ON s.workspace_id=requested.workspace_id AND s.id=requested.session_id JOIN task_sessions other ON other.workspace_id=s.workspace_id AND other.session_id=s.id JOIN tasks t ON t.workspace_id=other.workspace_id AND t.id=other.task_id WHERE requested.workspace_id=$1 AND requested.task_id=$2 AND s.state='terminated' AND t.status NOT IN ('done','cancelled'))"
+    pairParams (D.singleRow (D.column (D.nonNullable D.bool))) True
 
 createSession :: Pool Hasql.Connection -> CreateSession -> IO AgentSession
 createSession pool input = createSessionWith pool input Nothing

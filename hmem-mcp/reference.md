@@ -404,10 +404,17 @@ document contents are transferred as binary HTTP bodies, never base64 tool text.
 | --- | --- |
 | `attachment_upload` | `task_id`, explicit regular-file `path`, `role` (`source` or `evidence`), stable `request_id`; optional filename, title and media type |
 | `attachment_list` | `task_id`, `role`; optional server cursor and limit (1–50) |
-| `attachment_download` | `task_id`, `attachment_id`, new destination `path`; optional variant, page and generation |
+| `attachment_download` | `task_id`, `attachment_id`, new destination `path`; optional paired `role` and `association_id`, variant, page and generation |
 | `attachment_download_link` | `task_id`, `attachment_id`, explicit `role` and `association_id`; optional variant, page, generation and lifetime (1–900 seconds) |
 | `attachment_add_evidence` | `task_id`, `attachment_id`, stable `request_id` |
 | `attachment_remove_source` | `task_id`, `attachment_id` |
+
+`task_detail` points to `attachment_list` for attached inputs (`role=source`)
+and document evidence (`role=evidence`). Use `session_list` with `task_id`
+and `activity=completed` for completed transcripts. Bots can upload Sources
+only in `todo` or `blocked` and download document evidence only in `done` or
+`cancelled`. Session evidence downloads require every linked task to be done
+or cancelled. `task_triage` also requires its target task to be done or cancelled.
 
 `attachment_id` is the immutable document UUID. `association_id` identifies its
 separate Source or Evidence association. Removing Source preserves evidence and
@@ -440,12 +447,15 @@ flushed and atomically published without replacement; an existing destination,
 including one created during the transfer, is never overwritten. Failure,
 timeout or cancellation removes partial output.
 
-Raster derivatives require explicit `generation_id`. Styled HTML downloads also
+Use the listed role and association to select the exact Source or Evidence link.
+Download an original for ordinary inspection. Raster derivatives require
+explicit `generation_id`. Styled HTML downloads also
 require caller-supplied `role` and `association_id`, obtain a generation-pinned
 grant, and fetch only that isolated grant URL. Service authorization, bot
 identity, provenance and cookies are not forwarded. The fixed sandbox CSP,
 content type, no-store, no-referrer and nosniff policy are checked before local
-publication. All link variants require explicit role and association, and echo
+publication. Use bearer links for explicit delegation and treat them as
+credentials. All link variants require explicit role and association, and echo
 the actual grant binding. Revoked, expired, stale or ineligible delegation fails
 closed; JWT callers without authoritative credential revalidation receive
 `credential_authority_unavailable` while ordinary authenticated downloads remain

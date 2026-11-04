@@ -30,8 +30,16 @@ Within a workspace, identical original payload bytes share storage; each upload
 retains a distinct document, uploader and creation time. Payloads never dedup
 across workspaces. Source and Evidence are separate associations. Evidence fixes
 the original metadata snapshot and is additive/immutable. Source removal affects
-neither evidence nor published bytes. Task status does not gate documents;
-completed/cancelled tasks remain eligible while nondeleted and authorized.
+neither evidence nor published bytes.
+
+The server applies additional restrictions to authenticated bot actors and
+requests with an accepted bot declaration. Source upload requires a todo or
+blocked task at reservation and publication. Evidence downloads, including
+preview derivatives and bot-issued grants, require a done or cancelled task.
+Direct downloads accept the exact `role` and `association_id` together. A bot
+request without that pair uses an existing Source link if present, otherwise
+it uses the Evidence link and its status gate. The selected link is checked
+again during transfer. Human requests retain ordinary workspace authorization.
 
 Original admission allows PNG, JPEG, WebP, MP4, PDF, HTML, SVG, UTF-8 TXT/Markdown,
 DOCX, PPTX, XLSX, FIG and SKETCH. Media type, extension and applicable signatures

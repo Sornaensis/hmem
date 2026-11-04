@@ -45,7 +45,7 @@ import HMem.Document.Codec (chunks,payloadSha256)
 import HMem.Document.Grant
 import HMem.Document.Types (DocumentException(..))
 import HMem.Server.API (authorizeTaskEvidenceRead)
-import HMem.Server.Document.HTTP (safeHeaders,originalTransferHeaders)
+import HMem.Server.Document.HTTP (safeHeaders,originalTransferHeaders,downloadAssociationQuery,authorizeDocumentDownload)
 import HMem.Server.Exception (trySynchronous)
 
 data Origin=Origin { value :: !Text, hostname :: !Text, secure :: !Bool, port :: !Int } deriving stock(Show,Eq)
@@ -218,6 +218,11 @@ authorizeIssuer authority request grant=do
   allowed<-Auth.authorizeWorkspace authority.pool (Just current.principal) grant.binding.workspaceId Auth.WorkspaceRoleRead
   either (const(failGrant status403 "grant_revoked")) pure allowed
   DB.bindingIsCurrent authority.pool grant.binding >>= \valid->unless valid(failGrant status404 "grant_not_found")
+  when(grant.issuer.botRestricted || grant.issuer.principal.actorType==ActorBot) $ do
+    let binding=grant.binding
+    _<-authorizeDocumentDownload authority.pool True binding.workspaceId binding.taskId binding.documentId
+      (Just(binding.role,binding.associationId)) >>= either (uncurry failGrant) pure
+    pure()
   pure policy
 
 -- No raw bearer is stored in a runtime record or database row.
@@ -329,6 +334,8 @@ documentGrantMiddleware authority resolve app request respond=case documentGrant
           either(throwIO . AccessFailure)pure result
           pure fresh
         current=DB.previewStatus authority.pool workspace task document >>=maybe(failGrant status404 "document_not_found")pure
+        authorizeBytes selection=authorizeDocumentDownload authority.pool (isBotRequest original) workspace task document selection
+          >>= either (uncurry failGrant) pure
         pinned generation variant page=do
           unless(elem variant ["page","thumbnail"] &&validRepresentation variant page(Just generation))
             (failGrant status400 "document_preview_representation")
@@ -342,9 +349,12 @@ documentGrantMiddleware authority resolve app request respond=case documentGrant
           case (Wai.requestMethod request,route) of
             ("GET",CurrentPreview)->jsonResponse status200 . toJSON <$>current
             (method,RasterPreview generation variant page) | elem method [methodGet,methodHead]->do
+              selection<-either (failGrant status400) pure (downloadAssociationQuery request)
+              association<-authorizeBytes selection
               binding<-pinned generation variant page
               let check=do
                     _<-authorize
+                    _<-authorizeBytes association
                     found<-pinned generation variant page
                     unless(sameRepresentation binding found)(failGrant status409 "document_preview_stale")
               let headers=representationHeaders binding Nothing
@@ -371,6 +381,7 @@ documentGrantMiddleware authority resolve app request respond=case documentGrant
                 unless(policy.auth.mode==C.AuthModeLocal && C.serverHostIsLoopback policy.server.host && requestIsLoopback request
                   && C.serverHostIsLoopback origin.hostname &&latest.principal.authority==PrincipalSyntheticLocalSuperadmin)
                   (failGrant status403 "credential_authority_unavailable")
+              _<-authorizeBytes (Just(input.role,input.associationId))
               binding<-DB.resolveBinding authority.pool workspace task document input >>=maybe(failGrant status404 "document_representation_not_found")pure
               now<-getCurrentTime
               let requested=addUTCTime(fromIntegral(maybe 300 id input.ttlSeconds))now
@@ -379,7 +390,7 @@ documentGrantMiddleware authority resolve app request respond=case documentGrant
               bytes<-getRandomBytes 32::IO ByteString
               let token=TE.decodeUtf8(convertToBase Base64URLUnpadded bytes)
                   tokenHash=payloadSha256(TE.encodeUtf8 token)
-                  issuer=GrantIssuer latest.principal latest.credentialOrigin
+                  issuer=GrantIssuer latest.principal latest.credentialOrigin (isBotRequest original)
               identifier<-UUID.nextRandom
               stored<-DB.createGrant authority.pool identifier tokenHash issuer policy.epoch binding expiry
               _<-freshGrant authority request (input.variant=="styled_html_preview")identifier tokenHash input.variant input.page

@@ -991,7 +991,7 @@ sessionArchiveManifestPath = mempty
                 else Ref (Reference "#/components/schemas/SessionArchiveManifest")))))
             | (code,message)<-[(200,"Complete immutable ready generation."),(202,"Preparing or retrying; Retry-After supplied."),(503,"Terminal failed manifest (retryable:false), or transient archive_unavailable error.")]]
           <> [(401,Inline (mempty & description .~ "Authentication required."))
-             ,(403,Inline (mempty & description .~ "Workspace read permission required."))
+             ,(403,Inline (mempty & description .~ sessionEvidenceForbidden))
              ,(404,Inline (mempty & description .~ "Active workspace or same-workspace session not found."))
              ,(409,Inline (mempty & description .~ "session_state_conflict: session is active."))])))
 
@@ -1007,9 +1007,12 @@ sessionArchiveContentPath = mempty
               & content .~ InsOrdMap.singleton "application/gzip" (mempty & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "binary"))))
           ,(304,Inline (mempty & description .~ "Current authorization and complete object verified; matching generation/authentication-context ETag."))
           ,(401,Inline (mempty & description .~ "Authentication required or credential revoked/expired."))
-          ,(403,Inline (mempty & description .~ "Workspace read permission required."))
+          ,(403,Inline (mempty & description .~ sessionEvidenceForbidden))
           ,(404,Inline (mempty & description .~ "Unknown or unbound published generation, workspace or session."))
           ,(503,Inline (mempty & description .~ "archive_unavailable: complete object cannot be read; Retry-After:1."))]))
+
+sessionEvidenceForbidden :: Text
+sessionEvidenceForbidden="Workspace read permission required. Bot evidence reads return evidence_task_not_terminal unless all tasks linked to the session are done or cancelled."
 
 taskDocumentSchema :: Schema
 taskDocumentSchema=mempty & type_ ?~ OpenApiObject
@@ -1033,9 +1036,9 @@ documentPath detail=mempty & parameters .~ archivePathParameters(["workspaceId",
 
 documentOperation :: Text -> Text -> Operation
 documentOperation label detail=mempty & tags .~ InsOrdSet.singleton "Task Documents" & summary ?~ label
-  & description ?~ (detail<>" Authorization precedes metadata/body processing; any visible nondeleted task status is eligible. No task_start requirement. Cookie mutations retain existing CSRF checks. Bot/client labels grant no permission. Metadata is no-store/no-referrer/nosniff; no local paths, original bytes or grant URLs enter audit/change events.")
+  & description ?~ (detail<>" Authorization precedes metadata/body processing. Cookie mutations retain existing CSRF checks. Bot declarations confer no permissions. Metadata is no-store/no-referrer/nosniff; no local paths, original bytes or grant URLs enter audit/change events.")
   & responses .~ Responses Nothing(InsOrdMap.fromList[(code,Inline(mempty & description .~ message)) | (code,message)<-
-      [(400,"Invalid document metadata, body, cursor or manifest; no publication."),(401,"Authentication required."),(403,"Current workspace role or cookie CSRF required."),(404,"Workspace/task/document/link missing, foreign or soft-deleted."),(409,"Immutable request reuse conflict, quota or link limit; no publication."),(413,"Bounded original/body limit exceeded."),(415,"Unsupported/mismatched original type or non-binary upload body."),(431,"Upload metadata header exceeds8KiB."),(503,"Verified document storage unavailable."),(504,"Document database operation timed out.")]])
+      [(400,"Invalid document metadata, body, cursor or manifest; no publication."),(401,"Authentication required."),(403,"Workspace role, cookie CSRF or bot task-status requirement failed."),(404,"Workspace/task/document/link missing, foreign or soft-deleted."),(409,"Immutable request reuse conflict, quota or link limit; no publication."),(413,"Bounded original/body limit exceeded."),(415,"Unsupported/mismatched original type or non-binary upload body."),(431,"Upload metadata header exceeds8KiB."),(503,"Verified document storage unavailable."),(504,"Document database operation timed out.")]])
 
 documentJSONResponse :: Text -> Referenced Schema -> Referenced Response
 documentJSONResponse detail representation=Inline(mempty & description .~ detail & content .~ InsOrdMap.singleton "application/json"(mempty & schema ?~ representation))
@@ -1049,7 +1052,7 @@ taskDocumentsPath=documentPath False
         ,Inline(mempty & name .~ "before_created_at" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "date-time"))
         ,Inline(mempty & name .~ "before_id" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "uuid"))]
       & responses . responses . at 200 ?~ documentJSONResponse "Bounded association page: items contain association id/task_id/role/created_at/document; next_cursor is null or {created_at,id}." (Inline(mempty & type_ ?~ OpenApiObject)))
-  & post ?~ (documentOperation "Upload an immutable original" "Raw application/octet-stream body, at most25MiB. One X-HMem-Document-Metadata JSON header (at most8192bytes) contains exactly {request_id:UUID,role:source|evidence,manifest:{filename,title,media_type,raw_bytes,raw_sha256}}. Filename/title limits255/1024UTF-8bytes; lowercase64hex SHA256; accepted type/extension/signature must agree. Role is a placement choice under edit authorization, not client identity. Reserve quota before reading, verify the complete original even on exact retry, then publish atomically. Private interrupted reservations expire after1h; retry the same UUID/manifest. Browser product uses Source-only upload; evidence upload is an MCP product flow using this same authorized API."
+  & post ?~ (documentOperation "Upload an immutable original" "Raw application/octet-stream body, at most25MiB. One X-HMem-Document-Metadata JSON header (at most8192bytes) contains exactly {request_id:UUID,role:source|evidence,manifest:{filename,title,media_type,raw_bytes,raw_sha256}}. Filename/title limits255/1024UTF-8bytes; lowercase64hex SHA256; accepted type/extension/signature must agree. Bots may upload Sources only in todo or blocked, checked before body consumption and at publication. Reserve quota before reading, verify the complete original even on exact retry, then publish atomically. Private interrupted reservations expire after1h; retry the same UUID/manifest. The browser uploads Sources; MCP can upload either role through this API."
       & parameters .~ [Inline(mempty & name .~ "X-HMem-Document-Metadata" & in_ .~ ParamHeader & required ?~ True & schema ?~ Inline(mempty & type_ ?~ OpenApiString & maxLength ?~ 8192))]
       & requestBody ?~ Inline(mempty & required ?~ True & content .~ InsOrdMap.singleton "application/octet-stream"(mempty & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "binary" & maxLength ?~ 26214400)))
       & responses . responses . at 200 ?~ documentJSONResponse "Exact existing request retry; original document receipt." (Ref(Reference "TaskDocument"))
@@ -1065,8 +1068,18 @@ taskDocumentDetailPath=documentPath True & get ?~ (documentOperation "Read docum
 
 taskDocumentOriginalPath :: PathItem
 taskDocumentOriginalPath=documentPath True & get ?~ download & head_ ?~ (download & summary ?~ "Read original download headers")
-  where download=documentOperation "Download verified original bytes" "Forces application/octet-stream attachment with safe ASCII fallback and UTF-8 filename, Content-Length, original SHA256 ETag and X-HMem-Document-SHA256/Bytes. No content encoding or original HTML/SVG embedding. GET verifies stored gzip framing/size/hash before200, then rechecks credentials/workspace/task/link between at-most1MiB transfer chunks. HEAD returns original manifest headers and no body. Five-minute preparation/transfer deadline; post-header failure aborts, never appends JSON."
+  where download=documentOperation "Download verified original bytes" ("Forces application/octet-stream attachment with safe ASCII fallback and UTF-8 filename, Content-Length, original SHA256 ETag and X-HMem-Document-SHA256/Bytes. GET verifies stored gzip framing/size/hash before200 and reauthorizes between bounded transfer chunks. HEAD returns manifest headers. "<>documentAssociationPolicy)
+          & parameters .~ documentAssociationParameters
           & responses . responses . at 200 ?~ Inline(mempty & description .~ "Byte-identical original attachment (HEAD has no body)." & content .~ InsOrdMap.singleton "application/octet-stream"(mempty & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "binary")))
+
+documentAssociationPolicy :: Text
+documentAssociationPolicy="Supply role and association_id together to select an exact task association. Bots without a selection use an existing Source or fall back to Evidence. Bot Evidence downloads require a done or cancelled task."
+
+documentAssociationParameters :: [Referenced Param]
+documentAssociationParameters =
+  [ Inline(mempty & name .~ "role" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiString & enum_ ?~ ["source","evidence"]))
+  , Inline(mempty & name .~ "association_id" & in_ .~ ParamQuery & schema ?~ Inline(mempty & type_ ?~ OpenApiString & format ?~ "uuid"))
+  ]
 
 taskDocumentEvidencePath :: PathItem
 taskDocumentEvidencePath=documentPath True & post ?~ (documentOperation "Associate an existing source as immutable Document evidence" "MCP product flow; uses ordinary workspace edit authorization. Small JSON body contains exactly {request_id:UUID}. Exact retry is additive/idempotent, conflicting reuse fails. No payload copy, no Source removal, no browser evidence creation control."
@@ -1152,7 +1165,8 @@ documentRasterPath :: PathItem
 documentRasterPath=documentPath True
   & parameters %~ (<> (archivePathParameters ["generationId"]<>[grantVariantParameter False,grantPageParameter]))
   & get ?~ download & head_ ?~ (download & summary ?~ "Read pinned raster headers")
-  where download=documentOperation "Read a generation-pinned inert raster" "Read-authorized Source/Evidence access. Only page/thumbnail PNG/JPEG/WebP. Stale generations return409 and never substitute newer bytes. Styled HTML bytes require the dedicated-origin grant."
+  where download=documentOperation "Read a generation-pinned inert raster" ("Only page/thumbnail PNG/JPEG/WebP. Stale generations return409. Styled HTML bytes require the dedicated-origin grant. "<>documentAssociationPolicy)
+          & parameters .~ documentAssociationParameters
           & responses . responses . at 200 ?~ binaryDocumentResponse "Verified inert raster (HEAD has no body)." ["image/png","image/jpeg","image/webp"]
 
 documentGrantsPath :: PathItem
@@ -1202,6 +1216,6 @@ taskEvidenceArchivePath = mempty
       & responses .~ Responses Nothing (InsOrdMap.fromList
           [(200,Inline (mempty & description .~ "Binary compressed ZIP attachment." & content .~ InsOrdMap.singleton "application/zip" (mempty & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "binary"))))
           ,(401,Inline (mempty & description .~ "Authentication required."))
-          ,(403,Inline (mempty & description .~ "Workspace read permission required."))
+          ,(403,Inline (mempty & description .~ (sessionEvidenceForbidden<>" A bot ZIP export also requires the requested task to be done or cancelled.")))
           ,(404,Inline (mempty & description .~ "Active workspace or visible same-workspace task not found."))
           ,(503,Inline (mempty & description .~ "Both export admissions are occupied; retry after one second."))]))

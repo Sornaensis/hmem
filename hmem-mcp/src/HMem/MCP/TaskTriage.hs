@@ -7,6 +7,7 @@ import Control.Exception hiding (handle)
 import Control.Monad (unless, when)
 import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
 import Data.Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.Bits (xor, shiftR, shiftL, (.|.), (.&.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
@@ -25,7 +26,7 @@ import System.Timeout (timeout)
 
 import HMem.MCP.SessionFile (publishNewFile)
 
-data ArchiveFault = ArchiveInvalid | DestinationExists | ArchiveHTTP Int | ArchiveTimeout | PublishFailed
+data ArchiveFault = ArchiveInvalid | DestinationExists | ArchiveHTTP Int | EvidenceTaskNotTerminal | ArchiveTimeout | PublishFailed
   deriving (Show)
 instance Exception ArchiveFault
 
@@ -42,9 +43,17 @@ downloadEvidence manager base headers workspace task destination = do
     bracket (openBinaryTempFile directory ".hmem-evidence-") cleanup $ \(temporary,handle) -> do
       completed <- timeout (900*1000000) $ do
         initial <- parseRequest (base <> "/api/v1/workspaces/" <> show workspace <> "/tasks/" <> show task <> "/evidence.zip")
-        let request = initial {requestHeaders=headers,responseTimeout=responseTimeoutMicro (30*1000000),decompress=const False}
+        let request = initial {requestHeaders=headers,responseTimeout=responseTimeoutMicro (30*1000000),decompress=const False
+              ,checkResponse = \_ _ -> pure ()}
         (total,digest) <- withResponse request manager $ \response -> do
           let status = statusCode (responseStatus response)
+          when (status == 403) $ do
+            payload <- brReadSome (responseBody response) 4097
+            case decode payload of
+              Just (Object fields) | BL.length payload <= 4096
+                , KM.lookup "error" fields == Just (String "evidence_task_not_terminal") ->
+                    throwIO EvidenceTaskNotTerminal
+              _ -> pure ()
           unless (status == 200) $ throwIO (ArchiveHTTP status)
           let copy total context = do
                 bytes <- brRead (responseBody response)
@@ -70,6 +79,7 @@ downloadEvidence manager base headers workspace task destination = do
     Left exception | Just (_ :: SomeAsyncException) <- fromException exception -> throwIO exception
     Left exception -> pure $ failure $ case fromException exception of
       Just DestinationExists -> "destination_exists"
+      Just EvidenceTaskNotTerminal -> "evidence_task_not_terminal"
       Just (ArchiveHTTP status) | status == 401 -> "unauthorized"
       Just (ArchiveHTTP status) | status == 403 -> "forbidden"
       Just (ArchiveHTTP status) | status == 404 -> "task_not_found"
@@ -79,7 +89,11 @@ downloadEvidence manager base headers workspace task destination = do
       _ -> "archive_download_failed"
   where
     envelope value = object ["structuredContent" .= value,"content" .= [object ["type" .= ("text" :: Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode value))]]]
-    failure code = object ["isError" .= True,"structuredContent" .= object ["error" .= object ["code" .= (code :: Text),"message" .= ("Task evidence archive was not published." :: Text)]],"content" .= [object ["type" .= ("text" :: Text),"text" .= ("Task evidence archive was not published." :: Text)]]]
+    failure code = object ["isError" .= True,"structuredContent" .= object ["error" .= object ["code" .= (code :: Text),"message" .= message]],"content" .= [object ["type" .= ("text" :: Text),"text" .= message]]]
+      where message :: Text
+            message
+              | code == "evidence_task_not_terminal" = "Bots can download a task evidence archive only when the task and every task linked to its completed sessions are done or cancelled."
+              | otherwise = "Task evidence archive was not published."
 
 -- Deliberately accepts the bounded ZIP64 profile produced by SessionArchive,
 -- rather than extracting arbitrary ZIPs or materializing their central index.

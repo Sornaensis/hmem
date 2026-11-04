@@ -2,7 +2,7 @@
 -- body consumption; this layer also enforces workspace/task/link integrity.
 module HMem.DB.Document
   ( reserveUpload, publishUpload, uploadDocument, abortReservation, expireReservations
-  , getDocument, listDocuments, getTaskDocumentCounts, readOriginal
+  , getDocument, listDocuments, getTaskDocumentCounts, readOriginal, getDownloadScope
   , addEvidence, removeSource, reservePreview, publishPreview, failPreview
   , Derivative(..), readDerivative
   , PreparedPreview, preparePreview, storePreparedPreview, readPreviewOriginal
@@ -27,6 +27,7 @@ import Hasql.Encoders qualified as E
 import Hasql.Session qualified as S
 import Hasql.Statement qualified as St
 import HMem.DB.Pool (runSession,runTransaction)
+import HMem.DB.RequestContext (currentRequestContext,isBotRequest)
 import HMem.Document.Codec
 import HMem.Document.Types
 
@@ -54,23 +55,37 @@ checkTask ws task = S.statement (ws,task) (voidStatement "SELECT hmem_document_c
 lockBudget :: UUID -> S.Session ()
 lockBudget ws = S.statement ws (voidStatement "SELECT workspace_id FROM document_budgets WHERE workspace_id=$1 FOR UPDATE" (param id E.uuid))
 
+-- checkTask holds a shared lock through commit, so a status transition cannot
+-- race the decision to reserve or publish a bot's Source upload.
+checkUploadTask :: Bool -> UploadDocument -> S.Session Bool
+checkUploadTask bot input = do
+  checkTask input.workspaceId input.taskId
+  if bot && input.role == Source
+    then S.statement (input.workspaceId,input.taskId) $ St.Statement
+      "SELECT status IN ('todo','blocked') FROM tasks WHERE workspace_id=$1 AND id=$2"
+      pair (D.singleRow (D.column (D.nonNullable D.bool))) True
+    else pure True
+
 -- | Returns an exact already-published retry. Otherwise reserves before body
 -- consumption; no bytes, document or task link is visible yet.
 reserveUpload :: Pool H.Connection -> UploadDocument -> IO (Maybe Document)
 reserveUpload pool input = do
   validateManifest input.manifest
-  runTransaction pool $ do
-    checkTask input.workspaceId input.taskId
+  bot <- isBotRequest <$> currentRequestContext
+  result <- runTransaction pool $ do
     S.statement input.workspaceId (voidStatement "INSERT INTO document_budgets(workspace_id) VALUES($1) ON CONFLICT DO NOTHING" (param id E.uuid))
     lockBudget input.workspaceId
-    previous <- existingRequest input.workspaceId input.requestId (binding input)
-    case previous of
-      Just row -> pure (Just row)
-      Nothing -> do
-        S.statement input (voidStatement
-          "SELECT hmem_document_reserve($1,$2,'upload',$3,CASE WHEN EXISTS(SELECT 1 FROM document_payloads WHERE workspace_id=$1 AND original AND published_at IS NOT NULL AND raw_sha256=$4 AND raw_bytes=$5) THEN 0 ELSE $5 END,$6)"
-          (param (.workspaceId) E.uuid <> param (.requestId) E.uuid <> param binding E.jsonb <> param (\i -> i.manifest.rawSha256) E.text <> param (\i -> i.manifest.rawBytes) E.int8 <> param (\i -> uploadReservationBytes i.manifest.rawBytes) E.int8))
-        pure Nothing
+    allowed <- checkUploadTask bot input
+    if not allowed then pure (Left ()) else do
+      previous <- existingRequest input.workspaceId input.requestId (binding input)
+      case previous of
+        Just row -> pure (Right (Just row))
+        Nothing -> do
+          S.statement input (voidStatement
+            "SELECT hmem_document_reserve($1,$2,'upload',$3,CASE WHEN EXISTS(SELECT 1 FROM document_payloads WHERE workspace_id=$1 AND original AND published_at IS NOT NULL AND raw_sha256=$4 AND raw_bytes=$5) THEN 0 ELSE $5 END,$6)"
+            (param (.workspaceId) E.uuid <> param (.requestId) E.uuid <> param binding E.jsonb <> param (\i -> i.manifest.rawSha256) E.text <> param (\i -> i.manifest.rawBytes) E.int8 <> param (\i -> uploadReservationBytes i.manifest.rawBytes) E.int8))
+          pure (Right Nothing)
+  either (const (problem "document_source_task_not_ready")) pure result
 
 existingRequest :: UUID -> UUID -> Value -> S.Session (Maybe Document)
 existingRequest ws request expected = S.statement (ws,request,expected) $ St.Statement
@@ -94,20 +109,23 @@ publishUpload pool input bytes = do
   payload <- UUID.nextRandom
   identifier <- UUID.nextRandom
   association <- UUID.nextRandom
-  runTransaction pool $ do
+  bot <- isBotRequest <$> currentRequestContext
+  result <- runTransaction pool $ do
     lockBudget input.workspaceId
-    checkTask input.workspaceId input.taskId
-    previous <- existingRequest input.workspaceId input.requestId (binding input)
-    case previous of
-      Just row -> pure row
-      Nothing -> do
-        S.statement (input.workspaceId,input.requestId,binding input) (voidStatement "SELECT hmem_document_require_reservation($1,$2,$3)"
-          (param (\(a,_,_)->a) E.uuid <> param (\(_,b,_)->b) E.uuid <> param (\(_,_,c)->c) E.jsonb))
-        stored <- storePayload input.workspaceId payload True manifest parts
-        S.statement (input.workspaceId,input.requestId,stored,identifier,association) $ St.Statement
-          "SELECT hmem_document_publish($1,$2,$3,$4,$5)"
-          (param (\(a,_,_,_,_)->a) E.uuid <> param (\(_,b,_,_,_)->b) E.uuid <> param (\(_,_,c,_,_)->c) E.uuid <> param (\(_,_,_,d,_)->d) E.uuid <> param (\(_,_,_,_,e)->e) E.uuid)
-          (D.singleRow jsonRow) True
+    allowed <- checkUploadTask bot input
+    if not allowed then pure (Left ()) else do
+      previous <- existingRequest input.workspaceId input.requestId (binding input)
+      case previous of
+        Just row -> pure (Right row)
+        Nothing -> do
+          S.statement (input.workspaceId,input.requestId,binding input) (voidStatement "SELECT hmem_document_require_reservation($1,$2,$3)"
+            (param (\(a,_,_)->a) E.uuid <> param (\(_,b,_)->b) E.uuid <> param (\(_,_,c)->c) E.jsonb))
+          stored <- storePayload input.workspaceId payload True manifest parts
+          Right <$> S.statement (input.workspaceId,input.requestId,stored,identifier,association) (St.Statement
+            "SELECT hmem_document_publish($1,$2,$3,$4,$5)"
+            (param (\(a,_,_,_,_)->a) E.uuid <> param (\(_,b,_,_,_)->b) E.uuid <> param (\(_,_,c,_,_)->c) E.uuid <> param (\(_,_,_,d,_)->d) E.uuid <> param (\(_,_,_,_,e)->e) E.uuid)
+            (D.singleRow jsonRow) True)
+  either (const (problem "document_source_task_not_ready")) pure result
 
 storePayload :: UUID -> UUID -> Bool -> PayloadManifest -> [ByteString] -> S.Session UUID
 storePayload ws identifier original manifest parts = do
@@ -140,6 +158,12 @@ getDocument :: Pool H.Connection -> UUID -> UUID -> UUID -> IO (Maybe Document)
 getDocument pool ws task identifier = runSession pool $ S.statement (ws,task,identifier) $ St.Statement
   ("SELECT hmem_document_json(d) FROM documents d WHERE d.workspace_id=$1 AND d.id=$3 AND "<>visibleLink)
   triple (D.rowMaybe jsonRow) True
+
+-- | Terminal status and both exact associations from the same snapshot.
+getDownloadScope :: Pool H.Connection -> UUID -> UUID -> UUID -> IO (Maybe (Bool, Maybe UUID, Maybe UUID))
+getDownloadScope pool ws task identifier = runSession pool $ S.statement (ws,task,identifier) $ St.Statement
+  "SELECT t.status IN ('done','cancelled'), s.id, e.id FROM tasks t JOIN workspaces w ON w.id=t.workspace_id LEFT JOIN task_document_sources s ON s.workspace_id=$1 AND s.task_id=$2 AND s.document_id=$3 LEFT JOIN task_document_evidence e ON e.workspace_id=$1 AND e.task_id=$2 AND e.document_id=$3 WHERE t.workspace_id=$1 AND t.id=$2 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND (s.id IS NOT NULL OR e.id IS NOT NULL)"
+  triple (D.rowMaybe ((,,) <$> D.column (D.nonNullable D.bool) <*> D.column (D.nullable D.uuid) <*> D.column (D.nullable D.uuid))) True
 
 visibleLink :: ByteString
 visibleLink = "EXISTS(SELECT 1 FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=$2 AND t.workspace_id=$1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL AND (EXISTS(SELECT 1 FROM task_document_sources l WHERE l.task_id=t.id AND l.document_id=d.id) OR EXISTS(SELECT 1 FROM task_document_evidence l WHERE l.task_id=t.id AND l.document_id=d.id)))"

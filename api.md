@@ -59,6 +59,12 @@ file path or reads the caller's filesystem.
 | GET `/sessions/{sessionId}/archive` | No query/body | Ready manifest (200), preparing/retrying (202), failed (503), or active-state conflict (409) |
 | GET `/sessions/{sessionId}/archive/{generationId}/content` | Optional `If-None-Match` | Complete immutable `application/gzip` object (200), authorized 304, unknown generation (404), or unavailable object (503) |
 
+Bot evidence reads, archive manifest/content requests and task ZIP exports
+return 403 `evidence_task_not_terminal` if any task linked to a completed session
+is outside `done` or `cancelled`. ZIP exports also require the requested task
+itself to be done or cancelled. Metadata lists and active transcript reads
+use ordinary workspace authorization.
+
 Archive readiness schedules eligible terminated sessions idempotently. Until
 publication, generation and compressed receipt fields are null; pending manifests
 include bounded progress and `Retry-After`. Terminal failure requires operator
@@ -790,8 +796,11 @@ The document transport is separate from agent-session JSONL and `evidence.zip`.
 All paths below begin with
 `/api/v1/workspaces/{workspaceId}/tasks/{taskId}/documents`. Read operations need
 workspace read access; upload/link mutations need edit access and current cookie CSRF
-verification. The task must be visible and nondeleted in that workspace. Done
-and cancelled tasks remain eligible; document operations never start a task.
+verification. The task must be visible and nondeleted in that workspace.
+Bots may upload Sources only in `todo` or `blocked` and download Document
+evidence only in `done` or `cancelled`. The status rule also applies to preview
+bytes and bot-issued download grants. Use `role` and `association_id` together
+on authenticated original or raster reads to select the exact association.
 
 | Method and suffix | Contract |
 | --- | --- |

@@ -542,6 +542,11 @@ spec = aroundAll_ (withoutProvenance . withEphemeralPg) $ around withAttachmentS
       promotionRequest <- UUIDv4.nextRandom
       promoted <- call "attachment_add_evidence" ["attachment_id" .= identifier,"request_id" .= promotionRequest]
       evidenceAssociation <- required ["structuredContent","association_id"] promoted
+      blocked <- call "attachment_download"
+        ["attachment_id" .= identifier,"path" .= (directory </> "blocked.html"),"role" .= ("evidence" :: Text),
+         "association_id" .= (evidenceAssociation :: UUID)]
+      errorCode blocked `shouldBe` Just "document_evidence_task_not_terminal"
+      doesPathExist (directory </> "blocked.html") `shouldReturn` False
       removed <- call "attachment_remove_source" ["attachment_id" .= identifier]
       field ["structuredContent","counts","source_count"] removed `shouldBe` Just (Number 0)
       field ["structuredContent","counts","evidence_total"] removed `shouldBe` Just (Number 1)
@@ -553,6 +558,8 @@ spec = aroundAll_ (withoutProvenance . withEphemeralPg) $ around withAttachmentS
             field ["association_id"] row `shouldBe` Just (toJSON (evidenceAssociation :: UUID))
             field ["preview","generation_id"] row `shouldBe` Just (toJSON gen)
         _ -> expectationFailure "Missing Evidence preview metadata"
+      _ <- Tasks.updateTask env.pool tid
+        (Types.UpdateTask Nothing Types.Unchanged Types.Unchanged Types.Unchanged (Just Types.Done) Nothing Nothing)
       evidenceOriginal <- call "attachment_download"
         ["attachment_id" .= identifier,"path" .= (directory </> "evidence-original.html")]
       field ["structuredContent","verified"] evidenceOriginal `shouldBe` Just (Bool True)

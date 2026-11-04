@@ -1,8 +1,11 @@
 -- | Authorized bounded document transport. Original bytes never enter JSON.
-module HMem.Server.Document.HTTP (documentMiddleware, metadataHeader, safeHeaders, originalTransferHeaders) where
+module HMem.Server.Document.HTTP
+  (documentMiddleware, metadataHeader, safeHeaders, originalTransferHeaders,
+   downloadAssociationQuery, authorizeDocumentDownload) where
 
 import Control.Exception (Exception,fromException,throwIO)
 import Control.Monad (unless,when)
+import Control.Applicative ((<|>))
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
@@ -16,7 +19,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Char (toLower,isAscii,isPrint)
 import Data.Int (Int64)
 import Data.List (dropWhileEnd)
-import Data.Maybe (isNothing)
+import Data.Maybe (isNothing,listToMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -107,15 +110,19 @@ documentMiddleware pool resolve app request respond=case documentRoute request o
             ("GET",Counts) -> DB.getTaskDocumentCounts pool workspace task >>= maybe(problem status404 "task_not_found") (pure . json status200)
             ("GET",Detail identifier) -> json status200 <$> lookupDocument identifier
             (method,Original identifier) | method `elem` [methodGet,methodHead] -> do
+              selection<-either (problem status400) pure (downloadAssociationQuery request)
+              let authorizeBytes selected=authorizeDocumentDownload pool (isBotRequest original) workspace task identifier selected
+                    >>= either (uncurry problem) pure
+              association<-authorizeBytes selection
               document<-lookupDocument identifier
               let headers=originalHeaders document
               if method==methodHead then pure(Wai.responseLBS status200 headers "") else do
                 bytes<-DB.readOriginal pool workspace task identifier
-                authorize
-                let check=authorize >> lookupDocument identifier >> pure()
+                let check=authorize >> authorizeBytes association >> lookupDocument identifier >> pure()
                     stream send flush=withRequestContext original{workspaceId=Just workspace} $ do
                       complete<-timeout transferMicros $ mapM_ (\part -> check >> send(Builder.byteString part) >> flush)(chunks bytes)
                       unless(complete==Just())(problem status503 "document_transfer_timeout")
+                check
                 pure(Wai.responseStream status200 headers stream)
             ("POST",Evidence identifier) -> do
               requireContentType request "application/json"
@@ -229,6 +236,35 @@ listQuery request=do
     _ -> problem status400 "document_invalid_cursor"
   pure(selected,cursor,limit)
 
+downloadAssociationQuery :: Wai.Request -> Either Text (Maybe (Doc.DocumentRole,UUID))
+downloadAssociationQuery request = case (values "role",values "association_id") of
+  ([],[]) -> Right Nothing
+  ([Just role],[Just identifier])
+    | Just selected <- lookup role [("source",Doc.Source),("evidence",Doc.Evidence)]
+    , Just association <- UUID.fromASCIIBytes identifier -> Right (Just (selected,association))
+  _ -> Left "document_invalid_association"
+  where values key = [value | (name,value) <- Wai.queryString request, name==key]
+
+-- | Pin the association authorizing bytes. Legacy unscoped human reads keep
+-- their original behavior. A bot without a selection uses a Source if one
+-- exists, then falls back to the Evidence status gate.
+authorizeDocumentDownload :: Pool H.Connection -> Bool -> UUID -> UUID -> UUID
+  -> Maybe (Doc.DocumentRole,UUID) -> IO (Either (Status,Text) (Maybe (Doc.DocumentRole,UUID)))
+authorizeDocumentDownload pool bot workspace task document selected
+  | not bot && isNothing selected = pure (Right Nothing)
+  | otherwise = do
+      scope <- DB.getDownloadScope pool workspace task document
+      pure $ do
+        (terminal,source,evidence) <- maybe (Left missing) Right scope
+        let links = [(Doc.Source,identifier) | identifier <- maybe [] pure source]
+                 <> [(Doc.Evidence,identifier) | identifier <- maybe [] pure evidence]
+        association@(role,_) <- maybe (Left missing) Right (selected <|> listToMaybe links)
+        unless (association `elem` links) (Left missing)
+        when (bot && role==Doc.Evidence && not terminal) $
+          Left (status403,"document_evidence_task_not_terminal")
+        pure (Just association)
+  where missing = (status404,"document_not_found")
+
 safeHeaders :: [Header]
 safeHeaders=[(hCacheControl,"no-store"),(hVary,"Authorization, Cookie"),("Referrer-Policy","no-referrer"),("X-Content-Type-Options","nosniff")]
 json :: ToJSON a => Status -> a -> Wai.Response
@@ -240,6 +276,7 @@ documentError :: Text -> Wai.Response
 documentError code
   | code `elem` ["document_task_not_found","document_workspace_not_found","document_not_found"] = jsonError status404 "document_not_found"
   | code `elem` ["document_request_conflict","document_reservation_missing_or_conflicting"] = jsonError status409 "document_request_conflict"
+  | code=="document_source_task_not_ready" = jsonError status403 code
   | code `elem` ["document_quota_exceeded","document_task_link_limit"] = jsonError status409 code
   | code=="document_unsupported_or_mismatched_type" = jsonError status415 code
   | code=="document_size_exceeded" = jsonError status413 code

@@ -48,6 +48,31 @@ import HMem.Types qualified as Types
 
 spec :: Spec
 spec = describe "Archive HTTP" $ do
+  it "gates every bot transcript download route when any associated task is open" $
+    withLocalSandboxAppContext $ \ctx -> bounded $ do
+      let env=ctx.localEnv; app=ctx.localApplication
+          bot=[("X-HMem-Bot-Identity","{\"role\":\"Archive Test\",\"model-id\":\"test:fixture:default\"}")]
+      (workspace,sealed) <- fixture env "{}\n"
+      task <- Task.createTask env.pool (Types.CreateTask workspace Nothing Nothing "Second linked task" Nothing Nothing Nothing)
+      let update identifier state = Pool.runSession env.pool $ SQL.sql
+            ("UPDATE tasks SET status='"<>state<>"' WHERE id='"<>uuid identifier<>"'")
+      update task.id "in_progress"
+      Sessions.associateSessionTask env.pool workspace sealed.id task.id
+      update task.id "done"
+      manifest <- publish env workspace sealed.id
+      let paths = [ "/api/v1/workspaces/"<>uuid workspace<>"/sessions/"<>uuid sealed.id<>"/evidence"
+                  , archivePath workspace sealed.id, contentPath manifest
+                  , "/api/v1/workspaces/"<>uuid workspace<>"/tasks/"<>uuid task.id<>"/evidence.zip" ]
+      forM_ paths $ \path -> do
+        get app path bot >>= hasStatus status403
+        get app path [] >>= hasStatus status200
+      Pool.runSession env.pool $ SQL.sql
+        ("UPDATE tasks SET status='cancelled' WHERE id IN (SELECT task_id FROM task_sessions WHERE session_id='"<>uuid sealed.id<>"') AND id<>'"<>uuid task.id<>"'")
+      forM_ paths $ \path -> get app path bot >>= hasStatus status200
+      response <- get app (contentPath manifest) bot
+      Just tag <- pure $ lookup hETag response.simpleHeaders
+      update task.id "todo"
+      get app (contentPath manifest) (bot<>[(hIfNoneMatch,tag)]) >>= hasStatus status403
   it "schedules once, exposes honest progress, and transfers the exact complete persisted single-member gzip" $
     withLocalSandboxAppContext $ \ctx -> bounded $ do
       let env=ctx.localEnv; app=ctx.localApplication; bytes="{\"text\":\"\195\166\"}\r\n[]"
@@ -172,6 +197,8 @@ spec = describe "Archive HTTP" $ do
       let env=ctx.deployedEnv; app=ctx.deployedApplication
       (w,sealed) <- fixture env "{}\n"
       manifest <- publish env w sealed.id
+      Pool.runSession env.pool $ SQL.sql
+        ("UPDATE tasks SET status='done' WHERE id IN (SELECT task_id FROM task_sessions WHERE session_id='"<>uuid sealed.id<>"')")
       user <- createDeployedSandboxUser env False False
       _ <- Auth.upsertWorkspaceMembership env.pool w (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
       tokenA <- issueDeployedSandboxPAT env user "archive-a"

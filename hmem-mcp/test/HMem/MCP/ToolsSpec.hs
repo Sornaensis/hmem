@@ -274,6 +274,9 @@ spec = do
         jsonPath ["summary", "final_sha256"] sealed `shouldBe` Just (String (AgentSession.sessionSha256 bytes))
         retried <- invoke "session_terminate" terminateArgs
         retried `shouldBe` sealed
+        blocked <- handleToolCall manager base Nothing testIdentity (object ["name" .= ("session_evidence" :: Text), "arguments" .= arguments])
+        jsonPath ["structuredContent","error","code"] blocked `shouldBe` Just (String "evidence_task_not_terminal")
+        _ <- invoke "task_finish" (object ["task_id" .= initialId, "status" .= ("done" :: Text)])
         evidence <- downloadSession invoke "session_evidence" (setField "limit" (Number 3) arguments)
         evidence `shouldBe` bytes
         AgentSession.sessionSha256 evidence `shouldBe` AgentSession.sessionSha256 bytes

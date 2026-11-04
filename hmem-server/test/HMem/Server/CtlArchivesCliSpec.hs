@@ -20,6 +20,11 @@ spec=describe "Archive maintenance CLI" $ do
     parsed ["pause"] `shouldBe` Right (ArchivesCommand (ArchivesConfigure M.Pause) False)
     parsed ["backfill-enable","--qualified"] `shouldBe` Right (ArchivesCommand (ArchivesConfigure M.EnableBackfill) False)
     parsed ["reclaim-enable"] `shouldSatisfy` isLeft
+    parsed ["sanitized-reclaim-enable"] `shouldSatisfy` isLeft
+    parsed ["sanitized-reclaim-enable","--qualified"] `shouldBe` Right (ArchivesCommand (ArchivesConfigure M.EnableSanitizedReclamation) False)
+    parsed ["replacement-install","--policy-file","policy.json"] `shouldSatisfy` isLeft
+    parsed ["replacement-install","--policy-file","policy.json","--qualified"] `shouldBe` Right (ArchivesCommand (ArchivesInstallReplacement "policy.json") False)
+    parsed ["replacement-disable"] `shouldBe` Right (ArchivesCommand (ArchivesConfigure M.DisableReplacement) False)
     parsed ["backfill-enable"] `shouldSatisfy` isLeft
     parsed ["capacity","--staging-bytes","-1","--wal-bytes","0"] `shouldSatisfy` isLeft
     parsed ["capacity","--staging-bytes","9223372036854775808","--wal-bytes","0"] `shouldSatisfy` isLeft

@@ -5,9 +5,9 @@ It can be rebuilt from verified exact gzip evidence after raw reclamation, witho
 changing sealed canonical metadata, original bytes or archive receipts. Archive
 backfill/reclamation controls do not disable this bounded metadata correction.
 
-This is the implementation contract for post-seal storage and full-session
-viewing. The sanitized representation contract specifies planned behavior. The
-other sections describe the exact representation and shared machinery. The codec
+This reference covers post-seal storage and full-session viewing. The sanitized
+representation is available by explicit opt-in after lifecycle qualification.
+Replacement policy installation and sanitized cleanup default off. The codec
 probe and client qualification cover separate scopes. The aggregate qualification
 covers database, HTTP and browser integration and rollout.
 
@@ -156,11 +156,14 @@ Preserve the verified occurrence result. Exclude the session from automatic
 original-dependent occurrence repair once its original is unavailable, including
 after a later derivation version change. Report original-dependent rebuild as
 unavailable and keep the retained result identified by its verified version.
-Later batches recheck the attestation and fences, verify surviving rows against the
-original ledger and record progress with each bounded delete. Report cleanup as
-pending, in progress or complete. Disabled, paused or failed cleanup stays pending
-before deletion and preserves all original chunks. A failure after a committed
-batch preserves the remaining chunks and retry resumes from durable progress.
+Later batches recheck the attestation and fences, verify surviving rows against
+the original ledger and record progress with each bounded delete. The manifest
+reports cleanup as pending, in progress or complete. Disabled, paused or failed
+cleanup stays pending before deletion and preserves all original chunks. A
+batch failure preserves the remaining chunks and retained attestation, applies
+a 60-second backoff, and resumes from durable progress. An explicit retry can
+clear the backoff. A verified empty original can complete cleanup with zero
+deleted bytes and still serve the empty original.
 
 ## Durable storage and publication
 
@@ -430,23 +433,40 @@ hmem-ctl archives status --json
 hmem-ctl archives capacity --staging-bytes 8589934592 --wal-bytes 34359738368
 hmem-ctl archives backfill-enable --qualified
 hmem-ctl archives reclaim-enable --qualified
+hmem-ctl archives replacement-install --policy-file policy.json --qualified
+hmem-ctl archives sanitized-reclaim-enable --qualified
 hmem-ctl archives pause
 hmem-ctl archives resume
 hmem-ctl archives retry --workspace UUID --session UUID
+hmem-ctl archives sanitized-reclaim-disable
+hmem-ctl archives replacement-disable
 hmem-ctl archives reclaim-disable
 hmem-ctl archives backfill-disable
 ```
 
 The qualification switches acknowledge completed compatible-reader, complete-view
-and backup gates. They are operator actions; deployments never enable them merely
-because migrations or task acceptance succeeded. Status distinguishes configured
-capacity, current permit, attempt/retry counts, verification failures and reclaimed
-bytes. `runtime_safe=false` explains an unsuitable configured database role.
+and backup gates. V063 leaves sanitized qualification and cleanup off. Install
+the replacement policy with a trusted operator that has SELECT, INSERT and
+DELETE on the policy table and access to archive controls and status. Installation
+atomically replaces the format map. Disablement clears it for future jobs and
+preserves every frozen job. Only an explicit `sanitized-reclaim-enable` using
+the restricted runtime role can enable sanitized cleanup. It uses the existing
+`public.hmem_archive_reclaim(uuid,uuid,uuid,text,uuid)` grant and checks extended
+runtime authority over the new evidence and occurrence relations and callbacks.
+`sanitized-reclaim-disable` affects sanitized cleanup alone. `reclaim-disable`
+stops both representations. These commands preserve published archives and
+committed progress. Status includes `sanitized_runtime_safe`, independent
+qualification/enablement, and counts of pending, in-progress and complete
+sanitized cleanup alongside the shared capacity, permit and failure counters.
 
 Keep a verified pre-cleanup backup. Also back up **after** raw reclamation,
 restore into an empty replacement database and verify archive-only ranges,
-historical proofs, exact terminal replay and ZIP bytes. Code rollback must use
-an archive-compatible build; raw-only code requires the pre-cleanup backup.
+historical proofs, exact terminal replay and ZIP bytes for exact archives.
+For sanitized archives verify the selected content receipt, range and export,
+and explicit original unavailability. After the first sanitized deletion a
+rollback must use a build with sanitized readers, or restore the verified
+pre-cleanup backup to recover the originals. An exact-only reader cannot serve
+that sanitized generation or reconstruct the retired original.
 Logical DELETE makes space reclaimable. Ordinary VACUUM and later inserts may
 reuse heap/TOAST/index pages; reusable space is different from OS file shrink.
 Never run VACUUM FULL automatically. Measure raw baseline, ready-plus-raw,

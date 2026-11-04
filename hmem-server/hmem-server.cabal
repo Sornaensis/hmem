@@ -81,6 +81,7 @@ data-files:
     migrations/V060__document_preview_jobs.sql
     migrations/V061__mp4_document_previews.sql
     migrations/V062__sanitized_session_archives.sql
+    migrations/V063__sanitized_archive_reclamation.sql
 
 library
   exposed-modules:

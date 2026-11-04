@@ -4,7 +4,7 @@
 -- other source bytes from the input record, including its delimiter.
 module HMem.SessionArchive.Replacement
   ( Policy, Rule, ReplacementError(..)
-  , decodePolicy, freezePolicy, decodeSnapshot, replaceRecord, newReplacementSource
+  , decodePolicy, freezePolicy, freezePolicies, decodeSnapshot, replaceRecord, newReplacementSource
   ) where
 
 import Control.Exception (Exception, throwIO)
@@ -71,6 +71,12 @@ freezePolicy activated formatLabel (Policy cutoff formats) = traverse encode (Ma
       let bytes = encodeSnapshot effective formatLabel rules
       unless (BS.length bytes <= 65536) (Left InvalidPolicy)
       pure (effective,bytes)
+
+freezePolicies :: UTCTime -> Policy -> Either ReplacementError [(Text,UTCTime,ByteString)]
+freezePolicies activated policy@(Policy _ formats) = traverse freeze (Map.keys formats)
+  where
+    freeze label = freezePolicy activated label policy >>= maybe (Left InvalidPolicy)
+      (\(cutoff,bytes) -> Right (label,cutoff,bytes))
 
 decodeSnapshot :: Text -> UTCTime -> ByteString -> Either ReplacementError [Rule]
 decodeSnapshot expectedLabel expectedCutoff bytes = do

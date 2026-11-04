@@ -3,7 +3,7 @@ module HMem.Server.Archive.MaintenanceSpec (spec) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently,withAsync,wait)
 import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar)
-import Control.Exception (SomeException,bracket,try)
+import Control.Exception (SomeException,bracket,bracket_,try)
 import Control.Monad (foldM,forM_,void)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -11,6 +11,7 @@ import Data.ByteString.Char8 qualified as B8
 import Data.Aeson (encode)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Int (Int64)
+import Data.IORef (newIORef,readIORef,writeIORef,atomicModifyIORef')
 import Data.Pool (Pool,destroyAllResources)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -26,7 +27,7 @@ import Test.Hspec
 
 import HMem.AgentSession
 import HMem.DB.AgentSession
-import HMem.DB.Pool (createPool,runSession,runTransaction)
+import HMem.DB.Pool (createPool,runSession,runTransaction,withConn)
 import HMem.DB.SessionArchive qualified as A
 import HMem.DB.SessionArchive.Maintenance qualified as M
 import HMem.DB.SessionArchive.Reader qualified as R
@@ -36,10 +37,159 @@ import HMem.Server.Archive.Maintenance
 import HMem.Server.Archive.Worker
 import HMem.Server.CtlArchives
 import HMem.SessionArchive.Codec qualified as C
+import HMem.SessionArchive.Replacement qualified as Replacement
 import HMem.Types qualified as Types
 
 spec :: Spec
 spec=around withTestEnv $ describe "Archive maintenance worker" $ do
+  it "reclaims sanitized originals only after separate qualification and a complete occurrence, then resumes its bound progress" $ \admin -> bounded $
+    withRuntime admin $ \pool -> do
+      let env=admin {pool=pool}
+          original="{\"kind\":\"call\",\"encrypted\":\"opaque secret\"}\r\n"
+          sanitized="{\"kind\":\"call\",\"encrypted\":\"Encrypted Payload\"}\r\n"
+          chunks=replicate 9 original<>["[true]"]
+      installReplacement pool
+      (w,sealed,_)<-fixture env chunks
+      R.ensureArchive pool w sealed.id
+      M.configureMaintenance pool M.DisableReplacement
+      manifest<-publishSanitized env w sealed
+      let scope=" WHERE session_id='"<>uuid sealed.id<>"'"
+          rawRows=number env ("SELECT count(*) FROM session_chunks"<>scope)
+          projection=execute env . (<>scope)
+      M.configureMaintenance pool M.EnableReclamation
+      M.claimReclamation pool `shouldReturn` Nothing
+      M.configureMaintenance pool M.EnableSanitizedReclamation
+      projection "DELETE FROM session_occurrences"
+      M.claimReclamation pool `shouldReturn` Nothing
+      deriveSessionOccurrence pool w sealed.id
+      Just lease<-M.claimReclamation pool
+      lease.sanitized `shouldBe` True
+      rejected (M.reclaimArchiveBatch pool lease)
+      M.configureMaintenance pool M.Pause
+      runReclamation (pure ()) pool lease
+      rawRows `shouldReturn` 10
+      M.verificationRecorded pool manifest.archive `shouldReturn` True
+      M.configureMaintenance pool M.Resume
+      projection "UPDATE session_occurrences SET derivation_version=2"
+      M.reclaimArchiveBatch pool lease `shouldReturn` 0
+      deriveSessionOccurrence pool w sealed.id
+      M.configureMaintenance pool M.DisableSanitizedReclamation
+      M.reclaimArchiveBatch pool lease `shouldReturn` 0
+      rawRows `shouldReturn` 10
+      M.configureMaintenance pool M.EnableSanitizedReclamation
+      withOldSnapshot env $ \stale -> do
+        M.reclaimArchiveBatch pool lease `shouldReturn` 8
+        staleWriteRejected stale ("UPDATE session_occurrences SET derivation_version=2"<>scope)
+      rawRows `shouldReturn` 2
+      number env ("SELECT deleted_revision FROM session_archive_reclamation"<>scope) `shouldReturn` 8
+      let gone (failure :: SessionException)=failure.code==SessionOriginalUnavailable
+      readSessionRange pool w sealed.id (8*fromIntegral (BS.length original)) 1 `shouldThrow` gone
+      deriveSessionOccurrence pool w sealed.id `shouldThrow` gone
+      rejected (projection "UPDATE session_occurrences SET derivation_version=2")
+      rejected (execute env ("UPDATE session_archive_reclamation SET deleted_bytes=0"<>scope))
+      rejected (execute env ("DELETE FROM session_archive_reclamation"<>scope))
+      M.releaseReclamation pool lease
+      let corruptFinal bytes=runTransaction admin.pool $ S.sql
+            ("ALTER TABLE session_chunks DISABLE TRIGGER session_chunk_guard; UPDATE session_chunks SET data=convert_to('"
+              <>bytes<>"','UTF8')"<>scope<>" AND revision=10; ALTER TABLE session_chunks ENABLE TRIGGER session_chunk_guard")
+      corruptFinal "[null]"
+      Just failed<-M.claimReclamation pool
+      runReclamationLeaseWith (expectationFailure "Retry must reuse the existing attestation") pool failed
+      rawRows `shouldReturn` 2
+      number env ("SELECT count(*) FROM session_archive_reclamation"<>scope<>" AND deleted_revision=8 AND error_code='archive_reclamation_failed'") `shouldReturn` 1
+      M.claimReclamation pool `shouldReturn` Nothing
+      corruptFinal "[true]"
+      M.configureMaintenance pool (M.Retry w sealed.id)
+      Just resumed<-M.claimReclamation pool
+      resumed.leaseToken `shouldNotBe` lease.leaseToken
+      runReclamation (expectationFailure "Resumed cleanup must use its retained attestation") pool resumed
+      rawRows `shouldReturn` 0
+      Just final<-R.verifiedSanitizedManifest pool w sealed.id (Just manifest.archive.id)
+      final.originalAvailable `shouldBe` False
+      final.cleanupComplete `shouldBe` True
+      final.archive `shouldBe` manifest.archive
+      bracket (R.openSanitizedReader pool final) R.closeArchiveReader $ \reader ->
+        R.readArchiveRange reader 0 1048576 `shouldReturn` (BS.concat (replicate 9 sanitized)<>"[true]")
+      M.releaseReclamation pool resumed
+
+  it "rejects stale snapshots attempting to freeze a disabled replacement policy" $ \admin -> bounded $
+    withRuntime admin $ \pool -> do
+      let env=admin {pool=pool}
+      installReplacement pool
+      (w,sealed,_)<-fixture env ["{}\n"]
+      withOldSnapshot env $ \stale -> do
+        M.configureMaintenance pool M.DisableReplacement
+        staleWriteRejected stale ("INSERT INTO session_archive_jobs(session_id,workspace_id) VALUES ('"
+          <>uuid sealed.id<>"','"<>uuid w<>"')")
+      exact<-publish env w sealed
+      R.verifiedSanitizedManifest pool w sealed.id (Just exact.id) `shouldReturn` Nothing
+
+  it "rejects an internally consistent sanitized publication that differs from independently reapplied rules" $ \admin -> bounded $
+    withRuntime admin $ \pool -> do
+      let env=admin {pool=pool}
+          original="{\"kind\":\"call\",\"encrypted\":\"opaque secret\"}\n"
+          wrong="{\"kind\":\"call\",\"encrypted\":\"incorrect payload\"}\n"
+      installReplacement pool
+      (w,sealed,_)<-fixture env [original]
+      deriveSessionOccurrence pool w sealed.id
+      R.ensureArchive pool w sealed.id
+      implementation<-C.codecImplementation
+      Just lease<-A.claimArchive pool implementation
+      Just receipt<-A.readArchiveReceipt pool lease
+      Just (Just snapshot)<-A.readArchiveReplacementSnapshot pool lease
+      A.stageArchiveLedger pool lease 0 1 `shouldReturn` Just 1
+      input<-newIORef (Just wrong)
+      staged<-newIORef (0,0)
+      encoded<-C.compress (atomicModifyIORef' input (\value -> (Nothing,value))) $ \bytes -> do
+        (ordinal,offset)<-readIORef staged
+        A.stageArchivePart pool lease ordinal offset bytes `shouldReturn` True
+        writeIORef staged (ordinal+1,offset+fromIntegral (BS.length bytes))
+      (parts,_)<-readIORef staged
+      let content=A.SanitizedContent (sessionSha256 snapshot.snapshotBytes) encoded.raw.byteCount encoded.raw.sha256 1
+      verifyAndPublishArchive pool lease (PreparedArchive receipt encoded parts 1 (Just content))
+      Just manifest<-R.verifiedSanitizedManifest pool w sealed.id (Just lease.generationId)
+      M.configureMaintenance pool M.EnableSanitizedReclamation
+      maintainArchive pool
+      M.verificationRecorded pool manifest.archive `shouldReturn` False
+      number env "SELECT count(*) FROM session_chunks" `shouldReturn` 1
+      number env "SELECT count(*) FROM session_archive_reclamation WHERE error_code='archive_verification_failed' AND verified_at IS NULL AND deleted_bytes=0 AND NOT complete" `shouldReturn` 1
+      M.claimReclamation pool `shouldReturn` Nothing
+      readSessionRange pool w sealed.id 0 1024 >>= (\r -> r.bytes `shouldBe` original)
+
+  it "completes a verified empty sanitized archive without retiring original evidence" $ \admin -> bounded $
+    withRuntime admin $ \pool -> do
+      let env=admin {pool=pool}
+      installReplacement pool
+      (w,sealed,_)<-fixture env []
+      deriveSessionOccurrence pool w sealed.id
+      manifest<-publishSanitized env w sealed
+      M.configureMaintenance pool M.EnableSanitizedReclamation
+      maintainArchive pool
+      Just final<-R.verifiedSanitizedManifest pool w sealed.id (Just manifest.archive.id)
+      final.originalAvailable `shouldBe` True
+      final.cleanupComplete `shouldBe` True
+      final.content.replacementCount `shouldBe` 0
+      readSessionRange pool w sealed.id 0 1 >>= (\r -> r.bytes `shouldBe` "")
+
+  it "keeps exact qualification independent of authority over sanitized verification targets" $ \admin -> bounded $
+    withRuntime admin $ \pool -> do
+      let env=admin {pool=pool}
+      runtime<-runSession pool $ S.statement () (St.Statement "SELECT session_user::text" E.noParams (D.singleRow (D.column (D.nonNullable D.text))) False)
+      let role=TE.encodeUtf8 runtime
+          private=role<>"_san"
+      boolean env "SELECT public.hmem_archive_sanitized_runtime_safe()" `shouldReturn` True
+      bracket (execute admin ("CREATE SCHEMA "<>private<>" AUTHORIZATION "<>role))
+        (const (execute admin ("DROP SCHEMA "<>private<>" CASCADE"))) $ \_ -> do
+          execute admin ("GRANT TRIGGER ON session_occurrences TO "<>role)
+          boolean env "SELECT public.hmem_archive_runtime_safe() AND NOT public.hmem_archive_sanitized_runtime_safe()" `shouldReturn` True
+          rejected (M.configureMaintenance pool M.EnableSanitizedReclamation)
+          execute env ("CREATE FUNCTION "<>private<>".owned_hook() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER owned_hook BEFORE UPDATE ON public.session_occurrences FOR EACH ROW EXECUTE FUNCTION "<>private<>".owned_hook()")
+          execute admin ("REVOKE TRIGGER ON session_occurrences FROM "<>role)
+          boolean env "SELECT public.hmem_archive_runtime_safe() AND NOT public.hmem_archive_sanitized_runtime_safe()" `shouldReturn` True
+          M.configureMaintenance pool M.EnableReclamation
+          rejected (M.configureMaintenance pool M.EnableSanitizedReclamation)
+      boolean env "SELECT public.hmem_archive_sanitized_runtime_safe()" `shouldReturn` True
+
   it "verifies and reclaims empty, UTF-8/CRLF/final-no-LF and large evidence in bounded atomic turns" $ \admin -> bounded $
     withRuntime admin $ \pool -> do
       let env=admin {pool=pool}
@@ -296,6 +446,22 @@ spec=around withTestEnv $ describe "Archive maintenance worker" $ do
 
 bounded :: IO () -> IO ()
 bounded action=timeout 60000000 action >>= (`shouldBe` Just ())
+
+withOldSnapshot :: TestEnv -> (H.Connection -> IO a) -> IO a
+withOldSnapshot env action=do
+  role<-runSession env.pool $ S.statement () (St.Statement "SELECT session_user::text" E.noParams (D.singleRow (D.column (D.nonNullable D.text))) False)
+  -- Reserve the stale snapshot independently of the mutation's striped pool.
+  bracket (createPool (env.testDb.testDbConnStr<>" user="<>role) 1 30 30000) destroyAllResources $ \stalePool ->
+    withConn stalePool $ \connection -> do
+      let raw sql=S.run (S.sql sql) connection >>= either (fail . show) pure
+      bracket_ (raw "BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT singleton FROM session_archive_control")
+        (raw "ROLLBACK") (action connection)
+
+staleWriteRejected :: H.Connection -> ByteString -> IO ()
+staleWriteRejected connection sql=S.run (S.sql sql) connection >>= \case
+  Left (S.QueryError _ _ (S.ResultError (S.ServerError "40001" _ _ _ _))) -> pure ()
+  result -> expectationFailure ("Expected serialization failure, received "<>show result)
+
 fixture :: TestEnv -> [ByteString] -> IO (UUID,AgentSession,UUID)
 fixture env chunks=do
   w<-(.id) <$> createTestWorkspace env "archive-maintenance"
@@ -317,6 +483,21 @@ publish env workspace sealed=do
     Nothing -> do
       job<-A.getArchiveJob env.pool workspace sealed.id
       fail ("Archive was not published: "<>show job)
+
+installReplacement :: Pool H.Connection -> IO ()
+installReplacement pool=do
+  let policyBytes="{\"version\":1,\"eligible_from\":\"2000-01-01T00:00:00Z\",\"formats\":{\"jsonl\":[{\"match\":{\"/kind\":\"call\"},\"path\":\"/encrypted\"}]}}"
+  Right policy<-pure (Replacement.decodePolicy policyBytes)
+  M.configureMaintenance pool (M.InstallReplacement policy)
+
+publishSanitized :: TestEnv -> UUID -> AgentSession -> IO R.SanitizedManifest
+publishSanitized env workspace sealed=do
+  R.ensureArchive env.pool workspace sealed.id
+  implementation<-C.codecImplementation
+  Just lease<-A.claimArchive env.pool implementation
+  runArchiveLease env.pool lease
+  Just manifest<-R.verifiedSanitizedManifest env.pool workspace sealed.id (Just lease.generationId)
+  pure manifest
 
 -- This is a real authenticated PostgreSQL connection, not SET ROLE under an
 -- administrative session. The role cannot assume the protected NOLOGIN owner.

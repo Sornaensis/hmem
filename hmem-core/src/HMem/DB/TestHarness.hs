@@ -484,7 +484,7 @@ cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
         ]
       guardSql action = B8.pack $ unlines
         [ "DO $$ DECLARE target TEXT; BEGIN"
-        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions','session_archive_jobs','session_archive_generations','session_archive_parts','session_archive_checkpoints','session_archive_ledger','session_archive_sanitized_contents','session_archive_content_blocks','document_payloads','document_payload_parts','documents','task_document_evidence','document_requests','document_generations','document_preview_attempts','document_download_grants','document_preview_runtime','document_preview_jobs','document_preview_runs'] LOOP"
+        , "FOREACH target IN ARRAY ARRAY['sessions','session_chunks','task_sessions','session_occurrences','session_archive_jobs','session_archive_generations','session_archive_parts','session_archive_checkpoints','session_archive_ledger','session_archive_sanitized_contents','session_archive_content_blocks','session_archive_reclamation','document_payloads','document_payload_parts','documents','task_document_evidence','document_requests','document_generations','document_preview_attempts','document_download_grants','document_preview_runtime','document_preview_jobs','document_preview_runs'] LOOP"
         , "IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.'||target)"
         , "AND tgname='session_evidence_no_truncate' AND NOT tgisinternal) THEN"
         , "EXECUTE format('ALTER TABLE public.%I " <> action <> " TRIGGER session_evidence_no_truncate',target);"
@@ -504,6 +504,7 @@ cleanDB env = withConn env.pool $ \conn -> mask $ \restore -> do
           Session.sql sql
           Session.sql "DO $$ BEGIN IF to_regclass('public.session_archive_replacement_policies') IS NOT NULL THEN DELETE FROM public.session_archive_replacement_policies; END IF; END $$"
           Session.sql "DO $$ BEGIN IF to_regclass('public.session_archive_control') IS NOT NULL THEN UPDATE public.session_archive_control SET cutover_at=clock_timestamp(),paused=false,backfill_enabled=false,reclaim_enabled=false,qualified=false,cursor_time=NULL,cursor_id=NULL,staging_budget=8589934592,wal_budget=34359738368,staged_bytes=0,reserved_bytes=0,permit_generation=NULL,permit_token=NULL,permit_kind=NULL,permit_expires_at=NULL,blocked_reason=NULL WHERE singleton; END IF; END $$"
+          Session.sql "DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.session_archive_control') AND attname='sanitized_reclaim_enabled' AND NOT attisdropped) THEN UPDATE public.session_archive_control SET sanitized_reclaim_enabled=false,sanitized_qualified=false WHERE singleton; END IF; END $$"
           Session.sql (guardSql "ENABLE")
           Session.sql finish
   result <- try @SomeException (restore reset)

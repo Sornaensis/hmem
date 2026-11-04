@@ -4,7 +4,8 @@ module HMem.DB.SessionArchive.Reader
   ( ArchiveReader, openArchiveReader, closeArchiveReader, readArchiveRange
   , verifiedManifest, verifiedPart, ensureArchive
   , SanitizedManifest(..), verifiedSanitizedManifest, verifiedSanitizedPart, openSanitizedReader
-  , withCachedSanitizedReader, originalUnavailableSQL
+  , withCachedSanitizedReader, originalUnavailableSQL, sanitizedRelation
+  , verifiedSanitizedLedger, verifiedSanitizedBlock
   , verifiedLedger, ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..)
   , newReaderCache, closeReaderCache, withCachedReader
   , ReaderMetrics(..), readerMetrics
@@ -172,9 +173,20 @@ verifiedPartFrom relation pool w s g n = do
 ledgerRow :: D.Row A.ArchiveLedger
 ledgerRow = A.ArchiveLedger <$> column D.int8 <*> column D.int8 <*> column D.int8 <*> column D.bool <*> column D.int8 <*> column D.bool <*> column D.text <*> column D.text
 verifiedLedger :: Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe A.ArchiveLedger)
-verifiedLedger pool w s g offset = query pool (w,s,g,offset)
-  "SELECT l.revision,l.start_offset,l.end_offset,l.allow_final_record,l.record_count,l.ends_with_newline,l.raw_sha256,l.binding_sha256 FROM session_archives g JOIN session_archive_ledger l ON l.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND l.start_offset<=$4 AND l.end_offset>$4 AND l.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_ledger p WHERE p.generation_id=l.generation_id AND p.revision=l.revision-1),''),jsonb_build_array(l.generation_id,l.revision,l.start_offset,l.end_offset,l.allow_final_record,l.record_count,l.ends_with_newline,l.raw_sha256)) ORDER BY l.start_offset DESC LIMIT 1"
+verifiedLedger = verifiedLedgerFrom "session_archives"
+
+verifiedSanitizedLedger :: Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe A.ArchiveLedger)
+verifiedSanitizedLedger = verifiedLedgerFrom sanitizedRelation
+
+verifiedLedgerFrom :: ByteString -> Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe A.ArchiveLedger)
+verifiedLedgerFrom relation pool w s g offset = query pool (w,s,g,offset)
+  ("SELECT l.revision,l.start_offset,l.end_offset,l.allow_final_record,l.record_count,l.ends_with_newline,l.raw_sha256,l.binding_sha256 FROM "<>relation<>" g JOIN session_archive_ledger l ON l.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND l.start_offset<=$4 AND l.end_offset>$4 AND l.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_ledger p WHERE p.generation_id=l.generation_id AND p.revision=l.revision-1),''),jsonb_build_array(l.generation_id,l.revision,l.start_offset,l.end_offset,l.allow_final_record,l.record_count,l.ends_with_newline,l.raw_sha256)) ORDER BY l.start_offset DESC LIMIT 1")
   ledgerRow
+
+verifiedSanitizedBlock :: Pool H.Connection -> UUID -> UUID -> UUID -> Int64 -> IO (Maybe A.SanitizedBlock)
+verifiedSanitizedBlock pool w s g ordinal = query pool (w,s,g,ordinal)
+  ("SELECT b.ordinal,b.start_offset,b.end_offset,b.content_sha256 FROM "<>sanitizedRelation<>" g JOIN session_archive_content_blocks b ON b.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND b.ordinal=$4 AND b.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_content_blocks p WHERE p.generation_id=b.generation_id AND p.ordinal=b.ordinal-1),''),jsonb_build_array(b.generation_id,b.ordinal,b.start_offset,b.end_offset,b.content_sha256))")
+  (A.SanitizedBlock <$> column D.int8 <*> column D.int8 <*> column D.int8 <*> column D.text)
 
 data DecodeState = DecodeState !Int64 !C.Decoder
 data Chunk = Chunk !Int64 !Text !ByteString
@@ -250,16 +262,14 @@ restart reader offset = mask $ \restore -> do
 chunkBinding :: ArchiveReader -> Int64 -> IO (Int64,Int64,Text)
 chunkBinding reader offset = do
   let m = reader.archiveManifest
-      identity = (m.workspaceId,m.sessionId,m.id,offset `div` 1048576)
       missing = throwIO (C.CodecFailure "archive_ledger_unavailable")
   case reader.sanitized of
     Nothing -> do
       row <- verifiedLedger reader.pool m.workspaceId m.sessionId m.id offset >>= maybe missing pure
       pure (row.startOffset,row.endOffset,row.rawSha256)
     Just content -> do
-      (start,end,digest) <- query reader.pool identity
-        ("SELECT b.start_offset,b.end_offset,b.content_sha256 FROM "<>sanitizedRelation<>" g JOIN session_archive_content_blocks b ON b.generation_id=g.id WHERE g.workspace_id=$1 AND g.session_id=$2 AND g.id=$3 AND b.ordinal=$4 AND b.binding_sha256=hmem_archive_binding(coalesce((SELECT p.binding_sha256 FROM session_archive_content_blocks p WHERE p.generation_id=b.generation_id AND p.ordinal=b.ordinal-1),''),jsonb_build_array(b.generation_id,b.ordinal,b.start_offset,b.end_offset,b.content_sha256))")
-        ((,,) <$> column D.int8 <*> column D.int8 <*> column D.text) >>= maybe missing pure
+      A.SanitizedBlock _ start end digest <- verifiedSanitizedBlock reader.pool m.workspaceId m.sessionId m.id (offset `div` 1048576)
+        >>= maybe missing pure
       require (start == offset - offset `mod` 1048576 && end-start == min 1048576 (content.contentBytes-start))
       pure (start,end,digest)
 

@@ -1,20 +1,24 @@
 module HMem.Server.CtlArchives
   ( ArchivesOperation(..), runArchivesOperation, runArchivesOperationWithPool ) where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket,throwIO)
 import Data.Aeson (Value)
+import Data.ByteString qualified as BS
 import Data.Pool (Pool,destroyAllResources)
 import Hasql.Connection qualified as H
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Session qualified as S
 import Hasql.Statement qualified as St
+import System.IO (IOMode(ReadMode),withBinaryFile)
 
 import HMem.Config (HMemConfig(..),PoolConfig(..),connectionString,loadConfig)
 import HMem.DB.Pool qualified as P
 import HMem.DB.SessionArchive.Maintenance qualified as M
+import HMem.SessionArchive.Replacement qualified as Replacement
 
-data ArchivesOperation = ArchivesStatus | ArchivesConfigure M.MaintenanceAction deriving stock (Show,Eq)
+data ArchivesOperation = ArchivesStatus | ArchivesConfigure M.MaintenanceAction | ArchivesInstallReplacement FilePath
+  deriving stock (Show,Eq)
 
 runArchivesOperation :: ArchivesOperation -> IO Value
 runArchivesOperation operation=do
@@ -28,11 +32,18 @@ runArchivesOperationWithPool :: Pool H.Connection -> ArchivesOperation -> IO Val
 runArchivesOperationWithPool pool operation=do
   case operation of
     ArchivesStatus -> pure ()
-    ArchivesConfigure M.EnableReclamation -> do
-      safe<-P.runSession pool $ S.statement () $ St.Statement
-        "SELECT public.hmem_archive_runtime_safe()"
-        E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) True
-      if safe then M.configureMaintenance pool M.EnableReclamation
-        else fail "Archive reclamation requires a restricted runtime role with the explicit maintenance capability grant"
+    ArchivesConfigure M.EnableReclamation -> enable M.EnableReclamation "SELECT public.hmem_archive_runtime_safe()"
+    ArchivesConfigure M.EnableSanitizedReclamation -> enable M.EnableSanitizedReclamation "SELECT public.hmem_archive_sanitized_runtime_safe()"
     ArchivesConfigure action -> M.configureMaintenance pool action
+    ArchivesInstallReplacement path -> do
+      bytes<-withBinaryFile path ReadMode (\handle -> BS.hGet handle 65537)
+      policy<-either throwIO pure (Replacement.decodePolicy bytes)
+      M.configureMaintenance pool (M.InstallReplacement policy)
   M.maintenanceStatus pool
+  where
+    enable action sql = do
+      safe<-P.runSession pool $ S.statement () $ St.Statement
+        sql
+        E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) True
+      if safe then M.configureMaintenance pool action
+        else fail "Archive reclamation requires a restricted runtime role with the explicit maintenance capability grant"

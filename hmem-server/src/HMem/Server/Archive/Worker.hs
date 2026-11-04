@@ -233,7 +233,7 @@ runReclamationLeaseWith beforeVerification pool lease=mask $ \restore -> do
         Just _ -> throwIO failure
         Nothing -> throwTo parent (ArchiveFailure "archive_maintenance_lease_lost")
   outcome<-try @SomeException $ bracket (spawnOwned monitor) stopOwned $ \_ -> restore $ do
-    result<-timeout (archiveAttemptMicros lease.manifest.rawBytes) (Reclamation.runReclamation beforeVerification pool lease)
+    result<-timeout (archiveAttemptMicros lease.verificationBytes) (Reclamation.runReclamation beforeVerification pool lease)
     check (result==Just ()) "archive_maintenance_timeout"
   case outcome of
     Left failure | failedDrain failure -> throwIO failure
@@ -332,7 +332,7 @@ verifyAndPublishArchiveWith afterIndex pool lease prepared = do
   mapM_ (live . DB.stageSanitizedContent pool lease) prepared.sanitized
   (stageContent, finishStage) <- case prepared.sanitized of
     Nothing -> pure (const (pure ()),pure 0)
-    Just _ -> contentBlockSink contentBytes (live . DB.stageSanitizedBlock pool lease)
+    Just _ -> Reclamation.contentBlockSink contentBytes (live . DB.stageSanitizedBlock pool lease)
   firstSource <- partSource pool lease prepared
   index <- newIORef (0 :: Int64)
   first <- Codec.verify contentBytes firstSource stageContent $ \point -> do
@@ -350,7 +350,7 @@ verifyAndPublishArchiveWith afterIndex pool lease prepared = do
   (verifyContent, finishContent) <- case prepared.sanitized of
     Nothing -> verifyLedgerSink pool lease prepared
     Just _ -> do
-      (verifyBlock, finishBlocks) <- contentBlockSink contentBytes $ \block -> do
+      (verifyBlock, finishBlocks) <- Reclamation.contentBlockSink contentBytes $ \block -> do
         stored <- DB.readStagedSanitizedBlock pool lease block.ordinal
         check (stored == Just block) "archive_sanitized_block_integrity"
       pure (verifyBlock, do
@@ -374,30 +374,6 @@ verifyAndPublishArchiveWith afterIndex pool lease prepared = do
   check (currentReceipt == receipt) "archive_receipt_changed"
   let verified = DB.ArchiveVerification second.compressed.byteCount second.compressed.sha256 prepared.partCount points prepared.ledgerCount
   live (maybe (DB.publishArchive pool lease verified) (DB.publishSanitizedArchive pool lease verified) prepared.sanitized)
-
--- Derive and check one content block at a time from independent gzip readbacks.
--- The hash context crosses codec output-buffer boundaries, never coordinates.
-contentBlockSink :: Int64 -> (DB.SanitizedBlock -> IO ()) -> IO (ByteString -> IO (), IO Int64)
-contentBlockSink bytes emit = do
-  position <- newIORef (0,0,hashInit :: Context SHA256)
-  let consume input = unless (BS.null input) $ do
-        (ordinal,offset,context) <- readIORef position
-        let boundary = min (bytes-offset) (1048576 - offset `mod` 1048576)
-            amount = min (BS.length input) (fromIntegral boundary)
-            (piece,rest) = BS.splitAt amount input
-            next = offset + fromIntegral amount
-            updated = hashUpdate context piece
-        check (amount>0) "archive_sanitized_block_overflow"
-        if fromIntegral amount == boundary then do
-          emit (DB.SanitizedBlock ordinal (ordinal*1048576) next (digestText updated))
-          writeIORef position (ordinal+1,next,hashInit)
-        else updated `seq` writeIORef position (ordinal,next,updated)
-        consume rest
-      finish = do
-        (count,offset,_) <- readIORef position
-        check (offset == bytes) "archive_sanitized_block_incomplete"
-        pure count
-  pure (consume,finish)
 
 -- Sanitized inflation is never used to verify the original ledger. Re-read
 -- the sealed chunks and their immutable ledger bindings in original offsets.

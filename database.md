@@ -474,6 +474,8 @@ classDiagram
       BOOLEAN backfill_enabled
       BOOLEAN reclaim_enabled
       BOOLEAN qualified
+      BOOLEAN sanitized_reclaim_enabled
+      BOOLEAN sanitized_qualified
       TIMESTAMPTZ? cursor_time
       UUID? cursor_id
       BIGINT staging_budget
@@ -496,6 +498,7 @@ classDiagram
       UUID session_id FK
       UUID workspace_id FK
       TEXT metadata_sha256
+      TEXT? sanitized_attestation_sha256
       TIMESTAMPTZ? verified_at
       TIMESTAMPTZ retry_at
       BIGINT deleted_revision
@@ -724,8 +727,8 @@ classDiagram
   note for session_archive_content_blocks "UNIQUE (generation_id, start_offset)\n1 MiB sanitized content blocks except the final tail; ordered hash chain"
   note for session_archive_checkpoints "UNIQUE (generation_id, raw_offset)\nAt most 32 KiB EXTENDED dictionary; at most 1 MiB raw gap"
   note for session_archive_ledger "UNIQUE (generation_id, start_offset)\nExact original append metadata and chunk SHA-256"
-  note for session_archive_control "One initialized true singleton\nCapacity values are logical policy, not measured free disk/WAL caps\nPermit IDs are control fields without foreign keys"
-  note for session_archive_reclamation "Mutable verification/progress bound to immutable manifest\nRaw deletion at most 8 rows / 8 MiB per transaction"
+  note for session_archive_control "One initialized true singleton\nExact and sanitized reclamation have separate qualification and enablement\nCapacity values are logical policy, not measured free disk/WAL caps\nPermit IDs are control fields without foreign keys"
+  note for session_archive_reclamation "Verification bound to immutable manifest and, for sanitized archives, the frozen policy and original seal\nSanitized first-delete requires a complete current occurrence projection\nRaw deletion and progress commit together, at most 8 rows / 8 MiB per transaction"
   note for tasks "UNIQUE (id, workspace_id), used by session links"
   note for task_sessions "Composite foreign keys enforce one workspace\nAdditive links survive task soft deletion"
   note for observation_subjects "UNIQUE (observation_id, subject_kind, subject)"
@@ -857,4 +860,11 @@ V062 adds format-scoped replacement policy storage and freezes its selected
 snapshot on new eligible archive jobs. Sanitized receipts and content block
 hashes are generation sidecars. Original seal receipts and append coordinates
 remain authoritative. The migration installs no active policy and excludes
-sanitized generations from the exact archive view and reclamation capability.
+sanitized generations from the exact archive view.
+
+V063 adds separate sanitized reclamation qualification and a versioned
+attestation to the existing progress row. The guarded capability checks the
+complete original occurrence projection in the first-delete transaction.
+Committed positive deletion progress marks the original unavailable and
+protects the verified occurrence and progress from ordinary mutation. Exact
+reclamation retains its existing controls and capability grant.

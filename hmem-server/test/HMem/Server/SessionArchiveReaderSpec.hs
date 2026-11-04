@@ -63,6 +63,7 @@ spec = describe "Source-absent archive compatibility HTTP" $ do
       timeout 30000000 (runArchiveLease env.pool lease) `shouldReturn` Just ()
       Pool.runTransaction env.pool $ SQL.sql $
         "ALTER TABLE session_chunks DISABLE TRIGGER session_chunk_guard; DELETE FROM session_chunks c WHERE session_id='"<>uuid identifier<>"' AND EXISTS(SELECT 1 FROM session_archives g WHERE g.session_id=c.session_id); ALTER TABLE session_chunks ENABLE TRIGGER session_chunk_guard"
+      Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
       let target="/api/v1/workspaces/"<>uuid workspace.id<>"/sessions/"<>uuid identifier
           proofPath=target<>"/prefix-verifications"
       forM_ [0,1,170000,1048575,1048576,fromIntegral (BS.length raw)-1,fromIntegral (BS.length raw)] $ \offset -> do

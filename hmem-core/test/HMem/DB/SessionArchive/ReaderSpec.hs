@@ -234,7 +234,7 @@ spec = around withTestEnv $ describe "Compatible archive reader" $ do
     bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \blockers -> withConn blockers $ \connection -> do
       let sql statement=S.run (S.sql statement) connection >>= either (fail . show) pure
           blocked=runSession env.pool $ S.statement () $ St.Statement
-            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT coalesce(string_agg(substring(data%')"
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT gone,CASE WHEN gone THEN %ELSE (SELECT coalesce(string_agg(substring(data%' AND query LIKE '%session_archive_reclamation% AS gone) state')"
             E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) False
           await=do waiting<-blocked; if waiting then pure () else threadDelay 10000 >> await
       bracket_ (sql "BEGIN; LOCK session_chunks IN ACCESS EXCLUSIVE MODE") (sql "ROLLBACK") $

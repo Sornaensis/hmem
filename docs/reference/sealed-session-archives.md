@@ -867,6 +867,39 @@ authorized. Review by **2026-11-05**; this is neither an automation nor an
 automatic deletion date. Removal requires direct human file-deletion approval.
 The deferral changes none of the integrity, security, resource or product limits.
 
+### Sanitized lifecycle qualification
+
+The [sanitized qualification record](../../tools/sanitized-session-archive.qualification.json)
+binds the isolated PostgreSQL, native server, production frontend and Chromium
+results to their executable and source inputs. It records sampled server working
+set and all owned Chromium private memory over matched baselines. These loopback
+runs exercise the full-view deadline and verified local navigation. The earlier
+controlled 100 Mbit/s, loading acknowledgement and 20-action navigation p95
+checks have a separate scope.
+
+The 1 MiB and 100 MiB cases verified the browser view before reclamation and a
+fresh view and sanitized ZIP after reclamation. The 1 MiB case also verified
+the browser JSONL download. Their sampled browser and server increments stayed
+within 128 MiB. The 100 MiB run met the foreground p95 limit with full overlap. The
+1 MiB publication finished before the required foreground overlap.
+
+The 1 GiB case verified the first full browser view and an independent HTTP
+content receipt. Chromium used 159,666,176 additional bytes at the first
+worker index and handoff peak. Sanitized reclamation did not complete within
+the 90-second test gate. A repeat completed reclamation and verified the ZIP.
+Its first view exceeded the memory limit during indexing, before the processor
+reported ready. Its fresh view timed out after a sampled increment of
+178,282,496 bytes. Keep replacement policy installation and sanitized
+reclamation disabled for rollout until the resource and backup gates pass.
+
+The 1 MiB storage fixture uses 256 distinct deterministic base64 payloads and
+768 unchanged message rows. The 100 MiB and 1 GiB stress fixtures repeat an opaque
+payload at the same density. Deleting the original rows removes their logical
+bytes and stored values. In the 1 MiB fixture the allocated `session_chunks`
+relation stayed at 409,600 bytes and the allocated database grew by 16,384 bytes
+between ready publication and completed cleanup. These selected measurements do
+not estimate archive savings for other data.
+
 ## Reproducible codec baseline
 
 Run the standalone C probe in a verified task-owned scratch directory with a

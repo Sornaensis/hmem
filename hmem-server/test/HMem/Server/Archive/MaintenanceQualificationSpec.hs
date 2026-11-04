@@ -36,10 +36,10 @@ import Network.HTTP.Types
 import Network.Wai qualified as Wai
 import Network.Wai.Test qualified as W
 import System.CPUTime (getCPUTime)
-import System.Directory (createDirectoryIfMissing,getFileSize,removeFile)
+import System.Directory (canonicalizePath,createDirectoryIfMissing,getFileSize,removeFile)
 import System.Environment (getExecutablePath,lookupEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>))
+import System.FilePath ((</>),equalFilePath)
 import System.Process
 import System.IO (withBinaryFile,IOMode(..),hFlush,stdout)
 import System.Timeout (timeout)
@@ -133,6 +133,14 @@ qualify recipe chunkCount=do
   phaseStart<-getMonotonicTimeNSec
   currentPhase<-newIORef ("setup",phaseStart)
   repoRoot<-resolveRepoRoot
+  sanitizedTask<-((==Just "1") <$> lookupEnv "HMEM_SANITIZED_ARCHIVE_QUALIFICATION")
+  let receipts=repoRoot </> ".tmp" </> (if sanitizedTask then "sealed-archives-eab4ad17" else "sealed-archives-8ff1e216")
+      evidenceOwner=if sanitizedTask then "Sanitized archive qualification developer" else "Task7"
+      successOwner=if sanitizedTask then evidenceOwner else "Task7 until verified handoff, then Task8"
+      successExpiry=if sanitizedTask then "Sanitized archive qualification closure" else "Task8 aggregate reconciliation/closure"
+  when sanitizedTask $ do
+    actual<-canonicalizePath receipts
+    unless (equalFilePath actual receipts) (fail "Sanitized archive qualification receipt root escaped its task path")
   let large=chunkCount>=1024
       recordPhase :: Text -> IO a -> IO a
       recordPhase name action=do
@@ -147,9 +155,9 @@ qualify recipe chunkCount=do
         (name,start)<-readIORef currentPhase
         measured<-readIORef phases
         retained<-sandboxLifetimeFailures life
-        let path=repoRoot </> ".tmp" </> "sealed-archives-8ff1e216" </> "failed-"<>T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
-        createDirectoryIfMissing True (repoRoot </> ".tmp" </> "sealed-archives-8ff1e216")
-        LBS.writeFile path (encode (object ["owner".=("Task7"::Text),"expiry".=("Resolve diagnostic at issue resolution/task closure"::Text),"run_id".=runId,"recipe".=recipe,"chunks".=chunkCount,"failed_phase".=name,"observed_phase_seconds".=(fromIntegral (now-start)/1000000000::Double),"completed_phases".=measured,"cause".=T.take 8192 cause,"retained_lifetime_failures".=retained]))
+        let path=receipts </> "failed-"<>T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
+        createDirectoryIfMissing True receipts
+        LBS.writeFile path (encode (object ["owner".=(evidenceOwner::Text),"expiry".=("Resolve diagnostic at issue resolution/task closure"::Text),"run_id".=runId,"recipe".=recipe,"chunks".=chunkCount,"failed_phase".=name,"observed_phase_seconds".=(fromIntegral (now-start)/1000000000::Double),"completed_phases".=measured,"cause".=T.take 8192 cause,"retained_lifetime_failures".=retained]))
   attempt<-try @SomeException $ timeout 250000000 $ withSandboxedTestEnvBorrowed life acquire drain $ \admin owned -> do
     diagnostics<-((==Just "1") <$> lookupEnv "HMEM_ARCHIVE_QUAL_DIAGNOSTICS")
     when diagnostics $ do
@@ -159,7 +167,7 @@ qualify recipe chunkCount=do
     modifyIORef' phases (<>[object ["phase".=("setup"::Text),"elapsed_seconds".=(fromIntegral (setupEnd-phaseStart)/1000000000::Double),"outcome".=("success"::Text)]])
     let env=admin {pool=owned.runtimePool}
         rawBytes=fromIntegral chunkCount*1048576::Int64
-        receiptPath=admin.testSandbox.sandboxRepoRoot </> ".tmp" </> "sealed-archives-8ff1e216" </> T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
+        receiptPath=receipts </> T.unpack recipe<>"-"<>show chunkCount<>"MiB-"<>show runId<>".json"
     begin<-getMonotonicTimeNSec
     cpuBegin<-getCPUTime
     lsnStart<-text admin "SELECT pg_current_wal_insert_lsn()::text"
@@ -243,9 +251,9 @@ qualify recipe chunkCount=do
     pgVersion<-text admin "SELECT version()"
     helpers<-readIORef owned.helperReceipts
     measured<-readIORef phases
-    createDirectoryIfMissing True (admin.testSandbox.sandboxRepoRoot </> ".tmp" </> "sealed-archives-8ff1e216")
+    createDirectoryIfMissing True receipts
     let receipt=object
-          ["format_version".=(1::Int),"owner".=("Task7 until verified handoff, then Task8"::Text),"expiry".=("Task8 aggregate reconciliation/closure"::Text),"run_id".=runId
+          ["format_version".=(1::Int),"owner".=(successOwner::Text),"expiry".=(successExpiry::Text),"run_id".=runId
           ,"base_revision".=("b7428aa960d0b526fb85e33146f36374f3b8b109"::Text),"recipe".=recipe,"seed".=(1::Int),"record_bytes".=(1024::Int),"append_bytes".=(1048576::Int)
           ,"record_count".=sealed.committedRecords,"raw_bytes".=rawBytes,"raw_sha256".=sealed.finalSha256,"compressed_bytes".=manifest.compressedBytes,"compressed_sha256".=manifest.compressedSha256
           ,"part_count".=manifest.partCount,"checkpoint_count".=manifest.checkpointCount,"ledger_count".=manifest.ledgerCount
@@ -286,6 +294,8 @@ fixture env recipe count=do
     let !nextContext=hashUpdate context bytes
     pure(next,nextContext)) (initial,hashInit::Context SHA256) [0..count-1]
   sealed<-DB.terminateSession env.pool w identifier (Core.TerminateSession uploaded.committedBytes uploaded.revision uploaded.committedBytes (T.pack (show (hashFinalize context::Digest SHA256))))
+  -- Bot evidence is authorized only after every linked task is terminal.
+  execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
   pure(w,sealed,task.id)
 
 -- Exactly 1024-byte valid JSON records; CRLF is part of each raw record.

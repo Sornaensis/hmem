@@ -13,19 +13,29 @@ import {createGunzip,createInflateRaw,crc32} from 'node:zlib'
 import {Readable,Transform} from 'node:stream'
 import {pipeline,finished} from 'node:stream/promises'
 import {chromium} from '@playwright/test'
+import {memorySnapshot} from './support/session-archive-memory.mjs'
+import {ownOperatorInput} from './support/run-sanitized-archive-qualification.mjs'
 
 const repo=resolve(import.meta.dirname,'../../..')
-const taskRoot=join(repo,'.tmp','sealed-archives-4a40c671')
+const mode=process.env.HMEM_ARCHIVE_INTEGRATION_MODE
+const sanitizedRun=/^(?:(?:sanitized|comparison)-(?:1|100|1024)|historical-100)MiB$/.test(mode||'')
+const taskRoot=join(repo,'.tmp',sanitizedRun?'sealed-archives-eab4ad17':'sealed-archives-4a40c671')
 const scratchCeiling=8*1024**3
 const smokeAllowance=1024**3
 const integrationCases=Object.freeze({
   'integration-1MiB':{mebibytes:1,compatibility:false,timeoutMs:180000,internalMs:175000,reservedBytes:1024**3},
   'integration-100MiB':{mebibytes:100,compatibility:true,timeoutMs:600000,internalMs:595000,reservedBytes:2*1024**3},
-  'integration-1024MiB':{mebibytes:1024,compatibility:true,timeoutMs:1200000,internalMs:1195000,reservedBytes:6*1024**3}
+  'integration-1024MiB':{mebibytes:1024,compatibility:true,timeoutMs:1200000,internalMs:1195000,reservedBytes:6*1024**3},
+  'sanitized-1MiB':{mebibytes:1,sanitized:true,compatibility:true,timeoutMs:240000,internalMs:235000,reservedBytes:1024**3},
+  'sanitized-100MiB':{mebibytes:100,sanitized:true,compatibility:true,timeoutMs:600000,internalMs:595000,reservedBytes:2*1024**3},
+  'sanitized-1024MiB':{mebibytes:1024,sanitized:true,compatibility:true,timeoutMs:1200000,internalMs:1195000,reservedBytes:6*1024**3},
+  'comparison-100MiB':{mebibytes:100,comparison:true,compatibility:false,timeoutMs:600000,internalMs:595000,reservedBytes:2*1024**3},
+  'comparison-1024MiB':{mebibytes:1024,comparison:true,compatibility:false,timeoutMs:1200000,internalMs:1195000,reservedBytes:6*1024**3},
+  'historical-100MiB':{mebibytes:100,comparison:true,historical:true,compatibility:false,timeoutMs:600000,internalMs:595000,reservedBytes:2*1024**3}
 })
 const retainedOwners=new Map()
 const outputGuards=new WeakMap()
-const task='4a40c671-2d77-4cca-be24-c7c25ef72337'
+const task=sanitizedRun?'eab4ad17-d4bf-4153-814f-a3f1543768a7':'4a40c671-2d77-4cca-be24-c7c25ef72337'
 const pause=ms=>new Promise(done=>setTimeout(done,ms))
 const inside=(parent,path)=>{const part=relative(parent,path);return part===''||(!part.startsWith('..'+sep)&&part!=='..'&&!isAbsolute(part))}
 async function deadline(work,ms,label){let timer;try{return await Promise.race([work,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(label+' deadline; actual capability retained')),ms)})])}finally{clearTimeout(timer)}}
@@ -130,14 +140,15 @@ function openOwnerRoute(input,output,owners=retainedOwners){
 
 function requireReachableOwnerRoute(){
   assert.ok(process.execArgv.includes('--test-isolation=none'),'native admission requires --test-isolation=none so exec stdin reaches the actual owner')
-  assert.ok(process.stdin.isTTY===true&&process.stdin.readable&&!process.stdin.destroyed,'native admission requires an actual open TTY operator stdin')
+  const supervisedPipe=sanitizedRun&&process.env.HMEM_SANITIZED_ARCHIVE_OWNER_PIPE==='1'
+  assert.ok((process.stdin.isTTY===true||supervisedPipe)&&process.stdin.readable&&!process.stdin.destroyed,'native admission requires its actual open operator stdin')
   return openOwnerRoute(process.stdin,process.stdout)
 }
 
 function preAdmission(runId,owners=retainedOwners){
   let statusAck=null,admitted=false,resolveAdmission
   const admission=new Promise(done=>{resolveAdmission=done})
-  const placeholder={status:()=>({phase:'pre-admission',nativeCreated:false,filesCreated:false,statusAck,admitted}),acknowledgeStatus(id){statusAck=id},admit(ack){assert.ok(Number.isSafeInteger(ack)&&ack===statusAck,'admit must bind the actually written status ACK');assert.equal(admitted,false);admitted=true;resolveAdmission({run:runId,statusAck:ack,transport:'actual TTY stdin round trip',nativeCreated:false,filesCreated:false})},async close(){throw Error('pre-admission run has no native child')}}
+  const placeholder={status:()=>({phase:'pre-admission',nativeCreated:false,filesCreated:false,statusAck,admitted}),acknowledgeStatus(id){statusAck=id},admit(ack){assert.ok(Number.isSafeInteger(ack)&&ack===statusAck,'admit must bind the actually written status ACK');assert.equal(admitted,false);admitted=true;resolveAdmission({run:runId,statusAck:ack,transport:sanitizedRun?'actual owner stdin round trip':'actual TTY stdin round trip',nativeCreated:false,filesCreated:false})},async close(){throw Error('pre-admission run has no native child')}}
   owners.set(runId,placeholder)
   return {admission,placeholder}
 }
@@ -212,10 +223,10 @@ async function admitRun(allowance){
 async function createRun(id,endsAt,allowance=smokeAllowance){
   assert.equal(process.platform,'win32','qualified platform is Windows')
   assert.equal(await realpath(repo),repo,'exact repository working directory')
-  await mkdir(taskRoot,{recursive:true});assert.equal(await realpath(taskRoot),taskRoot,'exact contained Task8 root')
+  await mkdir(taskRoot,{recursive:true});assert.equal(await realpath(taskRoot),taskRoot,'exact contained qualification root')
   const admission=await admitRun(allowance)
   const path=join(taskRoot,'run-'+id)
-  await mkdir(path);await writeFile(join(path,'owner.json'),JSON.stringify({task,id,owner:'Task8 developer',expires:'aggregate approval/task closure; unresolved diagnostic at issue closure'}),{flag:'wx'})
+  await mkdir(path);await writeFile(join(path,'owner.json'),JSON.stringify({task,id,owner:sanitizedRun?'Sanitized archive qualification developer':'Task8 developer',expires:'aggregate approval/task closure; unresolved diagnostic at issue closure'}),{flag:'wx'})
   for(const name of ['tmp','home','config','appdata','localappdata'])await mkdir(join(path,name))
   return {id,path,admission,endsAt,allowance,setupEndsAt:Math.min(endsAt-40000,performance.now()+180000),nativeOwner:null,async dispose(){
     assert.equal(retainedOwners.has(id),false,'unconfirmed native cleanup retains the exact run and actual owner')
@@ -371,6 +382,27 @@ function rawRecipeBlock(first,count=64){
   return block
 }
 
+const sanitizedPolicy={version:1,eligible_from:'2000-01-01T00:00:00Z',formats:{codex_jsonl:[{match:{'/type':'response_item','/payload/type':'function_call'},path:'/payload/encrypted_content'}]}}
+function sanitizedRecipeBlock(first,totalRecords,entropy){
+  const raw=rawRecipeBlock(first),expected=[]
+  let replacements=0
+  for(let row=0;row<64;row++){
+    const index=first+row,original=raw.subarray(row*1024,(row+1)*1024)
+    if(index%4!==1||index===totalRecords-1){expected.push(original);continue}
+    const prefix='{"type":"response_item","payload":{"type":"function_call","name":"tool","call_id":"c'+index.toString(16).padStart(8,'0')+'","encrypted_content":"'
+    const suffix='","arguments":"{\\"scope\\":\\"unchanged\\"}"}}'
+    const room=1024-Buffer.byteLength(prefix+suffix+'\r\n')
+    const opaque=Buffer.alloc(Math.floor(room/4)*3)
+    let seed=(entropy?index:1)^0x51a7
+    for(let at=0;at<opaque.length;at++){seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;opaque[at]=seed&255}
+    const base64=opaque.toString('base64'),tail=suffix+' '.repeat(room-base64.length)+'\r\n'
+    const exact=Buffer.from(prefix+base64+tail)
+    assert.equal(exact.length,1024);exact.copy(original)
+    expected.push(Buffer.from(prefix+'Encrypted Payload'+tail));replacements++
+  }
+  return {raw,expected:Buffer.concat(expected),replacements}
+}
+
 async function integratedRequest(actions,url,{method='GET',body,status=200,timeoutMs=10000,externalSignal}={},consume=response=>response.json()){
   const abort=new AbortController(),cancel=()=>abort.abort(actions.signal.reason)
   const externalCancel=()=>abort.abort(externalSignal.reason)
@@ -431,21 +463,40 @@ function attachIntegratedBrowser(harness,run,actions){
     context=await launching
     context.setDefaultTimeout(actions.remaining(10000))
     const page=context.pages()[0]||await context.newPage()
+    if(sanitizedRun){
+      const workerDiagnostics=[]
+      run.workerDiagnostics=workerDiagnostics
+      const note=value=>{if(workerDiagnostics.length<16)workerDiagnostics.push(value)}
+      page.on('response',response=>{
+        if(/\/assets\/session-archive-worker-/.test(response.url()))note({kind:'worker-response',path:new URL(response.url()).pathname,status:response.status(),contentType:response.headers()['content-type']})
+      })
+      page.on('requestfailed',request=>{
+        if(/\/assets\/session-archive-worker-/.test(request.url()))note({kind:'worker-request-failed',path:new URL(request.url()).pathname,error:boundedText(request.failure()?.errorText,128)})
+      })
+      page.on('pageerror',error=>note({kind:'page-error',message:boundedText(error.message,256)}))
+      page.on('console',message=>{
+        if(message.type()==='error'&&/worker|module|mime|script/i.test(message.text()))note({kind:'browser-error',message:boundedText(message.text(),256)})
+      })
+    }
     await page.addInitScript(()=>{
+      if(typeof globalThis.crypto?.randomUUID!=='function')return
       window.HMEM_CONFIG={authMode:'local',apiUrl:location.origin,wsUrl:location.origin.replace(/^http/,'ws')+'/api/v1/ws',authTokenStorage:'memory'}
-      const state=window.__integratedArchive={documentNonce:crypto.randomUUID(),events:[],bytes:0,complete:false,verified:false,rowsBeforeComplete:false,rowsBeforeVerified:false,held:false}
+      const state=window.__integratedArchive={documentNonce:crypto.randomUUID(),events:[],readyTimes:[],firstRowsAt:null,bytes:0,complete:false,verified:false,rowsBeforeComplete:false,rowsBeforeVerified:false,held:false}
       const note=(kind,extra={})=>{if(state.events.length<64)state.events.push({kind,at:performance.now(),...extra})}
       const OriginalWorker=window.Worker
       window.Worker=class extends OriginalWorker{constructor(...args){super(...args);this.addEventListener('message',({data})=>{
         if(data.kind==='progress'&&['decoding','ready'].includes(data.phase)){
-          if(data.phase==='ready')state.verified=true
-          note('worker-'+data.phase,{compressedBytes:data.compressedBytes,rawBytes:data.rawBytes})
+          if(data.phase==='ready'){
+            state.verified=true
+            if(state.readyTimes.length<2)state.readyTimes.push(performance.now())
+          }
+          note('worker-'+data.phase,{compressedBytes:data.compressedBytes,rawBytes:data.rawBytes,...(data.qualificationIdbCounts?{qualificationIdbCounts:data.qualificationIdbCounts}:{})})
         }
-      })}}
+      });this.addEventListener('error',event=>note('worker-error',{message:String(event.message||'').slice(0,256),filename:String(event.filename||'').slice(0,256)}))}}
       const originalFetch=window.fetch
       window.fetch=async function(url,options){
         const response=await originalFetch.call(this,url,options)
-        if(!/\/archive\/[^/]+\/content$/.test(new URL(url,location.href).pathname)||response.status!==200)return response
+        if(!/\/archive\/[^/]+\/(?:sanitized-)?content$/.test(new URL(url,location.href).pathname)||response.status!==200)return response
         state.bytes=0;state.complete=false;state.verified=false
         const reader=response.body.getReader()
         const body=new ReadableStream({async pull(controller){try{
@@ -457,6 +508,7 @@ function attachIntegratedBrowser(harness,run,actions){
       }
       new MutationObserver(()=>{
         if(document.querySelector('.session-sealed-viewer .session-record-text')){
+          state.firstRowsAt??=performance.now()
           if(!state.complete)state.rowsBeforeComplete=true
           if(!state.verified)state.rowsBeforeVerified=true
           if(!state.events.some(event=>event.kind==='rows'))note('rows')
@@ -515,7 +567,7 @@ async function ordinaryForeground(actions,origin,result={}){
 // Passive Playwright response observation only. It never generates a request.
 // Each actual body-read capability is retained by the existing browser owner.
 function observeArchiveManifests(page,url,observe){
-  const records=[],errors=[],requests=new Map();let closed=false,firstDone,readyDone,firstSettled=false,readySettled=false
+  const records=[],errors=[],lostPolls=[],requests=new Map();let closed=false,firstDone,readyDone,firstSettled=false,readySettled=false
   const first=new Promise((yes,no)=>{firstDone={yes,no}}),ready=new Promise((yes,no)=>{readyDone={yes,no}})
   first.catch(()=>{});ready.catch(()=>{})
   const fail=error=>{if(errors.length<4)errors.push(errorTree(error,{left:2}));if(!firstSettled){firstSettled=true;firstDone.no(error)}if(!readySettled){readySettled=true;readyDone.no(error)}}
@@ -535,13 +587,20 @@ function observeArchiveManifests(page,url,observe){
         assert.ok((status===202&&['preparing','retrying'].includes(value.state))||published,'real frontend manifest response')
         if(!firstSettled&&(active||published)){firstSettled=true;firstDone.yes({active,record,value})}
         if(published&&!readySettled){readySettled=true;readyDone.yes({record,value})}
-      }catch(error){fail(error)}finally{requests.delete(request)}
+      }catch(error){
+        // Playwright can retire a CDP resource id for an intermediate poll
+        // even though the viewer's fetch succeeded. Never infer a body or
+        // an active/ready bracket from it. Wait for a later genuine response.
+        if(sanitizedRun&&response.status()===202&&/Network\.getResponseBody.*No data found for resource/.test(error.message)){
+          if(lostPolls.length<16)lostPolls.push({requestedAt,headersAt,status:202})
+        }else fail(error)
+      }finally{requests.delete(request)}
     })())
   }
   const onClose=()=>stop()
   function stop(){if(closed)return;closed=true;page.off('request',onRequest);page.off('response',onResponse);page.off('close',onClose);if(!firstSettled||!readySettled)fail(Error('passive manifest observer retired before readiness'))}
   page.on('request',onRequest);page.on('response',onResponse);page.on('close',onClose)
-  return {first,ready,stop,snapshot:()=>({scope:'passive real frontend response observations; queued Preparing is not active compression; event delivery uses caller monotonic time',records:[...records],errors:[...errors]})}
+  return {first,ready,stop,snapshot:()=>({scope:'passive real frontend response observations; queued Preparing is not active compression; event delivery uses caller monotonic time',records:[...records],errors:[...errors],...(sanitizedRun?{lostPolls:[...lostPolls]}:{})})}
 }
 
 async function clockSnapshot(actions,harness){
@@ -584,9 +643,10 @@ function foregroundCoverage(before,after,load,expected,admitted){
   return {status:qualified?'qualified-coverage':'inconclusive',scope:'persisted draft-created to published processing/publication bracket; not uninterrupted compression CPU',requiredOverlap:40,observedOverlap:overlaps,admittedOwnedUnpublishedDraft:admittedDraft,clockMapping:{method:'union of narrow-status caller send/receive minus DB clock intervals; widened 1ms for timestamp precision; assumes no unobserved intervening clock step',samples:anchors,offsetLowMs:offsetLow,offsetHighMs:offsetHigh,uncertaintyWidthMs:width,maximumWidthMs:10},generation,conservativeInnerBracket:inner,reason:qualified?null:!admittedDraft?'owned unpublished draft was not observed before timed admission':width>10?'clock mapping uncertainty exceeds 10ms':'fewer than all40 timed requests fit inside the conservative processing/publication bracket'}
 }
 
-function foregroundResult(baseline,load,coverage){
-  const result={status:coverage.status==='qualified-coverage'?'passed':'inconclusive',p95Ratio:load.p95Ms/baseline.p95Ms,maximumRatio:1.10,coverage}
-  if(coverage.status==='qualified-coverage')assert.ok(load.p95Ms<=baseline.p95Ms*1.10,'matched ordinary foreground p95 <= 1.10 baseline')
+function foregroundResult(baseline,load,coverage,enforce=true){
+  const within=load.p95Ms<=baseline.p95Ms*1.10
+  const result={status:coverage.status==='qualified-coverage'?(within?'passed':'failed'):'inconclusive',p95Ratio:load.p95Ms/baseline.p95Ms,maximumRatio:1.10,coverage}
+  if(enforce&&coverage.status==='qualified-coverage')assert.ok(within,'matched ordinary foreground p95 <= 1.10 baseline')
   return result
 }
 
@@ -604,7 +664,7 @@ async function writeCollectedForeground(runId,progress,ownerEndsAt,output=proces
   return errors
 }
 
-async function evidenceWindows(actions,origin,target,raw,outerEndsAt=Infinity){
+async function evidenceWindows(actions,origin,target,raw,outerEndsAt=Infinity,recipe=rawRecipeBlock){
   const samples=[],offsets=[0,1,Math.max(0,raw.bytes-65536),raw.bytes-1,raw.bytes]
   const expires=Math.min(outerEndsAt,performance.now()+actions.remaining(90000))
   const rangeRemaining=()=>{const left=Math.floor(expires-performance.now());assert.ok(left>0,'finite legacy range batch supervision');return actions.remaining(Math.min(30000,left))}
@@ -615,7 +675,7 @@ async function evidenceWindows(actions,origin,target,raw,outerEndsAt=Infinity){
     assert.equal(value.offset,offset);assert.equal(bytes.length,Math.min(65536,raw.bytes-offset));assert.equal(value.next_offset,offset+bytes.length)
     const expected=Buffer.alloc(bytes.length)
     for(let copied=0;copied<expected.length;){
-      const position=offset+copied,first=Math.floor(position/65536)*64,block=rawRecipeBlock(first),within=position%65536,take=Math.min(block.length-within,expected.length-copied)
+      const position=offset+copied,first=Math.floor(position/65536)*64,block=recipe(first),within=position%65536,take=Math.min(block.length-within,expected.length-copied)
       block.copy(expected,copied,within,within+take);copied+=take
     }
     assert.deepEqual(bytes,expected,'legacy evidence preserves original bytes across arbitrary offsets')
@@ -640,14 +700,15 @@ async function zipSlice(file,start,length,signal){
   return result
 }
 
-async function verifyTaskZip(actions,harness,run,workspace,ownedTask,session,raw){
+async function verifyTaskZip(actions,harness,run,workspace,ownedTask,session,raw,generation){
   const file=join(run.path,'evidence-'+session+'.zip');assert.ok(inside(run.path,file))
   await admitRun(raw.bytes+16777216)
   const start=performance.now(),bulkBudgetMs=raw.bytes>=1073741824?180000:90000,phaseAbort=new AbortController(),cancel=()=>phaseAbort.abort(actions.signal.reason)
   const phaseTimer=setTimeout(()=>phaseAbort.abort(Error('whole ZIP download/metadata/inflate supervision deadline')),actions.remaining(bulkBudgetMs))
   actions.signal.addEventListener('abort',cancel,{once:true})
   try{
-  const zip=await integratedRequest(actions,harness.origin+'/api/v1/workspaces/'+workspace+'/tasks/'+ownedTask+'/evidence.zip',{timeoutMs:bulkBudgetMs,externalSignal:phaseAbort.signal},async(response,signal)=>{
+  const zip=await integratedRequest(actions,harness.origin+'/api/v1/workspaces/'+workspace+'/tasks/'+ownedTask+'/evidence.zip'+(generation?'?representation=available-v1':''),{timeoutMs:bulkBudgetMs,externalSignal:phaseAbort.signal},async(response,signal)=>{
+    if(generation)assert.equal(response.headers.get('X-HMem-Evidence-Zip'),'representations-v2')
     const hash=createHash('sha256');let bytes=0
     const writer=createWriteStream(file,{flags:'wx',highWaterMark:65536})
     await pipeline(Readable.fromWeb(response.body),new Transform({transform(piece,_,done){bytes+=piece.length;if(bytes>raw.bytes+16777216){done(Error('bounded single-session ZIP size'));return}hash.update(piece);done(null,piece)}}),writer,{signal})
@@ -665,9 +726,20 @@ async function verifyTaskZip(actions,harness,run,workspace,ownedTask,session,raw
   const centralHeader=await zipSlice(file,central,46,phaseAbort.signal)
   assert.equal(centralHeader.readUInt32LE(0),0x02014b50)
   const name=await zipSlice(file,central+46,centralHeader.readUInt16LE(28),phaseAbort.signal);assert.ok(name.toString('utf8').includes(session),'single ZIP entry belongs to the owned session')
-  assert.equal(centralHeader.readUInt16LE(30),28)
-  const extra=await zipSlice(file,central+46+name.length,28,phaseAbort.signal)
+  const extraLength=28+(generation?106:0)
+  assert.equal(centralHeader.readUInt16LE(30),extraLength)
+  const extra=await zipSlice(file,central+46+name.length,extraLength,phaseAbort.signal)
   assert.equal(extra.readUInt16LE(0),1);assert.equal(extra.readUInt16LE(2),24);assert.equal(extra.readBigUInt64LE(4),BigInt(raw.bytes));assert.equal(extra.readBigUInt64LE(12),BigInt(central-24-begin));assert.equal(extra.readBigUInt64LE(20),0n)
+  if(generation){
+    assert.match(name.toString('utf8'),/-sanitized\.jsonl$/)
+    const receipt=extra.subarray(28)
+    const localReceipt=await zipSlice(file,begin-106,106,phaseAbort.signal)
+    assert.equal(header.readUInt16LE(28),126)
+    assert.deepEqual(localReceipt,receipt)
+    assert.equal(receipt.readUInt16LE(0),0x484d);assert.equal(receipt.readUInt16LE(2),102)
+    assert.equal(receipt[4],2);assert.equal(receipt[5],1)
+    assert.equal(receipt.toString('ascii',6,42),generation);assert.equal(receipt.toString('ascii',42),raw.sha256)
+  }
   const source=createReadStream(file,{start:begin,end:central-25,highWaterMark:65536}),hash=createHash('sha256');let bytes=0,checksum=0
   await pipeline(source,createInflateRaw(),new Writable({write(piece,_,done){bytes+=piece.length;if(bytes>raw.bytes){done(Error('ZIP raw count overflow'));return}hash.update(piece);checksum=crc32(piece,checksum);done()}}),{signal:phaseAbort.signal})
   assert.ok(source.closed,'actual ZIP deflate source closed before removal')
@@ -717,6 +789,148 @@ async function archiveCompatibility(actions,harness,run,workspace,ownedTask,sess
   return {scope:'actual raw-only baseline then archived-only legacy paths after verified reclamation; restore remains pending',phases,rawBaseline:baseline,archivedRanges,proofs:verified,replay:{replayed:true,committedBytes:replay.session.committed_bytes},zip,storage:{beforeReclaim:initial,afterReclaim:reclaimed},application:memory,postViewApplication:postView}
 }
 
+async function sanitizedCompatibility(actions,harness,run,workspace,ownedTask,session,raw,content,manifest,proof,firstArray,baseline){
+  const target='/api/v1/workspaces/'+workspace+'/sessions/'+session
+  const request=(path,options={})=>integratedRequest(actions,harness.origin+path,options)
+  const postView=await actions.control(harness,'phase',{name:'sanitized_reclaim'})
+  const initial=await actions.control(harness,'snapshot')
+  assert.equal(Number(initial.raw_logical_bytes),raw.bytes)
+  const disabled=await actions.control(harness,'status')
+  assert.equal(disabled.sanitized_runtime_safe,true)
+  assert.equal(disabled.sanitized_reclaim_enabled,false);assert.equal(disabled.sanitized_cleanup.pending,1)
+  const started=performance.now(),budgetMs=actions.remaining(90000),until=started+budgetMs
+  const phases={}
+  let previousBytes=0
+  await actions.control(harness,'sanitized-reclaim-enable')
+  phases.enabledMs=performance.now()-started
+  while(true){
+    const state=await actions.control(harness,'status')
+    const now=performance.now(),elapsedMs=now-started,bytes=Number(state.reclaimed_bytes)
+    if(state.permit_kind==='maintenance')phases.firstPermitMs??=elapsedMs
+    if(state.verified===1)phases.firstVerifiedMs??=elapsedMs
+    if(bytes>previousBytes){
+      phases.firstDeleteMs??=elapsedMs
+      phases.lastDeleteProgressMs=elapsedMs
+      previousBytes=bytes
+    }
+    if(now>=until){
+      const boundary={budgetMs,elapsedMs,phases,status:{cleanup:state.sanitized_cleanup,reclaimedBytes:bytes,verified:state.verified,
+        verificationFailures:state.verification_failures,permitKind:state.permit_kind,permitExpiresAt:state.permit_expires_at,
+        blockedReason:state.blocked_reason,state:state.state}}
+      try{
+        const snapshot=await actions.control(harness,'sanitized-reclaim-progress',{generation:manifest.generation_id})
+        boundary.detail={elapsedMs:performance.now()-started,snapshot}
+      }catch(error){boundary.detail={error:errorTree(error,{left:2})}}
+      run.reclamationBoundary=boundary
+      assert.fail('bounded sanitized reclamation completion')
+    }
+    if(state.sanitized_cleanup.complete===1&&bytes===raw.bytes)break
+    await actions.pause(Math.min(100,until-now))
+  }
+  await actions.control(harness,'pause');await actions.control(harness,'reclaim-disable')
+  const reclaimed=await actions.control(harness,'snapshot')
+  assert.equal(reclaimed.raw_rows,0);assert.equal(Number(reclaimed.raw_logical_bytes),0)
+  const selected=await request(target+'/archive?representation=available-v1')
+  assert.equal(selected.original_available,false);assert.equal(selected.original_cleanup,'complete')
+  for(const field of ['generation_id','raw_sha256','raw_bytes','content_sha256','content_bytes','compressed_sha256','policy_sha256']){
+    assert.equal(selected[field],manifest[field],'immutable receipt survives cleanup: '+field)
+  }
+  const evidence=await request(target+'/evidence?offset=0&limit=1',{status:409})
+  const prefix=await request(target+'/prefix-verifications',{method:'POST',status:409,body:{operation_id:randomUUID(),expected_offset:proof.offset,expected_revision:proof.revision,sha256:proof.sha256}})
+  const replay=await request(target+'/append',{method:'POST',status:409,body:{expected_offset:0,expected_revision:0,data_base64:firstArray.toString('base64'),allow_final_record:false}})
+  const defaultZip=await request('/api/v1/workspaces/'+workspace+'/tasks/'+ownedTask+'/evidence.zip',{status:409})
+  for(const value of [evidence,prefix,defaultZip])assert.equal(value.error,'original_evidence_unavailable')
+  assert.equal(replay.error,'session_state_conflict')
+  const zip=await verifyTaskZip(actions,harness,run,workspace,ownedTask,session,content,manifest.generation_id)
+  const memory=await actions.control(harness,'phase',{name:'sanitized_reclaim_complete'})
+  return {rawBaseline:baseline,originalEvidence:evidence.error,prefixProof:prefix.error,replay:replay.error,originalZip:defaultZip.error,zip,reclaimMs:performance.now()-started,storage:{beforeReclaim:initial,afterReclaim:reclaimed},application:memory,postViewApplication:postView}
+}
+
+async function clientMemorySampler(page,browserOwner,run,actions){
+  const sample=(levelOfDetail='background')=>deadline(browserOwner.observe(memorySnapshot(page,{levelOfDetail})),actions.remaining(10000),'owned browser memory snapshot')
+  const baseline=await sample()
+  assert.equal(baseline.workerTargets.length,0,'viewer baseline has no archive worker')
+  const processTotals=value=>value.processes.map(process=>({pid:process.pid,type:process.type,bytes:process.privateBytes}))
+  const baselineProcesses=processTotals(baseline),peaks=new Map()
+  let timer,pending,failure,stopped=false,paused=false,count=0,last=performance.now(),gap=0,maximum=baseline.totalPrivateBytes,detailed
+  const report=()=>{
+    const incrementBytes=maximum-baseline.totalPrivateBytes
+    assert.ok(Number.isSafeInteger(incrementBytes)&&incrementBytes>=0,'safe sampled browser memory increment required')
+    return {scope:'all owned Chromium process private_footprint_bytes, sampled per explicit background CDP dump',browserVersion:baseline.browserVersion,baselineBytes:baseline.totalPrivateBytes,baselineProcesses,maximumBytes:maximum,incrementBytes,samples:count,maximumGapMs:gap,phasePeaks:[...peaks.values()],...(detailed?{detailed}:{})}
+  }
+  run.clientMemoryReport=report
+  const measure=async label=>{
+    const requestedAt=performance.now(),value=await sample(),now=performance.now()
+    maximum=Math.max(maximum,value.totalPrivateBytes);count++
+    gap=Math.max(gap,now-last);last=now
+    const peak=peaks.get(label)
+    if(!peak||value.totalPrivateBytes>peak.bytes)peaks.set(label,{phase:label,bytes:value.totalPrivateBytes,processes:processTotals(value),sampleWindowMs:[requestedAt,now]})
+    assert.ok(count<=512,'bounded native memory sample count')
+    if(!detailed&&process.env.HMEM_ARCHIVE_DETAILED_MEMORY==='1'&&label==='first-worker-index-and-handoff'&&maximum-baseline.totalPrivateBytes>64*1024**2){
+      try{
+        const evidence=await sample('detailed')
+        detailed={phase:label,scope:'supplemental native allocator dump; excluded from background memory gate',requestGuid:evidence.requestGuid,
+          processes:evidence.processes.map(process=>({pid:process.pid,type:process.type,allocations:process.largestAllocators}))}
+      }catch(error){detailed={phase:label,error:boundedText(error.message,256)}}
+    }
+  }
+  function arm(){
+    if(stopped||paused||failure)return
+    timer=setTimeout(()=>{pending=measure(run.integrationProgress.phase).catch(error=>{failure=error}).finally(arm)},1000)
+  }
+  async function stop(){
+    stopped=true;clearTimeout(timer);await pending
+    if(failure)throw failure
+  }
+  run.stopClientMemory=stop
+  arm()
+  return {
+    async checkpoint(label){
+      paused=true;clearTimeout(timer)
+      try{await pending;if(failure)throw failure;await measure(label)}
+      finally{paused=false;arm()}
+    },
+    async finish(label){
+      await stop();await measure(label)
+      assert.ok(count>=2,'archive memory requires multiple actual load and final samples')
+      return report()
+    }
+  }
+}
+
+async function verifyBrowserDownload(page,actions,session,content){
+  const downloadEvent=page.waitForEvent('download',{timeout:actions.remaining(30000)})
+  downloadEvent.catch(()=>{})
+  await page.getByRole('button',{name:'↓ Download sanitized JSONL',exact:true}).click({timeout:actions.remaining(5000)})
+  const download=await downloadEvent
+  assert.equal(download.suggestedFilename(),session+'-sanitized.jsonl')
+  const hash=createHash('sha256');let size=0
+  for await(const piece of await download.createReadStream()){actions.remaining(1);size+=piece.length;assert.ok(size<=content.bytes);hash.update(piece)}
+  assert.equal(size,content.bytes);assert.equal(hash.digest('hex'),content.sha256)
+  return {name:download.suggestedFilename(),bytes:size,sha256:content.sha256}
+}
+
+async function countProcessorTransactions(worker,browserOwner,actions){
+  await deadline(browserOwner.observe(worker.evaluate(()=>{
+    const counters={groupReads:0,readwrite:0,readonly:0}
+    const transaction=IDBDatabase.prototype.transaction
+    IDBDatabase.prototype.transaction=function(names,mode,...args){
+      const result=Reflect.apply(transaction,this,[names,mode,...args])
+      if(result.mode==='readwrite')counters.readwrite++
+      if(result.mode==='readonly'){
+        counters.readonly++
+        if(names==='groups'||(Array.isArray(names)&&names.length===1&&names[0]==='groups'))counters.groupReads++
+      }
+      return result
+    }
+    const post=self.postMessage
+    self.postMessage=function(message,...args){
+      if(message.kind==='progress'&&message.phase==='ready')message={...message,qualificationIdbCounts:{...counters}}
+      return Reflect.apply(post,this,[message,...args])
+    }
+  })),actions.remaining(5000),'install isolated diagnostic transaction counters')
+}
+
 async function retireArchiveDocument(page,actions,observe){
   const previous=await page.evaluate(()=>window.__integratedArchive.documentNonce)
   const workers=page.workers(),retired=observe(Promise.all(workers.map(worker=>new Promise(done=>worker.once('close',done)))))
@@ -736,6 +950,8 @@ async function retireArchiveDocument(page,actions,observe){
 
 async function integrateArchive(harness,run,actions,vector){
   const progress={phase:'served-assets'}
+  const measuredFixture=vector.sanitized||vector.comparison
+  const mixedFixture=measuredFixture&&!vector.historical
   run.integrationProgress=progress
   const servedAssets=await bindServedAssets(harness,run,actions)
   const browserOwner=attachIntegratedBrowser(harness,run,actions)
@@ -757,41 +973,83 @@ async function integrateArchive(harness,run,actions,vector){
         return {url:location.href,readyState:document.readyState,client:s?{documentNonce:s.documentNonce,held:s.held,bytes:s.bytes,complete:s.complete,verified:s.verified,rowsBeforeComplete:s.rowsBeforeComplete,rowsBeforeVerified:s.rowsBeforeVerified,events:s.events.slice(-16)}:null,dom:{viewerPresent:!!document.querySelector('.session-sealed-viewer'),recordCount:document.querySelectorAll('.session-sealed-viewer .session-record-text').length,verifiedLabel:[...document.querySelectorAll('.session-sealed-viewer *')].some(node=>node.childElementCount===0&&node.textContent==='Verified complete archive.'),alerts:[...document.querySelectorAll('[role="alert"]')].slice(0,2).map(node=>node.textContent.slice(0,256))}}
       })),budget,'bounded pre-cleanup client diagnostic')
     }catch(error){client={unavailable:errorTree(error,{left:2})}}
-    run.integrationDiagnostic=boundedText(JSON.stringify({phase:progress.phase,actualBrowser:client,metricOutputErrors,partial:progress}),6144)
+    const clientMemory=run.clientMemoryReport?.()
+    if(clientMemory)await writePacket(process.stderr,{archiveMeasuredFailure:true,representation:vector.sanitized?'sanitized':'exact',phase:progress.phase,clientMemory,
+      raw:progress.raw,manifest:progress.manifest,transfer:progress.transfer,
+      firstView:progress.firstView,navigation:progress.navigation,browserClock:progress.browserClock,reclamationBoundary:run.reclamationBoundary,
+      foreground:progress.foregroundCoverage&&{coverage:progress.foregroundCoverage.status,overlap:progress.foregroundCoverage.observedOverlap,baselineP95Ms:progress.baseline?.p95Ms,loadP95Ms:progress.load?.p95Ms}},2000)
+    run.integrationDiagnostic=boundedText(JSON.stringify({phase:progress.phase,actualBrowser:client,workerDiagnostics:run.workerDiagnostics,metricOutputErrors,partial:progress}),6144)
   }
   progress.phase='original-appends'
   const workspace=await call('/api/v1/workspaces',{method:'POST',body:{name:'Task8 integrated '+vector.mebibytes+' MiB',workspace_type:'repository'}})
   const ownedTask=await call('/api/v1/tasks',{method:'POST',body:{workspace_id:workspace.id,title:'Integrated sealed archive'}})
   await call('/api/v1/tasks/'+ownedTask.id,{method:'PUT',body:{status:'in_progress'}})
   const id=randomUUID(),base='/api/v1/workspaces/'+workspace.id+'/sessions',target=base+'/'+id
-  await call(base,{method:'POST',body:{id,format_label:'codex-jsonl',title:'Qualify integrated sealed session archives',task_id:ownedTask.id}})
+  const viewUrl=harness.origin+'/workspace/'+workspace.id+'#tab=sessions&session='+id
+  if(vector.sanitized)await actions.control(harness,'replacement-install',{policy:sanitizedPolicy})
+  await call(base,{method:'POST',body:{id,format_label:mixedFixture?'codex_jsonl':'codex-jsonl',title:'Qualify integrated sealed session archives',task_id:ownedTask.id}})
   const digest=createHash('sha256'),records=vector.mebibytes*1024,arrayBytes=vector.mebibytes===1?65536:1048576,proofs=[];let offset=0,revision=0,firstArray
+  const expectedDigest=vector.sanitized?createHash('sha256'):null
+  let expectedBytes=0,replacements=0
+  const recipe=first=>sanitizedRecipeBlock(first,records,vector.mebibytes===1)
   for(let first=0;first<records;first+=arrayBytes/1024){
     const block=Buffer.alloc(arrayBytes)
-    for(let part=0;part<arrayBytes;part+=65536)rawRecipeBlock(first+part/1024).copy(block,part)
+    for(let part=0;part<arrayBytes;part+=65536){
+      if(mixedFixture){
+        const output=recipe(first+part/1024)
+        output.raw.copy(block,part);expectedDigest?.update(output.expected)
+        expectedBytes+=output.expected.length;replacements+=output.replacements
+      }else rawRecipeBlock(first+part/1024).copy(block,part)
+    }
     digest.update(block);firstArray??=Buffer.from(block)
     const value=await call(target+'/append',{method:'POST',body:{expected_offset:offset,expected_revision:revision,data_base64:block.toString('base64'),allow_final_record:false}})
     offset=value.session.committed_bytes;revision=value.session.revision
     if(revision===1||offset===vector.mebibytes*1048576/2||offset===vector.mebibytes*1048576)proofs.push({offset,revision,sha256:digest.copy().digest('hex')})
   }
-  const raw={recipe:'jsonl-1024-v1:xorshift32-0x51a7:hex-seq:utf8-crlf',bytes:offset,records,sha256:digest.digest('hex'),appendArrays:revision,appendArrayBytes:arrayBytes}
+  const raw={recipe:mixedFixture?'codex-jsonl-1024-v1:one-in-four-opaque-calls:'+ (vector.mebibytes===1?'per-record-entropy':'repeated-opaque-payload'):'jsonl-1024-v1:xorshift32-0x51a7:hex-seq:utf8-crlf',bytes:offset,records,sha256:digest.digest('hex'),appendArrays:revision,appendArrayBytes:arrayBytes}
+  const expected=vector.sanitized?{bytes:expectedBytes,sha256:expectedDigest.digest('hex'),replacements}:raw
   progress.raw=raw;progress.phase='seal-preparing'
   const expectedHashes={1:'c6b5a46542811809a4676fc43fa923689df3375b80b8f57658b35e4b5cd41df6',100:'fef46e1443ee2ab82b783e407b8294c5d3cf95722e504fff651c343f46dc9fbb',1024:'54a9d911e7c8ea4c197aec21a35750d45275c946a13eff5722dbaacbc8e9098c'}
-  assert.equal(raw.bytes,vector.mebibytes*1048576);assert.equal(raw.sha256,expectedHashes[vector.mebibytes])
+  assert.equal(raw.bytes,vector.mebibytes*1048576)
+  let clientMemory
+  if(!mixedFixture)assert.equal(raw.sha256,expectedHashes[vector.mebibytes])
+  if(measuredFixture){
+    const live=await call(target+'/transcript?offset=0&limit=65536')
+    assert.deepEqual(Buffer.from(live.data_base64,'base64'),firstArray.subarray(0,65536),'live upload and read preserve original bytes')
+    await page.goto(viewUrl,{timeout:setupRemaining()})
+    await page.locator('#session-records .session-record').first().waitFor({timeout:setupRemaining()})
+    clientMemory=await clientMemorySampler(page,browserOwner,run,actions)
+    await page.goto('about:blank',{timeout:setupRemaining()})
+  }
   const sealStarted=performance.now()
   const sealed=await call(target+'/terminate',{method:'POST',body:{expected_offset:offset,expected_revision:revision,final_bytes:offset,final_sha256:raw.sha256}})
   assert.equal(sealed.state,'terminated')
+  if(measuredFixture)await call('/api/v1/tasks/'+ownedTask.id,{method:'PUT',body:{status:'done'}})
   // /evidence is a saved-session surface. The worker is still paused, so this
   // matching baseline reads terminated original rows before any publication.
-  const rawRanges=vector.compatibility?await evidenceWindows(actions,harness.origin,target,raw,run.setupEndsAt):null
+  const rawRanges=vector.compatibility?await evidenceWindows(actions,harness.origin,target,raw,run.setupEndsAt,vector.sanitized?first=>recipe(first).raw:undefined):null
   const preparing=await integratedRequest(actions,harness.origin+target+'/archive',{status:202})
   assert.equal(preparing.state,'preparing')
+  const rawStorage=vector.sanitized?await actions.control(harness,'snapshot'):null
+  if(vector.sanitized)await actions.control(harness,'replacement-disable')
   const preparingSelected=performance.now()
+  const readyLabel=vector.sanitized?'Verified sanitized transcript.':'Verified complete archive.'
   const manifestObserver=observeArchiveManifests(page,harness.origin+target+'/archive',browserOwner.observe)
   run.manifestObserver=manifestObserver
-  await page.goto(harness.origin+'/workspace/'+workspace.id+'#tab=sessions&session='+id,{timeout:actions.remaining(10000)})
+  await page.goto(viewUrl,{timeout:actions.remaining(10000)})
   await page.getByText(/Preparing/).first().waitFor({timeout:actions.remaining(10000)})
   assert.equal(await page.locator('.session-sealed-viewer .session-record-text').count(),0)
+  if(measuredFixture){
+    const until=performance.now()+actions.remaining(5000)
+    while(!manifestObserver.snapshot().records.some(value=>value.status===202)){
+      assert.ok(performance.now()<until,'actual Chromium manifest request before publication')
+      await actions.pause(10)
+    }
+    const worker=page.workers().find(candidate=>/\/assets\/session-archive-worker-/.test(candidate.url()))
+    assert.ok(worker,'actual production archive worker is attached')
+    if(process.env.HMEM_ARCHIVE_IDB_COUNTS==='1')await countProcessorTransactions(worker,browserOwner,actions)
+    console.log(JSON.stringify({archiveWorkerAdmitted:true,representation:vector.sanitized?'sanitized':'exact',worker:new URL(worker.url()).pathname,manifestStatus:202}))
+  }
   await actions.control(harness,'phase',{name:'integration_idle_baseline'})
   await actions.pause(750)
   const idleMemory=await actions.control(harness,'phase',{name:'integration_warmups'})
@@ -819,19 +1077,29 @@ async function integrateArchive(harness,run,actions,vector){
     foreground=ordinaryForeground(actions,harness.origin,load).then(value=>({value}),error=>({error}))
     const published=await awaitManifest(manifestObserver.ready,actions,'real frontend publication observation',preparationRemaining())
     manifest=published.value;readyAt=published.record.bodyAt
-    clientViewBudgetMs=2*Number(manifest.compressed_bytes)/12500000*1000+120000*Math.max(1,Math.ceil(raw.bytes/1073741824))+5000
+    clientViewBudgetMs=2*Number(manifest.compressed_bytes)/12500000*1000+120000*Math.max(1,Math.ceil(expected.bytes/1073741824))+5000
     assert.equal(manifest.workspace_id,workspace.id);assert.equal(manifest.session_id,id)
-    progress.manifest=manifest;progress.sealToReadyMs=readyAt-sealStarted;progress.phase='first-content-eof'
+    progress.manifest=manifest;progress.sealToReadyMs=readyAt-sealStarted;progress.phase=measuredFixture?'first-compressed-transfer':'first-content-eof'
     assert.equal(manifest.raw_sha256,raw.sha256);assert.equal(manifest.raw_bytes,String(raw.bytes));assert.equal(manifest.raw_records,String(raw.records))
+    if(vector.sanitized){
+      assert.equal(manifest.representation,'sanitized-v1');assert.equal(manifest.original_available,true)
+      assert.equal(manifest.original_cleanup,'pending');assert.equal(manifest.content_sha256,expected.sha256)
+      assert.equal(manifest.content_bytes,String(expected.bytes));assert.equal(manifest.replacement_count,String(expected.replacements))
+      assert.match(manifest.policy_sha256,/^[a-f0-9]{64}$/)
+    }
     await page.waitForFunction(()=>window.__integratedArchive.held,null,{timeout:remainingView(actions,readyAt,clientViewBudgetMs)})
     heldAt=performance.now()
     assert.equal(await page.locator('.session-sealed-viewer .session-record-text').count(),0,'complete original receipt is required before any transcript display')
     assert.equal(await page.evaluate(()=>window.__integratedArchive.bytes),Number(manifest.compressed_bytes))
+    await clientMemory?.checkpoint('first-compressed-eof')
+    if(measuredFixture)progress.phase='first-worker-index-and-handoff'
     await page.evaluate(()=>window.__integratedArchive.release())
-    await page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:remainingView(actions,readyAt,clientViewBudgetMs)})
+    await page.getByText(readyLabel,{exact:true}).waitFor({timeout:remainingView(actions,readyAt,clientViewBudgetMs)})
     await page.locator('.session-sealed-viewer .session-record-text').first().waitFor({timeout:remainingView(actions,readyAt,clientViewBudgetMs)})
     viewAt=performance.now()
     assert.ok(viewAt-readyAt<=clientViewBudgetMs,'unchanged observed-ready to verified-view deadline')
+    progress.firstView={sealToReadyMs:readyAt-sealStarted,readyToVerifiedMs:viewAt-readyAt,budgetMs:clientViewBudgetMs}
+    await clientMemory?.checkpoint('first-worker-verified')
     progress.preparingSelectionToVerifiedViewMs=viewAt-preparingSelected
   }catch(error){loadError=error}
   finally{
@@ -854,22 +1122,65 @@ async function integrateArchive(harness,run,actions,vector){
     await pipeline(Readable.fromWeb(response.body),new Transform({transform(bytes,_,done){compressed.update(bytes);compressedBytes+=bytes.length;done(null,bytes)}}),createGunzip(),new Writable({write(bytes,_,done){rawHash.update(bytes);rawBytes+=bytes.length;done()}}),{signal})
     return {compressedBytes,compressedSha256:compressed.digest('hex'),rawBytes,rawSha256:rawHash.digest('hex')}
   })
-  assert.equal(transfer.compressedSha256,manifest.compressed_sha256);assert.equal(transfer.compressedBytes,Number(manifest.compressed_bytes));assert.equal(transfer.rawSha256,raw.sha256);assert.equal(transfer.rawBytes,raw.bytes)
+  assert.equal(transfer.compressedSha256,manifest.compressed_sha256);assert.equal(transfer.compressedBytes,Number(manifest.compressed_bytes));assert.equal(transfer.rawSha256,expected.sha256);assert.equal(transfer.rawBytes,expected.bytes)
   progress.transfer=transfer;progress.phase='first-last-navigation'
   const navigation=[]
-  for(const [name,text] of [['Last','row '+(records-1).toString(16).padStart(8,'0')],['First','row 00000000']]){
-    const start=performance.now();await page.getByRole('button',{name,exact:true}).click({timeout:actions.remaining(5000)})
+  if(measuredFixture&&vector.mebibytes>1){
+    const viewport=page.locator('#session-records')
+    const firstMounted=node=>{
+      for(const element of node.querySelectorAll('.session-record-text')){
+        const row=element.textContent.match(/row ([0-9a-f]{8})/)
+        const rect=element.getBoundingClientRect(),box=node.getBoundingClientRect()
+        if(row&&rect.bottom>box.top&&rect.top<box.bottom)return Number.parseInt(row[1],16)
+      }
+      return null
+    }
+    const before=await viewport.evaluate(firstMounted),start=performance.now()
+    assert.ok(Number.isInteger(before)&&before>0)
+    await viewport.press('Home',{timeout:actions.remaining(5000)})
+    await page.waitForFunction(before=>{
+      const node=document.getElementById('session-records'),box=node.getBoundingClientRect()
+      return [...node.querySelectorAll('.session-record-text')].some(element=>{
+        const row=element.textContent.match(/row ([0-9a-f]{8})/),rect=element.getBoundingClientRect()
+        return row&&Number.parseInt(row[1],16)<before&&rect.bottom>box.top&&rect.top<box.bottom
+      })
+    },before,{timeout:actions.remaining(10000)})
+    const after=await viewport.evaluate(firstMounted)
+    assert.ok(Number.isInteger(after)&&after<before)
+    navigation.push({name:'Home',scope:'bounded backward viewport progress',before,after,automationWallMs:performance.now()-start})
+  }
+  const destinations=[['Jump to latest','row '+(records-1).toString(16).padStart(8,'0')]]
+  if(!measuredFixture||vector.mebibytes===1)destinations.unshift(['Home','row 00000000'])
+  for(const [name,text] of destinations){
+    const start=performance.now()
+    if(name==='Home')await page.locator('#session-records').press('Home',{timeout:actions.remaining(5000)})
+    else await page.getByRole('button',{name,exact:true}).click({timeout:actions.remaining(5000)})
     await page.locator('.session-sealed-viewer .session-record-text').filter({hasText:text}).first().waitFor({timeout:actions.remaining(10000)})
     navigation.push({name,automationWallMs:performance.now()-start,text})
   }
-  const client=await page.evaluate(()=>{const s=window.__integratedArchive;return {events:s.events,rowsBeforeComplete:s.rowsBeforeComplete,rowsBeforeVerified:s.rowsBeforeVerified,complete:s.complete,verified:s.verified}})
+  const browserClockSentAt=performance.now()
+  const client=await page.evaluate(()=>{const s=window.__integratedArchive;return {events:s.events,rowsBeforeComplete:s.rowsBeforeComplete,rowsBeforeVerified:s.rowsBeforeVerified,complete:s.complete,verified:s.verified,readyTimes:s.readyTimes,firstRowsAt:s.firstRowsAt,sampledAt:performance.now()}})
+  const browserClockReceivedAt=performance.now()
+  progress.browserClock={offsetMs:[browserClockSentAt-client.sampledAt,browserClockReceivedAt-client.sampledAt],
+    processorReadyMs:client.readyTimes[0],readerReadyMs:client.readyTimes[1],firstRowsMs:client.firstRowsAt}
+  if(process.env.HMEM_ARCHIVE_IDB_COUNTS==='1'){
+    const counts=client.events.find(event=>event.kind==='worker-ready')?.qualificationIdbCounts
+    assert.ok(counts&&Number.isSafeInteger(counts.groupReads),'actual processor transaction counts')
+    console.log(JSON.stringify({archiveIdbDiagnostic:true,recipe:raw.recipe,bytes:raw.bytes,counts}))
+  }
   progress.navigation=navigation
   assert.equal(client.rowsBeforeComplete,false);assert.equal(client.rowsBeforeVerified,false);assert.equal(client.verified,true)
+  let compatibility
+  if(vector.sanitized){
+    progress.phase='sanitized-reclaim-compatibility'
+    compatibility=await sanitizedCompatibility(actions,harness,run,workspace.id,ownedTask.id,id,raw,expected,manifest,proofs.at(-1),firstArray,rawRanges)
+    compatibility.storage.beforePublication=rawStorage
+  }
   progress.phase='retire-previous-document'
   const documents=await retireArchiveDocument(page,actions,browserOwner.observe)
   const readySelected=performance.now()
-  progress.phase='fresh-ready-content-eof'
-  await page.goto(harness.origin+'/workspace/'+workspace.id+'#tab=sessions&session='+id,{timeout:remainingView(actions,readySelected,clientViewBudgetMs)})
+  progress.phase=measuredFixture?'fresh-compressed-transfer':'fresh-ready-content-eof'
+  await page.goto(viewUrl,{timeout:remainingView(actions,readySelected,clientViewBudgetMs)})
   const readyNonce=await page.evaluate(()=>window.__integratedArchive.documentNonce)
   assert.match(readyNonce,/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,'fresh real application init-script nonce')
   assert.notEqual(readyNonce,documents.previous,'fresh ready selection cannot reuse previous verified document')
@@ -877,31 +1188,61 @@ async function integrateArchive(harness,run,actions,vector){
   await page.waitForFunction(()=>window.__integratedArchive.held,null,{timeout:remainingView(actions,readySelected,clientViewBudgetMs)})
   assert.equal(await page.evaluate(()=>window.__integratedArchive.bytes),Number(manifest.compressed_bytes),'fresh ready document received the complete compressed body again')
   assert.equal(await page.locator('.session-sealed-viewer .session-record-text').count(),0)
+  await clientMemory?.checkpoint('fresh-compressed-eof')
+  if(measuredFixture)progress.phase='fresh-worker-index-and-handoff'
   await page.evaluate(()=>window.__integratedArchive.release())
-  await page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:remainingView(actions,readySelected,clientViewBudgetMs)})
+  await page.getByText(readyLabel,{exact:true}).waitFor({timeout:remainingView(actions,readySelected,clientViewBudgetMs)})
   await page.locator('.session-sealed-viewer .session-record-text').first().waitFor({timeout:remainingView(actions,readySelected,clientViewBudgetMs)})
   const readySelectionToVerifiedViewMs=performance.now()-readySelected
   assert.ok(readySelectionToVerifiedViewMs<=clientViewBudgetMs,'unchanged complete ready-view budget formula')
   progress.readySelectionToVerifiedViewMs=readySelectionToVerifiedViewMs;progress.phase='fixed-budget-assertions'
   const readyClient=await page.evaluate(()=>{const s=window.__integratedArchive;return {events:s.events,rowsBeforeComplete:s.rowsBeforeComplete,rowsBeforeVerified:s.rowsBeforeVerified,complete:s.complete,verified:s.verified}})
   assert.equal(readyClient.rowsBeforeComplete,false);assert.equal(readyClient.rowsBeforeVerified,false);assert.equal(readyClient.verified,true)
-  const foregroundPerformance=foregroundResult(baseline,load,coverage)
+  const foregroundPerformance=foregroundResult(baseline,load,coverage,!measuredFixture)
   const baselineWorkingSet=Math.min(idleMemory.maximum_working_set_bytes,baselineMemory.maximum_working_set_bytes)
   const workingSetDelta=phase.maximum_working_set_bytes-baselineWorkingSet
   assert.ok(workingSetDelta<=128*1024**2,'application current working set incremental limit')
   assert.ok(phase.samples>=2&&baselineMemory.samples>=2)
-  let compatibility
-  if(vector.compatibility){
+  let browserDownload,browserMemory
+  if(vector.sanitized){
+    const download=vector.mebibytes===1
+    if(download){
+      await clientMemory.checkpoint('verified-navigation-before-jsonl-export')
+      progress.phase='sanitized-browser-download'
+      browserDownload=await verifyBrowserDownload(page,actions,id,expected)
+    }
+    browserMemory=await clientMemory.finish(download?'after-jsonl-export':'final-verified-view')
+    const finalMemory=await actions.control(harness,'phase',{name:'sanitized_complete'})
+    assert.ok(Math.max(finalMemory.maximum_working_set_bytes,compatibility.application.maximum_working_set_bytes,compatibility.postViewApplication.maximum_working_set_bytes)-baselineWorkingSet<=128*1024**2,'application working set bound across both views, sanitized reclamation and exports')
+    compatibility.finalApplication=finalMemory
+  }else if(vector.compatibility){
     progress.phase='post-reclaim-compatibility'
     compatibility=await archiveCompatibility(actions,harness,run,workspace.id,ownedTask.id,id,raw,proofs,firstArray,rawRanges)
     assert.ok(Math.max(compatibility.application.maximum_working_set_bytes,compatibility.postViewApplication.maximum_working_set_bytes)-baselineWorkingSet<=128*1024**2,'same application128MiB bound through both views/reclamation/proof/ZIP')
+  }
+  if(vector.comparison)browserMemory=await clientMemory.finish('final-verified-view')
+  if(measuredFixture){
+    const serverPeak=Math.max(phase.maximum_working_set_bytes,compatibility?.application?.maximum_working_set_bytes??0,
+      compatibility?.postViewApplication?.maximum_working_set_bytes??0,compatibility?.finalApplication?.maximum_working_set_bytes??0)
+    console.log(JSON.stringify({archiveMeasured:true,representation:vector.sanitized?'sanitized':'exact',raw,content:expected,
+      compressedBytes:transfer.compressedBytes,compressedSha256:transfer.compressedSha256,
+      foreground:{status:foregroundPerformance.status,overlap:coverage.observedOverlap,p95Ratio:foregroundPerformance.p95Ratio,baselineP95Ms:baseline.p95Ms,loadP95Ms:load.p95Ms},
+      server:{baselineBytes:baselineWorkingSet,firstViewDelta:workingSetDelta,peakIncrementBytes:serverPeak-baselineWorkingSet},browser:browserMemory,
+      view:{firstMs:viewAt-readyAt,freshMs:readySelectionToVerifiedViewMs,budgetMs:clientViewBudgetMs},
+      navigation,originalRetired:compatibility?.originalEvidence==='original_evidence_unavailable'}))
+    const violations=[]
+    const withinBrowserMemory=Number.isSafeInteger(browserMemory.incrementBytes)&&browserMemory.incrementBytes>=0&&browserMemory.incrementBytes<=128*1024**2
+    if(!withinBrowserMemory)violations.push('browser private footprint increment '+browserMemory.incrementBytes+' exceeds 134217728 bytes or is invalid')
+    if(foregroundPerformance.status==='failed')violations.push('matched ordinary foreground p95 ratio '+foregroundPerformance.p95Ratio+' exceeds 1.10')
+    assert.deepEqual(violations,[],'unchanged integrated resource gates')
   }
   return {
     status:foregroundPerformance.status==='passed'?'current-slice-passed':'functional-success-performance-inconclusive',
     scope:'actual '+vector.mebibytes+' MiB PG publication, complete HTTP gzip/current client verified view'+(vector.compatibility?' and full post-reclaim proof/ZIP/legacy paths':'')+'; insufficient active coverage never qualifies foreground performance; restore and remaining matrix stay pending',
     caseBudget:{outerMs:vector.timeoutMs,internalMs:vector.internalMs,ownerCleanupMs:35000,deletionMs:5000,scratchReservationBytes:vector.reservedBytes,setupAppendRawBaselineMs:180000,bulkZipMs:raw.bytes>=1073741824?180000:90000,proofGroupMs:raw.bytes>=1073741824?120000:90000,reclamationMs:90000,archivedRangeBatchMs:90000,preparationObservationMs:125000,twoViews:'each uses the actual unchanged size-derived product formula',scope:'finite combined-case wrapper includes append/setup/raw ranges, preparation, both verified views, reclaim/range/proof/ZIP and reserved cleanup; restore is separately composed'},
     raw,manifest,transfer,compatibility,servedAssets,browser:image,client,readyClient,documents:{...documents,ready:readyNonce},navigation,
-    navigationScope:'First/Last content fidelity and Node/Playwright wall time only; unchanged Task6 client-side 20-action navigation p95 remains a separate qualification',
+    ...(measuredFixture?{content:expected,browserMemory,browserDownload}:{}),
+    navigationScope:'Home and Jump to latest content fidelity and Playwright wall time; Task6 client-side navigation p95 is a separate historical qualification',
     clocks:{scope:'Observed unadjusted qualification times. Seal-to-ready includes deliberate worker pause, raw baseline where enabled, idle sampling and foreground baseline. Preparing selection-to-view includes the remaining paused qualification work; both view clocks include deliberate EOF holds. No intervals are subtracted.',productDeadlineBoundaries:'unchanged formula applies independently from the actual ready manifest observation through first verified rows, and from fresh ready-session selection through verified rows; Preparing total remains separately reported',sealToReadyMs:readyAt-sealStarted,preparingSelectionToVerifiedViewMs:viewAt-preparingSelected,observedReadyToVerifiedViewMs:viewAt-readyAt,eofHeldAtMs:heldAt,readySelectionToVerifiedViewMs,clientViewBudgetMs},
     resume:progress.resume,manifestObservations:progress.manifests,foreground:{baseline,load,performance:foregroundPerformance},
     application:{scope:'current application process working set and CPU; PostgreSQL excluded',idleBaseline:idleMemory,foregroundBaseline:baselineMemory,load:phase,workingSetDeltaBytes:workingSetDelta},postgres:after.postgres
@@ -954,6 +1295,7 @@ test('integrated archive qualifier owns its sandbox and samples current applicat
     }
     finally{
       harness??=run?.nativeOwner
+      if(run?.stopClientMemory)try{await deadline(run.stopClientMemory(),10000,'owned client sampler join')}catch(error){primary=primary?new AggregateError([primary,error],'qualification and client memory sampling'):error}
       if(harness)try{receipt={...receipt,cleanup:await harness.close(run.cleanupEndsAt??Math.min(performance.now()+35000,endsAt-5000))}}catch(error){cleanup=error}
       else retainedOwners.delete(runId)
       if(run&&!cleanup)try{await run.dispose()}catch(error){cleanup=error}
@@ -963,11 +1305,29 @@ test('integrated archive qualifier owns its sandbox and samples current applicat
     if(primary||cleanup){
       const causes=[primary,cleanup,diagnosticError].filter(Boolean)
       try{await writePacket(process.stderr,failurePacket(run??{id:runId},harness,causes))}catch(failure){causes.push(failure)}
-      throw new AggregateError(causes,'Archive qualifier smoke failed; unresolved diagnostics remain owned by Task8 until issue closure')
+      throw new AggregateError(causes,'Archive qualification failed; unresolved diagnostics remain task-owned until issue closure')
     }
     assert.equal(receipt.cleanup.sandboxRemoved,true,'successful smoke requires observed sandbox cleanup')
     console.log(JSON.stringify(receipt))
   })
+
+test('owner interface causal: supervisor preserves the same owner pipe after an admitted recovery failure',async()=>{
+  const external=new PassThrough(),childInput=new PassThrough(),frames=[]
+  childInput.on('data',bytes=>frames.push(bytes.toString()))
+  const operator=ownOperatorInput(external,childInput)
+  operator.holdAdmission()
+  operator.failBeforeJoin()
+  assert.equal(childInput.writableEnded,false)
+  external.write('same-owner status\n')
+  await new Promise(done=>setImmediate(done))
+  assert.deepEqual(frames,['same-owner status\n'])
+  operator.joined()
+  assert.equal(childInput.writableEnded,true)
+  const unadmitted=new PassThrough(),before=ownOperatorInput(new PassThrough(),unadmitted)
+  before.failBeforeJoin()
+  assert.equal(unadmitted.writableEnded,true)
+  external.destroy();childInput.destroy();unadmitted.destroy()
+})
 
 test('owner interface causal: actual status ACK gates admission and EOF creates no resource',async()=>{
   const input=new PassThrough(),output=new PassThrough(),owners=new Map(),id=randomUUID(),frames=[]
@@ -1085,6 +1445,28 @@ test('integration document causal: blank commit and actual worker close precede 
   assert.deepEqual(await pending,{previous:'original',blank:null});assert.deepEqual(order,['blank-committed','blank-load-confirmed'])
   const stale={...page,workers:()=>[],evaluate:async()=>'same-document'}
   await assert.rejects(retireArchiveDocument(stale,{remaining:maximum=>maximum},promise=>promise),/replaced the instrumented document/)
+})
+
+test('integration recipe causal: the bounded storage sample has distinct opaque calls and unchanged message bytes',()=>{
+  const opaque=new Set()
+  let unchanged=0,replacements=0
+  for(let first=0;first<1024;first+=64){
+    const source=sanitizedRecipeBlock(first,1024,true)
+    const original=source.raw.toString('utf8').split('\r\n')
+    const transformed=source.expected.toString('utf8').split('\r\n')
+    assert.equal(original.length,65);assert.equal(transformed.length,65)
+    for(let row=0;row<64;row++){
+      const payload=JSON.parse(original[row]).payload
+      if(payload.type==='function_call'){
+        const value=payload.encrypted_content
+        assert.equal(Buffer.from(value,'base64').toString('base64'),value)
+        assert.ok(value.length>=800)
+        opaque.add(value);replacements++
+        assert.equal(transformed[row],original[row].replace(value,'Encrypted Payload'))
+      }else{assert.equal(transformed[row],original[row]);unchanged++}
+    }
+  }
+  assert.equal(opaque.size,256);assert.equal(replacements,256);assert.equal(unchanged,768)
 })
 
 test('integration recipe causal: original append arrays reproduce qualified 1 MiB raw receipt',()=>{

@@ -275,7 +275,7 @@ spec = around withTestEnv $ describe "Archive worker" $ do
     execute env ("INSERT INTO session_archive_reclamation(generation_id,session_id,workspace_id,metadata_sha256,verified_at) "
       <> "SELECT id,session_id,workspace_id,metadata_sha256,clock_timestamp() FROM session_archive_generations WHERE id='"
       <> uuid second.generationId <> "'") `shouldThrow` \case
-        DBCheckViolation message -> message == "Sanitized archives require dedicated reclamation verification."
+        DBCheckViolation message -> message == "Sanitized attestation requires a fenced verified publication"
         _ -> False
     runSession env.pool (S.statement second.generationId (St.Statement
       "SELECT content_bytes,content_sha256 FROM session_archive_sanitized_contents WHERE generation_id=$1"

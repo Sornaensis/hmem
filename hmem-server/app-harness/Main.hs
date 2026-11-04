@@ -40,9 +40,9 @@ import Network.Wai.Handler.Warp
 import Options.Applicative
 import System.Environment (setEnv, lookupEnv, getArgs)
 import System.Exit (exitFailure)
-import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, pathIsSymbolicLink, listDirectory)
+import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, pathIsSymbolicLink, listDirectory, removeFile)
 import System.FilePath ((</>), equalFilePath, addTrailingPathSeparator, takeDirectory, takeFileName, normalise)
-import System.IO (BufferMode(..), Handle, IOMode(ReadMode), SeekMode(AbsoluteSeek), openBinaryFile, hClose, hIsClosed, hIsSeekable, hFileSize, hSeek, hFlush, hPutStrLn, hSetBuffering, stderr, stdin, stdout)
+import System.IO (BufferMode(..), Handle, IOMode(ReadMode), SeekMode(AbsoluteSeek), openBinaryFile, openBinaryTempFile, hClose, hIsClosed, hIsSeekable, hFileSize, hSeek, hFlush, hPutStrLn, hSetBuffering, stderr, stdin, stdout)
 import System.Log.FastLogger (FileLogSpec(..), LogType'(LogFile), defaultBufSize, newFastLogger)
 import System.Random (randomRIO)
 import System.Timeout (timeout)
@@ -55,6 +55,7 @@ import HMem.DB.SessionArchive.Maintenance qualified as ArchiveMaintenance
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), TestSandbox(..), SandboxLifetime, createTestWorkspace, newSandboxLifetime, newSandboxLifetimeWithReleaseHooks, withSandboxedTestEnvBorrowed, retrySandboxLifetime)
 import HMem.Server.AccessTracker (flushNow, newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
+import HMem.Server.CtlArchives (ArchivesOperation(..), runArchivesOperationWithPool)
 import HMem.Server.Document.Worker (withPreviewWorker)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
@@ -166,7 +167,7 @@ optsParser = Opts
   <*> optional (strOption
       ( long "archive-qualification-root"
      <> metavar "DIRECTORY"
-     <> help "Opt-in fixed Task8 scratch root and private stdin qualification controls (Windows only)"
+     <> help "Opt-in fixed archive qualification scratch root and private stdin controls (Windows only)"
       ))
 
 modeReader :: ReadM HarnessMode
@@ -530,6 +531,7 @@ data QualificationThread = QualificationThread
   { nativeThread :: !ThreadId, completion :: !(MVar (Either SomeException ())) }
 data Qualification = Qualification
   { adminEnv :: !TestEnv, runtimePool :: !(Pool H.Connection)
+  , sanitizedQualification :: !Bool
   , archiveWorker :: !(IORef (Maybe ArchiveWorker))
   , children :: !(MVar [QualificationThread]), sampling :: !(MVar SamplePhase) }
 
@@ -537,10 +539,9 @@ verifyQualificationRoot :: FilePath -> IO ()
 verifyQualificationRoot root = do
   repo <- canonicalizePath "."
   actual <- canonicalizePath root
-  expected <- canonicalizePath (repo </> ".tmp" </> "sealed-archives-4a40c671")
   exists <- doesDirectoryExist actual
-  unless (exists && equalFilePath actual expected) $
-    fail "Archive qualification requires the existing exact Task8 scratch root"
+  unless (exists && any (\(name,_) -> equalFilePath actual (repo </> ".tmp" </> name)) qualificationRoots) $
+    fail "Archive qualification requires a supported exact task scratch root"
   -- Refuse ambient database/borrowing coordinates even though this entrypoint
   -- deliberately calls the standalone borrowed-sandbox constructor.
   mapM_ (\name -> lookupEnv name >>= \value -> unless (value == Nothing) $
@@ -550,10 +551,16 @@ verifyQualificationRoot root = do
   temporary <- lookupEnv "TEMP" >>= maybe (fail "Archive qualification requires child-only TEMP") canonicalizePath
   temporary2 <- lookupEnv "TMP" >>= maybe (fail "Archive qualification requires child-only TMP") canonicalizePath
   unless (contained actual temporary && contained actual temporary2) $
-    fail "Archive qualification TEMP/TMP must be inside its Task8 root"
+    fail "Archive qualification TEMP/TMP must be inside its task root"
   qualificationPhase "native-sample-begin"
   void takeNativeSample
   qualificationPhase "native-sample-complete"
+
+qualificationRoots :: [(FilePath, Text)]
+qualificationRoots =
+  [ ("sealed-archives-4a40c671","4a40c671-2d77-4cca-be24-c7c25ef72337")
+  , ("sealed-archives-eab4ad17","eab4ad17-d4bf-4153-814f-a3f1543768a7")
+  ]
 
 qualificationPhase :: Text -> IO ()
 qualificationPhase name = do
@@ -586,7 +593,7 @@ verifiedQualificationTemp taskRoot = do
   owner <- either (const (fail "Invalid qualification owner marker")) pure (eitherDecodeStrict' markerBytes)
   taskId <- controlField @Text "task" owner
   runId <- controlField @Text "id" owner
-  unless (taskId == "4a40c671-2d77-4cca-be24-c7c25ef72337" && not (T.null runId)
+  unless (lookup (takeFileName root) qualificationRoots == Just taskId && not (T.null runId)
     && takeFileName runRoot == "run-" <> T.unpack runId) $
     fail "Qualification TEMP owner/task mismatch"
   pure temporary
@@ -723,7 +730,7 @@ acquireQualification root env = mask $ \_ -> do
     `onException` DBPool.runSession env.pool (S.sql "DROP OWNED BY archive_qualification_runtime; DROP ROLE archive_qualification_runtime")
   -- No native/thread child is started until the caller has registered this
   -- borrower and its actual pool with SandboxLifetime.
-  (Qualification env pool <$> newIORef Nothing <*> newMVar [] <*> (takeNativeSample >>= newMVar . newPhase "setup"))
+  (Qualification env pool (takeFileName target=="sealed-archives-eab4ad17") <$> newIORef Nothing <*> newMVar [] <*> (takeNativeSample >>= newMVar . newPhase "setup"))
     `onException` destroyAllResources pool
 
 startQualification :: Qualification -> IO ()
@@ -808,6 +815,19 @@ qualificationInput qualified stopped serverDone = loop
         "resume" -> control ArchiveMaintenance.Resume
         "reclaim-disable" -> control ArchiveMaintenance.DisableReclamation
         "reclaim-enable" -> control ArchiveMaintenance.EnableReclamation
+        "sanitized-reclaim-enable" | qualified.sanitizedQualification ->
+          runArchivesOperationWithPool qualified.runtimePool (ArchivesConfigure ArchiveMaintenance.EnableSanitizedReclamation)
+        "replacement-disable" | qualified.sanitizedQualification ->
+          runArchivesOperationWithPool qualified.runtimePool (ArchivesConfigure ArchiveMaintenance.DisableReplacement)
+        "replacement-install" | qualified.sanitizedQualification -> do
+          policy <- controlField @Value "policy" request
+          let temp = qualified.adminEnv.testSandbox.sandboxRoot
+          bracket (openBinaryTempFile temp "archive-policy.json") (\(path,handle) -> do
+            hIsClosed handle >>= \closed -> unless closed (hClose handle)
+            removeFile path) $ \(path,handle) -> do
+              LBS.hPut handle (encode policy)
+              hClose handle
+              runArchivesOperationWithPool qualified.runtimePool (ArchivesInstallReplacement path)
         "status" -> do
           current <- ArchiveMaintenance.maintenanceStatus qualified.runtimePool
           clock <- DBPool.runSession qualified.adminEnv.pool $ S.statement () $ St.Statement
@@ -816,6 +836,8 @@ qualificationInput qualified stopped serverDone = loop
           case current of
             Object fields -> pure (Object (KM.insert "db_clock_epoch_us" (String clock) fields))
             _ -> fail "Qualification maintenance status is not an object"
+        "sanitized-reclaim-progress" | qualified.sanitizedQualification ->
+          controlField @Text "generation" request >>= qualificationReclaimProgress qualified
         "snapshot" -> qualificationSnapshot qualified
         "stop" -> pure (object ["stopping" .= True])
         _ -> fail "Unknown qualification control command"
@@ -824,10 +846,16 @@ qualificationInput qualified stopped serverDone = loop
       if command == "stop" then putMVar stopped () else loop
     control action = ArchiveMaintenance.configureMaintenance qualified.runtimePool action >> ArchiveMaintenance.maintenanceStatus qualified.runtimePool
 
+qualificationReclaimProgress :: Qualification -> Text -> IO Value
+qualificationReclaimProgress qualified generation = DBPool.runSession qualified.adminEnv.pool $ S.statement generation $
+  St.Statement
+    "SELECT jsonb_build_object('db_clock_epoch_us',floor(extract(epoch FROM clock_timestamp())*1000000)::bigint::text,'source_bytes',g.raw_bytes,'occurrence_version',o.derivation_version,'occurrence_processed_bytes',o.processed_bytes,'occurrence_pending_bytes',octet_length(o.pending),'verified_at',r.verified_at,'attested',r.sanitized_attestation_sha256 IS NOT NULL,'deleted_bytes',r.deleted_bytes,'deleted_revision',r.deleted_revision,'complete',r.complete,'retry_at',r.retry_at,'error_code',r.error_code,'permit_kind',c.permit_kind,'permit_matches',coalesce(c.permit_generation=g.id,false),'permit_expires_at',c.permit_expires_at,'blocked_reason',c.blocked_reason) FROM session_archive_generations g JOIN session_archive_sanitized_contents v ON v.generation_id=g.id LEFT JOIN session_archive_reclamation r ON r.generation_id=g.id LEFT JOIN session_occurrences o ON (o.session_id,o.workspace_id)=(g.session_id,g.workspace_id) CROSS JOIN session_archive_control c WHERE c.singleton AND g.id=$1::text::uuid"
+    (E.param (E.nonNullable E.text)) (D.singleRow (D.column (D.nonNullable D.jsonb))) True
+
 qualificationSnapshot :: Qualification -> IO Value
 qualificationSnapshot qualified = DBPool.runSession qualified.adminEnv.pool $ S.statement () $
   St.Statement
-    "SELECT jsonb_build_object('db_clock_epoch_us',floor(extract(epoch FROM clock_timestamp())*1000000)::bigint::text,'archive_generation',(SELECT jsonb_build_object('id',g.id,'session_id',g.session_id,'created_at',g.created_at,'published_at',g.published_at) FROM session_archive_generations g ORDER BY g.created_at DESC,g.id DESC LIMIT 1),'database_bytes',pg_database_size(current_database()),'raw_rows',(SELECT count(*) FROM session_chunks),'raw_stored_values',(SELECT coalesce(sum(pg_column_size(data)),0) FROM session_chunks),'wal_lsn',pg_current_wal_insert_lsn()::text,'retained_wal_bytes',(SELECT sum(size) FROM pg_ls_waldir()),'temporary_bytes',(SELECT temp_bytes FROM pg_stat_database WHERE datname=current_database()),'shared_buffers_setting',current_setting('shared_buffers'),'postgres_scope','configured/SQL observations; not included in application working set','relations',(SELECT jsonb_agg(jsonb_build_object('relation',c.relname,'heap_main',pg_relation_size(c.oid),'heap_other',pg_table_size(c.oid)-pg_relation_size(c.oid)-CASE WHEN c.reltoastrelid=0 THEN 0 ELSE pg_total_relation_size(c.reltoastrelid) END,'indexes',pg_indexes_size(c.oid),'toast_total',CASE WHEN c.reltoastrelid=0 THEN 0 ELSE pg_total_relation_size(c.reltoastrelid) END,'total',pg_total_relation_size(c.oid))) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('session_chunks','session_archive_parts','session_archive_checkpoints','session_archive_ledger','session_archive_generations','session_archive_reclamation','session_archive_control','session_archive_requests','session_archive_jobs')))"
+    "SELECT jsonb_build_object('db_clock_epoch_us',floor(extract(epoch FROM clock_timestamp())*1000000)::bigint::text,'archive_generation',(SELECT jsonb_build_object('id',g.id,'session_id',g.session_id,'created_at',g.created_at,'published_at',g.published_at) FROM session_archive_generations g ORDER BY g.created_at DESC,g.id DESC LIMIT 1),'database_bytes',pg_database_size(current_database()),'raw_rows',(SELECT count(*) FROM session_chunks),'raw_logical_bytes',(SELECT coalesce(sum(octet_length(data)),0) FROM session_chunks),'raw_stored_values',(SELECT coalesce(sum(pg_column_size(data)),0) FROM session_chunks),'wal_lsn',pg_current_wal_insert_lsn()::text,'retained_wal_bytes',(SELECT sum(size) FROM pg_ls_waldir()),'temporary_bytes',(SELECT temp_bytes FROM pg_stat_database WHERE datname=current_database()),'shared_buffers_setting',current_setting('shared_buffers'),'postgres_scope','configured/SQL observations; not included in application working set','relations',(SELECT jsonb_agg(jsonb_build_object('relation',c.relname,'heap_main',pg_relation_size(c.oid),'heap_other',pg_table_size(c.oid)-pg_relation_size(c.oid)-CASE WHEN c.reltoastrelid=0 THEN 0 ELSE pg_total_relation_size(c.reltoastrelid) END,'indexes',pg_indexes_size(c.oid),'toast_total',CASE WHEN c.reltoastrelid=0 THEN 0 ELSE pg_total_relation_size(c.reltoastrelid) END,'total',pg_total_relation_size(c.oid))) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('session_chunks','session_archive_parts','session_archive_checkpoints','session_archive_ledger','session_archive_generations','session_archive_reclamation','session_archive_control','session_archive_requests','session_archive_jobs','session_archive_sanitized_contents','session_archive_content_blocks','session_occurrences')))"
     E.noParams (D.singleRow (D.column (D.nonNullable D.jsonb))) False
 
 -- Keep the exact lifetime reachable in this process after a failed drain.

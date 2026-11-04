@@ -1,0 +1,1182 @@
+{
+  "format_version": 1,
+  "task": "eab4ad17-d4bf-4153-814f-a3f1543768a7",
+  "project": "dc9a738b-5ff0-474c-a403-74a38543decd",
+  "owner": "Sanitized archive qualification developer through review, repository maintainers after handoff",
+  "retention": "Bounded release evidence until superseded by matching qualification or feature retirement. No raw fixtures, routine logs, browser profiles or traces retained.",
+  "inputs": {
+    "revision": "9f7ab1e6e2d30696620d70f384075449661c2f71",
+    "workspace": "dbbba499-1847-49f7-a996-f50521daa12b",
+    "runtime": "Windows 10.0.26200.0 x64, Node 24.15.0, persistent normal Chromium HeadlessChrome/151.0.7922.34, real isolated PostgreSQL 18.2 and loopback HTTP.",
+    "chromium_sha256": "ce4635cd0e5dc0e21494542a701f347e91c1f1d821970578d97ed8df4ced50ef",
+    "harness_executable_sha256": "8692234c5dfa3c8a06366cdf7e6c790cabb1fe8ebcb310724276cc935e9e25d5",
+    "test_source_sha256": {
+      "hmem-core/test/HMem/DB/SessionArchive/ReaderSpec.hs": "66c1d89524c24a3f3f40b9a5b55a4fa7bf8a45a3c85caf8baf35ed436c2a1422",
+      "hmem-mcp/test/HMem/MCP/SessionFollowerSpec.hs": "7c6fc526b3ca4537fc1489ce8060bc32d7417eae1620d4a68179de615fb4af83",
+      "hmem-server/app-harness/Main.hs": "935c6903f1b1fa17a2e0295af64115e379a73d3751254e7c5933fb542808fb05",
+      "hmem-server/frontend/tests-js/session-archive.browser.test.js": "f726219e249d4dd73506033b626037c673b7e46f28636e57f8f3cff0a04f39c3",
+      "hmem-server/frontend/tests-js/session-archive.integration.browser.test.js": "3ec82a343562a957548e0f3ac36fad5353bf6e3a3653269caf3d5439d8dc98d7",
+      "hmem-server/frontend/tests-js/support/run-sanitized-archive-qualification.mjs": "39e5e25e8e297df079ef54c54a99a9384ffd640c1d72e6bae33e8a802b19de92",
+      "hmem-server/frontend/tests-js/support/session-archive-memory.mjs": "9c93a0c3be8ca590b5032f713050ecedcb9511bbd268d27b06c31d0f8bda2312",
+      "hmem-server/test/HMem/Server/Archive/MaintenanceQualificationSpec.hs": "a076cf8467bb28dba6d99b30cbe3640a49b7a15d4973ee19633a8c9d8e85de1a",
+      "hmem-server/test/HMem/Server/Archive/WorkerSpec.hs": "3a6830b66db55114b0ccb9593c0584810c6812f58d427b1412bdb330ebdf8237"
+    },
+    "served_asset_sha256": {
+      "index.html": "613e1ba9f59cd43bf5af6d4537bd35ba304a4f32329f4945a6e036e22ddc93d9",
+      "hmem-runtime-config.js": "739734590402f928ffac6856daa2448f3ba9b549a64d171fc5c5c2b3f03f6ae0",
+      "assets/index--QBT1zHe.js": "b810fa675a6930c1252e5b7cfc1af92aa3b9fbcd472b2125e6eb4808930e79a8",
+      "assets/index-C9xalcGg.css": "d7482b871d00feacf5b6091e797f06a2368af409c9fb0c78face8570be562def",
+      "assets/session-archive-worker-CpKEFKWP.js": "1188173cda73451750c63872195e98aa22e23c4100603d1c73b4055652ea6958",
+      "assets/vendor-W2tPfneV.js": "c533b37dd70e3e6478382630cbd9ba1d3ced3d6e0ff0992c431effab0afe3147"
+    }
+  },
+  "method": {
+    "build": "stack build hmem-server:exe:hmem-test-harness and frontend node node_modules/vite/bin/vite.js build with local node_modules/.bin on PATH",
+    "matrix": "From repository root with HMEM_ARCHIVE_INTEGRATION_HARNESS and HMEM_ARCHIVE_INTEGRATION_HARNESS_SHA256 bound to the matching executable, node hmem-server/frontend/tests-js/support/run-sanitized-archive-qualification.mjs <mode>. Three serial vectors, no concurrent build or diagnostic allocator capture.",
+    "memory_limit_bytes": 134217728,
+    "foreground_limit_ratio": 1.1,
+    "foreground_minimum_overlap": 40,
+    "full_view_deadline_ms": "2 * gzip bytes / 12500000 * 1000 + 120000 * ceil(source GiB) + 5000",
+    "measurements": "Application WorkingSetSize and browser total private_footprint_bytes are sampled over their corresponding active or idle baselines. PostgreSQL is separate. Sampling does not measure an unsampled continuous peak.",
+    "scope_limits": ["Loopback native integration with observed compressed EOF, worker handoff, verified rows and navigation. Prior controlled 100 Mbit/s transfer, 250 ms loading acknowledgement and 20-action navigation p95 are separate coverage.", "1 MiB measures browser JSONL export and sanitized ZIP. Larger vectors exercise full gzip/views and streamed ZIP where completed. Larger Home navigation measures bounded backward progress.", "The 1 MiB storage sample has 256 distinct deterministic base64 strings and 768 unchanged rows. Larger stress fixtures have one repeated opaque payload at the same density. No corpus savings estimate.", "Storage reports logical rows/bytes, stored value bytes and allocated heap/TOAST/index totals; retained WAL segment size is an allocation, not bytes written. This does not establish sanitized vacuum/reuse or restored sanitized generation behavior.", "The GiB runs ended before the full application-memory assertion and complete two-view browser matrix, so the GiB server gate remains unqualified.", "Successful reclaim-and-compatibility time includes checks and ZIP after delete completion. It is not the time to delete rows."]
+  },
+  "controls": {
+    "pre_index_100MiB": [
+      {
+        "run": "task-46",
+        "description": "Sanitized mixed fixture, full functional success, client memory exceeded limit.",
+        "raw_sha256": "410cda7ac62c2fbc3597c0732360c0bb16e5b99fa57b5dcbdcf83e2ab501789b",
+        "gzip_bytes": 564608,
+        "client_baseline_bytes": 145899520,
+        "client_peak_bytes": 380813312,
+        "client_increment_bytes": 234913792,
+        "first_and_fresh_ms": [18165.1745, 18196.183699999994],
+        "foreground": {
+          "status": "passed",
+          "overlap": 40,
+          "p95Ratio": 0.710846202004548,
+          "baselineP95Ms": 3.833599999998114,
+          "loadP95Ms": 2.7251000000032946
+        }
+      },
+      {
+        "run": "task-44",
+        "description": "Exact on identical mixed source, both views verified, client memory exceeded limit.",
+        "raw_sha256": "410cda7ac62c2fbc3597c0732360c0bb16e5b99fa57b5dcbdcf83e2ab501789b",
+        "gzip_bytes": 717272,
+        "client_baseline_bytes": 145756160,
+        "client_peak_bytes": 394829824,
+        "client_increment_bytes": 249073664,
+        "first_and_fresh_ms": [18317.0462, 18157.412600000003],
+        "foreground": {
+          "status": "passed",
+          "overlap": 40,
+          "p95Ratio": 0.5985947484775095,
+          "baselineP95Ms": 3.301899999998568,
+          "loadP95Ms": 1.9764999999970314
+        }
+      },
+      {
+        "run": "task-49",
+        "description": "Exact historical all-assistant fixture, memory passed and foreground p95 failed.",
+        "raw_sha256": "fef46e1443ee2ab82b783e407b8294c5d3cf95722e504fff651c343f46dc9fbb",
+        "gzip_bytes": 575969,
+        "client_baseline_bytes": 145625088,
+        "client_peak_bytes": 256430080,
+        "client_increment_bytes": 110804992,
+        "first_and_fresh_ms": [9140.265, 9551.021799999995],
+        "foreground": {
+          "status": "failed",
+          "overlap": 40,
+          "p95Ratio": 1.1231734823943165,
+          "baselineP95Ms": 2.0394000000014785,
+          "loadP95Ms": 2.2905999999966298
+        }
+      }
+    ],
+    "pre_index_1GiB": {
+      "run": "task-47",
+      "raw_sha256": "4b47db639f187e08850b39bb6d27b33ca4634615860d758424eef5ad1efe1e74",
+      "compressed_bytes": 5775421,
+      "content_sha256": "cec0f9ad3b4fd570fc3a4a36d1933be8426141afa5235b626d68d8986032cadd",
+      "client_baseline_bytes": 143917056,
+      "client_peak_bytes": 488624128,
+      "client_increment_bytes": 344707072,
+      "outcome": "Complete compressed EOF, first verified view timed out, no raw reclamation, actual owner joined and sandbox removed. task-45 was an earlier intermediate CDP response-body transport failure, not a completed view result."
+    },
+    "fresh_group_index": {
+      "before": "task-51: 256 read and 257 write IndexedDB transactions in first worker for 1 MiB",
+      "after": "task-54: 0 read and 10 write transactions for the same 1 MiB shape",
+      "instrumented_increment_bytes": 135651328,
+      "limit": "Transaction mechanism measured. No allocator attribution; separate bounded task-50 detailed capture returned no qualifying allocator-size records."
+    },
+    "post_index_1MiB_before_quiet": {
+      "run": "task-55",
+      "description": "Actual lifecycle completed; all-owned browser increment exceeded the 128 MiB gate by 40,960 bytes. Concurrent Haskell build present. Later quiet measurement is recorded separately.",
+      "raw_sha256": "0f03b92393ed98fd362c466de15bc00fa74f42cf37146d44431963a7c76f5510",
+      "gzip_bytes": 6233,
+      "client_baseline_bytes": 147243008,
+      "client_peak_bytes": 281501696,
+      "client_increment_bytes": 134258688,
+      "first_and_fresh_ms": [331.02550000000156, 368.33759999999893],
+      "foreground": {
+        "status": "inconclusive",
+        "overlap": 0,
+        "p95Ratio": 1.0444814702619893,
+        "baselineP95Ms": 1.980599999998958,
+        "loadP95Ms": 2.068699999999808
+      }
+    },
+    "legacy_exact": {
+      "run": "task-52",
+      "phase_of_earlier_failure": "Earlier legacy scale attempt got HTTP 403 at bot evidence for a still-open linked task. The fixture now completes the task before evidence; production authorization is unchanged.",
+      "exact_2MiB_restore": {
+        "source_receipt_sha256": "43d27857fe7bbd311293842d0ea83821c36f6304290e8cef06cfd888a824b095",
+        "raw_bytes": 2097152,
+        "backup_bytes": 2492504,
+        "checks": ["single-member stored verification", "archive-only concurrent ranges/proofs/replay/ZIP/content", "post-cleanup backup", "empty replacement restore", "archive-only ranges/proofs/replay/ZIP/content", "ordinary vacuum and same-input refill"],
+        "phase_seconds": {
+          "setup": 13.8180589,
+          "append_and_seal": 0.1715465,
+          "compress_stored_verify_publish": 0.964399,
+          "publication_ready": 0.0010324,
+          "first_independent_verify_and_delete_batch": 0.0707465,
+          "partial_cleanup_concurrent_http": 1.0508306,
+          "remaining_cleanup": 0.0004614,
+          "backup_after_reclaim": 0.433761,
+          "restore_empty_replacement": 1.0088492,
+          "post_restore_verification": 1.1025647,
+          "ordinary_vacuum": 0.0285885,
+          "same_input_refill": 0.6668989
+        },
+        "cleanup_seconds": 1.2326133
+      },
+      "limit": "The distinct restored prior-backend browser artifact and the sanitized generation backup/restore path are unqualified."
+    }
+  },
+  "status": "Sanitized rollout unqualified",
+  "recommendation": "Keep replacement policy installation and sanitized reclamation off for rollout. Require passing GiB memory and end-to-end reclaim/view gates and supported sanitized backup/restore before enablement.",
+  "quiet_matrix": {
+    "run": "Stack MCP task-58",
+    "vectors": [
+      {
+        "mode": "sanitized-1MiB",
+        "exit_code": 0,
+        "status": "functional-success-performance-inconclusive",
+        "raw": {
+          "recipe": "codex-jsonl-1024-v1:one-in-four-opaque-calls:per-record-entropy",
+          "bytes": 1048576,
+          "records": 1024,
+          "sha256": "0f03b92393ed98fd362c466de15bc00fa74f42cf37146d44431963a7c76f5510",
+          "appendArrays": 16,
+          "appendArrayBytes": 65536
+        },
+        "content": {
+          "bytes": 831744,
+          "sha256": "aeb289056ec722a8d90cf29c445f5e02560ecb4708209f4ca3379ba602cb3b13",
+          "replacements": 256
+        },
+        "gzip": {
+          "bytes": 6233,
+          "sha256": "3080e9397d0c905f9e1e02248adac124bad81dfc6b963d520606d5a7e3d5904d"
+        },
+        "foreground": {
+          "status": "inconclusive",
+          "overlap": 0,
+          "p95Ratio": 1.3993996684736425,
+          "baselineP95Ms": 2.2320999999992637,
+          "loadP95Ms": 3.123599999998987
+        },
+        "server": {
+          "baselineBytes": 64692224,
+          "firstViewDelta": 3612672,
+          "peakIncrementBytes": 6266880
+        },
+        "browser": {
+          "baseline_bytes": 143831040,
+          "peak_bytes": 273666048,
+          "increment_bytes": 129835008,
+          "samples": 12,
+          "max_sample_gap_ms": 1066.2939999999999,
+          "process_columns": ["pid", "type", "bytes"],
+          "baseline_processes": [
+            [74808, "browser", 21479424],
+            [79500, "renderer", 64643072],
+            [60864, "tracing.mojom.TracingService", 15773696],
+            [32928, "network.mojom.NetworkService", 14651392],
+            [88992, "GPU", 27283456]
+          ],
+          "phase_peaks": [
+            {
+              "phase": "seal-preparing",
+              "bytes": 164626432,
+              "processes": [
+                [88992, "GPU", 27955200],
+                [74808, "browser", 23523328],
+                [60864, "tracing.mojom.TracingService", 17408000],
+                [32928, "network.mojom.NetworkService", 15171584],
+                [79500, "renderer", 80568320]
+              ]
+            },
+            {
+              "phase": "publish-and-first-view",
+              "bytes": 165113856,
+              "processes": [
+                [74808, "browser", 23384064],
+                [32928, "network.mojom.NetworkService", 15200256],
+                [60864, "tracing.mojom.TracingService", 17473536],
+                [79500, "renderer", 81002496],
+                [88992, "GPU", 28053504]
+              ]
+            },
+            {
+              "phase": "first-compressed-eof",
+              "bytes": 169615360,
+              "processes": [
+                [60864, "tracing.mojom.TracingService", 17457152],
+                [88992, "GPU", 28061696],
+                [32928, "network.mojom.NetworkService", 15220736],
+                [74808, "browser", 23773184],
+                [79500, "renderer", 85102592]
+              ]
+            },
+            {
+              "phase": "first-worker-verified",
+              "bytes": 180178944,
+              "processes": [
+                [74808, "browser", 26288128],
+                [32928, "network.mojom.NetworkService", 15237120],
+                [60864, "tracing.mojom.TracingService", 17559552],
+                [79500, "renderer", 93032448],
+                [88992, "GPU", 28061696]
+              ]
+            },
+            {
+              "phase": "first-last-navigation",
+              "bytes": 248750080,
+              "processes": [
+                [88992, "GPU", 28651520],
+                [74808, "browser", 28246016],
+                [60864, "tracing.mojom.TracingService", 17608704],
+                [79500, "renderer", 158994432],
+                [32928, "network.mojom.NetworkService", 15249408]
+              ]
+            },
+            {
+              "phase": "sanitized-reclaim-compatibility",
+              "bytes": 249090048,
+              "processes": [
+                [60864, "tracing.mojom.TracingService", 17547264],
+                [32928, "network.mojom.NetworkService", 15253504],
+                [74808, "browser", 28483584],
+                [79500, "renderer", 159154176],
+                [88992, "GPU", 28651520]
+              ]
+            },
+            {
+              "phase": "fresh-compressed-transfer",
+              "bytes": 243740672,
+              "processes": [
+                [60864, "tracing.mojom.TracingService", 17530880],
+                [32928, "network.mojom.NetworkService", 15183872],
+                [74808, "browser", 27246592],
+                [79500, "renderer", 155594752],
+                [88992, "GPU", 28184576]
+              ]
+            },
+            {
+              "phase": "fresh-compressed-eof",
+              "bytes": 244301824,
+              "processes": [
+                [79500, "renderer", 155291648],
+                [74808, "browser", 27693056],
+                [60864, "tracing.mojom.TracingService", 17629184],
+                [32928, "network.mojom.NetworkService", 15265792],
+                [88992, "GPU", 28422144]
+              ]
+            },
+            {
+              "phase": "verified-navigation-before-jsonl-export",
+              "bytes": 250200064,
+              "processes": [
+                [60864, "tracing.mojom.TracingService", 17600512],
+                [32928, "network.mojom.NetworkService", 15278080],
+                [74808, "browser", 30121984],
+                [79500, "renderer", 158773248],
+                [88992, "GPU", 28426240]
+              ]
+            },
+            {
+              "phase": "after-jsonl-export",
+              "bytes": 273666048,
+              "processes": [
+                [88992, "GPU", 28430336],
+                [32928, "network.mojom.NetworkService", 15282176],
+                [60864, "tracing.mojom.TracingService", 18649088],
+                [74808, "browser", 30789632],
+                [79500, "renderer", 180514816]
+              ]
+            }
+          ]
+        },
+        "view_ms": {
+          "firstMs": 316.95430000000124,
+          "freshMs": 414.7324000000008,
+          "budgetMs": 125000.99728
+        },
+        "navigation": [
+          {
+            "name": "Home",
+            "automationWallMs": 2376.5110000000004,
+            "text": "row 00000000"
+          },
+          {
+            "name": "Jump to latest",
+            "automationWallMs": 59.43109999999979,
+            "text": "row 000003ff"
+          }
+        ],
+        "navigation_scope": "Home and Jump to latest content fidelity and Playwright wall time; Task6 client-side navigation p95 is a separate historical qualification",
+        "original_retired": true,
+        "policy_sha256": "3ecc03e8d7cb4ec55c9ade45b38f7f2b1c6c1a93a879d6f14ac19fbc6e745314",
+        "original_operations": {
+          "evidence": "original_evidence_unavailable",
+          "prefix_proof": "original_evidence_unavailable",
+          "replay": "session_state_conflict",
+          "zip": "original_evidence_unavailable"
+        },
+        "sanitized_zip": {
+          "bytes": 6801,
+          "sha256": "7748d9ea5c6fe60c8a2fe26656be06fe2efe7342bc76962a1cffee541ed29bb7",
+          "rawBytes": 831744,
+          "rawSha256": "aeb289056ec722a8d90cf29c445f5e02560ecb4708209f4ca3379ba602cb3b13",
+          "crc32": "82695768",
+          "elapsedMs": 72.39760000000024,
+          "bulkBudgetMs": 90000,
+          "entries": 1,
+          "scope": "complete actual ZIP64 single entry; streamed DEFLATE bytes/count/SHA256/CRC32 and descriptors/central directory; no full-input buffer"
+        },
+        "sanitized_jsonl": {
+          "bytes": 831744,
+          "sha256": "aeb289056ec722a8d90cf29c445f5e02560ecb4708209f4ca3379ba602cb3b13",
+          "sanitized_label": true
+        },
+        "clocks": {
+          "scope": "Observed unadjusted qualification times. Seal-to-ready includes deliberate worker pause, raw baseline where enabled, idle sampling and foreground baseline. Preparing selection-to-view includes the remaining paused qualification work; both view clocks include deliberate EOF holds. No intervals are subtracted.",
+          "productDeadlineBoundaries": "unchanged formula applies independently from the actual ready manifest observation through first verified rows, and from fresh ready-session selection through verified rows; Preparing total remains separately reported",
+          "sealToReadyMs": 3565.862299999999,
+          "preparingSelectionToVerifiedViewMs": 3503.8515000000007,
+          "observedReadyToVerifiedViewMs": 316.95430000000124,
+          "eofHeldAtMs": 12646.7405,
+          "readySelectionToVerifiedViewMs": 414.7324000000008,
+          "clientViewBudgetMs": 125000.99728
+        },
+        "manifest_pending_bodies_unobserved": 0,
+        "postgres_storage": {
+          "relation_columns": ["relation", "heap_main", "heap_other", "indexes", "toast_total", "total"],
+          "before_publication": {
+            "database_bytes": 13416127,
+            "raw_rows": 16,
+            "raw_logical_bytes": 1048576,
+            "raw_stored_values_bytes": 294921,
+            "wal_lsn": "0/2186BE8",
+            "retained_wal_bytes": 33554432,
+            "temporary_bytes": 0,
+            "relations": [
+              ["session_archive_jobs", 8192, 0, 49152, 8192, 65536],
+              ["session_archive_generations", 0, 0, 32768, 8192, 40960],
+              ["session_archive_control", 8192, 0, 16384, 8192, 32768],
+              ["session_chunks", 8192, 0, 32768, 368640, 409600],
+              ["session_archive_requests", 8192, 0, 16384, 0, 24576],
+              ["session_occurrences", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_parts", 0, 0, 16384, 8192, 24576],
+              ["session_archive_checkpoints", 0, 0, 16384, 8192, 24576],
+              ["session_archive_ledger", 0, 0, 16384, 8192, 24576],
+              ["session_archive_reclamation", 0, 0, 8192, 8192, 16384],
+              ["session_archive_sanitized_contents", 0, 0, 8192, 8192, 16384],
+              ["session_archive_content_blocks", 0, 0, 16384, 8192, 24576]
+            ]
+          },
+          "before_reclaim": {
+            "database_bytes": 13588159,
+            "raw_rows": 16,
+            "raw_logical_bytes": 1048576,
+            "raw_stored_values_bytes": 294921,
+            "wal_lsn": "0/2198A78",
+            "retained_wal_bytes": 33554432,
+            "temporary_bytes": 0,
+            "relations": [
+              ["session_archive_jobs", 8192, 0, 49152, 8192, 65536],
+              ["session_archive_generations", 8192, 0, 65536, 8192, 81920],
+              ["session_archive_control", 8192, 0, 16384, 8192, 32768],
+              ["session_chunks", 8192, 0, 32768, 368640, 409600],
+              ["session_archive_requests", 8192, 0, 16384, 0, 24576],
+              ["session_occurrences", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_parts", 8192, 0, 32768, 24576, 65536],
+              ["session_archive_checkpoints", 8192, 0, 32768, 8192, 49152],
+              ["session_archive_ledger", 8192, 0, 32768, 8192, 49152],
+              ["session_archive_reclamation", 0, 0, 8192, 8192, 16384],
+              ["session_archive_sanitized_contents", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_content_blocks", 8192, 0, 32768, 8192, 49152]
+            ]
+          },
+          "after_reclaim": {
+            "database_bytes": 13604543,
+            "raw_rows": 0,
+            "raw_logical_bytes": 0,
+            "raw_stored_values_bytes": 0,
+            "wal_lsn": "0/219C548",
+            "retained_wal_bytes": 33554432,
+            "temporary_bytes": 0,
+            "relations": [
+              ["session_archive_jobs", 8192, 0, 49152, 8192, 65536],
+              ["session_archive_generations", 8192, 0, 65536, 8192, 81920],
+              ["session_archive_control", 8192, 0, 16384, 8192, 32768],
+              ["session_chunks", 8192, 0, 32768, 368640, 409600],
+              ["session_archive_requests", 8192, 0, 16384, 0, 24576],
+              ["session_occurrences", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_parts", 8192, 0, 32768, 24576, 65536],
+              ["session_archive_checkpoints", 8192, 0, 32768, 8192, 49152],
+              ["session_archive_ledger", 8192, 0, 32768, 8192, 49152],
+              ["session_archive_reclamation", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_sanitized_contents", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_content_blocks", 8192, 0, 32768, 8192, 49152]
+            ]
+          }
+        },
+        "cleanup": {
+          "actualHandleJoined": true,
+          "pipesClosed": true,
+          "sandboxRemoved": true,
+          "recovered": false,
+          "scope": "observed sandbox root removed after native closure"
+        },
+        "reclaim_and_compatibility_ms": 757.9337999999989
+      },
+      {
+        "mode": "sanitized-100MiB",
+        "exit_code": 0,
+        "status": "current-slice-passed",
+        "raw": {
+          "recipe": "codex-jsonl-1024-v1:one-in-four-opaque-calls:repeated-opaque-payload",
+          "bytes": 104857600,
+          "records": 102400,
+          "sha256": "410cda7ac62c2fbc3597c0732360c0bb16e5b99fa57b5dcbdcf83e2ab501789b",
+          "appendArrays": 100,
+          "appendArrayBytes": 1048576
+        },
+        "content": {
+          "bytes": 83174400,
+          "sha256": "fb101785fbe27785fcc76e1d97d973984b01f827a79b8a978b058fb4a860bc54",
+          "replacements": 25600
+        },
+        "gzip": {
+          "bytes": 564608,
+          "sha256": "f6e7b593a5ccf20e00e7a3232b4b4ec8072548fc68ffc9a1c71b9e20f7363381"
+        },
+        "foreground": {
+          "status": "passed",
+          "overlap": 40,
+          "p95Ratio": 0.689487235164719,
+          "baselineP95Ms": 3.2237000000022817,
+          "loadP95Ms": 2.222700000002078
+        },
+        "server": {
+          "baselineBytes": 79462400,
+          "firstViewDelta": 6950912,
+          "peakIncrementBytes": 7991296
+        },
+        "browser": {
+          "baseline_bytes": 146227200,
+          "peak_bytes": 251072512,
+          "increment_bytes": 104845312,
+          "samples": 53,
+          "max_sample_gap_ms": 1123.7631000000038,
+          "process_columns": ["pid", "type", "bytes"],
+          "baseline_processes": [
+            [11992, "renderer", 66109440],
+            [34088, "browser", 22155264],
+            [76180, "tracing.mojom.TracingService", 15835136],
+            [58400, "GPU", 27377664],
+            [69356, "network.mojom.NetworkService", 14749696]
+          ],
+          "phase_peaks": [
+            {
+              "phase": "seal-preparing",
+              "bytes": 163332096,
+              "processes": [
+                [58400, "GPU", 28028928],
+                [76180, "tracing.mojom.TracingService", 17342464],
+                [11992, "renderer", 79491072],
+                [34088, "browser", 23138304],
+                [69356, "network.mojom.NetworkService", 15331328]
+              ]
+            },
+            {
+              "phase": "publish-and-first-view",
+              "bytes": 170946560,
+              "processes": [
+                [76180, "tracing.mojom.TracingService", 18587648],
+                [11992, "renderer", 84144128],
+                [34088, "browser", 24567808],
+                [58400, "GPU", 28205056],
+                [69356, "network.mojom.NetworkService", 15441920]
+              ]
+            },
+            {
+              "phase": "first-compressed-transfer",
+              "bytes": 175677440,
+              "processes": [
+                [58400, "GPU", 28213248],
+                [34088, "browser", 25079808],
+                [76180, "tracing.mojom.TracingService", 18685952],
+                [11992, "renderer", 87670784],
+                [69356, "network.mojom.NetworkService", 16027648]
+              ]
+            },
+            {
+              "phase": "first-compressed-eof",
+              "bytes": 176316416,
+              "processes": [
+                [76180, "tracing.mojom.TracingService", 18763776],
+                [58400, "GPU", 28217344],
+                [11992, "renderer", 88989696],
+                [34088, "browser", 25108480],
+                [69356, "network.mojom.NetworkService", 15237120]
+              ]
+            },
+            {
+              "phase": "first-worker-index-and-handoff",
+              "bytes": 225546240,
+              "processes": [
+                [34088, "browser", 37597184],
+                [76180, "tracing.mojom.TracingService", 19165184],
+                [11992, "renderer", 125157376],
+                [58400, "GPU", 28327936],
+                [69356, "network.mojom.NetworkService", 15298560]
+              ]
+            },
+            {
+              "phase": "first-worker-verified",
+              "bytes": 221212672,
+              "processes": [
+                [58400, "GPU", 28332032],
+                [11992, "renderer", 119795712],
+                [34088, "browser", 38621184],
+                [69356, "network.mojom.NetworkService", 15405056],
+                [76180, "tracing.mojom.TracingService", 19058688]
+              ]
+            },
+            {
+              "phase": "sanitized-reclaim-compatibility",
+              "bytes": 201359360,
+              "processes": [
+                [58400, "GPU", 28905472],
+                [11992, "renderer", 98967552],
+                [34088, "browser", 39067648],
+                [69356, "network.mojom.NetworkService", 15429632],
+                [76180, "tracing.mojom.TracingService", 18989056]
+              ]
+            },
+            {
+              "phase": "fresh-compressed-eof",
+              "bytes": 224686080,
+              "processes": [
+                [11992, "renderer", 101507072],
+                [76180, "tracing.mojom.TracingService", 19062784],
+                [34088, "browser", 60145664],
+                [58400, "GPU", 28438528],
+                [69356, "network.mojom.NetworkService", 15532032]
+              ]
+            },
+            {
+              "phase": "fresh-worker-index-and-handoff",
+              "bytes": 251072512,
+              "processes": [
+                [34088, "browser", 54071296],
+                [11992, "renderer", 133373952],
+                [76180, "tracing.mojom.TracingService", 19259392],
+                [58400, "GPU", 28741632],
+                [69356, "network.mojom.NetworkService", 15626240]
+              ]
+            },
+            {
+              "phase": "final-verified-view",
+              "bytes": 228827136,
+              "processes": [
+                [76180, "tracing.mojom.TracingService", 19275776],
+                [11992, "renderer", 114200576],
+                [34088, "browser", 52408320],
+                [58400, "GPU", 27713536],
+                [69356, "network.mojom.NetworkService", 15228928]
+              ]
+            }
+          ]
+        },
+        "view_ms": {
+          "firstMs": 9527.956999999995,
+          "freshMs": 10590.96360000001,
+          "budgetMs": 125090.33728
+        },
+        "navigation": [
+          {
+            "name": "Home",
+            "scope": "bounded backward viewport progress",
+            "before": 102398,
+            "after": 102395,
+            "automationWallMs": 34.04240000000573
+          },
+          {
+            "name": "Jump to latest",
+            "automationWallMs": 37.28049999999348,
+            "text": "row 00018fff"
+          }
+        ],
+        "navigation_scope": "Home and Jump to latest content fidelity and Playwright wall time; Task6 client-side navigation p95 is a separate historical qualification",
+        "original_retired": true,
+        "policy_sha256": "e81b8f77f3fd1cd9500a2ca1fa71ebababfe26e1b68fac37a4a72f36af2533f8",
+        "original_operations": {
+          "evidence": "original_evidence_unavailable",
+          "prefix_proof": "original_evidence_unavailable",
+          "replay": "session_state_conflict",
+          "zip": "original_evidence_unavailable"
+        },
+        "sanitized_zip": {
+          "bytes": 564925,
+          "sha256": "63b78859d06f4cb78cb9fc096f3fc96126ab472f5239553e8ac05304f22771f5",
+          "rawBytes": 83174400,
+          "rawSha256": "fb101785fbe27785fcc76e1d97d973984b01f827a79b8a978b058fb4a860bc54",
+          "crc32": "1caced9d",
+          "elapsedMs": 4912.7215,
+          "bulkBudgetMs": 90000,
+          "entries": 1,
+          "scope": "complete actual ZIP64 single entry; streamed DEFLATE bytes/count/SHA256/CRC32 and descriptors/central directory; no full-input buffer"
+        },
+        "clocks": {
+          "scope": "Observed unadjusted qualification times. Seal-to-ready includes deliberate worker pause, raw baseline where enabled, idle sampling and foreground baseline. Preparing selection-to-view includes the remaining paused qualification work; both view clocks include deliberate EOF holds. No intervals are subtracted.",
+          "productDeadlineBoundaries": "unchanged formula applies independently from the actual ready manifest observation through first verified rows, and from fresh ready-session selection through verified rows; Preparing total remains separately reported",
+          "sealToReadyMs": 15233.086500000001,
+          "preparingSelectionToVerifiedViewMs": 23872.520499999995,
+          "observedReadyToVerifiedViewMs": 9527.956999999995,
+          "eofHeldAtMs": 35263.4118,
+          "readySelectionToVerifiedViewMs": 10590.96360000001,
+          "clientViewBudgetMs": 125090.33728
+        },
+        "manifest_pending_bodies_unobserved": 0,
+        "postgres_storage": {
+          "relation_columns": ["relation", "heap_main", "heap_other", "indexes", "toast_total", "total"],
+          "before_publication": {
+            "database_bytes": 43488959,
+            "raw_rows": 100,
+            "raw_logical_bytes": 104857600,
+            "raw_stored_values_bytes": 29028277,
+            "wal_lsn": "0/3F1CAF0",
+            "retained_wal_bytes": 50331648,
+            "temporary_bytes": 0,
+            "relations": [
+              ["session_archive_jobs", 8192, 0, 49152, 8192, 65536],
+              ["session_archive_generations", 0, 0, 32768, 8192, 40960],
+              ["session_archive_control", 8192, 0, 16384, 8192, 32768],
+              ["session_chunks", 32768, 24576, 32768, 30277632, 30367744],
+              ["session_archive_requests", 8192, 0, 16384, 0, 24576],
+              ["session_occurrences", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_parts", 0, 0, 16384, 8192, 24576],
+              ["session_archive_checkpoints", 0, 0, 16384, 8192, 24576],
+              ["session_archive_ledger", 0, 0, 16384, 8192, 24576],
+              ["session_archive_reclamation", 0, 0, 8192, 8192, 16384],
+              ["session_archive_sanitized_contents", 0, 0, 8192, 8192, 16384],
+              ["session_archive_content_blocks", 0, 0, 16384, 8192, 24576]
+            ]
+          },
+          "before_reclaim": {
+            "database_bytes": 44594879,
+            "raw_rows": 100,
+            "raw_logical_bytes": 104857600,
+            "raw_stored_values_bytes": 29028277,
+            "wal_lsn": "0/403BD18",
+            "retained_wal_bytes": 67108864,
+            "temporary_bytes": 0,
+            "relations": [
+              ["session_archive_jobs", 8192, 0, 49152, 8192, 65536],
+              ["session_archive_generations", 8192, 0, 65536, 8192, 81920],
+              ["session_archive_control", 8192, 0, 16384, 8192, 32768],
+              ["session_chunks", 32768, 24576, 32768, 30277632, 30367744],
+              ["session_archive_requests", 8192, 0, 16384, 0, 24576],
+              ["session_occurrences", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_parts", 24576, 24576, 32768, 696320, 778240],
+              ["session_archive_checkpoints", 114688, 24576, 32768, 8192, 180224],
+              ["session_archive_ledger", 32768, 24576, 32768, 8192, 98304],
+              ["session_archive_reclamation", 0, 0, 8192, 8192, 16384],
+              ["session_archive_sanitized_contents", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_content_blocks", 24576, 24576, 32768, 8192, 90112]
+            ]
+          },
+          "after_reclaim": {
+            "database_bytes": 44611263,
+            "raw_rows": 0,
+            "raw_logical_bytes": 0,
+            "raw_stored_values_bytes": 0,
+            "wal_lsn": "0/410B168",
+            "retained_wal_bytes": 67108864,
+            "temporary_bytes": 0,
+            "relations": [
+              ["session_archive_jobs", 8192, 0, 49152, 8192, 65536],
+              ["session_archive_generations", 8192, 0, 65536, 8192, 81920],
+              ["session_archive_control", 8192, 0, 16384, 8192, 32768],
+              ["session_chunks", 32768, 24576, 32768, 30277632, 30367744],
+              ["session_archive_requests", 8192, 0, 16384, 0, 24576],
+              ["session_occurrences", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_parts", 24576, 24576, 32768, 696320, 778240],
+              ["session_archive_checkpoints", 114688, 24576, 32768, 8192, 180224],
+              ["session_archive_ledger", 32768, 24576, 32768, 8192, 98304],
+              ["session_archive_reclamation", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_sanitized_contents", 8192, 0, 16384, 8192, 32768],
+              ["session_archive_content_blocks", 24576, 24576, 32768, 8192, 90112]
+            ]
+          }
+        },
+        "cleanup": {
+          "actualHandleJoined": true,
+          "pipesClosed": true,
+          "sandboxRemoved": true,
+          "recovered": false,
+          "scope": "observed sandbox root removed after native closure"
+        },
+        "reclaim_and_compatibility_ms": 16908.207799999996
+      },
+      {
+        "mode": "sanitized-1024MiB",
+        "exit_code": 1,
+        "failed_phase": "sanitized-reclaim-compatibility",
+        "raw": {
+          "recipe": "codex-jsonl-1024-v1:one-in-four-opaque-calls:repeated-opaque-payload",
+          "bytes": 1073741824,
+          "records": 1048576,
+          "sha256": "4b47db639f187e08850b39bb6d27b33ca4634615860d758424eef5ad1efe1e74",
+          "appendArrays": 1024,
+          "appendArrayBytes": 1048576
+        },
+        "manifest": {
+          "content_bytes": 851705856,
+          "content_sha256": "cec0f9ad3b4fd570fc3a4a36d1933be8426141afa5235b626d68d8986032cadd",
+          "policy_sha256": "7db22e94e2f0310176e983cd914c2be072ef76bc8e4a17531384aa33064c7e26",
+          "original_available_on_ready": true
+        },
+        "client_memory": {
+          "baseline_bytes": 140357632,
+          "peak_bytes": 300023808,
+          "increment_bytes": 159666176,
+          "samples": 308,
+          "max_sample_gap_ms": 1135.8465999999898,
+          "process_columns": ["pid", "type", "bytes"],
+          "baseline_processes": [
+            [68140, "browser", 21045248],
+            [32404, "tracing.mojom.TracingService", 15740928],
+            [71520, "renderer", 61878272],
+            [68360, "GPU", 27160576],
+            [87884, "network.mojom.NetworkService", 14532608]
+          ],
+          "phase_peaks": [
+            {
+              "phase": "seal-preparing",
+              "bytes": 161751040,
+              "processes": [
+                [32404, "tracing.mojom.TracingService", 18542592],
+                [68140, "browser", 23887872],
+                [68360, "GPU", 28200960],
+                [71520, "renderer", 76283904],
+                [87884, "network.mojom.NetworkService", 14835712]
+              ]
+            },
+            {
+              "phase": "publish-and-first-view",
+              "bytes": 163057664,
+              "processes": [
+                [32404, "tracing.mojom.TracingService", 18579456],
+                [68140, "browser", 24145920],
+                [68360, "GPU", 28504064],
+                [71520, "renderer", 76967936],
+                [87884, "network.mojom.NetworkService", 14860288]
+              ]
+            },
+            {
+              "phase": "first-compressed-transfer",
+              "bytes": 175337472,
+              "processes": [
+                [71520, "renderer", 89186304],
+                [68360, "GPU", 28491776],
+                [68140, "browser", 24047616],
+                [32404, "tracing.mojom.TracingService", 18690048],
+                [87884, "network.mojom.NetworkService", 14921728]
+              ]
+            },
+            {
+              "phase": "first-compressed-eof",
+              "bytes": 186150912,
+              "processes": [
+                [32404, "tracing.mojom.TracingService", 18763776],
+                [68140, "browser", 25083904],
+                [68360, "GPU", 28278784],
+                [71520, "renderer", 99270656],
+                [87884, "network.mojom.NetworkService", 14753792]
+              ]
+            },
+            {
+              "phase": "first-worker-index-and-handoff",
+              "bytes": 300023808,
+              "processes": [
+                [68360, "GPU", 28545024],
+                [32404, "tracing.mojom.TracingService", 19116032],
+                [68140, "browser", 68141056],
+                [71520, "renderer", 169369600],
+                [87884, "network.mojom.NetworkService", 14852096]
+              ]
+            },
+            {
+              "phase": "first-worker-verified",
+              "bytes": 278999040,
+              "processes": [
+                [32404, "tracing.mojom.TracingService", 19312640],
+                [68140, "browser", 58806272],
+                [68360, "GPU", 28377088],
+                [71520, "renderer", 157548544],
+                [87884, "network.mojom.NetworkService", 14954496]
+              ]
+            },
+            {
+              "phase": "independent-http-receipt",
+              "bytes": 282607616,
+              "processes": [
+                [68360, "GPU", 28610560],
+                [32404, "tracing.mojom.TracingService", 19353600],
+                [68140, "browser", 60682240],
+                [71520, "renderer", 158920704],
+                [87884, "network.mojom.NetworkService", 15040512]
+              ]
+            },
+            {
+              "phase": "sanitized-reclaim-compatibility",
+              "bytes": 244404224,
+              "processes": [
+                [68140, "browser", 58626048],
+                [32404, "tracing.mojom.TracingService", 18796544],
+                [68360, "GPU", 28397568],
+                [71520, "renderer", 123711488],
+                [87884, "network.mojom.NetworkService", 14872576]
+              ]
+            }
+          ]
+        },
+        "cleanup": {
+          "actualHandleJoined": true,
+          "pipesClosed": true,
+          "sandboxRemoved": true,
+          "recovered": false,
+          "scope": "observed sandbox root removed after native closure"
+        },
+        "run": "ea2366ab-5f0c-4ef0-a0f2-5fb48b9fe7a5",
+        "status": "failed bounded sanitized reclamation; client memory also above limit",
+        "transfer": {
+          "compressedBytes": 5775421,
+          "compressedSha256": "be00099d8934c6cb3915ba983cf950dd1fded379b77b0d3fb431d8e314e2ea4d",
+          "rawBytes": 851705856,
+          "rawSha256": "cec0f9ad3b4fd570fc3a4a36d1933be8426141afa5235b626d68d8986032cadd"
+        },
+        "foreground": {
+          "coverage": "qualified-coverage",
+          "overlap": 40,
+          "baselineP95Ms": 4.341800000009243,
+          "loadP95Ms": 3.655899999997928
+        },
+        "first_view": "Complete verified first view under the unchanged view deadline, with no rows before verification. Independent HTTP transfer verified. Fresh view and ZIP were not reached."
+      }
+    ]
+  },
+  "targeted_checks": {
+    "prior_archive_core": {
+      "run": "task-52",
+      "command": "hmem-core-test --match SessionArchive +RTS -T -RTS",
+      "examples": 41,
+      "outcome": "passed",
+      "scope": "bounded transform including ambiguous, unmatched, cross-chunk and final tail; exact codec/reader, current sanitized/legacy reader and reclamation race"
+    },
+    "mcp": {
+      "run": "task-52",
+      "command": "hmem-mcp-test --match <selector>",
+      "examples": {
+        "SanitizedQualification": 1,
+        "HistoricalImport": 4,
+        "Agent session MCP": 12
+      },
+      "outcome": "passed"
+    },
+    "frontend": {
+      "run": "task-62",
+      "command": "node --test --test-concurrency=1 --test-name-pattern 'causal|requested memory dump selection|sanitized viewer labels|Jump to latest reaches' tests-js/session-archive.integration.browser.test.js tests-js/session-archive.browser.test.js",
+      "examples": 17,
+      "outcome": "passed"
+    },
+    "server": {
+      "run": "task-59",
+      "command": "hmem-server-test --match <selector>",
+      "executable_sha256": "303a341004836040ca42447488e092ecc7f6c6db417393a5aaaa4e0bc9930e12",
+      "examples": {
+        "HMem.Server.Archive.Worker": 16,
+        "Archive maintenance worker": 18,
+        "Archive maintenance CLI": 2,
+        "HMem.Server.ArchiveHTTP": 13
+      },
+      "outcome": "all four scopes passed",
+      "first_worker_run": "Earlier task-52 worker run failed only a test expecting an obsolete error for forged V063 attestation. The recheck uses the precise rejection and preserves no-deletion/provenance assertions."
+    },
+    "source_absent_exact": {
+      "prior_run": "task-59",
+      "prior_outcome": "HTTP 403 on the first /evidence request with a declared bot and a still-open linked task. Fixture transitions that task to done after verified archive publication and simulated source removal, preserving every exact source-absent assertion.",
+      "matching_recheck": {
+        "run": "task-64",
+        "command": "hmem-server-test --match 'Source-absent archive compatibility HTTP'",
+        "examples": 1,
+        "outcome": "passed",
+        "executable_sha256": "a51d65f1cd3952c9f95c6abfe7bd58ab91e0de88f3bb06605d000cd50557e581"
+      }
+    }
+  },
+  "diagnostic_repeat": {
+    "run": "Stack MCP task-63",
+    "native_run": "249255ad-4864-4c00-a770-36adbd80beaa",
+    "executable_sha256": "7e5e22540d9b6c3df522b5fcc73fa1afde37c0fba8677edb0c16724cf90035b9",
+    "diagnostic_input_sha256": {
+      "hmem-server/app-harness/Main.hs": "d55b4575e60a0482c55e19a00171adb58d6d7ecedfe9a71cb25facda7638545b",
+      "hmem-server/frontend/tests-js/session-archive.integration.browser.test.js": "fc06e477fb8b563074a59839b944cc2f46528d0d8119e6986c3e108354b0376a"
+    },
+    "exit_code": 1,
+    "purpose": "Repeat GiB with the same product bundle and unchanged acceptance deadlines. Record exact maintenance state if the 90 s gate expires and delimit sampled browser peaks against existing events.",
+    "raw_sha256": "4b47db639f187e08850b39bb6d27b33ca4634615860d758424eef5ad1efe1e74",
+    "transfer": {
+      "compressedBytes": 5775421,
+      "compressedSha256": "be00099d8934c6cb3915ba983cf950dd1fded379b77b0d3fb431d8e314e2ea4d",
+      "rawBytes": 851705856,
+      "rawSha256": "cec0f9ad3b4fd570fc3a4a36d1933be8426141afa5235b626d68d8986032cadd"
+    },
+    "first_view": {
+      "sealToReadyMs": 45068.176600000006,
+      "readyToVerifiedMs": 103954.1693,
+      "budgetMs": 125924.06736
+    },
+    "reclamation": {
+      "status": "observed complete under the 90 s gate",
+      "reason": "The repeat reached a fresh verified-generation request after the synchronous complete cleanup, zero original rows, original-only rejection and full verified ZIP assertions.",
+      "unavailable": "Successful phase timings were not emitted because the diagnostic only samples generation and occurrence state at a missed 90 s boundary. The first run's timeout cannot be attributed to independent verification, occurrence or delete batches from these runs."
+    },
+    "browser": {
+      "baseline_bytes": 143933440,
+      "peak_bytes": 322215936,
+      "increment_bytes": 178282496,
+      "samples": 274,
+      "max_sample_gap_ms": 1622.5555999999633,
+      "process_columns": ["pid", "type", "private_bytes"],
+      "baseline_processes": [
+        [85728, "GPU", 27463680],
+        [9832, "network.mojom.NetworkService", 14471168],
+        [18628, "browser", 21397504],
+        [68032, "renderer", 64851968],
+        [81024, "tracing.mojom.TracingService", 15749120]
+      ],
+      "phase_peaks": [
+        {
+          "phase": "seal-preparing",
+          "bytes": 163069952,
+          "sample_window_ms": [62000.651, 62040.8818],
+          "processes": [
+            [68032, "renderer", 78786560],
+            [85728, "GPU", 28041216],
+            [9832, "network.mojom.NetworkService", 15163392],
+            [18628, "browser", 23404544],
+            [81024, "tracing.mojom.TracingService", 17674240]
+          ]
+        },
+        {
+          "phase": "publish-and-first-view",
+          "bytes": 169218048,
+          "sample_window_ms": [66181.2394, 66217.9874],
+          "processes": [
+            [85728, "GPU", 28069888],
+            [9832, "network.mojom.NetworkService", 15192064],
+            [81024, "tracing.mojom.TracingService", 18640896],
+            [18628, "browser", 24326144],
+            [68032, "renderer", 82989056]
+          ]
+        },
+        {
+          "phase": "first-compressed-transfer",
+          "bytes": 171843584,
+          "sample_window_ms": [102696.5602, 102735.639],
+          "processes": [
+            [85728, "GPU", 27697152],
+            [18628, "browser", 24432640],
+            [81024, "tracing.mojom.TracingService", 18812928],
+            [9832, "network.mojom.NetworkService", 15724544],
+            [68032, "renderer", 85176320]
+          ]
+        },
+        {
+          "phase": "first-compressed-eof",
+          "bytes": 175673344,
+          "sample_window_ms": [102792.0212, 102826.1279],
+          "processes": [
+            [85728, "GPU", 27697152],
+            [68032, "renderer", 89559040],
+            [81024, "tracing.mojom.TracingService", 18812928],
+            [9832, "network.mojom.NetworkService", 14929920],
+            [18628, "browser", 24674304]
+          ]
+        },
+        {
+          "phase": "first-worker-index-and-handoff",
+          "bytes": 298012672,
+          "sample_window_ms": [195424.5888, 195491.0143],
+          "processes": [
+            [81024, "tracing.mojom.TracingService", 19316736],
+            [85728, "GPU", 28663808],
+            [9832, "network.mojom.NetworkService", 14868480],
+            [18628, "browser", 65622016],
+            [68032, "renderer", 169541632]
+          ]
+        },
+        {
+          "phase": "first-worker-verified",
+          "bytes": 283566080,
+          "sample_window_ms": [202708.1536, 202747.5502],
+          "processes": [
+            [85728, "GPU", 28659712],
+            [9832, "network.mojom.NetworkService", 14987264],
+            [18628, "browser", 63852544],
+            [68032, "renderer", 156725248],
+            [81024, "tracing.mojom.TracingService", 19341312]
+          ]
+        },
+        {
+          "phase": "independent-http-receipt",
+          "bytes": 282963968,
+          "sample_window_ms": [203755.0124, 203791.0639],
+          "processes": [
+            [85728, "GPU", 28827648],
+            [9832, "network.mojom.NetworkService", 14987264],
+            [18628, "browser", 64253952],
+            [68032, "renderer", 155561984],
+            [81024, "tracing.mojom.TracingService", 19333120]
+          ]
+        },
+        {
+          "phase": "sanitized-reclaim-compatibility",
+          "bytes": 244031488,
+          "sample_window_ms": [207931.8703, 207970.0159],
+          "processes": [
+            [85728, "GPU", 29372416],
+            [81024, "tracing.mojom.TracingService", 19353600],
+            [9832, "network.mojom.NetworkService", 14880768],
+            [18628, "browser", 64802816],
+            [68032, "renderer", 115621888]
+          ]
+        },
+        {
+          "phase": "fresh-compressed-transfer",
+          "bytes": 266452992,
+          "sample_window_ms": [294538.6676, 294579.3687],
+          "processes": [
+            [9832, "network.mojom.NetworkService", 15237120],
+            [81024, "tracing.mojom.TracingService", 18882560],
+            [18628, "browser", 87371776],
+            [68032, "renderer", 115912704],
+            [85728, "GPU", 29048832]
+          ]
+        },
+        {
+          "phase": "fresh-compressed-eof",
+          "bytes": 286801920,
+          "sample_window_ms": [295422.4548, 295457.9248],
+          "processes": [
+            [85728, "GPU", 29057024],
+            [9832, "network.mojom.NetworkService", 15253504],
+            [18628, "browser", 90062848],
+            [68032, "renderer", 133341184],
+            [81024, "tracing.mojom.TracingService", 19087360]
+          ]
+        },
+        {
+          "phase": "fresh-worker-index-and-handoff",
+          "bytes": 322215936,
+          "sample_window_ms": [322403.825, 322471.7659],
+          "processes": [
+            [85728, "GPU", 28909568],
+            [81024, "tracing.mojom.TracingService", 19107840],
+            [9832, "network.mojom.NetworkService", 14979072],
+            [18628, "browser", 81440768],
+            [68032, "renderer", 177778688]
+          ]
+        }
+      ],
+      "first_decode_index_peak_increment_bytes": 154079232,
+      "first_document_event_windows_on_caller_clock_ms": {
+        "processor_ready": [200428.2547999881, 200430.48069998808],
+        "reader_ready": [202296.65479999405, 202298.88069999404],
+        "first_rows": [202320.7547999881, 202322.98069998808]
+      },
+      "clock_offset_bounds_ms": [59958.65479999405, 59960.88069999404],
+      "attribution": "The first index/handoff peak sample ended before first processor-ready, so that sample occurred during processing before detach and reader adoption. The highest sample occurred during the fresh view before verification. Process totals cannot identify an allocation source.",
+      "first_decode_index_peak_process_deltas_bytes": {
+        "renderer": 104689664,
+        "browser": 44224512
+      },
+      "fresh_peak_process_deltas_bytes": {
+        "renderer": 112926720,
+        "browser": 60043264
+      }
+    },
+    "foreground": {
+      "coverage": "inconclusive",
+      "overlap": 40,
+      "baselineP95Ms": 2.440099999999802,
+      "loadP95Ms": 3.1886999999987893,
+      "clock_mapping_width_ms": 17.55908203125,
+      "reason": "clock mapping uncertainty exceeds 10ms"
+    },
+    "manifest_pending_bodies_unobserved": 1,
+    "failures": {
+      "functional": "Fresh view did not produce verified rows before the unchanged deadline after a complete compressed transfer. The remaining Playwright wait was 123,269 ms.",
+      "measurement": "The 16 MiB bounded CDP trace read failed closed after both above-cap samples were already observed. The sampled increment is a lower bound on the peak.",
+      "cleanup": "First actual persistent browser close timed out. Same supervisor stdin status id 100 and close id 101 reached the exact retained owner. The failed test exit was preserved."
+    },
+    "cleanup": {
+      "actualHandleJoined": true,
+      "pipesClosed": true,
+      "sandboxRemoved": true,
+      "recovered": false,
+      "scope": "observed sandbox root removed after native closure",
+      "browserJoined": true,
+      "pendingControls": 0,
+      "nativeExit": 0,
+      "residual_task_scratch": {
+        "owner": "Sanitized archive qualification developer",
+        "bytes": 1059267766,
+        "descendants": 384,
+        "marker_and_containment_verified": true,
+        "removed": true,
+        "empty_task_root_removed": true
+      }
+    }
+  },
+  "test_source_final_sha256": {
+    "hmem-core/test/HMem/DB/SessionArchive/ReaderSpec.hs": "66c1d89524c24a3f3f40b9a5b55a4fa7bf8a45a3c85caf8baf35ed436c2a1422",
+    "hmem-mcp/test/HMem/MCP/SessionFollowerSpec.hs": "7c6fc526b3ca4537fc1489ce8060bc32d7417eae1620d4a68179de615fb4af83",
+    "hmem-server/app-harness/Main.hs": "d55b4575e60a0482c55e19a00171adb58d6d7ecedfe9a71cb25facda7638545b",
+    "hmem-server/frontend/tests-js/session-archive.browser.test.js": "f726219e249d4dd73506033b626037c673b7e46f28636e57f8f3cff0a04f39c3",
+    "hmem-server/frontend/tests-js/session-archive.integration.browser.test.js": "fc06e477fb8b563074a59839b944cc2f46528d0d8119e6986c3e108354b0376a",
+    "hmem-server/frontend/tests-js/support/run-sanitized-archive-qualification.mjs": "39e5e25e8e297df079ef54c54a99a9384ffd640c1d72e6bae33e8a802b19de92",
+    "hmem-server/frontend/tests-js/support/session-archive-memory.mjs": "9c93a0c3be8ca590b5032f713050ecedcb9511bbd268d27b06c31d0f8bda2312",
+    "hmem-server/test/HMem/Server/Archive/MaintenanceQualificationSpec.hs": "a076cf8467bb28dba6d99b30cbe3640a49b7a15d4973ee19633a8c9d8e85de1a",
+    "hmem-server/test/HMem/Server/Archive/WorkerSpec.hs": "3a6830b66db55114b0ccb9593c0584810c6812f58d427b1412bdb330ebdf8237",
+    "hmem-server/test/HMem/Server/SessionArchiveReaderSpec.hs": "4a2f6554cbdd9e2cf9fa74306df1f82da95cdd4dcba79000f14e8cad1f178a56"
+  },
+  "scratch_disposition": "The exact task-owned .tmp/sealed-archives-eab4ad17 root was reused and removed after verified joins. Its temporary 2 MiB legacy receipt was reduced to this evidence, then deleted after SHA-256 verification. Older qualification roots were preserved."
+}

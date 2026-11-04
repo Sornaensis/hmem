@@ -11,6 +11,7 @@ import {pipeline} from 'node:stream/promises'
 import {once,EventEmitter} from 'node:events'
 import os from 'node:os'
 import {openSessionExplorer,continuousScrollStep} from './support/sessions-ux-fixture.mjs'
+import {attributedProcessTotals,memorySnapshot,privateFootprint} from './support/session-archive-memory.mjs'
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex')
 const hashFile=async path=>{const digest=createHash('sha256');for await(const bytes of createReadStream(path,{highWaterMark:65536}))digest.update(bytes);return digest.digest('hex')}
 async function renderedLinks(h,destination,expected,kind='plain'){
@@ -281,50 +282,18 @@ async function readQualificationEvidence(path=resolve('perf/session-archive.qual
   return evidence
 }
 
-function diagnosticCategories(values) {
-  const counts=Object.create(null),maximum=64;let uncounted=0
-  for(const value of values){const name=typeof value==='string'?value:'<absent>';if(name.length>128 || (!(name in counts)&&Object.keys(counts).length===maximum)){uncounted++;continue}counts[name]=(counts[name] || 0)+1}
-  return {counts,uncounted}
-}
-function attributedProcessTotals(events,requestGuid,actual,levelOfDetail) {
-  // Perfetto ec4b996c export_json.cc emits an internal snapshot row ID, not
-  // Chromium's CDP request GUID. Bind the single snapshot to the successful
-  // explicit GlobalMemoryDump interval; never infer an ID offset or use other rows.
-  const requests=events.filter(event=>event.name==='GlobalMemoryDump')
-  assert.equal(requests.length,2,'one explicit global request interval required')
-  const begin=requests.find(event=>event.ph==='b'),end=requests.find(event=>event.ph==='e')
-  assert.ok(begin&&end,'global request begin and end required')
-  assert.equal(begin.args?.dump_guid,requestGuid,'global request GUID must match CDP receipt')
-  assert.equal(begin.args?.success,true,'global request must report success')
-  assert.equal(begin.args?.dump_type,'explicitly_triggered','explicit global request required')
-  assert.equal(begin.args?.level_of_detail,levelOfDetail,'global request detail must match')
-  const identity=event=>({pid:event.pid,scope:event.scope,id:event.id,id2:event.id2})
-  assert.ok(typeof begin.id==='string'||typeof begin.id2?.local==='string'||typeof begin.id2?.global==='string','global request trace identity required')
-  assert.deepEqual(identity(end),identity(begin),'global request end must match begin identity')
-  assert.ok(Number.isFinite(begin.ts)&&Number.isFinite(end.ts)&&begin.ts<=end.ts,'ordered global request timestamps required')
-  const owned=actual.map(process=>process.id).sort((a,b)=>a-b)
-  const processBegins=events.filter(event=>event.name==='ProcessMemoryDump'&&event.ph==='b')
-  assert.deepEqual(processBegins.map(event=>event.pid).sort((a,b)=>a-b),owned,'each owned PID must begin the requested dump exactly once')
-  assert.ok(processBegins.every(event=>event.args?.dump_guid===requestGuid&&Number.isFinite(event.ts)&&event.ts>=begin.ts&&event.ts<=end.ts),'process request GUIDs and timestamps must match global interval')
-  const selected=events.filter(event=>event.ph==='v'&&event.args?.dumps?.process_totals)
-  assert.ok(selected.length,'explicit request must provide process totals')
-  const first=selected[0]
-  assert.ok(typeof first.id==='string'&&first.id.length>0&&Number.isFinite(first.ts),'exported snapshot identity and timestamp required')
-  assert.ok(selected.every(event=>event.id===first.id&&event.ts===first.ts&&event.args.dumps.level_of_detail===levelOfDetail),'one unambiguous exported snapshot and detail required')
-  assert.ok(first.ts>=begin.ts&&first.ts<=end.ts,'exported snapshot must lie inside requested interval')
-  assert.deepEqual(selected.map(event=>event.pid).sort((a,b)=>a-b),owned,'requested snapshot must cover each owned PID exactly once')
-  return {attribution:{basis:'explicit-global-request-span',requestGuid,exportRowId:first.id,snapshotTimestamp:first.ts,levelOfDetail,requestBegin:memoryEventMetadata(begin),requestEnd:memoryEventMetadata(end),processRequestPids:owned},processes:selected.map(event=>({pid:event.pid,totals:event.args.dumps.process_totals,allocatorNames:Object.keys(event.args.dumps.allocators || {}).filter(name=>/partition|v8|level|sqlite|file|malloc/.test(name)).slice(0,24),exportRowId:event.id}))}
-}
-function memoryEventMetadata(event) {
-  const short=value=>typeof value==='string'?value.slice(0,128):typeof value==='number'||typeof value==='boolean'?value:undefined
-  return {pid:event.pid,tid:event.tid,ph:short(event.ph),id:short(event.id),id2:event.id2?{local:short(event.id2.local),global:short(event.id2.global)}:undefined,scope:short(event.scope),s:short(event.s),name:short(event.name),ts:event.ts,dur:event.dur,argsKeys:Object.keys(event.args || {}).slice(0,16),dumpsKeys:Object.keys(event.args?.dumps || {}).slice(0,16),levelOfDetail:short(event.args?.dumps?.level_of_detail),dumpGuid:short(event.args?.dump_guid),success:short(event.args?.success),dumpType:short(event.args?.dump_type),requestLevelOfDetail:short(event.args?.level_of_detail)}
-}
 test('requested memory dump selection rejects ambiguous attribution, detail and PID coverage',()=>{
   const actual=[{id:1,type:'browser'},{id:2,type:'renderer'}],guid='0x2',detail='background'
   const source=[{name:'GlobalMemoryDump',ph:'b',pid:1,id2:{local:'0x7'},scope:'memory',ts:10,args:{dump_guid:guid,success:true,dump_type:'explicitly_triggered',level_of_detail:detail}},{name:'GlobalMemoryDump',ph:'e',pid:1,id2:{local:'0x7'},scope:'memory',ts:30},...[1,2].map(pid=>({name:'ProcessMemoryDump',ph:'b',pid,ts:15,args:{dump_guid:guid}})),...[1,2].map(pid=>({ph:'v',id:'0x0',pid,ts:20,args:{dumps:{level_of_detail:detail,process_totals:{private_footprint_bytes:'10'}}}}))]
   const result=attributedProcessTotals(source,guid,actual,detail)
   assert.equal(result.attribution.requestGuid,'0x2');assert.equal(result.attribution.exportRowId,'0x0')
   assert.deepEqual(result.processes.map(value=>value.exportRowId),['0x0','0x0'])
+  assert.equal(privateFootprint(result.processes),32)
+  assert.deepEqual(result.processes.map(value=>value.privateBytes),[16,16])
+  const footprint=value=>({totals:{private_footprint_bytes:value}})
+  for(const value of ['','nope','10x','-10','0x10','1.0',' 10','20000000000000',42])assert.throws(()=>privateFootprint([footprint(value)]),/private footprint/)
+  assert.throws(()=>privateFootprint([footprint('1fffffffffffff'),footprint('1')]),/safe total/)
+  assert.throws(()=>privateFootprint([footprint('0')]),/positive/)
   const invalid=[
     events=>{delete events[0].args.dump_guid},events=>{events[0].args.dump_guid='0x1'},
     events=>events.pop(),events=>events.push(structuredClone(events.at(-1))),
@@ -341,34 +310,6 @@ test('requested memory dump selection rejects ambiguous attribution, detail and 
   ]
   for(const [index,mutate]of invalid.entries()){const events=structuredClone(source);mutate(events);assert.throws(()=>attributedProcessTotals(events,guid,actual,detail),undefined,'invalid causal input '+index)}
 })
-async function memorySnapshot(page,{levelOfDetail='detailed'}={}) {
-  assert.ok(['background','light','detailed'].includes(levelOfDetail))
-  const cdp=await page.context().browser().newBrowserCDPSession()
-  let handle,text='',observedCharacters=0,observedUtf8Bytes=0,dumpGuid,traceLoss,observedDumpGuids=[],memoryMetadata
-  try {
-    await cdp.send('Tracing.start',{transferMode:'ReturnAsStream',traceConfig:{recordMode:'recordUntilFull',includedCategories:['disabled-by-default-memory-infra'],memoryDumpConfig:{triggers:[]}}})
-    const dump=await cdp.send('Tracing.requestMemoryDump',{deterministic:false,levelOfDetail});dumpGuid=dump.dumpGuid
-    assert.equal(dump.success,true,'native memory dump must be supported')
-    const complete=new Promise(resolve=>cdp.once('Tracing.tracingComplete',resolve))
-    await cdp.send('Tracing.end');const receipt=await complete;traceLoss=receipt.dataLossOccurred;assert.equal(receipt.dataLossOccurred,false,'native memory trace must explicitly report no data loss');handle=receipt.stream
-    while(true){const part=await cdp.send('IO.read',{handle,size:65536});assert.notEqual(part.base64Encoded,true,'plain JSON diagnostic stream required');observedCharacters+=part.data.length;observedUtf8Bytes+=Buffer.byteLength(part.data);assert.ok(observedCharacters<=16777216,'bounded diagnostic trace');text+=part.data;if(part.eof)break}
-    await cdp.send('IO.close',{handle});handle=null
-    const events=JSON.parse(text).traceEvents
-    observedDumpGuids=[...new Set(events.filter(event=>event.ph==='v'&&event.args?.dumps?.process_totals).map(event=>String(event.id).slice(0,128)))].slice(0,16)
-    const actual=await cdp.send('SystemInfo.getProcessInfo'),targets=await cdp.send('Target.getTargets')
-    memoryMetadata={ownedProcesses:actual.processInfo.map(value=>({pid:value.id,type:value.type})).slice(0,16),totals:events.filter(event=>event.ph==='v'&&event.args?.dumps?.process_totals).slice(0,16).map(memoryEventMetadata),requests:events.filter(event=>event.name==='GlobalMemoryDump'||event.name==='ProcessMemoryDump').slice(0,16).map(memoryEventMetadata)}
-    const {processes,attribution}=attributedProcessTotals(events,dump.dumpGuid,actual.processInfo,levelOfDetail)
-    for(const process of processes){process.type=actual.processInfo.find(value=>value.id===process.pid)?.type || 'unknown';process.name=events.find(value=>value.ph==='M'&&value.pid===process.pid&&value.name==='process_name')?.args?.name || ''}
-    const missing=actual.processInfo.filter(value=>!processes.some(process=>process.pid===value.id))
-    assert.equal(missing.length,0,'every browser-owned native process needs a memory sample: '+JSON.stringify(missing))
-    assert.ok(processes.every(process=>process.type!=='unknown'&&process.totals.private_footprint_bytes),'native process identity + footprint required')
-    const browserVersion=await cdp.send('Browser.getVersion')
-    return {requestGuid:dump.dumpGuid,exportRowId:attribution.exportRowId,attribution,traceLoss:!!receipt.dataLossOccurred,trace:{levelOfDetail,characters:observedCharacters,utf8Bytes:observedUtf8Bytes,categories:diagnosticCategories(events.map(event=>event.cat))},processes,browserVersion,workerTargets:targets.targetInfos.filter(target=>target.type==='worker').map(target=>({id:target.targetId,type:target.type,url:target.url})),totalPrivateBytes:processes.reduce((total,process)=>total+parseInt(process.totals.private_footprint_bytes,16),0)}
-  }catch(error){
-    error.diagnostic={levelOfDetail,deterministic:false,unit:'decoded UTF16 characters',capCharacters:16777216,requestedReadBytes:65536,observedCharacters,observedUtf8Bytes,dumpGuid,observedDumpGuids,traceLoss,memoryMetadata,categoriesInRetainedPrefix:diagnosticCategories((function*(){for(const match of text.matchAll(/"cat"\s*:\s*"([^"\\]*)"/g))yield match[1]})())}
-    throw error
-  }finally{if(handle)await cdp.send('IO.close',{handle});await cdp.detach()}
-}
 
 // A stuck diagnostic cannot keep the owned fixture alive indefinitely. The
 // caller's finally closes the actual BrowserServer and HTTP handles on expiry.
@@ -708,7 +649,7 @@ test('paired native memory dump modes retain process coverage',{skip:process.env
   const scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
   assert.ok(profile.startsWith(scratch+sep));await mkdir(profile)
   const receipt={kind:'paired-memory-dump-mode',at:new Date().toISOString(),deterministic:false,categoryConfig:{includedCategories:['disabled-by-default-memory-infra']},capCharacters:16777216,diagnosticUnit:'decoded UTF16 characters',browserImage:image,sourceHashes:{},snapshots:[],status:'running'}
-  for(const path of ['tests-js/session-archive.browser.test.js','tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs'])receipt.sourceHashes[path]=await hashFile(path)
+  for(const path of ['tests-js/session-archive.browser.test.js','tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','tests-js/support/session-archive-memory.mjs'])receipt.sourceHashes[path]=await hashFile(path)
   const deadline=Date.now()+60000
   const bounded=async(action,label)=>{const remaining=deadline-Date.now();assert.ok(remaining>0,'Memory dump canary60s body deadline');let timer;try{return await Promise.race([action,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(label+' body deadline')),remaining)})])}finally{clearTimeout(timer)}}
   let owner,h,primary
@@ -823,7 +764,7 @@ test('persistent profile canary and repeated native tracing idle control',{skip:
   assert.equal(await hashFile(executable),image.sha256)
   const scratch=resolve('../../.tmp/sealed-archives-e0ac6260'),profile=resolve(scratch,'archive-profile-'+randomUUID())
   assert.ok(profile.startsWith(scratch+sep));await mkdir(profile)
-  const inputs={};for(const path of ['tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','tests-js/session-archive.browser.test.js'])inputs[path]=await hashFile(path)
+  const inputs={};for(const path of ['tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','tests-js/support/session-archive-memory.mjs','tests-js/session-archive.browser.test.js'])inputs[path]=await hashFile(path)
   const receipt={at:new Date().toISOString(),kind:'persistent-profile-and-idle-tracing',contextMode:'task-owned persistent normal profile',method:'56 separate native Tracing.start/end snapshots; no archive processing during idle control; no forced GC',inputReferenceAttempt:0,inputHashes:inputs,browserImage:image,nodeImage:{path:process.execPath,sha256:await hashFile(process.execPath)},sources:[{url:'https://playwright.dev/docs/api/class-browsercontext',fact:'Nonpersistent browser contexts do not write browsing data to disk.'},{url:'https://chromium.googlesource.com/chromium/src/+/main/storage/browser/file_system/file_system_options.h',fact:'FileSystemOptions receives profile mode and force-in-memory choices; incognito filesystems use memory.'},{url:'https://raw.githubusercontent.com/chromium/chromium/main/storage/browser/file_system/file_system_options.cc',fact:'is_in_memory returns force_in_memory_ || is_incognito().'}],samples:[],status:'running'}
   let h,launchOwner,primary,safeToDelete=false
   const deadline=Date.now()+120000
@@ -1499,7 +1440,7 @@ test('ready archive idle same-cadence memory control',{skip:process.env.HMEM_ARC
   assert.ok(evidence.diagnostics.length<4);assert.ok(Buffer.byteLength(JSON.stringify(evidence))+131072<=1048576,'reserve bounded idle receipt before launch')
   const image=evidence.browserImage;assert.equal(await hashFile(image.path),image.sha256)
   const receipt={kind:'ready-archive-idle-same-dump-cadence',status:'running',at:new Date().toISOString(),purpose:'Natural application idle plus measurement; application timers remain active. Diagnostic only, not pure tracing or resource acceptance; no subtraction from prior failures.',contextMode:'task-owned persistent normal profile',observationsAfterBaseline:94,expectedTotalNativeSamples:95,cadenceMs:1000,memoryDumpMode:'background',deterministic:false,limits:{ownedBodyMs:180000,commandMs:2000,dumpMs:10000,lastSamples:8},phaseBoundary:'No page, navigation or disk-count operations between Ready and final idle measurement; disk verification follows all measurements.',browserImage:image,inputHashes:{},samples:[],maxima:{privateBytes:null,incrementBytes:null,perProcess:{},isolates:{},gapMs:0}}
-  for(const input of ['src/session-archive-store.js','src/session-archive-worker.js','tests-js/session-archive.browser.test.js','tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','../static/index.html',...Object.keys(await readdir('../static/assets').then(names=>Object.fromEntries(names.map(name=>['../static/assets/'+name,true]))))])receipt.inputHashes[input]=await hashFile(input)
+  for(const input of ['src/session-archive-store.js','src/session-archive-worker.js','tests-js/session-archive.browser.test.js','tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','tests-js/support/session-archive-memory.mjs','../static/index.html',...Object.keys(await readdir('../static/assets').then(names=>Object.fromEntries(names.map(name=>['../static/assets/'+name,true]))))])receipt.inputHashes[input]=await hashFile(input)
   receipt.nodeImage={path:process.execPath,sha256:await hashFile(process.execPath)}
   const body={owner:null,abort:new AbortController(),current(){this.abort.signal.throwIfAborted()}},began=performance.now()
   const timer=setTimeout(()=>{body.abort.abort(Error('ready_idle_owned_deadline'));if(body.owner)body.retirement=body.owner.close().then(()=>{body.retirementResult={closed:true}},error=>{body.retirementResult={failure:error.message}})},180000)
@@ -1566,7 +1507,7 @@ test('scale qualification uses actual complete browser archives',{skip:process.e
   async function include(path,label=path){inputHashes[label]=hash(await readFile(path));inputPaths[label]=path;assert.ok(Object.keys(inputHashes).length<=512)}
   async function sources(directory){for(const entry of await readdir(directory,{withFileTypes:true})){const path=directory+'/'+entry.name;if(entry.isDirectory())await sources(path);else if(entry.isFile()&&/\.(elm|js|css)$/.test(path))await include(path)}}
   await sources('src')
-  for(const path of ['package-lock.json','elm.json','vite.config.js','tests-js/session-archive.browser.test.js','tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','tests-js/support/observation-discovery-adapter.mjs','perf/fixtures.mjs','public/hmem-runtime-config.js'])await include(path)
+  for(const path of ['package-lock.json','elm.json','vite.config.js','tests-js/session-archive.browser.test.js','tests-js/hierarchy-fixture.mjs','tests-js/support/sessions-ux-fixture.mjs','tests-js/support/session-archive-memory.mjs','tests-js/support/observation-discovery-adapter.mjs','perf/fixtures.mjs','public/hmem-runtime-config.js'])await include(path)
   const assets={};for(const name of await readdir('../static/assets')){const path='../static/assets/'+name;assets[name]=hash(await readFile(path));inputPaths['asset:'+name]=path;inputHashes['asset:'+name]=assets[name]}
   inputHashes['node-image']=await hashFile(process.execPath);inputPaths['node-image']=process.execPath
   const environment={node:process.version,nodeImage:{path:process.execPath,sha256:inputHashes['node-image']},zlib:process.versions.zlib,platform:os.platform(),release:os.release(),arch:os.arch(),cpu:os.cpus()[0]?.model,logicalCpus:os.cpus().length,totalMemory:os.totalmem()}

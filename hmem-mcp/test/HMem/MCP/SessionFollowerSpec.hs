@@ -30,6 +30,9 @@ import HMem.Config qualified as Config
 import HMem.DB.AgentSession qualified as Sessions
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool (createPool, runSession)
+import HMem.DB.SessionArchive qualified as Archive
+import HMem.DB.SessionArchive.Maintenance qualified as ArchiveMaintenance
+import HMem.DB.SessionArchive.Reader qualified as ArchiveReader
 import Data.Pool (destroyAllResources)
 import Hasql.Session qualified as SQL
 import HMem.DB.RequestContext
@@ -43,8 +46,11 @@ import HMem.MCP.Tools (handleToolCall)
 import HMem.MCP.TaskTriage (validateArchive, validateArchiveWith)
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
+import HMem.Server.Archive.Worker (runArchiveLease)
 import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
 import HMem.Server.WebSocket (newWSState)
+import HMem.SessionArchive.Codec qualified as ArchiveCodec
+import HMem.SessionArchive.Replacement qualified as Replacement
 import HMem.Types (Workspace(..))
 import Network.HTTP.Client (Manager, newManager, closeManager, defaultManagerSettings, managerIdleConnectionCount)
 import Network.Wai.Handler.Warp (testWithApplication)
@@ -145,6 +151,40 @@ spec = describe "Session follower" $ do
                   field "isError" result `shouldBe` Just (Bool True)
                   doesPathExist missing `shouldReturn` False
           runSession env.pool (SQL.sql ("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM tasks WHERE id='"<>BS8.pack (show wid)<>"' AND status='done') THEN RAISE EXCEPTION 'Task status changed'; END IF; END $$"))
+
+  it "SanitizedQualification reads and triages an actual published sanitized generation through MCP" $
+    withBackendUsing credentialBackend $ \env wid manager base -> do
+      let original="{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"encrypted_content\":\"opaque\"}}\r\n[]"
+          sanitized="{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"encrypted_content\":\"Encrypted Payload\"}}\r\n[]"
+          encodedPolicy="{\"version\":1,\"eligible_from\":\"2000-01-01T00:00:00Z\",\"formats\":{\"codex_jsonl\":[{\"match\":{\"/type\":\"response_item\",\"/payload/type\":\"function_call\"},\"path\":\"/payload/encrypted_content\"}]}}"
+      policy <- either throwIO pure (Replacement.decodePolicy encodedPolicy)
+      ArchiveMaintenance.configureMaintenance env.pool (ArchiveMaintenance.InstallReplacement policy)
+      sid <- UUID.nextRandom
+      _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "codex_jsonl" "Sanitized MCP fixture" Nothing Nothing wid)
+      uploaded <- (.session) <$> Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 original True)
+      _ <- Sessions.terminateSession env.pool wid sid
+        (Core.TerminateSession uploaded.committedBytes uploaded.revision uploaded.committedBytes (Core.sessionSha256 original))
+      runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>BS8.pack (show wid)<>"'")
+      ArchiveReader.ensureArchive env.pool wid sid
+      implementation <- ArchiveCodec.codecImplementation
+      Just lease <- Archive.claimArchive env.pool implementation
+      runArchiveLease env.pool lease
+      let arguments=["workspace_id" .= wid,"session_id" .= sid]
+          call name fields=handleToolCall manager base Nothing identity
+            (object ["name" .= (name::Text),"arguments" .= object fields])
+          result key=nested ["structuredContent",key]
+      receipt <- call "session_archive_manifest" arguments
+      result "generation_id" receipt `shouldBe` Just (toJSON lease.generationId)
+      result "content_sha256" receipt `shouldBe` Just (String (Core.sessionSha256 sanitized))
+      exact <- call "session_evidence" arguments
+      result "data_base64" exact `shouldBe` Just (String (Wire.encodeSessionBytes original))
+      selected <- call "session_evidence" (arguments<>["sanitized_generation_id" .= lease.generationId])
+      result "data_base64" selected `shouldBe` Just (String (Wire.encodeSessionBytes sanitized))
+      withSourceFile "" $ \destination -> do
+        removeFile destination
+        exported <- call "task_triage" ["workspace_id" .= wid,"task_id" .= wid,"path" .= destination,"representation" .= ("available-v1"::Text)]
+        result "session_count" exported `shouldBe` Just (Number 1)
+        withBinaryFile destination ReadMode (validateArchiveWith True) `shouldReturn` 1
 
   it "HistoricalImport rejects invalid tails before remote registration and refuses live controls during validation" $
     withBackend $ \env wid manager base -> forM_ ["{}\n{", "{}\n\n",BS.pack [255],"{}\nfalse garbage"] $ \invalid ->

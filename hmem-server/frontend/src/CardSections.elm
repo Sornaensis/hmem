@@ -1,4 +1,4 @@
-module CardSections exposing (cardDisclosure, detailsId, disclosure, disclosureIcon, fact, facts, focusIcon, horizontalDisclosureIcon, metadata, panel, section, tabs, tabsWithEvidence, taskTabs)
+module CardSections exposing (cardDisclosure, detailsId, disclosure, disclosureIcon, fact, facts, focusIcon, horizontalDisclosureIcon, metadata, panel, projectTabs, section, taskTabs)
 
 import Html exposing (Html, div, footer, h4, label, span, text)
 import Html.Attributes exposing (attribute, class)
@@ -7,14 +7,9 @@ import Svg
 import Svg.Attributes as SvgAttr
 
 
-tabs : String -> String -> String -> (String -> msg) -> Html msg
-tabs kind entityId current select =
-    tabsWithEvidence True kind entityId current select
-
-
-tabsWithEvidence : Bool -> String -> String -> String -> (String -> msg) -> Html msg
-tabsWithEvidence evidenceAvailable kind entityId current select =
-    sectionTabs evidenceAvailable kind entityId current select [ ( "work", "Work" ), ( "evidence", "Evidence" ), ( "history", "History" ) ]
+projectTabs : String -> String -> (String -> msg) -> Html msg
+projectTabs entityId current select =
+    sectionTabs True "Project" entityId current select [ ( "work", "Work" ), ( "history", "History" ) ]
 
 
 taskTabs : Maybe Int -> Maybe Int -> String -> String -> (String -> msg) -> Html msg

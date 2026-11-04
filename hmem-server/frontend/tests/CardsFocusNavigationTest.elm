@@ -770,6 +770,52 @@ suite =
                     , \_ -> Query.find [ Selector.class "card-project" ] expanded |> Query.has [ Selector.class "editable-text", Selector.text "editable-parent" ]
                     ]
                     ()
+        , test "Project Work replaces a remembered Evidence section and rejects removed selections" <|
+            \_ ->
+                let
+                    parent =
+                        project "stale-section"
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ parent ] [] model
+
+                    cards =
+                        seeded.cards
+
+                    remembered =
+                        { seeded | cards = { cards | projectSections = Dict.singleton parent.id "evidence" } }
+
+                    reopened =
+                        Cards.update (ToggleCardExpand parent.id) remembered |> Tuple.first
+
+                    ignored =
+                        Cards.update (SetProjectCardSection parent.id "evidence") reopened |> Tuple.first
+
+                    history =
+                        Cards.update (SetProjectCardSection parent.id "history") ignored |> Tuple.first
+
+                    mounted =
+                        { remembered | cards = { cards | projectSections = Dict.singleton parent.id "evidence", expandedCards = Dict.singleton parent.id True } }
+
+                    view source =
+                        Cards.viewProjectsTree workspaceId source |> Query.fromHtml
+
+                    visibleWork source =
+                        view source
+                            |> Query.find [ Selector.id "project-stale-section-work" ]
+                            |> Query.hasNot [ Selector.attribute (Html.Attributes.hidden True) ]
+                in
+                Expect.all
+                    [ \_ -> Dict.get parent.id reopened.cards.projectSections |> Expect.equal (Just "work")
+                    , \_ -> Dict.get parent.id ignored.cards.projectSections |> Expect.equal (Just "work")
+                    , \_ -> Dict.get parent.id history.cards.projectSections |> Expect.equal (Just "history")
+                    , \_ -> Dict.get parent.id history.auditLog.historyExpanded |> Expect.equal (Just True)
+                    , \_ -> visibleWork reopened
+                    , \_ -> visibleWork mounted
+                    , \_ -> view mounted |> Query.hasNot [ Selector.id "project-stale-section-evidence" ]
+                    , \_ -> view mounted |> Query.hasNot [ Selector.id "project-stale-section-evidence-button" ]
+                    ]
+                    ()
         , test "task details unmount while collapsed and remain editable when expanded" <|
             \_ ->
                 let

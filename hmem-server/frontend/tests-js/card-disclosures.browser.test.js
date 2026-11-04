@@ -78,6 +78,64 @@ for (const width of [1440, 430]) test(`native card details keyboard and unique r
   } finally {await h.close()}
 })
 
+test('Project details keyboard navigation and reopen preserve Work and History in tree and focus', {timeout:30000}, async () => {
+  const f = hierarchyFixture()
+  f.projects = [f.projects[0]]
+  f.tasks = f.tasks.slice(0, 1)
+  const h = await openHierarchy(f)
+  const id = f.projects[0].id
+  const card = h.page.locator('#entity-' + id)
+  const disclosure = card.locator('.btn-extras-toggle')
+  const sections = card.getByRole('navigation', {name: 'Project sections'})
+  const work = sections.getByRole('button', {name: 'Work', exact: true})
+  const history = sections.getByRole('button', {name: 'History', exact: true})
+  const workPanel = card.locator('#project-' + id + '-work')
+  const historyPanel = card.locator('#project-' + id + '-history')
+  let historyRequests = 0
+  await h.page.route(url => url.pathname === '/api/v1/audit' && url.searchParams.get('entity_id') === id, async route => {
+    assert.equal(new URL(route.request().url()).searchParams.get('entity_type'), 'project')
+    historyRequests++
+    await route.fulfill({json: {items: [], has_more: false}})
+  })
+  try {
+    await h.start(); await h.idle()
+    await disclosure.click(); await h.idle()
+    assert.deepEqual(await sections.getByRole('button').allTextContents(), ['Work', 'History'])
+    assert.equal(await card.locator('#project-' + id + '-evidence').count(), 0)
+    assert.equal(await work.getAttribute('aria-pressed'), 'true')
+    assert.equal(await work.getAttribute('aria-controls'), await workPanel.getAttribute('id'))
+    assert.equal(await workPanel.getAttribute('aria-labelledby'), await work.getAttribute('id'))
+    assert.equal(await workPanel.locator('.project-next-tasks-section').isVisible(), true)
+    assert.equal(await historyPanel.isVisible(), false)
+    assert.equal(historyRequests, 0)
+
+    await work.focus(); await h.page.keyboard.press('Tab')
+    assert.equal(await history.evaluate(button => button === document.activeElement), true)
+    await h.page.keyboard.press('Space')
+    await historyPanel.getByText('No history entries').waitFor({state: 'visible', timeout: 10000})
+    assert.equal(await history.getAttribute('aria-pressed'), 'true')
+    assert.equal(await history.getAttribute('aria-controls'), await historyPanel.getAttribute('id'))
+    assert.equal(await historyPanel.getAttribute('aria-labelledby'), await history.getAttribute('id'))
+    assert.equal(await workPanel.isVisible(), false)
+    assert.equal(historyRequests, 1)
+
+    await disclosure.click(); await h.idle()
+    assert.equal(await sections.count(), 0)
+    await disclosure.click(); await h.idle()
+    assert.equal(await historyPanel.isVisible(), true)
+    assert.equal(historyRequests, 1)
+    await h.start('tab=projects&focus=project:' + id, id); await h.idle()
+    await card.locator('.card-project.card-context-selected').waitFor({state: 'visible', timeout: 10000})
+    assert.deepEqual(await sections.getByRole('button').allTextContents(), ['Work', 'History'])
+    await work.click()
+    await workPanel.waitFor({state: 'visible', timeout: 10000})
+    assert.equal(await work.getAttribute('aria-pressed'), 'true')
+    assert.equal(await historyPanel.isVisible(), false)
+    assert.deepEqual(h.errors, [])
+    assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 test('complete next work and blocked disclosure exceed both old limits and are independent of closed dependencies', {timeout:60000}, async () => {
   const h = await openHierarchy(fixture())
   try {

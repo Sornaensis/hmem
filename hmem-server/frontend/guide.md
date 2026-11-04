@@ -166,7 +166,9 @@ Uncheck **Show empty projects** to require a matching task in the subtree;
 ancestors stay visible.
 Workspace group disclosure is saved globally.
 
-Expand task details to switch between **Work**, **Evidence** and **History**.
+Expand project details to switch between **Work**, which shows next tasks and
+blocked work, and **History**. Expand task details to switch between **Work**,
+**Evidence** and **History**.
 The vertical double chevrons on the left reveal **Details** on hover or keyboard
 focus; creation actions sit on the right. Project, task and subtask footers show
 copyable identifiers, **Created** and **Updated**, including unavailable values.

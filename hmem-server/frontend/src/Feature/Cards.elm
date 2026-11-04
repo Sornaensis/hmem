@@ -113,6 +113,15 @@ selectCardSection kind entityId section model =
         ( model, Cmd.none )
 
 
+normalizeProjectCardSection : String -> String
+normalizeProjectCardSection section =
+    if section == "history" then
+        "history"
+
+    else
+        "work"
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
@@ -123,7 +132,7 @@ update msg model =
             else (model,Cmd.none)
 
         SetProjectCardSection project section ->
-            if Dict.member project model.projects && List.member section ["work","evidence","history"] then
+            if Dict.member project model.projects && section == normalizeProjectCardSection section then
                 selectCardSection "project" project section
                     (updateCardsModel (\state -> {state | projectSections = Dict.insert project section state.projectSections}) model)
             else (model,Cmd.none)
@@ -219,6 +228,12 @@ update msg model =
                 updatedCards =
                     { currentCards
                         | expandedCards = Dict.insert cardId newExpanded model.cards.expandedCards
+                        , projectSections =
+                            if newExpanded && branchKind == Just "project" then
+                                Dict.update cardId (Maybe.map normalizeProjectCardSection) currentCards.projectSections
+
+                            else
+                                currentCards.projectSections
                         , projectNextTasksLoading =
                             if shouldFetchProjectNextTasks then
                                 Dict.insert cardId True model.cards.projectNextTasksLoading
@@ -1834,16 +1849,15 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                     [ viewCardDescription model "project" project.id project.description ]
                 , if isExpanded model project.id then
                     let
-                        currentSection = Dict.get project.id model.cards.projectSections |> Maybe.withDefault "work"
+                        currentSection = Dict.get project.id model.cards.projectSections |> Maybe.withDefault "work" |> normalizeProjectCardSection
                         panel = CardSections.panel "project" project.id currentSection
                     in
                     div [ class "card-extras", id (CardSections.detailsId "project" project.id) ]
                         [ div [ class "card-details-toolbar" ]
                             [ CardSections.cardDisclosure True (CardSections.detailsId "project" project.id) ("project: " ++ project.name) (ToggleCardExpand project.id)
-                            , CardSections.tabs "Project" project.id currentSection (SetProjectCardSection project.id)
+                            , CardSections.projectTabs project.id currentSection (SetProjectCardSection project.id)
                             ]
                         , panel "work" [viewProjectNextTasksPanel projection model project]
-                        , panel "evidence" [p [class "card-meta"] [text "Open a task to view its evidence."]]
                         , panel "history" [Feature.AuditLog.viewEntityHistoryContent model "project" project.id]
                         ]
 

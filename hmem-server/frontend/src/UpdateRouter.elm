@@ -1029,6 +1029,9 @@ route msg model =
         ClearAuditFilters ->
             Ok (Feature.AuditLog.update msg model)
 
+        ToggleAuditAgentSessions ->
+            Ok (Feature.AuditLog.update msg model)
+
         LoadMoreAuditLog ->
             Ok (Feature.AuditLog.update msg model)
 

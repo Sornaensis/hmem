@@ -210,7 +210,7 @@ handleOwnedRaw ownedMsg model =
                             if Permissions.canViewCurrentWorkspaceAudit newModel then
                                 let
                                     filters =
-                                        workspaceAuditFilters wsId
+                                        AuditRequest.defaultFilters (Just wsId)
                                 in
                                 AuditRequest.replace filters newModel |> Tuple.mapFirst .auditLog
 
@@ -308,7 +308,7 @@ handleOwnedRaw ownedMsg model =
                                         if wsId == currentWsId && membershipModel.activeTab == AuditTab && sessionCanAdminWorkspace wsId sessionContext then
                                             let
                                                 filters =
-                                                    if membershipModel.auditLog.filters.workspaceId == Just wsId then membershipModel.auditLog.filters else workspaceAuditFilters wsId
+                                                    if membershipModel.auditLog.filters.workspaceId == Just wsId then membershipModel.auditLog.filters else AuditRequest.defaultFilters (Just wsId)
                                             in
                                             AuditRequest.restore filters membershipModel
 
@@ -630,19 +630,6 @@ sessionCanAdminWorkspace wsId sessionContext =
                 |> Maybe.map (\workspaceContext -> workspaceContext.workspaceId == wsId && workspaceContext.canAdmin)
                 |> Maybe.withDefault False
            )
-
-
-workspaceAuditFilters : String -> AuditLogFilters
-workspaceAuditFilters wsId =
-    { workspaceId = Just wsId
-    , entityType = Nothing
-    , entityId = Nothing
-    , action = Nothing
-    , since = Nothing
-    , until = Nothing
-    , limit = Just 50
-    , offset = Nothing
-    }
 
 
 {-| Compare with the trusted context before installing a refresh. A healthy

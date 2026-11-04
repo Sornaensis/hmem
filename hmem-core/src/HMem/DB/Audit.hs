@@ -11,6 +11,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.Aeson qualified as Aeson
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32)
+import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -126,10 +127,11 @@ getAuditLog pool q = do
                , q.until
                , fromIntegral lim :: Int32
                , fromIntegral off :: Int32
+               , fromMaybe True q.includeAgentSessions
                )
   runSession pool $ Session.statement params getAuditLogStatement
 
-type AuditLogParams = (Maybe UUID, Maybe Text, Maybe Text, Maybe Text, Maybe UTCTime, Maybe UTCTime, Int32, Int32)
+type AuditLogParams = (Maybe UUID, Maybe Text, Maybe Text, Maybe Text, Maybe UTCTime, Maybe UTCTime, Int32, Int32, Bool)
 
 getAuditLogStatement :: Statement.Statement AuditLogParams [AuditLogEntry]
 getAuditLogStatement = Statement.Statement sql encoder decoder True
@@ -144,16 +146,18 @@ getAuditLogStatement = Statement.Statement sql encoder decoder True
       , "  AND ($4::text IS NULL OR action::text = $4)"
       , "  AND ($5::timestamptz IS NULL OR changed_at >= $5)"
       , "  AND ($6::timestamptz IS NULL OR changed_at <= $6)"
+      , "  AND ($9::boolean OR entity_type NOT IN ('agent_session', 'task_session'))"
       , "ORDER BY changed_at DESC, id DESC"
       , "LIMIT $7 OFFSET $8"
       ]
     encoder =
-      contramap (\(a,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid)) <>
-      contramap (\(_,b,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,c,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,d,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,_,e,_,_,_) -> e) (Enc.param (Enc.nullable Enc.timestamptz)) <>
-      contramap (\(_,_,_,_,_,f,_,_) -> f) (Enc.param (Enc.nullable Enc.timestamptz)) <>
-      contramap (\(_,_,_,_,_,_,g,_) -> g) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,_,_,h) -> h) (Enc.param (Enc.nonNullable Enc.int4))
+      contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.timestamptz)) <>
+      contramap (\(_,_,_,_,_,f,_,_,_) -> f) (Enc.param (Enc.nullable Enc.timestamptz)) <>
+      contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,includeSessions) -> includeSessions) (Enc.param (Enc.nonNullable Enc.bool))
     decoder = Dec.rowList auditLogRowDecoder

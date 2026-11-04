@@ -54,7 +54,8 @@ async function setup() {
       const query = Object.fromEntries(url.searchParams); auditReads.push(query)
       const control = controls.find(control => !control.used && control.match(query))
       if (control) { control.used = true; control.arrive(); await control.wait }
-      const filtered = events.filter(entry => (!query.workspace_id || entry.workspace_id === query.workspace_id) && (!query.entity_type || entry.entity_type === query.entity_type) && (!query.action || entry.action === query.action))
+      const filtered = events.filter(entry => (!query.workspace_id || entry.workspace_id === query.workspace_id) && (!query.entity_type || entry.entity_type === query.entity_type) && (!query.action || entry.action === query.action)
+        && (query.include_agent_sessions !== 'false' || !['agent_session', 'task_session'].includes(entry.entity_type)))
       const offset = Number(query.offset || 0), limit = Number(query.limit || 50)
       return route.fulfill({ json: { items: filtered.slice(offset, offset + limit), has_more: filtered.length > offset + limit } })
     }
@@ -114,6 +115,8 @@ test('Audit destinations select actual Project Task Observation and active or se
     assert.equal(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('observation'), h.observation.id)
     assert.equal(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('focus'), null)
     await returnToAudit(h)
+    await h.page.getByRole('button', { name: 'Include Agent Sessions', exact: true }).click()
+    await row(h, 'active').waitFor()
     for (const [id, session, heading] of [['active', h.active, 'Audit active conversation'], ['saved', h.saved, 'Audit saved evidence']]) {
       phase = id
       await activate(h, id)
@@ -123,6 +126,7 @@ test('Audit destinations select actual Project Task Observation and active or se
       assert.equal(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('focus'), null)
       if (id === 'saved') { await h.page.getByText('Verified complete archive.', { exact: true }).waitFor(); assert.ok(h.archiveReads.some(path => path.endsWith('/content'))) }
       await returnToAudit(h)
+      assert.equal(h.auditReads.findLast(query => !query.entity_id).include_agent_sessions, 'true')
     }
     await activate(h, 'connection'); await h.page.locator('.session-detail-header').getByRole('heading', { name: 'Audit active conversation', exact: true }).waitFor(); await returnToAudit(h)
     await activate(h, 'connection', true); await h.page.locator('#entity-' + h.fixture.tasks[0].id).waitFor(); await returnToAudit(h)
@@ -176,9 +180,11 @@ test('missing deleted and forbidden targets have explicit outcomes and global cr
       await returnToAudit(h, true)
       assert.equal(await row(h, id).getAttribute('class'), 'audit-entry audit-entry-selected')
     }
+    await h.page.getByRole('button', { name: 'Include Agent Sessions', exact: true }).click()
     await activate(h, 'missing-session')
     await h.page.getByRole('alert').filter({ hasText: 'Session could not be loaded.' }).waitFor()
     await returnToAudit(h, true)
+    assert.equal(h.auditReads.findLast(query => !query.workspace_id && !query.entity_id).include_agent_sessions, 'true')
     assert.equal(await row(h, 'missing-session').getAttribute('class'), 'audit-entry audit-entry-selected')
     await activate(h, 'other-workspace')
     try { await h.page.getByText('You do not have access to this workspace or session scope', { exact: true }).waitFor({ timeout: 10000 }) }

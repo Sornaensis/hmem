@@ -474,7 +474,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       _ <- Task.updateTask env.pool frozenDone.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing)
       frozenBefore <- traverse (Task.getTask env.pool) [frozenTask.id,frozenDone.id]
       frozenEvents <- filter (\row -> jsonPath ["entity","type"] row.outboxEnvelope == Just (String "task")) <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
-      frozenAudit <- traverse (\id -> Audit.getAuditLog env.pool (AuditLogQuery Nothing (Just "task") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)) [frozenTask.id,frozenDone.id]
+      frozenAudit <- traverse (\id -> Audit.getAuditLog env.pool (AuditLogQuery Nothing (Just "task") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing Nothing)) [frozenTask.id,frozenDone.id]
       DBPool.runTransaction env.pool $ do
         Session.sql "ALTER TABLE projects DISABLE TRIGGER USER"
         Session.statement ancestor.id $ Statement.Statement "UPDATE projects SET deleted_at=now() WHERE id=$1"
@@ -500,7 +500,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         (((\(workspace,_) -> workspace) >$< Enc.param (Enc.nonNullable Enc.uuid)) <> ((\(_,project) -> project) >$< Enc.param (Enc.nonNullable Enc.uuid)))
         (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True) `shouldReturn` True
       traverse (Task.getTask env.pool) [frozenTask.id,frozenDone.id] `shouldReturn` frozenBefore
-      traverse (\id -> Audit.getAuditLog env.pool (AuditLogQuery Nothing (Just "task") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)) [frozenTask.id,frozenDone.id] `shouldReturn` frozenAudit
+      traverse (\id -> Audit.getAuditLog env.pool (AuditLogQuery Nothing (Just "task") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing Nothing)) [frozenTask.id,frozenDone.id] `shouldReturn` frozenAudit
       (filter (\row -> jsonPath ["entity","type"] row.outboxEnvelope == Just (String "task")) <$> listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100) `shouldReturn` frozenEvents
       Project.restoreProject env.pool ancestor.id `shouldReturn` True
       fmap (fmap (.status)) (Task.getTask env.pool frozenTask.id) `shouldReturn` Just Blocked
@@ -1999,6 +1999,32 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         filteredPage.items `shouldSatisfy` (not . null)
         all (\entry -> entry.entityId == T.pack (show firstProject.id)) filteredPage.items `shouldBe` True
 
+        DBPool.runSession ctx.deployedEnv.pool $ Session.statement (firstWorkspace.id, secondWorkspace.id) $ Statement.Statement
+          "INSERT INTO audit_log(workspace_id, entity_type, entity_id, action, changed_at) \
+          \VALUES ($1,'category','legacy','create','2024-01-01T12:00:00Z'), \
+          \       ($1,'task','first-task','create','2024-01-02T12:00:00Z'), \
+          \       ($2,'project','second-project','create','2024-01-03T12:00:00Z'), \
+          \       ($1,'agent_session','session','create','2024-01-04T12:00:00Z'), \
+          \       ($1,'task_session','connection','create','2024-01-05T12:00:00Z')"
+          ((fst >$< Enc.param (Enc.nonNullable Enc.uuid)) <> (snd >$< Enc.param (Enc.nonNullable Enc.uuid)))
+          Dec.noResult True
+        let mixedPath = "/api/v1/audit?since=2024-01-01T00:00:00Z&until=2024-01-06T00:00:00Z&limit=2"
+            scopedMixed = mixedPath <> "&workspace_id=" <> Text.encodeUtf8 (UUID.toText firstWorkspace.id)
+            getMixed token path = do
+              response <- requestWithHeaders ctx.deployedApplication methodGet path (authHeader token) ""
+              responseStatus response `shouldBe` status200
+              case decode (responseBody response) :: Maybe (PaginatedResult AuditLogEntry) of
+                Just page -> pure (map (.entityId) page.items, page.hasMore)
+                Nothing -> expectationFailure "invalid Audit page" >> fail "invalid Audit page"
+        getMixed superadminToken mixedPath `shouldReturn` (["connection", "session"], True)
+        getMixed superadminToken (mixedPath <> "&include_agent_sessions=true") `shouldReturn` (["connection", "session"], True)
+        getMixed superadminToken (mixedPath <> "&include_agent_sessions=false") `shouldReturn` (["second-project", "first-task"], True)
+        getMixed superadminToken (mixedPath <> "&include_agent_sessions=false&offset=2") `shouldReturn` (["legacy"], False)
+        getMixed workspaceAdminToken (scopedMixed <> "&include_agent_sessions=false") `shouldReturn` (["first-task", "legacy"], False)
+        getMixed workspaceAdminToken (scopedMixed <> "&entity_type=task_session") `shouldReturn` (["connection"], False)
+        deniedMixed <- requestWithHeaders ctx.deployedApplication methodGet (mixedPath <> "&include_agent_sessions=false") (authHeader workspaceAdminToken) ""
+        responseStatus deniedMixed `shouldBe` status403
+
   describe "Workspace Timeline HTTP contract" $ do
     it "lists, buckets, validates queries, and rejects missing or deleted workspaces" $ \(env, app) -> do
       workspace <- createTestWorkspace env "timeline-api"
@@ -3127,6 +3153,19 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       entityTypeToText ETObservation `shouldBe` "observation"
 
   describe "OpenAPI" $ do
+    it "documents the optional Audit session inclusion parameter" $ \(_,app) -> do
+      response <- request app methodGet "/api/v1/openapi.json" ""
+      responseStatus response `shouldBe` status200
+      let Just document = decode (responseBody response) :: Maybe Value
+      case jsonPath ["paths","/api/v1/audit","get","parameters"] document of
+        Just (Array params) -> do
+          let parameter = find ((== Just (String "include_agent_sessions")) . jsonField "name") (toList params)
+          (parameter >>= jsonField "in") `shouldBe` Just (String "query")
+          (parameter >>= jsonField "required") `shouldSatisfy` (\value -> value == Nothing || value == Just (Bool False))
+          (parameter >>= jsonField "schema" >>= jsonField "type") `shouldBe` Just (String "boolean")
+          (parameter >>= jsonField "description") `shouldSatisfy` isJust
+        _ -> expectationFailure "missing Audit list parameters"
+
     it "documents discovery public filter names and bounded live generations" $ \(_,app) -> do
       response <- request app methodGet "/api/v1/openapi.json" ""
       responseStatus response `shouldBe` status200
@@ -3524,11 +3563,11 @@ pauseAuditPath id = "/api/v1/audit/" <> Text.encodeUtf8 (T.pack (show id)) <> "/
 
 pauseProjectAudits :: TestEnv -> UUID -> IO [AuditLogEntry]
 pauseProjectAudits env id = Audit.getAuditLog env.pool
-  (AuditLogQuery Nothing (Just "project") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing)
+  (AuditLogQuery Nothing (Just "project") (Just (T.pack (show id))) Nothing Nothing Nothing (Just 100) Nothing Nothing)
 
 taskDueAudits :: TestEnv -> UUID -> IO [AuditLogEntry]
 taskDueAudits env taskId = Audit.getAuditLog env.pool
-  (AuditLogQuery Nothing (Just "task") (Just (T.pack (show taskId))) Nothing Nothing Nothing (Just 100) Nothing)
+  (AuditLogQuery Nothing (Just "task") (Just (T.pack (show taskId))) Nothing Nothing Nothing (Just 100) Nothing Nothing)
 
 -- Complete state comparison detects timestamp, entity, audit and outbox writes.
 planningDueState :: TestEnv -> IO Value

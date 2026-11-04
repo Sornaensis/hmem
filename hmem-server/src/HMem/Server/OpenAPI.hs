@@ -87,12 +87,17 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/projects/{projectId}" . _Just . put %~ fmap documentProjectPause
+  & paths . at "/api/v1/audit" . _Just . get . _Just . parameters . traversed %~ documentAuditListParameter
   & paths . at "/api/v1/audit/{auditId}/revert" . _Just . post . _Just . description ?~ "Authorized project replay restores canonical independent and retained pause intent. Ambiguous legacy transitions return audit_pause_provenance_missing (409); malformed canonical provenance returns audit_pause_provenance_invalid (409). Metadata replays preserve current pause intent. Task replay restores only supported fields changed by the historical operation. Due-only historical task updates return audit_due_operation_obsolete (409) without entity, timestamp, audit or outbox writes. Stored audit payloads remain unchanged. Lifecycle guards remain authoritative."
   & paths . at "/api/v1/tasks/batch-move" . _Just . post %~ fmap documentTaskBatchMove
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . post %~ fmap documentDependencyAdd
   & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
   where
+    documentAuditListParameter (Inline parameter)
+      | parameter ^. name == "include_agent_sessions" =
+          Inline (parameter & description ?~ "Omit or set true to include session lifecycle and task-connection events. Set false to exclude agent_session and task_session before pagination, alongside the other filters.")
+    documentAuditListParameter parameter = parameter
     documentSessionPath path item
       | "/archive" `isInfixOf` path = item
       | "/sessions" `isInfixOf` path = let document operation = documentSession operation

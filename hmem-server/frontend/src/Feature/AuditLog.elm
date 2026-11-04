@@ -43,7 +43,7 @@ init =
     , error = Nothing
     , restoreScrollY = Nothing
     , pendingReturn = Nothing
-    , filters = { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+    , filters = AuditRequest.defaultFilters Nothing
     , expandedEntries = Dict.empty
     , revertConfirmation = Nothing
     , revertInFlight = False
@@ -171,7 +171,10 @@ update msg model =
                 updated =
                     case filterName of
                         "entityType" ->
-                            { filters | entityType = if filterValue == "" then Nothing else Just filterValue }
+                            { filters
+                                | entityType = if filterValue == "" then Nothing else Just filterValue
+                                , includeAgentSessions = filters.includeAgentSessions || isAuditSessionEntity filterValue
+                            }
 
                         "action" ->
                             { filters | action = if filterValue == "" then Nothing else Just filterValue }
@@ -194,15 +197,25 @@ update msg model =
             else
                 AuditRequest.replace { updated | offset = Nothing } model
 
-        ClearAuditFilters ->
+        ToggleAuditAgentSessions ->
             let
-                oldFilters =
+                filters =
                     model.auditLog.filters
 
-                filters =
-                    { oldFilters | entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, offset = Nothing }
+                includeAgentSessions =
+                    not filters.includeAgentSessions
+
+                entityType =
+                    if not includeAgentSessions && (filters.entityType |> Maybe.map isAuditSessionEntity |> Maybe.withDefault False) then
+                        Nothing
+
+                    else
+                        filters.entityType
             in
-            AuditRequest.replace filters model
+            AuditRequest.replace { filters | includeAgentSessions = includeAgentSessions, entityType = entityType, offset = Nothing } model
+
+        ClearAuditFilters ->
+            AuditRequest.replace (AuditRequest.defaultFilters model.auditLog.filters.workspaceId) model
 
         LoadMoreAuditLog ->
             if model.auditLog.loading || not model.auditLog.hasMore then
@@ -431,6 +444,11 @@ viewAuditEntries model emptyMessage =
                 |> Maybe.withDefault (aside [ class "audit-ledger-empty" ] [ h4 [] [ text "Event detail" ], p [] [ text "Select an event to inspect its recorded changes." ] ])
             ]
 
+isAuditSessionEntity : String -> Bool
+isAuditSessionEntity entityType =
+    entityType == "agent_session" || entityType == "task_session"
+
+
 viewAuditLogFilters : Model -> Html Msg
 viewAuditLogFilters model =
     let
@@ -448,7 +466,6 @@ viewAuditLogFilters model =
                 , option [ value "observation", selected (filters.entityType == Just "observation") ] [ text "Observations" ]
                 , option [ value "agent_session", selected (filters.entityType == Just "agent_session") ] [ text "Agent Sessions" ]
                 , option [ value "task_session", selected (filters.entityType == Just "task_session") ] [ text "Session task connections" ]
-                , option [ value "category", selected (filters.entityType == Just "category") ] [ text "Category" ]
                 ]
             ]
         , div [ class "audit-filter-group" ]
@@ -468,6 +485,13 @@ viewAuditLogFilters model =
             [ label [for "audit-filter-until"] [ text "Until" ]
             , input [id "audit-filter-until", type_ "date", value (Maybe.withDefault "" filters.until), onInput (SetAuditFilter "until") ] []
             ]
+        , button
+            [ type_ "button"
+            , class (if filters.includeAgentSessions then "btn btn-primary" else "btn btn-secondary")
+            , attribute "aria-pressed" (if filters.includeAgentSessions then "true" else "false")
+            , onClick ToggleAuditAgentSessions
+            ]
+            [ text "Include Agent Sessions" ]
         , if AuditRequest.hasUserConstraints filters then
             button [ class "btn btn-secondary", onClick ClearAuditFilters ] [ text "Clear Filters" ]
 

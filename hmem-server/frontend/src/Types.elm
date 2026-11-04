@@ -1291,6 +1291,7 @@ type alias AuditLogFilters =
     , action : Maybe String
     , since : Maybe String
     , until : Maybe String
+    , includeAgentSessions : Bool
     , limit : Maybe Int
     , offset : Maybe Int
     }
@@ -1982,6 +1983,7 @@ type Msg
     | LoadMoreHistory String String
     | SetAuditFilter String String
     | ClearAuditFilters
+    | ToggleAuditAgentSessions
     | LoadMoreAuditLog
     | ToggleAuditExpand String
       -- Revert

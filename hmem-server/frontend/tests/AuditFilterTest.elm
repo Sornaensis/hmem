@@ -7,6 +7,7 @@ import Expect
 import Feature.AuditLog as Audit
 import Feature.AuditRequest as Request
 import Feature.Focus as Focus
+import Html.Attributes
 import Http
 import Test exposing (..)
 import Test.Html.Query as Query
@@ -38,7 +39,7 @@ suite =
                     before = populated
                     state = before.auditLog
                     filters = state.filters
-                    after = step ClearAuditFilters { before | auditLog = { state | filters = { filters | entityType = Just "task", entityId = Just "entity", action = Just "update", since = Just "2026-01-01", until = Just "2026-10-29" } } }
+                    after = step ClearAuditFilters { before | auditLog = { state | filters = { filters | entityType = Just "task", entityId = Just "entity", action = Just "update", since = Just "2026-01-01", until = Just "2026-10-29", includeAgentSessions = True } } }
                 in
                 Expect.equal { workspace = Just "ws", limit = Just 50, constraints = False, offset = Nothing, loading = True, entries = [] }
                     { workspace = after.auditLog.filters.workspaceId, limit = after.auditLog.filters.limit, constraints = Request.hasUserConstraints after.auditLog.filters, offset = after.auditLog.filters.offset, loading = after.auditLog.loading, entries = after.auditLog.entries }
@@ -52,7 +53,25 @@ suite =
                     , \_ -> view |> Query.hasNot [ Selector.text "Apply" ]
                     , \_ -> view |> Query.has [ Selector.text "Agent Sessions" ]
                     , \_ -> view |> Query.has [ Selector.text "Session task connections" ]
+                    , \_ -> view |> Query.hasNot [ Selector.text "Category" ]
+                    , \_ -> view |> Query.find [ Selector.tag "button", Selector.attribute (Html.Attributes.attribute "aria-pressed" "false") ] |> Query.has [ Selector.text "Include Agent Sessions" ]
                     , \_ -> Audit.viewWorkspaceAuditPanel "ws" (step (SetAuditFilter "action" "create") base) |> Query.fromHtml |> Query.has [ Selector.text "Clear Filters" ]
+                    ] ()
+        , test "session toggle preserves ordinary constraints and session choices imply inclusion" <|
+            \_ ->
+                let
+                    selected = base |> step (SetAuditFilter "entityType" "task") |> step (SetAuditFilter "action" "update")
+                    enabled = step ToggleAuditAgentSessions selected
+                    disabled = step ToggleAuditAgentSessions enabled
+                    sessionEntity kind = step (SetAuditFilter "entityType" kind) disabled
+                    shape model = ( model.auditLog.filters.entityType, model.auditLog.filters.action, model.auditLog.filters.includeAgentSessions )
+                in
+                Expect.all
+                    [ \_ -> shape enabled |> Expect.equal ( Just "task", Just "update", True )
+                    , \_ -> shape disabled |> Expect.equal ( Just "task", Just "update", False )
+                    , \_ -> List.map (sessionEntity >> shape) [ "agent_session", "task_session" ] |> Expect.equal [ ( Just "agent_session", Just "update", True ), ( Just "task_session", Just "update", True ) ]
+                    , \_ -> List.map (sessionEntity >> step ToggleAuditAgentSessions >> shape) [ "agent_session", "task_session" ] |> Expect.equal (List.repeat 2 ( Nothing, Just "update", False ))
+                    , \_ -> step ToggleAuditAgentSessions base |> .auditLog |> .filters |> Request.hasUserConstraints |> Expect.equal True
                     ] ()
         , test "removing the final constraint immediately fetches the default query and hides clear" <|
             \_ ->
@@ -72,8 +91,8 @@ suite =
         , test "A to B to A rejects earlier identical-query successes and errors" <|
             \_ ->
                 let
-                    first = step (SetAuditFilter "entityType" "task") base
-                    latest = first |> step (SetAuditFilter "entityType" "project") |> step (SetAuditFilter "entityType" "task")
+                    first = step ToggleAuditAgentSessions base
+                    latest = first |> step ToggleAuditAgentSessions |> step ToggleAuditAgentSessions
                     staleSuccess = respond first (Ok { items = [ { entry | id = "stale" } ], hasMore = True }) latest
                     staleError = respond first (Err Http.NetworkError) staleSuccess
                     accepted = respond latest (Ok { items = [ entry ], hasMore = False }) staleError
@@ -84,13 +103,13 @@ suite =
             \_ ->
                 let
                     more = step LoadMoreAuditLog populated
-                    changed = step (SetAuditFilter "entityType" "agent_session") more
+                    changed = step ToggleAuditAgentSessions more
                     late = respond more (Ok { items = [ { entry | id = "old-page" } ], hasMore = True }) changed
                     accepted = respond changed (Ok { items = [ { entry | id = "new-page" } ], hasMore = True }) late
                     next = step LoadMoreAuditLog accepted
                 in
-                Expect.equal { late = [], entries = [ "new-page" ], offset = Just 1, base = 0 }
-                    { late = late.auditLog.entries, entries = next.auditLog.entries |> List.map .id, offset = next.auditLog.filters.offset, base = next.auditLog.entryBaseOffset }
+                Expect.equal { late = [], entries = [ "new-page" ], offset = Just 1, base = 0, includeAgentSessions = True }
+                    { late = late.auditLog.entries, entries = next.auditLog.entries |> List.map .id, offset = next.auditLog.filters.offset, base = next.auditLog.entryBaseOffset, includeAgentSessions = next.auditLog.filters.includeAgentSessions }
         , test "current errors render as errors and a later query clears the error and old selection" <|
             \_ ->
                 let
@@ -129,7 +148,7 @@ suite =
         , test "return restores the originating page, selected event and filters under a fresh request" <|
             \_ ->
                 let
-                    filtered = step (SetAuditFilter "action" "create") base
+                    filtered = base |> step (SetAuditFilter "action" "create") |> step ToggleAuditAgentSessions
                     state = filtered.auditLog
                     filters = state.filters
                     returnFilters = { filters | offset = Just 100 }

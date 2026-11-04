@@ -742,6 +742,13 @@ with `project_paused=true`. Use the authoritative readiness rollup to decide
 whether subtasks can start. Lifecycle conflicts return a code, message, bounded
 blocker IDs/count and a recovery hint; rejected cascades leave no partial events.
 
+**Audit listing.** `GET /api/v1/audit` accepts the optional Boolean query parameter
+`include_agent_sessions`. Omit it or set it to `true` for the existing listing
+behavior. `false` excludes `agent_session` and `task_session` events before
+sorting and pagination, alongside the other query filters. With `workspace_id`
+the endpoint requires workspace admin access. The global list requires
+superadmin access. The web Audit view sends `false` by default.
+
 Audit reverts require workspace admin access. Metadata reverts preserve current
 pause intent; pause transitions restore their recorded independent and retained
 intent through the same lifecycle guards. `own_paused` and `retained_paused` are

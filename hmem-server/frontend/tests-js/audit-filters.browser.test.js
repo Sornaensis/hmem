@@ -16,9 +16,12 @@ async function setup() {
   const second = { ...f, workspace: { ...f.workspace, id: 'other-workspace', name: 'Other workspace' }, projects: [], tasks: [] }
   const h = await openHierarchy(f, [second])
   const events = [
+    ...Array.from({ length: 30 }, (_, i) => [
+      event(f, 'session-' + i, 'agent_session', i % 2 === 0 ? 'create' : 'update'),
+      event(f, 'connection-' + i, 'task_session', 'create'),
+    ]).flat(),
+    event(f, 'legacy-category', 'category'),
     ...Array.from({ length: 65 }, (_, i) => event(f, 'task-' + i)),
-    event(f, 'session-a', 'agent_session', 'create'), event(f, 'session-b', 'agent_session', 'update'),
-    event(f, 'link-a', 'task_session', 'create'), event(f, 'link-b', 'task_session', 'create'),
   ]
   const reads = [], controls = []
   let authorized = true
@@ -35,6 +38,7 @@ async function setup() {
         return route.fulfill({ status: control.status || 200, contentType: 'application/json', body: JSON.stringify(control.response || { items: [], has_more: false }) })
       }
       const filtered = events.filter(entry => (!query.workspace_id || entry.workspace_id === query.workspace_id) && (!query.entity_type || entry.entity_type === query.entity_type)
+        && (query.include_agent_sessions !== 'false' || !['agent_session', 'task_session'].includes(entry.entity_type))
         && (!query.action || entry.action === query.action)
         && (!query.since || entry.changed_at >= query.since) && (!query.until || entry.changed_at <= query.until))
       const offset = Number(query.offset || 0), limit = Number(query.limit || 50)
@@ -70,30 +74,48 @@ async function workspaceAudit(h) {
 
 test('workspace and global audit controls automatically filter, reset and paginate the current query', { timeout: 45000 }, async () => {
   const h = await setup()
+  const include = h.page.getByRole('button', { name: 'Include Agent Sessions', exact: true })
+  const entity = h.page.getByLabel('Entity type', { exact: true })
   try {
     await workspaceAudit(h)
     for (const global of [false, true]) {
       if (global) await change(h, () => h.page.getByRole('link', { name: 'Audit Log', exact: true }).click(), query => !query.workspace_id)
       assert.equal(await h.page.getByRole('button', { name: 'Apply', exact: true }).count(), 0)
       assert.equal(await h.page.getByRole('button', { name: 'Clear Filters', exact: true }).count(), 0)
+      assert.equal(await include.getAttribute('aria-pressed'), 'false')
+      assert.equal(await entity.locator('option[value="category"]').count(), 0)
+      assert.equal(h.reads.at(-1).include_agent_sessions, 'false')
       assert.equal(await h.page.locator('.audit-entry').count(), 50)
-      await change(h, () => h.page.getByRole('button', { name: 'Load more...', exact: true }).click(), query => query.offset === '50')
-      assert.equal(await h.page.locator('.audit-entry').count(), 69)
+      assert.equal(await h.page.locator('#audit-event-legacy-category').count(), 1)
+      assert.equal(await h.page.locator('#audit-event-session-0').count(), 0)
+      await change(h, () => h.page.getByRole('button', { name: 'Load more...', exact: true }).click(), query => query.offset === '50' && query.include_agent_sessions === 'false')
+      assert.equal(await h.page.locator('.audit-entry').count(), 66)
+      await change(h, () => include.click(), query => query.include_agent_sessions === 'true' && !query.offset)
+      assert.equal(await include.getAttribute('aria-pressed'), 'true')
+      assert.equal(await h.page.getByRole('button', { name: 'Clear Filters', exact: true }).count(), 1)
+      assert.equal(await h.page.locator('.audit-entry').count(), 50)
+      assert.equal(await h.page.locator('#audit-event-session-0, #audit-event-connection-0').count(), 2)
+      assert.equal(await h.page.locator('#audit-event-legacy-category').count(), 0)
+      await change(h, () => h.page.getByRole('button', { name: 'Load more...', exact: true }).click(), query => query.offset === '50' && query.include_agent_sessions === 'true')
+      assert.equal(await h.page.locator('.audit-entry').count(), 100)
+      await change(h, () => include.click(), query => query.include_agent_sessions === 'false' && !query.offset)
       await h.page.locator('.audit-expand-icon').first().click()
       await h.page.getByRole('complementary', { name: 'Selected audit event', exact: true }).waitFor()
-      await change(h, () => h.page.getByLabel('Entity type', { exact: true }).selectOption('agent_session'), query => query.entity_type === 'agent_session')
-      assert.equal(await h.page.locator('.audit-entry').count(), 2)
+      await change(h, () => entity.selectOption('agent_session'), query => query.entity_type === 'agent_session' && query.include_agent_sessions === 'true')
+      assert.equal(await h.page.locator('.audit-entry').count(), 30)
       assert.equal(await h.page.locator('.audit-entry-detail').count(), 0)
       assert.equal(h.reads.at(-1).offset, undefined)
       await change(h, () => h.page.getByLabel('Action', { exact: true }).selectOption('create'), query => query.action === 'create')
-      assert.equal(await h.page.locator('.audit-entry').count(), 1)
-      await change(h, () => h.page.getByLabel('Entity type', { exact: true }).selectOption('task_session'), query => query.entity_type === 'task_session')
-      assert.equal(await h.page.locator('.audit-entry').count(), 2)
+      assert.equal(await h.page.locator('.audit-entry').count(), 15)
+      await change(h, () => include.click(), query => query.include_agent_sessions === 'false' && !query.entity_type && query.action === 'create')
+      assert.equal(await entity.inputValue(), '')
+      await change(h, () => entity.selectOption('task_session'), query => query.entity_type === 'task_session' && query.include_agent_sessions === 'true')
+      assert.equal(await h.page.locator('.audit-entry').count(), 30)
       await change(h, () => h.page.getByLabel('Since', { exact: true }).fill('2026-10-16'), query => query.since === '2026-10-16T00:00:00Z')
       assert.equal(await h.page.locator('.audit-entry').count(), 0)
       assert.match(await h.page.locator('.audit-log-view').innerText(), /No (workspace )?audit (log )?entries found/)
       await change(h, () => h.page.getByLabel('Until', { exact: true }).fill('2026-10-29'), query => query.until === '2026-10-29T23:59:59Z')
-      await change(h, () => h.page.getByRole('button', { name: 'Clear Filters', exact: true }).click(), query => !query.entity_type && !query.action && !query.since && !query.until)
+      await change(h, () => h.page.getByRole('button', { name: 'Clear Filters', exact: true }).click(), query => query.include_agent_sessions === 'false' && !query.entity_type && !query.action && !query.since && !query.until && !query.offset)
       assert.equal(await h.page.locator('.audit-entry').count(), 50)
       assert.equal(await h.page.getByRole('button', { name: 'Clear Filters', exact: true }).count(), 0)
       assert.equal(h.reads.at(-1).workspace_id, global ? undefined : h.f.workspace.id)
@@ -123,14 +145,14 @@ test('production audit rejects stale A-B-A and load-more completions and recover
     await change(h, () => h.page.getByLabel('Entity type', { exact: true }).selectOption('agent_session'), query => query.entity_type === 'agent_session')
     const pageResponse = h.page.waitForResponse(response => new URL(response.url()).searchParams.get('offset') === '1')
     oldPage.release(); await callbacksSettled(h, await pageResponse); await settled(h)
-    assert.equal(await h.page.locator('.audit-entry').count(), 2)
+    assert.equal(await h.page.locator('.audit-entry').count(), 30)
     assert.equal(await h.page.locator('#audit-diff-row-stale-page').count(), 0)
     h.control(query => query.action === 'delete', { status: 500, response: { error: 'fixture failure' } })
     await change(h, () => h.page.getByLabel('Action', { exact: true }).selectOption('delete'), query => query.action === 'delete')
     await h.page.getByRole('alert').filter({ hasText: 'Failed to load audit entries for these filters.' }).waitFor()
     assert.equal(await h.page.locator('.audit-entry').count(), 0)
     await change(h, () => h.page.getByLabel('Action', { exact: true }).selectOption(''), query => !query.action)
-    assert.equal(await h.page.locator('.audit-entry').count(), 2)
+    assert.equal(await h.page.locator('.audit-entry').count(), 30)
     assert.equal(await h.page.locator('.audit-log-view [role=alert]').count(), 0)
   } finally { await h.close() }
 })
@@ -141,11 +163,12 @@ test('production audit return restores filters, selected event and page while wo
   try {
     await workspaceAudit(h)
     await change(h, () => h.page.getByLabel('Entity type', { exact: true }).selectOption('project'), query => query.entity_type === 'project')
+    await change(h, () => h.page.getByRole('button', { name: 'Include Agent Sessions', exact: true }).click(), query => query.entity_type === 'project' && query.include_agent_sessions === 'true')
     await h.page.locator('.audit-expand-icon').click()
     await h.page.getByRole('complementary', { name: 'Selected audit event', exact: true }).waitFor()
     await h.page.locator('.audit-entry .audit-entity-link').click()
     await h.page.getByRole('button', { name: 'Back to workspace Audit entry', exact: true }).waitFor()
-    await change(h, () => h.page.getByRole('button', { name: 'Back to workspace Audit entry', exact: true }).click(), query => query.entity_type === 'project')
+    await change(h, () => h.page.getByRole('button', { name: 'Back to workspace Audit entry', exact: true }).click(), query => query.entity_type === 'project' && query.include_agent_sessions === 'true')
     assert.equal(await h.page.getByLabel('Entity type', { exact: true }).inputValue(), 'project')
     await h.page.getByRole('complementary', { name: 'Selected audit event', exact: true }).waitFor()
     assert.equal(await h.page.locator('.audit-entry').count(), 1)
@@ -154,7 +177,7 @@ test('production audit return restores filters, selected event and page while wo
     const authority = h.page.waitForResponse(response => { const url = new URL(response.url()); return url.pathname === '/api/v1/session' && url.searchParams.get('workspace_id') === h.second.workspace.id })
     await h.page.evaluate(id => { history.pushState({}, '', '/workspace/' + id); dispatchEvent(new PopStateEvent('popstate')) }, h.second.workspace.id)
     await authority
-    await change(h, () => h.page.getByRole('button', { name: 'Audit', exact: true }).click(), query => query.workspace_id === h.second.workspace.id)
+    await change(h, () => h.page.getByRole('button', { name: 'Audit', exact: true }).click(), query => query.workspace_id === h.second.workspace.id && query.include_agent_sessions === 'false')
     const oldResponse = h.page.waitForResponse(response => { const url = new URL(response.url()); return url.pathname === '/api/v1/audit' && url.searchParams.get('workspace_id') === h.f.workspace.id })
     pending.release(); await callbacksSettled(h, await oldResponse)
     assert.equal(await h.page.locator('.audit-entry').count(), 0)

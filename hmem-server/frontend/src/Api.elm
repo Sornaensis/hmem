@@ -4434,7 +4434,7 @@ removeGroupMember apiUrl groupId workspaceId requestId toMsg =
 -- AUDIT LOG
 
 
-fetchAuditLog : String -> { workspaceId : Maybe String, entityType : Maybe String, entityId : Maybe String, action : Maybe String, since : Maybe String, until : Maybe String, limit : Maybe Int, offset : Maybe Int } -> (Result Http.Error (PaginatedResult AuditLogEntry) -> msg) -> Cmd msg
+fetchAuditLog : String -> { workspaceId : Maybe String, entityType : Maybe String, entityId : Maybe String, action : Maybe String, since : Maybe String, until : Maybe String, includeAgentSessions : Bool, limit : Maybe Int, offset : Maybe Int } -> (Result Http.Error (PaginatedResult AuditLogEntry) -> msg) -> Cmd msg
 fetchAuditLog apiUrl filters toMsg =
     let
         params =
@@ -4449,16 +4449,15 @@ fetchAuditLog apiUrl filters toMsg =
                 , Maybe.map (\v -> "offset=" ++ String.fromInt v) filters.offset
                 ]
 
-        queryString =
-            case params of
-                [] ->
-                    ""
+        sessionParam =
+            if filters.includeAgentSessions then
+                "include_agent_sessions=true"
 
-                _ ->
-                    "?" ++ String.join "&" params
+            else
+                "include_agent_sessions=false"
     in
     Http.get
-        { url = apiUrl ++ "/api/v1/audit" ++ queryString
+        { url = apiUrl ++ "/api/v1/audit?" ++ String.join "&" (sessionParam :: params)
         , expect = Http.expectJson toMsg (paginatedDecoder auditLogEntryDecoder)
         }
 

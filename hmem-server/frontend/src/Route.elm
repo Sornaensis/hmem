@@ -488,7 +488,7 @@ handleUrlChangeWithoutProtectedExit url model =
         AuditLogPage ->
             let
                 emptyFilters =
-                    { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+                    AuditRequest.defaultFilters Nothing
 
                 returnContext =
                     model.focus.returnContext
@@ -584,7 +584,7 @@ prepareWorkspaceAuditFromRoute wsId tab model =
     if tab == AuditTab && Permissions.canViewCurrentWorkspaceAudit model && model.auditLog.filters.workspaceId /= Just wsId then
         let
             filters =
-                workspaceAuditFilters wsId
+                AuditRequest.defaultFilters (Just wsId)
 
         in
         AuditRequest.replace filters model
@@ -616,19 +616,6 @@ reconcileSameWorkspaceObservationRoute tab observations =
 
     else
         Feature.Observation.clearSelection observations
-
-
-workspaceAuditFilters : String -> AuditLogFilters
-workspaceAuditFilters wsId =
-    { workspaceId = Just wsId
-    , entityType = Nothing
-    , entityId = Nothing
-    , action = Nothing
-    , since = Nothing
-    , until = Nothing
-    , limit = Just 50
-    , offset = Nothing
-    }
 
 
 returnContextForFocusedRoute : String -> Maybe ( String, String ) -> FocusModel -> Maybe FocusReturnContext

@@ -2167,6 +2167,7 @@ data AuditLogQuery = AuditLogQuery
   , until      :: Maybe UTCTime
   , limit      :: Maybe Int
   , offset     :: Maybe Int
+  , includeAgentSessions :: Maybe Bool
   } deriving (Show, Eq, Generic)
 
 instance ToJSON AuditLogQuery where

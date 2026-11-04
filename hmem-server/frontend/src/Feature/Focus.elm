@@ -142,7 +142,7 @@ restoreAuditReturnAuthority previous session model =
         clearedFilters = { filters | workspaceId = case model.page of
                 WorkspacePage workspace -> Just workspace
                 _ -> Nothing
-            , entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, offset = Nothing }
+            , entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, includeAgentSessions = False, offset = Nothing }
         restoredAudit = case pending of
             Just value -> { audit | pendingReturn = pending, filters = Maybe.withDefault audit.filters value.auditFilters, expandedEntries = expandedEntriesForReturn value, restoreScrollY = value.auditScrollY }
             Nothing -> if rejected then { audit | pendingReturn = Nothing, restoreScrollY = Nothing, filters = clearedFilters, entries = [], expandedEntries = Dict.empty, entryBaseOffset = 0, hasMore = False, loading = False, loadingFilters = Nothing, activeRequest = Nothing, activeNavigationId = Nothing, error = Nothing } else audit
@@ -394,7 +394,7 @@ returnToWorkspaceAuditSource : FocusReturnContext -> Model -> ( Model, Cmd Msg )
 returnToWorkspaceAuditSource context model =
     let
         filters =
-            context.auditFilters |> Maybe.withDefault { workspaceId = Just context.workspaceId, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+            context.auditFilters |> Maybe.withDefault (AuditRequest.defaultFilters (Just context.workspaceId))
 
         currentAuditLog =
             model.auditLog

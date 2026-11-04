@@ -76,7 +76,7 @@ suite = describe "Typed Audit destinations and return ownership"
     , test "global return restores only metadata belonging to the admitted principal" <| \_ ->
         let state = base.auditLog
             filters = state.filters
-            globalFilters = {filters | workspaceId = Nothing, action = Just "create", offset = Just 50}
+            globalFilters = {filters | workspaceId = Nothing, action = Just "create", offset = Just 50, includeAgentSessions = True}
             original = Focus.auditReturnContext ReturnFromGlobalAudit workspace globalFilters True entry ( "task", target )
             context = {original | auditScrollY = Just 401, auditPrincipal = Maybe.map .principal base.sessionContext, auditAuthMode = Just "local"}
             focus = base.focus
@@ -94,8 +94,8 @@ suite = describe "Typed Audit destinations and return ownership"
         let state = base.auditLog
             context = Focus.auditReturnContext ReturnFromWorkspaceAudit workspace state.filters True entry ( "task", target )
             returning = {base | auditLog = {state | pendingReturn = Just context, restoreScrollY = Just 631}}
-        in [ step (SetAuditFilter "action" "create") returning, step ClearAuditFilters returning ]
-            |> List.map (\model -> (model.auditLog.restoreScrollY,model.auditLog.pendingReturn)) |> Expect.equal [ (Nothing,Nothing),(Nothing,Nothing) ]
+        in [ step (SetAuditFilter "action" "create") returning, step ClearAuditFilters returning, step ToggleAuditAgentSessions returning ]
+            |> List.map (\model -> (model.auditLog.restoreScrollY,model.auditLog.pendingReturn)) |> Expect.equal (List.repeat 3 ( Nothing, Nothing ))
     ]
 
 

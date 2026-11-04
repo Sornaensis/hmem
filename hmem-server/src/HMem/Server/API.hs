@@ -271,7 +271,8 @@ type TaskAPI =
 type AuditAPI =
        QueryParam "workspace_id" UUID :> QueryParam "entity_type" Text :> QueryParam "entity_id" Text
          :> QueryParam "action" AuditAction :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime
-         :> QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult AuditLogEntry)
+         :> QueryParam "limit" Int :> QueryParam "offset" Int :> QueryParam "include_agent_sessions" Bool
+         :> Get '[JSON] (PaginatedResult AuditLogEntry)
   :<|> Capture "auditId" UUID :> "revert" :> Post '[JSON] RevertResult
   :<|> Capture "auditId" UUID :> Get '[JSON] AuditLogEntry
 
@@ -1560,14 +1561,14 @@ search pool query = do
 
 audit :: Pool Hasql.Connection -> Server AuditAPI
 audit pool = listH :<|> revertH :<|> getH where
-  listH workspaceId entityType entityId action since until limit offset = do
+  listH workspaceId entityType entityId action since until limit offset includeAgentSessions = do
     case workspaceId of
       Just id
         | entityType == Just "observation" -> requireObservationWorkspace pool id Auth.WorkspaceRoleAdmin
         | otherwise -> requireWorkspace pool id Auth.WorkspaceRoleAdmin
       Nothing -> requireSuperadmin pool
     let (takeN, skipN) = page limit offset
-        query = AuditLogQuery workspaceId entityType entityId action since until (Just (takeN + 1)) (Just skipN)
+        query = AuditLogQuery workspaceId entityType entityId action since until (Just (takeN + 1)) (Just skipN) includeAgentSessions
     rows <- handleDBErrors $ Audit.getAuditLog pool query
     pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
   getH auditId = do

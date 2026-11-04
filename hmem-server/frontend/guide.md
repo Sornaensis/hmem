@@ -63,6 +63,12 @@ Audit presents events in a ledger. Select an event to read its recorded changes,
 attribution and copyable IDs in the detail pane. Selecting another event keeps
 the current filters. The detail pane stacks above the history on narrow screens.
 
+Workspace and global Audit hide session lifecycle and task-connection events by
+default. Turn on **Include Agent Sessions** to see both. Selecting **Agent
+Sessions** or **Session task connections** also turns it on. Turning it off
+with either selected restores **All**. **Clear Filters** restores the default
+view, and returning from an event preserves the previous filters.
+
 **Against current** loads a fixed current snapshot for that opening. Switching
 fields reuses it; **Refresh** replaces it. Check the loaded-at time and entity
 update time. Observed changes mark it stale; disconnection makes freshness

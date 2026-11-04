@@ -1,9 +1,23 @@
-module Feature.AuditRequest exposing (append, hasUserConstraints, matches, replace, restore, retire)
+module Feature.AuditRequest exposing (append, defaultFilters, hasUserConstraints, matches, replace, restore, retire)
 
 import Api
 import Dict
 import Permissions
 import Types exposing (..)
+
+
+defaultFilters : Maybe String -> AuditLogFilters
+defaultFilters workspaceId =
+    { workspaceId = workspaceId
+    , entityType = Nothing
+    , entityId = Nothing
+    , action = Nothing
+    , since = Nothing
+    , until = Nothing
+    , includeAgentSessions = False
+    , limit = Just 50
+    , offset = Nothing
+    }
 
 
 {-| Every audit read, including route/admission/return reads, gets a fresh identity.
@@ -84,4 +98,5 @@ retire state =
 
 hasUserConstraints : AuditLogFilters -> Bool
 hasUserConstraints filters =
-    List.any ((/=) Nothing) [ filters.entityType, filters.entityId, filters.action, filters.since, filters.until ]
+    filters.includeAgentSessions
+        || List.any ((/=) Nothing) [ filters.entityType, filters.entityId, filters.action, filters.since, filters.until ]

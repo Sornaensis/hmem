@@ -3,7 +3,7 @@ const maxRaster = 100 * 1024 * 1024
 const rasterTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 const mediaTypes = {
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', mp4: 'video/mp4',
   pdf: 'application/pdf', html: 'text/html', htm: 'text/html', svg: 'image/svg+xml',
   txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',

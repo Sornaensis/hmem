@@ -375,6 +375,120 @@ test('Source tabs distinguish pending counts from zero and keep each canonical t
   }
 })
 
+test('MP4 Source uploads and both task panels use a static first frame and keep the original downloadable', { timeout: 45000 }, async () => {
+  const h = distinctTasks(await openSessionExplorer({ savedCount: 0 }))
+  const { page } = h
+  const task = h.fixture.tasks[0].id
+  const endpoint = '**/api/v1/workspaces/*/tasks/' + task + '/documents'
+  const image = item(task, 21, 'source', 'screen.png', 'image/png')
+  const original = Buffer.from('fixture MP4 original bytes')
+  const video = item(task, 22, 'source', 'walkthrough.MP4', 'video/mp4', original)
+  const evidenceVideo = { ...video, id: uuid(322), role: 'evidence' }
+  const failedVideo = item(task, 23, 'evidence', 'unavailable.mp4', 'video/mp4', original)
+  failedVideo.document.preview_state = 'failed'
+  let uploaded = false
+  const poster = Buffer.from(await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 4
+    canvas.height = 2
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = 'tomato'
+    ctx.fillRect(0, 0, 4, 2)
+    return canvas.toDataURL().split(',')[1]
+  }), 'base64')
+  const generation = uuid(902)
+
+  await page.route(endpoint + '**', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const suffix = url.pathname.split('/documents')[1]
+    if (suffix === '/counts') return route.fulfill({ json: counts(uploaded ? 2 : 1, 2, 0) })
+    if (suffix === '' && request.method() === 'POST') {
+      const metadata = JSON.parse(request.headers()['x-hmem-document-metadata'])
+      assert.equal(metadata.role, 'source')
+      assert.equal(metadata.manifest.media_type, 'video/mp4')
+      assert.equal(metadata.manifest.filename, video.document.filename)
+      assert.equal(metadata.manifest.raw_sha256, sha(original))
+      assert.deepEqual(request.postDataBuffer(), original)
+      uploaded = true
+      return route.fulfill({ status: 201, json: video })
+    }
+    if (suffix === '') {
+      const rows = url.searchParams.get('role') === 'source' ? (uploaded ? [image, video] : [image]) : [evidenceVideo, failedVideo]
+      return route.fulfill({ json: { items: rows, next_cursor: null } })
+    }
+    const [, doc, resource, version, variant, rasterPage] = suffix.split('/')
+    const raster = doc === image.document.id ? png : poster
+    if (resource === 'original') return route.fulfill({ body: original, contentType: 'application/octet-stream' })
+    if (version === 'current') {
+      if (doc === failedVideo.document.id) {
+        return route.fulfill({ json: { state: 'failed', generation_id: null, outputs: [], retryable: false, generation_metadata: null } })
+      }
+      const outputs = ['thumbnail', 'page'].map(name => ({
+        variant: name, page: 0, media_type: 'image/png', raw_bytes: raster.length, raw_sha256: sha(raster),
+      }))
+      return route.fulfill({ json: { state: 'ready', generation_id: generation, outputs, retryable: false, generation_metadata: null } })
+    }
+    assert.equal(resource, 'previews')
+    assert.equal(version, generation)
+    assert.ok(['thumbnail', 'page'].includes(variant))
+    assert.equal(rasterPage, '0')
+    return route.fulfill({ body: raster, contentType: 'image/png' })
+  })
+
+  try {
+    await h.start()
+    await h.idle()
+    const card = page.locator('#entity-' + task)
+    await card.locator('.card-details-control').click()
+    await card.getByRole('button', { name: 'Sources', exact: true }).click()
+    const sources = card.getByRole('region', { name: 'Sources' })
+    await sources.getByRole('button', { name: 'Upload source' }).click()
+    const upload = page.getByRole('dialog', { name: 'Upload source' })
+    const file = upload.getByLabel('File')
+    assert.ok((await file.getAttribute('accept')).split(',').includes('.mp4'))
+    await file.setInputFiles({ name: video.document.filename, mimeType: 'application/octet-stream', buffer: original })
+    await upload.getByRole('button', { name: 'Upload source' }).click()
+    await upload.waitFor({ state: 'detached' })
+
+    const decodedWidth = async raster => {
+      await raster.scrollIntoViewIfNeeded()
+      await until(() => raster.evaluate(img => img.complete && img.naturalWidth > 0))
+      return raster.evaluate(img => img.naturalWidth)
+    }
+    assert.equal(await decodedWidth(sources.getByRole('button', { name: 'Preview screen.png' }).locator('img')), 1)
+    await page.setViewportSize({ width: 390, height: 1000 })
+    const documents = card.getByRole('region', { name: 'Document evidence' })
+    for (const panel of [sources, documents]) {
+      if (panel === documents) await card.getByRole('button', { name: 'Evidence', exact: true }).click()
+      await panel.getByText('Video thumbnail · first frame').waitFor()
+      const thumbnail = panel.getByRole('button', { name: 'Preview walkthrough.MP4' })
+      assert.equal(await decodedWidth(thumbnail.locator('img')), 4)
+      await thumbnail.focus()
+      await page.keyboard.press('Enter')
+      const dialog = page.getByRole('dialog', { name: 'walkthrough.MP4' })
+      await dialog.getByText('Video preview · first frame shown').waitFor()
+      assert.equal(await decodedWidth(dialog.getByRole('img', { name: 'Preview of walkthrough.MP4' })), 4)
+      assert.equal(await dialog.locator('video, source, iframe').count(), 0)
+      await page.keyboard.press('Escape')
+      await dialog.waitFor({ state: 'detached' })
+      assert.equal(await thumbnail.evaluate(node => document.activeElement === node), true)
+    }
+    const failedRow = documents.locator('.task-document-row').filter({ hasText: 'unavailable.mp4' })
+    await failedRow.getByText('Preview failed').waitFor()
+    assert.equal(await failedRow.locator('img').count(), 0)
+    const downloaded = page.waitForEvent('download')
+    const originalResponse = page.waitForResponse(response => response.url().endsWith('/' + failedVideo.document.id + '/original'))
+    await failedRow.getByRole('button', { name: '↓ Download' }).click()
+    assert.equal((await downloaded).suggestedFilename(), 'unavailable.mp4')
+    assert.deepEqual(await (await originalResponse).body(), original)
+    assert.deepEqual(h.errors, [])
+    assert.deepEqual(h.unhandled, [])
+  } finally {
+    await h.close()
+  }
+})
+
 test('raster transport honors the authorized type and size and stale 401 cannot retire a new credential', { timeout: 45000 }, async () => {
   const h = distinctTasks(await openSessionExplorer({ savedCount: 0 }))
   const fixture = h.fixture

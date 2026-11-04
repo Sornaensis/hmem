@@ -14,7 +14,7 @@ Document evidence is added through MCP. The browser provides preview and downloa
 
 ## Preview and download
 
-Use an image thumbnail or the document’s **Preview** button to open the preview. Use **Zoom** and **Fit** for an image, and the page controls for PDFs. Animated images show their first frame. Styled HTML opens in an isolated frame.
+Use an image or video thumbnail or the document’s **Preview** button to open the preview. Use **Zoom** and **Fit** for raster previews and the page controls for PDFs. Animated images and supported MP4 files with one H.264 video track show a static first frame. Download the original MP4 to play it. Styled HTML opens in an isolated frame.
 
 The original remains available through **↓ Download** while a preview is queued, processing or unavailable. To preview an unsupported format, export it as PNG or PDF and upload that file. A failed preview can show **Retry preview** when another attempt is available and you have edit access.
 

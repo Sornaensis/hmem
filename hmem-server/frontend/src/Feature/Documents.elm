@@ -451,8 +451,9 @@ documentUrl model item =
 viewRow : Model -> Api.DocumentItem -> Html Msg
 viewRow model item =
     let
-        previewable = List.member item.mediaType [ "image/png", "image/jpeg", "image/webp", "application/pdf", "text/html" ]
-        imagePreview = String.startsWith "image/" item.mediaType && previewable
+        videoPreview = item.mediaType == "video/mp4"
+        thumbnailPreview = videoPreview || List.member item.mediaType [ "image/png", "image/jpeg", "image/webp" ]
+        previewable = thumbnailPreview || List.member item.mediaType [ "application/pdf", "text/html" ]
         previewButton buttonClass contents =
             button
                 [ id ("document-preview-" ++ item.id), type_ "button", class buttonClass
@@ -472,7 +473,7 @@ viewRow model item =
                     _ -> Nothing)
     in
     div [ class "task-document-row" ]
-        [ if imagePreview then
+        [ if thumbnailPreview then
             previewButton "document-thumbnail"
                 [ if item.previewState == "ready" then
                     Html.img
@@ -494,7 +495,8 @@ viewRow model item =
                 [ text (item.mediaType ++ " · " ++ byteLabel item.rawBytes ++ " · " ++ item.uploader ++ " · ")
                 , Html.time [ attribute "datetime" item.createdAt ] [ text item.createdAt ]
                 ]
-            , p [ class "card-meta" ] [ text (previewState item.previewState) ]
+            , p [ class "card-meta" ]
+                [ text (if videoPreview && item.previewState == "ready" then "Video thumbnail · first frame" else previewState item.previewState) ]
             , if item.role == "source" && Permissions.canEditCurrentWorkspace model then
                 button
                     [ type_ "button", class "task-document-remove", disabled (model.documents.operation /= Nothing)
@@ -506,7 +508,7 @@ viewRow model item =
                 text ""
             ]
         , div [ class "task-document-actions" ]
-            [ if previewable && not imagePreview then
+            [ if previewable && not thumbnailPreview then
                 previewButton "btn btn-sm" [ text "Preview" ]
               else
                 text ""
@@ -573,7 +575,7 @@ viewDialog model =
                                         [ Html.label [ attribute "for" "document-original-file" ] [ text "File" ]
                                         , Html.input
                                             [ id "document-original-file", type_ "file", attribute "name" "original"
-                                            , attribute "required" "", attribute "accept" ".png,.jpg,.jpeg,.webp,.pdf,.html,.htm,.svg,.txt,.md,.markdown,.docx,.pptx,.xlsx,.fig,.sketch"
+                                            , attribute "required" "", attribute "accept" ".png,.jpg,.jpeg,.webp,.mp4,.pdf,.html,.htm,.svg,.txt,.md,.markdown,.docx,.pptx,.xlsx,.fig,.sketch"
                                             ] []
                                         , p [ class "card-meta" ] [ text "Up to 25 MiB." ]
                                         , Html.label [ attribute "for" "document-original-title" ] [ text "Title (optional)" ]
@@ -666,7 +668,9 @@ viewPreview heading close model item page zoom =
         , close
         ]
     , div [ class "task-document-preview-body" ]
-        [ if preview |> Maybe.map .animatedFirstFrame |> Maybe.withDefault False then
+        [ if item.mediaType == "video/mp4" && (preview |> Maybe.map (.state >> (==) "ready") |> Maybe.withDefault False) then
+            p [ class "card-meta" ] [ text "Video preview · first frame shown" ]
+          else if preview |> Maybe.map .animatedFirstFrame |> Maybe.withDefault False then
             p [ class "card-meta" ] [ text "Animated original · first frame shown" ]
           else
             text ""
